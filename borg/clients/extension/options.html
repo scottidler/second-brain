@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { width: 400px; padding: 16px; font-family: system-ui, sans-serif; font-size: 14px; }
+    label { display: block; margin-bottom: 4px; font-weight: 600; }
+    input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+    button { margin-top: 12px; padding: 8px 16px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+    button:hover { background: #f0f0f0; }
+    .msg { margin-top: 8px; color: #2E7D32; }
+  </style>
+</head>
+<body>
+  <h3>obsidian-borg Settings</h3>
+  <label for="endpoint">Daemon endpoint</label>
+  <input id="endpoint" type="text" placeholder="http://localhost:8181">
+  <button id="save">Save</button>
+  <div id="msg" class="msg"></div>
+  <script src="options.js"></script>
+</body>
+</html>

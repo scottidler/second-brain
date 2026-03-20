@@ -7,3 +7,38 @@ build = "build.rs"
 
 [dependencies]
 vault = { path = "../vault" }
+axum = { version = "0.8.8", features = ["multipart"] }
+chrono = { workspace = true }
+chrono-tz = "0.10"
+clap = { workspace = true }
+colored = { workspace = true }
+dirs = { workspace = true }
+env_logger = { workspace = true }
+eyre = { workspace = true }
+fs2 = { workspace = true }
+log = { workspace = true }
+regex = { workspace = true }
+reqwest = { version = "0.13.2", features = ["json", "multipart", "stream"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = "0.10"
+shellexpand = { workspace = true }
+thiserror = "2.0.18"
+teloxide = { version = "0.17", features = ["macros"] }
+tokio = { workspace = true }
+tower = "0.5.3"
+tower-http = { version = "0.6.8", features = ["cors"] }
+url = "2.5.8"
+urlencoding = "2.1"
+arboard = "3"
+notify-rust = "4"
+tokio-stream = "0.1.18"
+tokio-util = { version = "0.7.18", features = ["io"] }
+hostname = "0.4.2"
+base64 = "0.22"
+
+[dependencies.serenity]
+version = "0.12"
+default-features = false
+features = ["client", "gateway", "model", "rustls_backend"]

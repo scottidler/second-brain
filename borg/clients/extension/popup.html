@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { width: 300px; padding: 12px; font-family: system-ui, sans-serif; font-size: 14px; }
+    h3 { margin: 0 0 8px; }
+    .status { padding: 8px; border-radius: 4px; margin-bottom: 8px; }
+    .ok { background: #E8F5E9; color: #2E7D32; }
+    .err { background: #FFEBEE; color: #C62828; }
+    .none { background: #F5F5F5; color: #757575; }
+    .tags { font-size: 12px; color: #666; }
+    button { width: 100%; padding: 8px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+    button:hover { background: #f0f0f0; }
+  </style>
+</head>
+<body>
+  <h3>obsidian-borg</h3>
+  <div id="result" class="status none">No captures yet</div>
+  <button id="capture">Capture This Page</button>
+  <script src="popup.js"></script>
+</body>
+</html>
