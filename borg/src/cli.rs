@@ -395,8 +395,7 @@ mod tests {
 
     #[test]
     fn test_ingest_with_tags() {
-        let cli =
-            Cli::try_parse_from(["borg", "ingest", "https://example.com", "-t", "ai,rust"]).expect("parse");
+        let cli = Cli::try_parse_from(["borg", "ingest", "https://example.com", "-t", "ai,rust"]).expect("parse");
         match cli.command {
             Some(Command::Ingest { url, tags, .. }) => {
                 assert_eq!(url, Some("https://example.com".to_string()));
@@ -432,16 +431,8 @@ mod tests {
 
     #[test]
     fn test_hotkey_custom_host_and_port() {
-        let cli = Cli::try_parse_from([
-            "borg",
-            "hotkey",
-            "--install",
-            "--host",
-            "desk.lan",
-            "--port",
-            "9090",
-        ])
-        .expect("parse");
+        let cli = Cli::try_parse_from(["borg", "hotkey", "--install", "--host", "desk.lan", "--port", "9090"])
+            .expect("parse");
         match cli.command {
             Some(Command::Hotkey(opts)) => {
                 assert!(opts.install);
@@ -478,8 +469,7 @@ mod tests {
 
     #[test]
     fn test_note_with_tags() {
-        let cli =
-            Cli::try_parse_from(["borg", "note", "define: garrulous", "-t", "vocab,english"]).expect("parse");
+        let cli = Cli::try_parse_from(["borg", "note", "define: garrulous", "-t", "vocab,english"]).expect("parse");
         match cli.command {
             Some(Command::Note { text, tags, .. }) => {
                 assert_eq!(text, Some("define: garrulous".to_string()));
@@ -526,8 +516,7 @@ mod tests {
 
     #[test]
     fn test_reingest_dry_run_with_type() {
-        let cli = Cli::try_parse_from(["borg", "reingest", "--all", "--type", "youtube", "--dry-run"])
-            .expect("parse");
+        let cli = Cli::try_parse_from(["borg", "reingest", "--all", "--type", "youtube", "--dry-run"]).expect("parse");
         match cli.command {
             Some(Command::Reingest {
                 all, r#type, dry_run, ..
@@ -554,16 +543,8 @@ mod tests {
 
     #[test]
     fn test_reingest_domain_and_date() {
-        let cli = Cli::try_parse_from([
-            "borg",
-            "reingest",
-            "--all",
-            "--domain",
-            "ai",
-            "--after",
-            "2026-03-01",
-        ])
-        .expect("parse");
+        let cli = Cli::try_parse_from(["borg", "reingest", "--all", "--domain", "ai", "--after", "2026-03-01"])
+            .expect("parse");
         match cli.command {
             Some(Command::Reingest { all, domain, after, .. }) => {
                 assert!(all);

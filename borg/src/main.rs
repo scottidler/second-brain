@@ -1,14 +1,13 @@
-use clap::Parser;
-use eyre::{Context, Result};
 use borg::cli::{Cli, Command};
 use borg::config::Config;
 use borg::logging;
+use clap::Parser;
+use eyre::{Context, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config: Config =
-        borg::config::load_config(cli.config.as_ref()).context("Failed to load configuration")?;
+    let config: Config = borg::config::load_config(cli.config.as_ref()).context("Failed to load configuration")?;
 
     let log_level = logging::resolve_log_level(cli.log_level.as_deref(), config.log_level.as_deref());
     logging::setup_logging(&log_level).context("Failed to setup logging")?;

@@ -272,7 +272,10 @@ fn apply_field_transforms(vault_root: &Path, notes: &[Note], migration: &Migrati
             for line in &mut lines {
                 if line.starts_with(&format!("{old_key}:")) {
                     if existing_keys.contains(new_key) {
-                        log::warn!("skipping rename: target field already exists: {} ({old_key} -> {new_key})", note.path.display());
+                        log::warn!(
+                            "skipping rename: target field already exists: {} ({old_key} -> {new_key})",
+                            note.path.display()
+                        );
                     } else {
                         *line = line.replacen(old_key, new_key, 1);
                         changed = true;

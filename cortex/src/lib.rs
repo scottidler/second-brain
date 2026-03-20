@@ -162,7 +162,11 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
     }
 
     if rules.contains(&"auto-tag") {
-        report.merge(autotag::lint_autotag(&lintable_notes, &all_notes, &config.actions.auto_tag));
+        report.merge(autotag::lint_autotag(
+            &lintable_notes,
+            &all_notes,
+            &config.actions.auto_tag,
+        ));
         if opts.apply {
             autotag::apply_autotag(vault_root, &lintable_notes, &all_notes, &config.actions.auto_tag)?;
         }

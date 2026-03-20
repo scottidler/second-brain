@@ -169,7 +169,10 @@ mod tests {
 
     #[test]
     fn test_normalize_text_input_basic() {
-        assert_eq!(normalize_text_input("  Definition:  Gregarious  "), "definition: gregarious");
+        assert_eq!(
+            normalize_text_input("  Definition:  Gregarious  "),
+            "definition: gregarious"
+        );
     }
 
     #[test]

@@ -295,7 +295,10 @@ pub fn apply_frontmatter(
                 {
                     // Don't insert if a title field already exists (YAML parse may have failed)
                     if content.contains("\ntitle:") || content.starts_with("title:") {
-                        log::debug!("skipping title insert: field already exists in raw content: {}", note.path.display());
+                        log::debug!(
+                            "skipping title insert: field already exists in raw content: {}",
+                            note.path.display()
+                        );
                         continue;
                     }
                     let insert_pos = pos + 4;

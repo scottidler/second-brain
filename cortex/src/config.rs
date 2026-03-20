@@ -457,7 +457,10 @@ impl Config {
                 match Self::load_from_file(&primary) {
                     Ok(config) => return Ok(config),
                     Err(e) => {
-                        log::warn!("failed to load config, falling back to defaults: {}: {e}", primary.display());
+                        log::warn!(
+                            "failed to load config, falling back to defaults: {}: {e}",
+                            primary.display()
+                        );
                     }
                 }
             }

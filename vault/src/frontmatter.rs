@@ -300,10 +300,12 @@ mod tests {
     #[test]
     fn test_frontmatter_is_empty() {
         assert!(Frontmatter::default().is_empty());
-        assert!(!Frontmatter {
-            title: Some("x".to_string()),
-            ..Default::default()
-        }
-        .is_empty());
+        assert!(
+            !Frontmatter {
+                title: Some("x".to_string()),
+                ..Default::default()
+            }
+            .is_empty()
+        );
     }
 }
