@@ -1,0 +1,914 @@
+use eyre::{Context, Result};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tokio::time::Instant;
+
+use crate::cli::DaemonOpts;
+use crate::config::{Config, DaemonConfig};
+
+/// Fingerprint of a single sweep's apply results.
+/// Used to detect oscillation between consecutive sweeps.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SweepFingerprint {
+    /// Sorted list of (action, sorted file paths) for actions that applied changes.
+    results: Vec<(String, Vec<String>)>,
+}
+
+impl SweepFingerprint {
+    fn is_empty(&self) -> bool {
+        self.results.is_empty() || self.results.iter().all(|(_, files)| files.is_empty())
+    }
+
+    fn add(&mut self, action: &str, mut files: Vec<String>) {
+        files.sort();
+        files.dedup();
+        if !files.is_empty() {
+            self.results.push((action.to_string(), files));
+        }
+    }
+}
+
+/// Run the daemon based on subcommand options.
+pub async fn run_daemon(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Result<()> {
+    if opts.install {
+        install_systemd_service(vault_root, config)?;
+    } else if opts.uninstall {
+        uninstall_systemd_service()?;
+    } else if opts.status {
+        show_status()?;
+    } else if opts.stop {
+        println!("Send SIGTERM to the running daemon process to stop it.");
+    } else {
+        // Default: start watching (--start or no flags)
+        start_watching(vault_root, config).await?;
+    }
+    Ok(())
+}
+
+/// Start filesystem watcher and run actions on changes using async tokio::select! loop.
+async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
+    let daemon_config = &config.daemon;
+    let debounce_duration = Duration::from_secs(daemon_config.debounce_secs);
+    let poll_interval = Duration::from_secs(daemon_config.poll_interval);
+
+    let action_names: Vec<&str> = daemon_config.enabled_actions();
+    let any_enabled = daemon_config.actions.values().any(|a| a.enable);
+
+    println!("Starting daemon, watching: {}", vault_root.display());
+    println!(
+        "Debounce: {}s, actions: {}{}",
+        daemon_config.debounce_secs,
+        action_names.join(", "),
+        if any_enabled { " (auto-apply enabled)" } else { "" },
+    );
+
+    // Flag to suppress watcher events during auto-apply (prevents feedback loops)
+    let applying = Arc::new(AtomicBool::new(false));
+    let applying_clone = Arc::clone(&applying);
+
+    // Channel for file watcher events -> async event loop
+    let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let mut watcher: RecommendedWatcher =
+        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            if applying_clone.load(Ordering::Relaxed) {
+                return; // Discard events during auto-apply
+            }
+            if let Ok(event) = res {
+                let _ = watch_tx.send(event);
+            }
+        })
+        .context("failed to create filesystem watcher")?;
+
+    watcher
+        .watch(vault_root.as_ref(), RecursiveMode::Recursive)
+        .context("failed to watch vault root")?;
+
+    log::info!("daemon started: {}", vault_root.display());
+
+    // Timers
+    let mut sweep_interval = tokio::time::interval(poll_interval);
+    sweep_interval.tick().await; // consume the immediate first tick
+
+    // Debounce: starts inert (far future), reset when events arrive
+    let debounce = tokio::time::sleep(Duration::MAX);
+    tokio::pin!(debounce);
+
+    // Scheduled intel timers
+    let intel_enabled = daemon_config.is_enabled("intel");
+    let daily_dur = match (&daemon_config.daily_at, intel_enabled) {
+        (Some(time_str), true) => {
+            let dur = duration_until_next(time_str);
+            println!(
+                "Daily intel scheduled at {time_str} (in {:.0}m)",
+                dur.as_secs_f64() / 60.0
+            );
+            dur
+        }
+        _ => Duration::MAX, // inert
+    };
+    let daily = tokio::time::sleep(daily_dur);
+    tokio::pin!(daily);
+
+    let weekly_dur = match (&daemon_config.weekly_at, intel_enabled) {
+        (Some(schedule_str), true) => {
+            let dur = duration_until_next(schedule_str);
+            println!(
+                "Weekly intel scheduled for {schedule_str} (in {:.1}h)",
+                dur.as_secs_f64() / 3600.0
+            );
+            dur
+        }
+        _ => Duration::MAX, // inert
+    };
+    let weekly = tokio::time::sleep(weekly_dur);
+    tokio::pin!(weekly);
+
+    let mut pending: Vec<PathBuf> = Vec::new();
+
+    // Run a full sweep on startup
+    log::info!("running initial full sweep");
+    applying.store(true, Ordering::Relaxed);
+    let mut last_fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
+    applying.store(false, Ordering::Relaxed);
+
+    loop {
+        tokio::select! {
+            Some(event) = watch_rx.recv() => {
+                if should_process_event(&event, &config.vault.ignore) {
+                    // Real user edit - reset cycle detection
+                    last_fingerprint = SweepFingerprint::default();
+                    for path in event.paths {
+                        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                            let relative = path.strip_prefix(vault_root).unwrap_or(&path).to_path_buf();
+                            if !pending.contains(&relative) {
+                                pending.push(relative);
+                            }
+                        }
+                    }
+                    // Reset debounce timer
+                    debounce.as_mut().reset(Instant::now() + debounce_duration);
+                }
+            }
+            () = &mut debounce, if !pending.is_empty() => {
+                // Debounce fired - process pending changes
+                log::info!("processing changes: {} file(s)", pending.len());
+                for path in &pending {
+                    println!("  changed: {}", path.display());
+                }
+                applying.store(true, Ordering::Relaxed);
+                let fingerprint = run_configured_actions(vault_root, config, daemon_config, &pending);
+                applying.store(false, Ordering::Relaxed);
+                last_fingerprint = fingerprint;
+                pending.clear();
+                // Make debounce inert again
+                debounce.as_mut().reset(Instant::now() + Duration::MAX);
+                // Reset sweep interval after processing changes
+                sweep_interval.reset();
+            }
+            _ = sweep_interval.tick() => {
+                // Periodic full sweep with cycle detection
+                if !last_fingerprint.is_empty() {
+                    let actions_desc: Vec<_> = last_fingerprint.results.iter().map(|(a, f)| format!("{a}: {} files", f.len())).collect();
+                    log::warn!("cycle detected: previous sweep had fixes, skipping to avoid oscillation: {:?}", actions_desc);
+                    // Don't run - last sweep applied fixes, so running again risks repeating them.
+                    // A real user edit will reset last_fingerprint and re-enable sweeps.
+                } else {
+                    log::info!("running periodic sweep");
+                    applying.store(true, Ordering::Relaxed);
+                    let fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
+                    applying.store(false, Ordering::Relaxed);
+                    last_fingerprint = fingerprint;
+                }
+            }
+            () = &mut daily => {
+                // Scheduled daily intel
+                log::info!("running scheduled daily intel");
+                println!("[daemon] running scheduled daily intel");
+                let opts = crate::cli::IntelOpts {
+                    daily: true,
+                    weekly: false,
+                    output: None,
+                };
+                if let Err(e) = crate::run_intel(vault_root, config, &opts) {
+                    log::error!("scheduled daily intel failed: {e}");
+                }
+                // Reschedule for next day
+                if let Some(time_str) = &daemon_config.daily_at {
+                    let next = duration_until_next(time_str);
+                    log::info!("daily intel rescheduled: next in {}s", next.as_secs());
+                    daily.as_mut().reset(Instant::now() + next);
+                }
+            }
+            () = &mut weekly => {
+                // Scheduled weekly intel
+                log::info!("running scheduled weekly intel");
+                println!("[daemon] running scheduled weekly intel");
+                let opts = crate::cli::IntelOpts {
+                    daily: false,
+                    weekly: true,
+                    output: None,
+                };
+                if let Err(e) = crate::run_intel(vault_root, config, &opts) {
+                    log::error!("scheduled weekly intel failed: {e}");
+                }
+                // Reschedule for next week
+                if let Some(schedule_str) = &daemon_config.weekly_at {
+                    let next = duration_until_next(schedule_str);
+                    log::info!("weekly intel rescheduled: next in {}s", next.as_secs());
+                    weekly.as_mut().reset(Instant::now() + next);
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                log::info!("received shutdown signal");
+                println!("\nShutting down daemon...");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if a filesystem event should be processed.
+fn should_process_event(event: &notify::Event, ignore_dirs: &[String]) -> bool {
+    match event.kind {
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {}
+        _ => return false,
+    }
+
+    // Check if any path is in an ignored directory
+    for path in &event.paths {
+        for component in path.components() {
+            let name = component.as_os_str().to_string_lossy();
+            if ignore_dirs.iter().any(|ig| name == *ig) {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Run the configured on-change actions, returning a fingerprint of what was applied.
+fn run_configured_actions(
+    vault_root: &Path,
+    config: &Config,
+    daemon_config: &DaemonConfig,
+    changed_files: &[PathBuf],
+) -> SweepFingerprint {
+    let action_names: Vec<&str> = daemon_config.enabled_actions();
+    log::info!("running configured actions: {:?}", action_names);
+    let mut fingerprint = SweepFingerprint::default();
+
+    for action in &action_names {
+        match *action {
+            "lint" => {
+                let auto = daemon_config.is_enabled("lint");
+                let opts = crate::cli::LintOpts {
+                    apply: auto,
+                    format: "human".to_string(),
+                    rule: Vec::new(),
+                    path: None,
+                };
+                match crate::run_lint(vault_root, config, &opts) {
+                    Ok(report) => {
+                        if auto {
+                            // Mark that lint ran in apply mode so cycle detection can track it.
+                            // We can't know exactly which files were modified (apply functions
+                            // don't return paths), so use a sentinel.
+                            fingerprint.add("lint", vec!["__applied__".to_string()]);
+                            let remaining = report.violations.len();
+                            if remaining > 0 {
+                                log::debug!("lint: unfixable violations remain after apply: {remaining} remaining");
+                            }
+                        } else if !report.is_empty() {
+                            println!("[daemon] lint: {} violation(s)", report.violations.len());
+                        }
+                    }
+                    Err(e) => log::error!("lint action failed: {e}"),
+                }
+            }
+            "broken-links" => {
+                let notes = match crate::vault::scan_vault(vault_root, &config.vault) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        log::error!("failed to scan vault for broken links: {e}");
+                        continue;
+                    }
+                };
+                let report = crate::links::lint_broken_links(&notes, &notes, &config.actions.broken_links);
+                if !report.is_empty() {
+                    println!("[daemon] broken-links: {} violation(s)", report.violations.len());
+                }
+            }
+            "link" => {
+                let auto = daemon_config.is_enabled("link");
+                let opts = crate::cli::LinkOpts {
+                    apply: auto,
+                    scan: "all".to_string(),
+                };
+                match crate::run_link(vault_root, config, &opts) {
+                    Ok(report) => {
+                        if auto {
+                            // run_link in apply mode returns empty report but prints count.
+                            // Mark as applied so cycle detection tracks it.
+                            fingerprint.add("link", vec!["__applied__".to_string()]);
+                        } else if !report.is_empty() {
+                            println!("[daemon] link: {} suggestion(s)", report.violations.len());
+                        }
+                    }
+                    Err(e) => log::error!("link action failed: {e}"),
+                }
+            }
+            "duplicates" => {
+                let auto = daemon_config.is_enabled("duplicates");
+                match crate::vault::scan_vault(vault_root, &config.vault) {
+                    Ok(notes) => {
+                        if auto {
+                            match crate::duplicates::apply_duplicates(vault_root, &notes, &config.actions.duplicates) {
+                                Ok(count) if count > 0 => {
+                                    fingerprint.add("duplicates", vec!["__applied__".to_string()]);
+                                    log::info!("auto-applied duplicates: {count} fix(es)");
+                                    println!("[daemon] auto-applied duplicates: {count} fix(es)");
+                                }
+                                Ok(_) => {}
+                                Err(e) => log::error!("duplicates apply failed: {e}"),
+                            }
+                        } else {
+                            let report = crate::duplicates::lint_duplicates(&notes, &config.actions.duplicates);
+                            if !report.is_empty() {
+                                println!("[daemon] duplicates: {} violation(s)", report.violations.len());
+                            }
+                        }
+                    }
+                    Err(e) => log::error!("failed to scan vault for duplicates: {e}"),
+                }
+            }
+            "auto-tag" => {
+                let auto = daemon_config.is_enabled("auto-tag");
+                match crate::vault::scan_vault(vault_root, &config.vault) {
+                    Ok(notes) => {
+                        if auto {
+                            match crate::autotag::apply_autotag(vault_root, &notes, &notes, &config.actions.auto_tag) {
+                                Ok(count) if count > 0 => {
+                                    fingerprint.add("auto-tag", vec!["__applied__".to_string()]);
+                                    log::info!("auto-applied auto-tag: {count} fix(es)");
+                                    println!("[daemon] auto-applied auto-tag: {count} fix(es)");
+                                }
+                                Ok(_) => {}
+                                Err(e) => log::error!("auto-tag apply failed: {e}"),
+                            }
+                        } else {
+                            let report = crate::autotag::lint_autotag(&notes, &notes, &config.actions.auto_tag);
+                            if !report.is_empty() {
+                                println!("[daemon] auto-tag: {} suggestion(s)", report.violations.len());
+                            }
+                        }
+                    }
+                    Err(e) => log::error!("failed to scan vault for auto-tag: {e}"),
+                }
+            }
+            "quality" => {
+                let auto = daemon_config.is_enabled("quality");
+                match crate::vault::scan_vault(vault_root, &config.vault) {
+                    Ok(notes) => {
+                        if auto {
+                            match crate::quality::apply_quality(vault_root, &notes, &config.actions.quality) {
+                                Ok(count) if count > 0 => {
+                                    fingerprint.add("quality", vec!["__applied__".to_string()]);
+                                    log::info!("auto-applied quality: {count} fix(es)");
+                                    println!("[daemon] auto-applied quality: {count} fix(es)");
+                                }
+                                Ok(_) => {}
+                                Err(e) => log::error!("quality apply failed: {e}"),
+                            }
+                        } else {
+                            let report = crate::quality::lint_quality(&notes, &config.actions.quality);
+                            if !report.is_empty() {
+                                println!("[daemon] quality: {} violation(s)", report.violations.len());
+                            }
+                        }
+                    }
+                    Err(e) => log::error!("failed to scan vault for quality: {e}"),
+                }
+            }
+            "intel" => {
+                let opts = crate::cli::IntelOpts {
+                    daily: true,
+                    weekly: false,
+                    output: None,
+                };
+                if let Err(e) = crate::run_intel(vault_root, config, &opts) {
+                    log::error!("intel action failed: {e}");
+                }
+            }
+            "state" => {
+                let opts = crate::cli::StateOpts {
+                    refresh: true,
+                    diff: false,
+                };
+                if let Err(e) = crate::run_state(vault_root, config, &opts) {
+                    log::error!("state action failed: {e}");
+                }
+            }
+            other => {
+                log::warn!("unknown daemon action: {other}");
+            }
+        }
+    }
+
+    log::info!("daemon action cycle complete: {} changed file(s)", changed_files.len());
+    fingerprint
+}
+
+/// Install a systemd user service for the daemon.
+fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
+    let service_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .join("systemd")
+        .join("user");
+
+    std::fs::create_dir_all(&service_dir).context("failed to create systemd user dir")?;
+
+    let binary = std::env::current_exe().context("failed to get current executable path")?;
+    let vault = vault_root.display();
+
+    let mut config_flag = String::new();
+    if let Some(config_dir) = dirs::config_dir() {
+        let config_path = config_dir.join("obsidian-cortex").join("obsidian-cortex.yml");
+        if config_path.exists() {
+            config_flag = format!(" --config {}", config_path.display());
+        }
+    }
+
+    let log_level = &config.log_level;
+
+    let service = format!(
+        "[Unit]\n\
+         Description=Obsidian Cortex Vault Daemon\n\
+         After=default.target\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart={binary}{config_flag} --vault {vault} --log-level {log_level} daemon --start\n\
+         Restart=on-failure\n\
+         RestartSec=5\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        binary = binary.display(),
+    );
+
+    let service_path = service_dir.join("obsidian-cortex.service");
+    std::fs::write(&service_path, &service)?;
+    println!("Installed: {}", service_path.display());
+
+    // Daily intel timer - runs at 23:00 every day
+    let daily_service = format!(
+        "[Unit]\n\
+         Description=Obsidian Cortex Daily Intel\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         ExecStart={binary}{config_flag} --vault {vault} intel --daily\n",
+        binary = binary.display(),
+    );
+
+    let daily_timer = "[Unit]\n\
+         Description=Obsidian Cortex Daily Intel Timer\n\
+         \n\
+         [Timer]\n\
+         OnCalendar=*-*-* 23:00:00\n\
+         Persistent=true\n\
+         \n\
+         [Install]\n\
+         WantedBy=timers.target\n";
+
+    let daily_svc_path = service_dir.join("obsidian-cortex-daily.service");
+    let daily_timer_path = service_dir.join("obsidian-cortex-daily.timer");
+    std::fs::write(&daily_svc_path, daily_service)?;
+    std::fs::write(&daily_timer_path, daily_timer)?;
+    println!("Installed: {}", daily_svc_path.display());
+    println!("Installed: {}", daily_timer_path.display());
+
+    // Weekly intel timer - runs Sunday at 22:00
+    let weekly_service = format!(
+        "[Unit]\n\
+         Description=Obsidian Cortex Weekly Intel\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         ExecStart={binary}{config_flag} --vault {vault} intel --weekly\n",
+        binary = binary.display(),
+    );
+
+    let weekly_timer = "[Unit]\n\
+         Description=Obsidian Cortex Weekly Intel Timer\n\
+         \n\
+         [Timer]\n\
+         OnCalendar=Sun *-*-* 22:00:00\n\
+         Persistent=true\n\
+         \n\
+         [Install]\n\
+         WantedBy=timers.target\n";
+
+    let weekly_svc_path = service_dir.join("obsidian-cortex-weekly.service");
+    let weekly_timer_path = service_dir.join("obsidian-cortex-weekly.timer");
+    std::fs::write(&weekly_svc_path, weekly_service)?;
+    std::fs::write(&weekly_timer_path, weekly_timer)?;
+    println!("Installed: {}", weekly_svc_path.display());
+    println!("Installed: {}", weekly_timer_path.display());
+
+    println!("\nRun:");
+    println!("  systemctl --user daemon-reload");
+    println!("  systemctl --user enable --now obsidian-cortex");
+    println!("  systemctl --user enable --now obsidian-cortex-daily.timer");
+    println!("  systemctl --user enable --now obsidian-cortex-weekly.timer");
+
+    Ok(())
+}
+
+/// Uninstall the systemd user service and timer units.
+fn uninstall_systemd_service() -> Result<()> {
+    let service_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .join("systemd")
+        .join("user");
+
+    let units = [
+        "obsidian-cortex.service",
+        "obsidian-cortex-daily.service",
+        "obsidian-cortex-daily.timer",
+        "obsidian-cortex-weekly.service",
+        "obsidian-cortex-weekly.timer",
+    ];
+
+    let mut removed = false;
+    for unit in &units {
+        let path = service_dir.join(unit);
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+            println!("Removed: {}", path.display());
+            removed = true;
+        }
+    }
+
+    if removed {
+        println!("Run: systemctl --user daemon-reload");
+    } else {
+        println!("No service files found");
+    }
+
+    Ok(())
+}
+
+/// Show daemon status.
+fn show_status() -> Result<()> {
+    let service_path = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .join("systemd")
+        .join("user")
+        .join("obsidian-cortex.service");
+
+    if service_path.exists() {
+        println!("Service file: {}", service_path.display());
+        println!("Check status: systemctl --user status obsidian-cortex");
+    } else {
+        println!("Daemon not installed. Run: cortex daemon --install");
+    }
+
+    Ok(())
+}
+
+/// Convert a human-friendly schedule string to a cron expression.
+///
+/// Supported formats:
+///   "M-F 07:00"       -> "0 7 * * 1-5"
+///   "Mon-Fri 07:00"   -> "0 7 * * 1-5"
+///   "Sat-Sun 10:00"   -> "0 10 * * 0,6"
+///   "Sun 22:00"       -> "0 22 * * 0"
+///   "Mon 09:30"       -> "30 9 * * 1"
+///   "07:00"           -> "0 7 * * *"
+pub fn schedule_to_cron(schedule: &str) -> String {
+    let parts: Vec<&str> = schedule.split_whitespace().collect();
+    let (day_part, time_part) = if parts.len() >= 2 {
+        (Some(parts[0]), parts[1])
+    } else {
+        (None, parts.first().copied().unwrap_or("00:00"))
+    };
+
+    let time_parts: Vec<&str> = time_part.split(':').collect();
+    let hour = time_parts.first().copied().unwrap_or("0");
+    let minute = time_parts.get(1).copied().unwrap_or("0");
+
+    let dow = match day_part {
+        None => "*".to_string(),
+        Some(d) => day_spec_to_cron(d),
+    };
+
+    format!("{minute} {hour} * * {dow}")
+}
+
+/// Convert a day specifier to cron day-of-week field.
+///
+/// Supports: single days (Mon, Tue, Sun), ranges (M-F, Mon-Fri, Sat-Sun),
+/// and common abbreviations.
+fn day_spec_to_cron(spec: &str) -> String {
+    // Check for range (e.g., "M-F", "Mon-Fri", "Sat-Sun")
+    if let Some((start, end)) = spec.split_once('-') {
+        let start_num = day_to_cron_num(start);
+        let end_num = day_to_cron_num(end);
+        if start_num <= end_num {
+            format!("{start_num}-{end_num}")
+        } else {
+            // Wrap around (e.g., Fri-Mon -> 5,6,0,1)
+            let mut days: Vec<u8> = Vec::new();
+            let mut d = start_num;
+            loop {
+                days.push(d);
+                if d == end_num {
+                    break;
+                }
+                d = (d + 1) % 7;
+            }
+            days.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",")
+        }
+    } else {
+        day_to_cron_num(spec).to_string()
+    }
+}
+
+/// Map day name/abbreviation to cron number (0=Sun, 1=Mon, ..., 6=Sat).
+fn day_to_cron_num(day: &str) -> u8 {
+    match day.to_lowercase().as_str() {
+        "m" | "mon" | "monday" => 1,
+        "t" | "tu" | "tue" | "tuesday" => 2,
+        "w" | "wed" | "wednesday" => 3,
+        "th" | "thu" | "thursday" => 4,
+        "f" | "fri" | "friday" => 5,
+        "sa" | "sat" | "saturday" => 6,
+        "su" | "sun" | "sunday" => 0,
+        _ => 0,
+    }
+}
+
+/// Compute Duration until the next occurrence of a human-friendly schedule.
+///
+/// Uses croner to parse the translated cron expression and find the next match.
+pub fn duration_until_next(schedule: &str) -> Duration {
+    let cron_expr = schedule_to_cron(schedule);
+    let cron = match croner::Cron::from_str(&cron_expr) {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("invalid schedule expression: schedule={schedule}, cron={cron_expr}, error={e}");
+            return Duration::MAX;
+        }
+    };
+
+    let now = chrono::Local::now();
+    match cron.find_next_occurrence(&now, false) {
+        Ok(next) => {
+            let dur: chrono::Duration = next - now;
+            dur.to_std().unwrap_or(Duration::from_secs(3600))
+        }
+        Err(e) => {
+            log::error!("could not find next occurrence: schedule={schedule}, error={e}");
+            Duration::MAX
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DaemonConfig;
+    use chrono::Datelike;
+
+    #[test]
+    fn test_is_enabled_default_is_false() {
+        let config = DaemonConfig::default();
+        assert!(!config.is_enabled("lint"));
+        assert!(!config.is_enabled("link"));
+        assert!(!config.is_enabled("nonexistent"));
+    }
+
+    #[test]
+    fn test_is_enabled_explicit_true() {
+        let mut config = DaemonConfig::default();
+        config
+            .actions
+            .insert("lint".to_string(), crate::config::DaemonAction { enable: true });
+        assert!(config.is_enabled("lint"));
+        assert!(!config.is_enabled("link"));
+    }
+
+    #[test]
+    fn test_is_enabled_explicit_false() {
+        let config = DaemonConfig::default();
+        // lint is in default actions but enable defaults to false
+        assert!(!config.is_enabled("lint"));
+    }
+
+    #[test]
+    fn test_enabled_actions() {
+        let config = DaemonConfig::default();
+        let actions = config.enabled_actions();
+        assert!(actions.contains(&"lint"));
+        assert!(actions.contains(&"broken-links"));
+    }
+
+    #[test]
+    fn test_daemon_config_deserialize_actions() {
+        let yaml =
+            "actions:\n  lint:\n    enable: true\n  broken-links: {}\n  link:\n    enable: false\ndebounce-secs: 10\n";
+        let config: DaemonConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        assert_eq!(config.debounce_secs, 10);
+        assert!(config.is_enabled("lint"));
+        assert!(!config.is_enabled("broken-links"));
+        assert!(!config.is_enabled("link"));
+        assert!(!config.is_enabled("nonexistent"));
+        assert_eq!(config.actions.len(), 3);
+    }
+
+    #[test]
+    fn test_sweep_fingerprint_empty_default() {
+        let fp = SweepFingerprint::default();
+        assert!(fp.is_empty());
+    }
+
+    #[test]
+    fn test_sweep_fingerprint_non_empty() {
+        let mut fp = SweepFingerprint::default();
+        fp.add("lint", vec!["a.md".to_string(), "b.md".to_string()]);
+        assert!(!fp.is_empty());
+    }
+
+    #[test]
+    fn test_sweep_fingerprint_equality() {
+        let mut fp1 = SweepFingerprint::default();
+        fp1.add("lint", vec!["b.md".to_string(), "a.md".to_string()]);
+
+        let mut fp2 = SweepFingerprint::default();
+        fp2.add("lint", vec!["a.md".to_string(), "b.md".to_string()]);
+
+        // Both should sort to the same order
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn test_sweep_fingerprint_different_files() {
+        let mut fp1 = SweepFingerprint::default();
+        fp1.add("lint", vec!["a.md".to_string()]);
+
+        let mut fp2 = SweepFingerprint::default();
+        fp2.add("lint", vec!["b.md".to_string()]);
+
+        assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn test_sweep_fingerprint_empty_files_ignored() {
+        let mut fp = SweepFingerprint::default();
+        fp.add("lint", vec![]);
+        assert!(fp.is_empty());
+    }
+
+    #[test]
+    fn test_should_process_event_create() {
+        let event = notify::Event {
+            kind: EventKind::Create(notify::event::CreateKind::File),
+            paths: vec![PathBuf::from("/vault/note.md")],
+            attrs: Default::default(),
+        };
+        assert!(should_process_event(&event, &[]));
+    }
+
+    #[test]
+    fn test_should_process_event_ignores_git() {
+        let event = notify::Event {
+            kind: EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Content)),
+            paths: vec![PathBuf::from("/vault/.git/objects/abc")],
+            attrs: Default::default(),
+        };
+        assert!(!should_process_event(&event, &[".git".to_string()]));
+    }
+
+    #[test]
+    fn test_should_process_event_ignores_access() {
+        let event = notify::Event {
+            kind: EventKind::Access(notify::event::AccessKind::Read),
+            paths: vec![PathBuf::from("/vault/note.md")],
+            attrs: Default::default(),
+        };
+        assert!(!should_process_event(&event, &[]));
+    }
+
+    #[test]
+    fn test_duration_until_daily_future_today() {
+        // If we ask for a time that hasn't passed yet today, it should be today (on weekdays)
+        // or next Monday (on weekends)
+        let now = chrono::Local::now();
+        let future_hour = (now.format("%H").to_string().parse::<u32>().unwrap_or(0) + 1) % 24;
+        let time_str = format!("{future_hour:02}:00");
+        let dur = duration_until_next(&time_str);
+        // Should be within 3 days (worst case: Saturday -> Monday)
+        assert!(dur < Duration::from_secs(3 * 24 * 3600));
+        assert!(dur > Duration::ZERO);
+    }
+
+    #[test]
+    fn test_duration_until_daily_already_passed() {
+        // If we ask for a time that already passed, it should be next weekday
+        let now = chrono::Local::now();
+        let past_hour = if now.format("%H").to_string().parse::<u32>().unwrap_or(0) > 0 {
+            now.format("%H").to_string().parse::<u32>().unwrap_or(0) - 1
+        } else {
+            23
+        };
+        let time_str = format!("{past_hour:02}:00");
+        let dur = duration_until_next(&time_str);
+        // Should be within 3 days (worst case: Friday past -> Monday)
+        assert!(dur > Duration::ZERO);
+        assert!(dur <= Duration::from_secs(3 * 24 * 3600));
+    }
+
+    #[test]
+    fn test_duration_until_weekday_schedule() {
+        // "M-F 12:00" should always land on a weekday (Mon-Fri)
+        let dur = duration_until_next("M-F 12:00");
+        let now = chrono::Local::now();
+        let target = now + chrono::Duration::from_std(dur).expect("valid duration");
+        let weekday = target.weekday();
+        assert!(
+            matches!(
+                weekday,
+                chrono::Weekday::Mon
+                    | chrono::Weekday::Tue
+                    | chrono::Weekday::Wed
+                    | chrono::Weekday::Thu
+                    | chrono::Weekday::Fri
+            ),
+            "M-F schedule should only fire on weekdays, got {weekday:?}"
+        );
+    }
+
+    #[test]
+    fn test_duration_until_weekly_returns_valid_duration() {
+        let dur = duration_until_next("Sun 22:00");
+        // Should be within 7 days
+        assert!(dur <= Duration::from_secs(7 * 24 * 3600));
+        assert!(dur > Duration::ZERO);
+    }
+
+    #[test]
+    fn test_duration_until_weekly_all_days() {
+        for day in &["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] {
+            let schedule = format!("{day} 12:00");
+            let dur = duration_until_next(&schedule);
+            assert!(dur <= Duration::from_secs(7 * 24 * 3600), "failed for {day}");
+            assert!(dur > Duration::ZERO, "failed for {day}");
+        }
+    }
+
+    #[test]
+    fn test_daemon_config_deserialize_schedule_fields() {
+        let yaml = "daily-at: \"23:00\"\nweekly-at: \"Sun 22:00\"\n";
+        let config: DaemonConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        assert_eq!(config.daily_at.as_deref(), Some("23:00"));
+        assert_eq!(config.weekly_at.as_deref(), Some("Sun 22:00"));
+    }
+
+    #[test]
+    fn test_schedule_to_cron_weekdays() {
+        assert_eq!(schedule_to_cron("M-F 07:00"), "00 07 * * 1-5");
+        assert_eq!(schedule_to_cron("Mon-Fri 07:00"), "00 07 * * 1-5");
+    }
+
+    #[test]
+    fn test_schedule_to_cron_single_day() {
+        assert_eq!(schedule_to_cron("Sun 22:00"), "00 22 * * 0");
+        assert_eq!(schedule_to_cron("Mon 09:30"), "30 09 * * 1");
+    }
+
+    #[test]
+    fn test_schedule_to_cron_weekend() {
+        assert_eq!(schedule_to_cron("Sat-Sun 10:00"), "00 10 * * 6,0");
+    }
+
+    #[test]
+    fn test_schedule_to_cron_bare_time() {
+        assert_eq!(schedule_to_cron("07:00"), "00 07 * * *");
+    }
+
+    #[test]
+    fn test_daemon_config_default_no_schedule() {
+        let config = DaemonConfig::default();
+        assert!(config.daily_at.is_none());
+        assert!(config.weekly_at.is_none());
+    }
+}
