@@ -1,0 +1,49 @@
+version: 2
+project: second-brain
+type: rust
+
+tasks:
+  lint:
+    description: Run clippy lints
+    commands:
+      - cargo clippy --workspace -- -D warnings
+
+  check:
+    description: Type-check the workspace
+    commands:
+      - cargo check --workspace
+
+  test:
+    description: Run all tests
+    commands:
+      - cargo test --workspace
+
+  fmt:
+    description: Check formatting
+    commands:
+      - cargo fmt --check
+
+  ci:
+    description: Full CI pipeline
+    commands:
+      - cargo fmt --check
+      - cargo check --workspace
+      - cargo clippy --workspace -- -D warnings
+      - cargo test --workspace
+
+  build:
+    description: Build release binaries
+    commands:
+      - cargo build --workspace --release
+
+  install:
+    description: Install binaries locally
+    commands:
+      - cargo install --path borg
+      - cargo install --path cortex
+
+  deploy:
+    description: Build and install release binaries
+    commands:
+      - cargo install --path borg
+      - cargo install --path cortex

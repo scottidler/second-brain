@@ -1,0 +1,25 @@
+[workspace]
+members = ["vault", "borg", "cortex"]
+resolver = "3"
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+authors = ["Scott Idler <scott.a.idler@gmail.com>"]
+
+[workspace.dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.6", features = ["derive"] }
+colored = "3.1"
+dirs = "6.0"
+env_logger = "0.11"
+eyre = "0.6"
+fs2 = "0.4"
+log = "0.4"
+regex = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+shellexpand = "3.1"
+tokio = { version = "1", features = ["full"] }
+walkdir = "2.5"

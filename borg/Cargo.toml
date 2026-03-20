@@ -1,0 +1,9 @@
+[package]
+name = "borg"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+build = "build.rs"
+
+[dependencies]
+vault = { path = "../vault" }
