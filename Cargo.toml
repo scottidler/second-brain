@@ -1,5 +1,5 @@
 [workspace]
-members = ["vault", "borg", "cortex"]
+members = ["vault", "borg", "cortex", "oracle"]
 resolver = "3"
 
 [workspace.package]

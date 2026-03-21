@@ -5,6 +5,9 @@ edition.workspace = true
 authors.workspace = true
 description = "Shared library crate for Obsidian vault types, frontmatter, and utilities"
 
+[features]
+schemars = ["dep:schemars"]
+
 [dependencies]
 chrono = { workspace = true }
 dirs = { workspace = true }
@@ -13,6 +16,7 @@ eyre = { workspace = true }
 fs2 = { workspace = true }
 log = { workspace = true }
 regex = { workspace = true }
+schemars = { version = "1.2", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
