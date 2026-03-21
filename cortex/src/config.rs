@@ -452,7 +452,7 @@ impl Config {
         }
 
         if let Some(config_dir) = dirs::config_dir() {
-            let primary = config_dir.join("obsidian-cortex").join("obsidian-cortex.yml");
+            let primary = config_dir.join("cortex").join("cortex.yml");
             if primary.exists() {
                 match Self::load_from_file(&primary) {
                     Ok(config) => return Ok(config),

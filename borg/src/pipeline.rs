@@ -413,7 +413,7 @@ async fn process_url_inner(
     let filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
     // Resolve write path
-    let dest_path = resolve_destination(&config.vault.root_path);
+    let dest_path = resolve_destination(&config.vault.inbox_path);
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&filename);
@@ -762,7 +762,7 @@ async fn process_image_inner(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let note_filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.root_path);
+    let dest_path = resolve_destination(&config.vault.inbox_path);
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&note_filename);
@@ -1018,7 +1018,7 @@ async fn process_audio_inner(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let note_filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.root_path);
+    let dest_path = resolve_destination(&config.vault.inbox_path);
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&note_filename);
@@ -1302,7 +1302,7 @@ async fn process_document_file_inner(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let note_filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.root_path);
+    let dest_path = resolve_destination(&config.vault.inbox_path);
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&note_filename);
@@ -1522,7 +1522,7 @@ async fn process_text_inner(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.root_path);
+    let dest_path = resolve_destination(&config.vault.inbox_path);
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&filename);
@@ -1685,7 +1685,7 @@ async fn process_vocab(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.root_path);
+    let dest_path = resolve_destination(&config.vault.inbox_path);
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&filename);
@@ -2093,7 +2093,7 @@ async fn process_code_snippet(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.root_path);
+    let dest_path = resolve_destination(&config.vault.inbox_path);
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&filename);
@@ -2176,8 +2176,8 @@ fn resolve_vocab_domain(language: &str, text_capture: &crate::config::TextCaptur
     }
 }
 
-fn resolve_destination(root_path: &str) -> PathBuf {
-    expand_tilde(root_path).join("notes")
+fn resolve_destination(inbox_path: &str) -> PathBuf {
+    expand_tilde(inbox_path)
 }
 
 /// Build an obsidian://open deep link from vault name and note path.
@@ -2333,15 +2333,15 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_destination_always_notes() {
-        let dest = resolve_destination("/vault");
-        assert_eq!(dest, PathBuf::from("/vault/notes"));
+    fn test_resolve_destination_uses_inbox_path() {
+        let dest = resolve_destination("/vault/inbox");
+        assert_eq!(dest, PathBuf::from("/vault/inbox"));
     }
 
     #[test]
     fn test_resolve_destination_with_trailing_slash() {
-        let dest = resolve_destination("/vault/");
-        assert_eq!(dest, PathBuf::from("/vault/notes"));
+        let dest = resolve_destination("/vault/inbox/");
+        assert_eq!(dest, PathBuf::from("/vault/inbox/"));
     }
 
     #[test]
@@ -2388,8 +2388,8 @@ mod tests {
 
     #[test]
     fn test_resolve_destination_absolute_path() {
-        let dest = resolve_destination("/home/user/obsidian");
-        assert_eq!(dest, PathBuf::from("/home/user/obsidian/notes"));
+        let dest = resolve_destination("/home/user/obsidian/inbox");
+        assert_eq!(dest, PathBuf::from("/home/user/obsidian/inbox"));
     }
 
     #[test]
