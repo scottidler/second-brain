@@ -160,6 +160,7 @@ tasks:
     bash: |
       cargo install --path borg
       cargo install --path cortex
+      cargo install --path oracle
       echo "✅ Binaries installed to ~/.cargo/bin"
 
   deploy:
@@ -167,4 +168,5 @@ tasks:
     bash: |
       cargo install --path borg
       cargo install --path cortex
-      echo "✅ Deployed borg and cortex"
+      cargo install --path oracle
+      echo "✅ Deployed borg, cortex, and oracle"
