@@ -35,6 +35,11 @@ impl OracleMcpServer {
         }
     }
 
+    /// Get a clone of the database handle for use in background tasks.
+    pub fn db_handle(&self) -> std::sync::Arc<Mutex<SearchIndex>> {
+        std::sync::Arc::clone(&self.db)
+    }
+
     fn err(e: impl std::fmt::Display) -> McpError {
         warn!("Tool error: {}", e);
         McpError::internal_error(e.to_string(), None)

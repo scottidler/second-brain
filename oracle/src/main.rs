@@ -7,6 +7,7 @@ use std::io;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 use vault::search::SearchIndex;
+use vault::watcher::{VaultWatcher, WatcherConfig};
 
 mod cli;
 
@@ -58,7 +59,46 @@ async fn run_serve(config: Config) -> Result<()> {
     );
 
     tracing::info!("Starting MCP server on stdio transport");
-    let server = oracle::server::OracleMcpServer::new(config, db);
+    let server = oracle::server::OracleMcpServer::new(config.clone(), db);
+
+    // Spawn file watcher for live reindex
+    if config.watcher.enable {
+        let watcher_config = WatcherConfig {
+            debounce_secs: config.watcher.debounce_secs,
+            ignore_dirs: config.watcher.ignore.clone(),
+        };
+        let vault_root = config.vault_root();
+        match VaultWatcher::start(&vault_root, watcher_config, None) {
+            Ok((watcher, mut rx)) => {
+                let db_handle = server.db_handle();
+                let vault_root = config.vault_root();
+                tracing::info!("File watcher started (debounce: {}s)", config.watcher.debounce_secs);
+                tokio::spawn(async move {
+                    // Hold watcher alive for the lifetime of this task
+                    let _keep = watcher;
+                    while let Some(change) = rx.recv().await {
+                        tracing::info!(
+                            "vault changed ({} files), reindexing",
+                            change.changed_paths.len()
+                        );
+                        if let Ok(db) = db_handle.lock() {
+                            match db.index_vault(&vault_root) {
+                                Ok(stats) => tracing::info!(
+                                    "reindex: {} updated, {} inserted, {} unchanged",
+                                    stats.updated, stats.inserted, stats.unchanged
+                                ),
+                                Err(e) => tracing::warn!("reindex failed: {e}"),
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start file watcher, continuing without live reindex: {e}");
+            }
+        }
+    }
+
     let transport = (tokio::io::stdin(), tokio::io::stdout());
     let service = server.serve(transport).await?;
 

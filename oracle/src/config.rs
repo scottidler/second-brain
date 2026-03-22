@@ -17,6 +17,10 @@ pub struct Config {
     /// Logging configuration
     #[serde(default)]
     pub logging: LogConfig,
+
+    /// File watcher configuration
+    #[serde(default)]
+    pub watcher: WatcherConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -34,6 +38,43 @@ impl Default for LogConfig {
             file: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatcherConfig {
+    /// Whether to enable the file watcher for live reindexing
+    #[serde(default = "default_watcher_enable")]
+    pub enable: bool,
+
+    /// Seconds to wait after last event before reindexing
+    #[serde(default = "default_debounce_secs", rename = "debounce-secs")]
+    pub debounce_secs: u64,
+
+    /// Directory names to ignore
+    #[serde(default = "default_ignore_dirs")]
+    pub ignore: Vec<String>,
+}
+
+impl Default for WatcherConfig {
+    fn default() -> Self {
+        Self {
+            enable: default_watcher_enable(),
+            debounce_secs: default_debounce_secs(),
+            ignore: default_ignore_dirs(),
+        }
+    }
+}
+
+fn default_watcher_enable() -> bool {
+    true
+}
+
+fn default_debounce_secs() -> u64 {
+    5
+}
+
+fn default_ignore_dirs() -> Vec<String> {
+    vec![".git".into(), ".obsidian".into(), "templates".into()]
 }
 
 fn default_vault_root() -> String {
@@ -97,6 +138,7 @@ impl Default for Config {
             vault_root: default_vault_root(),
             db_path: default_db_path(),
             logging: LogConfig::default(),
+            watcher: WatcherConfig::default(),
         }
     }
 }
