@@ -1,4 +1,5 @@
 pub mod autotag;
+pub mod classify;
 pub mod cli;
 pub mod config;
 pub mod daemon;
@@ -23,6 +24,7 @@ use colored::Colorize;
 use eyre::Result;
 use std::path::Path;
 
+use classify::ClassifyOpts;
 use cli::{IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts};
 use config::Config;
 use report::Report;
@@ -288,6 +290,25 @@ pub fn run_link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<R
         Ok(Report::default())
     } else {
         let report = linking::lint_linking(&notes, &config.actions.linking);
+        report.print_human(false);
+        Ok(report)
+    }
+}
+
+pub fn run_classify(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Report> {
+    log::info!("starting classify command (vault_root={})", vault_root.display());
+    let notes = scan_vault(vault_root, &config.vault)?;
+
+    if opts.apply {
+        classify::apply_classify(
+            vault_root,
+            &notes,
+            &config.actions.classify,
+            opts.force,
+            opts.review_only,
+        )
+    } else {
+        let report = classify::lint_classify(&notes, &config.actions.classify);
         report.print_human(false);
         Ok(report)
     }

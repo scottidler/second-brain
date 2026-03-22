@@ -73,6 +73,7 @@ impl Default for VaultConfig {
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 pub struct ActionsConfig {
+    pub classify: crate::classify::ClassifyConfig,
     pub naming: NamingConfig,
     pub frontmatter: FrontmatterConfig,
     pub tags: TagsConfig,

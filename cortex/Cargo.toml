@@ -7,7 +7,7 @@ build = "build.rs"
 description = "Vault governance and intelligence companion for Obsidian"
 
 [dependencies]
-vault = { path = "../vault" }
+vault = { path = "../vault", features = ["search"] }
 chrono = { workspace = true }
 clap = { workspace = true }
 colored = { workspace = true }

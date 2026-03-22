@@ -28,6 +28,9 @@ async fn main() -> Result<()> {
     log::info!("resolved vault root: {}", vault_root.display());
 
     match &cli.command {
+        Command::Classify(opts) => {
+            cortex::run_classify(&vault_root, &config, opts)?;
+        }
         Command::Lint(opts) => {
             cortex::run_lint(&vault_root, &config, opts)?;
         }

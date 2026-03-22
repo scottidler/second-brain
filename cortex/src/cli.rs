@@ -62,6 +62,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Classify inbox notes by domain and promote to notes/
+    Classify(crate::classify::ClassifyOpts),
     /// Validate vault against rules
     Lint(LintOpts),
     /// Scan for and create wikilinks

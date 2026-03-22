@@ -204,6 +204,7 @@ impl TestVault {
             log_level: "warn".to_string(),
             schema: SchemaConfig::default(),
             actions: ActionsConfig {
+                classify: crate::classify::ClassifyConfig::default(),
                 naming: NamingConfig {
                     style: "lowercase-hyphenated".to_string(),
                     max_length: 80,
