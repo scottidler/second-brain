@@ -73,20 +73,13 @@ pub fn normalize_text_input(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
-pub fn sanitize_tag(tag: &str) -> String {
-    tag.trim()
+/// Lowercase, strip apostrophes, replace non-alphanumeric with hyphens,
+/// collapse consecutive hyphens, and trim leading/trailing hyphens.
+fn sanitize_slug(input: &str) -> String {
+    let sanitized: String = input
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
-}
-
-pub fn sanitize_filename(title: &str) -> String {
-    let sanitized: String = title
-        .to_lowercase()
-        .chars()
+        .filter(|c| *c != '\'')
         .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
         .collect();
 
@@ -106,6 +99,31 @@ pub fn sanitize_filename(title: &str) -> String {
     }
 
     result.trim_matches('-').to_string()
+}
+
+pub fn sanitize_tag(tag: &str) -> String {
+    sanitize_slug(tag.trim())
+}
+
+/// Maximum filename stem length (without `.md` extension).
+/// Matches cortex naming convention max_length default.
+const MAX_FILENAME_LEN: usize = 80;
+
+pub fn sanitize_filename(title: &str) -> String {
+    let slug = sanitize_slug(title);
+
+    if slug.len() <= MAX_FILENAME_LEN {
+        return slug;
+    }
+
+    // Truncate to max length, breaking at a hyphen boundary if possible
+    let truncated = &slug[..MAX_FILENAME_LEN];
+    if let Some(pos) = truncated.rfind('-') {
+        if pos > MAX_FILENAME_LEN / 2 {
+            return truncated[..pos].to_string();
+        }
+    }
+    truncated.trim_end_matches('-').to_string()
 }
 
 #[cfg(test)]
@@ -152,19 +170,193 @@ mod tests {
         assert_eq!(sanitize_tag("--hello--"), "hello");
     }
 
+    // ---- sanitize_filename: basics ----
+
     #[test]
     fn test_sanitize_filename_basic() {
         assert_eq!(sanitize_filename("Hello World!"), "hello-world");
     }
 
     #[test]
-    fn test_sanitize_filename_special() {
-        assert_eq!(sanitize_filename("Test: A/B \"quotes\""), "test-a-b-quotes");
+    fn test_sanitize_filename_lowercases() {
+        assert_eq!(sanitize_filename("MY TITLE"), "my-title");
+        assert_eq!(sanitize_filename("CamelCase"), "camelcase");
     }
 
     #[test]
-    fn test_sanitize_filename_collapses_hyphens() {
+    fn test_sanitize_filename_spaces_become_hyphens() {
+        assert_eq!(sanitize_filename("one two three"), "one-two-three");
+        assert_eq!(sanitize_filename("  leading trailing  "), "leading-trailing");
+    }
+
+    #[test]
+    fn test_sanitize_filename_special_chars() {
+        assert_eq!(sanitize_filename("Test: A/B \"quotes\""), "test-a-b-quotes");
+        assert_eq!(sanitize_filename("hello@world.com"), "hello-world-com");
+        assert_eq!(sanitize_filename("(parens) [brackets] {braces}"), "parens-brackets-braces");
+        assert_eq!(sanitize_filename("a + b = c"), "a-b-c");
+        assert_eq!(sanitize_filename("100% done!"), "100-done");
+        assert_eq!(sanitize_filename("file#anchor?query&param"), "file-anchor-query-param");
+    }
+
+    #[test]
+    fn test_sanitize_filename_already_clean() {
+        assert_eq!(sanitize_filename("my-cool-note"), "my-cool-note");
+        assert_eq!(sanitize_filename("abc123"), "abc123");
+    }
+
+    // ---- sanitize_filename: apostrophes and quotes ----
+
+    #[test]
+    fn test_sanitize_filename_strips_apostrophes() {
+        assert_eq!(sanitize_filename("Bob's idea"), "bobs-idea");
+        assert_eq!(sanitize_filename("it's a don't won't"), "its-a-dont-wont");
+        assert_eq!(sanitize_filename("rock 'n' roll"), "rock-n-roll");
+        assert_eq!(sanitize_filename("'quoted'"), "quoted");
+    }
+
+    #[test]
+    fn test_sanitize_filename_double_quotes_become_hyphens() {
+        // double quotes are not stripped, they become hyphens (then collapsed)
+        assert_eq!(sanitize_filename("the \"best\" plan"), "the-best-plan");
+    }
+
+    #[test]
+    fn test_sanitize_filename_backticks_become_hyphens() {
+        assert_eq!(sanitize_filename("use `cargo test`"), "use-cargo-test");
+    }
+
+    // ---- sanitize_filename: dash/hyphen collapsing ----
+
+    #[test]
+    fn test_sanitize_filename_collapses_consecutive_hyphens() {
+        assert_eq!(sanitize_filename("a--b"), "a-b");
+        assert_eq!(sanitize_filename("a---b"), "a-b");
+        assert_eq!(sanitize_filename("a------b"), "a-b");
+    }
+
+    #[test]
+    fn test_sanitize_filename_em_dash() {
+        assert_eq!(sanitize_filename("before\u{2014}after"), "before-after"); // em dash U+2014
+        assert_eq!(sanitize_filename("a\u{2013}b"), "a-b"); // en dash U+2013
+    }
+
+    #[test]
+    fn test_sanitize_filename_mixed_separators_collapse() {
+        assert_eq!(sanitize_filename("a-_-b"), "a-b");
+        assert_eq!(sanitize_filename("a _ - _ b"), "a-b");
+        assert_eq!(sanitize_filename("a - - - b"), "a-b");
         assert_eq!(sanitize_filename("a:::b"), "a-b");
+        assert_eq!(sanitize_filename("a///b"), "a-b");
+    }
+
+    #[test]
+    fn test_sanitize_filename_underscores_become_hyphens() {
+        assert_eq!(sanitize_filename("hello_world"), "hello-world");
+        assert_eq!(sanitize_filename("a__b"), "a-b");
+    }
+
+    // ---- sanitize_filename: leading/trailing cleanup ----
+
+    #[test]
+    fn test_sanitize_filename_strips_leading_trailing_hyphens() {
+        assert_eq!(sanitize_filename("--hello--"), "hello");
+        assert_eq!(sanitize_filename("---test---"), "test");
+        assert_eq!(sanitize_filename(" - hello - "), "hello");
+    }
+
+    // ---- sanitize_filename: truncation ----
+
+    #[test]
+    fn test_sanitize_filename_short_title_unchanged() {
+        assert_eq!(sanitize_filename("my-cool-note"), "my-cool-note");
+    }
+
+    #[test]
+    fn test_sanitize_filename_exactly_at_limit() {
+        let title = "a".repeat(80);
+        let result = sanitize_filename(&title);
+        assert_eq!(result.len(), 80);
+    }
+
+    #[test]
+    fn test_sanitize_filename_truncates_long_title() {
+        let long_title = "GitHub - joaoh82/rustunnel: A minimal, educational TCP tunneling tool written in Rust that demonstrates core networking concepts including TCP proxying, TLS termination, and connection multiplexing";
+        let result = sanitize_filename(long_title);
+        assert!(result.len() <= 80, "got length {}: {result}", result.len());
+        assert!(!result.ends_with('-'));
+    }
+
+    #[test]
+    fn test_sanitize_filename_truncation_breaks_at_word_boundary() {
+        // 85 chars when sanitized: "aaa...aaa-bbb" - should truncate at last hyphen before 80
+        let title = format!("{}-bbbbbbbbb", "a-".repeat(38).trim_end_matches('-'));
+        let result = sanitize_filename(&title);
+        assert!(result.len() <= 80, "got length {}: {result}", result.len());
+        assert!(!result.ends_with('-'));
+    }
+
+    #[test]
+    fn test_sanitize_filename_truncation_never_exceeds_limit() {
+        // No hyphens at all - just a long run of chars
+        let title = "a".repeat(200);
+        let result = sanitize_filename(&title);
+        assert_eq!(result.len(), 80);
+    }
+
+    // ---- sanitize_filename: real-world titles ----
+
+    #[test]
+    fn test_sanitize_filename_youtube_title() {
+        assert_eq!(
+            sanitize_filename("I Built My Second Brain with Claude Code + Obsidian"),
+            "i-built-my-second-brain-with-claude-code-obsidian"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_filename_github_repo() {
+        // github titles often include the full description
+        let title = "GitHub - infatoshi/opensquirrel: For people who get distracted by agents. A native Rust GPUI control plane for running claude-code, codex, cursor and opencode side by side";
+        let result = sanitize_filename(title);
+        assert!(result.len() <= 80, "got length {}: {result}", result.len());
+    }
+
+    #[test]
+    fn test_sanitize_filename_howtogeek_url_slug() {
+        assert_eq!(
+            sanitize_filename("i failed to build a second brain until i used obsidians daily notes"),
+            "i-failed-to-build-a-second-brain-until-i-used-obsidians-daily-notes"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_filename_possessive_in_real_title() {
+        assert_eq!(
+            sanitize_filename("Anthropic's New Claude Model: What You Need to Know"),
+            "anthropics-new-claude-model-what-you-need-to-know"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_filename_unicode_and_emoji() {
+        // emoji and non-latin chars become hyphens, then collapse
+        let result = sanitize_filename("hello world cafe");
+        assert_eq!(result, "hello-world-cafe");
+    }
+
+    // ---- sanitize_tag: matching behavior ----
+
+    #[test]
+    fn test_sanitize_tag_strips_apostrophes() {
+        assert_eq!(sanitize_tag("don't-panic"), "dont-panic");
+        assert_eq!(sanitize_tag("it's"), "its");
+    }
+
+    #[test]
+    fn test_sanitize_tag_collapses_hyphens() {
+        assert_eq!(sanitize_tag("a--b"), "a-b");
+        assert_eq!(sanitize_tag("a - b"), "a-b");
     }
 
     #[test]
