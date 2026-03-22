@@ -268,8 +268,10 @@ pub fn apply_classify(
         let dest_relative = PathBuf::from("notes").join(filename);
         let dest_abs = vault_root.join(&dest_relative);
 
-        // Handle filename collision
-        let dest_abs = resolve_collision(&dest_abs);
+        // Handle filename collision - pass source URL so we can detect
+        // reingest replacements (same source = overwrite, not -2 suffix)
+        let source_url = note.frontmatter.source.as_deref();
+        let dest_abs = resolve_collision(&dest_abs, source_url);
         let dest_relative = dest_abs.strip_prefix(vault_root).unwrap_or(&dest_abs).to_path_buf();
 
         if let Some(parent) = dest_abs.parent() {
@@ -595,10 +597,23 @@ fn mark_needs_review(vault_root: &Path, note: &Note) -> Result<()> {
     Ok(())
 }
 
-/// Resolve filename collision by appending numeric suffix
-fn resolve_collision(path: &Path) -> PathBuf {
+/// Resolve filename collision. If the existing note has the same source URL,
+/// this is a reingest replacement - return the original path (overwrite in place).
+/// Only append a numeric suffix for genuinely different notes with the same slug.
+fn resolve_collision(path: &Path, source_url: Option<&str>) -> PathBuf {
     if !path.exists() {
         return path.to_path_buf();
+    }
+
+    // Same source URL means reingest replacement - overwrite, don't create -2
+    if let Some(source) = source_url {
+        if existing_note_has_source(path, source) {
+            log::info!(
+                "collision is a reingest replacement (same source), overwriting: {}",
+                path.display()
+            );
+            return path.to_path_buf();
+        }
     }
 
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("note");
@@ -614,6 +629,20 @@ fn resolve_collision(path: &Path) -> PathBuf {
 
     // Extremely unlikely - fall back to original
     path.to_path_buf()
+}
+
+/// Check if an existing note file contains a matching source URL in its frontmatter.
+fn existing_note_has_source(path: &Path, source_url: &str) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    let mut buf = vec![0u8; 2048];
+    let mut reader = std::io::BufReader::new(file);
+    let n = reader.read(&mut buf).unwrap_or(0);
+    let header = String::from_utf8_lossy(&buf[..n]);
+    let needle = format!("source: \"{source_url}\"");
+    header.contains(&needle)
 }
 
 /// Update wikilinks across vault after file moves
@@ -784,7 +813,7 @@ mod tests {
     #[test]
     fn test_resolve_collision_no_conflict() {
         let path = PathBuf::from("/tmp/nonexistent-classify-test-12345.md");
-        assert_eq!(resolve_collision(&path), path);
+        assert_eq!(resolve_collision(&path, None), path);
     }
 
     #[test]

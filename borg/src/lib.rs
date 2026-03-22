@@ -431,7 +431,7 @@ pub async fn run_reingest(
         let body = serde_json::json!({
             "url": entry.source,
             "tags": [],
-            "force": false,
+            "force": true,
             "method": "cli",
         });
 
