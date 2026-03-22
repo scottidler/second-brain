@@ -277,6 +277,53 @@ impl OracleMcpServer {
         let stats = db.index_vault(&vault_root).map_err(Self::err)?;
         Ok(CallToolResult::success(vec![Content::json(&stats)?]))
     }
+
+    /// Search notes by tag or list all tags
+    #[tool(
+        description = "Search notes by tag, or list all tags with counts when no tag is specified. Supports exact match and prefix match (append * to tag). Filter by domain."
+    )]
+    async fn tag_search(&self, params: Parameters<TagSearchRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let db = self.db.lock().map_err(Self::err)?;
+
+        match req.tag {
+            Some(tag) => {
+                let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
+                let notes = db
+                    .tag_search(&tag, req.domain.as_ref().map(|d| d.as_str()), req.limit)
+                    .map_err(Self::err)?;
+
+                let results: Vec<serde_json::Value> =
+                    notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
+
+                Ok(CallToolResult::success(vec![Content::json(json!({
+                    "tag": tag,
+                    "count": results.len(),
+                    "results": results,
+                }))?]))
+            }
+            None => {
+                let stats = db.tag_stats().map_err(Self::err)?;
+                let limit = req.limit.unwrap_or(50) as usize;
+                let stats: Vec<&vault::search::TagStat> = stats.iter().take(limit).collect();
+                let tags: Vec<serde_json::Value> = stats
+                    .iter()
+                    .map(|s| {
+                        json!({
+                            "tag": s.tag,
+                            "count": s.count,
+                            "domains": s.domains,
+                        })
+                    })
+                    .collect();
+
+                Ok(CallToolResult::success(vec![Content::json(json!({
+                    "count": tags.len(),
+                    "tags": tags,
+                }))?]))
+            }
+        }
+    }
 }
 
 #[tool_handler]

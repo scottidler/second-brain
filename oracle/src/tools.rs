@@ -123,6 +123,28 @@ pub struct IngestHistoryRequest {
     pub before: Option<String>,
 }
 
+/// Search notes by tag, or list all tags with counts when no tag is specified.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TagSearchRequest {
+    /// Specific tag to search for. Exact match by default; append * for prefix match (e.g. "rust*"). Omit to list all tags with counts.
+    #[schemars(
+        description = "Tag to search for (exact match, or prefix match with trailing *). Omit to list all tags with counts."
+    )]
+    pub tag: Option<String>,
+
+    /// Filter to tags within a domain
+    #[schemars(description = "Filter to a specific domain")]
+    pub domain: Option<Domain>,
+
+    /// How much content to return per note
+    #[schemars(description = "Detail level for returned notes. Default: metadata")]
+    pub detail: Option<DetailLevel>,
+
+    /// Maximum number of results
+    #[schemars(description = "Maximum number of results (default: 20)")]
+    pub limit: Option<u32>,
+}
+
 /// List all valid schema values (domains, note types, origins, statuses, methods).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SchemaInfoRequest {}

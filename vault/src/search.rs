@@ -7,6 +7,7 @@ use crate::config::ScanConfig;
 use crate::detail;
 use crate::note::scan_vault;
 use crate::schema::{Domain, NoteType, Origin, Status};
+use chrono;
 use eyre::{Result, WrapErr};
 use rusqlite::{Connection, params};
 use serde::Serialize;
@@ -35,6 +36,28 @@ fn normalize_enum<T: std::str::FromStr + std::fmt::Display>(
         },
         _ => String::new(),
     }
+}
+
+/// Extract a string value from the frontmatter extra map (for cortex-* fields)
+fn extract_cortex_string(extra: &HashMap<String, serde_yaml::Value>, key: &str) -> String {
+    extra
+        .get(key)
+        .and_then(|v| match v {
+            serde_yaml::Value::String(s) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Extract a boolean value from the frontmatter extra map as i64 (0/1)
+fn extract_cortex_bool(extra: &HashMap<String, serde_yaml::Value>, key: &str) -> i64 {
+    extra
+        .get(key)
+        .map(|v| match v {
+            serde_yaml::Value::Bool(b) => i64::from(*b),
+            _ => 0,
+        })
+        .unwrap_or(0)
 }
 
 impl SearchIndex {
@@ -80,7 +103,13 @@ impl SearchIndex {
                 creator TEXT,
                 body TEXT,
                 summary TEXT,
-                modified_at INTEGER
+                modified_at INTEGER,
+                quality TEXT DEFAULT '',
+                classified INTEGER DEFAULT 0,
+                classified_by TEXT DEFAULT '',
+                confidence TEXT DEFAULT '',
+                needs_review INTEGER DEFAULT 0,
+                duplicate_group TEXT DEFAULT ''
             );
 
             CREATE INDEX IF NOT EXISTS idx_notes_domain ON notes(domain);
@@ -110,6 +139,37 @@ impl SearchIndex {
                 VALUES (new.rowid, new.title, new.body, new.tags, new.summary);
             END;",
         )?;
+
+        // Add governance columns to existing tables (safe to call multiple times)
+        self.ensure_governance_columns()?;
+
+        Ok(())
+    }
+
+    /// Add cortex governance columns if they don't exist yet (handles schema migration)
+    fn ensure_governance_columns(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(notes)")?;
+        let existing_columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let governance_columns = [
+            ("quality", "TEXT DEFAULT ''"),
+            ("classified", "INTEGER DEFAULT 0"),
+            ("classified_by", "TEXT DEFAULT ''"),
+            ("confidence", "TEXT DEFAULT ''"),
+            ("needs_review", "INTEGER DEFAULT 0"),
+            ("duplicate_group", "TEXT DEFAULT ''"),
+        ];
+
+        for (col, col_type) in governance_columns {
+            if !existing_columns.contains(&col.to_string()) {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE notes ADD COLUMN {col} {col_type};"))?;
+            }
+        }
+
         Ok(())
     }
 
@@ -160,9 +220,17 @@ impl SearchIndex {
             let origin = normalize_enum::<Origin>(fm.origin.as_deref(), "origin", &path_str);
             let status = normalize_enum::<Status>(fm.status.as_deref(), "status", &path_str);
 
+            // Extract cortex governance fields from frontmatter.extra
+            let quality = extract_cortex_string(&fm.extra, "cortex-quality");
+            let classified = extract_cortex_bool(&fm.extra, "cortex-classified");
+            let classified_by = extract_cortex_string(&fm.extra, "cortex-classified-by");
+            let confidence = extract_cortex_string(&fm.extra, "cortex-confidence");
+            let needs_review = extract_cortex_bool(&fm.extra, "cortex-needs-review");
+            let duplicate_group = extract_cortex_string(&fm.extra, "cortex-duplicate-group");
+
             self.conn.execute(
-                "INSERT OR REPLACE INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT OR REPLACE INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality, classified, classified_by, confidence, needs_review, duplicate_group)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     path_str.as_ref(),
                     fm.title.as_deref().unwrap_or(""),
@@ -177,6 +245,12 @@ impl SearchIndex {
                     &note.body,
                     summary,
                     mtime,
+                    quality,
+                    classified,
+                    classified_by,
+                    confidence,
+                    needs_review,
+                    duplicate_group,
                 ],
             )?;
 
@@ -475,6 +549,138 @@ impl SearchIndex {
     pub fn domain_exemplars(&self, domain: &str, limit: usize) -> Result<Vec<NoteRow>> {
         self.list_notes(Some(domain), None, None, None, None, Some(limit as u32))
     }
+
+    /// Find notes matching a specific tag, optionally filtered by domain
+    pub fn tag_search(&self, tag: &str, domain: Option<&str>, limit: Option<u32>) -> Result<Vec<NoteRow>> {
+        let limit = limit.unwrap_or(20);
+
+        // Tags are stored as JSON arrays, use Rust-side filtering
+        let mut sql = String::from(
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+             FROM notes WHERE tags != ''",
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+        let mut param_idx = 1;
+
+        if let Some(d) = domain {
+            sql.push_str(&format!(" AND domain = ?{param_idx}"));
+            param_values.push(Box::new(d.to_string()));
+            param_idx += 1;
+        }
+        let _ = param_idx;
+
+        sql.push_str(" ORDER BY date DESC");
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let tag_lower = tag.to_lowercase();
+        let is_prefix = tag_lower.ends_with('*');
+        let prefix = if is_prefix { &tag_lower[..tag_lower.len() - 1] } else { &tag_lower };
+
+        let rows: Vec<NoteRow> = stmt
+            .query_map(params_refs.as_slice(), NoteRow::from_row)?
+            .filter_map(|r| r.ok())
+            .filter(|note| {
+                if let Ok(tags) = serde_json::from_str::<Vec<String>>(&note.tags) {
+                    tags.iter().any(|t| {
+                        let t_lower = t.to_lowercase();
+                        if is_prefix { t_lower.starts_with(prefix) } else { t_lower == *prefix }
+                    })
+                } else {
+                    false
+                }
+            })
+            .take(limit as usize)
+            .collect();
+
+        Ok(rows)
+    }
+
+    /// Get all tags with their counts and domain distribution
+    pub fn tag_stats(&self) -> Result<Vec<TagStat>> {
+        let mut stmt = self.conn.prepare("SELECT tags, domain FROM notes WHERE tags != ''")?;
+
+        let mut tag_info: HashMap<String, (u64, HashMap<String, u64>)> = HashMap::new();
+
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+
+        for row in rows.flatten() {
+            let (tags_json, domain) = row;
+            if let Ok(tags) = serde_json::from_str::<Vec<String>>(&tags_json) {
+                for tag in tags {
+                    let entry = tag_info.entry(tag).or_insert_with(|| (0, HashMap::new()));
+                    entry.0 += 1;
+                    if !domain.is_empty() {
+                        *entry.1.entry(domain.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        let mut stats: Vec<TagStat> = tag_info
+            .into_iter()
+            .map(|(tag, (count, domains))| {
+                let domain_list: Vec<String> = domains.keys().cloned().collect();
+                TagStat {
+                    tag,
+                    count,
+                    domains: domain_list,
+                }
+            })
+            .collect();
+
+        stats.sort_by(|a, b| b.count.cmp(&a.count));
+        Ok(stats)
+    }
+
+    /// Find tags that co-occur with the given tag, sorted by frequency
+    pub fn tag_cooccurrence(&self, tag: &str) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self.conn.prepare("SELECT tags FROM notes WHERE tags != ''")?;
+
+        let tag_lower = tag.to_lowercase();
+        let mut cooccur: HashMap<String, u64> = HashMap::new();
+
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+
+        for row in rows.flatten() {
+            if let Ok(tags) = serde_json::from_str::<Vec<String>>(&row) {
+                let has_target = tags.iter().any(|t| t.to_lowercase() == tag_lower);
+                if has_target {
+                    for t in &tags {
+                        let t_lower = t.to_lowercase();
+                        if t_lower != tag_lower {
+                            *cooccur.entry(t_lower).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut result: Vec<(String, u64)> = cooccur.into_iter().collect();
+        result.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(result)
+    }
+
+    /// Get recent notes across the vault, optionally filtered by domain and/or note type
+    pub fn recent_notes(
+        &self,
+        days: Option<u32>,
+        domain: Option<&str>,
+        note_type: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Vec<NoteRow>> {
+        let days = days.unwrap_or(7);
+        let limit = limit.unwrap_or(20);
+
+        let cutoff = chrono::Local::now()
+            .date_naive()
+            .checked_sub_days(chrono::Days::new(u64::from(days)))
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
+
+        self.list_notes(domain, note_type, None, Some(&cutoff), None, Some(limit))
+    }
 }
 
 /// Extract significant search terms from content for FTS5 similarity queries.
@@ -575,6 +781,14 @@ pub struct IndexStats {
     pub removed: u64,
 }
 
+/// Tag with count and domain distribution
+#[derive(Debug, Serialize)]
+pub struct TagStat {
+    pub tag: String,
+    pub count: u64,
+    pub domains: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +846,115 @@ mod tests {
         let index = SearchIndex::open_memory().expect("Failed to open in-memory index");
         let results = index.find_similar("", 5).expect("Failed find_similar");
         assert!(results.is_empty());
+    }
+
+    /// Helper: insert a test note directly into the DB
+    fn insert_test_note(index: &SearchIndex, path: &str, title: &str, domain: &str, tags: &[&str], body: &str) {
+        let tags_json = serde_json::to_string(&tags).expect("tags json");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![path, title, domain, "article", "assisted", "", "2026-03-21", tags_json, "", "", body, "", 0],
+            )
+            .expect("insert test note");
+    }
+
+    #[test]
+    fn test_tag_search_exact() {
+        let index = SearchIndex::open_memory().expect("open");
+        insert_test_note(&index, "notes/a.md", "Rust CLI", "tech", &["rust", "cli"], "body");
+        insert_test_note(&index, "notes/b.md", "Rust Web", "tech", &["rust", "web"], "body");
+        insert_test_note(&index, "notes/c.md", "Python ML", "ai", &["python", "ml"], "body");
+
+        let results = index.tag_search("rust", None, None).expect("tag_search");
+        assert_eq!(results.len(), 2);
+
+        let results = index.tag_search("python", None, None).expect("tag_search");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, "notes/c.md");
+    }
+
+    #[test]
+    fn test_tag_search_prefix() {
+        let index = SearchIndex::open_memory().expect("open");
+        insert_test_note(&index, "notes/a.md", "Rust CLI", "tech", &["rust", "rust-cli"], "body");
+        insert_test_note(&index, "notes/b.md", "Ruby", "tech", &["ruby"], "body");
+
+        let results = index.tag_search("rust*", None, None).expect("tag_search prefix");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, "notes/a.md");
+    }
+
+    #[test]
+    fn test_tag_search_with_domain_filter() {
+        let index = SearchIndex::open_memory().expect("open");
+        insert_test_note(&index, "notes/a.md", "AI Rust", "ai", &["rust"], "body");
+        insert_test_note(&index, "notes/b.md", "Tech Rust", "tech", &["rust"], "body");
+
+        let results = index.tag_search("rust", Some("ai"), None).expect("tag_search domain");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, "notes/a.md");
+    }
+
+    #[test]
+    fn test_tag_stats() {
+        let index = SearchIndex::open_memory().expect("open");
+        insert_test_note(&index, "notes/a.md", "A", "tech", &["rust", "cli"], "body");
+        insert_test_note(&index, "notes/b.md", "B", "tech", &["rust", "web"], "body");
+        insert_test_note(&index, "notes/c.md", "C", "ai", &["rust", "ml"], "body");
+
+        let stats = index.tag_stats().expect("tag_stats");
+        let rust_stat = stats.iter().find(|s| s.tag == "rust").expect("rust tag");
+        assert_eq!(rust_stat.count, 3);
+        assert!(rust_stat.domains.contains(&"tech".to_string()));
+        assert!(rust_stat.domains.contains(&"ai".to_string()));
+
+        let cli_stat = stats.iter().find(|s| s.tag == "cli").expect("cli tag");
+        assert_eq!(cli_stat.count, 1);
+    }
+
+    #[test]
+    fn test_tag_cooccurrence() {
+        let index = SearchIndex::open_memory().expect("open");
+        insert_test_note(&index, "notes/a.md", "A", "tech", &["rust", "cli", "linux"], "body");
+        insert_test_note(&index, "notes/b.md", "B", "tech", &["rust", "web"], "body");
+        insert_test_note(&index, "notes/c.md", "C", "ai", &["python", "ml"], "body");
+
+        let cooccur = index.tag_cooccurrence("rust").expect("cooccurrence");
+        // cli, linux, web all co-occur with rust
+        assert_eq!(cooccur.len(), 3);
+        assert!(cooccur.iter().any(|(t, c)| t == "cli" && *c == 1));
+        assert!(cooccur.iter().any(|(t, c)| t == "web" && *c == 1));
+        assert!(cooccur.iter().any(|(t, c)| t == "linux" && *c == 1));
+    }
+
+    #[test]
+    fn test_governance_columns_exist() {
+        let index = SearchIndex::open_memory().expect("open");
+        // Insert a note with governance fields via direct SQL
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality, classified, classified_by, confidence, needs_review, duplicate_group)
+                 VALUES ('test.md', 'Test', 'tech', 'article', 'assisted', '', '2026-03-21', '[]', '', '', '', '', 0, 'high', 1, 'deterministic', 'high', 0, '')",
+                [],
+            )
+            .expect("insert with governance columns");
+
+        let quality: String = index
+            .conn
+            .query_row("SELECT quality FROM notes WHERE path = 'test.md'", [], |row| row.get(0))
+            .expect("query quality");
+        assert_eq!(quality, "high");
+
+        let classified: i64 = index
+            .conn
+            .query_row("SELECT classified FROM notes WHERE path = 'test.md'", [], |row| {
+                row.get(0)
+            })
+            .expect("query classified");
+        assert_eq!(classified, 1);
     }
 }
