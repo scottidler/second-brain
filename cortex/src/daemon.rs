@@ -261,12 +261,38 @@ fn run_configured_actions(
     daemon_config: &DaemonConfig,
     changed_files: &[PathBuf],
 ) -> SweepFingerprint {
-    let action_names: Vec<&str> = daemon_config.enabled_actions();
+    let mut action_names: Vec<&str> = daemon_config.enabled_actions();
+    // Ensure classify runs first - it moves files, other actions need the final locations
+    action_names.sort_by_key(|a| if *a == "classify" { 0 } else { 1 });
     log::info!("running configured actions: {:?}", action_names);
     let mut fingerprint = SweepFingerprint::default();
 
     for action in &action_names {
         match *action {
+            "classify" => {
+                // Classify runs first - moves inbox notes to notes/ before other actions
+                let opts = crate::classify::ClassifyOpts {
+                    apply: true,
+                    path: None,
+                    force: false,
+                    review_only: false,
+                };
+                match crate::run_classify(vault_root, config, &opts) {
+                    Ok(report) => {
+                        let promoted = report
+                            .violations
+                            .iter()
+                            .filter(|v| v.message.contains("promoted"))
+                            .count();
+                        if promoted > 0 {
+                            fingerprint.add("classify", vec!["__applied__".to_string()]);
+                            log::info!("classify: promoted {promoted} note(s)");
+                            println!("[daemon] classify: promoted {promoted} note(s) from inbox/");
+                        }
+                    }
+                    Err(e) => log::error!("classify action failed: {e}"),
+                }
+            }
             "lint" => {
                 let auto = daemon_config.is_enabled("lint");
                 let opts = crate::cli::LintOpts {
