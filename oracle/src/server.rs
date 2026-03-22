@@ -543,6 +543,112 @@ impl OracleMcpServer {
             }
         }
     }
+
+    /// View inbox contents and classification pipeline health
+    #[tool(
+        description = "View inbox contents, notes needing review, and classification pipeline health. Shows inbox count, review candidates, and classified notes."
+    )]
+    async fn inbox_status(&self, params: Parameters<InboxStatusRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let detail_level = req.detail.unwrap_or(DetailLevel::Tldr);
+
+        let db = self.db.lock().map_err(Self::err)?;
+        let inbox = db.inbox_notes(req.limit).map_err(Self::err)?;
+        let review = db.notes_needing_review(req.limit).map_err(Self::err)?;
+
+        let inbox_results: Vec<serde_json::Value> = inbox.iter().map(|n| Self::format_note(n, &detail_level)).collect();
+        let review_results: Vec<serde_json::Value> =
+            review.iter().map(|n| Self::format_note(n, &detail_level)).collect();
+
+        let classified: u64 = inbox.iter().filter(|n| !n.domain.is_empty()).count() as u64;
+
+        Ok(CallToolResult::success(vec![Content::json(json!({
+            "inbox_count": inbox_results.len(),
+            "needs_review": review_results.len(),
+            "classified": classified,
+            "notes": inbox_results,
+            "review_candidates": review_results,
+        }))?]))
+    }
+
+    /// Notes by quality score and common issues
+    #[tool(
+        description = "View note quality distribution and browse notes by quality level. Shows quality score distribution and notes filtered by quality."
+    )]
+    async fn quality_report(&self, params: Parameters<QualityReportRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let detail_level = req.detail.unwrap_or(DetailLevel::Tldr);
+
+        let db = self.db.lock().map_err(Self::err)?;
+        let distribution = db.quality_distribution().map_err(Self::err)?;
+
+        let results = if let Some(quality) = req.quality {
+            let notes = db.notes_by_quality(&quality, req.limit).map_err(Self::err)?;
+            notes.iter().map(|n| Self::format_note(n, &detail_level)).collect()
+        } else {
+            vec![]
+        };
+
+        Ok(CallToolResult::success(vec![Content::json(json!({
+            "distribution": distribution.iter().map(|(q, c)| json!({"quality": q, "count": c})).collect::<Vec<_>>(),
+            "results": results,
+        }))?]))
+    }
+
+    /// Browse duplicate note clusters
+    #[tool(
+        description = "Browse duplicate note clusters identified by cortex. List all groups or inspect a specific group."
+    )]
+    async fn duplicate_groups(&self, params: Parameters<DuplicateGroupsRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let db = self.db.lock().map_err(Self::err)?;
+        let groups = db.duplicate_groups().map_err(Self::err)?;
+
+        match req.group_id {
+            Some(gid) => {
+                let group = groups.into_iter().find(|g| g.group_id == gid);
+                match group {
+                    Some(g) => Ok(CallToolResult::success(vec![Content::json(&g)?])),
+                    None => Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Duplicate group not found: {gid}"
+                    ))])),
+                }
+            }
+            None => {
+                let limit = req.limit.unwrap_or(10) as usize;
+                let groups: Vec<serde_json::Value> = groups
+                    .iter()
+                    .take(limit)
+                    .map(|g| {
+                        json!({
+                            "group_id": g.group_id,
+                            "note_count": g.note_count,
+                            "titles": g.notes.iter().map(|n| &n.title).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+
+                Ok(CallToolResult::success(vec![Content::json(json!({
+                    "count": groups.len(),
+                    "groups": groups,
+                }))?]))
+            }
+        }
+    }
+
+    /// Classification pipeline health and metadata
+    #[tool(
+        description = "View classification pipeline statistics - total classified, method breakdown, confidence distribution, domain assignments, inbox count, and pending reviews."
+    )]
+    async fn classify_status(&self, params: Parameters<ClassifyStatusRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let db = self.db.lock().map_err(Self::err)?;
+        let stats = db
+            .classify_stats(req.domain.as_ref().map(|d| d.as_str()))
+            .map_err(Self::err)?;
+
+        Ok(CallToolResult::success(vec![Content::json(&stats)?]))
+    }
 }
 
 #[tool_handler]

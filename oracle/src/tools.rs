@@ -253,6 +253,54 @@ pub struct SourceBrowseRequest {
     pub limit: Option<u32>,
 }
 
+/// View inbox contents and classification pipeline health.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InboxStatusRequest {
+    /// How much content to return per note
+    #[schemars(description = "Detail level for returned notes. Default: tldr")]
+    pub detail: Option<DetailLevel>,
+
+    /// Maximum number of results
+    #[schemars(description = "Maximum number of inbox notes to return (default: 50)")]
+    pub limit: Option<u32>,
+}
+
+/// Notes by quality score and common issues.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QualityReportRequest {
+    /// Filter by quality level: "low", "medium", "high"
+    #[schemars(description = "Filter by quality level: low, medium, high. Omit for distribution overview.")]
+    pub quality: Option<String>,
+
+    /// How much content to return per note
+    #[schemars(description = "Detail level for returned notes. Default: tldr")]
+    pub detail: Option<DetailLevel>,
+
+    /// Maximum number of results
+    #[schemars(description = "Maximum number of results (default: 20)")]
+    pub limit: Option<u32>,
+}
+
+/// Browse duplicate note clusters.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DuplicateGroupsRequest {
+    /// Specific group to inspect
+    #[schemars(description = "Specific duplicate group ID to inspect. Omit to list all groups.")]
+    pub group_id: Option<String>,
+
+    /// Maximum number of groups to return
+    #[schemars(description = "Maximum number of groups to return (default: 10)")]
+    pub limit: Option<u32>,
+}
+
+/// Classification pipeline health and metadata.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClassifyStatusRequest {
+    /// Filter to a specific domain
+    #[schemars(description = "Filter statistics to a specific domain")]
+    pub domain: Option<Domain>,
+}
+
 /// List all valid schema values (domains, note types, origins, statuses, methods).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SchemaInfoRequest {}

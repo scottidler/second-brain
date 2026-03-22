@@ -893,6 +893,159 @@ impl SearchIndex {
             .collect();
         Ok(rows)
     }
+
+    // --- Governance & Health Methods ---
+
+    /// Get notes currently in the inbox
+    pub fn inbox_notes(&self, limit: Option<u32>) -> Result<Vec<NoteRow>> {
+        let limit = limit.unwrap_or(50);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+                 FROM notes WHERE path LIKE 'inbox/%' ORDER BY date DESC LIMIT {limit}"
+        ))?;
+        let rows = stmt.query_map([], NoteRow::from_row)?.filter_map(|r| r.ok()).collect();
+        Ok(rows)
+    }
+
+    /// Get notes that need review (cortex-needs-review = true)
+    pub fn notes_needing_review(&self, limit: Option<u32>) -> Result<Vec<NoteRow>> {
+        let limit = limit.unwrap_or(50);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+                 FROM notes WHERE needs_review = 1 ORDER BY date DESC LIMIT {limit}"
+        ))?;
+        let rows = stmt.query_map([], NoteRow::from_row)?.filter_map(|r| r.ok()).collect();
+        Ok(rows)
+    }
+
+    /// Get quality score distribution and notes filtered by quality level
+    pub fn quality_distribution(&self) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT quality, COUNT(*) as cnt FROM notes WHERE quality != '' GROUP BY quality ORDER BY cnt DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Get notes at a specific quality level
+    pub fn notes_by_quality(&self, quality: &str, limit: Option<u32>) -> Result<Vec<NoteRow>> {
+        let limit = limit.unwrap_or(20);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+                 FROM notes WHERE LOWER(quality) = ?1 ORDER BY date DESC LIMIT {limit}"
+        ))?;
+        let rows = stmt
+            .query_map(params![quality.to_lowercase()], NoteRow::from_row)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Get duplicate note groups
+    pub fn duplicate_groups(&self) -> Result<Vec<DuplicateGroup>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT duplicate_group, path, title FROM notes WHERE duplicate_group != '' ORDER BY duplicate_group, path",
+        )?;
+
+        let mut groups: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        for row in rows.flatten() {
+            let (group_id, path, title) = row;
+            groups.entry(group_id).or_default().push((path, title));
+        }
+
+        let mut result: Vec<DuplicateGroup> = groups
+            .into_iter()
+            .filter(|(_, notes)| notes.len() > 1)
+            .map(|(group_id, notes)| DuplicateGroup {
+                group_id,
+                note_count: notes.len() as u64,
+                notes: notes
+                    .into_iter()
+                    .map(|(path, title)| DuplicateNote { path, title })
+                    .collect(),
+            })
+            .collect();
+
+        result.sort_by(|a, b| b.note_count.cmp(&a.note_count));
+        Ok(result)
+    }
+
+    /// Get classification pipeline statistics
+    pub fn classify_stats(&self, domain: Option<&str>) -> Result<ClassifyStats> {
+        let domain_filter = domain.map(|d| format!(" AND domain = '{d}'")).unwrap_or_default();
+
+        let total_classified: u64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM notes WHERE classified = 1{domain_filter}"),
+            [],
+            |row| row.get(0),
+        )?;
+
+        let by_method = {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT classified_by, COUNT(*) FROM notes WHERE classified = 1 AND classified_by != ''{domain_filter} GROUP BY classified_by ORDER BY COUNT(*) DESC"
+            ))?;
+            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        let by_confidence = {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT confidence, COUNT(*) FROM notes WHERE classified = 1 AND confidence != ''{domain_filter} GROUP BY confidence ORDER BY COUNT(*) DESC"
+            ))?;
+            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        let by_domain = {
+            let mut stmt = self.conn.prepare(
+                "SELECT domain, COUNT(*) FROM notes WHERE classified = 1 AND domain != '' GROUP BY domain ORDER BY COUNT(*) DESC",
+            )?;
+            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        let pending_review: u64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM notes WHERE needs_review = 1{domain_filter}"),
+            [],
+            |row| row.get(0),
+        )?;
+
+        let inbox_count: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM notes WHERE path LIKE 'inbox/%'", [], |row| {
+                    row.get(0)
+                })?;
+
+        let unclassified: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM notes WHERE domain = '' AND note_type NOT IN ('daily', 'system')",
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok(ClassifyStats {
+            total_classified,
+            by_method,
+            by_confidence,
+            by_domain,
+            pending_review,
+            inbox_count,
+            unclassified,
+        })
+    }
 }
 
 /// Extract significant search terms from content for FTS5 similarity queries.
@@ -1046,6 +1199,33 @@ pub struct OutboundLink {
     pub target: String,
     pub resolved_path: Option<String>,
     pub exists: bool,
+}
+
+/// A group of duplicate notes
+#[derive(Debug, Serialize)]
+pub struct DuplicateGroup {
+    pub group_id: String,
+    pub note_count: u64,
+    pub notes: Vec<DuplicateNote>,
+}
+
+/// A note within a duplicate group
+#[derive(Debug, Serialize)]
+pub struct DuplicateNote {
+    pub path: String,
+    pub title: String,
+}
+
+/// Classification pipeline statistics
+#[derive(Debug, Serialize)]
+pub struct ClassifyStats {
+    pub total_classified: u64,
+    pub by_method: Vec<(String, u64)>,
+    pub by_confidence: Vec<(String, u64)>,
+    pub by_domain: Vec<(String, u64)>,
+    pub pending_review: u64,
+    pub inbox_count: u64,
+    pub unclassified: u64,
 }
 
 #[cfg(test)]
@@ -1331,5 +1511,112 @@ mod tests {
             })
             .expect("query classified");
         assert_eq!(classified, 1);
+    }
+
+    #[test]
+    fn test_inbox_notes() {
+        let index = SearchIndex::open_memory().expect("open");
+        insert_test_note(&index, "inbox/a.md", "Inbox A", "tech", &[], "body");
+        insert_test_note(&index, "inbox/b.md", "Inbox B", "", &[], "body");
+        insert_test_note(&index, "notes/c.md", "Not inbox", "tech", &[], "body");
+
+        let inbox = index.inbox_notes(None).expect("inbox");
+        assert_eq!(inbox.len(), 2);
+    }
+
+    #[test]
+    fn test_quality_distribution() {
+        let index = SearchIndex::open_memory().expect("open");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality)
+                 VALUES ('a.md', 'A', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'high')",
+                [],
+            )
+            .expect("insert");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality)
+                 VALUES ('b.md', 'B', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'low')",
+                [],
+            )
+            .expect("insert");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality)
+                 VALUES ('c.md', 'C', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'high')",
+                [],
+            )
+            .expect("insert");
+
+        let dist = index.quality_distribution().expect("distribution");
+        assert_eq!(dist.len(), 2);
+        assert!(dist.iter().any(|(q, c)| q == "high" && *c == 2));
+        assert!(dist.iter().any(|(q, c)| q == "low" && *c == 1));
+    }
+
+    #[test]
+    fn test_classify_stats() {
+        let index = SearchIndex::open_memory().expect("open");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, classified, classified_by, confidence, needs_review)
+                 VALUES ('notes/a.md', 'A', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 1, 'deterministic', 'high', 0)",
+                [],
+            )
+            .expect("insert");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, classified, classified_by, confidence, needs_review)
+                 VALUES ('inbox/b.md', 'B', '', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 0, '', '', 1)",
+                [],
+            )
+            .expect("insert");
+
+        let stats = index.classify_stats(None).expect("classify_stats");
+        assert_eq!(stats.total_classified, 1);
+        assert_eq!(stats.pending_review, 1);
+        assert_eq!(stats.inbox_count, 1);
+        assert_eq!(stats.unclassified, 1);
+    }
+
+    #[test]
+    fn test_duplicate_groups() {
+        let index = SearchIndex::open_memory().expect("open");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, duplicate_group)
+                 VALUES ('a.md', 'Article A', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'group-1')",
+                [],
+            )
+            .expect("insert");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, duplicate_group)
+                 VALUES ('b.md', 'Article A Copy', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'group-1')",
+                [],
+            )
+            .expect("insert");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, duplicate_group)
+                 VALUES ('c.md', 'Solo', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'group-solo')",
+                [],
+            )
+            .expect("insert");
+
+        let groups = index.duplicate_groups().expect("duplicate_groups");
+        // Only group-1 has more than 1 note
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_id, "group-1");
+        assert_eq!(groups[0].note_count, 2);
     }
 }
