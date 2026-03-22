@@ -3,43 +3,16 @@ use std::process::Command;
 
 use crate::config::FabricConfig;
 
-#[derive(Debug)]
-pub struct YouTubeContent {
-    pub title: String,
-    pub channel: String,
-    pub duration_secs: f64,
-    pub published_at: String,
-    pub transcript: String,
-    pub video_id: String,
-    pub description: String,
-    pub tags: Vec<String>,
-}
-
 pub async fn run_pattern(pattern: &str, input: &str, config: &FabricConfig) -> Result<String> {
     vault::fabric::run_pattern(pattern, input, &config.binary, &config.model, config.max_content_chars)
 }
 
-pub async fn fetch_youtube(url: &str, config: &FabricConfig) -> Result<YouTubeContent> {
-    // Get metadata via fabric -y <url> --metadata
+/// Fetch a YouTube transcript via fabric's captions API.
+/// Returns the transcript text, or an empty string if unavailable.
+/// Metadata is NOT fetched here - yt-dlp is the authoritative source for all metadata.
+/// See docs/design/2026-03-22-youtube-metadata-pipeline-redesign.md.
+pub fn fetch_transcript(url: &str, config: &FabricConfig) -> Result<String> {
     let binary = vault::fabric::resolve_binary(&config.binary);
-    log::debug!("fabric: fetching YouTube metadata for {url}");
-    let mut cmd = Command::new(&binary);
-    cmd.args(["-y", url, "--metadata"]);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let output = cmd.spawn()?.wait_with_output()?;
-    let metadata_json = if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    } else {
-        String::new()
-    };
-
-    // Parse metadata
-    let (title, channel, duration_secs, published_at, video_id, description, tags) =
-        parse_youtube_metadata(&metadata_json, url);
-
-    // Get transcript via fabric -y <url> --transcript
     log::debug!("fabric: fetching YouTube transcript for {url}");
     let mut cmd = Command::new(&binary);
     cmd.args(["-y", url, "--transcript"]);
@@ -47,24 +20,13 @@ pub async fn fetch_youtube(url: &str, config: &FabricConfig) -> Result<YouTubeCo
     cmd.stderr(std::process::Stdio::piped());
 
     let output = cmd.spawn()?.wait_with_output()?;
-    let transcript = if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::warn!("fabric -y --transcript failed: {stderr}");
-        String::new()
-    };
-
-    Ok(YouTubeContent {
-        title,
-        channel,
-        duration_secs,
-        published_at,
-        transcript,
-        video_id,
-        description,
-        tags,
-    })
+        Ok(String::new())
+    }
 }
 
 pub async fn fetch_article(url: &str, config: &FabricConfig) -> Result<String> {
@@ -125,124 +87,6 @@ pub async fn generate_tags(content: &str, config: &FabricConfig) -> Result<Vec<S
     Ok(tags)
 }
 
-/// Parse YouTube metadata JSON from either fabric (YouTube Data API v3) or yt-dlp.
-/// Field names differ between sources - see docs/design/2026-03-22-youtube-description-extraction.md
-/// for the full mapping table. Each field tries fabric names first, yt-dlp names as fallback.
-fn parse_youtube_metadata(json_str: &str, url: &str) -> (String, String, f64, String, String, String, Vec<String>) {
-    let video_id = crate::youtube::extract_video_id(url).unwrap_or_default();
-
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
-        let title = json["title"].as_str().unwrap_or("Unknown").to_string();
-        let channel = json["channelTitle"]
-            .as_str()
-            .or_else(|| json["channel"].as_str())
-            .or_else(|| json["uploader"].as_str())
-            .unwrap_or("Unknown")
-            .to_string();
-        let duration = json["duration"]
-            .as_f64()
-            .unwrap_or_else(|| parse_iso8601_duration(json["duration"].as_str().unwrap_or("")));
-        let published = json["publishedAt"]
-            .as_str()
-            .or_else(|| json["upload_date"].as_str())
-            .or_else(|| json["published_at"].as_str())
-            .unwrap_or("")
-            .to_string();
-        let description = json["description"].as_str().unwrap_or("").to_string();
-        let tags = json["tags"]
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
-            .unwrap_or_default();
-        (title, channel, duration, published, video_id, description, tags)
-    } else {
-        (
-            "Unknown".to_string(),
-            "Unknown".to_string(),
-            0.0,
-            String::new(),
-            video_id,
-            String::new(),
-            Vec::new(),
-        )
-    }
-}
-
-/// Parse ISO 8601 duration (e.g., "PT8M14S") to seconds.
-fn parse_iso8601_duration(s: &str) -> f64 {
-    let s = s.strip_prefix("PT").unwrap_or(s);
-    let mut secs = 0.0;
-    let mut num_buf = String::new();
-    for ch in s.chars() {
-        match ch {
-            'H' | 'h' => {
-                secs += num_buf.parse::<f64>().unwrap_or(0.0) * 3600.0;
-                num_buf.clear();
-            }
-            'M' | 'm' => {
-                secs += num_buf.parse::<f64>().unwrap_or(0.0) * 60.0;
-                num_buf.clear();
-            }
-            'S' | 's' => {
-                secs += num_buf.parse::<f64>().unwrap_or(0.0);
-                num_buf.clear();
-            }
-            _ => num_buf.push(ch),
-        }
-    }
-    secs
-}
-
 pub fn is_available(config: &FabricConfig) -> bool {
     vault::fabric::is_available(&config.binary)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_youtube_metadata_valid_fabric() {
-        let json = r#"{"title": "Test Video", "channelTitle": "TestChan", "duration": "PT2M0S", "publishedAt": "2026-01-01T00:00:00Z", "description": "A test video", "tags": ["rust", "coding"]}"#;
-        let (title, channel, dur, published, _vid, description, tags) =
-            parse_youtube_metadata(json, "https://youtube.com/watch?v=abc123");
-        assert_eq!(title, "Test Video");
-        assert_eq!(channel, "TestChan");
-        assert!((dur - 120.0).abs() < f64::EPSILON);
-        assert_eq!(published, "2026-01-01T00:00:00Z");
-        assert_eq!(description, "A test video");
-        assert_eq!(tags, vec!["rust", "coding"]);
-    }
-
-    #[test]
-    fn test_parse_youtube_metadata_valid_ytdlp() {
-        let json = r#"{"title": "Test Video", "uploader": "TestChan", "duration": 120.0, "upload_date": "2026-01-01", "description": "A test video", "tags": ["rust", "coding"]}"#;
-        let (title, channel, dur, published, _vid, description, tags) =
-            parse_youtube_metadata(json, "https://youtube.com/watch?v=abc123");
-        assert_eq!(title, "Test Video");
-        assert_eq!(channel, "TestChan");
-        assert!((dur - 120.0).abs() < f64::EPSILON);
-        assert_eq!(published, "2026-01-01");
-        assert_eq!(description, "A test video");
-        assert_eq!(tags, vec!["rust", "coding"]);
-    }
-
-    #[test]
-    fn test_parse_iso8601_duration() {
-        assert!((parse_iso8601_duration("PT8M14S") - 494.0).abs() < f64::EPSILON);
-        assert!((parse_iso8601_duration("PT1H2M3S") - 3723.0).abs() < f64::EPSILON);
-        assert!((parse_iso8601_duration("PT30S") - 30.0).abs() < f64::EPSILON);
-        assert!((parse_iso8601_duration("PT0S") - 0.0).abs() < f64::EPSILON);
-        assert!((parse_iso8601_duration("") - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_parse_youtube_metadata_invalid() {
-        let (title, channel, dur, _, _, description, tags) =
-            parse_youtube_metadata("not json", "https://youtube.com/watch?v=abc");
-        assert_eq!(title, "Unknown");
-        assert_eq!(channel, "Unknown");
-        assert!((dur - 0.0).abs() < f64::EPSILON);
-        assert!(description.is_empty());
-        assert!(tags.is_empty());
-    }
 }

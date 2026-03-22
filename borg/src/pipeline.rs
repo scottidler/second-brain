@@ -308,15 +308,11 @@ async fn process_url_inner(
 
     let use_fabric = fabric::is_available(&config.fabric);
     if !use_fabric {
-        log::warn!("[{trace_id}] Fabric binary not available, falling back to legacy pipeline");
+        log::warn!("[{trace_id}] Fabric binary not available, transcript/summary will use fallbacks");
     }
 
     let (title, summary, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
-        let yt_result = if use_fabric {
-            process_youtube_fabric(&url_match.url, config).await?
-        } else {
-            process_youtube_legacy(&url_match.url, config).await?
-        };
+        let yt_result = process_youtube(&url_match.url, config).await?;
         (
             yt_result.title,
             yt_result.summary,
@@ -442,90 +438,94 @@ async fn process_url_inner(
     })
 }
 
-async fn process_youtube_fabric(url: &str, config: &Config) -> Result<YouTubeResult> {
-    let yt = fabric::fetch_youtube(url, &config.fabric).await?;
+/// Unified YouTube processing: yt-dlp for metadata, fabric for transcript+summary.
+/// Metadata and transcript run concurrently. Fabric is optional (gates transcript+summary).
+/// See docs/design/2026-03-22-youtube-metadata-pipeline-redesign.md.
+async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
+    let use_fabric = fabric::is_available(&config.fabric);
 
-    // If fabric returned "Unknown" title, fall back to yt-dlp metadata
-    let (title, channel, duration_secs, description, yt_tags) = if yt.title == "Unknown" || yt.title.is_empty() {
-        log::warn!("Fabric returned no title, falling back to yt-dlp metadata");
-        match youtube::fetch_metadata(url) {
-            Ok(meta) => {
-                // Use yt-dlp metadata for title/channel/duration, but prefer fabric description/tags if available
-                let desc = if yt.description.is_empty() { meta.description } else { yt.description };
-                let tags = if yt.tags.is_empty() { meta.tags } else { yt.tags };
-                (meta.title, meta.uploader, meta.duration_secs, desc, tags)
-            }
-            Err(e) => {
-                log::warn!("yt-dlp metadata also failed: {e:#}");
-                (yt.title, yt.channel, yt.duration_secs, yt.description, yt.tags)
-            }
-        }
-    } else {
-        (yt.title, yt.channel, yt.duration_secs, yt.description, yt.tags)
-    };
+    // Run metadata (yt-dlp) and transcript (fabric) concurrently.
+    // These are independent - yt-dlp scrapes the page, fabric calls the captions API.
+    let url_owned = url.to_string();
+    let metadata_handle = tokio::task::spawn_blocking({
+        let url = url_owned.clone();
+        move || youtube::fetch_metadata(&url)
+    });
 
-    let transcript = if yt.transcript.is_empty() {
-        log::warn!("Fabric returned empty transcript, falling back to yt-dlp");
-        youtube::fetch_subtitles(url).await?.unwrap_or_default()
-    } else {
-        yt.transcript
-    };
-
-    // Summarize via Fabric (graceful failure)
-    let summary = fabric::summarize(&transcript, true, &config.fabric)
-        .await
-        .unwrap_or_else(|e| {
-            log::warn!("Fabric summarization failed: {e:#}");
-            transcript.clone()
-        });
-
-    let content_type = ContentType::YouTube {
-        uploader: channel,
-        duration_secs,
-    };
-
-    Ok(YouTubeResult {
-        title,
-        summary,
-        content_type,
-        description,
-        yt_tags,
-    })
-}
-
-async fn process_youtube_legacy(url: &str, config: &Config) -> Result<YouTubeResult> {
-    log::debug!("Fetching YouTube metadata for: {url}");
-    let metadata = youtube::fetch_metadata(url)?;
-
-    let transcript = match youtube::fetch_subtitles(url).await? {
-        Some(subs) => subs,
-        None => {
-            let temp_dir = std::env::temp_dir().join("obsidian-borg");
-            std::fs::create_dir_all(&temp_dir)?;
-            let audio_path = youtube::extract_audio(url, &temp_dir.to_string_lossy())?;
-            let audio_bytes = std::fs::read(&audio_path)?;
-            let _ = std::fs::remove_file(&audio_path);
-
-            let groq_key = crate::config::resolve_secret(&config.groq.api_key).ok();
-            let client = TranscriptionClient::new(
-                &config.transcriber.url,
-                groq_key,
-                &config.groq.model,
-                config.transcriber.timeout_secs,
-            );
-            let response = client.transcribe(audio_bytes, AudioFormat::Mp3, None).await?;
-            response.text
+    let transcript_future = async {
+        if use_fabric {
+            let config_fabric = config.fabric.clone();
+            let url = url_owned.clone();
+            let result = tokio::task::spawn_blocking(move || fabric::fetch_transcript(&url, &config_fabric))
+                .await
+                .unwrap_or_else(|e| {
+                    log::warn!("Fabric transcript task panicked: {e}");
+                    Ok(String::new())
+                });
+            result.unwrap_or_else(|e| {
+                log::warn!("Fabric transcript failed: {e:#}");
+                String::new()
+            })
+        } else {
+            String::new()
         }
     };
 
+    let (metadata_result, fabric_transcript) = tokio::join!(metadata_handle, transcript_future);
+    let metadata = metadata_result
+        .context("yt-dlp metadata task panicked")?
+        .context("yt-dlp metadata failed")?;
+
+    // Transcript fallback chain: fabric -> yt-dlp subtitles -> audio extraction + Groq
+    let transcript = if !fabric_transcript.is_empty() {
+        fabric_transcript
+    } else {
+        if use_fabric {
+            log::warn!("Fabric returned empty transcript, falling back to yt-dlp subtitles");
+        }
+        match youtube::fetch_subtitles(url).await? {
+            Some(subs) => subs,
+            None => {
+                log::warn!("No subtitles available, falling back to audio extraction + Groq");
+                let temp_dir = std::env::temp_dir().join("obsidian-borg");
+                std::fs::create_dir_all(&temp_dir)?;
+                let audio_path = youtube::extract_audio(url, &temp_dir.to_string_lossy())?;
+                let audio_bytes = std::fs::read(&audio_path)?;
+                let _ = std::fs::remove_file(&audio_path);
+
+                let groq_key = crate::config::resolve_secret(&config.groq.api_key).ok();
+                let client = TranscriptionClient::new(
+                    &config.transcriber.url,
+                    groq_key,
+                    &config.groq.model,
+                    config.transcriber.timeout_secs,
+                );
+                let response = client.transcribe(audio_bytes, AudioFormat::Mp3, None).await?;
+                response.text
+            }
+        }
+    };
+
+    // Summarize via Fabric (depends on transcript, runs after join)
+    let summary = if use_fabric {
+        fabric::summarize(&transcript, true, &config.fabric)
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("Fabric summarization failed: {e:#}");
+                transcript.clone()
+            })
+    } else {
+        transcript.clone()
+    };
+
     let content_type = ContentType::YouTube {
-        uploader: metadata.uploader.clone(),
+        uploader: metadata.uploader,
         duration_secs: metadata.duration_secs,
     };
 
     Ok(YouTubeResult {
         title: metadata.title,
-        summary: transcript,
+        summary,
         content_type,
         description: metadata.description,
         yt_tags: metadata.tags,
