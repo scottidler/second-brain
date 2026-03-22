@@ -13,7 +13,8 @@ use serde::Deserialize;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::scope::insert_frontmatter_fields;
 use crate::vault::Note;
-use vault::schema::Domain;
+use ::vault::schema::Domain;
+use ::vault::search::SearchIndex;
 
 /// Classification configuration from cortex.yml
 #[derive(Debug, Clone, Deserialize)]
@@ -172,12 +173,12 @@ pub struct ClassifyOpts {
 }
 
 /// Dry-run: returns planned classifications as violations in a Report
-pub fn lint_classify(notes: &[Note], config: &ClassifyConfig) -> Report {
+pub fn lint_classify(notes: &[Note], config: &ClassifyConfig, search_index: Option<&SearchIndex>) -> Report {
     let mut report = Report::default();
     let inbox_notes = filter_inbox_notes(notes, false, false);
 
     for note in &inbox_notes {
-        match classify_note(note, config) {
+        match classify_note(note, config, search_index) {
             Some(result) if result.confidence != ClassifyConfidence::Low => {
                 report.add(Violation {
                     path: note.path.clone(),
@@ -228,13 +229,14 @@ pub fn apply_classify(
     config: &ClassifyConfig,
     force: bool,
     review_only: bool,
+    search_index: Option<&SearchIndex>,
 ) -> Result<Report> {
     let inbox_notes = filter_inbox_notes(notes, force, review_only);
     let mut report = Report::default();
     let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     for note in &inbox_notes {
-        let result = match classify_note(note, config) {
+        let result = match classify_note(note, config, search_index) {
             Some(r) => r,
             None => {
                 // No classification signal - hold for review
@@ -312,7 +314,7 @@ pub fn apply_classify(
 }
 
 /// Classify a single note using the tiered pipeline
-fn classify_note(note: &Note, config: &ClassifyConfig) -> Option<ClassifyResult> {
+fn classify_note(note: &Note, config: &ClassifyConfig, search_index: Option<&SearchIndex>) -> Option<ClassifyResult> {
     // Tier 1: Deterministic classification
     if let Some(result) = classify_by_tags(note, config) {
         return Some(result);
@@ -322,11 +324,136 @@ fn classify_note(note: &Note, config: &ClassifyConfig) -> Option<ClassifyResult>
         return Some(result);
     }
 
-    // Tier 2: LLM classification (future phase)
-    // Will use vault::search::SearchIndex for context
+    // Tier 2: LLM classification with vault context
+    if let Some(index) = search_index
+        && let Some(result) = classify_by_llm(note, config, index)
+    {
+        return Some(result);
+    }
 
     // Tier 3: No signal
     None
+}
+
+/// Tier 2: LLM classification using Fabric with vault context from SearchIndex
+fn classify_by_llm(note: &Note, config: &ClassifyConfig, index: &SearchIndex) -> Option<ClassifyResult> {
+    if !crate::fabric::is_available() {
+        log::debug!("fabric not available, skipping LLM classification");
+        return None;
+    }
+
+    // Build vault context
+    let context = build_llm_context(note, config, index);
+    let input = crate::fabric::truncate_input(&context, config.max_input_tokens);
+
+    // Call Fabric pattern
+    match crate::fabric::run_pattern(&config.fabric_pattern, input, config.fabric_timeout_secs) {
+        Ok(output) => parse_llm_result(&output, config.confidence_threshold),
+        Err(e) => {
+            log::warn!("LLM classification failed: {e}");
+            None
+        }
+    }
+}
+
+/// Build the LLM context string with vault search results
+fn build_llm_context(note: &Note, config: &ClassifyConfig, index: &SearchIndex) -> String {
+    let title = note.frontmatter.title.as_deref().unwrap_or("Untitled");
+    let tags = note.frontmatter.tags.as_ref().map(|t| t.join(", ")).unwrap_or_default();
+
+    // Find similar notes via FTS5
+    let similar_text = match index.find_similar(&note.body, config.similar_notes_limit) {
+        Ok(results) if !results.is_empty() => {
+            let lines: Vec<String> = results
+                .iter()
+                .map(|r| format!("- \"{}\" (domain: {})", r.title, r.domain))
+                .collect();
+            lines.join("\n")
+        }
+        _ => "No similar notes found.".to_string(),
+    };
+
+    // Get tag-domain correlations for this note's tags
+    let tag_correlations = match (index.tag_domain_map(), &note.frontmatter.tags) {
+        (Ok(tdm), Some(note_tags)) => {
+            let lines: Vec<String> = note_tags
+                .iter()
+                .filter_map(|tag| {
+                    tdm.get(tag).map(|domains| {
+                        let domain_list: Vec<String> = domains.iter().map(|(d, c)| format!("{d}:{c}")).collect();
+                        format!("- tag \"{tag}\" appears in: {}", domain_list.join(", "))
+                    })
+                })
+                .collect();
+            if lines.is_empty() {
+                "No tag-domain correlations found.".to_string()
+            } else {
+                lines.join("\n")
+            }
+        }
+        _ => "No tag-domain correlations available.".to_string(),
+    };
+
+    // Truncate body for LLM input
+    let body_chars: String = note.body.chars().take(4000).collect();
+
+    format!(
+        "Title: {title}\n\n\
+         Tags: {tags}\n\n\
+         Similar notes in vault:\n{similar_text}\n\n\
+         Tag-domain correlations:\n{tag_correlations}\n\n\
+         Content:\n{body_chars}"
+    )
+}
+
+/// Parse LLM JSON output into a ClassifyResult
+fn parse_llm_result(output: &str, confidence_threshold: f64) -> Option<ClassifyResult> {
+    let json_str = ::vault::fabric::extract_json(output);
+
+    #[derive(Deserialize)]
+    struct LlmOutput {
+        domain: String,
+        confidence: f64,
+        #[serde(default)]
+        reasoning: String,
+        #[serde(default)]
+        suggested_tags: Vec<String>,
+    }
+
+    let parsed: LlmOutput = match serde_json::from_str(&json_str) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("Failed to parse LLM classification JSON: {e}");
+            return None;
+        }
+    };
+
+    let domain = match parsed.domain.parse::<Domain>() {
+        Ok(d) => d,
+        Err(_) => {
+            log::warn!("LLM returned invalid domain: {}", parsed.domain);
+            return None;
+        }
+    };
+
+    let confidence = if parsed.confidence >= confidence_threshold {
+        if parsed.confidence >= 0.85 {
+            ClassifyConfidence::High
+        } else {
+            ClassifyConfidence::Medium
+        }
+    } else {
+        ClassifyConfidence::Low
+    };
+
+    let _ = parsed.suggested_tags; // Available for future tag enrichment
+
+    Some(ClassifyResult {
+        domain,
+        confidence,
+        method: ClassifyMethod::Llm,
+        reason: parsed.reasoning,
+    })
 }
 
 /// Tier 1a: Tag-to-domain mapping
@@ -702,7 +829,7 @@ mod tests {
 
         // Tags say ai (3 matches), source says tech - tags should win because
         // classify_note tries tags first
-        let result = classify_note(&note, &config);
+        let result = classify_note(&note, &config, None);
         assert!(result.is_some());
         assert_eq!(result.expect("should classify").domain, Domain::Ai);
     }

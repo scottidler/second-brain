@@ -299,6 +299,20 @@ pub fn run_classify(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> 
     log::info!("starting classify command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
 
+    // Open search index for Tier 2 (LLM with vault context)
+    let db_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share"))
+        .join("oracle")
+        .join("oracle.db");
+    let search_index = ::vault::search::SearchIndex::open(&db_path).ok();
+    if let Some(ref idx) = search_index {
+        // Ensure index is fresh
+        if let Err(e) = idx.index_vault(vault_root) {
+            log::warn!("failed to refresh search index: {e}");
+        }
+    }
+    let search_ref = search_index.as_ref();
+
     if opts.apply {
         classify::apply_classify(
             vault_root,
@@ -306,9 +320,10 @@ pub fn run_classify(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> 
             &config.actions.classify,
             opts.force,
             opts.review_only,
+            search_ref,
         )
     } else {
-        let report = classify::lint_classify(&notes, &config.actions.classify);
+        let report = classify::lint_classify(&notes, &config.actions.classify, search_ref);
         report.print_human(false);
         Ok(report)
     }
