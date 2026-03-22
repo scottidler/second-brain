@@ -1,11 +1,11 @@
 use eyre::{Context, Result};
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
+use vault::watcher::{VaultWatcher, WatcherConfig};
 
 use crate::cli::DaemonOpts;
 use crate::config::{Config, DaemonConfig};
@@ -52,7 +52,6 @@ pub async fn run_daemon(vault_root: &Path, config: &Config, opts: &DaemonOpts) -
 /// Start filesystem watcher and run actions on changes using async tokio::select! loop.
 async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let daemon_config = &config.daemon;
-    let debounce_duration = Duration::from_secs(daemon_config.debounce_secs);
     let poll_interval = Duration::from_secs(daemon_config.poll_interval);
 
     let action_names: Vec<&str> = daemon_config.enabled_actions();
@@ -68,35 +67,23 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
 
     // Flag to suppress watcher events during auto-apply (prevents feedback loops)
     let applying = Arc::new(AtomicBool::new(false));
-    let applying_clone = Arc::clone(&applying);
 
-    // Channel for file watcher events -> async event loop
-    let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel();
-
-    let mut watcher: RecommendedWatcher =
-        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            if applying_clone.load(Ordering::Relaxed) {
-                return; // Discard events during auto-apply
-            }
-            if let Ok(event) = res {
-                let _ = watch_tx.send(event);
-            }
-        })
-        .context("failed to create filesystem watcher")?;
-
-    watcher
-        .watch(vault_root.as_ref(), RecursiveMode::Recursive)
-        .context("failed to watch vault root")?;
+    // Shared VaultWatcher from the vault crate
+    let watcher_config = WatcherConfig {
+        debounce_secs: daemon_config.debounce_secs,
+        ignore_dirs: config.vault.ignore.clone(),
+    };
+    let (watcher, mut watch_rx) = VaultWatcher::start(
+        vault_root,
+        watcher_config,
+        Some(Arc::clone(&applying)),
+    )?;
 
     log::info!("daemon started: {}", vault_root.display());
 
     // Timers
     let mut sweep_interval = tokio::time::interval(poll_interval);
     sweep_interval.tick().await; // consume the immediate first tick
-
-    // Debounce: starts inert (far future), reset when events arrive
-    let debounce = tokio::time::sleep(Duration::MAX);
-    tokio::pin!(debounce);
 
     // Scheduled intel timers
     let intel_enabled = daemon_config.is_enabled("intel");
@@ -128,8 +115,6 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let weekly = tokio::time::sleep(weekly_dur);
     tokio::pin!(weekly);
 
-    let mut pending: Vec<PathBuf> = Vec::new();
-
     // Run a full sweep on startup
     log::info!("running initial full sweep");
     applying.store(true, Ordering::Relaxed);
@@ -138,24 +123,11 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
 
     loop {
         tokio::select! {
-            Some(event) = watch_rx.recv() => {
-                if should_process_event(&event, &config.vault.ignore) {
-                    // Real user edit - reset cycle detection
-                    last_fingerprint = SweepFingerprint::default();
-                    for path in event.paths {
-                        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                            let relative = path.strip_prefix(vault_root).unwrap_or(&path).to_path_buf();
-                            if !pending.contains(&relative) {
-                                pending.push(relative);
-                            }
-                        }
-                    }
-                    // Reset debounce timer
-                    debounce.as_mut().reset(Instant::now() + debounce_duration);
-                }
-            }
-            () = &mut debounce, if !pending.is_empty() => {
-                // Debounce fired - process pending changes
+            Some(change) = watch_rx.recv() => {
+                // VaultWatcher already debounced and filtered - process immediately
+                let pending: Vec<PathBuf> = change.changed_paths.iter()
+                    .map(|p| p.strip_prefix(vault_root).unwrap_or(p).to_path_buf())
+                    .collect();
                 log::info!("processing changes: {} file(s)", pending.len());
                 for path in &pending {
                     println!("  changed: {}", path.display());
@@ -163,10 +135,8 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 applying.store(true, Ordering::Relaxed);
                 let fingerprint = run_configured_actions(vault_root, config, daemon_config, &pending);
                 applying.store(false, Ordering::Relaxed);
-                last_fingerprint = fingerprint;
-                pending.clear();
-                // Make debounce inert again
-                debounce.as_mut().reset(Instant::now() + Duration::MAX);
+                // Real user edit - reset cycle detection so periodic sweeps re-enable
+                last_fingerprint = if fingerprint.is_empty() { SweepFingerprint::default() } else { fingerprint };
                 // Reset sweep interval after processing changes
                 sweep_interval.reset();
             }
@@ -231,27 +201,8 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
         }
     }
 
+    drop(watcher);
     Ok(())
-}
-
-/// Check if a filesystem event should be processed.
-fn should_process_event(event: &notify::Event, ignore_dirs: &[String]) -> bool {
-    match event.kind {
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {}
-        _ => return false,
-    }
-
-    // Check if any path is in an ignored directory
-    for path in &event.paths {
-        for component in path.components() {
-            let name = component.as_os_str().to_string_lossy();
-            if ignore_dirs.iter().any(|ig| name == *ig) {
-                return false;
-            }
-        }
-    }
-
-    true
 }
 
 /// Run the configured on-change actions, returning a fingerprint of what was applied.
@@ -802,36 +753,6 @@ mod tests {
         let mut fp = SweepFingerprint::default();
         fp.add("lint", vec![]);
         assert!(fp.is_empty());
-    }
-
-    #[test]
-    fn test_should_process_event_create() {
-        let event = notify::Event {
-            kind: EventKind::Create(notify::event::CreateKind::File),
-            paths: vec![PathBuf::from("/vault/note.md")],
-            attrs: Default::default(),
-        };
-        assert!(should_process_event(&event, &[]));
-    }
-
-    #[test]
-    fn test_should_process_event_ignores_git() {
-        let event = notify::Event {
-            kind: EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Content)),
-            paths: vec![PathBuf::from("/vault/.git/objects/abc")],
-            attrs: Default::default(),
-        };
-        assert!(!should_process_event(&event, &[".git".to_string()]));
-    }
-
-    #[test]
-    fn test_should_process_event_ignores_access() {
-        let event = notify::Event {
-            kind: EventKind::Access(notify::event::AccessKind::Read),
-            paths: vec![PathBuf::from("/vault/note.md")],
-            attrs: Default::default(),
-        };
-        assert!(!should_process_event(&event, &[]));
     }
 
     #[test]
