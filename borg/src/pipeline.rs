@@ -245,58 +245,67 @@ async fn process_url_inner(
     let log_date = now.format("%Y-%m-%d").to_string();
     let log_time = now.format("%H:%M").to_string();
 
-    // Dedup check (skip if --force)
+    let mut original_date: Option<String> = None;
     let ledger_file = ledger::ledger_path(config);
-    if !force {
-        // Check in-memory inflight guard first (prevents concurrent race)
-        {
-            let mut inflight = INFLIGHT.lock().await;
-            if inflight.contains(&canonical) {
-                log::info!("[{trace_id}] Duplicate URL (inflight): {canonical}");
-                ledger::append_entry(
-                    &ledger_file,
-                    &LedgerEntry {
-                        date: log_date,
-                        time: log_time,
-                        method: method.into(),
-                        status: LedgerStatus::Skipped,
-                        title: None,
-                        path: None,
-                        source: canonical.clone(),
-                        domain: None,
-                        trace_id: Some(trace_id.to_string()),
-                    },
-                )?;
-                return Ok(IngestResult {
-                    status: IngestStatus::Duplicate {
-                        original_date: "inflight".to_string(),
-                    },
-                    method: Some(method),
-                    canonical_url: Some(canonical),
-                    ..Default::default()
-                });
-            }
-            inflight.insert(canonical.clone());
-        }
 
-        // Then check ledger (durable dedup) - replace-on-match semantics
-        if let Some(existing) = ledger::find_completed(&ledger_file, &canonical)? {
-            log::info!(
-                "[{trace_id}] Found existing entry for {canonical} (ingested {}), replacing",
-                existing.date
-            );
-            // Delete old note file if path is known
-            if existing.path != "-" {
-                let old_path = expand_tilde(&config.vault.root_path).join(&existing.path);
-                if old_path.exists() {
-                    std::fs::remove_file(&old_path).context("Failed to delete old note during reingest")?;
-                    log::info!("[{trace_id}] Deleted old note: {}", old_path.display());
-                }
-            }
-            // Mark old ledger entry as replaced
-            ledger::mark_replaced(&ledger_file, existing.line_number)?;
-            log::info!("[{trace_id}] Marked ledger row {} as replaced", existing.line_number);
+    // Dedup guard: reject concurrent/duplicate ingestions (skip if --force)
+    if !force {
+        let mut inflight = INFLIGHT.lock().await;
+        if inflight.contains(&canonical) {
+            log::info!("[{trace_id}] Duplicate URL (inflight): {canonical}");
+            ledger::append_entry(
+                &ledger_file,
+                &LedgerEntry {
+                    date: log_date,
+                    time: log_time,
+                    method: method.into(),
+                    status: LedgerStatus::Skipped,
+                    title: None,
+                    path: None,
+                    source: canonical.clone(),
+                    domain: None,
+                    trace_id: Some(trace_id.to_string()),
+                },
+            )?;
+            return Ok(IngestResult {
+                status: IngestStatus::Duplicate {
+                    original_date: "inflight".to_string(),
+                },
+                method: Some(method),
+                canonical_url: Some(canonical),
+                ..Default::default()
+            });
         }
+        inflight.insert(canonical.clone());
+    }
+
+    // Replace existing note if found. Runs for both normal and --force ingestions.
+    // Scans the vault by source URL rather than trusting the ledger's stored path,
+    // because cortex may have moved the file (e.g., inbox/ -> notes/).
+    if let Some(existing) = ledger::find_completed(&ledger_file, &canonical)? {
+        log::info!(
+            "[{trace_id}] Found existing entry for {canonical} (ingested {}), replacing",
+            existing.date
+        );
+        let vault_root = expand_tilde(&config.vault.root_path);
+        if let Some(old_note_path) = find_note_by_source(&vault_root, &canonical) {
+            original_date = read_note_date(&old_note_path);
+            log::debug!("[{trace_id}] Preserved original date: {:?}", original_date);
+            std::fs::remove_file(&old_note_path).context("Failed to delete old note during reingest")?;
+            log::info!("[{trace_id}] Deleted old note: {}", old_note_path.display());
+        } else if existing.path != "-" {
+            let old_path = vault_root.join(&existing.path);
+            if old_path.exists() {
+                original_date = read_note_date(&old_path);
+                std::fs::remove_file(&old_path).context("Failed to delete old note during reingest")?;
+                log::info!(
+                    "[{trace_id}] Deleted old note (via ledger path): {}",
+                    old_path.display()
+                );
+            }
+        }
+        ledger::mark_replaced(&ledger_file, existing.line_number)?;
+        log::info!("[{trace_id}] Marked ledger row {} as replaced", existing.line_number);
     }
 
     let url_match = router::classify_url(&canonical, &config.links)?;
@@ -397,6 +406,12 @@ async fn process_url_inner(
 
     let note_path = dest_path.join(&filename);
     std::fs::write(&note_path, &rendered).context("Failed to write note to vault")?;
+
+    // If replacing an existing note, restore its original ingestion date
+    if let Some(ref orig_date) = original_date {
+        patch_note_date(&note_path, orig_date)?;
+        log::info!("[{trace_id}] Restored original date: {orig_date}");
+    }
 
     log::info!("[{trace_id}] Wrote note: {}", note_path.display());
 
@@ -2079,6 +2094,73 @@ fn vault_relative_path(note_path: &std::path::Path, vault_root: &str) -> Option<
 /// Expand a vault root path (handling ~/) to an absolute PathBuf.
 pub fn expand_vault_root(path: &str) -> PathBuf {
     expand_tilde(path)
+}
+
+/// Scan the vault for a note whose `source:` frontmatter matches the given URL.
+/// Returns the path to the note file if found. This is more reliable than the
+/// ledger's stored path because cortex may have moved the file after ingestion.
+fn find_note_by_source(vault_root: &std::path::Path, source_url: &str) -> Option<PathBuf> {
+    let needle = format!("source: \"{source_url}\"");
+    find_note_by_source_recursive(vault_root, &needle)
+}
+
+fn find_note_by_source_recursive(dir: &std::path::Path, needle: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // Skip system directories that won't contain ingested notes
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') || name == "templates" {
+                continue;
+            }
+            if let Some(found) = find_note_by_source_recursive(&path, needle) {
+                return Some(found);
+            }
+        } else if path.extension().is_some_and(|ext| ext == "md") {
+            // Quick check: read first 2KB (frontmatter is always at the top)
+            if let Ok(file) = std::fs::File::open(&path) {
+                use std::io::Read;
+                let mut buf = vec![0u8; 2048];
+                let mut reader = std::io::BufReader::new(file);
+                let n = reader.read(&mut buf).unwrap_or(0);
+                let header = String::from_utf8_lossy(&buf[..n]);
+                if header.contains(needle) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Read the `date:` field from a note's frontmatter.
+fn read_note_date(path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        if let Some(date) = line.strip_prefix("date:") {
+            return Some(date.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Patch the `date:` field in a note file, preserving all other content.
+fn patch_note_date(path: &std::path::Path, new_date: &str) -> eyre::Result<()> {
+    let content = std::fs::read_to_string(path).context("Failed to read note for date patching")?;
+    let mut patched = String::with_capacity(content.len());
+    let mut found = false;
+    for line in content.lines() {
+        if !found && line.starts_with("date:") {
+            patched.push_str(&format!("date: {new_date}"));
+            found = true;
+        } else {
+            patched.push_str(line);
+        }
+        patched.push('\n');
+    }
+    std::fs::write(path, patched).context("Failed to write patched note")?;
+    Ok(())
 }
 
 fn expand_tilde(path: &str) -> PathBuf {

@@ -155,6 +155,18 @@ There is an uncommitted change in `process_youtube_fabric()` that added a `ytdlp
 11. Update the description extraction design doc to reflect the new architecture
 12. Update tests
 
+#### Phase 4: Fix reingest dedup - find old note by source URL, not ledger path
+
+The current dedup logic in `ingest_url()` reads the old note's file path from the ledger entry, then tries to delete it. This breaks when cortex has moved the file (e.g., `inbox/foo.md` -> `notes/foo.md`) because the ledger still stores the original inbox path.
+
+**Fix:** When replacing an existing note, scan the vault for any `.md` file whose `source:` frontmatter matches the canonical URL, and delete that file regardless of where it lives. The ledger is still used for fast dedup detection ("have I ingested this URL before?"), but file location comes from the vault itself.
+
+13. Add a `find_note_by_source(vault_root, canonical_url) -> Option<PathBuf>` function to search the vault for a note matching the given source URL
+14. In the dedup/replace block of `ingest_url()`, use `find_note_by_source()` instead of (or in addition to) the ledger's stored path to locate and delete the old note
+15. Preserve the original note's `date:` field - read it from the old note before deleting, then patch it into the new note after writing
+
+This directly enables the 150-note YouTube backport reingest, where old notes may be in `inbox/` or `notes/` and the original ingestion date must be preserved.
+
 ## Alternatives Considered
 
 ### Alternative 1: Fabric metadata + yt-dlp duration supplement
