@@ -38,3 +38,14 @@ cargo test --workspace
 otto ci          # full CI pipeline
 otto install     # build and install binaries
 ```
+
+## Install (for /shipit)
+
+```bash
+cargo install --path borg && systemctl --user restart borg
+cargo install --path cortex && systemctl --user restart cortex
+cargo install --path oracle
+```
+
+borg and cortex run as systemd user daemons and must be restarted after install.
+oracle is an MCP server launched on demand, no restart needed.
