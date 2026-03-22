@@ -130,14 +130,18 @@ fn parse_youtube_metadata(json_str: &str, url: &str) -> (String, String, f64, St
 
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
         let title = json["title"].as_str().unwrap_or("Unknown").to_string();
-        let channel = json["channel"]
+        let channel = json["channelTitle"]
             .as_str()
+            .or_else(|| json["channel"].as_str())
             .or_else(|| json["uploader"].as_str())
             .unwrap_or("Unknown")
             .to_string();
-        let duration = json["duration"].as_f64().unwrap_or(0.0);
-        let published = json["upload_date"]
+        let duration = json["duration"]
+            .as_f64()
+            .unwrap_or_else(|| parse_iso8601_duration(json["duration"].as_str().unwrap_or("")));
+        let published = json["publishedAt"]
             .as_str()
+            .or_else(|| json["upload_date"].as_str())
             .or_else(|| json["published_at"].as_str())
             .unwrap_or("")
             .to_string();
@@ -160,6 +164,31 @@ fn parse_youtube_metadata(json_str: &str, url: &str) -> (String, String, f64, St
     }
 }
 
+/// Parse ISO 8601 duration (e.g., "PT8M14S") to seconds.
+fn parse_iso8601_duration(s: &str) -> f64 {
+    let s = s.strip_prefix("PT").unwrap_or(s);
+    let mut secs = 0.0;
+    let mut num_buf = String::new();
+    for ch in s.chars() {
+        match ch {
+            'H' | 'h' => {
+                secs += num_buf.parse::<f64>().unwrap_or(0.0) * 3600.0;
+                num_buf.clear();
+            }
+            'M' | 'm' => {
+                secs += num_buf.parse::<f64>().unwrap_or(0.0) * 60.0;
+                num_buf.clear();
+            }
+            'S' | 's' => {
+                secs += num_buf.parse::<f64>().unwrap_or(0.0);
+                num_buf.clear();
+            }
+            _ => num_buf.push(ch),
+        }
+    }
+    secs
+}
+
 pub fn is_available(config: &FabricConfig) -> bool {
     vault::fabric::is_available(&config.binary)
 }
@@ -169,8 +198,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_youtube_metadata_valid() {
-        let json = r#"{"title": "Test Video", "channel": "TestChan", "duration": 120.0, "upload_date": "2026-01-01", "description": "A test video", "tags": ["rust", "coding"]}"#;
+    fn test_parse_youtube_metadata_valid_fabric() {
+        let json = r#"{"title": "Test Video", "channelTitle": "TestChan", "duration": "PT2M0S", "publishedAt": "2026-01-01T00:00:00Z", "description": "A test video", "tags": ["rust", "coding"]}"#;
+        let (title, channel, dur, published, _vid, description, tags) =
+            parse_youtube_metadata(json, "https://youtube.com/watch?v=abc123");
+        assert_eq!(title, "Test Video");
+        assert_eq!(channel, "TestChan");
+        assert!((dur - 120.0).abs() < f64::EPSILON);
+        assert_eq!(published, "2026-01-01T00:00:00Z");
+        assert_eq!(description, "A test video");
+        assert_eq!(tags, vec!["rust", "coding"]);
+    }
+
+    #[test]
+    fn test_parse_youtube_metadata_valid_ytdlp() {
+        let json = r#"{"title": "Test Video", "uploader": "TestChan", "duration": 120.0, "upload_date": "2026-01-01", "description": "A test video", "tags": ["rust", "coding"]}"#;
         let (title, channel, dur, published, _vid, description, tags) =
             parse_youtube_metadata(json, "https://youtube.com/watch?v=abc123");
         assert_eq!(title, "Test Video");
@@ -179,6 +221,15 @@ mod tests {
         assert_eq!(published, "2026-01-01");
         assert_eq!(description, "A test video");
         assert_eq!(tags, vec!["rust", "coding"]);
+    }
+
+    #[test]
+    fn test_parse_iso8601_duration() {
+        assert!((parse_iso8601_duration("PT8M14S") - 494.0).abs() < f64::EPSILON);
+        assert!((parse_iso8601_duration("PT1H2M3S") - 3723.0).abs() < f64::EPSILON);
+        assert!((parse_iso8601_duration("PT30S") - 30.0).abs() < f64::EPSILON);
+        assert!((parse_iso8601_duration("PT0S") - 0.0).abs() < f64::EPSILON);
+        assert!((parse_iso8601_duration("") - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
