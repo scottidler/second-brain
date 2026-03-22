@@ -1,5 +1,6 @@
 use crate::assets;
 use crate::config::Config;
+use crate::description;
 use crate::extraction;
 use crate::fabric;
 use crate::hygiene;
@@ -18,6 +19,14 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Instant;
 use tokio::sync::Mutex;
+
+struct YouTubeResult {
+    title: String,
+    summary: String,
+    content_type: ContentType,
+    description: String,
+    yt_tags: Vec<String>,
+}
 
 /// Extract the best title from fabric's markdown output.
 ///
@@ -302,12 +311,19 @@ async fn process_url_inner(
         log::warn!("[{trace_id}] Fabric binary not available, falling back to legacy pipeline");
     }
 
-    let (title, summary, content_type) = if url_match.is_youtube_type() {
-        if use_fabric {
+    let (title, summary, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
+        let yt_result = if use_fabric {
             process_youtube_fabric(&url_match.url, config).await?
         } else {
             process_youtube_legacy(&url_match.url, config).await?
-        }
+        };
+        (
+            yt_result.title,
+            yt_result.summary,
+            yt_result.content_type,
+            Some(yt_result.description),
+            yt_result.yt_tags,
+        )
     } else {
         // Determine content type from link classification
         let ct = match url_match.link_name.as_str() {
@@ -318,16 +334,16 @@ async fn process_url_inner(
         };
         if use_fabric {
             match process_article_fabric(&url_match.url, config).await {
-                Ok((title, summary, _)) => (title, summary, ct),
+                Ok((title, summary, _)) => (title, summary, ct, None, Vec::new()),
                 Err(e) => {
                     log::warn!("Fabric article fetch failed: {e:#}, falling back to Jina");
                     let (title, summary, _) = process_article_jina(&url_match.url).await?;
-                    (title, summary, ct)
+                    (title, summary, ct, None, Vec::new())
                 }
             }
         } else {
             let (title, summary, _) = process_article_jina(&url_match.url).await?;
-            (title, summary, ct)
+            (title, summary, ct, None, Vec::new())
         }
     };
 
@@ -338,12 +354,22 @@ async fn process_url_inner(
 
     let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
 
+    // Extract hashtags from YouTube description and merge yt-dlp tags
+    if let Some(ref desc) = raw_description {
+        let hashtags = description::extract_hashtags(desc);
+        all_tags.extend(hashtags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+    }
+    all_tags.extend(yt_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+
     // Generate tags via Fabric (graceful failure)
     if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&summary, &config.fabric).await {
         all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
     }
     all_tags.sort();
     all_tags.dedup();
+
+    // Filter YouTube description for the note callout
+    let filtered_description = raw_description.as_deref().and_then(description::filter_description);
 
     // Generate embed code for YouTube
     let embed_code = if url_match.is_youtube_type() {
@@ -359,6 +385,7 @@ async fn process_url_inner(
         asset_path: None,
         tags: all_tags.clone(),
         summary,
+        description: filtered_description,
         content_type,
         embed_code,
         method: Some(method),
@@ -415,21 +442,26 @@ async fn process_url_inner(
     })
 }
 
-async fn process_youtube_fabric(url: &str, config: &Config) -> Result<(String, String, ContentType)> {
+async fn process_youtube_fabric(url: &str, config: &Config) -> Result<YouTubeResult> {
     let yt = fabric::fetch_youtube(url, &config.fabric).await?;
 
     // If fabric returned "Unknown" title, fall back to yt-dlp metadata
-    let (title, channel, duration_secs) = if yt.title == "Unknown" || yt.title.is_empty() {
+    let (title, channel, duration_secs, description, yt_tags) = if yt.title == "Unknown" || yt.title.is_empty() {
         log::warn!("Fabric returned no title, falling back to yt-dlp metadata");
         match youtube::fetch_metadata(url) {
-            Ok(meta) => (meta.title, meta.uploader, meta.duration_secs),
+            Ok(meta) => {
+                // Use yt-dlp metadata for title/channel/duration, but prefer fabric description/tags if available
+                let desc = if yt.description.is_empty() { meta.description } else { yt.description };
+                let tags = if yt.tags.is_empty() { meta.tags } else { yt.tags };
+                (meta.title, meta.uploader, meta.duration_secs, desc, tags)
+            }
             Err(e) => {
                 log::warn!("yt-dlp metadata also failed: {e:#}");
-                (yt.title, yt.channel, yt.duration_secs)
+                (yt.title, yt.channel, yt.duration_secs, yt.description, yt.tags)
             }
         }
     } else {
-        (yt.title, yt.channel, yt.duration_secs)
+        (yt.title, yt.channel, yt.duration_secs, yt.description, yt.tags)
     };
 
     let transcript = if yt.transcript.is_empty() {
@@ -452,10 +484,16 @@ async fn process_youtube_fabric(url: &str, config: &Config) -> Result<(String, S
         duration_secs,
     };
 
-    Ok((title, summary, content_type))
+    Ok(YouTubeResult {
+        title,
+        summary,
+        content_type,
+        description,
+        yt_tags,
+    })
 }
 
-async fn process_youtube_legacy(url: &str, config: &Config) -> Result<(String, String, ContentType)> {
+async fn process_youtube_legacy(url: &str, config: &Config) -> Result<YouTubeResult> {
     log::debug!("Fetching YouTube metadata for: {url}");
     let metadata = youtube::fetch_metadata(url)?;
 
@@ -485,7 +523,13 @@ async fn process_youtube_legacy(url: &str, config: &Config) -> Result<(String, S
         duration_secs: metadata.duration_secs,
     };
 
-    Ok((metadata.title, transcript, content_type))
+    Ok(YouTubeResult {
+        title: metadata.title,
+        summary: transcript,
+        content_type,
+        description: metadata.description,
+        yt_tags: metadata.tags,
+    })
 }
 
 async fn process_article_fabric(url: &str, config: &Config) -> Result<(String, String, ContentType)> {
@@ -681,6 +725,7 @@ async fn process_image_inner(
         asset_path: Some(rel_path.clone()),
         tags: all_tags.clone(),
         summary,
+        description: None,
         content_type: ContentType::Image { asset_path: rel_path },
         embed_code: None,
         method: Some(method),
@@ -902,6 +947,7 @@ async fn process_audio_inner(
         asset_path: Some(rel_path.clone()),
         tags: all_tags.clone(),
         summary,
+        description: None,
         content_type: ContentType::Audio {
             asset_path: rel_path,
             duration_secs,
@@ -1156,6 +1202,7 @@ async fn process_document_file_inner(
         asset_path: Some(rel_path.clone()),
         tags: all_tags.clone(),
         summary,
+        description: None,
         content_type: kind.content_type(rel_path),
         embed_code: None,
         method: Some(method),
@@ -1349,6 +1396,7 @@ async fn process_text_inner(
         asset_path: None,
         tags: all_tags.clone(),
         summary: text.to_string(),
+        description: None,
         content_type: ContentType::Note,
         embed_code: None,
         method: Some(method),
@@ -1502,6 +1550,7 @@ async fn process_vocab(
         asset_path: None,
         tags: all_tags.clone(),
         summary: body,
+        description: None,
         content_type,
         embed_code: None,
         method: Some(method),
@@ -1900,6 +1949,7 @@ async fn process_code_snippet(
         asset_path: None,
         tags: all_tags.clone(),
         summary,
+        description: None,
         content_type: ContentType::Code {
             language: language.to_string(),
         },
@@ -2363,6 +2413,7 @@ int main() {
             asset_path: None,
             tags: vec!["rust".to_string(), "code-snippet".to_string()],
             summary: "```rust\nfn main() {\n    println!(\"hello\");\n}\n```".to_string(),
+            description: None,
             content_type: ContentType::Code {
                 language: "rust".to_string(),
             },

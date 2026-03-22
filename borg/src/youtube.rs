@@ -27,6 +27,8 @@ pub struct VideoMetadata {
     pub title: String,
     pub uploader: String,
     pub duration_secs: f64,
+    pub description: String,
+    pub tags: Vec<String>,
 }
 
 pub fn fetch_metadata(url: &str) -> Result<VideoMetadata> {
@@ -52,6 +54,11 @@ pub fn fetch_metadata(url: &str) -> Result<VideoMetadata> {
         title: json["title"].as_str().unwrap_or("Unknown").to_string(),
         uploader: json["uploader"].as_str().unwrap_or("Unknown").to_string(),
         duration_secs: json["duration"].as_f64().unwrap_or(0.0),
+        description: json["description"].as_str().unwrap_or("").to_string(),
+        tags: json["tags"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+            .unwrap_or_default(),
     })
 }
 

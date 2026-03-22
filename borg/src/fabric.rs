@@ -11,6 +11,8 @@ pub struct YouTubeContent {
     pub published_at: String,
     pub transcript: String,
     pub video_id: String,
+    pub description: String,
+    pub tags: Vec<String>,
 }
 
 pub async fn run_pattern(pattern: &str, input: &str, config: &FabricConfig) -> Result<String> {
@@ -34,7 +36,8 @@ pub async fn fetch_youtube(url: &str, config: &FabricConfig) -> Result<YouTubeCo
     };
 
     // Parse metadata
-    let (title, channel, duration_secs, published_at, video_id) = parse_youtube_metadata(&metadata_json, url);
+    let (title, channel, duration_secs, published_at, video_id, description, tags) =
+        parse_youtube_metadata(&metadata_json, url);
 
     // Get transcript via fabric -y <url> --transcript
     log::debug!("fabric: fetching YouTube transcript for {url}");
@@ -59,6 +62,8 @@ pub async fn fetch_youtube(url: &str, config: &FabricConfig) -> Result<YouTubeCo
         published_at,
         transcript,
         video_id,
+        description,
+        tags,
     })
 }
 
@@ -120,7 +125,7 @@ pub async fn generate_tags(content: &str, config: &FabricConfig) -> Result<Vec<S
     Ok(tags)
 }
 
-fn parse_youtube_metadata(json_str: &str, url: &str) -> (String, String, f64, String, String) {
+fn parse_youtube_metadata(json_str: &str, url: &str) -> (String, String, f64, String, String, String, Vec<String>) {
     let video_id = crate::youtube::extract_video_id(url).unwrap_or_default();
 
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
@@ -136,7 +141,12 @@ fn parse_youtube_metadata(json_str: &str, url: &str) -> (String, String, f64, St
             .or_else(|| json["published_at"].as_str())
             .unwrap_or("")
             .to_string();
-        (title, channel, duration, published, video_id)
+        let description = json["description"].as_str().unwrap_or("").to_string();
+        let tags = json["tags"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        (title, channel, duration, published, video_id, description, tags)
     } else {
         (
             "Unknown".to_string(),
@@ -144,6 +154,8 @@ fn parse_youtube_metadata(json_str: &str, url: &str) -> (String, String, f64, St
             0.0,
             String::new(),
             video_id,
+            String::new(),
+            Vec::new(),
         )
     }
 }
@@ -158,19 +170,25 @@ mod tests {
 
     #[test]
     fn test_parse_youtube_metadata_valid() {
-        let json = r#"{"title": "Test Video", "channel": "TestChan", "duration": 120.0, "upload_date": "2026-01-01"}"#;
-        let (title, channel, dur, published, _vid) = parse_youtube_metadata(json, "https://youtube.com/watch?v=abc123");
+        let json = r#"{"title": "Test Video", "channel": "TestChan", "duration": 120.0, "upload_date": "2026-01-01", "description": "A test video", "tags": ["rust", "coding"]}"#;
+        let (title, channel, dur, published, _vid, description, tags) =
+            parse_youtube_metadata(json, "https://youtube.com/watch?v=abc123");
         assert_eq!(title, "Test Video");
         assert_eq!(channel, "TestChan");
         assert!((dur - 120.0).abs() < f64::EPSILON);
         assert_eq!(published, "2026-01-01");
+        assert_eq!(description, "A test video");
+        assert_eq!(tags, vec!["rust", "coding"]);
     }
 
     #[test]
     fn test_parse_youtube_metadata_invalid() {
-        let (title, channel, dur, _, _) = parse_youtube_metadata("not json", "https://youtube.com/watch?v=abc");
+        let (title, channel, dur, _, _, description, tags) =
+            parse_youtube_metadata("not json", "https://youtube.com/watch?v=abc");
         assert_eq!(title, "Unknown");
         assert_eq!(channel, "Unknown");
         assert!((dur - 0.0).abs() < f64::EPSILON);
+        assert!(description.is_empty());
+        assert!(tags.is_empty());
     }
 }

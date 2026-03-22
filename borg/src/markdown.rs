@@ -10,6 +10,7 @@ pub struct NoteContent {
     pub asset_path: Option<String>,
     pub tags: Vec<String>,
     pub summary: String,
+    pub description: Option<String>,
     pub content_type: ContentType,
     pub embed_code: Option<String>,
     pub method: Option<IngestMethod>,
@@ -161,6 +162,19 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         _ => {}
     }
 
+    // Description callout (YouTube only)
+    if let Some(ref desc) = note.description {
+        body.push_str("> [!info]- Video Description\n");
+        for line in desc.lines() {
+            if line.trim().is_empty() {
+                body.push_str(">\n");
+            } else {
+                body.push_str(&format!("> {line}\n"));
+            }
+        }
+        body.push('\n');
+    }
+
     // Summary section
     if !note.summary.is_empty() {
         body.push_str("## Summary\n\n");
@@ -205,6 +219,7 @@ mod tests {
             tags: vec!["rust".to_string(), "programming".to_string()],
             summary: "This is a summary.".to_string(),
             content_type: ContentType::Article,
+            description: None,
             embed_code: None,
             method: None,
             trace_id: None,
@@ -231,6 +246,7 @@ mod tests {
                 uploader: "TechChannel".to_string(),
                 duration_secs: 600.0,
             },
+            description: None,
             embed_code: Some(r#"<iframe width="854" height="480" src="https://www.youtube.com/embed/abc" frameborder="0" allowfullscreen></iframe>"#.to_string()),
             method: Some(IngestMethod::Telegram),
             trace_id: None,
@@ -258,6 +274,7 @@ mod tests {
             tags: vec!["ai".to_string()],
             summary: String::new(),
             content_type: ContentType::Article,
+            description: None,
             embed_code: None,
             method: None,
             trace_id: None,
@@ -277,6 +294,7 @@ mod tests {
             tags: vec!["note".to_string()],
             summary: "Some quick note text.".to_string(),
             content_type: ContentType::Note,
+            description: None,
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
@@ -298,6 +316,7 @@ mod tests {
             content_type: ContentType::Image {
                 asset_path: "system/attachments/images/2026-03/whiteboard-a1b2c3d4.png".to_string(),
             },
+            description: None,
             embed_code: None,
             method: Some(IngestMethod::Cli),
             trace_id: None,
@@ -316,6 +335,7 @@ mod tests {
             asset_path: None,
             tags: vec!["test".to_string()],
             summary: "Summary.".to_string(),
+            description: None,
             content_type: ContentType::Article,
             embed_code: None,
             method: Some(IngestMethod::Telegram),
@@ -339,6 +359,7 @@ mod tests {
             tags: vec![],
             summary: String::new(),
             content_type: ContentType::Note,
+            description: None,
             embed_code: None,
             method: None,
             trace_id: None,
@@ -356,6 +377,7 @@ mod tests {
             tags: vec!["github".to_string()],
             summary: "A terminal you can curl.".to_string(),
             content_type: ContentType::GitHub,
+            description: None,
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
@@ -373,6 +395,7 @@ mod tests {
             tags: vec!["ai".to_string()],
             summary: "A social post.".to_string(),
             content_type: ContentType::Social,
+            description: None,
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
@@ -390,12 +413,65 @@ mod tests {
             tags: vec!["football".to_string()],
             summary: "A reddit discussion.".to_string(),
             content_type: ContentType::Reddit,
+            description: None,
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: reddit"));
+    }
+
+    #[test]
+    fn test_render_youtube_note_with_description_callout() {
+        let note = NoteContent {
+            title: "Homelab Tour".to_string(),
+            source_url: Some("https://youtube.com/watch?v=abc".to_string()),
+            asset_path: None,
+            tags: vec!["homelab".to_string()],
+            summary: "A tour of my homelab.".to_string(),
+            description: Some("My homelab after 3 years\n\nResources:\n- Talos: https://talos.dev\n- Cilium: https://cilium.io".to_string()),
+            content_type: ContentType::YouTube {
+                uploader: "TechChannel".to_string(),
+                duration_secs: 1440.0,
+            },
+            embed_code: Some(r#"<iframe width="854" height="480" src="https://www.youtube.com/embed/abc" frameborder="0" allowfullscreen></iframe>"#.to_string()),
+            method: Some(IngestMethod::Telegram),
+            trace_id: None,
+        };
+        let rendered = render_note(&note, &test_config());
+        // Callout header
+        assert!(rendered.contains("> [!info]- Video Description"));
+        // Content inside callout
+        assert!(rendered.contains("> My homelab after 3 years"));
+        assert!(rendered.contains("> - Talos: https://talos.dev"));
+        // Blank line inside callout renders as bare >
+        assert!(rendered.contains(">\n"));
+        // Callout appears before Summary
+        let callout_pos = rendered.find("> [!info]- Video Description").expect("callout header");
+        let summary_pos = rendered.find("## Summary").expect("summary header");
+        assert!(callout_pos < summary_pos, "callout should appear before summary");
+        // Callout appears after iframe
+        let iframe_pos = rendered.find("iframe").expect("iframe embed");
+        assert!(callout_pos > iframe_pos, "callout should appear after iframe");
+    }
+
+    #[test]
+    fn test_render_note_without_description_has_no_callout() {
+        let note = NoteContent {
+            title: "Article".to_string(),
+            source_url: Some("https://example.com".to_string()),
+            asset_path: None,
+            tags: vec![],
+            summary: "Content.".to_string(),
+            description: None,
+            content_type: ContentType::Article,
+            embed_code: None,
+            method: None,
+            trace_id: None,
+        };
+        let rendered = render_note(&note, &test_config());
+        assert!(!rendered.contains("[!info]"), "no callout when description is None");
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub mod backoff;
 pub mod cli;
 pub mod config;
 pub mod dashboard;
+pub mod description;
 pub mod discord;
 pub mod error;
 pub mod extraction;
