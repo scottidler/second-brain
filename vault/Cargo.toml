@@ -8,6 +8,7 @@ description = "Shared library crate for Obsidian vault types, frontmatter, and u
 [features]
 schemars = ["dep:schemars"]
 search = ["dep:rusqlite"]
+watcher = ["dep:notify", "dep:tokio"]
 
 [dependencies]
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
@@ -18,8 +19,10 @@ eyre = { workspace = true }
 fs2 = { workspace = true }
 log = { workspace = true }
 regex = { workspace = true }
+notify = { version = "7", optional = true }
 schemars = { version = "1.2", optional = true }
 serde = { workspace = true }
+tokio = { workspace = true, optional = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 shellexpand = { workspace = true }
