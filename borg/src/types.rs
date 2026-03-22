@@ -96,8 +96,6 @@ pub struct IngestResult {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_secs: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "folder")]
-    pub domain: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<IngestMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

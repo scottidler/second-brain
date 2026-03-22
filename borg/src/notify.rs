@@ -127,7 +127,6 @@ mod tests {
             title: Some("Test Article".to_string()),
             tags: vec!["ai".to_string()],
             elapsed_secs: Some(3.5),
-            domain: Some("tech".to_string()),
             obsidian_url: Some("obsidian://open?vault=obsidian&file=notes%2Ftest-article.md".to_string()),
             ..Default::default()
         };

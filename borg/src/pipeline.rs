@@ -200,7 +200,6 @@ pub async fn process_url(
                 title: None,
                 tags: vec![],
                 elapsed_secs: Some(elapsed.as_secs_f64()),
-                domain: None,
                 method: Some(method),
                 canonical_url: Some(canonical),
                 trace_id: None,
@@ -346,48 +345,6 @@ async fn process_url_inner(
     all_tags.sort();
     all_tags.dedup();
 
-    // Resolve destination domain (3-tier routing)
-    // If title is still "Unknown" after all extraction attempts, force fallback to inbox
-    let domain = hygiene::normalize_domain(&if title == "Unknown" || title.is_empty() {
-        log::warn!("Title is '{title}', forcing fallback to inbox");
-        config.routing.fallback_domain.clone()
-    } else if !url_match.domain.is_empty() {
-        // Tier 1: URL-type routing from config
-        log::debug!("Tier 1 routing: URL config -> {}", url_match.domain);
-        url_match.domain.clone()
-    } else if use_fabric {
-        // Tier 2: LLM topic classification
-        match fabric::classify_topic(&title, &summary, &config.fabric).await {
-            Ok(result) if result.confidence >= config.routing.confidence_threshold => {
-                log::info!(
-                    "Tier 2 routing: LLM classified -> {} (confidence: {:.2})",
-                    result.domain,
-                    result.confidence
-                );
-                all_tags.extend(result.suggested_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
-                all_tags.sort();
-                all_tags.dedup();
-                result.domain
-            }
-            Ok(result) => {
-                log::info!(
-                    "Tier 2 routing: low confidence {:.2} for '{}', falling back",
-                    result.confidence,
-                    result.domain
-                );
-                config.routing.fallback_domain.clone()
-            }
-            Err(e) => {
-                log::warn!("Tier 2 routing failed: {e:#}, using fallback");
-                config.routing.fallback_domain.clone()
-            }
-        }
-    } else {
-        // Tier 3: Fallback
-        log::debug!("Tier 3 routing: fallback -> {}", config.routing.fallback_domain);
-        config.routing.fallback_domain.clone()
-    });
-
     // Generate embed code for YouTube
     let embed_code = if url_match.is_youtube_type() {
         youtube::extract_video_id(&url_match.url)
@@ -406,7 +363,6 @@ async fn process_url_inner(
         embed_code,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
-        domain: domain.clone(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -419,7 +375,7 @@ async fn process_url_inner(
     let note_path = dest_path.join(&filename);
     std::fs::write(&note_path, &rendered).context("Failed to write note to vault")?;
 
-    log::info!("[{trace_id}] Wrote note: {} (domain: {})", note_path.display(), domain);
+    log::info!("[{trace_id}] Wrote note: {}", note_path.display());
 
     // Log success to Borg Ledger
     ledger::append_entry(
@@ -432,7 +388,7 @@ async fn process_url_inner(
             title: Some(title.clone()),
             path: vault_relative_path(&note_path, &config.vault.root_path),
             source: canonical.clone(),
-            domain: Some(domain.clone()),
+            domain: None,
             trace_id: Some(trace_id.to_string()),
         },
     )?;
@@ -452,7 +408,6 @@ async fn process_url_inner(
         title: Some(title),
         tags: all_tags,
         elapsed_secs: None,
-        domain: Some(domain),
         method: Some(method),
         canonical_url: Some(canonical),
         trace_id: None,
@@ -705,32 +660,6 @@ async fn process_image_inner(
     all_tags.sort();
     all_tags.dedup();
 
-    // Classify topic for routing
-    let summary_text = if !extracted_text.is_empty() {
-        extracted_text.clone()
-    } else {
-        format!("Image: {}", title)
-    };
-
-    let domain = hygiene::normalize_domain(&if use_fabric {
-        match fabric::classify_topic(&title, &summary_text, &config.fabric).await {
-            Ok(result) if result.confidence >= config.routing.confidence_threshold => {
-                log::info!(
-                    "Image routing: LLM classified -> {} (confidence: {:.2})",
-                    result.domain,
-                    result.confidence
-                );
-                all_tags.extend(result.suggested_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
-                all_tags.sort();
-                all_tags.dedup();
-                result.domain
-            }
-            _ => config.routing.fallback_domain.clone(),
-        }
-    } else {
-        config.routing.fallback_domain.clone()
-    });
-
     // Build summary: include vision description and extracted text
     let summary = {
         let mut parts = Vec::new();
@@ -756,7 +685,6 @@ async fn process_image_inner(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
-        domain: domain.clone(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -768,11 +696,7 @@ async fn process_image_inner(
     let note_path = dest_path.join(&note_filename);
     std::fs::write(&note_path, &rendered).context("Failed to write image note to vault")?;
 
-    log::info!(
-        "[{trace_id}] Wrote image note: {} (domain: {})",
-        note_path.display(),
-        domain
-    );
+    log::info!("[{trace_id}] Wrote image note: {}", note_path.display());
 
     // Clean up temp file
     let _ = std::fs::remove_file(&temp_path);
@@ -790,7 +714,7 @@ async fn process_image_inner(
             title: Some(title.clone()),
             path: vault_relative_path(&note_path, &config.vault.root_path),
             source: source_display,
-            domain: Some(domain.clone()),
+            domain: None,
             trace_id: Some(trace_id.to_string()),
         },
     )?;
@@ -807,7 +731,6 @@ async fn process_image_inner(
         title: Some(title),
         tags: all_tags,
         elapsed_secs: None,
-        domain: Some(domain),
         method: Some(method),
         canonical_url: None,
         trace_id: None,
@@ -966,32 +889,6 @@ async fn process_audio_inner(
     all_tags.sort();
     all_tags.dedup();
 
-    // Classify topic for routing
-    let summary_text = if !transcript_text.is_empty() {
-        transcript_text.clone()
-    } else {
-        format!("Audio: {}", title)
-    };
-
-    let domain = hygiene::normalize_domain(&if use_fabric {
-        match fabric::classify_topic(&title, &summary_text, &config.fabric).await {
-            Ok(result) if result.confidence >= config.routing.confidence_threshold => {
-                log::info!(
-                    "Audio routing: LLM classified -> {} (confidence: {:.2})",
-                    result.domain,
-                    result.confidence
-                );
-                all_tags.extend(result.suggested_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
-                all_tags.sort();
-                all_tags.dedup();
-                result.domain
-            }
-            _ => config.routing.fallback_domain.clone(),
-        }
-    } else {
-        config.routing.fallback_domain.clone()
-    });
-
     // Build summary
     let summary = if !transcript_text.is_empty() {
         format!("## Transcript\n\n{transcript_text}")
@@ -1012,7 +909,6 @@ async fn process_audio_inner(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
-        domain: domain.clone(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1024,11 +920,7 @@ async fn process_audio_inner(
     let note_path = dest_path.join(&note_filename);
     std::fs::write(&note_path, &rendered).context("Failed to write audio note to vault")?;
 
-    log::info!(
-        "[{trace_id}] Wrote audio note: {} (domain: {})",
-        note_path.display(),
-        domain
-    );
+    log::info!("[{trace_id}] Wrote audio note: {}", note_path.display());
 
     // Log to ledger
     let ledger_file = ledger::ledger_path(config);
@@ -1043,7 +935,7 @@ async fn process_audio_inner(
             title: Some(title.clone()),
             path: vault_relative_path(&note_path, &config.vault.root_path),
             source: source_display,
-            domain: Some(domain.clone()),
+            domain: None,
             trace_id: Some(trace_id.to_string()),
         },
     )?;
@@ -1060,7 +952,6 @@ async fn process_audio_inner(
         title: Some(title),
         tags: all_tags,
         elapsed_secs: None,
-        domain: Some(domain),
         method: Some(method),
         canonical_url: None,
         trace_id: None,
@@ -1259,33 +1150,6 @@ async fn process_document_file_inner(
     all_tags.sort();
     all_tags.dedup();
 
-    // Classify topic for routing
-    let summary_for_classify = if !extracted_text.is_empty() {
-        extracted_text.clone()
-    } else {
-        format!("{}: {}", kind.label(), title)
-    };
-
-    let domain = hygiene::normalize_domain(&if use_fabric {
-        match fabric::classify_topic(&title, &summary_for_classify, &config.fabric).await {
-            Ok(result) if result.confidence >= config.routing.confidence_threshold => {
-                log::info!(
-                    "{} routing: LLM classified -> {} (confidence: {:.2})",
-                    kind.label(),
-                    result.domain,
-                    result.confidence
-                );
-                all_tags.extend(result.suggested_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
-                all_tags.sort();
-                all_tags.dedup();
-                result.domain
-            }
-            _ => config.routing.fallback_domain.clone(),
-        }
-    } else {
-        config.routing.fallback_domain.clone()
-    });
-
     let note = NoteContent {
         title: title.clone(),
         source_url: None,
@@ -1296,7 +1160,6 @@ async fn process_document_file_inner(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
-        domain: domain.clone(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1308,12 +1171,7 @@ async fn process_document_file_inner(
     let note_path = dest_path.join(&note_filename);
     std::fs::write(&note_path, &rendered).context(format!("Failed to write {} note to vault", kind.label()))?;
 
-    log::info!(
-        "[{trace_id}] Wrote {} note: {} (domain: {})",
-        kind.label(),
-        note_path.display(),
-        domain
-    );
+    log::info!("[{trace_id}] Wrote {} note: {}", kind.label(), note_path.display());
 
     // Clean up temp file
     let _ = std::fs::remove_file(&temp_path);
@@ -1331,7 +1189,7 @@ async fn process_document_file_inner(
             title: Some(title.clone()),
             path: vault_relative_path(&note_path, &config.vault.root_path),
             source: source_display,
-            domain: Some(domain.clone()),
+            domain: None,
             trace_id: Some(trace_id.to_string()),
         },
     )?;
@@ -1348,7 +1206,6 @@ async fn process_document_file_inner(
         title: Some(title),
         tags: all_tags,
         elapsed_secs: None,
-        domain: Some(domain),
         method: Some(method),
         canonical_url: None,
         trace_id: None,
@@ -1486,26 +1343,6 @@ async fn process_text_inner(
     all_tags.sort();
     all_tags.dedup();
 
-    // Route via LLM classification
-    let domain = hygiene::normalize_domain(&if use_fabric {
-        match fabric::classify_topic(&title, text, &config.fabric).await {
-            Ok(result) if result.confidence >= config.routing.confidence_threshold => {
-                log::info!(
-                    "Text routing: LLM classified -> {} (confidence: {:.2})",
-                    result.domain,
-                    result.confidence
-                );
-                all_tags.extend(result.suggested_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
-                all_tags.sort();
-                all_tags.dedup();
-                result.domain
-            }
-            _ => config.routing.fallback_domain.clone(),
-        }
-    } else {
-        config.routing.fallback_domain.clone()
-    });
-
     let note = NoteContent {
         title: title.clone(),
         source_url: None,
@@ -1516,7 +1353,6 @@ async fn process_text_inner(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
-        domain: domain.clone(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1528,11 +1364,7 @@ async fn process_text_inner(
     let note_path = dest_path.join(&filename);
     std::fs::write(&note_path, &rendered).context("Failed to write note to vault")?;
 
-    log::info!(
-        "[{trace_id}] Wrote text note: {} (domain: {})",
-        note_path.display(),
-        domain
-    );
+    log::info!("[{trace_id}] Wrote text note: {}", note_path.display());
 
     // Log to ledger
     let ledger_file = ledger::ledger_path(config);
@@ -1550,7 +1382,7 @@ async fn process_text_inner(
             title: Some(title.clone()),
             path: vault_relative_path(&note_path, &config.vault.root_path),
             source: source_display,
-            domain: Some(domain.clone()),
+            domain: None,
             trace_id: Some(trace_id.to_string()),
         },
     )?;
@@ -1567,7 +1399,6 @@ async fn process_text_inner(
         title: Some(title),
         tags: all_tags,
         elapsed_secs: None,
-        domain: Some(domain),
         method: Some(method),
         canonical_url: None,
         trace_id: None,
@@ -1595,7 +1426,7 @@ async fn process_vocab(
 
     let use_fabric = fabric::is_available(&config.fabric);
 
-    let (title, content_type, body, domain) = match pattern {
+    let (title, content_type, body) = match pattern {
         TextPattern::Define { word } => {
             // Generate definition via LLM
             let body = if use_fabric {
@@ -1613,7 +1444,6 @@ async fn process_vocab(
 
             // Detect language (simple heuristic: ask LLM or check common patterns)
             let language = detect_language(word, use_fabric, config).await;
-            let domain = resolve_vocab_domain(&language, &config.text_capture);
 
             (
                 word.clone(),
@@ -1622,7 +1452,6 @@ async fn process_vocab(
                     language: language.clone(),
                 },
                 body,
-                domain,
             )
         }
         TextPattern::Clarify { word_a, word_b } => {
@@ -1642,7 +1471,6 @@ async fn process_vocab(
             };
 
             let language = detect_language(word_a, use_fabric, config).await;
-            let domain = resolve_vocab_domain(&language, &config.text_capture);
 
             (
                 title,
@@ -1652,7 +1480,6 @@ async fn process_vocab(
                     language: language.clone(),
                 },
                 body,
-                domain,
             )
         }
         _ => unreachable!("process_vocab called with non-vocab pattern"),
@@ -1679,7 +1506,6 @@ async fn process_vocab(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
-        domain: domain.clone(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1691,11 +1517,7 @@ async fn process_vocab(
     let note_path = dest_path.join(&filename);
     std::fs::write(&note_path, &rendered).context("Failed to write note to vault")?;
 
-    log::info!(
-        "[{trace_id}] Wrote vocab note: {} (domain: {})",
-        note_path.display(),
-        domain
-    );
+    log::info!("[{trace_id}] Wrote vocab note: {}", note_path.display());
 
     // Log to ledger
     let ledger_file = ledger::ledger_path(config);
@@ -1709,7 +1531,7 @@ async fn process_vocab(
             title: Some(title.clone()),
             path: vault_relative_path(&note_path, &config.vault.root_path),
             source: format!("[{}]", text.trim()),
-            domain: Some(domain.clone()),
+            domain: None,
             trace_id: Some(trace_id.to_string()),
         },
     )?;
@@ -1726,7 +1548,6 @@ async fn process_vocab(
         title: Some(title),
         tags: all_tags,
         elapsed_secs: None,
-        domain: Some(domain),
         method: Some(method),
         canonical_url: None,
         trace_id: None,
@@ -2035,7 +1856,7 @@ async fn generate_code_title(text: &str, language: &str, use_fabric: bool, confi
     "Code Snippet".to_string()
 }
 
-/// Process a code snippet: create a note with fenced code block and route to code domain.
+/// Process a code snippet: create a note with fenced code block.
 async fn process_code_snippet(
     text: &str,
     language: &str,
@@ -2073,8 +1894,6 @@ async fn process_code_snippet(
     // Build fenced code block as the summary
     let summary = format!("```{language}\n{text}\n```");
 
-    let domain = config.text_capture.code_domain.clone();
-
     let note = NoteContent {
         title: title.clone(),
         source_url: None,
@@ -2087,7 +1906,6 @@ async fn process_code_snippet(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
-        domain: domain.clone(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -2100,9 +1918,8 @@ async fn process_code_snippet(
     std::fs::write(&note_path, &rendered).context("Failed to write code note to vault")?;
 
     log::info!(
-        "[{trace_id}] Wrote code snippet note: {} (domain: {}, language: {})",
+        "[{trace_id}] Wrote code snippet note: {} (language: {})",
         note_path.display(),
-        domain,
         language
     );
 
@@ -2119,7 +1936,7 @@ async fn process_code_snippet(
             title: Some(title.clone()),
             path: vault_relative_path(&note_path, &config.vault.root_path),
             source: source_display,
-            domain: Some(domain.clone()),
+            domain: None,
             trace_id: Some(trace_id.to_string()),
         },
     )?;
@@ -2136,7 +1953,6 @@ async fn process_code_snippet(
         title: Some(title),
         tags: all_tags,
         elapsed_secs: None,
-        domain: Some(domain),
         method: Some(method),
         canonical_url: None,
         trace_id: None,
@@ -2166,14 +1982,6 @@ async fn detect_language(word: &str, use_fabric: bool, config: &Config) -> Strin
 
     // Fallback: assume English
     "english".to_string()
-}
-
-fn resolve_vocab_domain(language: &str, text_capture: &crate::config::TextCaptureConfig) -> String {
-    if language == "spanish" {
-        "spanish".to_string()
-    } else {
-        text_capture.vocab_domain.clone()
-    }
 }
 
 fn resolve_destination(inbox_path: &str) -> PathBuf {
@@ -2299,24 +2107,6 @@ mod tests {
     fn test_detect_text_pattern_empty_define() {
         // "define:" with no word should not match
         assert_eq!(detect_text_pattern("define: "), TextPattern::General);
-    }
-
-    #[test]
-    fn test_resolve_vocab_domain_english() {
-        let config = crate::config::TextCaptureConfig::default();
-        assert_eq!(resolve_vocab_domain("english", &config), "knowledge");
-    }
-
-    #[test]
-    fn test_resolve_vocab_domain_spanish() {
-        let config = crate::config::TextCaptureConfig::default();
-        assert_eq!(resolve_vocab_domain("spanish", &config), "spanish");
-    }
-
-    #[test]
-    fn test_resolve_vocab_domain_unknown() {
-        let config = crate::config::TextCaptureConfig::default();
-        assert_eq!(resolve_vocab_domain("french", &config), "knowledge");
     }
 
     #[test]
@@ -2579,7 +2369,6 @@ int main() {
             embed_code: None,
             method: Some(IngestMethod::Cli),
             trace_id: None,
-            domain: "tech".to_string(),
         };
         let rendered = markdown::render_note(
             &note,

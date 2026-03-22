@@ -164,7 +164,6 @@ pub struct Config {
     pub links: Vec<LinkConfig>,
     pub fabric: FabricConfig,
     pub frontmatter: FrontmatterConfig,
-    pub routing: RoutingConfig,
     pub hotkey: HotkeyConfig,
     pub canonicalization: CanonicalConfig,
     pub migration: MigrationConfig,
@@ -200,23 +199,9 @@ pub struct MigrationConfig {
     pub skip_folders: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
-pub struct TextCaptureConfig {
-    #[serde(alias = "vocab-folders")]
-    pub vocab_domain: String,
-    #[serde(alias = "code-folder")]
-    pub code_domain: String,
-}
-
-impl Default for TextCaptureConfig {
-    fn default() -> Self {
-        Self {
-            vocab_domain: "knowledge".to_string(),
-            code_domain: "tech".to_string(),
-        }
-    }
-}
+pub struct TextCaptureConfig {}
 
 fn default_links() -> Vec<LinkConfig> {
     vec![
@@ -224,7 +209,6 @@ fn default_links() -> Vec<LinkConfig> {
             name: "shorts".to_string(),
             regex: r"https?://(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]+)".to_string(),
             resolution: "480p".to_string(),
-            domain: "".to_string(),
         },
         LinkConfig {
             name: "youtube".to_string(),
@@ -232,31 +216,26 @@ fn default_links() -> Vec<LinkConfig> {
                 r"https?://(?:www\.)?(youtube\.com/watch\?v=|youtu\.be/|music\.youtube\.com/watch\?v=)([a-zA-Z0-9_-]+)"
                     .to_string(),
             resolution: "FWVGA".to_string(),
-            domain: "".to_string(),
         },
         LinkConfig {
             name: "github".to_string(),
             regex: r"https?://github\.com/[^/]+/[^/]+/?(\?[^ ]*)?$".to_string(),
             resolution: "FWVGA".to_string(),
-            domain: "".to_string(),
         },
         LinkConfig {
             name: "social".to_string(),
             regex: r"https?://x\.com/[^/]+/status/\d+".to_string(),
             resolution: "FWVGA".to_string(),
-            domain: "".to_string(),
         },
         LinkConfig {
             name: "reddit".to_string(),
             regex: r"https?://(?:www\.)?reddit\.com/r/[^/]+/comments/".to_string(),
             resolution: "FWVGA".to_string(),
-            domain: "".to_string(),
         },
         LinkConfig {
             name: "default".to_string(),
             regex: r".*".to_string(),
             resolution: "FWVGA".to_string(),
-            domain: "".to_string(),
         },
     ]
 }
@@ -267,8 +246,6 @@ pub struct LinkConfig {
     pub regex: String,
     #[serde(default = "default_resolution")]
     pub resolution: String,
-    #[serde(default, alias = "folder")]
-    pub domain: String,
 }
 
 fn default_resolution() -> String {
@@ -283,7 +260,6 @@ pub struct FabricConfig {
     pub summarize_pattern_youtube: String,
     pub summarize_pattern_article: String,
     pub tag_pattern: String,
-    pub classify_pattern: String,
     pub max_content_chars: usize,
 }
 
@@ -295,7 +271,6 @@ impl Default for FabricConfig {
             summarize_pattern_youtube: "youtube_summary".to_string(),
             summarize_pattern_article: "extract_article_wisdom".to_string(),
             tag_pattern: "create_tags".to_string(),
-            classify_pattern: "obsidian_classify".to_string(),
             max_content_chars: 30000,
         }
     }
@@ -319,32 +294,6 @@ impl Default for FrontmatterConfig {
             timezone: "America/Los_Angeles".to_string(),
         }
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, rename_all = "kebab-case")]
-pub struct RoutingConfig {
-    pub confidence_threshold: f64,
-    #[serde(alias = "fallback-folder")]
-    pub fallback_domain: String,
-    #[serde(default)]
-    pub routes: Vec<TopicRoute>,
-}
-
-impl Default for RoutingConfig {
-    fn default() -> Self {
-        Self {
-            confidence_threshold: 0.6,
-            fallback_domain: "inbox".to_string(),
-            routes: vec![],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TopicRoute {
-    pub keywords: Vec<String>,
-    pub domain: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

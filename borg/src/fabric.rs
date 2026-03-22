@@ -1,5 +1,4 @@
-use eyre::{Context, Result, bail};
-use serde::Deserialize;
+use eyre::{Result, bail};
 use std::process::Command;
 
 use crate::config::FabricConfig;
@@ -12,15 +11,6 @@ pub struct YouTubeContent {
     pub published_at: String,
     pub transcript: String,
     pub video_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ClassificationResult {
-    #[serde(alias = "folder")]
-    pub domain: String,
-    pub confidence: f64,
-    #[serde(default)]
-    pub suggested_tags: Vec<String>,
 }
 
 pub async fn run_pattern(pattern: &str, input: &str, config: &FabricConfig) -> Result<String> {
@@ -130,17 +120,6 @@ pub async fn generate_tags(content: &str, config: &FabricConfig) -> Result<Vec<S
     Ok(tags)
 }
 
-pub async fn classify_topic(title: &str, summary: &str, config: &FabricConfig) -> Result<ClassificationResult> {
-    let input = format!("Title: {title}\n\nSummary:\n{summary}");
-    let output = run_pattern(&config.classify_pattern, &input, config).await?;
-
-    // Try to parse JSON from the output (fabric may wrap it in markdown)
-    let json_str = vault::fabric::extract_json(&output);
-    let result: ClassificationResult =
-        serde_json::from_str(&json_str).context("Failed to parse classification JSON")?;
-    Ok(result)
-}
-
 fn parse_youtube_metadata(json_str: &str, url: &str) -> (String, String, f64, String, String) {
     let video_id = crate::youtube::extract_video_id(url).unwrap_or_default();
 
@@ -178,23 +157,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_json_bare() {
-        let input = r#"{"folder": "Tech", "confidence": 0.9, "suggested_tags": []}"#;
-        let result = vault::fabric::extract_json(input);
-        assert!(result.starts_with('{'));
-        let parsed: ClassificationResult = serde_json::from_str(&result).expect("valid json");
-        assert_eq!(parsed.domain, "Tech");
-    }
-
-    #[test]
-    fn test_extract_json_markdown_wrapped() {
-        let input = "```json\n{\"folder\": \"Tech\", \"confidence\": 0.8}\n```";
-        let result = vault::fabric::extract_json(input);
-        let parsed: ClassificationResult = serde_json::from_str(&result).expect("valid json");
-        assert_eq!(parsed.domain, "Tech");
-    }
-
-    #[test]
     fn test_parse_youtube_metadata_valid() {
         let json = r#"{"title": "Test Video", "channel": "TestChan", "duration": 120.0, "upload_date": "2026-01-01"}"#;
         let (title, channel, dur, published, _vid) = parse_youtube_metadata(json, "https://youtube.com/watch?v=abc123");
@@ -210,14 +172,5 @@ mod tests {
         assert_eq!(title, "Unknown");
         assert_eq!(channel, "Unknown");
         assert!((dur - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_classification_result_deserialize() {
-        let json = r#"{"folder": "Tech/AI-LLM", "confidence": 0.85, "reasoning": "AI content", "suggested_tags": ["ai", "llm"]}"#;
-        let result: ClassificationResult = serde_json::from_str(json).expect("valid");
-        assert_eq!(result.domain, "Tech/AI-LLM");
-        assert!((result.confidence - 0.85).abs() < f64::EPSILON);
-        assert_eq!(result.suggested_tags, vec!["ai", "llm"]);
     }
 }

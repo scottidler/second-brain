@@ -1,4 +1,4 @@
-pub use vault::hygiene::{normalize_domain, normalize_text_input, sanitize_filename, sanitize_tag};
+pub use vault::hygiene::{normalize_text_input, sanitize_filename, sanitize_tag};
 
 use crate::config::CanonicalRule;
 use url::Url;

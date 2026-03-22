@@ -14,7 +14,6 @@ pub struct NoteContent {
     pub embed_code: Option<String>,
     pub method: Option<IngestMethod>,
     pub trace_id: Option<String>,
-    pub domain: String,
 }
 
 pub enum ContentType {
@@ -98,7 +97,6 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         fm.push_str(&format!("asset: \"{asset}\"\n"));
     }
     fm.push_str(&format!("type: {type_field}\n"));
-    fm.push_str(&format!("domain: {}\n", note.domain));
     fm.push_str("origin: assisted\n");
 
     if let Some(method) = &note.method {
@@ -210,12 +208,10 @@ mod tests {
             embed_code: None,
             method: None,
             trace_id: None,
-            domain: "tech".to_string(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("title: \"Test Article\""));
         assert!(rendered.contains("type: article"));
-        assert!(rendered.contains("domain: tech"));
         assert!(rendered.contains("origin: assisted"));
         assert!(rendered.contains("  - rust"));
         assert!(rendered.contains("## Summary"));
@@ -238,7 +234,6 @@ mod tests {
             embed_code: Some(r#"<iframe width="854" height="480" src="https://www.youtube.com/embed/abc" frameborder="0" allowfullscreen></iframe>"#.to_string()),
             method: Some(IngestMethod::Telegram),
             trace_id: None,
-            domain: "ai".to_string(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: youtube"));
@@ -266,7 +261,6 @@ mod tests {
             embed_code: None,
             method: None,
             trace_id: None,
-            domain: "ai".to_string(),
         };
         let rendered = render_note(&note, &config);
         assert!(rendered.contains("  - ai"));
@@ -286,7 +280,6 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
-            domain: "inbox".to_string(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: note"));
@@ -308,7 +301,6 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Cli),
             trace_id: None,
-            domain: "inbox".to_string(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: image"));
@@ -328,7 +320,6 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: Some("tg-7f3a2c".to_string()),
-            domain: "tech".to_string(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("trace: tg-7f3a2c"));
@@ -351,7 +342,6 @@ mod tests {
             embed_code: None,
             method: None,
             trace_id: None,
-            domain: "inbox".to_string(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(!rendered.contains("trace:"));
@@ -369,7 +359,6 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
-            domain: "tech".to_string(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: github"));
@@ -387,7 +376,6 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
-            domain: "ai".to_string(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: social"));
@@ -405,7 +393,6 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
-            domain: "football".to_string(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: reddit"));
