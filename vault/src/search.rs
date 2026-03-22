@@ -9,6 +9,7 @@ use crate::note::scan_vault;
 use crate::schema::{Domain, NoteType, Origin, Status};
 use chrono;
 use eyre::{Result, WrapErr};
+use regex::Regex;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -681,6 +682,217 @@ impl SearchIndex {
 
         self.list_notes(domain, note_type, None, Some(&cutoff), None, Some(limit))
     }
+
+    /// Find outbound wikilinks from a note's body
+    pub fn find_outbound_links(&self, path: &str) -> Result<Vec<OutboundLink>> {
+        let note = self.get_note(path)?;
+        let body = match note {
+            Some(n) => n.body,
+            None => return Ok(vec![]),
+        };
+
+        let targets = extract_wikilinks(&body);
+        let mut links = Vec::new();
+
+        for target in targets {
+            // Try to resolve the target to an actual note path
+            let resolved = self.resolve_wikilink(&target)?;
+            links.push(OutboundLink {
+                target: target.clone(),
+                resolved_path: resolved.clone(),
+                exists: resolved.is_some(),
+            });
+        }
+
+        Ok(links)
+    }
+
+    /// Find notes that link TO the given note (inbound links)
+    pub fn find_inbound_links(&self, path: &str) -> Result<Vec<NoteRow>> {
+        // Extract the stem from the path (filename without extension)
+        let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or(path);
+
+        let mut stmt = self.conn.prepare(
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+             FROM notes WHERE body LIKE ?1",
+        )?;
+
+        let pattern = format!("%[[{stem}%");
+        let rows: Vec<NoteRow> = stmt
+            .query_map(params![pattern], NoteRow::from_row)?
+            .filter_map(|r| r.ok())
+            .filter(|note| {
+                // Verify with exact wikilink parsing
+                let links = extract_wikilinks(&note.body);
+                links.iter().any(|l| l.eq_ignore_ascii_case(stem))
+            })
+            .collect();
+
+        Ok(rows)
+    }
+
+    /// Find notes with no inbound links (orphans)
+    pub fn orphan_notes(&self, limit: Option<u32>) -> Result<Vec<NoteRow>> {
+        let limit = limit.unwrap_or(50);
+
+        // Get all notes
+        let mut stmt = self.conn.prepare(
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+             FROM notes ORDER BY date DESC",
+        )?;
+        let all_notes: Vec<NoteRow> = stmt.query_map([], NoteRow::from_row)?.filter_map(|r| r.ok()).collect();
+
+        // Collect all wikilink targets across the vault
+        let mut linked_stems: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for note in &all_notes {
+            for link in extract_wikilinks(&note.body) {
+                linked_stems.insert(link.to_lowercase());
+            }
+        }
+
+        // Notes whose stem is never referenced
+        let orphans: Vec<NoteRow> = all_notes
+            .into_iter()
+            .filter(|note| {
+                let stem = Path::new(&note.path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                !linked_stems.contains(&stem)
+            })
+            .take(limit as usize)
+            .collect();
+
+        Ok(orphans)
+    }
+
+    /// Try to resolve a wikilink target to an actual note path in the index
+    fn resolve_wikilink(&self, target: &str) -> Result<Option<String>> {
+        // Try exact path match first
+        let row: Option<String> = self
+            .conn
+            .query_row("SELECT path FROM notes WHERE path = ?1", params![target], |row| {
+                row.get(0)
+            })
+            .ok();
+        if row.is_some() {
+            return Ok(row);
+        }
+
+        // Try matching by stem (filename without extension)
+        let target_lower = target.to_lowercase();
+        let row: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT path FROM notes WHERE LOWER(path) LIKE ?1 LIMIT 1",
+                params![format!("%/{target_lower}.md")],
+                |row| row.get(0),
+            )
+            .ok();
+        if row.is_some() {
+            return Ok(row);
+        }
+
+        // Try matching just the stem anywhere
+        let row: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT path FROM notes WHERE LOWER(path) LIKE ?1 LIMIT 1",
+                params![format!("%{target_lower}%")],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(row)
+    }
+
+    /// Get creator statistics (name -> count), sorted by count
+    pub fn creator_stats(&self) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT creator, COUNT(*) as cnt FROM notes WHERE creator != '' GROUP BY creator ORDER BY cnt DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Get notes by a specific creator
+    pub fn notes_by_creator(&self, creator: &str, domain: Option<&str>, limit: Option<u32>) -> Result<Vec<NoteRow>> {
+        let limit = limit.unwrap_or(20);
+        let mut sql = String::from(
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+             FROM notes WHERE LOWER(creator) LIKE ?1",
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(format!("%{}%", creator.to_lowercase()))];
+        let mut param_idx = 2;
+
+        if let Some(d) = domain {
+            sql.push_str(&format!(" AND domain = ?{param_idx}"));
+            param_values.push(Box::new(d.to_string()));
+            param_idx += 1;
+        }
+        let _ = param_idx;
+
+        sql.push_str(&format!(" ORDER BY date DESC LIMIT {limit}"));
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params_refs.as_slice(), NoteRow::from_row)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Get source domain statistics (host -> count), sorted by count
+    pub fn source_domain_stats(&self) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self.conn.prepare("SELECT source FROM notes WHERE source != ''")?;
+
+        let mut host_counts: HashMap<String, u64> = HashMap::new();
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+
+        for row in rows.flatten() {
+            if let Some(host) = extract_host(&row) {
+                *host_counts.entry(host).or_insert(0) += 1;
+            }
+        }
+
+        let mut result: Vec<(String, u64)> = host_counts.into_iter().collect();
+        result.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(result)
+    }
+
+    /// Get notes from a specific source domain
+    pub fn notes_by_source_domain(&self, host: &str, domain: Option<&str>, limit: Option<u32>) -> Result<Vec<NoteRow>> {
+        let limit = limit.unwrap_or(20);
+        let mut sql = String::from(
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+             FROM notes WHERE source LIKE ?1",
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(format!("%{}%", host.to_lowercase()))];
+        let mut param_idx = 2;
+
+        if let Some(d) = domain {
+            sql.push_str(&format!(" AND domain = ?{param_idx}"));
+            param_values.push(Box::new(d.to_string()));
+            param_idx += 1;
+        }
+        let _ = param_idx;
+
+        sql.push_str(&format!(" ORDER BY date DESC LIMIT {limit}"));
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params_refs.as_slice(), NoteRow::from_row)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
 }
 
 /// Extract significant search terms from content for FTS5 similarity queries.
@@ -712,6 +924,45 @@ fn extract_search_terms(content: &str, max_terms: usize) -> Vec<String> {
     terms.sort_by(|a, b| b.1.cmp(&a.1));
 
     terms.into_iter().take(max_terms).map(|(word, _)| word).collect()
+}
+
+/// Extract wikilink targets from note body, skipping fenced code blocks.
+/// Handles [[simple]], [[with|alias]], [[with#heading]], [[path/to/note]].
+fn extract_wikilinks(body: &str) -> Vec<String> {
+    let re = Regex::new(r"\[\[([^\]|#]+)(?:[|#][^\]]+)?\]\]").expect("wikilink regex");
+    let mut targets = Vec::new();
+    let mut in_code_block = false;
+
+    for line in body.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if in_code_block {
+            continue;
+        }
+        for cap in re.captures_iter(line) {
+            if let Some(m) = cap.get(1) {
+                let target = m.as_str().trim();
+                if !target.is_empty() {
+                    targets.push(target.to_string());
+                }
+            }
+        }
+    }
+
+    targets
+}
+
+/// Extract hostname from a URL string
+fn extract_host(url: &str) -> Option<String> {
+    // Simple extraction without pulling in the url crate
+    let stripped = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let host = stripped.split('/').next()?;
+    let host = host.split('?').next()?;
+    // Remove www. prefix
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    if host.is_empty() { None } else { Some(host.to_lowercase()) }
 }
 
 /// A row from the notes table
@@ -787,6 +1038,14 @@ pub struct TagStat {
     pub tag: String,
     pub count: u64,
     pub domains: Vec<String>,
+}
+
+/// An outbound wikilink from a note
+#[derive(Debug, Serialize)]
+pub struct OutboundLink {
+    pub target: String,
+    pub resolved_path: Option<String>,
+    pub exists: bool,
 }
 
 #[cfg(test)]
@@ -928,6 +1187,122 @@ mod tests {
         assert!(cooccur.iter().any(|(t, c)| t == "cli" && *c == 1));
         assert!(cooccur.iter().any(|(t, c)| t == "web" && *c == 1));
         assert!(cooccur.iter().any(|(t, c)| t == "linux" && *c == 1));
+    }
+
+    #[test]
+    fn test_extract_wikilinks_simple() {
+        let body = "See [[some-note]] and [[another-note]] for details.";
+        let links = extract_wikilinks(body);
+        assert_eq!(links, vec!["some-note", "another-note"]);
+    }
+
+    #[test]
+    fn test_extract_wikilinks_with_alias() {
+        let body = "Check [[some-note|display text]] here.";
+        let links = extract_wikilinks(body);
+        assert_eq!(links, vec!["some-note"]);
+    }
+
+    #[test]
+    fn test_extract_wikilinks_with_heading() {
+        let body = "See [[some-note#heading]] for the section.";
+        let links = extract_wikilinks(body);
+        assert_eq!(links, vec!["some-note"]);
+    }
+
+    #[test]
+    fn test_extract_wikilinks_skips_code_blocks() {
+        let body = "Before\n```\n[[code-link]]\n```\nAfter [[real-link]]";
+        let links = extract_wikilinks(body);
+        assert_eq!(links, vec!["real-link"]);
+    }
+
+    #[test]
+    fn test_extract_host() {
+        assert_eq!(
+            extract_host("https://www.youtube.com/watch?v=abc"),
+            Some("youtube.com".to_string())
+        );
+        assert_eq!(
+            extract_host("https://github.com/user/repo"),
+            Some("github.com".to_string())
+        );
+        assert_eq!(extract_host("http://example.com"), Some("example.com".to_string()));
+        assert_eq!(extract_host("not-a-url"), None);
+    }
+
+    #[test]
+    fn test_creator_stats() {
+        let index = SearchIndex::open_memory().expect("open");
+        index.conn.execute(
+            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('a.md', 'A', 'tech', 'youtube', 'assisted', '', '2026-03-21', '[]', '', 'Alice', '', '', 0)",
+            [],
+        ).expect("insert");
+        index.conn.execute(
+            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('b.md', 'B', 'ai', 'youtube', 'assisted', '', '2026-03-21', '[]', '', 'Alice', '', '', 0)",
+            [],
+        ).expect("insert");
+        index.conn.execute(
+            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('c.md', 'C', 'tech', 'article', 'assisted', '', '2026-03-21', '[]', '', 'Bob', '', '', 0)",
+            [],
+        ).expect("insert");
+
+        let stats = index.creator_stats().expect("creator_stats");
+        assert_eq!(stats[0], ("Alice".to_string(), 2));
+        assert_eq!(stats[1], ("Bob".to_string(), 1));
+    }
+
+    #[test]
+    fn test_source_domain_stats() {
+        let index = SearchIndex::open_memory().expect("open");
+        index.conn.execute(
+            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('a.md', 'A', 'tech', 'youtube', 'assisted', '', '2026-03-21', '[]', 'https://www.youtube.com/watch?v=abc', '', '', '', 0)",
+            [],
+        ).expect("insert");
+        index.conn.execute(
+            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('b.md', 'B', 'tech', 'youtube', 'assisted', '', '2026-03-21', '[]', 'https://youtube.com/watch?v=def', '', '', '', 0)",
+            [],
+        ).expect("insert");
+        index.conn.execute(
+            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('c.md', 'C', 'tech', 'article', 'assisted', '', '2026-03-21', '[]', 'https://github.com/user/repo', '', '', '', 0)",
+            [],
+        ).expect("insert");
+
+        let stats = index.source_domain_stats().expect("source_domain_stats");
+        assert_eq!(stats[0], ("youtube.com".to_string(), 2));
+        assert_eq!(stats[1], ("github.com".to_string(), 1));
+    }
+
+    #[test]
+    fn test_find_outbound_links() {
+        let index = SearchIndex::open_memory().expect("open");
+        insert_test_note(&index, "notes/a.md", "A", "tech", &[], "See [[b]] and [[c|see C]].");
+        insert_test_note(&index, "notes/b.md", "B", "tech", &[], "Just body.");
+
+        let links = index.find_outbound_links("notes/a.md").expect("outbound");
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].target, "b");
+        assert_eq!(links[1].target, "c");
+    }
+
+    #[test]
+    fn test_find_inbound_links() {
+        let index = SearchIndex::open_memory().expect("open");
+        insert_test_note(&index, "notes/a.md", "A", "tech", &[], "Links to [[b]].");
+        insert_test_note(&index, "notes/b.md", "B", "tech", &[], "No links.");
+        insert_test_note(&index, "notes/c.md", "C", "tech", &[], "Also links to [[b]].");
+
+        let inbound = index.find_inbound_links("notes/b.md").expect("inbound");
+        assert_eq!(inbound.len(), 2);
+        let paths: Vec<&str> = inbound.iter().map(|n| n.path.as_str()).collect();
+        assert!(paths.contains(&"notes/a.md"));
+        assert!(paths.contains(&"notes/c.md"));
     }
 
     #[test]

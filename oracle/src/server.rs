@@ -401,6 +401,148 @@ impl OracleMcpServer {
             "results": results,
         }))?]))
     }
+
+    /// Wikilink graph traversal for a note
+    #[tool(
+        description = "Traverse the wikilink graph for a note. Shows outbound links (what this note links to), inbound links (what links to this note), and whether the note is an orphan."
+    )]
+    async fn find_links(&self, params: Parameters<FindLinksRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
+        let direction = req.direction.as_deref().unwrap_or("both");
+
+        let db = self.db.lock().map_err(Self::err)?;
+
+        let note = db.get_note(&req.path).map_err(Self::err)?;
+        let (title, path) = match note {
+            Some(n) => (n.title.clone(), n.path.clone()),
+            None => {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Note not found: {}",
+                    req.path
+                ))]));
+            }
+        };
+
+        let mut result = json!({
+            "note": { "path": path, "title": title },
+        });
+
+        if direction == "outbound" || direction == "both" {
+            let outbound = db.find_outbound_links(&req.path).map_err(Self::err)?;
+            let outbound_json: Vec<serde_json::Value> = outbound
+                .iter()
+                .map(|l| {
+                    json!({
+                        "target": l.target,
+                        "resolved_path": l.resolved_path,
+                        "exists": l.exists,
+                    })
+                })
+                .collect();
+            result["outbound"] = json!(outbound_json);
+        }
+
+        if direction == "inbound" || direction == "both" {
+            let inbound = db.find_inbound_links(&req.path).map_err(Self::err)?;
+            let inbound_json: Vec<serde_json::Value> =
+                inbound.iter().map(|n| Self::format_note(n, &detail_level)).collect();
+            result["inbound"] = json!(inbound_json);
+            result["orphan"] = json!(inbound.is_empty());
+        }
+
+        Ok(CallToolResult::success(vec![Content::json(&result)?]))
+    }
+
+    /// Browse notes by creator/channel
+    #[tool(
+        description = "Browse notes by creator or channel. When creator is provided, returns matching notes. When omitted, lists all creators with counts."
+    )]
+    async fn creator_browse(&self, params: Parameters<CreatorBrowseRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let db = self.db.lock().map_err(Self::err)?;
+
+        match req.creator {
+            Some(creator) => {
+                let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
+                let notes = db
+                    .notes_by_creator(&creator, req.domain.as_ref().map(|d| d.as_str()), req.limit)
+                    .map_err(Self::err)?;
+                let results: Vec<serde_json::Value> =
+                    notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
+
+                Ok(CallToolResult::success(vec![Content::json(json!({
+                    "creator": creator,
+                    "count": results.len(),
+                    "results": results,
+                }))?]))
+            }
+            None => {
+                let stats = db.creator_stats().map_err(Self::err)?;
+                let limit = req.limit.unwrap_or(50) as usize;
+                let creators: Vec<serde_json::Value> = stats
+                    .iter()
+                    .take(limit)
+                    .map(|(name, count)| {
+                        json!({
+                            "name": name,
+                            "count": count,
+                        })
+                    })
+                    .collect();
+
+                Ok(CallToolResult::success(vec![Content::json(json!({
+                    "count": creators.len(),
+                    "creators": creators,
+                }))?]))
+            }
+        }
+    }
+
+    /// Browse notes by source URL domain
+    #[tool(
+        description = "Browse notes by source URL domain. When host is provided, returns matching notes. When omitted, lists all source domains with counts."
+    )]
+    async fn source_browse(&self, params: Parameters<SourceBrowseRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let db = self.db.lock().map_err(Self::err)?;
+
+        match req.host {
+            Some(host) => {
+                let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
+                let notes = db
+                    .notes_by_source_domain(&host, req.domain.as_ref().map(|d| d.as_str()), req.limit)
+                    .map_err(Self::err)?;
+                let results: Vec<serde_json::Value> =
+                    notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
+
+                Ok(CallToolResult::success(vec![Content::json(json!({
+                    "host": host,
+                    "count": results.len(),
+                    "results": results,
+                }))?]))
+            }
+            None => {
+                let stats = db.source_domain_stats().map_err(Self::err)?;
+                let limit = req.limit.unwrap_or(50) as usize;
+                let sources: Vec<serde_json::Value> = stats
+                    .iter()
+                    .take(limit)
+                    .map(|(host, count)| {
+                        json!({
+                            "host": host,
+                            "count": count,
+                        })
+                    })
+                    .collect();
+
+                Ok(CallToolResult::success(vec![Content::json(json!({
+                    "count": sources.len(),
+                    "sources": sources,
+                }))?]))
+            }
+        }
+    }
 }
 
 #[tool_handler]

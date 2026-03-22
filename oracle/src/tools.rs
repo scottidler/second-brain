@@ -195,6 +195,64 @@ pub struct RecentActivityRequest {
     pub limit: Option<u32>,
 }
 
+/// Wikilink graph traversal for a note - outbound and inbound links.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FindLinksRequest {
+    /// Note path to inspect
+    #[schemars(description = "Vault-relative path to the note to inspect links for")]
+    pub path: String,
+
+    /// Direction: "outbound", "inbound", or "both"
+    #[schemars(description = "Link direction: outbound, inbound, or both (default: both)")]
+    pub direction: Option<String>,
+
+    /// Detail level for inbound notes
+    #[schemars(description = "Detail level for inbound note results. Default: metadata")]
+    pub detail: Option<DetailLevel>,
+}
+
+/// Browse notes by creator/channel.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreatorBrowseRequest {
+    /// Filter to specific creator (substring match). Omit to list all creators with counts.
+    #[schemars(description = "Creator name to filter (substring match). Omit to list all creators with counts.")]
+    pub creator: Option<String>,
+
+    /// Filter by domain
+    #[schemars(description = "Filter to a specific domain")]
+    pub domain: Option<Domain>,
+
+    /// How much content to return per note
+    #[schemars(description = "Detail level for returned notes. Default: metadata")]
+    pub detail: Option<DetailLevel>,
+
+    /// Maximum number of results
+    #[schemars(description = "Maximum number of results (default: 20)")]
+    pub limit: Option<u32>,
+}
+
+/// Browse notes by source URL domain.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SourceBrowseRequest {
+    /// Source domain to filter (e.g., "youtube.com"). Omit to list all source domains with counts.
+    #[schemars(
+        description = "Source domain to filter (e.g., 'youtube.com'). Omit to list all source domains with counts."
+    )]
+    pub host: Option<String>,
+
+    /// Filter by vault domain
+    #[schemars(description = "Filter to a specific vault domain")]
+    pub domain: Option<Domain>,
+
+    /// How much content to return per note
+    #[schemars(description = "Detail level for returned notes. Default: metadata")]
+    pub detail: Option<DetailLevel>,
+
+    /// Maximum number of results
+    #[schemars(description = "Maximum number of results (default: 20)")]
+    pub limit: Option<u32>,
+}
+
 /// List all valid schema values (domains, note types, origins, statuses, methods).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SchemaInfoRequest {}
