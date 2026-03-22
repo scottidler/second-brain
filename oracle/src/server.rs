@@ -324,6 +324,83 @@ impl OracleMcpServer {
             }
         }
     }
+
+    /// Find notes similar to given content or another note
+    #[tool(
+        description = "Find notes similar to given text content or another note. Provide either content text or a note path. Uses FTS5 term extraction for similarity matching."
+    )]
+    async fn find_similar(&self, params: Parameters<FindSimilarRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let detail_level = req.detail.unwrap_or(DetailLevel::Tldr);
+        let limit = req.limit.unwrap_or(5);
+
+        let db = self.db.lock().map_err(Self::err)?;
+
+        let content = match (&req.content, &req.path) {
+            (Some(c), _) => c.clone(),
+            (None, Some(p)) => match db.get_note(p).map_err(Self::err)? {
+                Some(note) => note.body,
+                None => {
+                    return Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Note not found: {p}"
+                    ))]));
+                }
+            },
+            (None, None) => {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    "Provide either 'content' or 'path' parameter",
+                )]));
+            }
+        };
+
+        let mut notes = db.find_similar(&content, limit as usize).map_err(Self::err)?;
+
+        // Filter by domain if requested
+        if let Some(ref domain) = req.domain {
+            let d = domain.as_str();
+            notes.retain(|n| n.domain == d);
+        }
+
+        // Exclude the source note if searching by path
+        if let Some(ref path) = req.path {
+            notes.retain(|n| n.path != *path);
+        }
+
+        let results: Vec<serde_json::Value> = notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
+
+        Ok(CallToolResult::success(vec![Content::json(json!({
+            "count": results.len(),
+            "results": results,
+        }))?]))
+    }
+
+    /// Get recent vault activity across domains
+    #[tool(
+        description = "Cross-domain timeline of recent vault activity. Shows notes added or modified in the last N days. Filter by domain or note type."
+    )]
+    async fn recent_activity(&self, params: Parameters<RecentActivityRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let detail_level = req.detail.unwrap_or(DetailLevel::Tldr);
+
+        let db = self.db.lock().map_err(Self::err)?;
+        let notes = db
+            .recent_notes(
+                req.days,
+                req.domain.as_ref().map(|d| d.as_str()),
+                req.note_type.as_ref().map(|t| t.as_str()),
+                req.limit,
+            )
+            .map_err(Self::err)?;
+
+        let days = req.days.unwrap_or(7);
+        let results: Vec<serde_json::Value> = notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
+
+        Ok(CallToolResult::success(vec![Content::json(json!({
+            "days": days,
+            "count": results.len(),
+            "results": results,
+        }))?]))
+    }
 }
 
 #[tool_handler]

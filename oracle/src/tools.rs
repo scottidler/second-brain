@@ -145,6 +145,56 @@ pub struct TagSearchRequest {
     pub limit: Option<u32>,
 }
 
+/// Find notes similar to given content or another note.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FindSimilarRequest {
+    /// Text to find similar notes for
+    #[schemars(description = "Text content to find similar notes for. Provide either this or path, not both.")]
+    pub content: Option<String>,
+
+    /// Path to a note (uses its body as the comparison content)
+    #[schemars(
+        description = "Vault-relative path to a note. Uses its body to find similar notes. Provide either this or content."
+    )]
+    pub path: Option<String>,
+
+    /// Filter by domain
+    #[schemars(description = "Restrict results to a specific domain")]
+    pub domain: Option<Domain>,
+
+    /// How much content to return per note
+    #[schemars(description = "Detail level for returned notes. Default: tldr")]
+    pub detail: Option<DetailLevel>,
+
+    /// Maximum number of results
+    #[schemars(description = "Maximum number of similar notes to return (default: 5)")]
+    pub limit: Option<u32>,
+}
+
+/// Cross-domain timeline of recent vault activity.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RecentActivityRequest {
+    /// How many days back to look
+    #[schemars(description = "Number of days back to search (default: 7)")]
+    pub days: Option<u32>,
+
+    /// Filter by domain
+    #[schemars(description = "Filter to a specific domain")]
+    pub domain: Option<Domain>,
+
+    /// Filter by note type
+    #[schemars(description = "Filter to a specific note type")]
+    pub note_type: Option<NoteType>,
+
+    /// How much content to return per note
+    #[schemars(description = "Detail level for returned notes. Default: tldr")]
+    pub detail: Option<DetailLevel>,
+
+    /// Maximum number of results
+    #[schemars(description = "Maximum number of results (default: 20)")]
+    pub limit: Option<u32>,
+}
+
 /// List all valid schema values (domains, note types, origins, statuses, methods).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SchemaInfoRequest {}
