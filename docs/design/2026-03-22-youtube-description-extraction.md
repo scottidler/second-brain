@@ -357,6 +357,25 @@ By: https://www.youtube.com/@awesome-coding
 
 ## Technical Considerations
 
+### Metadata Field Mapping: Fabric vs yt-dlp
+
+Fabric uses the YouTube Data API v3 and yt-dlp scrapes directly. They return the same data under different field names and formats. `parse_youtube_metadata()` in `fabric.rs` must handle both, preferring fabric field names with yt-dlp as fallback.
+
+| Purpose | Fabric (YouTube Data API v3) | yt-dlp | Notes |
+|---------|------------------------------|--------|-------|
+| Title | `title` | `title` | Same |
+| Creator | `channelTitle` | `channel` / `uploader` | Fabric uses API v3 naming |
+| Duration | `duration` (ISO 8601: `"PT8M14S"`) | `duration` (float secs: `495`) | Parser handles both formats |
+| Published | `publishedAt` (`"2026-03-12T14:34:44Z"`) | `upload_date` (`"20260312"`) | Different date formats; only used for logging |
+| Description | `description` | `description` | Same |
+| Tags | `tags` | `tags` | Same (string arrays) |
+| Video ID | `id` | `id` | Same; borg extracts from URL instead |
+| View count | `viewCount` | `view_count` | Not used by borg |
+| Like count | `likeCount` | `like_count` | Not used by borg |
+| Category | `categoryId` (numeric) | `categories` (string array) | Not used by borg |
+
+**Lesson learned:** During initial implementation, `parse_youtube_metadata()` only handled yt-dlp field names. This was masked because most ingestions either fell back to yt-dlp (fabric returned "Unknown" title) or the fields happened to overlap. The bug surfaced when fabric metadata succeeded with a valid title but returned `channelTitle` (not `channel`), producing `creator: "Unknown"` and `duration: 0`. Fixed in v0.5.5.
+
 ### Dependencies
 
 - No new crate dependencies. The filter uses `regex` (already in the dependency tree) and string manipulation.

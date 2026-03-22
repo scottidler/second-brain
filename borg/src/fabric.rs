@@ -125,6 +125,9 @@ pub async fn generate_tags(content: &str, config: &FabricConfig) -> Result<Vec<S
     Ok(tags)
 }
 
+/// Parse YouTube metadata JSON from either fabric (YouTube Data API v3) or yt-dlp.
+/// Field names differ between sources - see docs/design/2026-03-22-youtube-description-extraction.md
+/// for the full mapping table. Each field tries fabric names first, yt-dlp names as fallback.
 fn parse_youtube_metadata(json_str: &str, url: &str) -> (String, String, f64, String, String, String, Vec<String>) {
     let video_id = crate::youtube::extract_video_id(url).unwrap_or_default();
 
