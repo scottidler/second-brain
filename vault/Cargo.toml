@@ -7,8 +7,10 @@ description = "Shared library crate for Obsidian vault types, frontmatter, and u
 
 [features]
 schemars = ["dep:schemars"]
+search = ["dep:rusqlite"]
 
 [dependencies]
+rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 env_logger = { workspace = true }

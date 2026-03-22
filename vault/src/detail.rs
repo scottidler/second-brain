@@ -1,15 +1,15 @@
 //! Detail level extraction for notes
 //!
 //! Parses note bodies by H2 sections and returns content at the requested detail level.
+//! This is the shared implementation used by both oracle (MCP) and cortex (daemon).
 
-use rmcp::schemars;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// How much content to return for a note
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum DetailLevel {
     /// Just frontmatter fields: title, domain, type, status, date, source, tags
     #[default]
@@ -122,8 +122,14 @@ mod tests {
         let parsed = parse_sections(body);
 
         assert_eq!(parsed.heading.as_deref(), Some("My Note"));
-        assert_eq!(parsed.sections.get("Summary").unwrap(), "This is the summary.");
-        assert_eq!(parsed.sections.get("Details").unwrap(), "More details here.");
+        assert_eq!(
+            parsed.sections.get("Summary").expect("missing Summary"),
+            "This is the summary."
+        );
+        assert_eq!(
+            parsed.sections.get("Details").expect("missing Details"),
+            "More details here."
+        );
         assert_eq!(parsed.preamble, "Some preamble.");
     }
 

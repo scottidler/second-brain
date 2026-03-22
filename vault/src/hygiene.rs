@@ -118,10 +118,10 @@ pub fn sanitize_filename(title: &str) -> String {
 
     // Truncate to max length, breaking at a hyphen boundary if possible
     let truncated = &slug[..MAX_FILENAME_LEN];
-    if let Some(pos) = truncated.rfind('-') {
-        if pos > MAX_FILENAME_LEN / 2 {
-            return truncated[..pos].to_string();
-        }
+    if let Some(pos) = truncated.rfind('-')
+        && pos > MAX_FILENAME_LEN / 2
+    {
+        return truncated[..pos].to_string();
     }
     truncated.trim_end_matches('-').to_string()
 }
@@ -193,7 +193,10 @@ mod tests {
     fn test_sanitize_filename_special_chars() {
         assert_eq!(sanitize_filename("Test: A/B \"quotes\""), "test-a-b-quotes");
         assert_eq!(sanitize_filename("hello@world.com"), "hello-world-com");
-        assert_eq!(sanitize_filename("(parens) [brackets] {braces}"), "parens-brackets-braces");
+        assert_eq!(
+            sanitize_filename("(parens) [brackets] {braces}"),
+            "parens-brackets-braces"
+        );
         assert_eq!(sanitize_filename("a + b = c"), "a-b-c");
         assert_eq!(sanitize_filename("100% done!"), "100-done");
         assert_eq!(sanitize_filename("file#anchor?query&param"), "file-anchor-query-param");

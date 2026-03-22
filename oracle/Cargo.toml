@@ -16,9 +16,8 @@ name = "oracle"
 path = "src/main.rs"
 
 [dependencies]
-vault = { path = "../vault", features = ["schemars"] }
+vault = { path = "../vault", features = ["schemars", "search"] }
 rmcp = { version = "0.12", features = ["server", "macros"] }
-rusqlite = { version = "0.34", features = ["bundled"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

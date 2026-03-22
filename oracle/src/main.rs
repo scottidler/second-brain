@@ -6,11 +6,12 @@ use rmcp::ServiceExt;
 use std::io;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
+use vault::search::SearchIndex;
 
 mod cli;
 
 use cli::{Cli, Commands};
-use oracle::{Config, Database};
+use oracle::Config;
 
 fn setup_logging(verbose: bool, log_config: &oracle::config::LogConfig) -> Result<()> {
     let level = if verbose { "debug" } else { &log_config.level };
@@ -43,7 +44,7 @@ fn setup_logging(verbose: bool, log_config: &oracle::config::LogConfig) -> Resul
 
 async fn run_serve(config: Config) -> Result<()> {
     tracing::info!("Opening database at {}", config.db_path().display());
-    let db = Database::open(&config.db_path()).context("Failed to open database")?;
+    let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
 
     tracing::info!("Indexing vault at {}", config.vault_root().display());
     let stats = db.index_vault(&config.vault_root()).context("Failed to index vault")?;
@@ -69,7 +70,7 @@ async fn run_serve(config: Config) -> Result<()> {
 }
 
 fn run_index(config: &Config) -> Result<()> {
-    let db = Database::open(&config.db_path()).context("Failed to open database")?;
+    let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
 
     println!("Indexing vault: {}", config.vault_root().display());
     println!("Database: {}", config.db_path().display());
@@ -87,7 +88,7 @@ fn run_index(config: &Config) -> Result<()> {
 }
 
 fn run_stats(config: &Config) -> Result<()> {
-    let db = Database::open(&config.db_path()).context("Failed to open database")?;
+    let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
 
     db.index_vault(&config.vault_root()).context("Failed to index vault")?;
 

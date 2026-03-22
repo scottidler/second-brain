@@ -3,10 +3,10 @@
 //! Filter parameters use vault schema enums for compile-time correctness.
 //! Invalid values fail deserialization with a clear error listing valid options.
 
-use crate::detail::DetailLevel;
 use rmcp::schemars;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use vault::detail::DetailLevel;
 use vault::schema::{Domain, NoteType, Status};
 
 /// Search the vault's ingested knowledge using full-text search with optional filters.

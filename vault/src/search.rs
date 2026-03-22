@@ -1,16 +1,20 @@
-//! SQLite database for vault indexing and full-text search
+//! SQLite-backed full-text search index for vault notes
+//!
+//! Provides FTS5-powered search, incremental indexing by mtime, and
+//! domain/tag analytics. Shared by oracle (MCP server) and cortex (daemon).
 
+use crate::config::ScanConfig;
 use crate::detail;
+use crate::note::scan_vault;
+use crate::schema::{Domain, NoteType, Origin, Status};
 use eyre::{Result, WrapErr};
 use rusqlite::{Connection, params};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::Path;
-use vault::config::ScanConfig;
-use vault::note::scan_vault;
-use vault::schema::{Domain, NoteType, Origin, Status};
 
-/// Manages the SQLite index of vault notes
-pub struct Database {
+/// Manages the SQLite FTS5 index of vault notes
+pub struct SearchIndex {
     conn: Connection,
 }
 
@@ -25,7 +29,7 @@ fn normalize_enum<T: std::str::FromStr + std::fmt::Display>(
         Some(s) if !s.is_empty() => match s.parse::<T>() {
             Ok(val) => val.to_string(),
             Err(_) => {
-                tracing::warn!("Invalid {field_name} value '{s}' in note {note_path}, indexing as empty");
+                log::warn!("Invalid {field_name} value '{s}' in note {note_path}, indexing as empty");
                 String::new()
             }
         },
@@ -33,32 +37,32 @@ fn normalize_enum<T: std::str::FromStr + std::fmt::Display>(
     }
 }
 
-impl Database {
-    /// Open (or create) the database at the given path
+impl SearchIndex {
+    /// Open (or create) the search index at the given path
     pub fn open(db_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
                 .wrap_err_with(|| format!("Failed to create db directory: {}", parent.display()))?;
         }
 
-        let conn =
-            Connection::open(db_path).wrap_err_with(|| format!("Failed to open database: {}", db_path.display()))?;
+        let conn = Connection::open(db_path)
+            .wrap_err_with(|| format!("Failed to open search index: {}", db_path.display()))?;
 
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
-        let db = Self { conn };
-        db.ensure_schema()?;
-        Ok(db)
+        let index = Self { conn };
+        index.ensure_schema()?;
+        Ok(index)
     }
 
-    /// Open an in-memory database (for testing)
+    /// Open an in-memory search index (for testing)
     #[cfg(test)]
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let db = Self { conn };
-        db.ensure_schema()?;
-        Ok(db)
+        let index = Self { conn };
+        index.ensure_schema()?;
+        Ok(index)
     }
 
     fn ensure_schema(&self) -> Result<()> {
@@ -258,6 +262,20 @@ impl Database {
         Ok(rows)
     }
 
+    /// Find notes most similar to the given content using FTS5 term matching
+    pub fn find_similar(&self, content: &str, limit: usize) -> Result<Vec<NoteRow>> {
+        // Extract significant words from content for FTS5 query
+        let terms = extract_search_terms(content, 20);
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Build OR query from extracted terms
+        let fts_query = terms.join(" OR ");
+
+        self.search(&fts_query, None, None, None, Some(limit as u32))
+    }
+
     /// List notes with optional filters (no full-text search)
     pub fn list_notes(
         &self,
@@ -422,6 +440,72 @@ impl Database {
             recent: recent_notes,
         })
     }
+
+    /// Get domain distribution: how many notes per domain
+    pub fn domain_stats(&self) -> Result<HashMap<String, u64>> {
+        let counts = self.count_by_column("domain")?;
+        Ok(counts.into_iter().collect())
+    }
+
+    /// Get tag-domain correlation: for each tag, which domains it appears in and how often.
+    /// Returns a map of tag -> (domain -> count).
+    pub fn tag_domain_map(&self) -> Result<HashMap<String, HashMap<String, u64>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tags, domain FROM notes WHERE tags != '' AND domain != ''")?;
+
+        let mut result: HashMap<String, HashMap<String, u64>> = HashMap::new();
+
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+
+        for row in rows.flatten() {
+            let (tags_json, domain) = row;
+            if let Ok(tags) = serde_json::from_str::<Vec<String>>(&tags_json) {
+                for tag in tags {
+                    let domain_counts = result.entry(tag).or_default();
+                    *domain_counts.entry(domain.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Get exemplar notes for a domain (recent, well-classified notes)
+    pub fn domain_exemplars(&self, domain: &str, limit: usize) -> Result<Vec<NoteRow>> {
+        self.list_notes(Some(domain), None, None, None, None, Some(limit as u32))
+    }
+}
+
+/// Extract significant search terms from content for FTS5 similarity queries.
+/// Filters out common English stop words and short tokens.
+fn extract_search_terms(content: &str, max_terms: usize) -> Vec<String> {
+    let stop_words: std::collections::HashSet<&str> = [
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "it",
+        "this", "that", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will",
+        "would", "could", "should", "may", "might", "can", "shall", "not", "no", "nor", "so", "if", "then", "than",
+        "too", "very", "just", "about", "up", "out", "into", "over", "after", "before", "between", "through", "during",
+        "without", "again", "further", "once", "here", "there", "when", "where", "why", "how", "all", "each", "every",
+        "both", "few", "more", "most", "other", "some", "such", "only", "own", "same", "also", "as", "its", "you",
+        "your", "we", "our", "they", "their", "what", "which", "who", "whom",
+    ]
+    .into_iter()
+    .collect();
+
+    let mut word_counts: HashMap<String, usize> = HashMap::new();
+
+    for word in content.split(|c: char| !c.is_alphanumeric() && c != '-') {
+        let lower = word.to_lowercase();
+        if lower.len() >= 3 && !stop_words.contains(lower.as_str()) {
+            *word_counts.entry(lower).or_insert(0) += 1;
+        }
+    }
+
+    // Sort by frequency (descending), take top N
+    let mut terms: Vec<(String, usize)> = word_counts.into_iter().collect();
+    terms.sort_by(|a, b| b.1.cmp(&a.1));
+
+    terms.into_iter().take(max_terms).map(|(word, _)| word).collect()
 }
 
 /// A row from the notes table
@@ -442,7 +526,7 @@ pub struct NoteRow {
 }
 
 impl NoteRow {
-    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+    pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             path: row.get(0)?,
             title: row.get(1)?,
@@ -489,4 +573,64 @@ pub struct IndexStats {
     pub updated: u64,
     pub unchanged: u64,
     pub removed: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_search_terms() {
+        let content = "Rust programming language for building CLI tools with great performance";
+        let terms = extract_search_terms(content, 10);
+        assert!(!terms.is_empty());
+        // Content words should be included
+        assert!(terms.contains(&"rust".to_string()));
+        assert!(terms.contains(&"programming".to_string()));
+        assert!(terms.contains(&"building".to_string()));
+        // Stop words should be excluded
+        assert!(!terms.contains(&"for".to_string()));
+        assert!(!terms.contains(&"with".to_string()));
+    }
+
+    #[test]
+    fn test_extract_search_terms_empty_input() {
+        let terms = extract_search_terms("", 5);
+        assert!(terms.is_empty());
+    }
+
+    #[test]
+    fn test_extract_search_terms_respects_limit() {
+        let content = "one two three four five six seven eight nine ten eleven twelve";
+        let terms = extract_search_terms(content, 3);
+        assert!(terms.len() <= 3);
+    }
+
+    #[test]
+    fn test_open_memory_index() {
+        let index = SearchIndex::open_memory().expect("Failed to open in-memory index");
+        let stats = index.stats().expect("Failed to get stats");
+        assert_eq!(stats.total_notes, 0);
+    }
+
+    #[test]
+    fn test_domain_stats_empty() {
+        let index = SearchIndex::open_memory().expect("Failed to open in-memory index");
+        let stats = index.domain_stats().expect("Failed to get domain stats");
+        assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn test_tag_domain_map_empty() {
+        let index = SearchIndex::open_memory().expect("Failed to open in-memory index");
+        let map = index.tag_domain_map().expect("Failed to get tag domain map");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_find_similar_empty_content() {
+        let index = SearchIndex::open_memory().expect("Failed to open in-memory index");
+        let results = index.find_similar("", 5).expect("Failed find_similar");
+        assert!(results.is_empty());
+    }
 }

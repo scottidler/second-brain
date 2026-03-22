@@ -1,8 +1,6 @@
 //! MCP server implementation for oracle
 
 use crate::config::Config;
-use crate::db::{Database, NoteRow};
-use crate::detail::{self, DetailLevel};
 use crate::tools::*;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -11,20 +9,22 @@ use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router
 use serde_json::json;
 use std::sync::Mutex;
 use tracing::{debug, info, warn};
+use vault::detail::{self, DetailLevel};
 use vault::ledger;
 use vault::schema::{Domain, Method, NoteType, Origin, Status};
+use vault::search::{NoteRow, SearchIndex};
 
 /// Oracle MCP server - knowledge retrieval from an Obsidian vault
 #[derive(Clone)]
 pub struct OracleMcpServer {
     config: Config,
-    db: std::sync::Arc<Mutex<Database>>,
+    db: std::sync::Arc<Mutex<SearchIndex>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
 impl OracleMcpServer {
-    pub fn new(config: Config, db: Database) -> Self {
+    pub fn new(config: Config, db: SearchIndex) -> Self {
         info!("Creating OracleMcpServer");
         let tool_router = Self::tool_router();
         debug!("Tool router created with {} tools", tool_router.list_all().len());

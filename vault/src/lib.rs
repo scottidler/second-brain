@@ -3,6 +3,7 @@
 #![deny(unused_variables)]
 
 pub mod config;
+pub mod detail;
 pub mod fabric;
 pub mod frontmatter;
 pub mod hygiene;
@@ -10,4 +11,6 @@ pub mod ledger;
 pub mod logging;
 pub mod note;
 pub mod schema;
+#[cfg(feature = "search")]
+pub mod search;
 pub mod trace;
