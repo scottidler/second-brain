@@ -37,6 +37,9 @@ pub fn lint_migrate(notes: &[Note], migrations: &[MigrationConfig]) -> Report {
 
         // Report field transforms
         lint_field_transforms(notes, migration, &mut report);
+
+        // Report value transforms
+        lint_value_transforms(notes, migration, &mut report);
     }
 
     log::info!("migrate lint complete: {} violation(s)", report.violations.len());
@@ -51,6 +54,14 @@ pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationC
     for migration in migrations {
         if !migration.field_renames.is_empty() || !migration.field_drops.is_empty() {
             let count = apply_field_transforms(vault_root, notes, migration)?;
+            total_count += count;
+        }
+    }
+
+    // Phase 1b: Apply value transforms (value renames within fields)
+    for migration in migrations {
+        if !migration.value_renames.is_empty() {
+            let count = apply_value_transforms(vault_root, notes, migration)?;
             total_count += count;
         }
     }
@@ -328,6 +339,109 @@ fn extract_frontmatter_block(content: &str) -> Option<(&str, &str, &str)> {
     Some((fm_block, before, after))
 }
 
+/// Report what value transforms would be applied (dry-run).
+fn lint_value_transforms(notes: &[Note], migration: &MigrationConfig, report: &mut Report) {
+    if migration.value_renames.is_empty() {
+        return;
+    }
+
+    for note in notes {
+        let abs_path_display = note.path.display().to_string();
+        for (field_name, value_map) in &migration.value_renames {
+            let current_value = match field_name.as_str() {
+                "domain" => note.frontmatter.domain.as_deref(),
+                "type" => note.frontmatter.note_type.as_deref(),
+                "origin" => note.frontmatter.origin.as_deref(),
+                "status" => note.frontmatter.status.as_deref(),
+                _ => note.frontmatter.extra.get(field_name).and_then(|v| v.as_str()),
+            };
+
+            if let Some(current) = current_value
+                && let Some(new_value) = value_map.get(current)
+            {
+                report.add(Violation {
+                    path: note.path.clone(),
+                    rule: format!("migrate.{}.value-rename", migration.name),
+                    severity: Severity::Info,
+                    message: format!("would rename {field_name}: '{current}' -> '{new_value}' in {abs_path_display}"),
+                    fix: None,
+                });
+            }
+        }
+    }
+}
+
+/// Apply value renames within frontmatter fields.
+/// Operates on raw text to preserve formatting, same as field transforms.
+fn apply_value_transforms(vault_root: &Path, notes: &[Note], migration: &MigrationConfig) -> Result<usize> {
+    let mut count = 0;
+
+    for note in notes {
+        // Quick check: does this note have any values to transform?
+        let mut has_target = false;
+        for (field_name, value_map) in &migration.value_renames {
+            let current_value = match field_name.as_str() {
+                "domain" => note.frontmatter.domain.as_deref(),
+                "type" => note.frontmatter.note_type.as_deref(),
+                "origin" => note.frontmatter.origin.as_deref(),
+                "status" => note.frontmatter.status.as_deref(),
+                _ => note.frontmatter.extra.get(field_name).and_then(|v| v.as_str()),
+            };
+            if let Some(current) = current_value
+                && value_map.contains_key(current)
+            {
+                has_target = true;
+                break;
+            }
+        }
+
+        if !has_target {
+            continue;
+        }
+
+        let abs_path = vault_root.join(&note.path);
+        let content = std::fs::read_to_string(&abs_path).context(format!("failed to read {}", abs_path.display()))?;
+
+        let Some((fm_block, before, after)) = extract_frontmatter_block(&content) else {
+            continue;
+        };
+
+        let mut lines: Vec<String> = fm_block.lines().map(String::from).collect();
+        let mut changed = false;
+
+        for (field_name, value_map) in &migration.value_renames {
+            for line in &mut lines {
+                for (old_value, new_value) in value_map {
+                    // Match both quoted and unquoted YAML values
+                    let unquoted = format!("{field_name}: {old_value}");
+                    let double_quoted = format!("{field_name}: \"{old_value}\"");
+                    let single_quoted = format!("{field_name}: '{old_value}'");
+
+                    if *line == unquoted {
+                        *line = format!("{field_name}: {new_value}");
+                        changed = true;
+                    } else if *line == double_quoted {
+                        *line = format!("{field_name}: \"{new_value}\"");
+                        changed = true;
+                    } else if *line == single_quoted {
+                        *line = format!("{field_name}: '{new_value}'");
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if changed {
+            let new_content = format!("{before}---\n{}\n---{after}", lines.join("\n"));
+            std::fs::write(&abs_path, new_content)?;
+            log::info!("applied value transforms: {} ({})", note.path.display(), migration.name);
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,6 +663,118 @@ mod tests {
                 .violations
                 .iter()
                 .any(|v| v.rule.contains("drop") && v.path.to_string_lossy() == "legacy-note.md")
+        );
+    }
+
+    #[test]
+    fn test_value_rename_applies() {
+        let v = TestVault::new();
+        v.add_note(
+            "knowledge-note.md",
+            "---\ntitle: Health Tips\ndate: 2026-01-01\ntype: note\ndomain: knowledge\ntags: []\n---\nBody.\n",
+        );
+        let notes = v.scan();
+
+        let mut value_map = HashMap::new();
+        value_map.insert("knowledge".to_string(), "life".to_string());
+        let mut value_renames = HashMap::new();
+        value_renames.insert("domain".to_string(), value_map);
+
+        let migration = MigrationConfig {
+            name: "v3-domain-expansion".to_string(),
+            value_renames,
+            ..Default::default()
+        };
+
+        let count = apply_value_transforms(v.root(), &notes, &migration).expect("apply");
+        assert!(count > 0, "expected at least one value transform");
+
+        let content = v.read("knowledge-note.md");
+        assert!(content.contains("domain: life"), "expected domain: life after rename");
+        assert!(
+            !content.contains("domain: knowledge"),
+            "expected knowledge to be renamed"
+        );
+    }
+
+    #[test]
+    fn test_value_rename_quoted() {
+        let v = TestVault::new();
+        v.add_note(
+            "quoted-domain.md",
+            "---\ntitle: Quoted\ndate: 2026-01-01\ntype: note\ndomain: \"knowledge\"\ntags: []\n---\nBody.\n",
+        );
+        let notes = v.scan();
+
+        let mut value_map = HashMap::new();
+        value_map.insert("knowledge".to_string(), "life".to_string());
+        let mut value_renames = HashMap::new();
+        value_renames.insert("domain".to_string(), value_map);
+
+        let migration = MigrationConfig {
+            name: "v3-test".to_string(),
+            value_renames,
+            ..Default::default()
+        };
+
+        let count = apply_value_transforms(v.root(), &notes, &migration).expect("apply");
+        assert!(count > 0);
+
+        let content = v.read("quoted-domain.md");
+        assert!(
+            content.contains("domain: \"life\""),
+            "expected quoted value to be renamed"
+        );
+    }
+
+    #[test]
+    fn test_value_rename_no_match() {
+        let v = TestVault::new();
+        v.add_note(
+            "ai-note.md",
+            "---\ntitle: AI Note\ndate: 2026-01-01\ntype: note\ndomain: ai\ntags: []\n---\nBody.\n",
+        );
+        let notes = v.scan();
+
+        let mut value_map = HashMap::new();
+        value_map.insert("knowledge".to_string(), "life".to_string());
+        let mut value_renames = HashMap::new();
+        value_renames.insert("domain".to_string(), value_map);
+
+        let migration = MigrationConfig {
+            name: "v3-test".to_string(),
+            value_renames,
+            ..Default::default()
+        };
+
+        let count = apply_value_transforms(v.root(), &notes, &migration).expect("apply");
+        assert_eq!(count, 0, "ai domain should not be renamed");
+    }
+
+    #[test]
+    fn test_lint_value_transforms_reports() {
+        let v = TestVault::new();
+        v.add_note(
+            "knowledge-note.md",
+            "---\ntitle: Health Tips\ndate: 2026-01-01\ntype: note\ndomain: knowledge\ntags: []\n---\nBody.\n",
+        );
+        let notes = v.scan();
+
+        let mut value_map = HashMap::new();
+        value_map.insert("knowledge".to_string(), "life".to_string());
+        let mut value_renames = HashMap::new();
+        value_renames.insert("domain".to_string(), value_map);
+
+        let migrations = vec![MigrationConfig {
+            name: "v3-test".to_string(),
+            value_renames,
+            ..Default::default()
+        }];
+
+        let report = lint_migrate(&notes, &migrations);
+        assert!(
+            report.violations.iter().any(|v| v.rule.contains("value-rename")),
+            "expected value-rename violation"
         );
     }
 

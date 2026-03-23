@@ -437,6 +437,8 @@ pub struct MigrationConfig {
     pub field_renames: HashMap<String, String>,
     #[serde(rename = "field-drops", default)]
     pub field_drops: Vec<String>,
+    #[serde(rename = "value-renames", default)]
+    pub value_renames: HashMap<String, HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
