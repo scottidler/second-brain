@@ -47,17 +47,37 @@ fn default_tag_domain_map() -> HashMap<String, Vec<String>> {
     let mut m = HashMap::new();
     m.insert(
         "ai".into(),
-        vec!["claude", "llm", "gpt", "anthropic", "openai", "agents", "prompting"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+        vec![
+            "ai",
+            "claude",
+            "llm",
+            "gpt",
+            "anthropic",
+            "openai",
+            "agents",
+            "prompting",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
     );
     m.insert(
         "tech".into(),
-        vec!["rust", "python", "nix", "cli", "devops", "obsidian", "neovim", "linux"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+        vec![
+            "rust",
+            "python",
+            "nix",
+            "cli",
+            "devops",
+            "obsidian",
+            "neovim",
+            "linux",
+            "programming",
+            "gemini",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
     );
     m.insert(
         "football".into(),
@@ -96,7 +116,7 @@ fn default_tag_domain_map() -> HashMap<String, Vec<String>> {
     );
     m.insert(
         "knowledge".into(),
-        vec!["health", "exercise", "learning", "vocabulary"]
+        vec!["health", "exercise", "learning", "vocabulary", "productivity"]
             .into_iter()
             .map(String::from)
             .collect(),
@@ -472,7 +492,10 @@ fn classify_by_tags(note: &Note, config: &ClassifyConfig) -> Option<ClassifyResu
     for (domain, trigger_tags) in &config.tag_domain_map {
         for note_tag in note_tags {
             let lower_tag = note_tag.to_lowercase();
-            if trigger_tags.iter().any(|t| t.to_lowercase() == lower_tag) {
+            if trigger_tags.iter().any(|t| {
+                let t_lower = t.to_lowercase();
+                lower_tag == t_lower || lower_tag.split('-').any(|segment| segment == t_lower)
+            }) {
                 *domain_scores.entry(domain.as_str()).or_insert(0) += 1;
                 matched_tags.entry(domain.as_str()).or_default().push(note_tag.as_str());
             }
@@ -841,6 +864,79 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k == "cortex-classified" && v == &serde_yaml::Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn test_classify_by_tags_compound_segment_match() {
+        // Compound tags like "ai-agents" should match via segment "agents"
+        let note = NoteBuilder::new("inbox/test-note.md")
+            .title("AI Agents Article")
+            .tags(&["ai-agents", "ai-strategy"])
+            .build();
+
+        let config = test_config();
+        let result = classify_by_tags(&note, &config);
+        assert!(result.is_some());
+        let result = result.expect("should classify");
+        assert_eq!(result.domain, Domain::Ai);
+        assert_eq!(result.confidence, ClassifyConfidence::High);
+    }
+
+    #[test]
+    fn test_classify_by_tags_compound_claude_code() {
+        // "claude-code" should match via segment "claude" -> ai domain
+        let note = NoteBuilder::new("inbox/test-note.md")
+            .title("Claude Code Tips")
+            .tags(&["claude-code", "claudecode"])
+            .build();
+
+        let config = test_config();
+        let result = classify_by_tags(&note, &config);
+        assert!(result.is_some());
+        let result = result.expect("should classify");
+        assert_eq!(result.domain, Domain::Ai);
+    }
+
+    #[test]
+    fn test_classify_by_tags_compound_no_false_positive() {
+        // Tags with no segment matching any trigger should still return None
+        let note = NoteBuilder::new("inbox/test-note.md")
+            .title("Random Article")
+            .tags(&["career-advice", "hiring-trends"])
+            .build();
+
+        let config = test_config();
+        let result = classify_by_tags(&note, &config);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_classify_by_tags_single_word_still_works() {
+        // Exact single-word matches should still work
+        let note = NoteBuilder::new("inbox/test-note.md")
+            .title("Rust Article")
+            .tags(&["rust"])
+            .build();
+
+        let config = test_config();
+        let result = classify_by_tags(&note, &config);
+        assert!(result.is_some());
+        assert_eq!(result.expect("should classify").domain, Domain::Tech);
+    }
+
+    #[test]
+    fn test_classify_by_tags_multi_segment_tag() {
+        // "ai-coding-agents" has segments ["ai", "coding", "agents"]
+        // Both "ai" and "agents" are triggers for ai domain - should give ai +1 (not +2)
+        let note = NoteBuilder::new("inbox/test-note.md")
+            .title("AI Coding Agents")
+            .tags(&["ai-coding-agents"])
+            .build();
+
+        let config = test_config();
+        let result = classify_by_tags(&note, &config);
+        assert!(result.is_some());
+        assert_eq!(result.expect("should classify").domain, Domain::Ai);
     }
 
     #[test]
