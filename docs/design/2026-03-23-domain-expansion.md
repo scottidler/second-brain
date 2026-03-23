@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-03-23
-**Status:** Draft
+**Status:** Implemented
 **Review Passes Completed:** 5/5
 
 ## Summary
@@ -36,8 +36,19 @@ After fixing the classify pipeline (2026-03-23-classify-pipeline-fix.md), all 83
 
 - Making the Domain enum config-driven (it stays a Rust enum)
 - Reclassifying notes in other domains (ai, tech, football, etc. are fine)
-- Changing the tag sweeper design (it references domains but doesn't need changes beyond updating domain lists)
 - Adding more than 3 new domains in this pass
+
+### Coordination with Tag Sweeper
+
+The tag sweeper (v0.5.14) landed while this design was being written. It introduced:
+- `config/canonical-tags.yml` with domain-grouped tags (currently groups under `knowledge` and `resources`)
+- `vault/src/canonical.rs` - shared tag loader/matcher
+- `cortex/src/sweep.rs` - sweep command
+- `cortex/src/config.rs` - `SweepConfig` struct
+- `cortex/src/cli.rs` - `Sweep(SweepOpts)` command variant
+- `cortex/src/testutil.rs` - SweepConfig in test builder
+
+This design must update `canonical-tags.yml` domain groupings (rename `knowledge` -> `life`, add `homelab`/`diy`, redistribute tags like `fitness`/`home-automation` to new domains). The sweep/canonical code itself needs no changes - domain groupings in canonical-tags.yml are cosmetic (flattened to a single HashSet at load time).
 
 ## Proposed Solution
 
@@ -108,7 +119,7 @@ Total: 12 variants (was 10, +3 new, -1 removed). `Knowledge` is removed entirely
 | Domain | Triggers |
 |--------|----------|
 | life | `health`, `exercise`, `learning`, `vocabulary`, `productivity`, `motivation`, `fitness`, `psychology`, `mindset`, `habits` |
-| homelab | `homelab`, `selfhosted`, `docker`, `plex`, `networking`, `unifi`, `pfsense`, `proxmox`, `nas`, `firewall` |
+| homelab | `homelab`, `selfhosted`, `plex`, `unifi`, `pfsense`, `proxmox`, `nas`, `pihole`, `home-automation` |
 | diy | `diy`, `woodworking`, `building`, `knots`, `construction`, `makeover`, `furniture`, `timber` |
 
 The existing `knowledge` entry is renamed to `life` and expanded. Two new entries are added.
@@ -119,7 +130,7 @@ The existing `knowledge` entry is renamed to `life` and expanded. Two new entrie
 
 ```
 - "life" - Health, fitness, motivation, psychology, habits, personal development, culture, relationships, learning
-- "homelab" - Self-hosting, home networking, Docker, Plex, NAS, Unifi, pfSense, Proxmox, home automation hardware
+- "homelab" - Self-hosting, home networking, Plex, NAS, Unifi, pfSense, Proxmox, Pi-hole, home automation hardware. NOT professional infra (Docker/k8s/networking for work goes in tech)
 - "diy" - Building, woodworking, construction, knots, furniture, physical making, tools, crafts
 ```
 
@@ -154,18 +165,25 @@ Additionally, `vault/src/hygiene.rs` has legacy folder-to-domain mappings that r
 1. Update `Domain` enum in `vault/src/schema.rs` - add `Homelab`, `Diy`, `Life`, remove `Knowledge`
 2. Update `FromStr`, `as_str`, `all()`, `Display` implementations
 3. Add `"knowledge"` as backwards-compat alias in `FromStr` -> `Life`
-4. Update `default_tag_domain_map()` in `cortex/src/classify.rs` - rename knowledge to life, add homelab and diy
-5. Update cortex.yml schema.domains list
-6. Add `--reclassify-domain` flag to classify CLI
-7. Add migration entry `v3-domain-expansion` to cortex.yml
-8. `otto ci`
+4. Update `vault/src/hygiene.rs` legacy folder mappings: Knowledge -> life
+5. Update `default_tag_domain_map()` in `cortex/src/classify.rs` - rename knowledge to life, add homelab and diy
+6. Update cortex.yml: schema.domains list and migration entry `v3-domain-expansion`
+7. Update `cortex/src/frontmatter.rs` if it references knowledge domain in validation
+8. Add `--reclassify-domain` flag to classify CLI and implement `filter_domain_notes`
+9. `otto ci`
 
-**Phase 3: Fabric pattern and Obsidian artifacts**
+**Phase 3: Patterns, config, and Obsidian artifacts**
 1. Move `cortex_classify` pattern into the repo at `cortex/patterns/cortex_classify.md` (matching borg's convention where `borg/patterns/` is the source of truth, installed to `~/.config/borg/patterns/`). Install step copies to `~/.config/fabric/patterns/cortex_classify/system.md`. Update the pattern with new domain descriptions.
 2. Update `borg/patterns/obsidian-classify.md` with the same domain list
-3. Create Dataview views: `domain-homelab.md`, `domain-diy.md`, `domain-life.md`
-4. Remove `domain-knowledge.md`
-5. Update `domain-values.md`
+3. Update `config/canonical-tags.yml` domain groupings:
+   - Rename `knowledge:` group to `life:` (keep obsidian/note-taking/pkm tags - they're cosmetic groupings)
+   - Add `homelab:` group with `home-automation` (moved from resources). Docker/kubernetes/networking stay in `tech` - those are professional SRE/platform tools, not homelab topics.
+   - Add `diy:` group (currently no canonical tags fit, but the group exists for future additions)
+   - Move `fitness`, `exercise`, `nutrition`, `health` from `resources:` to `life:`
+   - `gaming`, `noita` stay in `resources:` (no gaming domain)
+4. Create Dataview views: `domain-homelab.md`, `domain-diy.md`, `domain-life.md`
+5. Remove `domain-knowledge.md`
+6. Update `domain-values.md`
 
 **Phase 4: Deploy and reclassify**
 1. Build and install cortex: `cargo install --path cortex`
