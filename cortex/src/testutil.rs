@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{
     ActionsConfig, AutoTagConfig, BrokenLinksConfig, Config, DaemonConfig, DuplicatesConfig, FrontmatterConfig,
     IntelConfig, LinkingConfig, LinkingEntities, LlmConfig, NamingConfig, QualityConfig, SchemaConfig, ScopeConfig,
-    ScopeMatch, ScopeRule, StateConfig, TagsConfig, VaultConfig,
+    ScopeMatch, ScopeRule, StateConfig, SweepConfig, TagsConfig, VaultConfig,
 };
 use crate::vault::{self, Frontmatter, Note};
 
@@ -315,6 +315,7 @@ impl TestVault {
             daemon: DaemonConfig::default(),
             migrations: Vec::new(),
             llm: LlmConfig::default(),
+            sweep: SweepConfig::default(),
         }
     }
 

@@ -16,6 +16,7 @@ pub struct Config {
     pub daemon: DaemonConfig,
     pub migrations: Vec<MigrationConfig>,
     pub llm: LlmConfig,
+    pub sweep: SweepConfig,
 }
 
 impl Default for Config {
@@ -29,6 +30,7 @@ impl Default for Config {
             daemon: DaemonConfig::default(),
             migrations: Vec::new(),
             llm: LlmConfig::default(),
+            sweep: SweepConfig::default(),
         }
     }
 }
@@ -152,6 +154,28 @@ impl Default for TagsConfig {
             style: "lowercase-hyphenated".to_string(),
             canonical: Vec::new(),
             aliases: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct SweepConfig {
+    pub canonical_path: String,
+    pub mapping_path: String,
+    pub proposals_path: String,
+    pub sweep_interval: String,
+    pub proposal_threshold: usize,
+}
+
+impl Default for SweepConfig {
+    fn default() -> Self {
+        Self {
+            canonical_path: "~/.config/second-brain/canonical-tags.yml".to_string(),
+            mapping_path: "~/.config/second-brain/tag-mapping.yml".to_string(),
+            proposals_path: "~/.config/second-brain/tag-proposals.yml".to_string(),
+            sweep_interval: "1h".to_string(),
+            proposal_threshold: 3,
         }
     }
 }

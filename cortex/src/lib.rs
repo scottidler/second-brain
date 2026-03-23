@@ -16,6 +16,7 @@ pub mod quality;
 pub mod report;
 pub mod scope;
 pub mod state;
+pub mod sweep;
 pub mod tags;
 pub mod testutil;
 pub mod vault;
@@ -25,7 +26,7 @@ use eyre::Result;
 use std::path::Path;
 
 use classify::ClassifyOpts;
-use cli::{IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts};
+use cli::{IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts, SweepOpts};
 use config::Config;
 use report::Report;
 use state::VaultManifest;
@@ -327,6 +328,39 @@ pub fn run_classify(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> 
         report.print_human(false);
         Ok(report)
     }
+}
+
+pub fn run_sweep(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<()> {
+    log::info!("starting sweep command (vault_root={})", vault_root.display());
+    let notes = scan_vault(vault_root, &config.vault)?;
+
+    if opts.migrate {
+        let count = sweep::run_migrate(vault_root, &notes, &config.sweep, opts.dry_run)?;
+        if opts.dry_run {
+            println!("Dry run: would modify {count} note(s).");
+        } else {
+            println!("Migrated tags in {count} note(s).");
+        }
+    }
+
+    if opts.proposals || !opts.migrate {
+        // Default action: scan for proposals
+        let proposals = sweep::scan_proposals(&notes, &config.sweep)?;
+        if proposals.is_empty() {
+            println!("No new tag proposals.");
+        } else {
+            println!("Found {} tag(s) needing review:", proposals.len());
+            for p in &proposals {
+                println!("  {} (on {} notes)", p.tag, p.frequency);
+            }
+            if !opts.dry_run {
+                sweep::write_proposals(&config.sweep, proposals)?;
+                println!("Proposals written to {}", config.sweep.proposals_path);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub fn run_intel(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<()> {

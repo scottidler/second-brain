@@ -49,6 +49,9 @@ async fn main() -> Result<()> {
         Command::Migrate(opts) => {
             cortex::run_migrate(&vault_root, &config, opts)?;
         }
+        Command::Sweep(opts) => {
+            cortex::run_sweep(&vault_root, &config, opts)?;
+        }
     }
 
     Ok(())

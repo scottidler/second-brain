@@ -76,6 +76,8 @@ pub enum Command {
     Daemon(DaemonOpts),
     /// Schema evolution and vault structure migration
     Migrate(MigrateOpts),
+    /// Sweep tags: consolidate to canonical vocabulary
+    Sweep(SweepOpts),
 }
 
 #[derive(Parser)]
@@ -166,4 +168,19 @@ pub struct MigrateOpts {
     /// Path to migration plan YAML
     #[arg(long)]
     pub plan: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct SweepOpts {
+    /// Run full tag migration (rewrite all notes to canonical tags)
+    #[arg(long)]
+    pub migrate: bool,
+
+    /// Preview changes without modifying files
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Scan for non-canonical tags and generate proposals
+    #[arg(long)]
+    pub proposals: bool,
 }

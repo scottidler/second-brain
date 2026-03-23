@@ -161,7 +161,7 @@ fn normalize_tag(tag: &str) -> String {
 
 /// Replace the tags line in frontmatter YAML with new tags.
 /// Uses targeted string replacement to avoid full re-serialization.
-fn replace_tags_in_frontmatter(content: &str, new_tags: &[String]) -> Option<String> {
+pub fn replace_tags_in_frontmatter(content: &str, new_tags: &[String]) -> Option<String> {
     // Find the frontmatter block
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
