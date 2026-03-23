@@ -169,6 +169,7 @@ pub struct Config {
     pub migration: MigrationConfig,
     pub text_capture: TextCaptureConfig,
     pub vision: VisionConfig,
+    pub tags: TagsConfig,
     pub log_level: Option<String>,
 }
 
@@ -408,6 +409,24 @@ impl Default for HotkeyConfig {
             host: "localhost".to_string(),
             port: 8181,
             key: "<Ctrl><Shift>b".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct TagsConfig {
+    pub canonical_path: String,
+    pub mapping_path: String,
+    pub reject_concatenated: bool,
+}
+
+impl Default for TagsConfig {
+    fn default() -> Self {
+        Self {
+            canonical_path: "~/.config/second-brain/canonical-tags.yml".to_string(),
+            mapping_path: "~/.config/second-brain/tag-mapping.yml".to_string(),
+            reject_concatenated: true,
         }
     }
 }

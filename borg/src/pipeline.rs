@@ -15,10 +15,74 @@ use crate::types::{AudioFormat, ContentKind, IngestMethod, IngestResult, IngestS
 use crate::youtube;
 use eyre::{Context, Result};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
 use tokio::sync::Mutex;
+use vault::canonical::{self, CanonicalTagsFile, TagMapping};
+
+/// Cached canonical tag state loaded once at first use.
+struct CanonicalState {
+    canonical_set: std::collections::HashSet<String>,
+    mapping: TagMapping,
+    max_per_note: usize,
+    reject_concatenated: bool,
+}
+
+async fn get_or_init_canonical(config: &Config) -> Option<std::sync::Arc<CanonicalState>> {
+    use std::sync::Arc;
+    static CACHED: LazyLock<Mutex<Option<Arc<CanonicalState>>>> = LazyLock::new(|| Mutex::new(None));
+
+    let mut guard = CACHED.lock().await;
+    if let Some(ref cached) = *guard {
+        return Some(Arc::clone(cached));
+    }
+
+    let canonical_path = Path::new(&config.tags.canonical_path);
+    let mapping_path = Path::new(&config.tags.mapping_path);
+
+    let canonical_file = match CanonicalTagsFile::load(canonical_path) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("Could not load canonical tags: {e}. Tag filtering disabled.");
+            return None;
+        }
+    };
+
+    let mapping = match canonical::load_tag_mapping(mapping_path) {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("Could not load tag mapping: {e}. Using empty mapping.");
+            TagMapping::new()
+        }
+    };
+
+    let state = Arc::new(CanonicalState {
+        canonical_set: canonical_file.all_tags(),
+        max_per_note: canonical_file.max_per_note,
+        mapping,
+        reject_concatenated: config.tags.reject_concatenated,
+    });
+    *guard = Some(Arc::clone(&state));
+    Some(state)
+}
+
+/// Sort, dedup, and filter tags through the canonical vocabulary.
+/// Falls back to simple sort+dedup if canonical config is not available.
+async fn finalize_tags(tags: &mut Vec<String>, config: &Config) {
+    tags.sort();
+    tags.dedup();
+
+    if let Some(state) = get_or_init_canonical(config).await {
+        // Reject concatenated words
+        if state.reject_concatenated {
+            tags.retain(|t| !canonical::is_concatenated_word(t, &state.canonical_set));
+        }
+
+        // Filter and cap through canonical vocabulary
+        *tags = canonical::filter_and_cap(tags, &state.canonical_set, &state.mapping, state.max_per_note);
+    }
+}
 
 struct YouTubeResult {
     title: String,
@@ -370,8 +434,7 @@ async fn process_url_inner(
     if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&summary, &config.fabric).await {
         all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
     }
-    all_tags.sort();
-    all_tags.dedup();
+    finalize_tags(&mut all_tags, config).await;
 
     // Filter YouTube description for the note callout
     let filtered_description = raw_description.as_deref().and_then(description::filter_description);
@@ -716,8 +779,7 @@ async fn process_image_inner(
     if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&tag_source, &config.fabric).await {
         all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
     }
-    all_tags.sort();
-    all_tags.dedup();
+    finalize_tags(&mut all_tags, config).await;
 
     // Build summary: include vision description and extracted text
     let summary = {
@@ -946,8 +1008,7 @@ async fn process_audio_inner(
     if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&tag_source, &config.fabric).await {
         all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
     }
-    all_tags.sort();
-    all_tags.dedup();
+    finalize_tags(&mut all_tags, config).await;
 
     // Build summary
     let summary = if !transcript_text.is_empty() {
@@ -1208,8 +1269,7 @@ async fn process_document_file_inner(
     if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&tag_source, &config.fabric).await {
         all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
     }
-    all_tags.sort();
-    all_tags.dedup();
+    finalize_tags(&mut all_tags, config).await;
 
     let note = NoteContent {
         title: title.clone(),
@@ -1402,8 +1462,7 @@ async fn process_text_inner(
     if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(text, &config.fabric).await {
         all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
     }
-    all_tags.sort();
-    all_tags.dedup();
+    finalize_tags(&mut all_tags, config).await;
 
     let note = NoteContent {
         title: title.clone(),
@@ -1556,8 +1615,7 @@ async fn process_vocab(
         _ => "vocab".to_string(),
     };
     all_tags.push(hygiene::sanitize_tag(&vocab_tag));
-    all_tags.sort();
-    all_tags.dedup();
+    finalize_tags(&mut all_tags, config).await;
 
     let note = NoteContent {
         title: title.clone(),
@@ -1952,8 +2010,7 @@ async fn process_code_snippet(
     if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(text, &config.fabric).await {
         all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
     }
-    all_tags.sort();
-    all_tags.dedup();
+    finalize_tags(&mut all_tags, config).await;
 
     // Build fenced code block as the summary
     let summary = format!("```{language}\n{text}\n```");
