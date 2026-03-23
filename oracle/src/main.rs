@@ -3,7 +3,6 @@
 use clap::Parser;
 use eyre::{Context, Result};
 use rmcp::ServiceExt;
-use std::io;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 use vault::search::SearchIndex;
@@ -18,27 +17,36 @@ fn setup_logging(verbose: bool, log_config: &oracle::config::LogConfig) -> Resul
     let level = if verbose { "debug" } else { &log_config.level };
     let filter = EnvFilter::new(level);
 
-    if let Some(ref log_file) = log_config.file {
-        let expanded_path = shellexpand::tilde(log_file);
-        let path = PathBuf::from(expanded_path.as_ref());
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+    let log_path = match log_config.file {
+        Some(ref path) => {
+            let expanded = shellexpand::tilde(path);
+            PathBuf::from(expanded.as_ref())
         }
+        None => {
+            // Default XDG log path
+            dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("oracle")
+                .join("logs")
+                .join("oracle.log")
+        }
+    };
 
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
-
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(file)
-            .with_ansi(false)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(io::stderr)
-            .init();
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .context("Failed to open log file")?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(file)
+        .with_ansi(false)
+        .init();
 
     Ok(())
 }
