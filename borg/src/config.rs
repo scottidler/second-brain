@@ -268,8 +268,8 @@ impl Default for FabricConfig {
         Self {
             binary: "fabric".to_string(),
             model: String::new(),
-            summarize_pattern_youtube: "youtube_summary".to_string(),
-            summarize_pattern_article: "extract_article_wisdom".to_string(),
+            summarize_pattern_youtube: "obsidian-note.md".to_string(),
+            summarize_pattern_article: "obsidian-note.md".to_string(),
             tag_pattern: "create_tags".to_string(),
             max_content_chars: 30000,
         }

@@ -23,7 +23,8 @@ second-brain/
 - **Edition:** 2024
 - **Logging:** env_logger + log (unified; no tracing) for borg/cortex; tracing for oracle (rmcp compatibility)
 - **Schema:** vault::schema is THE single source of truth for Domain, NoteType, Origin, Status, Method. vault enums have feature-gated `schemars::JsonSchema` derives for MCP tool schemas.
-- **Config:** borg reads ~/.config/obsidian-borg/obsidian-borg.yml; cortex reads ~/.config/obsidian-cortex/obsidian-cortex.yml; oracle reads ~/.config/oracle/oracle.yml
+- **Config:** borg reads ~/.config/borg/borg.yml; cortex reads ~/.config/obsidian-cortex/obsidian-cortex.yml; oracle reads ~/.config/oracle/oracle.yml
+- **Patterns:** borg's Fabric patterns live at `~/.config/borg/patterns/` (source of truth in `borg/patterns/`)
 - **Binary names:** `borg`, `cortex`, and `oracle` (no obsidian- prefix)
 
 ## Testing
@@ -45,6 +46,7 @@ otto install     # build and install binaries
 cargo install --path borg && systemctl --user restart borg
 cargo install --path cortex && systemctl --user restart cortex
 cargo install --path oracle
+cp borg/patterns/*.md ~/.config/borg/patterns/
 ```
 
 borg and cortex run as systemd user daemons and must be restarted after install.

@@ -1,10 +1,37 @@
 use eyre::{Result, bail};
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::config::FabricConfig;
 
+/// Resolve a pattern name to a file path.
+///
+/// If the pattern is already a path (starts with `~`, `/`, or `.`), return it as-is.
+/// Otherwise, treat it as a filename and resolve to `~/.config/borg/patterns/<name>`.
+/// If that file exists, return the resolved path. Otherwise, return the original name
+/// so fabric can try its own pattern resolution as a fallback.
+fn resolve_pattern(name: &str) -> String {
+    if name.starts_with('~') || name.starts_with('/') || name.starts_with('.') {
+        return name.to_string();
+    }
+    if let Some(home) = dirs::home_dir() {
+        let path: PathBuf = home.join(".config/borg/patterns").join(name);
+        if path.exists() {
+            return path.to_string_lossy().to_string();
+        }
+    }
+    name.to_string()
+}
+
 pub async fn run_pattern(pattern: &str, input: &str, config: &FabricConfig) -> Result<String> {
-    vault::fabric::run_pattern(pattern, input, &config.binary, &config.model, config.max_content_chars)
+    let resolved = resolve_pattern(pattern);
+    vault::fabric::run_pattern(
+        &resolved,
+        input,
+        &config.binary,
+        &config.model,
+        config.max_content_chars,
+    )
 }
 
 /// Fetch a YouTube transcript via fabric's captions API.

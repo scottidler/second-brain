@@ -296,6 +296,48 @@ Manual validation before removing old pattern:
 | Fabric file-path resolution breaks on update | Low | Medium | Pin fabric version; path resolution is stable, core feature |
 | Old unversioned pattern lost | Low | High | Back up to `borg/patterns/obsidian-note.md.bak` before removing |
 
+## Addendum: Pattern Delivery (post-implementation revision)
+
+The initial implementation placed patterns in `borg/patterns/` and referenced them from `borg.yml` using fully canonical paths (`~/repos/scottidler/second-brain/borg/patterns/obsidian-note.md`). This worked but was ugly and coupled the user's config to a specific repo checkout location.
+
+Several alternatives were considered before settling on the current approach:
+
+### Approach: Canonical file paths in config (initial implementation)
+
+Config referenced patterns by absolute `~` path. Fabric's `loadPattern()` supports this natively.
+
+- **Problem:** Long paths in config, breaks if repo moves, couples user config to repo layout.
+
+### Approach: Embed patterns in binary via `include_str!`
+
+Compile patterns into the borg binary at build time. Config fields become optional overrides (empty = use embedded default).
+
+- **Pros:** Zero external files, updates ship with `cargo install`, works out of the box
+- **Cons:** User can't edit patterns without recompiling. Patterns are inherently configuration (prompt text the user tunes), not code. Embedding them treats user-facing config as a build artifact.
+- **Verdict:** Deferred. May revisit if patterns stabilize and rarely need user edits.
+
+### Approach: Patterns in `~/.config/borg/patterns/` (chosen)
+
+Patterns are configuration - they control behavior and the user may want to edit them. They belong next to `borg.yml`. The repo copy at `borg/patterns/` is the source of truth for defaults. The install step copies them into `~/.config/borg/patterns/`. Config references them by short name, and the code resolves the name to the config directory automatically.
+
+```yaml
+fabric:
+  summarize-pattern-youtube: obsidian-note.md
+  summarize-pattern-article: obsidian-note.md
+  classify-pattern: obsidian-classify.md
+```
+
+The code resolves `obsidian-note.md` to `~/.config/borg/patterns/obsidian-note.md`. The user sees the actual filename in config, making it clear what file is being used.
+
+- **Pros:** Clean config, patterns are editable, install step keeps defaults current, no repo path coupling
+- **Cons:** Requires install step to copy patterns (added to CLAUDE.md install instructions)
+
+### Changes required
+
+- Add pattern name resolution in borg: if pattern name is not a path, resolve to `~/.config/borg/patterns/<name>.md`
+- Update install instructions to copy patterns
+- Simplify `borg.yml` pattern config values to short names
+
 ## Open Questions
 
 - (none - all resolved during brainstorming)
