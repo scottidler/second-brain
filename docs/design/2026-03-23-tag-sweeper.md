@@ -60,9 +60,11 @@ canonical-tags.yml (source of truth)
 ```
 
 **Config files** (source of truth in `second-brain/config/`, installed to `~/.config/second-brain/`):
-- `canonical-tags.yml` - the curated tag vocabulary
+- `canonical-tags.yml` - the curated tag vocabulary (includes `max-per-note` in header)
 - `tag-mapping.yml` - full old-to-canonical mapping (training artifact)
 - `tag-proposals.yml` - LLM-generated proposals awaiting human review
+
+**New shared config directory:** This introduces `~/.config/second-brain/` as a shared config path alongside the per-binary directories (`~/.config/borg/`, `~/.config/obsidian-cortex/`, `~/.config/oracle/`). This is a deliberate architectural choice - tag vocabulary is truly shared state that neither binary owns. The install step in CLAUDE.md and `otto install` must be updated to create this directory and copy config files from `second-brain/config/`.
 
 ### Architecture
 
@@ -70,8 +72,8 @@ canonical-tags.yml (source of truth)
 
 New module in `vault` providing:
 - `load_canonical_tags(path) -> Vec<String>` - loads the YAML list
-- `match_to_canonical(raw_tag, canonical_set, mapping) -> Option<String>` - matching logic: check mapping file first (deterministic), then exact match against canonical set, then segment-based fuzzy match (split on `-`, check overlap with canonical tag segments)
-- `is_concatenated_word(tag) -> bool` - rejection heuristic: single segment with no hyphens that contains two or more known canonical tags as substrings (e.g., `claudecodeai` contains `claude` + `code` + `ai`). Does NOT use length thresholds since legitimate long words exist (`infrastructure`, `worldbuilding`)
+- `match_to_canonical(raw_tag, canonical_set, mapping) -> Vec<String>` - matching logic: check mapping file first (deterministic), then exact match against canonical set, then segment-based fuzzy match. Returns zero (no match), one (deterministic/exact), or multiple (segment match) canonical tags.
+- `is_concatenated_word(tag) -> bool` - rejection heuristic for tags with no hyphens. Algorithm: strip hyphens from each canonical tag to build a substring dictionary (e.g., `prompt-engineering` becomes `promptengineering`). If a raw unhyphenated tag contains 2+ of these substrings as non-overlapping matches, it is concatenated (e.g., `claudecodeai` matches `claude` + `code` + `ai`). Does NOT use length thresholds since legitimate long words exist (`infrastructure`, `worldbuilding`). Tags with hyphens skip this check entirely.
 - `filter_and_cap(raw_tags, canonical_set, max) -> Vec<String>` - full pipeline both binaries use
 
 Both borg and cortex call the same functions, guaranteeing identical tag behavior.
@@ -82,7 +84,7 @@ When resolving a raw tag to a canonical tag, the matcher follows this priority:
 
 1. **Mapping file lookup** - if `tag-mapping.yml` has an entry for this exact raw tag, use it (or reject if mapped to `null`). This is the fast path and handles all known tags deterministically.
 2. **Exact canonical match** - if the raw tag is already in the canonical set, keep it as-is.
-3. **Segment fuzzy match** - split raw tag on `-`, check if any segment matches a canonical tag. If exactly one canonical tag matches, use it. If multiple match, prefer the one with the most segment overlap.
+3. **Segment fuzzy match** - split raw tag on `-`, check if any segment exactly matches a canonical tag (single-word canonical tags only; multi-word canonical tags like `prompt-engineering` are only matched via the mapping file or exact match). If exactly one canonical tag matches, use it. If multiple match, return all matches - `filter_and_cap` will include each as a separate canonical tag (e.g., `ai-coding-agents` with segments `ai`, `coding`, `agents` may map to both `ai` and `agents`). This is correct: a single raw tag can contribute multiple canonical tags to the note's final tag set.
 4. **No match** - drop the tag. If cortex sees this tag on 3+ notes, it enters the proposal queue.
 
 The mapping file grows over time as the sweeper encounters and resolves new tags. This means the fuzzy matcher (step 3) is primarily a cold-start mechanism - once a tag has been seen and mapped, future encounters use the deterministic path.
@@ -101,7 +103,7 @@ Inserted in `pipeline.rs` after existing tag collection and dedup (lines ~360-37
    - Matched tags map to canonical form
    - Unmatched tags are dropped silently (proposal queue in cortex catches patterns)
 5. Dedup again (multiple raw tags may map to same canonical)
-6. Cap at `max-per-note` (configurable, default 7)
+6. Cap at `max-per-note` (default 7). When over the cap, keep tags in the order they were matched (mapping hits first, then exact, then segment), which naturally prefers more specific/deterministic matches. Within a tier, alphabetical.
 
 #### Cortex sweeper (governance)
 
@@ -136,7 +138,7 @@ proposals:
     action: "merge"
 ```
 
-Human reviews proposals, approves/rejects, and the canonical list + mapping update accordingly. Accept/reject decisions themselves become training signal.
+Human reviews proposals, approves/rejects, and the canonical list + mapping update accordingly. Accept/reject decisions themselves become training signal. Rejected proposals are added to `tag-mapping.yml` mapped to `null`, which prevents the sweeper from re-proposing them. If a rejected tag later accumulates significantly more notes, the human can remove the null mapping to allow re-proposal.
 
 ### Data Model
 
@@ -144,7 +146,8 @@ Human reviews proposals, approves/rejects, and the canonical list + mapping upda
 
 ```yaml
 # Canonical tag vocabulary for second-brain
-# Ceiling: 300 tags. Current target: 80-150.
+max-per-note: 7
+max-canonical: 300
 tags:
   ai:
     - ai
@@ -174,7 +177,7 @@ tags:
   # ... additional domains
 ```
 
-Tags are organized by domain for human readability but the loader flattens to a single `HashSet<String>` for matching. The domain grouping is purely cosmetic and editorial - it helps humans browse the list but has no runtime significance. A tag appearing under the "ai" heading does not affect classification; that remains the job of `tag_domain_map` in classify config. Tags that span domains (e.g., `automation`) should be listed under whichever domain feels most natural; the grouping does not constrain usage.
+Tags are organized by domain for human readability but the loader flattens to a single `HashSet<String>` for matching. The domain grouping is purely cosmetic and editorial - it helps humans browse the list but has no runtime significance. A tag appearing under the "ai" heading does not affect classification; that remains the job of `tag_domain_map` in classify config. Tags that span domains (e.g., `automation`) should be listed under whichever domain feels most natural; the grouping does not constrain usage. Note: this creates two domain-to-tag mappings - one cosmetic here and one functional in classify's `tag_domain_map`. This duplication is accepted for now; a future unification could derive `tag_domain_map` from canonical-tags.yml's grouping, but that is out of scope.
 
 #### tag-mapping.yml (training artifact)
 
@@ -214,6 +217,7 @@ Cortex already has tag-related code in `tags.rs` (aliases, canonical list, linti
 - **`tags.canonical`** in cortex config is replaced by `canonical-tags.yml`. Same data, shared location.
 - **`autotag.rs`** coexists. Auto-tag suggests canonical tags for notes with too few tags. The sweeper consolidates notes with too many or non-canonical tags. They solve complementary problems. Auto-tag's `canonical_tags` config should point to the shared canonical file.
 - **`tags.rs` linting** continues to validate tag format (lowercase-hyphenated). The sweeper adds vocabulary governance on top of format governance.
+- **oracle** requires no changes. Its `tag_search` tool queries tags as they exist in note frontmatter. After migration, it naturally searches the consolidated canonical tags. No code changes needed.
 
 ### Mixed state during rollout
 
@@ -228,14 +232,14 @@ Between borg deploy (Phase 3) and migration (Phase 5), the vault contains a mix 
 
 ```yaml
 tags:
-  max-per-note: 7
-  max-canonical: 300
   canonical-path: "~/.config/second-brain/canonical-tags.yml"
   mapping-path: "~/.config/second-brain/tag-mapping.yml"
   proposals-path: "~/.config/second-brain/tag-proposals.yml"
   sweep-interval: "1h"
   proposal-threshold: 3
 ```
+
+Note: `max-per-note` and `max-canonical` live in `canonical-tags.yml` (the shared vocabulary file), not in per-binary configs. Both borg and cortex read these values from the same source.
 
 #### borg.yml additions
 
@@ -246,17 +250,18 @@ tags:
   reject-concatenated: true
 ```
 
-Note: `max-per-note` lives only in `cortex.yml` (the governance authority). Borg reads it from the shared canonical config or defaults to 7. This avoids two configs drifting out of sync.
+Note: `max-per-note` is not in borg.yml - it lives in `canonical-tags.yml` where both binaries read it.
 
 ### Implementation Plan
 
 **Phase 1: Generate canonical set and mapping (manual + LLM)**
-1. Extract all 4,760 tags alphabetically to a file
-2. LLM proposes canonical set (~100-120 tags) organized by domain
-3. Human reviews and approves canonical set
-4. LLM generates full mapping (4,760 -> canonical or null)
-5. Human reviews mapping
-6. Both files committed to `second-brain/config/`
+1. Create `second-brain/config/` directory in the repo
+2. Extract all 4,760 tags alphabetically to a file
+3. LLM proposes canonical set (~100-120 tags) organized by domain
+4. Human reviews and approves canonical set
+5. LLM generates full mapping (4,760 -> canonical or null)
+6. Human reviews mapping
+7. Both files committed to `second-brain/config/`
 
 **Phase 2: Vault crate - shared loader and matcher**
 1. New module `vault::canonical` (or extend `vault::tags` if it exists)
@@ -354,7 +359,6 @@ Note: `max-per-note` lives only in `cortex.yml` (the governance authority). Borg
 
 ## Open Questions
 
-- [ ] Should the canonical list include a "weight" per tag for cap selection (prefer domain-relevant tags over generic ones)?
 - [ ] How should `max-per-note` interact with manually added tags in Obsidian? Should cortex sweep enforce the cap on all notes or only borg-ingested ones?
 - [ ] Should the proposal queue use an LLM to cluster proposals, or just surface raw frequency data for human judgment?
 
