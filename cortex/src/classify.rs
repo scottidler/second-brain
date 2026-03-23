@@ -606,14 +606,14 @@ fn resolve_collision(path: &Path, source_url: Option<&str>) -> PathBuf {
     }
 
     // Same source URL means reingest replacement - overwrite, don't create -2
-    if let Some(source) = source_url {
-        if existing_note_has_source(path, source) {
-            log::info!(
-                "collision is a reingest replacement (same source), overwriting: {}",
-                path.display()
-            );
-            return path.to_path_buf();
-        }
+    if let Some(source) = source_url
+        && existing_note_has_source(path, source)
+    {
+        log::info!(
+            "collision is a reingest replacement (same source), overwriting: {}",
+            path.display()
+        );
+        return path.to_path_buf();
     }
 
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("note");

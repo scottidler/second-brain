@@ -8,8 +8,8 @@
 use eyre::{Context, Result};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -27,11 +27,7 @@ impl Default for WatcherConfig {
     fn default() -> Self {
         Self {
             debounce_secs: 5,
-            ignore_dirs: vec![
-                ".git".into(),
-                ".obsidian".into(),
-                "templates".into(),
-            ],
+            ignore_dirs: vec![".git".into(), ".obsidian".into(), "templates".into()],
         }
     }
 }
@@ -81,10 +77,10 @@ impl VaultWatcher {
         let mut watcher: RecommendedWatcher =
             notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
                 // If applying flag is set, discard events silently
-                if let Some(ref flag) = applying_for_callback {
-                    if flag.load(Ordering::Relaxed) {
-                        return;
-                    }
+                if let Some(ref flag) = applying_for_callback
+                    && flag.load(Ordering::Relaxed)
+                {
+                    return;
                 }
                 if let Ok(event) = res {
                     let _ = raw_tx.send(event);
@@ -135,10 +131,10 @@ async fn debounce_loop(
 
                 // Collect .md file paths from this event
                 for path in &event.paths {
-                    if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                        if !pending.contains(path) {
-                            pending.push(path.clone());
-                        }
+                    if path.extension().and_then(|e| e.to_str()) == Some("md")
+                        && !pending.contains(path)
+                    {
+                        pending.push(path.clone());
                     }
                 }
 
@@ -151,7 +147,7 @@ async fn debounce_loop(
                 // Debounce fired - emit batch
                 log::info!("vault watcher debounce fired: {} file(s)", pending.len());
                 let change = VaultChange {
-                    changed_paths: pending.drain(..).collect(),
+                    changed_paths: std::mem::take(&mut pending),
                 };
                 if out_tx.send(change).is_err() {
                     // Consumer dropped - exit
@@ -225,9 +221,7 @@ mod tests {
     #[test]
     fn test_should_process_event_ignore_dirs() {
         let event = notify::Event {
-            kind: EventKind::Modify(notify::event::ModifyKind::Data(
-                notify::event::DataChange::Content,
-            )),
+            kind: EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Content)),
             paths: vec![PathBuf::from("/vault/.git/config")],
             attrs: Default::default(),
         };
@@ -238,9 +232,7 @@ mod tests {
     #[test]
     fn test_should_process_event_obsidian_ignored() {
         let event = notify::Event {
-            kind: EventKind::Modify(notify::event::ModifyKind::Data(
-                notify::event::DataChange::Content,
-            )),
+            kind: EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Content)),
             paths: vec![PathBuf::from("/vault/.obsidian/workspace.json")],
             attrs: Default::default(),
         };
@@ -262,8 +254,7 @@ mod tests {
             ignore_dirs: vec![".git".into()],
         };
 
-        let (watcher, mut rx) = VaultWatcher::start(vault_root, config, None)
-            .expect("failed to start watcher");
+        let (watcher, mut rx) = VaultWatcher::start(vault_root, config, None).expect("failed to start watcher");
 
         // Give the watcher a moment to initialize
         time::sleep(Duration::from_millis(100)).await;
@@ -309,8 +300,7 @@ mod tests {
             ignore_dirs: vec![],
         };
 
-        let (watcher, mut rx) = VaultWatcher::start(vault_root, config, None)
-            .expect("failed to start watcher");
+        let (watcher, mut rx) = VaultWatcher::start(vault_root, config, None).expect("failed to start watcher");
 
         time::sleep(Duration::from_millis(100)).await;
 
