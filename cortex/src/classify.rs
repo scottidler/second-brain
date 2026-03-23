@@ -115,11 +115,54 @@ fn default_tag_domain_map() -> HashMap<String, Vec<String>> {
             .collect(),
     );
     m.insert(
-        "knowledge".into(),
-        vec!["health", "exercise", "learning", "vocabulary", "productivity"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+        "life".into(),
+        vec![
+            "health",
+            "exercise",
+            "learning",
+            "vocabulary",
+            "productivity",
+            "motivation",
+            "fitness",
+            "psychology",
+            "mindset",
+            "habits",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+    );
+    m.insert(
+        "homelab".into(),
+        vec![
+            "homelab",
+            "selfhosted",
+            "plex",
+            "unifi",
+            "pfsense",
+            "proxmox",
+            "nas",
+            "pihole",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+    );
+    m.insert(
+        "diy".into(),
+        vec![
+            "diy",
+            "woodworking",
+            "building",
+            "knots",
+            "construction",
+            "makeover",
+            "furniture",
+            "timber",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
     );
     m.insert(
         "resources".into(),
@@ -190,6 +233,10 @@ pub struct ClassifyOpts {
     /// Only process notes with cortex-needs-review: true
     #[arg(long)]
     pub review_only: bool,
+
+    /// Reclassify all notes with this domain (e.g., --reclassify-domain resources)
+    #[arg(long)]
+    pub reclassify_domain: Option<String>,
 }
 
 /// Dry-run: returns planned classifications as violations in a Report
@@ -243,36 +290,77 @@ pub fn lint_classify(notes: &[Note], config: &ClassifyConfig, search_index: Opti
 }
 
 /// Apply: classify and move notes from inbox/ to notes/
+/// If `reclassify_domain` is set, reclassifies notes already in notes/ that have that domain.
 pub fn apply_classify(
     vault_root: &Path,
     notes: &[Note],
     config: &ClassifyConfig,
     force: bool,
     review_only: bool,
+    reclassify_domain: Option<&str>,
     search_index: Option<&SearchIndex>,
 ) -> Result<Report> {
-    let inbox_notes = filter_inbox_notes(notes, force, review_only);
+    let target_notes: Vec<&Note> = if let Some(domain) = reclassify_domain {
+        filter_domain_notes(notes, domain)
+    } else {
+        filter_inbox_notes(notes, force, review_only)
+    };
+    let is_reclassify = reclassify_domain.is_some();
     let mut report = Report::default();
     let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-    for note in &inbox_notes {
+    for note in &target_notes {
         let result = match classify_note(note, config, search_index) {
             Some(r) => r,
             None => {
-                // No classification signal - hold for review
-                mark_needs_review(vault_root, note)?;
+                if !is_reclassify {
+                    mark_needs_review(vault_root, note)?;
+                }
                 log::info!("held for review (no signal): {}", note.path.display());
                 continue;
             }
         };
 
         if result.confidence == ClassifyConfidence::Low {
-            mark_needs_review(vault_root, note)?;
+            if !is_reclassify {
+                mark_needs_review(vault_root, note)?;
+            }
             log::info!("held for review (low confidence): {}", note.path.display());
             continue;
         }
 
-        // Enrich frontmatter and promote
+        // For reclassify: update domain in place, no file move
+        if is_reclassify {
+            let abs_path = vault_root.join(&note.path);
+            let content = std::fs::read_to_string(&abs_path)?;
+            let fields = build_enrichment_fields(&result);
+            if let Some(new_content) = insert_frontmatter_fields(&content, &fields) {
+                std::fs::write(&abs_path, new_content)?;
+            }
+
+            report.add(Violation {
+                path: note.path.clone(),
+                rule: "classify".to_string(),
+                severity: Severity::Info,
+                message: format!(
+                    "reclassified domain={} (method={})",
+                    result.domain.as_str(),
+                    result.method.as_str(),
+                ),
+                fix: None,
+            });
+
+            log::info!(
+                "reclassified {} (domain={}, confidence={}, method={})",
+                note.path.display(),
+                result.domain.as_str(),
+                result.confidence.as_str(),
+                result.method.as_str(),
+            );
+            continue;
+        }
+
+        // Enrich frontmatter and promote (inbox -> notes/)
         let mut enrichment_fields = build_enrichment_fields(&result);
         ensure_origin(&mut enrichment_fields, note);
         let enrichment_fields = enrichment_fields;
@@ -548,6 +636,14 @@ fn classify_by_source(note: &Note, config: &ClassifyConfig) -> Option<ClassifyRe
     }
 
     None
+}
+
+/// Filter notes to those matching a specific domain value (for reclassification)
+fn filter_domain_notes<'a>(notes: &'a [Note], domain: &str) -> Vec<&'a Note> {
+    notes
+        .iter()
+        .filter(|n| n.frontmatter.domain.as_deref() == Some(domain))
+        .collect()
 }
 
 /// Filter notes to inbox-only, respecting force and review-only flags

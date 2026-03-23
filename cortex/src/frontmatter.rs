@@ -334,7 +334,9 @@ mod tests {
                 "writing",
                 "music",
                 "spanish",
-                "knowledge",
+                "life",
+                "homelab",
+                "diy",
                 "resources",
                 "system",
             ]

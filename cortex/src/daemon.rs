@@ -223,6 +223,7 @@ fn run_configured_actions(
                     path: None,
                     force: false,
                     review_only: false,
+                    reclassify_domain: None,
                 };
                 match crate::run_classify(vault_root, config, &opts) {
                     Ok(report) => {

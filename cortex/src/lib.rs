@@ -321,6 +321,7 @@ pub fn run_classify(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> 
             &config.actions.classify,
             opts.force,
             opts.review_only,
+            opts.reclassify_domain.as_deref(),
             search_ref,
         )
     } else {
