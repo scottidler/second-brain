@@ -1,0 +1,122 @@
+max-per-note: 7
+max-canonical: 300
+tags:
+  ai:
+    - ai
+    - agents
+    - claude
+    - anthropic
+    - openai
+    - gemini
+    - chatgpt
+    - llm
+    - mcp
+    - prompt-engineering
+    - context-engineering
+    - ai-safety
+    - multi-agent
+    - autonomous-agents
+    - enterprise-ai
+    - human-ai-collaboration
+    - vibe-coding
+    - cursor
+  tech:
+    - rust
+    - python
+    - typescript
+    - linux
+    - cli
+    - terminal
+    - git
+    - github
+    - docker
+    - kubernetes
+    - devops
+    - infrastructure
+    - networking
+    - security
+    - api
+    - database
+    - web-development
+    - css
+    - open-source
+    - neovim
+    - nix
+    - webassembly
+    - architecture
+    - sandboxing
+    - iot
+    - hardware
+    - performance
+    - auth
+    - saas
+    - programming
+  football:
+    - football
+    - nfl
+    - college-football
+    - high-school-football
+    - youth-football
+    - coaching
+    - offense
+    - defense
+    - spread-offense
+    - air-raid
+    - inside-zone
+    - outside-zone
+    - counter
+    - rpo
+    - blocking
+    - pass-protection
+    - offensive-line
+    - quarterback
+    - drills
+  work:
+    - productivity
+    - automation
+    - workflow
+    - future-of-work
+    - career
+    - software-engineering
+  writing:
+    - writing
+    - creative-writing
+    - fiction
+    - books
+    - reading
+    - research
+  knowledge:
+    - obsidian
+    - note-taking
+    - markdown
+    - templates
+    - daily-notes
+    - para-method
+    - pkm
+    - second-brain
+    - knowledge-management
+    - tutorial
+    - design
+    - science
+    - privacy
+    - data
+  music:
+    - music
+    - synth
+    - voice
+  resources:
+    - gaming
+    - noita
+    - fitness
+    - exercise
+    - nutrition
+    - health
+    - parenting
+    - travel
+    - cooking
+    - finance
+    - battery
+    - home-automation
+  spanish:
+    - spanish
+    - language-learning
