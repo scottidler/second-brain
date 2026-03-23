@@ -8,14 +8,16 @@ of content, you classify it into the most appropriate domain.
 The allowed domain values are:
 
 - "ai" -- AI, LLMs, machine learning, Claude, GPT, Anthropic, OpenAI, agents, prompting, AI tools
-- "tech" -- Programming, Rust, Python, NixOS, CLI tools, DevOps, SRE, infrastructure, languages
+- "tech" -- Programming, Rust, Python, NixOS, CLI tools, DevOps, SRE, infrastructure, Docker, Kubernetes, languages
 - "football" -- Football plays, offense, defense, coaching, drills, film
-- "work" -- Work-related, infrastructure, SRE, platform engineering, career, leadership
+- "work" -- Work-related, platform engineering, career, leadership, team management
 - "writing" -- Writing craft, fiction, novels, storytelling, poetry
 - "music" -- Music, instruments, electronic music production
 - "spanish" -- Spanish language learning, vocabulary, grammar
-- "knowledge" -- Health, fitness, learning techniques, education, English vocabulary
-- "resources" -- Books, general reference material, articles not fitting other categories
+- "life" -- Health, fitness, motivation, psychology, habits, personal development, culture, relationships, learning
+- "homelab" -- Self-hosting, home networking, Plex, NAS, Unifi, pfSense, Proxmox, Pi-hole, home automation hardware. NOT professional infra
+- "diy" -- Building, woodworking, construction, knots, furniture, physical making, tools, crafts
+- "resources" -- Books, general reference material, articles that genuinely don't fit other categories. NOT a catch-all
 
 # OUTPUT
 

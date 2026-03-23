@@ -85,7 +85,7 @@ tags:
     - books
     - reading
     - research
-  knowledge:
+  life:
     - obsidian
     - note-taking
     - markdown
@@ -100,6 +100,13 @@ tags:
     - science
     - privacy
     - data
+    - fitness
+    - exercise
+    - nutrition
+    - health
+  homelab:
+    - home-automation
+  diy: []
   music:
     - music
     - synth
@@ -107,16 +114,11 @@ tags:
   resources:
     - gaming
     - noita
-    - fitness
-    - exercise
-    - nutrition
-    - health
     - parenting
     - travel
     - cooking
     - finance
     - battery
-    - home-automation
   spanish:
     - spanish
     - language-learning
