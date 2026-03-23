@@ -2,6 +2,7 @@
 #![deny(dead_code)]
 #![deny(unused_variables)]
 
+pub mod canonical;
 pub mod config;
 pub mod detail;
 pub mod fabric;
