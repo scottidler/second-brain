@@ -85,15 +85,14 @@ async fn run_serve(config: Config) -> Result<()> {
                     // Hold watcher alive for the lifetime of this task
                     let _keep = watcher;
                     while let Some(change) = rx.recv().await {
-                        tracing::info!(
-                            "vault changed ({} files), reindexing",
-                            change.changed_paths.len()
-                        );
+                        tracing::info!("vault changed ({} files), reindexing", change.changed_paths.len());
                         if let Ok(db) = db_handle.lock() {
                             match db.index_vault(&vault_root) {
                                 Ok(stats) => tracing::info!(
                                     "reindex: {} updated, {} inserted, {} unchanged",
-                                    stats.updated, stats.inserted, stats.unchanged
+                                    stats.updated,
+                                    stats.inserted,
+                                    stats.unchanged
                                 ),
                                 Err(e) => tracing::warn!("reindex failed: {e}"),
                             }

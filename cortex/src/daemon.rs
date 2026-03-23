@@ -73,11 +73,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
         debounce_secs: daemon_config.debounce_secs,
         ignore_dirs: config.vault.ignore.clone(),
     };
-    let (watcher, mut watch_rx) = VaultWatcher::start(
-        vault_root,
-        watcher_config,
-        Some(Arc::clone(&applying)),
-    )?;
+    let (watcher, mut watch_rx) = VaultWatcher::start(vault_root, watcher_config, Some(Arc::clone(&applying)))?;
 
     log::info!("daemon started: {}", vault_root.display());
 
