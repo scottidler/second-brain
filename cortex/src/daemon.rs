@@ -141,7 +141,10 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 if !last_fingerprint.is_empty() {
                     let actions_desc: Vec<_> = last_fingerprint.results.iter().map(|(a, f)| format!("{a}: {} files", f.len())).collect();
                     log::warn!("cycle detected: previous sweep had fixes, skipping to avoid oscillation: {:?}", actions_desc);
-                    // Don't run - last sweep applied fixes, so running again risks repeating them.
+                    // Don't run most actions - last sweep applied fixes, so running again risks repeating them.
+                    // Exception: classify is inherently idempotent (marks notes cortex-classified: true),
+                    // so it can never cause a cycle and must always run to promote new inbox notes.
+                    run_classify_only(vault_root, config, daemon_config);
                     // A real user edit will reset last_fingerprint and re-enable sweeps.
                 } else {
                     log::info!("running periodic sweep");
@@ -201,6 +204,35 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Run classify only - used during cycle detection since classify is inherently idempotent
+/// (notes are marked cortex-classified: true and never reprocessed).
+fn run_classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonConfig) {
+    if !daemon_config.enabled_actions().contains(&"classify") {
+        return;
+    }
+    let opts = crate::classify::ClassifyOpts {
+        apply: true,
+        path: None,
+        force: false,
+        review_only: false,
+        reclassify_domain: None,
+    };
+    match crate::run_classify(vault_root, config, &opts) {
+        Ok(report) => {
+            let promoted = report
+                .violations
+                .iter()
+                .filter(|v| v.message.contains("promoted"))
+                .count();
+            if promoted > 0 {
+                log::info!("classify (cycle-exempt): promoted {promoted} note(s)");
+                println!("[daemon] classify: promoted {promoted} note(s) from inbox/");
+            }
+        }
+        Err(e) => log::error!("classify action failed: {e}"),
+    }
+}
+
 /// Run the configured on-change actions, returning a fingerprint of what was applied.
 fn run_configured_actions(
     vault_root: &Path,
@@ -252,13 +284,12 @@ fn run_configured_actions(
                 match crate::run_lint(vault_root, config, &opts) {
                     Ok(report) => {
                         if auto {
-                            // Mark that lint ran in apply mode so cycle detection can track it.
-                            // We can't know exactly which files were modified (apply functions
-                            // don't return paths), so use a sentinel.
-                            fingerprint.add("lint", vec!["__applied__".to_string()]);
-                            let remaining = report.violations.len();
-                            if remaining > 0 {
-                                log::debug!("lint: unfixable violations remain after apply: {remaining} remaining");
+                            // Only mark as applied when violations were found (some may have been fixed).
+                            // Previously this was unconditional, which permanently triggered cycle detection.
+                            if !report.is_empty() {
+                                fingerprint.add("lint", vec!["__applied__".to_string()]);
+                                let remaining = report.violations.len();
+                                log::info!("lint: applied fixes ({remaining} unfixable violation(s) remain)");
                             }
                         } else if !report.is_empty() {
                             println!("[daemon] lint: {} violation(s)", report.violations.len());
@@ -282,21 +313,43 @@ fn run_configured_actions(
             }
             "link" => {
                 let auto = daemon_config.is_enabled("link");
-                let opts = crate::cli::LinkOpts {
-                    apply: auto,
-                    scan: "all".to_string(),
-                };
-                match crate::run_link(vault_root, config, &opts) {
-                    Ok(report) => {
-                        if auto {
-                            // run_link in apply mode returns empty report but prints count.
-                            // Mark as applied so cycle detection tracks it.
-                            fingerprint.add("link", vec!["__applied__".to_string()]);
-                        } else if !report.is_empty() {
+                if auto {
+                    // Lint first to check if there's work, then apply only if needed.
+                    // Previously fingerprinted unconditionally, permanently triggering cycle detection.
+                    let lint_opts = crate::cli::LinkOpts {
+                        apply: false,
+                        scan: "all".to_string(),
+                    };
+                    match crate::run_link(vault_root, config, &lint_opts) {
+                        Ok(report) if !report.is_empty() => {
+                            let apply_opts = crate::cli::LinkOpts {
+                                apply: true,
+                                scan: "all".to_string(),
+                            };
+                            match crate::run_link(vault_root, config, &apply_opts) {
+                                Ok(_) => {
+                                    fingerprint.add("link", vec!["__applied__".to_string()]);
+                                    log::info!("link: applied wikilink fixes");
+                                    println!("[daemon] link: applied wikilink fixes");
+                                }
+                                Err(e) => log::error!("link apply failed: {e}"),
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => log::error!("link lint failed: {e}"),
+                    }
+                } else {
+                    let opts = crate::cli::LinkOpts {
+                        apply: false,
+                        scan: "all".to_string(),
+                    };
+                    match crate::run_link(vault_root, config, &opts) {
+                        Ok(report) if !report.is_empty() => {
                             println!("[daemon] link: {} suggestion(s)", report.violations.len());
                         }
+                        Ok(_) => {}
+                        Err(e) => log::error!("link action failed: {e}"),
                     }
-                    Err(e) => log::error!("link action failed: {e}"),
                 }
             }
             "duplicates" => {
