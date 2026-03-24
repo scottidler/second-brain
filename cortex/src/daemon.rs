@@ -390,6 +390,37 @@ fn run_configured_actions(
                     log::error!("state action failed: {e}");
                 }
             }
+            "sweep" => {
+                let auto = daemon_config.is_enabled("sweep");
+                match crate::vault::scan_vault(vault_root, &config.vault) {
+                    Ok(notes) => {
+                        if auto {
+                            // Run migration (rewrite non-canonical tags)
+                            match crate::sweep::run_migrate(vault_root, &notes, &config.sweep, false) {
+                                Ok(count) if count > 0 => {
+                                    fingerprint.add("sweep", vec!["__applied__".to_string()]);
+                                    log::info!("sweep: migrated tags in {count} note(s)");
+                                    println!("[daemon] sweep: migrated tags in {count} note(s)");
+                                }
+                                Ok(_) => {}
+                                Err(e) => log::error!("sweep migrate failed: {e}"),
+                            }
+                        }
+                        // Always scan for proposals (even if not auto-applying)
+                        match crate::sweep::scan_proposals(&notes, &config.sweep) {
+                            Ok(proposals) if !proposals.is_empty() => {
+                                log::info!("sweep: {} tag(s) needing review", proposals.len());
+                                if let Err(e) = crate::sweep::write_proposals(&config.sweep, proposals) {
+                                    log::error!("sweep: failed to write proposals: {e}");
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => log::error!("sweep proposals scan failed: {e}"),
+                        }
+                    }
+                    Err(e) => log::error!("failed to scan vault for sweep: {e}"),
+                }
+            }
             other => {
                 log::warn!("unknown daemon action: {other}");
             }
