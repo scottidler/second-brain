@@ -281,7 +281,7 @@ impl Default for IntelConfig {
             batch_weekly: Some("weekly_digest".to_string()),
             max_input_tokens: 50000,
             fabric_timeout_secs: 120,
-            model: Some("claude-opus-4-0-20250514".to_string()),
+            model: Some("claude-opus-4-20250514".to_string()),
             max_output_tokens: 1024,
             llm_timeout_secs: 120,
         }

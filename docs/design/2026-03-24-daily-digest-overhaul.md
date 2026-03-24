@@ -105,7 +105,7 @@ pub fn complete(
 | Field | Old | New | Default |
 |-------|-----|-----|---------|
 | `batch-daily` | `Option<String>` (Fabric pattern) | Removed | - |
-| `model` | (new) | `String` | `"claude-opus-4-0-20250514"` |
+| `model` | (new) | `String` | `"claude-opus-4-20250514"` |
 | `max-output-tokens` | (new) | `u32` | `1024` |
 | `llm-timeout-secs` | (new) | `u64` | `120` |
 | `fabric-timeout-secs` | `u64` | unchanged (used by weekly review) | `120` |

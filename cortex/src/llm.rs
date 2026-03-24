@@ -39,6 +39,7 @@ pub fn complete(
 
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(timeout_secs)))
+        .http_status_as_error(false)
         .build()
         .new_agent();
 
@@ -50,10 +51,15 @@ pub fn complete(
         .send_json(&body)
         .context("anthropic API request failed")?;
 
+    let status = response.status().as_u16();
     let response_text = response
         .body_mut()
         .read_to_string()
         .context("failed to read API response body")?;
+
+    if status != 200 {
+        return Err(eyre::eyre!("anthropic API returned {status}: {response_text}"));
+    }
 
     let parsed: serde_json::Value =
         serde_json::from_str(&response_text).context("failed to parse API response JSON")?;
