@@ -256,14 +256,18 @@ pub struct IntelConfig {
     pub output_path: String,
     #[serde(rename = "on-new-note")]
     pub on_new_note: Option<String>,
-    #[serde(rename = "batch-daily")]
-    pub batch_daily: Option<String>,
     #[serde(rename = "batch-weekly")]
     pub batch_weekly: Option<String>,
     #[serde(rename = "max-input-tokens")]
     pub max_input_tokens: usize,
     #[serde(rename = "fabric-timeout-secs")]
     pub fabric_timeout_secs: u64,
+    /// Model override for daily digest LLM call. Falls back to top-level llm.model if None.
+    pub model: Option<String>,
+    #[serde(rename = "max-output-tokens")]
+    pub max_output_tokens: u32,
+    #[serde(rename = "llm-timeout-secs")]
+    pub llm_timeout_secs: u64,
 }
 
 impl Default for IntelConfig {
@@ -274,10 +278,12 @@ impl Default for IntelConfig {
             fabric_patterns: vec!["extract_wisdom".to_string(), "summarize".to_string()],
             output_path: "notes/ai".to_string(),
             on_new_note: Some("extract_wisdom".to_string()),
-            batch_daily: Some("daily_digest".to_string()),
             batch_weekly: Some("weekly_digest".to_string()),
             max_input_tokens: 50000,
             fabric_timeout_secs: 120,
+            model: Some("claude-opus-4-0-20250514".to_string()),
+            max_output_tokens: 1024,
+            llm_timeout_secs: 120,
         }
     }
 }

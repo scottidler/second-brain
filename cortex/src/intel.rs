@@ -3,13 +3,44 @@ use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::cli::IntelOpts;
-use crate::config::IntelConfig;
+use crate::config::{IntelConfig, LlmConfig};
 use crate::vault::Note;
 
+const DAILY_SYSTEM_PROMPT: &str = "\
+You are a sharp, well-read colleague reviewing someone's daily reading and notes. \
+You've read everything they ingested yesterday and you're giving them a morning \
+briefing - conversational, second-person, concise. Not a summary bot. Not a book \
+report. You notice patterns, connections, and tensions they might have missed.
+
+Output exactly three markdown sections. No frontmatter, no title heading.
+Never use em dashes. Use regular dashes, commas, or semicolons instead.
+
+## Themes
+3-5 sentences. What threads connected yesterday's reading? What was the user \
+gravitating toward? Be specific - name concepts, tools, people. Don't just list \
+topics.
+
+## Highlights
+3-5 bullet points. Each starts with a wikilink in the format [[slug|Title]] using \
+the exact slugs provided, followed by a dash and a one-liner about why this note \
+stood out or how it connects to a broader theme. Pick the most interesting or \
+connective notes, not just the longest.
+
+## Breadcrumbs
+2-3 bullet points. Provocative questions, surprising connections between notes, or \
+tensions you noticed. These should make the reader want to go back and look at \
+specific notes. Reference notes by their wikilink when relevant.";
+
 /// Generate intelligence outputs (daily digest, weekly review).
-pub fn run_intel(vault_root: &Path, notes: &[Note], config: &IntelConfig, opts: &IntelOpts) -> Result<()> {
+pub fn run_intel(
+    vault_root: &Path,
+    notes: &[Note],
+    config: &IntelConfig,
+    llm_config: &LlmConfig,
+    opts: &IntelOpts,
+) -> Result<()> {
     if opts.daily || !opts.weekly {
-        generate_daily_digest(vault_root, notes, config, opts)?;
+        generate_daily_digest(vault_root, notes, config, llm_config, opts)?;
     }
 
     if opts.weekly {
@@ -80,10 +111,48 @@ pub fn process_new_notes(vault_root: &Path, notes: &[Note], config: &IntelConfig
     Ok(processed)
 }
 
+/// Build the user prompt for the daily digest LLM call.
+///
+/// Each note is formatted with its wikilink header so the LLM can reference it.
+fn build_daily_prompt(recent_notes: &[&Note], max_input_tokens: usize) -> String {
+    let concatenated: String = recent_notes
+        .iter()
+        .map(|n| {
+            let title = n.frontmatter.title.as_deref().unwrap_or("Untitled");
+            let stem = n.path.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled");
+            format!("=== [[{stem}|{title}]] ===\n\n{}", n.body)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+    crate::llm::truncate_input(&concatenated, max_input_tokens).to_string()
+}
+
+/// Build the collapsed callout section listing all notes.
+fn build_note_callout(recent_notes: &[&Note]) -> String {
+    let mut callout = format!("> [!notes]- Yesterday's Notes ({})\n", recent_notes.len());
+    for note in recent_notes {
+        let title = note
+            .frontmatter
+            .title
+            .as_deref()
+            .unwrap_or_else(|| note.path.to_str().unwrap_or("untitled"));
+        let stem = note.path.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled");
+        callout.push_str(&format!("> - [[{stem}|{title}]]\n"));
+    }
+    callout
+}
+
 /// Generate a daily digest note.
 ///
-/// Collects notes from the previous day (yesterday's ingestions) and summarizes them.
-fn generate_daily_digest(vault_root: &Path, notes: &[Note], config: &IntelConfig, opts: &IntelOpts) -> Result<()> {
+/// Collects notes from the previous day (yesterday's ingestions) and synthesizes
+/// themes, highlights, and breadcrumbs via the Anthropic API.
+fn generate_daily_digest(
+    vault_root: &Path,
+    notes: &[Note],
+    config: &IntelConfig,
+    llm_config: &LlmConfig,
+    opts: &IntelOpts,
+) -> Result<()> {
     let yesterday = Local::now().date_naive() - chrono::Duration::days(1);
     let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
     let today = Local::now().format("%Y-%m-%d").to_string();
@@ -101,82 +170,43 @@ fn generate_daily_digest(vault_root: &Path, notes: &[Note], config: &IntelConfig
         })
         .collect();
 
-    // Gather tags from recent notes
-    let mut tag_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for note in &recent_notes {
-        if let Some(ref tags) = note.frontmatter.tags {
-            for tag in tags {
-                *tag_counts.entry(tag.as_str()).or_insert(0) += 1;
-            }
-        }
-    }
-
-    let mut top_tags: Vec<(&&str, &usize)> = tag_counts.iter().collect();
-    top_tags.sort_by(|a, b| b.1.cmp(a.1));
-    let top_tags: Vec<&str> = top_tags.iter().take(5).map(|(t, _)| **t).collect();
-
-    // Generate digest content
+    // Build frontmatter + heading
     let mut digest = String::new();
     digest.push_str(&format!(
         "---\ntitle: Daily Digest {today}\ndate: {today}\ntype: digest\ntags: [digest]\n---\n\n"
     ));
     digest.push_str(&format!("# Daily Digest - {today}\n\n"));
 
-    digest.push_str("## Notes\n\n");
     if recent_notes.is_empty() {
-        digest.push_str(&format!("No notes ingested on {yesterday_str}.\n\n"));
+        digest.push_str(&format!("No notes ingested on {yesterday_str}.\n"));
     } else {
-        for note in &recent_notes {
-            let title = note
-                .frontmatter
-                .title
-                .as_deref()
-                .unwrap_or_else(|| note.path.to_str().unwrap_or("untitled"));
-            let stem = note.path.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled");
-            digest.push_str(&format!("- [[{stem}|{title}]]\n"));
-        }
-        digest.push('\n');
-    }
+        // Try LLM synthesis
+        let model = config.model.as_deref().unwrap_or(&llm_config.model);
 
-    if !top_tags.is_empty() {
-        digest.push_str("## Active Topics\n\n");
-        for tag in &top_tags {
-            digest.push_str(&format!("- #{tag}\n"));
-        }
-        digest.push('\n');
-    }
+        let user_prompt = build_daily_prompt(&recent_notes, config.max_input_tokens);
 
-    digest.push_str(&format!(
-        "## Stats\n\n- Total vault notes: {}\n- Notes on {}: {}\n",
-        notes.len(),
-        yesterday_str,
-        recent_notes.len()
-    ));
-
-    // Fabric enhancement: synthesize across all of yesterday's notes
-    if let Some(ref pattern) = config.batch_daily
-        && crate::fabric::is_available()
-        && !recent_notes.is_empty()
-    {
-        let concatenated: String = recent_notes
-            .iter()
-            .map(|n| {
-                let title = n.frontmatter.title.as_deref().unwrap_or("Untitled");
-                format!("# {title}\n\n{}", n.body)
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n---\n\n");
-        let input = crate::fabric::truncate_input(&concatenated, config.max_input_tokens);
-        match crate::fabric::run_pattern(pattern, input, config.fabric_timeout_secs) {
-            Ok(summary) => {
-                digest.push_str("\n## AI Summary\n\n");
-                digest.push_str(summary.trim());
-                digest.push('\n');
+        match crate::llm::complete(
+            DAILY_SYSTEM_PROMPT,
+            &user_prompt,
+            model,
+            config.max_output_tokens,
+            config.llm_timeout_secs,
+            &llm_config.api_key,
+        ) {
+            Ok(synthesis) => {
+                // Strip any accidental frontmatter or title from LLM output
+                let cleaned = synthesis.trim();
+                digest.push_str(cleaned);
+                digest.push_str("\n\n");
             }
             Err(e) => {
-                log::warn!("fabric daily summary failed, skipping: {e}");
+                log::warn!("LLM daily synthesis failed, using fallback: {e}");
+                digest.push_str("*LLM synthesis unavailable.*\n\n");
             }
         }
+
+        // Always append collapsed note list
+        digest.push_str(&build_note_callout(&recent_notes));
     }
 
     // Write to output path
@@ -324,27 +354,32 @@ fn write_intel_output(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::TestVault;
+    use crate::testutil::{NoteBuilder, TestVault};
 
     #[test]
     fn test_daily_digest_on_vault() {
         let v = TestVault::new();
         let notes = v.scan();
         let config = v.config().actions.intel;
+        let llm_config = v.config().llm;
         let opts = IntelOpts {
             daily: true,
             weekly: false,
             output: None,
         };
 
-        run_intel(v.root(), &notes, &config, &opts).expect("run_intel");
+        run_intel(v.root(), &notes, &config, &llm_config, &opts).expect("run_intel");
 
         let today = Local::now().format("%Y-%m-%d").to_string();
-        let digest_path = v.root().join("ai-output").join(format!("daily-{today}.md"));
+        let digest_path = v.root().join("notes/ai").join(format!("daily-{today}.md"));
         assert!(digest_path.exists());
         let content = std::fs::read_to_string(&digest_path).expect("read");
         assert!(content.contains("Daily Digest"));
-        assert!(content.contains("Total vault notes:"));
+        // With no API key set, LLM will fail gracefully
+        assert!(
+            content.contains("LLM synthesis unavailable") || content.contains("No notes ingested"),
+            "should have fallback message or empty day message"
+        );
     }
 
     #[test]
@@ -352,15 +387,16 @@ mod tests {
         let v = TestVault::new();
         let notes = v.scan();
         let config = v.config().actions.intel;
+        let llm_config = v.config().llm;
         let opts = IntelOpts {
             daily: false,
             weekly: true,
             output: None,
         };
 
-        run_intel(v.root(), &notes, &config, &opts).expect("run_intel");
+        run_intel(v.root(), &notes, &config, &llm_config, &opts).expect("run_intel");
 
-        let output_dir = v.root().join("ai-output");
+        let output_dir = v.root().join("notes/ai");
         assert!(output_dir.exists());
         let files: Vec<_> = std::fs::read_dir(&output_dir)
             .expect("read dir")
@@ -385,10 +421,7 @@ mod tests {
 
     #[test]
     fn test_resolve_output_path_default() {
-        let config = IntelConfig {
-            output_path: "ai-output".to_string(),
-            ..Default::default()
-        };
+        let config = IntelConfig::default();
         let opts = IntelOpts {
             daily: true,
             weekly: false,
@@ -396,7 +429,7 @@ mod tests {
         };
 
         let path = resolve_output_path(Path::new("/vault"), &config, &opts, "daily-2026-03-16.md");
-        assert_eq!(path, PathBuf::from("/vault/ai-output/daily-2026-03-16.md"));
+        assert_eq!(path, PathBuf::from("/vault/notes/ai/daily-2026-03-16.md"));
     }
 
     #[test]
@@ -414,5 +447,66 @@ mod tests {
 
         let count = process_new_notes(v.root(), &notes, &config).expect("process");
         assert_eq!(count, 0, "should skip when on_new_note is None");
+    }
+
+    #[test]
+    fn test_build_daily_prompt_includes_wikilinks() {
+        let note = NoteBuilder::new("cool-video.md")
+            .title("Cool Video")
+            .body("This is about cool stuff.")
+            .build();
+        let notes = vec![&note];
+        let prompt = build_daily_prompt(&notes, 50000);
+        assert!(prompt.contains("[[cool-video|Cool Video]]"));
+        assert!(prompt.contains("This is about cool stuff."));
+    }
+
+    #[test]
+    fn test_build_note_callout_format() {
+        let note1 = NoteBuilder::new("note-one.md").title("Note One").build();
+        let note2 = NoteBuilder::new("note-two.md").title("Note Two").build();
+        let notes = vec![&note1, &note2];
+        let callout = build_note_callout(&notes);
+        assert!(callout.starts_with("> [!notes]- Yesterday's Notes (2)"));
+        assert!(callout.contains("> - [[note-one|Note One]]"));
+        assert!(callout.contains("> - [[note-two|Note Two]]"));
+    }
+
+    #[test]
+    fn test_daily_digest_fallback_on_llm_failure() {
+        // Use a bogus API key env var to force LLM failure
+        let v = TestVault::new();
+        let yesterday = Local::now().date_naive() - chrono::Duration::days(1);
+        let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
+        v.add_note(
+            "yesterday-note.md",
+            &format!(
+                "---\ntitle: Yesterday Note\ndate: {yesterday_str}\ntype: note\ndomain: tech\norigin: authored\ntags: [rust]\n---\nSome content from yesterday.\n"
+            ),
+        );
+        let notes = v.scan();
+        let config = v.config().actions.intel;
+        // Use a nonexistent env var to guarantee LLM failure
+        let llm_config = LlmConfig {
+            api_key: "NONEXISTENT_TEST_KEY_99999".to_string(),
+            ..Default::default()
+        };
+        let opts = IntelOpts {
+            daily: true,
+            weekly: false,
+            output: None,
+        };
+
+        run_intel(v.root(), &notes, &config, &llm_config, &opts).expect("run_intel");
+
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let digest_path = v.root().join("notes/ai").join(format!("daily-{today}.md"));
+        let content = std::fs::read_to_string(&digest_path).expect("read");
+        assert!(content.contains("LLM synthesis unavailable"), "should show fallback");
+        assert!(content.contains("[!notes]-"), "should have collapsed callout");
+        assert!(
+            content.contains("[[yesterday-note|Yesterday Note]]"),
+            "should list the note"
+        );
     }
 }

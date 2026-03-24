@@ -9,6 +9,7 @@ pub mod frontmatter;
 pub mod intel;
 pub mod linking;
 pub mod links;
+pub mod llm;
 pub mod logging;
 pub mod migrate;
 pub mod naming;
@@ -367,7 +368,7 @@ pub fn run_sweep(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result
 pub fn run_intel(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<()> {
     log::info!("starting intel command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
-    intel::run_intel(vault_root, &notes, &config.actions.intel, opts)
+    intel::run_intel(vault_root, &notes, &config.actions.intel, &config.llm, opts)
 }
 
 #[cfg(test)]
