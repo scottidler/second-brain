@@ -239,7 +239,7 @@ impl OracleMcpServer {
                     "date": e.date,
                     "method": e.method,
                     "title": e.title,
-                    "path": e.path,
+                    "filename": e.filename,
                     "source": e.source,
                     "domain": e.domain,
                 })

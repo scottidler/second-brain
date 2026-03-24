@@ -155,7 +155,7 @@ impl TestVault {
         // -- Protected file (should be skipped) --
         write(
             root,
-            "system/borg-ledger.md",
+            "system/views/borg-ledger.md",
             "---\ntitle: Borg Ledger\n---\nManaged by borg, do not touch.\n",
         );
 

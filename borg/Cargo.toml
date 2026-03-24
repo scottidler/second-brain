@@ -42,3 +42,6 @@ base64 = "0.22"
 version = "0.12"
 default-features = false
 features = ["client", "gateway", "model", "rustls_backend"]
+
+[dev-dependencies]
+tempfile = "3.27.0"

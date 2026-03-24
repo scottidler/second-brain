@@ -260,7 +260,7 @@ pub async fn process_url(
                     method: method.into(),
                     status: LedgerStatus::Failed,
                     title: None,
-                    path: None,
+                    filename: None,
                     source: canonical.clone(),
                     domain: None,
                     trace_id: Some(trace_id.to_string()),
@@ -325,7 +325,7 @@ async fn process_url_inner(
                     method: method.into(),
                     status: LedgerStatus::Skipped,
                     title: None,
-                    path: None,
+                    filename: None,
                     source: canonical.clone(),
                     domain: None,
                     trace_id: Some(trace_id.to_string()),
@@ -344,29 +344,32 @@ async fn process_url_inner(
     }
 
     // Replace existing note if found. Runs for both normal and --force ingestions.
-    // Scans the vault by source URL rather than trusting the ledger's stored path,
-    // because cortex may have moved the file (e.g., inbox/ -> notes/).
+    // We preserve the original date and write location so the new note overwrites
+    // in place rather than demoting a promoted note back to inbox.
+    let mut reingest_dest: Option<PathBuf> = None;
     if let Some(existing) = ledger::find_completed(&ledger_file, &canonical)? {
         log::info!(
             "[{trace_id}] Found existing entry for {canonical} (ingested {}), replacing",
             existing.date
         );
         let vault_root = expand_tilde(&config.vault.root_path);
-        if let Some(old_note_path) = find_note_by_source(&vault_root, &canonical) {
-            original_date = read_note_date(&old_note_path);
-            log::debug!("[{trace_id}] Preserved original date: {:?}", original_date);
-            std::fs::remove_file(&old_note_path).context("Failed to delete old note during reingest")?;
-            log::info!("[{trace_id}] Deleted old note: {}", old_note_path.display());
-        } else if existing.path != "-" {
-            let old_path = vault_root.join(&existing.path);
-            if old_path.exists() {
-                original_date = read_note_date(&old_path);
-                std::fs::remove_file(&old_path).context("Failed to delete old note during reingest")?;
-                log::info!(
-                    "[{trace_id}] Deleted old note (via ledger path): {}",
-                    old_path.display()
-                );
+        let old_note_path = find_note_by_source(&vault_root, &canonical).or_else(|| {
+            if existing.filename != "-" {
+                [vault_root.join("notes"), vault_root.join("inbox")]
+                    .iter()
+                    .map(|dir| dir.join(&existing.filename))
+                    .find(|p| p.exists())
+            } else {
+                None
             }
+        });
+        if let Some(ref old_path) = old_note_path {
+            original_date = read_note_date(old_path);
+            reingest_dest = old_path.parent().map(|p| p.to_path_buf());
+            log::debug!("[{trace_id}] Preserved original date: {:?}", original_date);
+            log::debug!("[{trace_id}] Will overwrite in: {:?}", reingest_dest);
+            std::fs::remove_file(old_path).context("Failed to remove old note during reingest")?;
+            log::info!("[{trace_id}] Removed old note: {}", old_path.display());
         }
         ledger::mark_replaced(&ledger_file, existing.line_number)?;
         log::info!("[{trace_id}] Marked ledger row {} as replaced", existing.line_number);
@@ -463,8 +466,8 @@ async fn process_url_inner(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    // Resolve write path
-    let dest_path = resolve_destination(&config.vault.inbox_path);
+    // Resolve write path: reingest preserves the original location, new ingests go to inbox
+    let dest_path = reingest_dest.unwrap_or_else(|| resolve_destination(&config.vault.inbox_path));
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&filename);
@@ -487,7 +490,7 @@ async fn process_url_inner(
             method: method.into(),
             status: LedgerStatus::Completed,
             title: Some(title.clone()),
-            path: vault_relative_path(&note_path, &config.vault.root_path),
+            filename: extract_filename(&note_path),
             source: canonical.clone(),
             domain: None,
             trace_id: Some(trace_id.to_string()),
@@ -834,7 +837,7 @@ async fn process_image_inner(
             method: method.into(),
             status: LedgerStatus::Completed,
             title: Some(title.clone()),
-            path: vault_relative_path(&note_path, &config.vault.root_path),
+            filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
             trace_id: Some(trace_id.to_string()),
@@ -1055,7 +1058,7 @@ async fn process_audio_inner(
             method: method.into(),
             status: LedgerStatus::Completed,
             title: Some(title.clone()),
-            path: vault_relative_path(&note_path, &config.vault.root_path),
+            filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
             trace_id: Some(trace_id.to_string()),
@@ -1309,7 +1312,7 @@ async fn process_document_file_inner(
             method: method.into(),
             status: LedgerStatus::Completed,
             title: Some(title.clone()),
-            path: vault_relative_path(&note_path, &config.vault.root_path),
+            filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
             trace_id: Some(trace_id.to_string()),
@@ -1502,7 +1505,7 @@ async fn process_text_inner(
             method: method.into(),
             status: LedgerStatus::Completed,
             title: Some(title.clone()),
-            path: vault_relative_path(&note_path, &config.vault.root_path),
+            filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
             trace_id: Some(trace_id.to_string()),
@@ -1651,7 +1654,7 @@ async fn process_vocab(
             method: method.into(),
             status: LedgerStatus::Completed,
             title: Some(title.clone()),
-            path: vault_relative_path(&note_path, &config.vault.root_path),
+            filename: extract_filename(&note_path),
             source: format!("[{}]", text.trim()),
             domain: None,
             trace_id: Some(trace_id.to_string()),
@@ -2056,7 +2059,7 @@ async fn process_code_snippet(
             method: method.into(),
             status: LedgerStatus::Completed,
             title: Some(title.clone()),
-            path: vault_relative_path(&note_path, &config.vault.root_path),
+            filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
             trace_id: Some(trace_id.to_string()),
@@ -2134,18 +2137,10 @@ fn build_obsidian_url(vault_name: &str, note_path: &str, vault_root: &str) -> Op
 
 /// Compute the vault-relative path for a note, for use in the ledger Path column.
 /// Returns something like "notes/some-title.md".
-fn vault_relative_path(note_path: &std::path::Path, vault_root: &str) -> Option<String> {
-    let expanded_root = expand_tilde(vault_root);
-    let root_str = expanded_root.to_string_lossy();
-    let root_prefix = if root_str.ends_with('/') {
-        root_str.to_string()
-    } else {
-        format!("{root_str}/")
-    };
+fn extract_filename(note_path: &std::path::Path) -> Option<String> {
     note_path
-        .to_string_lossy()
-        .strip_prefix(&root_prefix)
-        .map(|s| s.to_string())
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
 }
 
 /// Expand a vault root path (handling ~/) to an absolute PathBuf.
@@ -2708,5 +2703,207 @@ int main() {
     fn test_build_obsidian_url_vault_name_with_spaces() {
         let url = build_obsidian_url("My Notes", "/home/user/obsidian/note.md", "/home/user/obsidian/");
         assert_eq!(url, Some("obsidian://open?vault=My%20Notes&file=note.md".to_string()));
+    }
+
+    #[test]
+    fn test_extract_filename_strips_directory() {
+        let path = std::path::Path::new("/home/user/vault/notes/my-note.md");
+        assert_eq!(extract_filename(path), Some("my-note.md".to_string()));
+    }
+
+    #[test]
+    fn test_extract_filename_bare_filename() {
+        let path = std::path::Path::new("my-note.md");
+        assert_eq!(extract_filename(path), Some("my-note.md".to_string()));
+    }
+
+    #[test]
+    fn test_extract_filename_inbox_path() {
+        let path = std::path::Path::new("/vault/inbox/some-article.md");
+        assert_eq!(extract_filename(path), Some("some-article.md".to_string()));
+    }
+
+    #[test]
+    fn test_find_note_by_source_in_notes_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path();
+        let notes = vault.join("notes");
+        std::fs::create_dir_all(&notes).expect("mkdir");
+
+        let note_content = "---\ntitle: Test\nsource: \"https://example.com/article\"\n---\nBody.\n";
+        std::fs::write(notes.join("test-article.md"), note_content).expect("write");
+
+        let found = find_note_by_source(vault, "https://example.com/article");
+        assert!(found.is_some(), "should find note by source URL");
+        assert_eq!(
+            found.unwrap().file_name().unwrap().to_str().unwrap(),
+            "test-article.md"
+        );
+    }
+
+    #[test]
+    fn test_find_note_by_source_in_inbox() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path();
+        let inbox = vault.join("inbox");
+        std::fs::create_dir_all(&inbox).expect("mkdir");
+
+        let note_content = "---\ntitle: Inbox Note\nsource: \"https://example.com/inbox-item\"\n---\nBody.\n";
+        std::fs::write(inbox.join("inbox-item.md"), note_content).expect("write");
+
+        let found = find_note_by_source(vault, "https://example.com/inbox-item");
+        assert!(found.is_some(), "should find note in inbox/");
+        assert!(
+            found.unwrap().starts_with(&inbox),
+            "found path should be in inbox/"
+        );
+    }
+
+    #[test]
+    fn test_find_note_by_source_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path();
+        let notes = vault.join("notes");
+        std::fs::create_dir_all(&notes).expect("mkdir");
+
+        let note_content = "---\ntitle: Other\nsource: \"https://other.com\"\n---\nBody.\n";
+        std::fs::write(notes.join("other.md"), note_content).expect("write");
+
+        let found = find_note_by_source(vault, "https://example.com/missing");
+        assert!(found.is_none(), "should not find non-matching source");
+    }
+
+    #[test]
+    fn test_find_note_by_source_skips_dotfiles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path();
+        let hidden = vault.join(".obsidian");
+        std::fs::create_dir_all(&hidden).expect("mkdir");
+
+        let note_content = "---\nsource: \"https://example.com/hidden\"\n---\n";
+        std::fs::write(hidden.join("config.md"), note_content).expect("write");
+
+        let found = find_note_by_source(vault, "https://example.com/hidden");
+        assert!(found.is_none(), "should skip dot-prefixed directories");
+    }
+
+    #[test]
+    fn test_reingest_preserves_notes_directory() {
+        // Integration test: when a note exists in notes/ and we reingest the same URL,
+        // the reingest_dest should point to notes/, not inbox/.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path();
+        let notes = vault.join("notes");
+        let inbox = vault.join("inbox");
+        std::fs::create_dir_all(&notes).expect("mkdir notes");
+        std::fs::create_dir_all(&inbox).expect("mkdir inbox");
+        std::fs::create_dir_all(vault.join("system").join("views")).expect("mkdir ledger dir");
+
+        let source_url = "https://example.com/reingest-test";
+
+        // Create an existing note in notes/ (already promoted by cortex)
+        let note_content = format!(
+            "---\ntitle: Original\ndate: 2026-03-20\nsource: \"{source_url}\"\n---\nOriginal body.\n"
+        );
+        std::fs::write(notes.join("reingest-test.md"), &note_content).expect("write note");
+
+        // Create a ledger with the existing entry
+        let ledger_file = vault.join("system").join("views").join("borg-ledger.md");
+        let ledger_content = format!(
+            "---\ntitle: Borg Ledger\ndate: 2026-03-23\ntype: system\ndomain: system\norigin: authored\ntags: []\n---\n\n\
+             # Borg Ledger\n\n\
+             | Date | Time | Method | Status | Title | Filename | Source | Domain | Trace |\n\
+             |------|------|--------|--------|-------|----------|--------|--------|-------|\n\
+             | 2026-03-20 | 10:00 | http | {} | [[Original]] | reingest-test.md | {source_url} | ai | tr-000001 |\n",
+            "\u{2705}"
+        );
+        std::fs::write(&ledger_file, ledger_content).expect("write ledger");
+
+        // Simulate the reingest lookup logic from process_url_inner
+        let existing = ledger::find_completed(&ledger_file, source_url)
+            .expect("find_completed")
+            .expect("should find existing entry");
+
+        let old_note_path = find_note_by_source(vault, source_url).or_else(|| {
+            if existing.filename != "-" {
+                [vault.join("notes"), vault.join("inbox")]
+                    .iter()
+                    .map(|d| d.join(&existing.filename))
+                    .find(|p| p.exists())
+            } else {
+                None
+            }
+        });
+
+        assert!(old_note_path.is_some(), "should find existing note");
+        let reingest_dest = old_note_path.as_ref().unwrap().parent().map(|p| p.to_path_buf());
+        assert_eq!(
+            reingest_dest.as_ref().unwrap(),
+            &notes,
+            "reingest should target notes/ dir, not inbox/"
+        );
+    }
+
+    #[test]
+    fn test_reingest_falls_back_to_inbox_for_new_urls() {
+        // When no existing note is found, dest should fall back to inbox.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path();
+        let inbox_path = vault.join("inbox");
+        std::fs::create_dir_all(&inbox_path).expect("mkdir");
+
+        let found = find_note_by_source(vault, "https://example.com/brand-new");
+        assert!(found.is_none());
+
+        // reingest_dest would be None, so resolve_destination is used
+        let reingest_dest: Option<PathBuf> = None;
+        let dest = reingest_dest.unwrap_or_else(|| inbox_path.clone());
+        assert_eq!(dest, inbox_path, "new URLs should land in inbox/");
+    }
+
+    #[test]
+    fn test_reingest_finds_note_via_ledger_filename_fallback() {
+        // When find_note_by_source fails (e.g. source URL changed slightly),
+        // the fallback uses the ledger's stored filename to find the note.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path();
+        let notes = vault.join("notes");
+        std::fs::create_dir_all(&notes).expect("mkdir notes");
+        std::fs::create_dir_all(vault.join("system").join("views")).expect("mkdir ledger dir");
+
+        // Note exists but with a DIFFERENT source URL (e.g. URL was re-canonicalized)
+        let note_content = "---\ntitle: Fallback\nsource: \"https://old-url.com/page\"\n---\nBody.\n";
+        std::fs::write(notes.join("fallback-note.md"), note_content).expect("write");
+
+        // Ledger references the new canonical URL but has the filename
+        let ledger_file = vault.join("system").join("views").join("borg-ledger.md");
+        let ledger_content = format!(
+            "---\ntitle: Borg Ledger\ndate: 2026-03-23\ntype: system\ndomain: system\norigin: authored\ntags: []\n---\n\n\
+             # Borg Ledger\n\n\
+             | Date | Time | Method | Status | Title | Filename | Source | Domain | Trace |\n\
+             |------|------|--------|--------|-------|----------|--------|--------|-------|\n\
+             | 2026-03-20 | 10:00 | http | {} | [[Fallback]] | fallback-note.md | https://new-url.com/page | ai | tr-000001 |\n",
+            "\u{2705}"
+        );
+        std::fs::write(&ledger_file, ledger_content).expect("write ledger");
+
+        let existing = ledger::find_completed(&ledger_file, "https://new-url.com/page")
+            .expect("find_completed")
+            .expect("should find entry");
+
+        // find_note_by_source won't match (source URLs differ)
+        let by_source = find_note_by_source(vault, "https://new-url.com/page");
+        assert!(by_source.is_none(), "source URL mismatch, should not find");
+
+        // Fallback: use ledger filename to locate the file
+        let candidates = [vault.join("notes").join(&existing.filename), vault.join("inbox").join(&existing.filename)];
+        let by_filename = candidates.iter().find(|p| p.exists());
+
+        assert!(by_filename.is_some(), "should find note via filename fallback");
+        assert_eq!(
+            by_filename.as_ref().unwrap().parent().unwrap(),
+            notes,
+            "found note should be in notes/"
+        );
     }
 }

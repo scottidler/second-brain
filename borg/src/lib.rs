@@ -378,10 +378,15 @@ pub async fn run_reingest(
         entries
             .into_iter()
             .filter(|e| {
-                if e.path == "-" {
+                if e.filename == "-" {
                     return false;
                 }
-                let note_path = vault_root.join(&e.path);
+                let note_path = [vault_root.join("notes").join(&e.filename), vault_root.join("inbox").join(&e.filename)]
+                    .into_iter()
+                    .find(|p| p.exists());
+                let Some(note_path) = note_path else {
+                    return false;
+                };
                 match std::fs::read_to_string(&note_path) {
                     Ok(content) => {
                         // Quick frontmatter type: field check

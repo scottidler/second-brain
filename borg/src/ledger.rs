@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// Resolve the Borg Ledger path from borg config.
 pub fn ledger_path(config: &Config) -> PathBuf {
     let root = expand_tilde(&config.vault.root_path);
-    root.join("system").join("borg-ledger.md")
+    root.join("system").join("views").join("borg-ledger.md")
 }
 
 fn expand_tilde(path: &str) -> PathBuf {

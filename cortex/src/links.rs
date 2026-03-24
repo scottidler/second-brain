@@ -216,7 +216,7 @@ mod tests {
             "---\ntitle: Zone Blocking Families\ndate: 2026-03-18\ntype: note\ndomain: football\norigin: authored\ntags:\n  - football\n---\nZone blocking content.\n",
         );
         v.add_note(
-            "borg-ledger.md",
+            "views/borg-ledger.md",
             "---\ntitle: Borg Ledger\ndate: 2026-03-18\ntype: system\ndomain: system\norigin: generated\ntags: []\n---\nSee [[Zone Blocking Families]] for details.\n",
         );
         let notes = v.scan();
