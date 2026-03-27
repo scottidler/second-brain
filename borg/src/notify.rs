@@ -2,7 +2,7 @@ use crate::config::TelegramConfig;
 use crate::router::format_reply;
 use crate::types::IngestResult;
 use teloxide::prelude::*;
-use teloxide::types::ChatId;
+use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup};
 
 /// Shared notification service that sends feedback via Telegram.
 /// Clone-cheap: `Bot` is an HTTP client wrapper.
@@ -67,17 +67,27 @@ impl Notifier {
 
     /// Send the full result message (Saved/Duplicate/Failed) with HTML formatting.
     ///
-    /// Fire-and-forget: logs on failure, never errors the caller.
+    /// When an Obsidian deep link is available, attaches an inline keyboard
+    /// button. Telegram's HTML `<a>` tags strip custom URI schemes like
+    /// `obsidian://`, but inline keyboard URL buttons support them.
     pub async fn result(&self, result: &IngestResult, display_source: &str, override_chat_id: Option<i64>) {
         let chat_id = self.resolve_chat_id(override_chat_id);
         let reply = format_telegram_reply(result, display_source);
 
-        if let Err(e) = self
+        let mut msg = self
             .bot
             .send_message(chat_id, reply)
-            .parse_mode(teloxide::types::ParseMode::Html)
-            .await
-        {
+            .parse_mode(teloxide::types::ParseMode::Html);
+
+        if let Some(url_str) = &result.obsidian_url {
+            if let Ok(url) = reqwest::Url::parse(url_str) {
+                let button = InlineKeyboardButton::url("Open in Obsidian", url);
+                let keyboard = InlineKeyboardMarkup::default().append_row(vec![button]);
+                msg = msg.reply_markup(keyboard);
+            }
+        }
+
+        if let Err(e) = msg.await {
             log::warn!("notify: failed to send result message: {e}");
         }
     }
@@ -88,16 +98,14 @@ pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// Format an `IngestResult` as an HTML Telegram message with an optional
-/// clickable "Open in Obsidian" deep link.
+/// Format an `IngestResult` as an HTML Telegram message.
+///
+/// The Obsidian deep link is attached as an inline keyboard button by
+/// `Notifier::result`, not as an HTML `<a>` tag (Telegram strips custom
+/// URI schemes from HTML links).
 pub fn format_telegram_reply(result: &IngestResult, display_source: &str) -> String {
     let base = format_reply(result, display_source);
-    let escaped = html_escape(&base);
-
-    match &result.obsidian_url {
-        Some(url) => format!("{escaped}\n<a href=\"{url}\">Open in Obsidian</a>"),
-        None => escaped,
-    }
+    html_escape(&base)
 }
 
 #[cfg(test)]
@@ -132,7 +140,9 @@ mod tests {
         };
         let reply = format_telegram_reply(&result, "https://example.com");
         assert!(reply.contains("Saved: Test Article"));
-        assert!(reply.contains("<a href=\"obsidian://search?vault=obsidian&query=test-article\">Open in Obsidian</a>"));
+        // Deep link is now an inline keyboard button, not in the message text
+        assert!(!reply.contains("Open in Obsidian"));
+        assert!(!reply.contains("<a href="));
     }
 
     #[test]
@@ -160,7 +170,7 @@ mod tests {
         let reply = format_telegram_reply(&result, "https://example.com");
         assert!(reply.contains("&lt;html&gt;"));
         assert!(reply.contains("&amp;"));
-        assert!(reply.contains("<a href="));
+        assert!(!reply.contains("<a href="));
     }
 
     #[test]
