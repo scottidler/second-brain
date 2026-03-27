@@ -1,5 +1,35 @@
 // Content quality gate - detects blocked/garbage content before note creation.
 
+/// Patterns that indicate the LLM couldn't see the full content (truncation artifacts).
+const TRUNCATION_INDICATORS: &[&str] = &[
+    "[not detailed in provided content]",
+    "[not available in provided content]",
+    "[not available in transcript]",
+    "[content not provided]",
+    "[not mentioned in provided content]",
+    "[not included in provided content]",
+    "[information not available]",
+    "[details not provided]",
+    "[not covered in provided content]",
+    "[not in provided content]",
+    "[not specified in provided content]",
+];
+
+/// Check summarized output for signs of truncation artifacts.
+/// Returns Some(reason) if the output appears to contain placeholder content
+/// from an LLM that didn't see the full input.
+pub fn detect_truncation_artifacts(summary: &str) -> Option<String> {
+    let lower = summary.to_lowercase();
+    for indicator in TRUNCATION_INDICATORS {
+        if lower.contains(indicator) {
+            return Some(format!(
+                "Truncation artifact detected: summary contains '{indicator}'"
+            ));
+        }
+    }
+    None
+}
+
 /// Known block page title patterns (high confidence - these are almost never real titles)
 const BLOCKED_TITLE_INDICATORS: &[&str] = &[
     "just a moment",
@@ -134,5 +164,29 @@ mod tests {
     fn test_case_insensitive_content() {
         let result = detect_blocked_content("CHECKING YOUR BROWSER before accessing", "Title");
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_detect_truncation_not_detailed() {
+        let summary = "1. **Basic Prompting** - Just you and a prompt.\n\
+                        6. [Not detailed in provided content] - Advanced level.";
+        let result = detect_truncation_artifacts(summary);
+        assert!(result.is_some());
+        assert!(result.as_ref().is_some_and(|r| r.contains("Truncation artifact")));
+    }
+
+    #[test]
+    fn test_detect_truncation_case_insensitive() {
+        let summary = "Some text [NOT DETAILED IN PROVIDED CONTENT] more text";
+        let result = detect_truncation_artifacts(summary);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_clean_summary_passes_truncation_check() {
+        let summary = "## Key Ideas\n\n- **Great idea** - This is well explained.\n\
+                        - **Another idea** - Also well covered.";
+        let result = detect_truncation_artifacts(summary);
+        assert!(result.is_none());
     }
 }

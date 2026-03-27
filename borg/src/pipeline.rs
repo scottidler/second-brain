@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::description;
 use crate::extraction;
 use crate::fabric;
+use crate::quality;
 use crate::hygiene;
 use crate::jina;
 use crate::ledger::{self, LedgerEntry, LedgerStatus};
@@ -589,12 +590,26 @@ async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
 
     // Summarize via Fabric (depends on transcript, runs after join)
     let summary = if use_fabric {
-        fabric::summarize(&transcript, true, &config.fabric)
+        let initial = fabric::summarize(&transcript, true, &config.fabric)
             .await
             .unwrap_or_else(|e| {
                 log::warn!("Fabric summarization failed: {e:#}");
                 transcript.clone()
-            })
+            });
+
+        // Quality gate: check for truncation artifacts in the summary
+        if let Some(reason) = quality::detect_truncation_artifacts(&initial) {
+            log::warn!("Quality gate failed: {reason}");
+            log::info!("Re-summarizing with forced chunked approach");
+            fabric::summarize_forced_chunked(&transcript, true, &config.fabric)
+                .await
+                .unwrap_or_else(|e| {
+                    log::warn!("Chunked re-summarization also failed: {e:#}");
+                    initial
+                })
+        } else {
+            initial
+        }
     } else {
         transcript.clone()
     };
@@ -619,12 +634,26 @@ async fn process_article_fabric(url: &str, config: &Config) -> Result<(String, S
     let title = extract_article_title(&article_md, url);
 
     // Summarize via Fabric (graceful failure)
-    let summary = fabric::summarize(&article_md, false, &config.fabric)
+    let initial = fabric::summarize(&article_md, false, &config.fabric)
         .await
         .unwrap_or_else(|e| {
             log::warn!("Fabric summarization failed: {e:#}");
             article_md.clone()
         });
+
+    // Quality gate: check for truncation artifacts
+    let summary = if let Some(reason) = quality::detect_truncation_artifacts(&initial) {
+        log::warn!("Quality gate failed for article: {reason}");
+        log::info!("Re-summarizing article with forced chunked approach");
+        fabric::summarize_forced_chunked(&article_md, false, &config.fabric)
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("Chunked re-summarization also failed: {e:#}");
+                initial
+            })
+    } else {
+        initial
+    };
 
     Ok((title, summary, ContentType::Article))
 }

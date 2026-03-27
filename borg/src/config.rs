@@ -260,6 +260,7 @@ pub struct FabricConfig {
     pub model: String,
     pub summarize_pattern_youtube: String,
     pub summarize_pattern_article: String,
+    pub condense_pattern: String,
     pub tag_pattern: String,
     pub max_content_chars: usize,
 }
@@ -271,8 +272,9 @@ impl Default for FabricConfig {
             model: String::new(),
             summarize_pattern_youtube: "obsidian-note.md".to_string(),
             summarize_pattern_article: "obsidian-note.md".to_string(),
+            condense_pattern: "condense.md".to_string(),
             tag_pattern: "create_tags".to_string(),
-            max_content_chars: 30000,
+            max_content_chars: 100000,
         }
     }
 }

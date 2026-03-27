@@ -101,7 +101,138 @@ pub async fn summarize(content: &str, is_youtube: bool, config: &FabricConfig) -
     } else {
         &config.summarize_pattern_article
     };
-    run_pattern(pattern, content, config).await
+
+    if content.len() <= config.max_content_chars {
+        return run_pattern(pattern, content, config).await;
+    }
+
+    log::info!(
+        "Content exceeds max_content_chars ({} > {}), using multi-pass chunked summarization",
+        content.len(),
+        config.max_content_chars
+    );
+    summarize_chunked(content, pattern, config).await
+}
+
+/// Force chunked summarization regardless of content length.
+/// Used when quality gate detects truncation artifacts in a single-pass summary.
+pub async fn summarize_forced_chunked(content: &str, is_youtube: bool, config: &FabricConfig) -> Result<String> {
+    let pattern = if is_youtube {
+        &config.summarize_pattern_youtube
+    } else {
+        &config.summarize_pattern_article
+    };
+    log::info!(
+        "Forced chunked summarization for {} chars of content",
+        content.len()
+    );
+    summarize_chunked(content, pattern, config).await
+}
+
+/// Multi-pass summarization for content that exceeds max_content_chars.
+/// 1. Split content into overlapping chunks that fit within the limit.
+/// 2. Run the condense pattern on each chunk to extract key details.
+/// 3. Concatenate condensed chunks and run the final summarize pattern.
+fn summarize_chunked<'a>(content: &'a str, pattern: &'a str, config: &'a FabricConfig) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
+    Box::pin(async move {
+    let chunk_size = config.max_content_chars;
+    // 10% overlap to avoid losing context at chunk boundaries
+    let overlap = chunk_size / 10;
+    let chunks = split_with_overlap(content, chunk_size, overlap);
+
+    log::info!(
+        "Split {} chars into {} chunks (chunk_size={}, overlap={})",
+        content.len(),
+        chunks.len(),
+        chunk_size,
+        overlap
+    );
+
+    // Condense each chunk in sequence (parallel would hammer the LLM)
+    let mut condensed_parts = Vec::with_capacity(chunks.len());
+    for (i, chunk) in chunks.iter().enumerate() {
+        log::info!(
+            "Condensing chunk {}/{} ({} chars)",
+            i + 1,
+            chunks.len(),
+            chunk.len()
+        );
+        let condensed = run_pattern(&config.condense_pattern, chunk, config).await?;
+        condensed_parts.push(condensed);
+    }
+
+    let merged = condensed_parts.join("\n\n---\n\n");
+    log::info!(
+        "Condensed {} chars down to {} chars, running final summarization",
+        content.len(),
+        merged.len()
+    );
+
+    // If the condensed result still exceeds the limit, recurse
+    if merged.len() > config.max_content_chars {
+        log::warn!(
+            "Condensed output still exceeds limit ({} > {}), recursing",
+            merged.len(),
+            config.max_content_chars
+        );
+        return summarize_chunked(&merged, pattern, config).await;
+    }
+
+    run_pattern(pattern, &merged, config).await
+    })
+}
+
+/// Split text into chunks of approximately `chunk_size` chars with `overlap` char overlap.
+/// Tries to split at paragraph boundaries (\n\n) or sentence boundaries (. ) for cleaner chunks.
+fn split_with_overlap(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
+    if text.len() <= chunk_size {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+
+    while start < text.len() {
+        let end = (start + chunk_size).min(text.len());
+
+        // Try to find a clean break point near the end
+        let actual_end = if end < text.len() {
+            find_break_point(text, end.saturating_sub(200), end)
+        } else {
+            end
+        };
+
+        chunks.push(text[start..actual_end].to_string());
+
+        if actual_end >= text.len() {
+            break;
+        }
+
+        // Next chunk starts `overlap` chars before the end of this one
+        start = actual_end.saturating_sub(overlap);
+    }
+
+    chunks
+}
+
+/// Find a clean break point (paragraph or sentence boundary) in the range [search_start, end].
+/// Falls back to `end` if no good break point is found.
+fn find_break_point(text: &str, search_start: usize, end: usize) -> usize {
+    let region = &text[search_start..end];
+
+    // Prefer paragraph breaks
+    if let Some(pos) = region.rfind("\n\n") {
+        return search_start + pos + 2;
+    }
+    // Fall back to sentence breaks
+    if let Some(pos) = region.rfind(". ") {
+        return search_start + pos + 2;
+    }
+    // Fall back to line breaks
+    if let Some(pos) = region.rfind('\n') {
+        return search_start + pos + 1;
+    }
+    end
 }
 
 pub async fn generate_tags(content: &str, config: &FabricConfig) -> Result<Vec<String>> {

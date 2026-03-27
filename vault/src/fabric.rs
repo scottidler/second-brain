@@ -85,6 +85,12 @@ fn truncate_input(input: &str, max_chars: usize) -> String {
     if max_chars == 0 || input.len() <= max_chars {
         input.to_string()
     } else {
+        log::warn!(
+            "Truncating input from {} to {} chars ({} chars lost)",
+            input.len(),
+            max_chars,
+            input.len() - max_chars
+        );
         input[..max_chars].to_string()
     }
 }
