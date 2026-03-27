@@ -3,12 +3,12 @@ use crate::config::Config;
 use crate::description;
 use crate::extraction;
 use crate::fabric;
-use crate::quality;
 use crate::hygiene;
 use crate::jina;
 use crate::ledger::{self, LedgerEntry, LedgerStatus};
 use crate::markdown::{self, ContentType, NoteContent};
 use crate::ocr;
+use crate::quality;
 use crate::router;
 use crate::trace;
 use crate::transcription::TranscriptionClient;
@@ -501,11 +501,7 @@ async fn process_url_inner(
     // Release inflight guard now that ledger has the ✅ entry
     INFLIGHT.lock().await.remove(&canonical);
 
-    let obsidian_url = build_obsidian_url(
-        &config.vault.vault_name,
-        &note_path.to_string_lossy(),
-        &config.vault.root_path,
-    );
+    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
 
     Ok(IngestResult {
         status: IngestStatus::Completed,
@@ -873,11 +869,7 @@ async fn process_image_inner(
         },
     )?;
 
-    let obsidian_url = build_obsidian_url(
-        &config.vault.vault_name,
-        &note_path.to_string_lossy(),
-        &config.vault.root_path,
-    );
+    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
 
     Ok(IngestResult {
         status: IngestStatus::Completed,
@@ -1094,11 +1086,7 @@ async fn process_audio_inner(
         },
     )?;
 
-    let obsidian_url = build_obsidian_url(
-        &config.vault.vault_name,
-        &note_path.to_string_lossy(),
-        &config.vault.root_path,
-    );
+    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
 
     Ok(IngestResult {
         status: IngestStatus::Completed,
@@ -1348,11 +1336,7 @@ async fn process_document_file_inner(
         },
     )?;
 
-    let obsidian_url = build_obsidian_url(
-        &config.vault.vault_name,
-        &note_path.to_string_lossy(),
-        &config.vault.root_path,
-    );
+    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
 
     Ok(IngestResult {
         status: IngestStatus::Completed,
@@ -1541,11 +1525,7 @@ async fn process_text_inner(
         },
     )?;
 
-    let obsidian_url = build_obsidian_url(
-        &config.vault.vault_name,
-        &note_path.to_string_lossy(),
-        &config.vault.root_path,
-    );
+    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
 
     Ok(IngestResult {
         status: IngestStatus::Completed,
@@ -1690,11 +1670,7 @@ async fn process_vocab(
         },
     )?;
 
-    let obsidian_url = build_obsidian_url(
-        &config.vault.vault_name,
-        &note_path.to_string_lossy(),
-        &config.vault.root_path,
-    );
+    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
 
     Ok(IngestResult {
         status: IngestStatus::Completed,
@@ -2095,11 +2071,7 @@ async fn process_code_snippet(
         },
     )?;
 
-    let obsidian_url = build_obsidian_url(
-        &config.vault.vault_name,
-        &note_path.to_string_lossy(),
-        &config.vault.root_path,
-    );
+    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
 
     Ok(IngestResult {
         status: IngestStatus::Completed,
@@ -2142,34 +2114,22 @@ fn resolve_destination(inbox_path: &str) -> PathBuf {
     expand_tilde(inbox_path)
 }
 
-/// Build an obsidian://open deep link from vault name and note path.
+/// Build an obsidian://search deep link from vault name and note path.
 ///
-/// `note_path` is the absolute filesystem path to the written note.
-/// `vault_root` is the unexpanded config value (e.g., "~/repos/scottidler/obsidian/").
-/// Returns None if note_path doesn't start with the expanded vault_root.
-fn build_obsidian_url(vault_name: &str, note_path: &str, vault_root: &str) -> Option<String> {
-    let expanded_root = expand_tilde(vault_root);
-    let root_str = expanded_root.to_string_lossy();
-    let root_prefix = if root_str.ends_with('/') {
-        root_str.to_string()
-    } else {
-        format!("{root_str}/")
-    };
-
-    let rel_path = note_path.strip_prefix(&root_prefix)?;
-
+/// Uses the filename stem (without extension or directory) as the search query,
+/// so the link survives note moves between directories (e.g. inbox/ -> notes/).
+fn build_obsidian_url(vault_name: &str, note_path: &str) -> Option<String> {
+    let path = std::path::Path::new(note_path);
+    let stem = path.file_stem()?.to_str()?;
     let encoded_vault = urlencoding::encode(vault_name);
-    let encoded_file = urlencoding::encode(rel_path);
-
-    Some(format!("obsidian://open?vault={encoded_vault}&file={encoded_file}"))
+    let encoded_query = urlencoding::encode(stem);
+    Some(format!("obsidian://search?vault={encoded_vault}&query={encoded_query}"))
 }
 
 /// Compute the vault-relative path for a note, for use in the ledger Path column.
 /// Returns something like "notes/some-title.md".
 fn extract_filename(note_path: &std::path::Path) -> Option<String> {
-    note_path
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
+    note_path.file_name().map(|f| f.to_string_lossy().to_string())
 }
 
 /// Expand a vault root path (handling ~/) to an absolute PathBuf.
@@ -2254,6 +2214,7 @@ fn expand_tilde(path: &str) -> PathBuf {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -2671,67 +2632,37 @@ int main() {
     // --- build_obsidian_url tests ---
 
     #[test]
-    fn test_build_obsidian_url_simple() {
-        let url = build_obsidian_url(
-            "obsidian",
-            "/home/user/obsidian/inbox/my-note.md",
-            "/home/user/obsidian/",
-        );
-        assert_eq!(
-            url,
-            Some("obsidian://open?vault=obsidian&file=inbox%2Fmy-note.md".to_string())
-        );
-    }
-
-    #[test]
-    fn test_build_obsidian_url_no_trailing_slash() {
-        let url = build_obsidian_url(
-            "obsidian",
-            "/home/user/obsidian/inbox/my-note.md",
-            "/home/user/obsidian",
-        );
-        assert_eq!(
-            url,
-            Some("obsidian://open?vault=obsidian&file=inbox%2Fmy-note.md".to_string())
-        );
+    fn test_build_obsidian_url_inbox() {
+        let url = build_obsidian_url("obsidian", "/home/user/obsidian/inbox/my-note.md");
+        assert_eq!(url, Some("obsidian://search?vault=obsidian&query=my-note".to_string()));
     }
 
     #[test]
     fn test_build_obsidian_url_notes_folder() {
-        let url = build_obsidian_url(
-            "obsidian",
-            "/home/user/obsidian/notes/claude-code-guide.md",
-            "/home/user/obsidian/",
-        );
-        let url = url.expect("should produce a URL for notes folder path");
-        assert!(url.starts_with("obsidian://open?vault=obsidian&file="));
-        assert!(url.contains("notes"));
-        assert!(url.contains("claude-code-guide.md"));
-    }
-
-    #[test]
-    fn test_build_obsidian_url_nested_notes() {
-        let url = build_obsidian_url(
-            "obsidian",
-            "/home/user/obsidian/notes/my-note.md",
-            "/home/user/obsidian/",
-        );
+        let url = build_obsidian_url("obsidian", "/home/user/obsidian/notes/claude-code-guide.md");
         assert_eq!(
             url,
-            Some("obsidian://open?vault=obsidian&file=notes%2Fmy-note.md".to_string())
+            Some("obsidian://search?vault=obsidian&query=claude-code-guide".to_string())
         );
     }
 
     #[test]
-    fn test_build_obsidian_url_path_mismatch() {
-        let url = build_obsidian_url("obsidian", "/home/user/other-vault/note.md", "/home/user/obsidian/");
-        assert_eq!(url, None);
+    fn test_build_obsidian_url_same_stem_different_dirs() {
+        let inbox = build_obsidian_url("obsidian", "/home/user/obsidian/inbox/my-note.md");
+        let notes = build_obsidian_url("obsidian", "/home/user/obsidian/notes/my-note.md");
+        assert_eq!(inbox, notes, "URL should be path-independent");
     }
 
     #[test]
     fn test_build_obsidian_url_vault_name_with_spaces() {
-        let url = build_obsidian_url("My Notes", "/home/user/obsidian/note.md", "/home/user/obsidian/");
-        assert_eq!(url, Some("obsidian://open?vault=My%20Notes&file=note.md".to_string()));
+        let url = build_obsidian_url("My Notes", "/home/user/obsidian/note.md");
+        assert_eq!(url, Some("obsidian://search?vault=My%20Notes&query=note".to_string()));
+    }
+
+    #[test]
+    fn test_build_obsidian_url_bare_filename() {
+        let url = build_obsidian_url("obsidian", "my-note.md");
+        assert_eq!(url, Some("obsidian://search?vault=obsidian&query=my-note".to_string()));
     }
 
     #[test]
@@ -2764,10 +2695,7 @@ int main() {
 
         let found = find_note_by_source(vault, "https://example.com/article");
         assert!(found.is_some(), "should find note by source URL");
-        assert_eq!(
-            found.unwrap().file_name().unwrap().to_str().unwrap(),
-            "test-article.md"
-        );
+        assert_eq!(found.unwrap().file_name().unwrap().to_str().unwrap(), "test-article.md");
     }
 
     #[test]
@@ -2782,10 +2710,7 @@ int main() {
 
         let found = find_note_by_source(vault, "https://example.com/inbox-item");
         assert!(found.is_some(), "should find note in inbox/");
-        assert!(
-            found.unwrap().starts_with(&inbox),
-            "found path should be in inbox/"
-        );
+        assert!(found.unwrap().starts_with(&inbox), "found path should be in inbox/");
     }
 
     #[test]
@@ -2831,9 +2756,8 @@ int main() {
         let source_url = "https://example.com/reingest-test";
 
         // Create an existing note in notes/ (already promoted by cortex)
-        let note_content = format!(
-            "---\ntitle: Original\ndate: 2026-03-20\nsource: \"{source_url}\"\n---\nOriginal body.\n"
-        );
+        let note_content =
+            format!("---\ntitle: Original\ndate: 2026-03-20\nsource: \"{source_url}\"\n---\nOriginal body.\n");
         std::fs::write(notes.join("reingest-test.md"), &note_content).expect("write note");
 
         // Create a ledger with the existing entry
@@ -2885,8 +2809,7 @@ int main() {
         assert!(found.is_none());
 
         // reingest_dest would be None, so resolve_destination is used
-        let reingest_dest: Option<PathBuf> = None;
-        let dest = reingest_dest.unwrap_or_else(|| inbox_path.clone());
+        let dest = inbox_path.clone();
         assert_eq!(dest, inbox_path, "new URLs should land in inbox/");
     }
 
@@ -2925,7 +2848,10 @@ int main() {
         assert!(by_source.is_none(), "source URL mismatch, should not find");
 
         // Fallback: use ledger filename to locate the file
-        let candidates = [vault.join("notes").join(&existing.filename), vault.join("inbox").join(&existing.filename)];
+        let candidates = [
+            vault.join("notes").join(&existing.filename),
+            vault.join("inbox").join(&existing.filename),
+        ];
         let by_filename = candidates.iter().find(|p| p.exists());
 
         assert!(by_filename.is_some(), "should find note via filename fallback");

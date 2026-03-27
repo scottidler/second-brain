@@ -80,18 +80,14 @@ fn ensure_header_matches(ledger_path: &Path) -> Result<()> {
         trimmed.starts_with("| Date") || trimmed.starts_with("|Date")
     });
     let sep_idx = lines.iter().position(|l| {
-        l.starts_with('|')
-            && l.contains('-')
-            && l.chars().all(|c| c == '|' || c == '-' || c == ' ' || c == ':')
+        l.starts_with('|') && l.contains('-') && l.chars().all(|c| c == '|' || c == '-' || c == ' ' || c == ':')
     });
 
     if let (Some(hi), Some(si)) = (header_idx, sep_idx) {
         let current_header = lines[hi].trim();
         let canonical_header = LEDGER_HEADER.trim();
         // Normalize: collapse whitespace for comparison
-        let norm = |s: &str| -> String {
-            s.split('|').map(|c| c.trim()).collect::<Vec<_>>().join("|")
-        };
+        let norm = |s: &str| -> String { s.split('|').map(|c| c.trim()).collect::<Vec<_>>().join("|") };
         if norm(current_header) != norm(canonical_header) {
             log::warn!(
                 "Borg Ledger header has drifted, repairing: {:?} -> {:?}",
@@ -436,10 +432,7 @@ pub fn append_entry(ledger_path: &Path, entry: &LedgerEntry) -> Result<()> {
     let insert_pos = lines
         .iter()
         .position(|l| {
-            l.starts_with('|')
-                && l.contains('-')
-                && l.chars()
-                    .all(|c| c == '|' || c == '-' || c == ' ' || c == ':')
+            l.starts_with('|') && l.contains('-') && l.chars().all(|c| c == '|' || c == '-' || c == ' ' || c == ':')
         })
         .map(|i| i + 1)
         .unwrap_or(lines.len());

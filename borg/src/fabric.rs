@@ -122,10 +122,7 @@ pub async fn summarize_forced_chunked(content: &str, is_youtube: bool, config: &
     } else {
         &config.summarize_pattern_article
     };
-    log::info!(
-        "Forced chunked summarization for {} chars of content",
-        content.len()
-    );
+    log::info!("Forced chunked summarization for {} chars of content", content.len());
     summarize_chunked(content, pattern, config).await
 }
 
@@ -133,52 +130,51 @@ pub async fn summarize_forced_chunked(content: &str, is_youtube: bool, config: &
 /// 1. Split content into overlapping chunks that fit within the limit.
 /// 2. Run the condense pattern on each chunk to extract key details.
 /// 3. Concatenate condensed chunks and run the final summarize pattern.
-fn summarize_chunked<'a>(content: &'a str, pattern: &'a str, config: &'a FabricConfig) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
+fn summarize_chunked<'a>(
+    content: &'a str,
+    pattern: &'a str,
+    config: &'a FabricConfig,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
     Box::pin(async move {
-    let chunk_size = config.max_content_chars;
-    // 10% overlap to avoid losing context at chunk boundaries
-    let overlap = chunk_size / 10;
-    let chunks = split_with_overlap(content, chunk_size, overlap);
+        let chunk_size = config.max_content_chars;
+        // 10% overlap to avoid losing context at chunk boundaries
+        let overlap = chunk_size / 10;
+        let chunks = split_with_overlap(content, chunk_size, overlap);
 
-    log::info!(
-        "Split {} chars into {} chunks (chunk_size={}, overlap={})",
-        content.len(),
-        chunks.len(),
-        chunk_size,
-        overlap
-    );
-
-    // Condense each chunk in sequence (parallel would hammer the LLM)
-    let mut condensed_parts = Vec::with_capacity(chunks.len());
-    for (i, chunk) in chunks.iter().enumerate() {
         log::info!(
-            "Condensing chunk {}/{} ({} chars)",
-            i + 1,
+            "Split {} chars into {} chunks (chunk_size={}, overlap={})",
+            content.len(),
             chunks.len(),
-            chunk.len()
+            chunk_size,
+            overlap
         );
-        let condensed = run_pattern(&config.condense_pattern, chunk, config).await?;
-        condensed_parts.push(condensed);
-    }
 
-    let merged = condensed_parts.join("\n\n---\n\n");
-    log::info!(
-        "Condensed {} chars down to {} chars, running final summarization",
-        content.len(),
-        merged.len()
-    );
+        // Condense each chunk in sequence (parallel would hammer the LLM)
+        let mut condensed_parts = Vec::with_capacity(chunks.len());
+        for (i, chunk) in chunks.iter().enumerate() {
+            log::info!("Condensing chunk {}/{} ({} chars)", i + 1, chunks.len(), chunk.len());
+            let condensed = run_pattern(&config.condense_pattern, chunk, config).await?;
+            condensed_parts.push(condensed);
+        }
 
-    // If the condensed result still exceeds the limit, recurse
-    if merged.len() > config.max_content_chars {
-        log::warn!(
-            "Condensed output still exceeds limit ({} > {}), recursing",
-            merged.len(),
-            config.max_content_chars
+        let merged = condensed_parts.join("\n\n---\n\n");
+        log::info!(
+            "Condensed {} chars down to {} chars, running final summarization",
+            content.len(),
+            merged.len()
         );
-        return summarize_chunked(&merged, pattern, config).await;
-    }
 
-    run_pattern(pattern, &merged, config).await
+        // If the condensed result still exceeds the limit, recurse
+        if merged.len() > config.max_content_chars {
+            log::warn!(
+                "Condensed output still exceeds limit ({} > {}), recursing",
+                merged.len(),
+                config.max_content_chars
+            );
+            return summarize_chunked(&merged, pattern, config).await;
+        }
+
+        run_pattern(pattern, &merged, config).await
     })
 }
 

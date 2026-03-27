@@ -127,16 +127,12 @@ mod tests {
             title: Some("Test Article".to_string()),
             tags: vec!["ai".to_string()],
             elapsed_secs: Some(3.5),
-            obsidian_url: Some("obsidian://open?vault=obsidian&file=notes%2Ftest-article.md".to_string()),
+            obsidian_url: Some("obsidian://search?vault=obsidian&query=test-article".to_string()),
             ..Default::default()
         };
         let reply = format_telegram_reply(&result, "https://example.com");
         assert!(reply.contains("Saved: Test Article"));
-        assert!(
-            reply.contains(
-                "<a href=\"obsidian://open?vault=obsidian&file=notes%2Ftest-article.md\">Open in Obsidian</a>"
-            )
-        );
+        assert!(reply.contains("<a href=\"obsidian://search?vault=obsidian&query=test-article\">Open in Obsidian</a>"));
     }
 
     #[test]
@@ -158,7 +154,7 @@ mod tests {
             status: IngestStatus::Completed,
             title: Some("Title with <html> & stuff".to_string()),
             tags: vec![],
-            obsidian_url: Some("obsidian://open?vault=obsidian&file=test.md".to_string()),
+            obsidian_url: Some("obsidian://search?vault=obsidian&query=test".to_string()),
             ..Default::default()
         };
         let reply = format_telegram_reply(&result, "https://example.com");

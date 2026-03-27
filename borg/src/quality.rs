@@ -22,9 +22,7 @@ pub fn detect_truncation_artifacts(summary: &str) -> Option<String> {
     let lower = summary.to_lowercase();
     for indicator in TRUNCATION_INDICATORS {
         if lower.contains(indicator) {
-            return Some(format!(
-                "Truncation artifact detected: summary contains '{indicator}'"
-            ));
+            return Some(format!("Truncation artifact detected: summary contains '{indicator}'"));
         }
     }
     None

@@ -381,9 +381,12 @@ pub async fn run_reingest(
                 if e.filename == "-" {
                     return false;
                 }
-                let note_path = [vault_root.join("notes").join(&e.filename), vault_root.join("inbox").join(&e.filename)]
-                    .into_iter()
-                    .find(|p| p.exists());
+                let note_path = [
+                    vault_root.join("notes").join(&e.filename),
+                    vault_root.join("inbox").join(&e.filename),
+                ]
+                .into_iter()
+                .find(|p| p.exists());
                 let Some(note_path) = note_path else {
                     return false;
                 };
