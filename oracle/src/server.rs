@@ -40,6 +40,99 @@ impl OracleMcpServer {
         std::sync::Arc::clone(&self.db)
     }
 
+    /// List all registered tools (for `oracle call --list`).
+    pub fn list_tools() -> Vec<rmcp::model::Tool> {
+        Self::tool_router().list_all()
+    }
+
+    /// Dispatch a tool call directly, bypassing MCP transport.
+    pub async fn dispatch(&self, name: &str, args: serde_json::Value) -> Result<CallToolResult, McpError> {
+        match name {
+            "knowledge_search" => {
+                let req: KnowledgeSearchRequest =
+                    serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.knowledge_search(Parameters(req)).await
+            }
+            "note_read" => {
+                let req: NoteReadRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.note_read(Parameters(req)).await
+            }
+            "list_notes" => {
+                let req: ListNotesRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.list_notes(Parameters(req)).await
+            }
+            "vault_overview" => {
+                let req: VaultOverviewRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.vault_overview(Parameters(req)).await
+            }
+            "domain_brief" => {
+                let req: DomainBriefRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.domain_brief(Parameters(req)).await
+            }
+            "ingest_history" => {
+                let req: IngestHistoryRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.ingest_history(Parameters(req)).await
+            }
+            "schema_info" => {
+                let req: SchemaInfoRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.schema_info(Parameters(req)).await
+            }
+            "reindex" => {
+                let req: ReindexRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.reindex(Parameters(req)).await
+            }
+            "tag_search" => {
+                let req: TagSearchRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.tag_search(Parameters(req)).await
+            }
+            "find_similar" => {
+                let req: FindSimilarRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.find_similar(Parameters(req)).await
+            }
+            "recent_activity" => {
+                let req: RecentActivityRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.recent_activity(Parameters(req)).await
+            }
+            "find_links" => {
+                let req: FindLinksRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.find_links(Parameters(req)).await
+            }
+            "creator_browse" => {
+                let req: CreatorBrowseRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.creator_browse(Parameters(req)).await
+            }
+            "source_browse" => {
+                let req: SourceBrowseRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.source_browse(Parameters(req)).await
+            }
+            "inbox_status" => {
+                let req: InboxStatusRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.inbox_status(Parameters(req)).await
+            }
+            "quality_report" => {
+                let req: QualityReportRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.quality_report(Parameters(req)).await
+            }
+            "duplicate_groups" => {
+                let req: DuplicateGroupsRequest =
+                    serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.duplicate_groups(Parameters(req)).await
+            }
+            "classify_status" => {
+                let req: ClassifyStatusRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.classify_status(Parameters(req)).await
+            }
+            _ => Err(McpError::invalid_params(
+                format!("unknown tool: {name} (use oracle call --list)"),
+                None,
+            )),
+        }
+    }
+
+    fn deser_err(tool: &str, e: &serde_json::Error) -> McpError {
+        McpError::invalid_params(format!("{tool}: {e}"), None)
+    }
+
     fn err(e: impl std::fmt::Display) -> McpError {
         warn!("Tool error: {}", e);
         McpError::internal_error(e.to_string(), None)
@@ -660,18 +753,17 @@ impl OracleMcpServer {
 impl ServerHandler for OracleMcpServer {
     fn get_info(&self) -> ServerInfo {
         info!("MCP client requested server info");
-        ServerInfo {
-            instructions: Some(
-                "Oracle - knowledge retrieval MCP for a second-brain Obsidian vault. \
-                 Search ingested knowledge by domain, type, or full-text query. \
-                 Control content verbosity with the 'detail' parameter: \
-                 metadata (fields only), tldr (one-liner), summary (summary section), full (complete body). \
-                 Use vault_overview for the big picture, domain_brief for domain-specific intelligence, \
-                 and knowledge_search for targeted queries."
-                    .to_string(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+        let mut info = ServerInfo::default();
+        info.instructions = Some(
+            "Oracle - knowledge retrieval MCP for a second-brain Obsidian vault. \
+             Search ingested knowledge by domain, type, or full-text query. \
+             Control content verbosity with the 'detail' parameter: \
+             metadata (fields only), tldr (one-liner), summary (summary section), full (complete body). \
+             Use vault_overview for the big picture, domain_brief for domain-specific intelligence, \
+             and knowledge_search for targeted queries."
+                .to_string(),
+        );
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info
     }
 }

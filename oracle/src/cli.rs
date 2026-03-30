@@ -48,4 +48,17 @@ pub enum Commands {
 
     /// Show vault statistics
     Stats,
+
+    /// Call a tool directly (no MCP transport)
+    Call {
+        /// Tool name (use --list to see available tools)
+        #[arg(required_unless_present = "list")]
+        tool: Option<String>,
+        /// JSON arguments (default: {})
+        #[arg(long)]
+        json: Option<String>,
+        /// List available tool names
+        #[arg(long)]
+        list: bool,
+    },
 }

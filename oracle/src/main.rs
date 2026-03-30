@@ -134,6 +134,50 @@ fn run_index(config: &Config) -> Result<()> {
     Ok(())
 }
 
+async fn run_call(config: Config, tool: &str, args_json: Option<&str>) -> Result<()> {
+    let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
+    db.index_vault(&config.vault_root()).context("Failed to index vault")?;
+
+    let server = oracle::server::OracleMcpServer::new(config, db);
+
+    let args: serde_json::Value = match args_json {
+        Some(json) => serde_json::from_str(json).context("invalid JSON arguments")?,
+        None => serde_json::json!({}),
+    };
+
+    let result = server
+        .dispatch(tool, args)
+        .await
+        .map_err(|e| eyre::eyre!("{}", e.message))?;
+
+    if result.is_error == Some(true) {
+        for content in &result.content {
+            if let Some(text) = content.as_text() {
+                eprintln!("{}", text.text);
+            }
+        }
+        std::process::exit(1);
+    }
+
+    for content in &result.content {
+        if let Some(text) = content.as_text() {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text.text) {
+                println!("{}", serde_json::to_string_pretty(&parsed)?);
+            } else {
+                println!("{}", text.text);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_list() {
+    for tool in oracle::server::OracleMcpServer::list_tools() {
+        println!("{:<20} {}", tool.name, tool.description.as_deref().unwrap_or(""));
+    }
+}
+
 fn run_stats(config: &Config) -> Result<()> {
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
 
@@ -181,5 +225,18 @@ async fn main() -> Result<()> {
         Commands::Serve => run_serve(config).await,
         Commands::Index => run_index(&config),
         Commands::Stats => run_stats(&config),
+        Commands::Call { tool, json, list } => {
+            if list {
+                run_list();
+                Ok(())
+            } else {
+                run_call(
+                    config,
+                    tool.as_deref().expect("clap enforces tool or --list"),
+                    json.as_deref(),
+                )
+                .await
+            }
+        }
     }
 }
