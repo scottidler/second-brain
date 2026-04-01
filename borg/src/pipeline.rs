@@ -311,6 +311,7 @@ async fn process_url_inner(
     let log_time = now.format("%H:%M").to_string();
 
     let mut original_date: Option<String> = None;
+    let mut cortex_fields: Vec<(String, String)> = Vec::new();
     let ledger_file = ledger::ledger_path(config);
 
     // Dedup guard: reject concurrent/duplicate ingestions (skip if --force)
@@ -366,8 +367,10 @@ async fn process_url_inner(
         });
         if let Some(ref old_path) = old_note_path {
             original_date = read_note_date(old_path);
+            cortex_fields = read_cortex_fields(old_path);
             reingest_dest = old_path.parent().map(|p| p.to_path_buf());
             log::debug!("[{trace_id}] Preserved original date: {:?}", original_date);
+            log::debug!("[{trace_id}] Preserved cortex fields: {:?}", cortex_fields);
             log::debug!("[{trace_id}] Will overwrite in: {:?}", reingest_dest);
             std::fs::remove_file(old_path).context("Failed to remove old note during reingest")?;
             log::info!("[{trace_id}] Removed old note: {}", old_path.display());
@@ -478,6 +481,15 @@ async fn process_url_inner(
     if let Some(ref orig_date) = original_date {
         patch_note_date(&note_path, orig_date)?;
         log::info!("[{trace_id}] Restored original date: {orig_date}");
+    }
+
+    // If replacing an existing note, restore cortex-managed fields
+    if !cortex_fields.is_empty() {
+        patch_cortex_fields(&note_path, &cortex_fields)?;
+        log::info!(
+            "[{trace_id}] Restored cortex fields: {:?}",
+            cortex_fields.iter().map(|(k, _)| k).collect::<Vec<_>>()
+        );
     }
 
     log::info!("[{trace_id}] Wrote note: {}", note_path.display());
@@ -2204,6 +2216,74 @@ fn patch_note_date(path: &std::path::Path, new_date: &str) -> eyre::Result<()> {
     Ok(())
 }
 
+const CORTEX_PRESERVE_KEYS: &[&str] = &[
+    "domain",
+    "status",
+    "cortex-classified",
+    "cortex-classified-by",
+    "cortex-confidence",
+    "cortex-quality",
+    "cortex-quality-issues",
+];
+
+/// Read cortex-managed fields from frontmatter.
+/// Assumes all values are single-line (inline YAML). This holds for all current
+/// cortex fields: `cortex-quality-issues` uses inline arrays like `[no-outbound-links]`.
+fn read_cortex_fields(path: &std::path::Path) -> Vec<(String, String)> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut fields = Vec::new();
+    let mut in_frontmatter = false;
+    for line in content.lines() {
+        if line.trim() == "---" {
+            if in_frontmatter {
+                break;
+            }
+            in_frontmatter = true;
+            continue;
+        }
+        if !in_frontmatter {
+            continue;
+        }
+        for key in CORTEX_PRESERVE_KEYS {
+            if let Some(val) = line.strip_prefix(&format!("{key}:")) {
+                fields.push((key.to_string(), val.trim().to_string()));
+            }
+        }
+    }
+    fields
+}
+
+fn patch_cortex_fields(path: &std::path::Path, fields: &[(String, String)]) -> eyre::Result<()> {
+    let content = std::fs::read_to_string(path).context("Failed to read note for cortex field patching")?;
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return Ok(());
+    }
+    let after_opening = trimmed.trim_start_matches("---").trim_start_matches(['\r', '\n']);
+    let end_pos = match after_opening.find("\n---") {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let fm_block = &after_opening[..end_pos];
+    let rest = &after_opening[end_pos..];
+
+    let mut lines: Vec<String> = fm_block.lines().map(String::from).collect();
+    for (key, value) in fields {
+        // Remove existing line for this key if present
+        lines.retain(|line| !line.starts_with(&format!("{key}:")));
+        lines.push(format!("{key}: {value}"));
+    }
+
+    let offset = content.len() - trimmed.len();
+    let prefix = &content[..offset];
+    let result = format!("{prefix}---\n{}\n{rest}", lines.join("\n"));
+    std::fs::write(path, result).context("Failed to write cortex-patched note")?;
+    Ok(())
+}
+
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
@@ -2860,5 +2940,134 @@ int main() {
             notes,
             "found note should be in notes/"
         );
+    }
+
+    #[test]
+    fn test_read_cortex_fields_all_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("test.md");
+        std::fs::write(
+            &note,
+            "---\ntitle: Test\ndate: 2026-03-20\ndomain: tech\nstatus: read\ncortex-classified: true\ncortex-classified-by: deterministic\ncortex-confidence: high\ncortex-quality: medium\ncortex-quality-issues: [no-outbound-links]\n---\nBody text.\n",
+        )
+        .unwrap();
+
+        let fields = read_cortex_fields(&note);
+        assert_eq!(fields.len(), 7);
+        assert!(fields.iter().any(|(k, v)| k == "domain" && v == "tech"));
+        assert!(fields.iter().any(|(k, v)| k == "status" && v == "read"));
+        assert!(fields.iter().any(|(k, v)| k == "cortex-classified" && v == "true"));
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "cortex-classified-by" && v == "deterministic")
+        );
+        assert!(fields.iter().any(|(k, v)| k == "cortex-confidence" && v == "high"));
+        assert!(fields.iter().any(|(k, v)| k == "cortex-quality" && v == "medium"));
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "cortex-quality-issues" && v == "[no-outbound-links]")
+        );
+    }
+
+    #[test]
+    fn test_read_cortex_fields_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("test.md");
+        std::fs::write(&note, "---\ntitle: Test\ndate: 2026-03-20\ndomain: ai\n---\nBody.\n").unwrap();
+
+        let fields = read_cortex_fields(&note);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0], ("domain".to_string(), "ai".to_string()));
+    }
+
+    #[test]
+    fn test_read_cortex_fields_none_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("test.md");
+        std::fs::write(
+            &note,
+            "---\ntitle: Test\ndate: 2026-03-20\ntags:\n  - rust\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let fields = read_cortex_fields(&note);
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn test_read_cortex_fields_no_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("test.md");
+        std::fs::write(&note, "Just plain text, no frontmatter.\n").unwrap();
+
+        let fields = read_cortex_fields(&note);
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn test_read_cortex_fields_missing_file() {
+        let fields = read_cortex_fields(std::path::Path::new("/tmp/nonexistent-cortex-test.md"));
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn test_patch_cortex_fields_inserts_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("test.md");
+        std::fs::write(
+            &note,
+            "---\ntitle: Test\ndate: 2026-03-20\ntags:\n  - rust\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let fields = vec![
+            ("domain".to_string(), "tech".to_string()),
+            ("cortex-classified".to_string(), "true".to_string()),
+        ];
+        patch_cortex_fields(&note, &fields).unwrap();
+
+        let content = std::fs::read_to_string(&note).unwrap();
+        assert!(content.contains("domain: tech"));
+        assert!(content.contains("cortex-classified: true"));
+        assert!(content.contains("title: Test"));
+        assert!(content.contains("Body."));
+    }
+
+    #[test]
+    fn test_patch_cortex_fields_replaces_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("test.md");
+        std::fs::write(
+            &note,
+            "---\ntitle: Test\ndomain: ai\ncortex-classified: true\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let fields = vec![
+            ("domain".to_string(), "tech".to_string()),
+            ("cortex-classified".to_string(), "true".to_string()),
+        ];
+        patch_cortex_fields(&note, &fields).unwrap();
+
+        let content = std::fs::read_to_string(&note).unwrap();
+        assert!(content.contains("domain: tech"));
+        // Should not have duplicate domain lines
+        assert_eq!(content.matches("domain:").count(), 1);
+    }
+
+    #[test]
+    fn test_patch_cortex_fields_no_frontmatter_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("test.md");
+        let original = "Just plain text.\n";
+        std::fs::write(&note, original).unwrap();
+
+        let fields = vec![("domain".to_string(), "tech".to_string())];
+        patch_cortex_fields(&note, &fields).unwrap();
+
+        let content = std::fs::read_to_string(&note).unwrap();
+        assert_eq!(content, original);
     }
 }
