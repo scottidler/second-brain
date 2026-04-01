@@ -243,49 +243,79 @@ pub struct ClassifyOpts {
 pub fn lint_classify(notes: &[Note], config: &ClassifyConfig, search_index: Option<&SearchIndex>) -> Report {
     let mut report = Report::default();
     let inbox_notes = filter_inbox_notes(notes, false, false);
+    let unclassified_notes = filter_unclassified_notes(notes);
+    let all_targets: Vec<&Note> = inbox_notes
+        .iter()
+        .copied()
+        .chain(unclassified_notes.iter().copied())
+        .collect();
 
-    for note in &inbox_notes {
+    for note in &all_targets {
+        let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
+
         match classify_note(note, config, search_index) {
             Some(result) if result.confidence != ClassifyConfidence::Low => {
-                report.add(Violation {
-                    path: note.path.clone(),
-                    rule: "classify".to_string(),
-                    severity: Severity::Info,
-                    message: format!(
-                        "would classify as domain={}, confidence={}, method={}: {}",
-                        result.domain.as_str(),
-                        result.confidence.as_str(),
-                        result.method.as_str(),
-                        result.reason,
-                    ),
-                    fix: Some(Fix::MoveFile {
-                        from: note.path.clone(),
-                        to: PathBuf::from("notes").join(note.path.file_name().unwrap_or_default()),
-                    }),
-                });
+                if already_in_notes {
+                    report.add(Violation {
+                        path: note.path.clone(),
+                        rule: "classify".to_string(),
+                        severity: Severity::Info,
+                        message: format!(
+                            "would catch-up classify domain={}, method={}",
+                            result.domain.as_str(),
+                            result.method.as_str(),
+                        ),
+                        fix: None,
+                    });
+                } else {
+                    report.add(Violation {
+                        path: note.path.clone(),
+                        rule: "classify".to_string(),
+                        severity: Severity::Info,
+                        message: format!(
+                            "would classify as domain={}, confidence={}, method={}: {}",
+                            result.domain.as_str(),
+                            result.confidence.as_str(),
+                            result.method.as_str(),
+                            result.reason,
+                        ),
+                        fix: Some(Fix::MoveFile {
+                            from: note.path.clone(),
+                            to: PathBuf::from("notes").join(note.path.file_name().unwrap_or_default()),
+                        }),
+                    });
+                }
             }
             Some(result) => {
-                report.add(Violation {
-                    path: note.path.clone(),
-                    rule: "classify".to_string(),
-                    severity: Severity::Warning,
-                    message: format!("low confidence, would hold for review: {}", result.reason),
-                    fix: None,
-                });
+                if !already_in_notes {
+                    report.add(Violation {
+                        path: note.path.clone(),
+                        rule: "classify".to_string(),
+                        severity: Severity::Warning,
+                        message: format!("low confidence, would hold for review: {}", result.reason),
+                        fix: None,
+                    });
+                }
             }
             None => {
-                report.add(Violation {
-                    path: note.path.clone(),
-                    rule: "classify".to_string(),
-                    severity: Severity::Warning,
-                    message: "no classification signal, would hold for review".to_string(),
-                    fix: None,
-                });
+                if !already_in_notes {
+                    report.add(Violation {
+                        path: note.path.clone(),
+                        rule: "classify".to_string(),
+                        severity: Severity::Warning,
+                        message: "no classification signal, would hold for review".to_string(),
+                        fix: None,
+                    });
+                }
             }
         }
     }
 
-    log::info!("classify lint complete: {} note(s) in inbox", inbox_notes.len());
+    log::info!(
+        "classify lint complete: {} inbox + {} unclassified note(s)",
+        inbox_notes.len(),
+        unclassified_notes.len(),
+    );
     report
 }
 
@@ -303,17 +333,21 @@ pub fn apply_classify(
     let target_notes: Vec<&Note> = if let Some(domain) = reclassify_domain {
         filter_domain_notes(notes, domain)
     } else {
-        filter_inbox_notes(notes, force, review_only)
+        let inbox = filter_inbox_notes(notes, force, review_only);
+        let unclassified = filter_unclassified_notes(notes);
+        inbox.into_iter().chain(unclassified).collect()
     };
     let is_reclassify = reclassify_domain.is_some();
     let mut report = Report::default();
     let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     for note in &target_notes {
+        let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
+
         let result = match classify_note(note, config, search_index) {
             Some(r) => r,
             None => {
-                if !is_reclassify {
+                if !is_reclassify && !already_in_notes {
                     mark_needs_review(vault_root, note)?;
                 }
                 log::info!("held for review (no signal): {}", note.path.display());
@@ -322,10 +356,40 @@ pub fn apply_classify(
         };
 
         if result.confidence == ClassifyConfidence::Low {
-            if !is_reclassify {
+            if !is_reclassify && !already_in_notes {
                 mark_needs_review(vault_root, note)?;
             }
             log::info!("held for review (low confidence): {}", note.path.display());
+            continue;
+        }
+
+        // Catch-up: enrich domainless notes in notes/ in place
+        if already_in_notes && !is_reclassify {
+            let abs_path = vault_root.join(&note.path);
+            let content = std::fs::read_to_string(&abs_path)?;
+            let fields = build_enrichment_fields(&result);
+            if let Some(new_content) = insert_frontmatter_fields(&content, &fields) {
+                std::fs::write(&abs_path, new_content)?;
+            }
+
+            report.add(Violation {
+                path: note.path.clone(),
+                rule: "classify".to_string(),
+                severity: Severity::Info,
+                message: format!(
+                    "catch-up classified domain={} (method={})",
+                    result.domain.as_str(),
+                    result.method.as_str(),
+                ),
+                fix: None,
+            });
+
+            log::info!(
+                "catch-up classified {} (domain={}, method={})",
+                note.path.display(),
+                result.domain.as_str(),
+                result.method.as_str(),
+            );
             continue;
         }
 
@@ -672,6 +736,18 @@ fn filter_inbox_notes(notes: &[Note], force: bool, review_only: bool) -> Vec<&No
             }
             true
         })
+        .collect()
+}
+
+/// Filter notes in notes/ that are missing a domain field (orphaned by reingest or other means).
+fn filter_unclassified_notes(notes: &[Note]) -> Vec<&Note> {
+    notes
+        .iter()
+        .filter(|n| {
+            let path_str = n.path.to_string_lossy();
+            path_str.starts_with("notes/") || path_str.starts_with("notes\\")
+        })
+        .filter(|n| n.frontmatter.domain.is_none())
         .collect()
 }
 
@@ -1053,5 +1129,83 @@ mod tests {
         let result = classify_note(&note, &config, None);
         assert!(result.is_some());
         assert_eq!(result.expect("should classify").domain, Domain::Ai);
+    }
+
+    #[test]
+    fn test_filter_unclassified_notes_selects_domainless_in_notes() {
+        let domainless = NoteBuilder::new("notes/orphaned.md").title("Orphaned").build();
+        let classified = NoteBuilder::new("notes/good.md").title("Good").domain("tech").build();
+        let inbox = NoteBuilder::new("inbox/new.md").title("New").build();
+        let notes = vec![domainless, classified, inbox];
+
+        let filtered = filter_unclassified_notes(&notes);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path.to_string_lossy(), "notes/orphaned.md");
+    }
+
+    #[test]
+    fn test_filter_unclassified_notes_ignores_inbox() {
+        let inbox_no_domain = NoteBuilder::new("inbox/test.md").title("Test").build();
+        let notes = vec![inbox_no_domain];
+
+        let filtered = filter_unclassified_notes(&notes);
+        assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn test_catchup_classify_enriches_in_place() {
+        use crate::testutil::TestVault;
+
+        let vault = TestVault::new();
+        // Add a domainless note in notes/ with classifiable tags
+        vault.add_note(
+            "notes/reingest-orphan.md",
+            "---\ntitle: Reingest Orphan\ndate: 2026-03-20\ntype: link\ntags:\n  - rust\n  - cli\nsource: \"https://example.com/rust-guide\"\n---\nA reingested note that lost its domain.\n",
+        );
+
+        let notes = vault.scan();
+        let config = vault.config();
+        let report = apply_classify(vault.root(), &notes, &config.actions.classify, false, false, None, None).unwrap();
+
+        // The orphan should have been catch-up classified
+        let content = vault.read("notes/reingest-orphan.md");
+        assert!(content.contains("domain: tech"), "should have domain assigned");
+        assert!(
+            content.contains("cortex-classified: true"),
+            "should be marked classified"
+        );
+
+        // Report should mention catch-up
+        let violations: Vec<_> = report
+            .violations
+            .iter()
+            .filter(|v| v.path.to_string_lossy().contains("reingest-orphan"))
+            .collect();
+        assert!(!violations.is_empty(), "should have a violation for the orphan");
+        assert!(
+            violations[0].message.contains("catch-up"),
+            "violation message should mention catch-up"
+        );
+    }
+
+    #[test]
+    fn test_lint_classify_includes_unclassified_notes() {
+        let inbox_note = NoteBuilder::new("inbox/test.md").title("Test").tags(&["rust"]).build();
+        let orphan = NoteBuilder::new("notes/orphan.md")
+            .title("Orphan")
+            .tags(&["rust"])
+            .build();
+        let notes = vec![inbox_note, orphan];
+
+        let config = test_config();
+        let report = lint_classify(&notes, &config, None);
+        // Both should produce violations
+        let paths: Vec<String> = report
+            .violations
+            .iter()
+            .map(|v| v.path.to_string_lossy().to_string())
+            .collect();
+        assert!(paths.iter().any(|p| p.contains("inbox/test.md")));
+        assert!(paths.iter().any(|p| p.contains("notes/orphan.md")));
     }
 }
