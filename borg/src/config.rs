@@ -170,7 +170,67 @@ pub struct Config {
     pub text_capture: TextCaptureConfig,
     pub vision: VisionConfig,
     pub tags: TagsConfig,
+    pub staging: StagingConfig,
     pub log_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct StagingConfig {
+    /// Master switch. When `false` the staged pipeline is dormant (no stage
+    /// artifacts are written, no gates fire). Flipped `true` in Phase 2 rollout
+    /// once the artifact store + Stage 0 plumbing is live.
+    pub enabled: bool,
+    /// Root directory for staging artifacts. Per-trace directories hang off this.
+    pub root: PathBuf,
+    /// Retention window for successful traces. A directory without a
+    /// `rejection.yml` older than this is deleted by the retention sweep.
+    pub retention_days: u32,
+    /// Retention window for rejected traces (presence of `rejection.yml`).
+    /// Intentionally longer than `retention_days` so failures have a bigger
+    /// investigation window.
+    pub rejected_retention_days: u32,
+    /// On-disk layout. `PerTrace` is the recommended default (see design doc
+    /// Storage Organization Options). `PerStage` exists as a config knob for
+    /// users who want stage-level views.
+    pub layout: StagingLayout,
+    /// Soft cap on total staging disk usage in GB; used by the retention
+    /// sweep to emit a warning alert past `size_alert_threshold_pct`.
+    pub max_size_gb: u32,
+    /// Percentage of `max_size_gb` that triggers a disk-usage alert.
+    pub size_alert_threshold_pct: u8,
+    /// Write-through mode: the legacy single-shot pipeline still publishes
+    /// notes, but any URL fetch it performs is intercepted and also persisted
+    /// to the artifact store. Enables Stage 1/2 to read from disk offline
+    /// while preserving a one-fetch-per-ingestion invariant.
+    pub double_write: bool,
+}
+
+impl Default for StagingConfig {
+    fn default() -> Self {
+        let root = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from(".local/share"))
+            .join("borg")
+            .join("stages");
+        Self {
+            enabled: false,
+            root,
+            retention_days: 60,
+            rejected_retention_days: 90,
+            layout: StagingLayout::default(),
+            max_size_gb: 20,
+            size_alert_threshold_pct: 80,
+            double_write: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum StagingLayout {
+    #[default]
+    PerTrace,
+    PerStage,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

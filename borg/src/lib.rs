@@ -29,6 +29,7 @@ pub mod pipeline;
 pub mod quality;
 pub mod router;
 pub mod routes;
+pub mod stages;
 pub mod telegram;
 pub mod trace;
 pub mod transcription;
