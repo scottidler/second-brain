@@ -659,7 +659,13 @@ async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> R
     ) {
         log::warn!("[{trace_id}] persist_fetched (fabric) failed: {e:#}");
     }
-    crate::stages::raw::run_gate_1(config, trace_id, url, article_md.as_bytes(), 200)?;
+    // Gate-1 fires only on the final fetched bytes, which in this flow is the
+    // Jina path (see process_article_jina). If fabric -u returned a block
+    // page the caller (process_url_inner) will catch our bail and fall back
+    // to Jina + browser-UA without dirtying the blocklist yet.
+    if crate::stages::classify::detect_block_page(article_md.as_bytes(), 200, chrono::Utc::now()).is_some() {
+        eyre::bail!("fabric -u returned a block page for {url}; falling back to Jina");
+    }
 
     let title = extract_article_title(&article_md, url);
 
