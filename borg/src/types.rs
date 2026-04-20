@@ -69,7 +69,7 @@ impl fmt::Display for StageKind {
 }
 
 /// Which gate fired (0/1/2/3 per the design doc).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GateId {
     /// URL blocklist enforcement (Stage 0, pre-fetch).

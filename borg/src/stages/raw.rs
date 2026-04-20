@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::blocklist::{self, Blocklist};
 use crate::config::Config;
+use crate::stages::alert;
 use crate::stages::artifact::{ArtifactStore, FsArtifactStore, sha256_hex};
 use crate::stages::classify as gate1;
 use crate::stages::summarize as gate2;
@@ -137,7 +138,17 @@ pub fn stage_0_init(config: &Config, content: &ContentKind, method: IngestMethod
         });
         let now = Utc::now();
         if let Err(err) = blocklist::gate_0(&blocklist, url, now, ()) {
-            log::warn!("[{trace_id}] Gate-0 reject: {err:#}");
+            let domain = blocklist::domain_for(url);
+            let retriable = blocklist.get(&domain).map(|b| b.retriable_after.clone());
+            alert::emit_gate_alert(
+                trace_id,
+                0,
+                GateId::DomainBlocklist,
+                Some(&domain),
+                &format!("{err}"),
+                retriable.as_deref(),
+                alert::DEFAULT_COOLDOWN_MINUTES,
+            );
             bail!("{err}");
         }
     }
@@ -223,6 +234,15 @@ pub fn run_gate_1(config: &Config, trace_id: &str, url: &str, bytes: &[u8], stat
     if let Err(e) = store.write_rejection(trace_id, &rec) {
         log::warn!("[{trace_id}] Gate-1: rejection write failed: {e:#}");
     }
+    alert::emit_gate_alert(
+        trace_id,
+        1,
+        GateId::BlockPage,
+        Some(&domain),
+        &matched.reason,
+        Some(&matched.retriable_after.to_rfc3339()),
+        alert::DEFAULT_COOLDOWN_MINUTES,
+    );
     bail!("gate-1: {}", matched.reason);
 }
 
@@ -256,6 +276,15 @@ pub fn run_gate_2(config: &Config, trace_id: &str, url: Option<&str>, summary: &
     if let Err(e) = store.write_rejection(trace_id, &rec) {
         log::warn!("[{trace_id}] Gate-2: rejection write failed: {e:#}");
     }
+    alert::emit_gate_alert(
+        trace_id,
+        2,
+        GateId::FailedFetchParaphrase,
+        rec.domain.as_deref(),
+        &reason,
+        None,
+        alert::DEFAULT_COOLDOWN_MINUTES,
+    );
     bail!("gate-2: {reason}");
 }
 

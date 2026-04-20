@@ -1,3 +1,4 @@
+pub mod alert;
 pub mod artifact;
 pub mod classify;
 pub mod extract;
