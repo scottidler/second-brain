@@ -77,5 +77,6 @@ async fn main() -> Result<()> {
             RetentionAction::Sweep { dry_run } => borg::retention::run_sweep(&config, dry_run),
             RetentionAction::Status => borg::retention::run_status(&config),
         },
+        Some(Command::ReingestFailed { dry_run }) => borg::migrate::run_reingest_failed(&config, dry_run).await,
     }
 }

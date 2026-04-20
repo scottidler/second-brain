@@ -286,6 +286,119 @@ fn render_yaml_field(lines: &mut Vec<String>, key: &str, val: &serde_yaml::Value
     }
 }
 
+/// Scan every markdown file under the vault root and re-ingest any note
+/// whose body matches the failed-fetch signature (block-page paraphrase).
+/// This is the migration path for notes that predate the staged pipeline -
+/// the 28 XDA-style notes identified in the 2026-04-19 audit.
+pub async fn run_reingest_failed(config: &Config, dry_run: bool) -> Result<()> {
+    let vault_root = expand_tilde(&config.vault.root_path);
+    if !vault_root.exists() {
+        eyre::bail!("Vault root does not exist: {}", vault_root.display());
+    }
+    let md_files = collect_md_files(&vault_root, &config.migration.skip_folders)?;
+
+    // Walk every markdown file; for each, check whether the BODY (not the
+    // frontmatter) contains a failed-fetch signature and extract the source
+    // URL from the frontmatter to drive a re-ingestion.
+    let mut matches: Vec<(PathBuf, String)> = Vec::new();
+    for path in &md_files {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Some((frontmatter, body)) = split_frontmatter(&content) else {
+            continue;
+        };
+        if !body_has_failed_fetch_signature(&body) {
+            continue;
+        }
+        let Ok(fm) = serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(&frontmatter) else {
+            continue;
+        };
+        let Some(source) = fm.get("source").and_then(|v| v.as_str()).map(String::from) else {
+            log::warn!(
+                "reingest-failed: {} matches failed-fetch but has no source",
+                path.display()
+            );
+            continue;
+        };
+        matches.push((path.clone(), source));
+    }
+
+    if matches.is_empty() {
+        println!("reingest-failed: no failed-fetch notes found");
+        return Ok(());
+    }
+    let mode = if dry_run { "[dry-run] " } else { "" };
+    println!("{mode}reingest-failed: {} matching note(s)", matches.len());
+    for (path, source) in &matches {
+        let rel = path.strip_prefix(&vault_root).unwrap_or(path.as_path());
+        println!("  {}  <- {}", rel.display(), source);
+    }
+    if dry_run {
+        return Ok(());
+    }
+
+    // Reingest via the daemon's /ingest endpoint so the request flows through
+    // Stage-0 (Gate-0) → fetch chain (Jina → fabric-u → browser-UA) → Gate-1
+    // → Stage-2 → Gate-2 → publish, preserving cortex-owned frontmatter.
+    let host = &config.hotkey.host;
+    let port = config.hotkey.port;
+    let endpoint = format!("http://{host}:{port}/ingest");
+    let client = reqwest::Client::new();
+    for (path, source) in &matches {
+        println!("  -> {}", source);
+        let body = serde_json::json!({
+            "url": source,
+            "tags": [],
+            "force": true,
+            "method": "cli",
+        });
+        match client.post(&endpoint).json(&body).send().await {
+            Ok(response) => match response.json::<crate::types::IngestResult>().await {
+                Ok(result) => match &result.status {
+                    crate::types::IngestStatus::Completed => {
+                        println!("     ok: {}", result.title.as_deref().unwrap_or("(no title)"));
+                    }
+                    crate::types::IngestStatus::Duplicate { .. } => {
+                        println!("     duplicate (unchanged)");
+                    }
+                    crate::types::IngestStatus::Failed { reason } => {
+                        println!("     failed: {reason}");
+                    }
+                    crate::types::IngestStatus::Queued => {
+                        println!("     queued");
+                    }
+                },
+                Err(e) => {
+                    eprintln!("     {}: response parse error: {e}", path.display());
+                }
+            },
+            Err(e) => {
+                if e.is_connect() {
+                    eyre::bail!("cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?");
+                }
+                eprintln!("     {}: HTTP error: {e}", path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Detect the failed-fetch signature in a note body. Duplicates the
+/// cortex::quality patterns by intent (keeping cortex and borg in sync).
+fn body_has_failed_fetch_signature(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    const PATTERNS: &[&str] = &[
+        "only an error message",
+        "no actual content",
+        "error message indicating",
+        "content inaccessible",
+        "access to the website is blocked",
+        "anonymous access to domain",
+    ];
+    PATTERNS.iter().any(|p| lower.contains(p))
+}
+
 /// Classify a source URL into the correct content type string.
 /// Used by both migrate reclassify and audit.
 pub fn reclassify_type(source: &str) -> &'static str {

@@ -108,6 +108,13 @@ pub enum Command {
     Replay(ReplayCliArgs),
     /// Manage staging retention
     Retention(RetentionCliArgs),
+    /// Re-ingest every vault note whose body matches the failed-fetch
+    /// signature (the migration path for the 28 bad XDA-style notes).
+    ReingestFailed {
+        /// Preview matches without re-ingesting
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Parser, Debug)]

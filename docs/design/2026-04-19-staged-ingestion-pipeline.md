@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-04-19
-**Status:** In Review
+**Status:** Implemented (phases 1-7; phase 8 decomposition deferred)
 **Review Passes Completed:** 5/5
 
 **Supersedes:** [2026-03-30-llm-block-detection.md](2026-03-30-llm-block-detection.md) (never shipped; its block-detection + blocklist concepts are absorbed here as stage-boundary gates)

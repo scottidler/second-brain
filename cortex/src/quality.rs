@@ -11,6 +11,27 @@ use crate::vault::Note;
 static WIKILINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]").expect("valid wikilink regex"));
 
+/// Patterns (case-insensitive) that indicate the note content is a Fabric
+/// paraphrase of a block/error page rather than the intended article. These
+/// are the "failed-fetch" quality signature.
+/// Matches Gate-2's paraphrase patterns in borg's staged pipeline so the two
+/// detectors stay in sync.
+const FAILED_FETCH_PATTERNS: &[&str] = &[
+    "only an error message",
+    "no actual content",
+    "error message indicating",
+    "content inaccessible",
+    "access to the website is blocked",
+    "anonymous access to domain",
+];
+
+/// True when the note body contains a failed-fetch signature. Public so the
+/// `borg migrate reingest-failed` command can reuse the same detection.
+pub fn has_failed_fetch_signature(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    FAILED_FETCH_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
 /// Types excluded from quality scoring (system-generated notes).
 const EXCLUDED_TYPES: &[&str] = &["digest", "review", "daily", "system"];
 
@@ -185,6 +206,17 @@ fn assess_note(note: &Note, inbound_targets: &HashSet<String>, config: &QualityC
         issues.push(QualityIssue {
             name: "stub-body".to_string(),
             severity: IssueSeverity::Warning,
+        });
+    }
+
+    // Failed-fetch signature: Fabric paraphrased a block/error page into a
+    // "summary". Flagged Critical so the note shows up at QualityLevel::Low
+    // and is easy to find with `cortex lint --json | jq '.[] |
+    // select(.issues | includes("failed-fetch"))'`.
+    if has_failed_fetch_signature(body) {
+        issues.push(QualityIssue {
+            name: "failed-fetch".to_string(),
+            severity: IssueSeverity::Critical,
         });
     }
 
@@ -407,6 +439,52 @@ mod tests {
             partial.contains("cortex-quality:"),
             "partial-frontmatter.md should have quality field"
         );
+    }
+
+    #[test]
+    fn test_failed_fetch_signature_detects_paraphrased_block() {
+        assert!(has_failed_fetch_signature(
+            "The provided input contains an error message indicating that access to the website is blocked."
+        ));
+        assert!(has_failed_fetch_signature(
+            "This page contains only an error message and no real content."
+        ));
+        assert!(has_failed_fetch_signature(
+            "Anonymous access to domain has been blocked due to suspected DDoS activity."
+        ));
+    }
+
+    #[test]
+    fn test_failed_fetch_signature_not_triggered_on_clean_content() {
+        assert!(!has_failed_fetch_signature(
+            "Docker containers provide lightweight virtualisation. The article explains seven useful \
+             containers for self-hosters who want to minimise overhead."
+        ));
+    }
+
+    #[test]
+    fn test_failed_fetch_flagged_critical() {
+        let body = "The provided input contains an error message indicating that access to the website \
+                    is blocked. More words here to exceed the min_word_count threshold so the stub check \
+                    does not interfere with the failed-fetch signal being the dominant issue on the note. \
+                    Adding enough content to reach beyond fifty words total for the configured threshold.";
+        let notes = vec![
+            NoteBuilder::new("blocked.md")
+                .title("Blocked")
+                .note_type("note")
+                .body(body)
+                .build(),
+        ];
+
+        let report = lint_quality(&notes, &default_config());
+        let vi = report
+            .violations
+            .iter()
+            .find(|v| v.path.to_string_lossy() == "blocked.md")
+            .expect("blocked.md should be flagged");
+        assert!(vi.message.contains("failed-fetch"));
+        // Critical issue → QualityLevel::Low
+        assert!(vi.message.contains("low"));
     }
 
     #[test]
