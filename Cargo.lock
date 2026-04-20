@@ -440,6 +440,7 @@ dependencies = [
  "dirs",
  "env_logger",
  "eyre",
+ "filetime",
  "fs2",
  "hostname",
  "log",

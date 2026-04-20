@@ -45,4 +45,5 @@ default-features = false
 features = ["client", "gateway", "model", "rustls_backend"]
 
 [dev-dependencies]
+filetime = "0.2.27"
 tempfile = "3.27.0"

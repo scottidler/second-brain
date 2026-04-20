@@ -1,4 +1,4 @@
-use borg::cli::{Cli, Command};
+use borg::cli::{Cli, Command, RetentionAction};
 use borg::config::Config;
 use borg::logging;
 use clap::Parser;
@@ -61,5 +61,21 @@ async fn main() -> Result<()> {
             after,
             dry_run,
         }) => borg::run_reingest(config, all, r#type, domain, source, before, after, dry_run).await,
+        Some(Command::Replay(args)) => {
+            let opts = borg::replay::ReplayOptions {
+                trace_id: args.trace_id,
+                from_stage: args.from_stage,
+                since: args.since,
+                rejected: args.rejected,
+                bootstrap_from_vault: args.bootstrap_from_vault,
+                note: args.note,
+                dry_run: args.dry_run,
+            };
+            borg::replay::run(config, opts).await
+        }
+        Some(Command::Retention(args)) => match args.action {
+            RetentionAction::Sweep { dry_run } => borg::retention::run_sweep(&config, dry_run),
+            RetentionAction::Status => borg::retention::run_status(&config),
+        },
     }
 }

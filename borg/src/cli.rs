@@ -104,6 +104,51 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Replay the ingestion pipeline for staged traces or vault notes
+    Replay(ReplayCliArgs),
+    /// Manage staging retention
+    Retention(RetentionCliArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct ReplayCliArgs {
+    /// Specific trace ID to replay
+    pub trace_id: Option<String>,
+    /// Start replay at this stage (keep artifacts from earlier stages)
+    #[arg(long, default_value_t = 0)]
+    pub from_stage: u8,
+    /// Replay all traces from the last N duration (e.g. "7d", "24h")
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Only replay rejected traces
+    #[arg(long)]
+    pub rejected: bool,
+    /// Seed replay from a vault note's frontmatter (for pre-staging notes)
+    #[arg(long)]
+    pub bootstrap_from_vault: bool,
+    /// Path to a specific vault note (required with --bootstrap-from-vault)
+    #[arg(long)]
+    pub note: Option<PathBuf>,
+    /// Dry-run: print actions without executing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct RetentionCliArgs {
+    #[command(subcommand)]
+    pub action: RetentionAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RetentionAction {
+    /// Sweep aged-off trace directories
+    Sweep {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Report trace counts and disk usage
+    Status,
 }
 
 #[derive(Parser, Debug)]

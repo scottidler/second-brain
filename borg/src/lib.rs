@@ -28,6 +28,8 @@ pub mod ntfy;
 pub mod ocr;
 pub mod pipeline;
 pub mod quality;
+pub mod replay;
+pub mod retention;
 pub mod router;
 pub mod routes;
 pub mod stages;
