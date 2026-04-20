@@ -3,7 +3,7 @@
 //! traces within a time window, and bootstrap-from-vault replay that
 //! re-fetches a pre-staging note by reading its frontmatter.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use eyre::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
@@ -140,9 +140,15 @@ async fn reingest_via_daemon(config: &Config, url: &str) -> Result<IngestResult>
     Ok(result)
 }
 
-async fn replay_trace(config: &Config, trace_id: &str, _from_stage: u8, dry_run: bool) -> Result<()> {
+async fn replay_trace(config: &Config, trace_id: &str, from_stage: u8, dry_run: bool) -> Result<()> {
     if !config.staging.enabled {
         bail!("replay: staging.enabled must be true");
+    }
+    if from_stage > 0 {
+        bail!(
+            "replay: --from-stage {from_stage} not yet supported; only --from-stage 0 \
+             (full re-fetch) is wired in this release. Skip the flag to re-run from Stage 0."
+        );
     }
     let store = FsArtifactStore::from_config(&config.staging);
     if !store.has_trace(trace_id)? {
@@ -201,15 +207,6 @@ async fn replay_matching(config: &Config, opts: &ReplayOptions) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Accept an RFC3339 or duration expression and return a bounded timestamp.
-#[allow(dead_code)]
-fn normalize_since(s: &str, now: DateTime<Utc>) -> Result<String> {
-    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return Ok(dt.with_timezone(&Utc).to_rfc3339());
-    }
-    Ok((now - parse_duration(s)?).to_rfc3339())
 }
 
 #[cfg(test)]
