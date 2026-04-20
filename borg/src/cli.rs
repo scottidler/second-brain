@@ -115,6 +115,24 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Manage the Gate-0 domain blocklist (list / remove / clear)
+    Blocklist(BlocklistCliArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct BlocklistCliArgs {
+    #[command(subcommand)]
+    pub action: BlocklistAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BlocklistAction {
+    /// List every blocklisted domain with its retriable-after timestamp
+    List,
+    /// Remove a single domain from the blocklist
+    Remove { domain: String },
+    /// Remove every entry from the blocklist
+    Clear,
 }
 
 #[derive(Parser, Debug)]

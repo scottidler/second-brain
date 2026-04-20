@@ -1,4 +1,4 @@
-use borg::cli::{Cli, Command, RetentionAction};
+use borg::cli::{BlocklistAction, Cli, Command, RetentionAction};
 use borg::config::Config;
 use borg::logging;
 use clap::Parser;
@@ -78,5 +78,42 @@ async fn main() -> Result<()> {
             RetentionAction::Status => borg::retention::run_status(&config),
         },
         Some(Command::ReingestFailed { dry_run }) => borg::migrate::run_reingest_failed(&config, dry_run).await,
+        Some(Command::Blocklist(args)) => {
+            use borg::blocklist::{Blocklist, default_path};
+            let path = default_path();
+            match args.action {
+                BlocklistAction::List => {
+                    let bl = Blocklist::from_file(&path)?;
+                    if bl.domains.is_empty() {
+                        println!("(blocklist empty)");
+                    } else {
+                        for (domain, entry) in bl.list() {
+                            println!(
+                                "{domain:30} retriable-after={} hits={} reason={}",
+                                entry.retriable_after, entry.hits, entry.reason
+                            );
+                        }
+                    }
+                    Ok(())
+                }
+                BlocklistAction::Remove { domain } => {
+                    let mut bl = Blocklist::from_file(&path)?;
+                    let removed = bl.remove(&domain).is_some();
+                    bl.save_to(&path)?;
+                    if removed {
+                        println!("removed: {domain}");
+                    } else {
+                        println!("not blocklisted: {domain}");
+                    }
+                    Ok(())
+                }
+                BlocklistAction::Clear => {
+                    let bl = Blocklist::default();
+                    bl.save_to(&path)?;
+                    println!("blocklist cleared");
+                    Ok(())
+                }
+            }
+        }
     }
 }
