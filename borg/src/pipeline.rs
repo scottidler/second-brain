@@ -685,6 +685,8 @@ async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> R
         initial
     };
 
+    crate::stages::raw::run_gate_2(config, trace_id, Some(url), &summary)?;
+
     Ok((title, summary, ContentType::Article))
 }
 

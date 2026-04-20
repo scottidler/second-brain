@@ -6,6 +6,7 @@ use crate::blocklist::{self, Blocklist};
 use crate::config::Config;
 use crate::stages::artifact::{ArtifactStore, FsArtifactStore, sha256_hex};
 use crate::stages::classify as gate1;
+use crate::stages::summarize as gate2;
 use crate::types::{ContentKind, Envelope, FetchMeta, GateId, IngestKind, IngestMethod, RejectionRecord, StageKind};
 
 /// Classify the primary `IngestKind` for a capture. Non-destructive: the Stage-0
@@ -223,6 +224,39 @@ pub fn run_gate_1(config: &Config, trace_id: &str, url: &str, bytes: &[u8], stat
         log::warn!("[{trace_id}] Gate-1: rejection write failed: {e:#}");
     }
     bail!("gate-1: {}", matched.reason);
+}
+
+/// Gate-2: paraphrase-detection backstop. Runs on the produced summary. If
+/// Fabric paraphrased a block/error page into prose, the summary still has
+/// distinctive signatures. Records a rejection but does NOT update the
+/// blocklist (by this stage the domain signature has been masked and we
+/// cannot reliably attribute the match to a specific domain).
+pub fn run_gate_2(config: &Config, trace_id: &str, url: Option<&str>, summary: &str) -> Result<()> {
+    if !config.staging.enabled {
+        return Ok(());
+    }
+    let Some(reason) = gate2::detect_paraphrased_block(summary) else {
+        return Ok(());
+    };
+    log::warn!("[{trace_id}] Gate-2 reject: {reason}");
+    let store = FsArtifactStore::from_config(&config.staging);
+    let domain = url.map(blocklist::domain_for);
+    let rec = RejectionRecord {
+        trace: trace_id.to_string(),
+        stage: StageKind::Summary,
+        gate: GateId::FailedFetchParaphrase,
+        reason: reason.clone(),
+        rejected_at: Utc::now().to_rfc3339(),
+        raw_artifact: Some(format!("{trace_id}/summary.md")),
+        source: url.map(String::from),
+        domain,
+        blocklist_updated: false,
+        retriable_after: None,
+    };
+    if let Err(e) = store.write_rejection(trace_id, &rec) {
+        log::warn!("[{trace_id}] Gate-2: rejection write failed: {e:#}");
+    }
+    bail!("gate-2: {reason}");
 }
 
 #[cfg(test)]
