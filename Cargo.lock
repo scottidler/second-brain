@@ -430,6 +430,7 @@ name = "borg"
 version = "0.5.26"
 dependencies = [
  "arboard",
+ "async-trait",
  "axum",
  "base64",
  "chrono",

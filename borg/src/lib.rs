@@ -7,6 +7,7 @@ pub use vault;
 pub mod assets;
 pub mod audit;
 pub mod backoff;
+pub mod blocklist;
 pub mod cli;
 pub mod config;
 pub mod dashboard;

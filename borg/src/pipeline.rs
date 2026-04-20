@@ -180,6 +180,16 @@ pub async fn process_content(
 ) -> IngestResult {
     let trace_id = trace_id.unwrap_or_else(|| trace::generate(method));
     log::info!("[{trace_id}] Starting ingest: method={method}");
+    if let Err(err) = crate::stages::raw::stage_0_init(config, &content, method, &trace_id) {
+        let reason = format!("{err:#}");
+        log::warn!("[{trace_id}] Stage-0 rejected: {reason}");
+        return IngestResult {
+            status: IngestStatus::Failed { reason },
+            trace_id: Some(trace_id),
+            method: Some(method),
+            ..Default::default()
+        };
+    }
     let mut result = match content {
         ContentKind::Url(url) => process_url(&url, tags, method, force, config, &trace_id).await,
         ContentKind::Image { data, filename } => {
@@ -409,16 +419,16 @@ async fn process_url_inner(
             _ => ContentType::Article,
         };
         if use_fabric {
-            match process_article_fabric(&url_match.url, config).await {
+            match process_article_fabric(&url_match.url, config, trace_id).await {
                 Ok((title, summary, _)) => (title, summary, ct, None, Vec::new()),
                 Err(e) => {
                     log::warn!("Fabric article fetch failed: {e:#}, falling back to Jina");
-                    let (title, summary, _) = process_article_jina(&url_match.url).await?;
+                    let (title, summary, _) = process_article_jina(&url_match.url, config, trace_id).await?;
                     (title, summary, ct, None, Vec::new())
                 }
             }
         } else {
-            let (title, summary, _) = process_article_jina(&url_match.url).await?;
+            let (title, summary, _) = process_article_jina(&url_match.url, config, trace_id).await?;
             (title, summary, ct, None, Vec::new())
         }
     };
@@ -636,8 +646,19 @@ async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
     })
 }
 
-async fn process_article_fabric(url: &str, config: &Config) -> Result<(String, String, ContentType)> {
+async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> Result<(String, String, ContentType)> {
     let article_md = fabric::fetch_article(url, &config.fabric).await?;
+    if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
+        config,
+        trace_id,
+        url,
+        article_md.as_bytes(),
+        "fabric-u",
+        200,
+        Some("text/markdown"),
+    ) {
+        log::warn!("[{trace_id}] persist_fetched (fabric) failed: {e:#}");
+    }
 
     let title = extract_article_title(&article_md, url);
 
@@ -666,8 +687,19 @@ async fn process_article_fabric(url: &str, config: &Config) -> Result<(String, S
     Ok((title, summary, ContentType::Article))
 }
 
-async fn process_article_jina(url: &str) -> Result<(String, String, ContentType)> {
+async fn process_article_jina(url: &str, config: &Config, trace_id: &str) -> Result<(String, String, ContentType)> {
     let article_md = jina::fetch_article_markdown(url).await?;
+    if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
+        config,
+        trace_id,
+        url,
+        article_md.as_bytes(),
+        "jina",
+        200,
+        Some("text/markdown"),
+    ) {
+        log::warn!("[{trace_id}] persist_fetched (jina) failed: {e:#}");
+    }
 
     let title = extract_article_title(&article_md, url);
 

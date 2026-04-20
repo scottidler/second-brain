@@ -37,6 +37,7 @@ tokio-stream = "0.1.18"
 tokio-util = { version = "0.7.18", features = ["io"] }
 hostname = "0.4.2"
 base64 = "0.22"
+async-trait = "0.1.89"
 
 [dependencies.serenity]
 version = "0.12"
