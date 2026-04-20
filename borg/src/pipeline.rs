@@ -659,6 +659,7 @@ async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> R
     ) {
         log::warn!("[{trace_id}] persist_fetched (fabric) failed: {e:#}");
     }
+    crate::stages::raw::run_gate_1(config, trace_id, url, article_md.as_bytes(), 200)?;
 
     let title = extract_article_title(&article_md, url);
 
@@ -700,6 +701,7 @@ async fn process_article_jina(url: &str, config: &Config, trace_id: &str) -> Res
     ) {
         log::warn!("[{trace_id}] persist_fetched (jina) failed: {e:#}");
     }
+    crate::stages::raw::run_gate_1(config, trace_id, url, article_md.as_bytes(), 200)?;
 
     let title = extract_article_title(&article_md, url);
 

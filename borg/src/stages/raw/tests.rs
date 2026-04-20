@@ -139,3 +139,69 @@ fn write_capture_for_url_stores_url_as_body() {
     let body = store.read_body("tg-url").unwrap();
     assert_eq!(body, url.as_bytes());
 }
+
+#[test]
+fn run_gate_1_clean_body_returns_ok() {
+    // Staging disabled → no-op Ok.
+    let config = crate::config::Config::default();
+    let result = run_gate_1(
+        &config,
+        "tg-test",
+        "https://example.com",
+        b"<html><h1>Real article</h1></html>",
+        200,
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_gate_1_block_body_when_enabled_persists_blocklist_and_rejection() {
+    // Point staging.root at a tempdir so the rejection/blocklist artifacts
+    // land somewhere we can inspect.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut config = crate::config::Config::default();
+    config.staging.enabled = true;
+    config.staging.root = tmp.path().join("stages");
+
+    // Pre-seed a trace directory so run_gate_1 can write rejection.yml next to it.
+    let store = FsArtifactStore::from_config(&config.staging);
+    let env = crate::stages::artifact::new_envelope("tg-gate1", IngestKind::ArticleUrl, IngestMethod::Telegram);
+    store.write_envelope(&env.trace, &env).unwrap();
+
+    // Redirect the blocklist default path into the tempdir so persistence
+    // doesn't leak into the user's real dotfiles.
+    //
+    // run_gate_1 uses blocklist::default_path() which resolves via
+    // dirs::data_local_dir(). We set XDG_DATA_HOME for this test.
+    // SAFETY: single-threaded test.
+    unsafe {
+        std::env::set_var("XDG_DATA_HOME", tmp.path());
+    }
+
+    // Block until far in the future so the test is stable across actual wall-clock.
+    let err = run_gate_1(
+        &config,
+        &env.trace,
+        "https://www.xda-developers.com/7-docker-containers/",
+        b"anonymous access to domain blocked until 2099-01-01T00:00:00Z",
+        200,
+    )
+    .expect_err("expected gate-1 to reject");
+    assert!(format!("{err:#}").contains("gate-1"));
+
+    // Rejection record written.
+    let rec = store.read_rejection(&env.trace).unwrap().expect("rejection missing");
+    assert_eq!(rec.gate, crate::types::GateId::BlockPage);
+    assert_eq!(rec.domain.as_deref(), Some("xda-developers.com"));
+    assert!(rec.blocklist_updated);
+
+    // Blocklist persisted and contains the domain.
+    let bl_path = crate::blocklist::default_path();
+    let bl = crate::blocklist::Blocklist::from_file(&bl_path).unwrap();
+    assert!(bl.is_blocked("xda-developers.com", chrono::Utc::now()));
+
+    // Clean up env var for other tests.
+    unsafe {
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+}

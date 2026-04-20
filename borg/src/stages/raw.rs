@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use crate::blocklist::{self, Blocklist};
 use crate::config::Config;
 use crate::stages::artifact::{ArtifactStore, FsArtifactStore, sha256_hex};
-use crate::types::{ContentKind, Envelope, FetchMeta, IngestKind, IngestMethod};
+use crate::stages::classify as gate1;
+use crate::types::{ContentKind, Envelope, FetchMeta, GateId, IngestKind, IngestMethod, RejectionRecord, StageKind};
 
 /// Classify the primary `IngestKind` for a capture. Non-destructive: the Stage-0
 /// write persists the full raw event regardless of what this returns.
@@ -173,6 +174,55 @@ pub fn persist_fetched_if_staging(
     };
     store.write_fetched(trace_id, bytes, &meta)?;
     Ok(())
+}
+
+/// Gate-1: block-page detection on the raw Stage-0 fetched bytes. When a match
+/// fires, this function:
+///
+/// - Adds the URL's registrable domain to the blocklist (with the parsed
+///   `retriable-after` timestamp).
+/// - Persists the blocklist to disk.
+/// - Writes a rejection record to the artifact store.
+/// - Returns `Err` so the caller converts the ingestion to Failed.
+///
+/// No-op when staging is disabled.
+pub fn run_gate_1(config: &Config, trace_id: &str, url: &str, bytes: &[u8], status: u16) -> Result<()> {
+    if !config.staging.enabled {
+        return Ok(());
+    }
+    let now = Utc::now();
+    let Some(matched) = gate1::detect_block_page(bytes, status, now) else {
+        return Ok(());
+    };
+    let domain = blocklist::domain_for(url);
+    log::warn!(
+        "[{trace_id}] Gate-1 reject: domain {domain} {reason} retriable-after={retry}",
+        reason = matched.reason,
+        retry = matched.retriable_after.to_rfc3339(),
+    );
+    let blocklist_path = blocklist::default_path();
+    let mut bl = Blocklist::from_file(&blocklist_path).unwrap_or_default();
+    bl.add_or_refresh(&domain, &matched.reason, matched.retriable_after);
+    if let Err(e) = bl.save_to(&blocklist_path) {
+        log::warn!("[{trace_id}] Gate-1: blocklist save failed: {e:#}");
+    }
+    let store = FsArtifactStore::from_config(&config.staging);
+    let rec = RejectionRecord {
+        trace: trace_id.to_string(),
+        stage: StageKind::Transcript,
+        gate: GateId::BlockPage,
+        reason: matched.reason.clone(),
+        rejected_at: now.to_rfc3339(),
+        raw_artifact: Some(format!("{trace_id}/fetched.html")),
+        source: Some(url.to_string()),
+        domain: Some(domain.clone()),
+        blocklist_updated: true,
+        retriable_after: Some(matched.retriable_after.to_rfc3339()),
+    };
+    if let Err(e) = store.write_rejection(trace_id, &rec) {
+        log::warn!("[{trace_id}] Gate-1: rejection write failed: {e:#}");
+    }
+    bail!("gate-1: {}", matched.reason);
 }
 
 #[cfg(test)]
