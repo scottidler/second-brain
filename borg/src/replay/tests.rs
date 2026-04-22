@@ -73,3 +73,35 @@ fn read_source_handles_quoted_value() {
     let source = read_source_from_note(file.path()).unwrap();
     assert_eq!(source, "https://example.com/a b");
 }
+
+#[test]
+fn read_method_from_note_extracts_telegram() {
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "---\ntitle: Example\nmethod: telegram\nsource: https://example.com\n---\nbody").unwrap();
+    let method = read_method_from_note(file.path()).unwrap();
+    assert_eq!(method, Some("telegram".to_string()));
+}
+
+#[test]
+fn read_method_from_note_extracts_cli() {
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "---\ntitle: Example\nmethod: cli\nsource: https://example.com\n---\nbody").unwrap();
+    let method = read_method_from_note(file.path()).unwrap();
+    assert_eq!(method, Some("cli".to_string()));
+}
+
+#[test]
+fn read_method_from_note_returns_none_when_missing() {
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "---\ntitle: Example\nsource: https://example.com\n---\nbody").unwrap();
+    let method = read_method_from_note(file.path()).unwrap();
+    assert_eq!(method, None);
+}
+
+#[test]
+fn read_method_from_note_handles_quoted_value() {
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "---\ntitle: Example\nmethod: \"telegram\"\n---\nbody").unwrap();
+    let method = read_method_from_note(file.path()).unwrap();
+    assert_eq!(method, Some("telegram".to_string()));
+}

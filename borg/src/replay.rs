@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
-use crate::types::{IngestMethod, IngestResult, IngestStatus, TraceFilter};
+use crate::types::{IngestResult, IngestStatus, TraceFilter};
 
 #[derive(Debug, Default)]
 pub struct ReplayOptions {
@@ -39,6 +39,24 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
         "s" => Ok(Duration::seconds(num)),
         _ => bail!("unknown duration unit in {s}: expected d|h|m|s"),
     }
+}
+
+/// Read a vault note's frontmatter and return the `method:` value, if any.
+pub fn read_method_from_note(note_path: &Path) -> Result<Option<String>> {
+    let text = std::fs::read_to_string(note_path).with_context(|| format!("read note {}", note_path.display()))?;
+    let Some(frontmatter) = extract_frontmatter(&text) else {
+        return Ok(None);
+    };
+    for line in frontmatter.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("method:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+            if !value.is_empty() {
+                return Ok(Some(value));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Read a vault note's frontmatter and return the `source:` URL, if any.
@@ -92,7 +110,8 @@ pub async fn run(config: Config, opts: ReplayOptions) -> Result<()> {
 async fn bootstrap_note(config: &Config, note_path: &Path, dry_run: bool) -> Result<()> {
     let source =
         read_source_from_note(note_path).with_context(|| format!("extract source from {}", note_path.display()))?;
-    println!("bootstrap: {} -> {}", note_path.display(), source);
+    let method = read_method_from_note(note_path)?.unwrap_or_else(|| "cli".to_string());
+    println!("bootstrap: {} -> {} (method: {method})", note_path.display(), source);
     if dry_run {
         println!("  [dry-run] would re-ingest {source}");
         return Ok(());
@@ -101,7 +120,7 @@ async fn bootstrap_note(config: &Config, note_path: &Path, dry_run: bool) -> Res
     // daemon's reingest-domain-preservation logic (overwrites the note while
     // preserving cortex-owned frontmatter fields) and exercises the full
     // Stage-0-through-Stage-3 pipeline end to end.
-    let result = reingest_via_daemon(config, &source).await?;
+    let result = reingest_via_daemon(config, &source, &method).await?;
     match &result.status {
         IngestStatus::Completed => {
             println!("  -> {}", result.title.as_deref().unwrap_or("(no title)"));
@@ -119,7 +138,7 @@ async fn bootstrap_note(config: &Config, note_path: &Path, dry_run: bool) -> Res
     Ok(())
 }
 
-async fn reingest_via_daemon(config: &Config, url: &str) -> Result<IngestResult> {
+async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result<IngestResult> {
     let host = &config.hotkey.host;
     let port = config.hotkey.port;
     let endpoint = format!("http://{host}:{port}/ingest");
@@ -127,7 +146,7 @@ async fn reingest_via_daemon(config: &Config, url: &str) -> Result<IngestResult>
         "url": url,
         "tags": [],
         "force": true,
-        "method": "cli",
+        "method": method,
     });
     let client = reqwest::Client::new();
     let response = client
@@ -167,15 +186,13 @@ async fn replay_trace(config: &Config, trace_id: &str, from_stage: u8, dry_run: 
         println!("  [dry-run] would re-ingest via daemon");
         return Ok(());
     }
-    let result = reingest_via_daemon(config, &source).await?;
+    let method = envelope.method.to_string();
+    let result = reingest_via_daemon(config, &source, &method).await?;
     match &result.status {
         IngestStatus::Completed => println!("  -> {}", result.title.as_deref().unwrap_or("(no title)")),
         IngestStatus::Failed { reason } => println!("  -> failed: {reason}"),
         other => println!("  -> {other:?}"),
     }
-    // Silence "unused" on method - keeps the envelope-reading line meaningful
-    // if callers want to gate on IngestMethod later.
-    let _: IngestMethod = envelope.method;
     Ok(())
 }
 

@@ -713,7 +713,31 @@ async fn process_article_jina(url: &str, config: &Config, trace_id: &str) -> Res
 
     let title = extract_article_title(&article_md, url);
 
-    Ok((title, article_md, ContentType::Article))
+    let summary = if fabric::is_available(&config.fabric) {
+        let initial = fabric::summarize(&article_md, false, &config.fabric)
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("[{trace_id}] Fabric summarization failed (jina/browser-UA fallback): {e:#}");
+                article_md.clone()
+            });
+        if let Some(reason) = quality::detect_truncation_artifacts(&initial) {
+            log::warn!("[{trace_id}] Quality gate failed (jina/browser-UA fallback): {reason}");
+            fabric::summarize_forced_chunked(&article_md, false, &config.fabric)
+                .await
+                .unwrap_or_else(|e| {
+                    log::warn!("[{trace_id}] Chunked re-summarization also failed: {e:#}");
+                    initial
+                })
+        } else {
+            initial
+        }
+    } else {
+        article_md
+    };
+
+    crate::stages::raw::run_gate_2(config, trace_id, Some(url), &summary)?;
+
+    Ok((title, summary, ContentType::Article))
 }
 
 async fn process_image(
