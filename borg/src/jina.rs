@@ -4,7 +4,7 @@ use crate::stages::fetcher::{BrowserUaFetcher, Fetcher};
 
 /// Fetch article markdown. Primary path is Jina Reader (r.jina.ai).
 /// On HTTP 451 (Jina IP-block) or any other failure, fall back to a direct
-/// reqwest with a realistic browser User-Agent piped through markitdown-cli.
+/// reqwest with a realistic browser User-Agent piped through markitdown.
 /// This recovers URLs whose origin blocks Jina's IP range (e.g. XDA, HowToGeek
 /// circa 2026-04-19) but happily serves requests that look like a browser.
 pub async fn fetch_article_markdown(url: &str) -> Result<String> {

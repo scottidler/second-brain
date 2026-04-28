@@ -235,7 +235,7 @@ fn get_tool_validation_help() -> String {
     let tools: &[(&str, &str, &str, &[(&str, &str, &str)])] = &[
         ("yt-dlp", "--version", "2023.0.0", &[("ffmpeg", "-version", "")]),
         ("fabric", "--version", "1.0.0", &[]),
-        ("markitdown-cli", "-h", "", &[]),
+        ("markitdown", "--version", "", &[]),
     ];
 
     // Collect all tool statuses first to compute column widths

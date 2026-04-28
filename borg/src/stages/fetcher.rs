@@ -17,7 +17,7 @@ pub trait Fetcher: Send + Sync {
 }
 
 /// Chain of Stage-0 fetchers tried in order: Jina Reader → Fabric `-u` → browser-UA
-/// (reqwest with a realistic Firefox User-Agent piped through markitdown-cli).
+/// (reqwest with a realistic Firefox User-Agent piped through markitdown).
 /// Each fetcher's failure is logged and the next is attempted.
 pub struct MultiFetcher {
     jina: JinaFetcher,
@@ -182,7 +182,7 @@ impl Fetcher for FabricFetcher {
 }
 
 /// Fetch via reqwest with a realistic browser User-Agent and convert the
-/// response body to markdown via markitdown-cli. Recovers URLs that block
+/// response body to markdown via markitdown. Recovers URLs that block
 /// bot IPs (Jina) but not browser UAs (e.g. XDA Developers on 2026-04-19).
 pub struct BrowserUaFetcher {
     client: reqwest::Client,

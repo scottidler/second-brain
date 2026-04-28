@@ -3,10 +3,10 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-/// Timeout for markitdown-cli execution (30 seconds).
+/// Timeout for markitdown execution (30 seconds).
 const MARKITDOWN_TIMEOUT_SECS: u64 = 30;
 
-/// Extract markdown text from a file using markitdown-cli.
+/// Extract markdown text from a file using markitdown.
 ///
 /// Returns the extracted markdown content, or an error if the tool
 /// is not found or extraction fails. Applies a 30-second timeout
@@ -17,12 +17,12 @@ pub fn extract_markdown(file_path: &Path) -> Result<String> {
         eyre::bail!("File does not exist: {}", file_path.display());
     }
 
-    let mut child = Command::new("markitdown-cli")
+    let mut child = Command::new("markitdown")
         .arg(file_path.as_os_str())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .context("markitdown-cli not found - install with: pipx install markitdown-cli")?;
+        .context("markitdown not found - install with: pipx install markitdown")?;
 
     // Wait with timeout to prevent hangs
     let timeout = Duration::from_secs(MARKITDOWN_TIMEOUT_SECS);
@@ -35,7 +35,7 @@ pub fn extract_markdown(file_path: &Path) -> Result<String> {
                     let _ = child.kill();
                     let _ = child.wait();
                     eyre::bail!(
-                        "markitdown-cli timed out after {}s for {}",
+                        "markitdown timed out after {}s for {}",
                         MARKITDOWN_TIMEOUT_SECS,
                         file_path.display()
                     );
@@ -43,32 +43,32 @@ pub fn extract_markdown(file_path: &Path) -> Result<String> {
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
-                eyre::bail!("Failed to wait for markitdown-cli: {e}");
+                eyre::bail!("Failed to wait for markitdown: {e}");
             }
         }
     }
 
     let output = child
         .wait_with_output()
-        .context("Failed to collect markitdown-cli output")?;
+        .context("Failed to collect markitdown output")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eyre::bail!("markitdown-cli failed for {}: {stderr}", file_path.display());
+        eyre::bail!("markitdown failed for {}: {stderr}", file_path.display());
     }
 
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if text.is_empty() {
-        eyre::bail!("markitdown-cli produced no output for {}", file_path.display());
+        eyre::bail!("markitdown produced no output for {}", file_path.display());
     }
 
     Ok(text)
 }
 
-/// Check if markitdown-cli is available on PATH.
+/// Check if markitdown is available on PATH.
 pub fn is_available() -> bool {
-    Command::new("markitdown-cli")
-        .arg("--help")
+    Command::new("markitdown")
+        .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

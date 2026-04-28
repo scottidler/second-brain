@@ -1286,7 +1286,7 @@ async fn process_document_file_inner(
     let temp_path = temp_dir.join(filename);
     std::fs::write(&temp_path, data).context("Failed to write temp file")?;
 
-    // Extract text via markitdown-cli
+    // Extract text via markitdown
     let extracted_text = extraction::extract_markdown(&temp_path).unwrap_or_else(|e| {
         log::warn!("Text extraction failed for {filename}: {e:#}");
         String::new()
