@@ -91,6 +91,16 @@ struct YouTubeResult {
     content_type: ContentType,
     description: String,
     yt_tags: Vec<String>,
+    /// Slide manifest + LLM-shaped output when frame-aware ingestion ran
+    /// successfully and produced a non-text-only shape. Stage 3 publish
+    /// happens in `process_url_inner` so the slug is known.
+    slide_payload: Option<SlidePayload>,
+}
+
+#[derive(Debug)]
+struct SlidePayload {
+    manifest: crate::slides::SlideManifest,
+    stage2: crate::slides::StageTwoOutput,
 }
 
 /// Extract the best title from fabric's markdown output.
@@ -322,6 +332,7 @@ async fn process_url_inner(
 
     let mut original_date: Option<String> = None;
     let mut cortex_fields: Vec<(String, String)> = Vec::new();
+    let mut old_slides_frontmatter: Vec<String> = Vec::new();
     let ledger_file = ledger::ledger_path(config);
 
     // Dedup guard: reject concurrent/duplicate ingestions (skip if --force)
@@ -379,8 +390,15 @@ async fn process_url_inner(
             original_date = read_note_date(old_path);
             cortex_fields = read_cortex_fields(old_path);
             reingest_dest = old_path.parent().map(|p| p.to_path_buf());
+            // Capture the old note's `slides:` frontmatter list BEFORE removing it
+            // so reingest cleanup can find any orphaned slide attachments.
+            old_slides_frontmatter = crate::slides::cleanup::read_old_slides_frontmatter(old_path).unwrap_or_default();
             log::debug!("[{trace_id}] Preserved original date: {:?}", original_date);
             log::debug!("[{trace_id}] Preserved cortex fields: {:?}", cortex_fields);
+            log::debug!(
+                "[{trace_id}] Captured old slides for cleanup: {:?}",
+                old_slides_frontmatter
+            );
             log::debug!("[{trace_id}] Will overwrite in: {:?}", reingest_dest);
             std::fs::remove_file(old_path).context("Failed to remove old note during reingest")?;
             log::info!("[{trace_id}] Removed old note: {}", old_path.display());
@@ -401,8 +419,10 @@ async fn process_url_inner(
         log::warn!("[{trace_id}] Fabric binary not available, transcript/summary will use fallbacks");
     }
 
+    let mut slide_payload: Option<SlidePayload> = None;
     let (title, summary, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
         let yt_result = process_youtube(&url_match.url, config).await?;
+        slide_payload = yt_result.slide_payload;
         (
             yt_result.title,
             yt_result.summary,
@@ -464,17 +484,49 @@ async fn process_url_inner(
         None
     };
 
+    // Slide-aware publish: when frame extraction produced a non-text-only
+    // payload, copy slides into the vault attachment area and replace the
+    // summary body with the section-structured form (with wikilink embeds).
+    let filename_stub = hygiene::sanitize_filename(&title);
+    let vault_root = std::path::Path::new(&config.vault.root_path);
+    let vault_root_resolved: PathBuf = shellexpand::tilde(&vault_root.to_string_lossy()).to_string().into();
+    let (final_summary, slide_paths) = if let Some(payload) = slide_payload.as_ref() {
+        match crate::slides::publish::publish_slides(
+            &vault_root_resolved,
+            &filename_stub,
+            &payload.manifest,
+            &payload.stage2,
+            &chrono::Utc::now(),
+        ) {
+            Ok(result) => {
+                log::info!(
+                    "[{trace_id}] Slide-aware publish: shape={:?} slides={}",
+                    result.shape,
+                    result.slides.len(),
+                );
+                (result.body, result.slides)
+            }
+            Err(e) => {
+                log::warn!("[{trace_id}] Slide publish failed: {e:#} - using prose summary");
+                (summary, Vec::new())
+            }
+        }
+    } else {
+        (summary, Vec::new())
+    };
+
     let note = NoteContent {
         title: title.clone(),
         source_url: Some(url_match.url.clone()),
         asset_path: None,
         tags: all_tags.clone(),
-        summary,
+        summary: final_summary,
         description: filtered_description,
         content_type,
         embed_code,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
+        slides: slide_paths.clone(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -503,6 +555,21 @@ async fn process_url_inner(
     }
 
     log::info!("[{trace_id}] Wrote note: {}", note_path.display());
+
+    // Slide cleanup: now that the new note is durable, archive any orphan
+    // slide attachments the old note used to reference. Best-effort - if
+    // rkvr fails we log and move on rather than failing the ingestion.
+    if !old_slides_frontmatter.is_empty() || !slide_paths.is_empty() {
+        let orphans = crate::slides::cleanup::compute_orphans(&old_slides_frontmatter, &slide_paths);
+        if !orphans.is_empty() {
+            let abs = crate::slides::cleanup::resolve_existing(&vault_root_resolved, &orphans);
+            if let Err(e) = crate::slides::cleanup::rkvr_remove(&abs) {
+                log::warn!("[{trace_id}] Slide cleanup failed: {e:#}");
+            } else {
+                log::info!("[{trace_id}] Archived {} orphan slide(s)", orphans.len());
+            }
+        }
+    }
 
     // Log success to Borg Ledger
     ledger::append_entry(
@@ -606,8 +673,32 @@ async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
         }
     };
 
-    // Summarize via Fabric (depends on transcript, runs after join)
-    let summary = if use_fabric {
+    // Frame-aware path: when enabled, download the video, extract frames,
+    // segment slides, and (when the proposed shape is non-text-only) run
+    // the slide-aware Fabric pattern instead of the flat summarizer.
+    let mut slide_payload: Option<SlidePayload> = None;
+    let mut slide_summary: Option<String> = None;
+    if config.youtube.slides.enabled {
+        match try_extract_slides(url, &transcript, metadata.duration_secs, config).await {
+            Ok(Some((manifest, stage2))) => {
+                if !stage2.body.trim().is_empty() {
+                    slide_summary = Some(stage2.body.clone());
+                }
+                slide_payload = Some(SlidePayload { manifest, stage2 });
+            }
+            Ok(None) => {
+                log::debug!("Slide-aware path produced no manifest; using text-only summary");
+            }
+            Err(e) => {
+                log::warn!("Frame-aware path failed: {e:#} - falling back to text-only summary");
+            }
+        }
+    }
+
+    // Summarize via Fabric (text-only fallback / when slide path didn't run).
+    let summary = if let Some(s) = slide_summary {
+        s
+    } else if use_fabric {
         let initial = fabric::summarize(&transcript, true, &config.fabric)
             .await
             .unwrap_or_else(|e| {
@@ -643,7 +734,104 @@ async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
         content_type,
         description: metadata.description,
         yt_tags: metadata.tags,
+        slide_payload,
     })
+}
+
+/// Frame-aware ingestion path. Downloads the video, extracts frames, runs
+/// slide segmentation, and - when the proposed shape is non-text-only -
+/// runs the slide-aware Fabric pattern. Returns the manifest + parsed
+/// LLM output. Returns `Ok(None)` for text-only proposals (the caller
+/// should use the existing summary path).
+///
+/// All heavy work happens in tempdir under `borg/youtube-frames/<video_id>/`
+/// for replay-friendly debug; the directory survives the function so the
+/// caller can copy slides out of it.
+async fn try_extract_slides(
+    url: &str,
+    transcript: &str,
+    duration_secs: f64,
+    config: &Config,
+) -> Result<Option<(crate::slides::SlideManifest, crate::slides::StageTwoOutput)>> {
+    use crate::slides::{self, NoteShape};
+    use crate::youtube;
+
+    let video_id = youtube::extract_video_id(url)
+        .ok_or_else(|| eyre::eyre!("could not extract YouTube video id from url: {url}"))?;
+
+    let work_dir = std::env::temp_dir().join("borg-youtube-frames").join(&video_id);
+    let _ = std::fs::remove_dir_all(&work_dir);
+    std::fs::create_dir_all(&work_dir).context("create youtube-frames work dir")?;
+
+    // 1. Download the video. yt-dlp `-f` picks the best mp4 under 720p so
+    //    frames are reasonable and disk usage stays small.
+    let video_path = work_dir.join(format!("{video_id}.mp4"));
+    let output_template = video_path.to_string_lossy().to_string();
+    let dl = std::process::Command::new("yt-dlp")
+        .args([
+            "--no-warnings",
+            "-f",
+            "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b",
+            "--merge-output-format",
+            "mp4",
+            "-o",
+            &output_template,
+            url,
+        ])
+        .output()
+        .context("yt-dlp video download")?;
+    if !dl.status.success() {
+        let stderr = String::from_utf8_lossy(&dl.stderr);
+        eyre::bail!("yt-dlp failed: {stderr}");
+    }
+
+    // The merge step may write the file with a different extension; locate
+    // whatever yt-dlp produced under the work_dir.
+    let actual_video = std::fs::read_dir(&work_dir)
+        .context("scan work dir")?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.extension()
+                .and_then(|s| s.to_str())
+                .map(|s| matches!(s, "mp4" | "mkv" | "webm"))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| eyre::eyre!("yt-dlp did not write a video file"))?;
+
+    // 2. Extract frames.
+    let frames_dir = work_dir.join("frames");
+    let frames = youtube::extract_frames(&actual_video, &frames_dir, duration_secs, &config.youtube.slides)?;
+    if frames.is_empty() {
+        log::info!("No frames extracted; skipping slide-aware path");
+        return Ok(None);
+    }
+
+    // 3. Segment + OCR + transcript bind.
+    let manifest = slides::segment(
+        &video_id,
+        url,
+        duration_secs,
+        &frames,
+        transcript,
+        &work_dir,
+        &config.youtube.slides,
+    )?;
+    let _ = slides::write_manifest(&manifest, &work_dir);
+
+    if matches!(manifest.extraction.proposed_note_shape, NoteShape::TextOnly) {
+        log::info!(
+            "Stage 1 proposed text-only shape (unique_slides={}); skipping slide-aware Fabric pattern",
+            manifest.extraction.unique_slides,
+        );
+        return Ok(None);
+    }
+
+    // 4. Render pattern input + run new Fabric pattern.
+    let pattern_input = slides::render_pattern_input(&manifest);
+    let raw = fabric::run_pattern("obsidian-youtube-slides.md", &pattern_input, &config.fabric).await?;
+    let stage2 = slides::parse_stage2_output(&raw);
+    Ok(Some((manifest, stage2)))
 }
 
 async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> Result<(String, String, ContentType)> {
@@ -913,6 +1101,7 @@ async fn process_image_inner(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
+        slides: Vec::new(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1133,6 +1322,7 @@ async fn process_audio_inner(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
+        slides: Vec::new(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1380,6 +1570,7 @@ async fn process_document_file_inner(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
+        slides: Vec::new(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1569,6 +1760,7 @@ async fn process_text_inner(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
+        slides: Vec::new(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1718,6 +1910,7 @@ async fn process_vocab(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
+        slides: Vec::new(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -2114,6 +2307,7 @@ async fn process_code_snippet(
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
+        slides: Vec::new(),
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -2690,6 +2884,7 @@ int main() {
             embed_code: None,
             method: Some(IngestMethod::Cli),
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = markdown::render_note(
             &note,

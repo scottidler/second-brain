@@ -15,6 +15,9 @@ pub struct NoteContent {
     pub embed_code: Option<String>,
     pub method: Option<IngestMethod>,
     pub trace_id: Option<String>,
+    /// Vault-relative paths to slide JPEGs the note owns. Rendered into the
+    /// `slides:` frontmatter list so cleanup on replay can find them.
+    pub slides: Vec<String>,
 }
 
 pub enum ContentType {
@@ -106,6 +109,13 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
 
     if let Some(ref tid) = note.trace_id {
         fm.push_str(&format!("trace: {tid}\n"));
+    }
+
+    if !note.slides.is_empty() {
+        fm.push_str("slides:\n");
+        for s in &note.slides {
+            fm.push_str(&format!("  - {s}\n"));
+        }
     }
 
     fm.push_str(&format!("tags:\n{tags_yaml}\n"));
@@ -223,6 +233,7 @@ mod tests {
             embed_code: None,
             method: None,
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("title: \"Test Article\""));
@@ -250,6 +261,7 @@ mod tests {
             embed_code: Some(r#"<iframe width="854" height="480" src="https://www.youtube.com/embed/abc" frameborder="0" allowfullscreen></iframe>"#.to_string()),
             method: Some(IngestMethod::Telegram),
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: youtube"));
@@ -278,6 +290,7 @@ mod tests {
             embed_code: None,
             method: None,
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &config);
         assert!(rendered.contains("  - ai"));
@@ -298,6 +311,7 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: note"));
@@ -320,6 +334,7 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Cli),
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: image"));
@@ -340,6 +355,7 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: Some("tg-7f3a2c".to_string()),
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("trace: tg-7f3a2c"));
@@ -363,6 +379,7 @@ mod tests {
             embed_code: None,
             method: None,
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(!rendered.contains("trace:"));
@@ -381,6 +398,7 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: github"));
@@ -399,6 +417,7 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: social"));
@@ -417,6 +436,7 @@ mod tests {
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: reddit"));
@@ -438,6 +458,7 @@ mod tests {
             embed_code: Some(r#"<iframe width="854" height="480" src="https://www.youtube.com/embed/abc" frameborder="0" allowfullscreen></iframe>"#.to_string()),
             method: Some(IngestMethod::Telegram),
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &test_config());
         // Callout header
@@ -469,6 +490,7 @@ mod tests {
             embed_code: None,
             method: None,
             trace_id: None,
+            slides: Vec::new(),
         };
         let rendered = render_note(&note, &test_config());
         assert!(!rendered.contains("[!info]"), "no callout when description is None");
