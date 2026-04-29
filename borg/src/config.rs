@@ -171,7 +171,85 @@ pub struct Config {
     pub vision: VisionConfig,
     pub tags: TagsConfig,
     pub staging: StagingConfig,
+    pub youtube: YoutubeConfig,
     pub log_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct YoutubeConfig {
+    pub slides: YoutubeSlidesConfig,
+}
+
+/// Frame-aware YouTube ingestion config (see docs/design/2026-04-29-frame-aware-youtube-ingestion.md).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct YoutubeSlidesConfig {
+    /// Master switch. When false, frame extraction and slide segmentation are skipped
+    /// entirely; the pipeline reverts to pre-frame-aware behavior.
+    pub enabled: bool,
+    /// Hard cap on extracted frames per video (per-budget tier may be lower).
+    pub max_frames: u32,
+    /// Hard ceiling on the source-resampling fps fed to mpdecimate. The
+    /// auto-fps table picks an effective fps based on duration; this caps it.
+    pub max_fps: f32,
+    /// mpdecimate `hi` threshold (default 64*32 = 2048).
+    pub mpdecimate_hi: u32,
+    /// mpdecimate `lo` threshold (default 64*16 = 1024).
+    pub mpdecimate_lo: u32,
+    /// mpdecimate `frac` threshold (fraction of 8x8 blocks that must change).
+    pub mpdecimate_frac: f32,
+    /// Hamming-distance threshold for clustering frames into a single slide.
+    pub phash_hamming_threshold: u32,
+    /// Slide clusters shorter than this many seconds are dropped as transition artifacts.
+    pub transition_min_seconds: f32,
+    /// Width to downscale frames to before writing JPEGs (height auto-preserves aspect).
+    pub frame_resolution_px: u32,
+    /// Per-slide vision-API captioning. `false` in Phase 1 (Tesseract OCR only).
+    pub vision_per_slide: bool,
+    /// Thresholds that drive Stage 1's note-shape proposal.
+    pub slide_thresholds: SlideThresholds,
+}
+
+impl Default for YoutubeSlidesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_frames: 100,
+            max_fps: 2.0,
+            mpdecimate_hi: 64 * 32,
+            mpdecimate_lo: 64 * 16,
+            mpdecimate_frac: 0.33,
+            phash_hamming_threshold: 6,
+            transition_min_seconds: 5.0,
+            frame_resolution_px: 512,
+            vision_per_slide: false,
+            slide_thresholds: SlideThresholds::default(),
+        }
+    }
+}
+
+/// Thresholds that drive Stage 1's note-shape proposal.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct SlideThresholds {
+    /// `compression_ratio >= this` => text-only (motion / animated content).
+    pub text_only_max_ratio: f32,
+    /// `compression_ratio < this` => slide-section (slide-heavy content).
+    pub slide_section_max_ratio: f32,
+    /// Below this unique-slide count, fall back to text-only regardless of ratio
+    /// (handles talking-head / static-camera videos with low ratio but few slides).
+    pub min_unique_slides: u32,
+}
+
+impl Default for SlideThresholds {
+    fn default() -> Self {
+        Self {
+            text_only_max_ratio: 0.50,
+            slide_section_max_ratio: 0.10,
+            min_unique_slides: 4,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

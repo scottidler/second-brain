@@ -77,7 +77,11 @@ fn read_source_handles_quoted_value() {
 #[test]
 fn read_method_from_note_extracts_telegram() {
     let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "---\ntitle: Example\nmethod: telegram\nsource: https://example.com\n---\nbody").unwrap();
+    writeln!(
+        file,
+        "---\ntitle: Example\nmethod: telegram\nsource: https://example.com\n---\nbody"
+    )
+    .unwrap();
     let method = read_method_from_note(file.path()).unwrap();
     assert_eq!(method, Some("telegram".to_string()));
 }
@@ -85,7 +89,11 @@ fn read_method_from_note_extracts_telegram() {
 #[test]
 fn read_method_from_note_extracts_cli() {
     let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "---\ntitle: Example\nmethod: cli\nsource: https://example.com\n---\nbody").unwrap();
+    writeln!(
+        file,
+        "---\ntitle: Example\nmethod: cli\nsource: https://example.com\n---\nbody"
+    )
+    .unwrap();
     let method = read_method_from_note(file.path()).unwrap();
     assert_eq!(method, Some("cli".to_string()));
 }

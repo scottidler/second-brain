@@ -1,6 +1,10 @@
 use eyre::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
+
+use crate::config::YoutubeSlidesConfig;
 
 static VIDEO_ID_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
@@ -166,6 +170,180 @@ pub fn extract_audio(url: &str, output_dir: &str) -> Result<String> {
     bail!("Could not determine audio output path from yt-dlp")
 }
 
+/// One extracted frame: where it lives on disk and when in the source video it occurred.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct FrameRef {
+    pub index: u32,
+    pub path: PathBuf,
+    pub timestamp_secs: f64,
+}
+
+/// Sidecar written next to the extracted frames as `frames.yml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct FramesSidecar {
+    pub video_duration_secs: f64,
+    pub frame_budget: u32,
+    pub effective_fps: f32,
+    pub frames_extracted: u32,
+    pub frames: Vec<FrameRef>,
+}
+
+/// Compute the effective source-resampling fps given a video duration.
+/// Returns `(frame_budget, effective_fps)`, derived from the auto-fps table in
+/// `claude-video/scripts/frames.py:94-110` (lightly adapted). The actual
+/// JPEG count after mpdecimate may be lower than the budget for static content.
+pub fn frame_budget(duration_secs: f64, config: &YoutubeSlidesConfig) -> (u32, f32) {
+    let raw_fps: f32 = if duration_secs <= 30.0 {
+        1.0
+    } else if duration_secs <= 60.0 {
+        // 40 frames over the duration, capped by max_fps
+        40.0 / duration_secs as f32
+    } else if duration_secs <= 180.0 {
+        60.0 / duration_secs as f32
+    } else if duration_secs <= 600.0 {
+        80.0 / duration_secs as f32
+    } else {
+        100.0 / duration_secs as f32
+    };
+
+    let budget: u32 = if duration_secs <= 30.0 {
+        30
+    } else if duration_secs <= 60.0 {
+        40
+    } else if duration_secs <= 180.0 {
+        60
+    } else if duration_secs <= 600.0 {
+        80
+    } else {
+        100
+    };
+
+    let effective_fps = raw_fps.min(config.max_fps).max(0.001);
+    let capped_budget = budget.min(config.max_frames);
+    (capped_budget, effective_fps)
+}
+
+/// Extract a budget-bounded set of frames from a video to JPEGs.
+///
+/// Filter chain order is load-bearing: `fps -> mpdecimate -> scale`.
+/// `fps` resamples the source to the budget rate first; `mpdecimate` then
+/// drops near-identical neighbors from the downsampled stream; `scale`
+/// resizes for token efficiency. The reverse order would let `fps` re-fill
+/// gaps mpdecimate created by duplicating the previous frame, undoing dedupe.
+///
+/// Writes `<out_dir>/frame_NNNN.jpg` (1-indexed, 4-digit zero-padded) plus
+/// `<out_dir>/../frames.yml` sidecar listing each frame's source-video timestamp.
+/// The output directory is created if missing.
+pub fn extract_frames(
+    video_path: &Path,
+    out_dir: &Path,
+    duration_secs: f64,
+    config: &YoutubeSlidesConfig,
+) -> Result<Vec<FrameRef>> {
+    if !config.enabled {
+        log::debug!("extract_frames: disabled by config; returning empty");
+        return Ok(Vec::new());
+    }
+    log::debug!(
+        "extract_frames: video={} out_dir={} duration_secs={duration_secs}",
+        video_path.display(),
+        out_dir.display(),
+    );
+
+    std::fs::create_dir_all(out_dir).with_context(|| format!("Failed to create frames dir: {}", out_dir.display()))?;
+
+    let (budget, effective_fps) = frame_budget(duration_secs, config);
+
+    let filter = format!(
+        "fps={fps},mpdecimate=hi={hi}:lo={lo}:frac={frac},scale={px}:-2",
+        fps = effective_fps,
+        hi = config.mpdecimate_hi,
+        lo = config.mpdecimate_lo,
+        frac = config.mpdecimate_frac,
+        px = config.frame_resolution_px,
+    );
+    let frames_glob = out_dir.join("frame_%04d.jpg");
+    let frames_arg = frames_glob.to_string_lossy().to_string();
+
+    let output = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            &video_path.to_string_lossy(),
+            "-vf",
+            &filter,
+            "-frames:v",
+            &budget.to_string(),
+            "-q:v",
+            "4",
+            "-vsync",
+            "vfr",
+            &frames_arg,
+        ])
+        .output()
+        .context("Failed to run ffmpeg - is it installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::error!("ffmpeg frame extraction failed (exit {}): {stderr}", output.status);
+        bail!("ffmpeg frame extraction failed: {stderr}");
+    }
+
+    let mut frames: Vec<FrameRef> = std::fs::read_dir(out_dir)
+        .with_context(|| format!("Failed to read frames dir: {}", out_dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jpg"))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .filter_map(|path| {
+            let stem = path.file_stem()?.to_str()?;
+            let idx_str = stem.strip_prefix("frame_")?;
+            let index: u32 = idx_str.parse().ok()?;
+            // Timestamp = (index - 1) / effective_fps. ffmpeg writes frame_0001
+            // for the first emitted frame, which corresponds to time 0 after fps
+            // resampling. The mpdecimate filter may have dropped intermediate
+            // frames so this is a lower bound on the actual source-video time;
+            // good enough for the slide-segmentation step which uses ranges.
+            let timestamp_secs = ((index.saturating_sub(1)) as f64) / (effective_fps as f64);
+            Some(FrameRef {
+                index,
+                path,
+                timestamp_secs,
+            })
+        })
+        .collect();
+    frames.sort_by_key(|f| f.index);
+
+    let sidecar = FramesSidecar {
+        video_duration_secs: duration_secs,
+        frame_budget: budget,
+        effective_fps,
+        frames_extracted: frames.len() as u32,
+        frames: frames.clone(),
+    };
+    let sidecar_path = out_dir
+        .parent()
+        .map(|p| p.join("frames.yml"))
+        .unwrap_or_else(|| out_dir.join("frames.yml"));
+    let sidecar_yaml = serde_yaml::to_string(&sidecar).context("Failed to serialize frames sidecar")?;
+    std::fs::write(&sidecar_path, sidecar_yaml)
+        .with_context(|| format!("Failed to write frames sidecar: {}", sidecar_path.display()))?;
+
+    log::info!(
+        "extract_frames: wrote {} frames to {} (budget={budget}, fps={effective_fps:.3})",
+        frames.len(),
+        out_dir.display(),
+    );
+
+    Ok(frames)
+}
+
 fn clean_vtt(vtt: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut last_line = String::new();
@@ -261,5 +439,150 @@ mod tests {
         assert!(code.contains("854"));
         assert!(code.contains("480"));
         assert!(code.contains("iframe"));
+    }
+
+    #[test]
+    fn test_frame_budget_short_video() {
+        let cfg = YoutubeSlidesConfig::default();
+        let (budget, fps) = frame_budget(15.0, &cfg);
+        assert_eq!(budget, 30);
+        assert!((fps - 1.0).abs() < 1e-3, "expected ~1 fps for short video, got {fps}");
+    }
+
+    #[test]
+    fn test_frame_budget_one_minute() {
+        let cfg = YoutubeSlidesConfig::default();
+        let (budget, fps) = frame_budget(60.0, &cfg);
+        assert_eq!(budget, 40);
+        // 40 / 60 = 0.666...
+        assert!(
+            (fps - 0.6667).abs() < 1e-3,
+            "expected ~0.667 fps for 60s video, got {fps}"
+        );
+    }
+
+    #[test]
+    fn test_frame_budget_three_minutes() {
+        let cfg = YoutubeSlidesConfig::default();
+        let (budget, fps) = frame_budget(180.0, &cfg);
+        assert_eq!(budget, 60);
+        // 60 / 180 = 0.333...
+        assert!(
+            (fps - 0.3333).abs() < 1e-3,
+            "expected ~0.333 fps for 180s video, got {fps}"
+        );
+    }
+
+    #[test]
+    fn test_frame_budget_long_video_caps_at_100() {
+        let cfg = YoutubeSlidesConfig::default();
+        let (budget, _) = frame_budget(3600.0, &cfg);
+        assert_eq!(budget, 100);
+    }
+
+    #[test]
+    fn test_frame_budget_respects_max_fps() {
+        let cfg = YoutubeSlidesConfig {
+            max_fps: 0.5,
+            ..YoutubeSlidesConfig::default()
+        };
+        let (_, fps) = frame_budget(15.0, &cfg);
+        assert!(fps <= 0.5, "fps should be capped at max_fps; got {fps}");
+    }
+
+    #[test]
+    fn test_frame_budget_respects_max_frames() {
+        let cfg = YoutubeSlidesConfig {
+            max_frames: 50,
+            ..YoutubeSlidesConfig::default()
+        };
+        let (budget, _) = frame_budget(3600.0, &cfg);
+        assert_eq!(budget, 50);
+    }
+
+    #[test]
+    fn test_extract_frames_disabled_returns_empty() {
+        let cfg = YoutubeSlidesConfig {
+            enabled: false,
+            ..YoutubeSlidesConfig::default()
+        };
+        let tmp = std::env::temp_dir().join("borg-test-frames-disabled");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let frames = extract_frames(Path::new("/nonexistent.mp4"), &tmp.join("frames"), 30.0, &cfg)
+            .expect("disabled path should not error");
+        assert!(frames.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Synthesize a small test mp4 with `ffmpeg -f lavfi` and run frame extraction.
+    /// Skipped if ffmpeg is not on PATH; serves as a smoke test that the filter
+    /// chain is well-formed and the sidecar gets written.
+    #[test]
+    fn test_extract_frames_synthetic_video() {
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            eprintln!("ffmpeg not found; skipping test_extract_frames_synthetic_video");
+            return;
+        }
+        let tmp = std::env::temp_dir().join("borg-test-frames-synth");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create tmp");
+        let video = tmp.join("synthetic.mp4");
+
+        // 10s of testsrc at 5fps, 320x240. Plenty of motion so mpdecimate
+        // does not collapse it to nothing.
+        let synth = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=10:rate=5:size=320x240",
+                "-pix_fmt",
+                "yuv420p",
+                &video.to_string_lossy(),
+            ])
+            .output()
+            .expect("ffmpeg synth");
+        assert!(
+            synth.status.success(),
+            "ffmpeg synth: {:?}",
+            String::from_utf8_lossy(&synth.stderr)
+        );
+
+        let cfg = YoutubeSlidesConfig::default();
+        let frames_dir = tmp.join("frames");
+        let frames = extract_frames(&video, &frames_dir, 10.0, &cfg).expect("extract_frames");
+
+        assert!(
+            !frames.is_empty(),
+            "expected at least one frame from a 10s testsrc video"
+        );
+        // Auto-fps for 10s video is 1fps from the table; mpdecimate will not collapse
+        // testsrc's continuously-changing pattern. Expect close to budget=30.
+        assert!(
+            frames.len() <= 30,
+            "frames {} should not exceed budget=30",
+            frames.len(),
+        );
+
+        // Frames should be named frame_NNNN.jpg, sequentially indexed.
+        for (i, fr) in frames.iter().enumerate() {
+            let expected = format!("frame_{:04}.jpg", i + 1);
+            assert_eq!(fr.path.file_name().and_then(|s| s.to_str()), Some(expected.as_str()),);
+            assert!(fr.path.exists(), "frame should exist on disk: {}", fr.path.display());
+        }
+
+        // Sidecar was written.
+        let sidecar_path = tmp.join("frames.yml");
+        assert!(sidecar_path.exists(), "frames.yml sidecar should exist");
+        let sidecar_yaml = std::fs::read_to_string(&sidecar_path).expect("read sidecar");
+        let sidecar: FramesSidecar = serde_yaml::from_str(&sidecar_yaml).expect("parse sidecar");
+        assert_eq!(sidecar.frames_extracted as usize, frames.len());
+        assert_eq!(sidecar.video_duration_secs, 10.0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
