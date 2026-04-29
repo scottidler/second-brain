@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-04-29
-**Status:** Draft
+**Status:** Implemented (components ready; production wiring awaits YoutubeUrl staged-pipeline migration. Phase 3 reliability improvements ship live.)
 **Review Passes Completed:** 5/5
 
 **Builds on:** [2026-04-19-staged-ingestion-pipeline.md](2026-04-19-staged-ingestion-pipeline.md) (staged pipeline with `trace_id`-keyed artifacts is the foundation; this doc adds visual extraction to the `YoutubeUrl` shape)

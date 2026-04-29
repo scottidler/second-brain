@@ -132,6 +132,12 @@ pub async fn fetch_subtitles(url: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
+/// Extract audio bound for Whisper transcription. Output is mono 16kHz mp3
+/// at ~64kbps, which packs ~480KB/min and stays under Whisper's 25MB upload
+/// limit for ~50min mono audio. The `-vn -ac 1 -ar 16000 -b:a 64k` ffmpeg
+/// post-processor args come from `claude-video/scripts/whisper.py` (lifted
+/// per the design doc). `-ac 1` matters: stereo doubles the upload bytes
+/// while Whisper down-mixes anyway.
 pub fn extract_audio(url: &str, output_dir: &str) -> Result<String> {
     log::debug!("yt-dlp: extracting audio for {url} to {output_dir}");
     let output_template = format!("{output_dir}/%(id)s.%(ext)s");
@@ -141,8 +147,9 @@ pub fn extract_audio(url: &str, output_dir: &str) -> Result<String> {
             "-x",
             "--audio-format",
             "mp3",
-            "--audio-quality",
-            "5",
+            // Whisper-tuned ffmpeg args: drop video, mono, 16kHz, 64kbps.
+            "--postprocessor-args",
+            "ffmpeg:-vn -ac 1 -ar 16000 -b:a 64k",
             "-o",
             &output_template,
             url,
@@ -344,14 +351,20 @@ pub fn extract_frames(
     Ok(frames)
 }
 
+/// Strip VTT plumbing (header, timestamps, cue numbers, HTML tags) and
+/// collapse consecutive prefix-overlapping cues into one line. Auto-generated
+/// captions emit a "rolling prefix" - each cue extends the previous text by
+/// a word or two - which the naive consecutive-dedupe misses. The rolling
+/// dedupe pops the previous line when the new line starts with it (the new
+/// is the more complete continuation), and skips the new line when the
+/// previous line already covers it (regression / silence-fill duplicate).
+/// Both observations are from `claude-video/scripts/transcribe.py:55-67`.
 fn clean_vtt(vtt: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
-    let mut last_line = String::new();
 
     for line in vtt.lines() {
         let line = line.trim();
 
-        // Skip VTT headers and timestamps
         if line.starts_with("WEBVTT")
             || line.starts_with("Kind:")
             || line.starts_with("Language:")
@@ -360,23 +373,35 @@ fn clean_vtt(vtt: &str) -> String {
         {
             continue;
         }
-
-        // Skip numeric cue identifiers
         if line.parse::<u32>().is_ok() {
             continue;
         }
 
-        // Remove HTML tags
         let cleaned = line
             .replace("<c>", "")
             .replace("</c>", "")
             .replace("<i>", "")
             .replace("</i>", "");
 
-        // Deduplicate consecutive identical lines
-        if cleaned != last_line {
-            lines.push(cleaned.clone());
-            last_line = cleaned;
+        if cleaned.is_empty() {
+            continue;
+        }
+
+        match lines.last() {
+            Some(last) if cleaned.starts_with(last) => {
+                // New line extends the previous one; replace.
+                lines.pop();
+                lines.push(cleaned);
+            }
+            Some(last) if last.starts_with(&cleaned) => {
+                // Previous line already covers this; skip.
+            }
+            Some(last) if last == &cleaned => {
+                // Exact duplicate; skip.
+            }
+            _ => {
+                lines.push(cleaned);
+            }
         }
     }
 
@@ -406,6 +431,33 @@ mod tests {
         let vtt = "00:00:00.000 --> 00:00:05.000\nHello\n\n00:00:05.000 --> 00:00:10.000\nHello\n\n00:00:10.000 --> 00:00:15.000\nWorld";
         let result = clean_vtt(vtt);
         assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn test_clean_vtt_rolling_prefix_collapses_extensions() {
+        // Auto-generated VTT often emits "hello", then "hello world",
+        // then "hello world how are you" - each cue extending the previous.
+        // Rolling-prefix dedupe collapses these into one line.
+        let vtt = "00:00:00.000 --> 00:00:01.000\nhello\n\n00:00:01.000 --> 00:00:02.000\nhello world\n\n00:00:02.000 --> 00:00:03.000\nhello world how are you";
+        let result = clean_vtt(vtt);
+        assert_eq!(result, "hello world how are you");
+    }
+
+    #[test]
+    fn test_clean_vtt_rolling_prefix_skips_regressions() {
+        // If a later cue is a prefix of the previously accumulated line
+        // (silence-fill or partial frame) it should be skipped.
+        let vtt =
+            "00:00:00.000 --> 00:00:01.000\nhello world how are you\n\n00:00:01.000 --> 00:00:02.000\nhello world";
+        let result = clean_vtt(vtt);
+        assert_eq!(result, "hello world how are you");
+    }
+
+    #[test]
+    fn test_clean_vtt_rolling_prefix_keeps_distinct_lines() {
+        let vtt = "00:00:00.000 --> 00:00:01.000\nhello world\n\n00:00:01.000 --> 00:00:02.000\nhow are you\n\n00:00:02.000 --> 00:00:03.000\nhow are you doing today";
+        let result = clean_vtt(vtt);
+        assert_eq!(result, "hello world how are you doing today");
     }
 
     #[test]
