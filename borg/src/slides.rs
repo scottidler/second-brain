@@ -17,6 +17,7 @@ use crate::config::{SlideThresholds, YoutubeSlidesConfig};
 use crate::ocr;
 use crate::youtube::FrameRef;
 
+pub mod cleanup;
 pub mod publish;
 
 /// Note-shape proposal computed by Stage 1, confirmed/downgraded by Stage 2's
