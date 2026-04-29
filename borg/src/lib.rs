@@ -32,6 +32,7 @@ pub mod replay;
 pub mod retention;
 pub mod router;
 pub mod routes;
+pub mod slides;
 pub mod stages;
 pub mod telegram;
 pub mod trace;
