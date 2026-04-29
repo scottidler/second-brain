@@ -17,6 +17,8 @@ use crate::config::{SlideThresholds, YoutubeSlidesConfig};
 use crate::ocr;
 use crate::youtube::FrameRef;
 
+pub mod publish;
+
 /// Note-shape proposal computed by Stage 1, confirmed/downgraded by Stage 2's
 /// LLM via its `embed_slides` output, and enforced by Stage 3 Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

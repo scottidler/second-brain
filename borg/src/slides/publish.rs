@@ -1,0 +1,197 @@
+//! Stage 3: copy selected slides into the vault attachment area, emit
+//! wikilink embeds in the note body, and produce the `slides:` frontmatter
+//! list. See `docs/design/2026-04-29-frame-aware-youtube-ingestion.md`.
+
+use chrono::{DateTime, Datelike, Utc};
+use eyre::{Context, Result};
+use std::path::{Path, PathBuf};
+
+use crate::slides::{NoteShape, SlideManifest, StageTwoOutput, enforce_shape};
+
+/// Outcome of publishing slides for one note.
+#[derive(Debug, Clone)]
+pub struct PublishResult {
+    /// The final, possibly-downgraded note shape.
+    pub shape: NoteShape,
+    /// Vault-relative paths to slide JPEGs that the note owns.
+    /// Empty for `text-only`. Goes verbatim into the note's `slides:` frontmatter.
+    pub slides: Vec<String>,
+    /// The note body to render under the frontmatter. For `text-only` this
+    /// is the LLM's body verbatim. For `hero` / `slide-section` the body
+    /// has wikilink embeds inserted at the right places.
+    pub body: String,
+}
+
+/// Compute the per-month subdirectory for image attachments
+/// (`images/YYYY-MM`), matching the existing convention.
+pub fn month_subdir(now: &DateTime<Utc>) -> String {
+    format!("images/{:04}-{:02}", now.year(), now.month())
+}
+
+/// Publish slides into the vault and return the final body + frontmatter slides list.
+///
+/// On `text-only`, no slides are copied and the body is the LLM's verbatim.
+/// On `hero`, the first selected slide is copied and embedded once near the top.
+/// On `slide-section`, every selected slide is copied and one wikilink is
+/// inserted directly under the matching `## <section title>` heading in the
+/// body.
+///
+/// File copies are atomic (write to `.tmp`, then rename). Slide IDs not
+/// present in the manifest are dropped silently. Existing files at the
+/// destination are NOT overwritten - on collision we pick a different
+/// sequence suffix so a previously-published note's slides survive until
+/// the cleanup step (Phase 2.2) deletes them.
+pub fn publish_slides(
+    vault_root: &Path,
+    slug: &str,
+    manifest: &SlideManifest,
+    stage2: &StageTwoOutput,
+    now: &DateTime<Utc>,
+) -> Result<PublishResult> {
+    let (final_shape, final_slide_ids) =
+        enforce_shape(manifest, &stage2.frontmatter.shape, &stage2.frontmatter.embed_slides);
+
+    if matches!(final_shape, NoteShape::TextOnly) || final_slide_ids.is_empty() {
+        return Ok(PublishResult {
+            shape: NoteShape::TextOnly,
+            slides: Vec::new(),
+            body: stage2.body.clone(),
+        });
+    }
+
+    let subdir = month_subdir(now);
+    let attachments_dir = vault_root.join("system/attachments").join(&subdir);
+    std::fs::create_dir_all(&attachments_dir)
+        .with_context(|| format!("create attachments dir: {}", attachments_dir.display()))?;
+
+    let mut owned: Vec<String> = Vec::with_capacity(final_slide_ids.len());
+    let mut filenames_for_ids: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    for (i, slide_id) in final_slide_ids.iter().enumerate() {
+        let slide = match manifest.slides.iter().find(|s| &s.id == slide_id) {
+            Some(s) => s,
+            None => continue,
+        };
+        // Source file lives under transcripts/<trace_id>/slides/slide-NNN.jpg.
+        // The manifest stores the relative path; resolve against the manifest's transcripts dir.
+        let src = manifest_slide_source(manifest, &slide.frame_path)?;
+        let basename = pick_filename(slug, i + 1, &attachments_dir);
+        let dest = attachments_dir.join(&basename);
+        atomic_copy(&src, &dest).with_context(|| format!("publish slide {} -> {}", src.display(), dest.display()))?;
+        let vault_rel = format!("system/attachments/{subdir}/{basename}");
+        owned.push(vault_rel.clone());
+        filenames_for_ids.insert(slide_id.clone(), basename);
+    }
+
+    let body = match final_shape {
+        NoteShape::TextOnly => stage2.body.clone(),
+        NoteShape::Hero => {
+            // Insert exactly one wikilink at the top of the body.
+            let first = filenames_for_ids
+                .get(final_slide_ids.first().expect("hero requires one slide"))
+                .map(String::as_str)
+                .unwrap_or("");
+            format!("![[{first}]]\n\n{body}", body = stage2.body)
+        }
+        NoteShape::SlideSection => {
+            insert_section_embeds(&stage2.body, &stage2.frontmatter.sections, &filenames_for_ids)
+        }
+    };
+
+    Ok(PublishResult {
+        shape: final_shape,
+        slides: owned,
+        body,
+    })
+}
+
+/// The slide JPEGs Stage 1 produced live under
+/// `<staging_root>/<trace_id>/slides/slide-NNN.jpg`. The manifest's
+/// `frame_path` is relative to the trace's transcript dir. For tests and the
+/// migration shim we accept the manifest carrying an absolute path; otherwise
+/// we attempt a best-effort resolve against `staging.root` from config.
+///
+/// Phase 2.1 keeps this simple: if `frame_path` is already absolute we use
+/// it; otherwise we treat the manifest's `trace_id` as the directory under
+/// the user's data-local `borg/stages/` and resolve from there. The
+/// authoritative path resolution will move to the staged-pipeline glue
+/// when YoutubeUrl migrates onto staging proper.
+fn manifest_slide_source(manifest: &SlideManifest, frame_path: &Path) -> Result<PathBuf> {
+    if frame_path.is_absolute() {
+        return Ok(frame_path.to_path_buf());
+    }
+    let staging_root = dirs::data_local_dir()
+        .ok_or_else(|| eyre::eyre!("could not resolve data_local_dir for staging root"))?
+        .join("borg")
+        .join("stages")
+        .join(&manifest.trace_id);
+    Ok(staging_root.join(frame_path))
+}
+
+/// Pick a filename `<slug>-slide-NNN.jpg` whose path does not yet exist in
+/// `attachments_dir`. On collision (e.g. previous publish of the same slug
+/// is being replaced and old files are still present) bump the sequence
+/// number until a free slot is found. Caps at 999 iterations so we never
+/// loop forever on a wedged directory.
+fn pick_filename(slug: &str, requested: usize, attachments_dir: &Path) -> String {
+    for n in requested..=requested.saturating_add(999) {
+        let candidate = format!("{slug}-slide-{:03}.jpg", n);
+        if !attachments_dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    // Fallback - this should never happen short of 1000 collisions.
+    format!("{slug}-slide-{:03}.jpg", requested)
+}
+
+/// Atomic file copy: write bytes to `<dest>.tmp`, then rename. Crash mid-copy
+/// leaves the dest absent or fully written, never half-written.
+fn atomic_copy(src: &Path, dest: &Path) -> Result<()> {
+    let tmp = dest.with_extension("tmp");
+    let bytes = std::fs::read(src).with_context(|| format!("read {}", src.display()))?;
+    std::fs::write(&tmp, &bytes).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, dest).with_context(|| format!("rename {} -> {}", tmp.display(), dest.display()))?;
+    Ok(())
+}
+
+/// Insert a `![[<filename>]]` wikilink directly under each `## <title>`
+/// heading whose title matches a `sections` entry's title. Sections without
+/// a matching heading in the body are appended at the end (so the LLM's
+/// section-title-versus-heading skew never silently drops a slide).
+fn insert_section_embeds(
+    body: &str,
+    sections: &[crate::slides::StageTwoSection],
+    filenames_for_ids: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut out = String::with_capacity(body.len() + sections.len() * 64);
+    let mut placed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for line in body.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if let Some(title) = line.strip_prefix("## ").map(str::trim_end)
+            && let Some(section) = sections
+                .iter()
+                .find(|s| s.title.trim_end() == title && !placed.contains(s.slide.as_str()))
+            && let Some(filename) = filenames_for_ids.get(&section.slide)
+        {
+            out.push_str(&format!("![[{filename}]]\n\n"));
+            placed.insert(section.slide.as_str());
+        }
+    }
+
+    // Append any unplaced sections at the end.
+    for section in sections {
+        if placed.contains(section.slide.as_str()) {
+            continue;
+        }
+        if let Some(filename) = filenames_for_ids.get(&section.slide) {
+            out.push_str(&format!("\n## {}\n\n![[{filename}]]\n", section.title));
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests;
