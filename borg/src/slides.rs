@@ -414,5 +414,170 @@ pub fn write_manifest(manifest: &SlideManifest, out_dir: &Path) -> Result<PathBu
     Ok(path)
 }
 
+/// Render a `SlideManifest` to the markdown shape the
+/// `obsidian-youtube-slides` Fabric pattern expects as input. Embeds image
+/// references using the manifest's stored `frame_path` so the LLM has context
+/// when deciding which slides to include in its `embed_slides` output.
+pub fn render_pattern_input(manifest: &SlideManifest) -> String {
+    let mut out = String::new();
+    out.push_str("# Slide-aware video summary input\n\n");
+    out.push_str(&format!("Video URL: {}\n", manifest.video.url));
+    out.push_str(&format!("Duration: {:.1}s\n", manifest.video.duration_seconds,));
+    let shape = match manifest.extraction.proposed_note_shape {
+        NoteShape::TextOnly => "text-only",
+        NoteShape::Hero => "hero",
+        NoteShape::SlideSection => "slide-section",
+    };
+    out.push_str(&format!("Note shape: {shape}\n"));
+    out.push_str(&format!(
+        "Frames extracted: {} / Unique slides: {} / Compression ratio: {:.3}\n\n",
+        manifest.extraction.frames_after_mpdecimate,
+        manifest.extraction.unique_slides,
+        manifest.extraction.compression_ratio,
+    ));
+
+    for slide in &manifest.slides {
+        out.push_str(&format!(
+            "## Slide {} - {} -> {}\n\n",
+            slide.id,
+            format_mmss(slide.start),
+            format_mmss(slide.end),
+        ));
+        out.push_str(&format!("![]({})\n\n", slide.frame_path.display()));
+        if !slide.ocr.trim().is_empty() {
+            out.push_str("On-slide text (OCR):\n");
+            for line in slide.ocr.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    out.push_str(&format!("> {trimmed}\n"));
+                }
+            }
+            out.push('\n');
+        }
+        if let Some(caption) = &slide.caption
+            && !caption.trim().is_empty()
+        {
+            out.push_str("Visual caption:\n");
+            out.push_str(&format!("> {caption}\n\n"));
+        }
+        if !slide.transcript.is_empty() {
+            out.push_str("Transcript while this slide was on screen:\n");
+            for seg in &slide.transcript {
+                out.push_str(&format!("- {seg}\n"));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// One LLM-named section in the published note (slide id + human title).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub struct StageTwoSection {
+    pub slide: String,
+    pub title: String,
+}
+
+/// Frontmatter at the top of the Stage 2 Fabric output, parsed from a YAML
+/// block delimited by `---` lines. Field naming intentionally matches the
+/// design doc's pattern-output spec: `embed_slides` (with underscore in the
+/// LLM output) is mapped to a tidy Rust field via serde alias.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct StageTwoFrontmatter {
+    pub shape: String,
+    #[serde(alias = "embed_slides")]
+    pub embed_slides: Vec<String>,
+    #[serde(default)]
+    pub sections: Vec<StageTwoSection>,
+}
+
+impl Default for StageTwoFrontmatter {
+    fn default() -> Self {
+        Self {
+            shape: "text-only".to_string(),
+            embed_slides: Vec::new(),
+            sections: Vec::new(),
+        }
+    }
+}
+
+/// Result of splitting the Stage 2 LLM output into frontmatter + body.
+#[derive(Debug, Clone)]
+pub struct StageTwoOutput {
+    pub frontmatter: StageTwoFrontmatter,
+    pub body: String,
+}
+
+/// Parse the LLM output produced by the `obsidian-youtube-slides` pattern.
+/// Tolerant: when no leading `---` frontmatter is present, treats the whole
+/// thing as body with a default `text-only` frontmatter (the pattern output
+/// for shape `text-only` may legitimately be just prose).
+pub fn parse_stage2_output(text: &str) -> StageTwoOutput {
+    let trimmed = text.trim_start_matches('\n');
+    if let Some(rest) = trimmed.strip_prefix("---\n")
+        && let Some(end_idx) = rest.find("\n---")
+    {
+        let yaml = &rest[..end_idx];
+        let after_close = &rest[end_idx + "\n---".len()..];
+        let body = after_close.trim_start_matches('\n').to_string();
+        let frontmatter = serde_yaml::from_str::<StageTwoFrontmatter>(yaml).unwrap_or_default();
+        return StageTwoOutput { frontmatter, body };
+    }
+    StageTwoOutput {
+        frontmatter: StageTwoFrontmatter::default(),
+        body: text.to_string(),
+    }
+}
+
+/// Stage 3 enforcement gate: validate the LLM's `embed_slides` against
+/// Stage 1's proposed note shape and, if needed, downgrade.
+///
+/// Returns the (possibly downgraded) shape and the (possibly truncated)
+/// list of slide IDs to embed. Slide IDs not present in the manifest are
+/// dropped silently. The "downgrade only, no upgrade" rule comes from the
+/// design doc: Stage 1's mechanical analysis is grounded in actual frame
+/// data; an LLM upgrade beyond that is almost certainly hallucination.
+pub fn enforce_shape(
+    manifest: &SlideManifest,
+    requested_shape: &str,
+    requested_slides: &[String],
+) -> (NoteShape, Vec<String>) {
+    let manifest_ids: std::collections::HashSet<&str> = manifest.slides.iter().map(|s| s.id.as_str()).collect();
+    let requested_existing: Vec<String> = requested_slides
+        .iter()
+        .filter(|id| manifest_ids.contains(id.as_str()))
+        .cloned()
+        .collect();
+
+    let llm_shape = match requested_shape {
+        "slide-section" => NoteShape::SlideSection,
+        "hero" => NoteShape::Hero,
+        _ => NoteShape::TextOnly,
+    };
+
+    // Cap the LLM's shape by Stage 1's proposal (downgrade-only).
+    let final_shape = match (manifest.extraction.proposed_note_shape, llm_shape) {
+        (NoteShape::TextOnly, _) => NoteShape::TextOnly,
+        (NoteShape::Hero, NoteShape::SlideSection) => {
+            log::warn!(
+                "[{trace}] Stage 3: LLM proposed slide-section but Stage 1 only allows hero; downgrading",
+                trace = manifest.trace_id,
+            );
+            NoteShape::Hero
+        }
+        (_, llm) => llm,
+    };
+
+    let final_slides = match final_shape {
+        NoteShape::TextOnly => Vec::new(),
+        NoteShape::Hero => requested_existing.into_iter().take(1).collect(),
+        NoteShape::SlideSection => requested_existing,
+    };
+
+    (final_shape, final_slides)
+}
+
 #[cfg(test)]
 mod tests;

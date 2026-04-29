@@ -329,6 +329,208 @@ fn test_segment_two_color_blocks_yields_slides() {
 }
 
 #[test]
+fn test_render_pattern_input_includes_shape_and_slides() {
+    let manifest = SlideManifest {
+        trace_id: "ht-test".to_string(),
+        video: VideoMetaSnippet {
+            url: "https://www.youtube.com/watch?v=abc".to_string(),
+            duration_seconds: 540.0,
+        },
+        extraction: ExtractionStats {
+            frames_after_mpdecimate: 38,
+            unique_slides: 7,
+            transitions_dropped: 2,
+            compression_ratio: 0.18,
+            proposed_note_shape: NoteShape::SlideSection,
+        },
+        slides: vec![
+            Slide {
+                id: "s001".to_string(),
+                frame_path: PathBuf::from("slides/slide-001.jpg"),
+                start: 0.0,
+                end: 42.3,
+                duration: 42.3,
+                ocr: "Title slide\nMy Talk".to_string(),
+                caption: Some("Title card with bold yellow text".to_string()),
+                transcript: vec!["[00:00] welcome".to_string(), "[00:05] today we will".to_string()],
+            },
+            Slide {
+                id: "s002".to_string(),
+                frame_path: PathBuf::from("slides/slide-002.jpg"),
+                start: 42.3,
+                end: 135.8,
+                duration: 93.5,
+                ocr: "How it works".to_string(),
+                caption: None,
+                transcript: vec!["[00:42] the way this works".to_string()],
+            },
+        ],
+    };
+    let rendered = render_pattern_input(&manifest);
+    assert!(rendered.contains("Note shape: slide-section"));
+    assert!(rendered.contains("## Slide s001 - 00:00 -> 00:42"));
+    assert!(rendered.contains("## Slide s002 - 00:42 -> 02:15"));
+    assert!(rendered.contains("![](slides/slide-001.jpg)"));
+    assert!(rendered.contains("On-slide text (OCR):"));
+    assert!(rendered.contains("> Title slide"));
+    assert!(rendered.contains("Visual caption:"));
+    assert!(rendered.contains("> Title card with bold yellow text"));
+    assert!(rendered.contains("Transcript while this slide was on screen:"));
+    assert!(rendered.contains("- [00:00] welcome"));
+}
+
+#[test]
+fn test_parse_stage2_output_with_frontmatter() {
+    let raw = "---\nshape: slide-section\nembed_slides: [s001, s002, s005]\nsections:\n  - slide: s001\n    title: Introduction\n  - slide: s002\n    title: How the pipeline works\n  - slide: s005\n    title: Cost and limits\n---\n\n## Introduction\nThe talk opens.\n\n## How the pipeline works\nThe presenter walks through.\n";
+    let parsed = parse_stage2_output(raw);
+    assert_eq!(parsed.frontmatter.shape, "slide-section");
+    assert_eq!(parsed.frontmatter.embed_slides, vec!["s001", "s002", "s005"]);
+    assert_eq!(parsed.frontmatter.sections.len(), 3);
+    assert_eq!(parsed.frontmatter.sections[0].slide, "s001");
+    assert_eq!(parsed.frontmatter.sections[0].title, "Introduction");
+    assert!(parsed.body.starts_with("## Introduction"));
+}
+
+#[test]
+fn test_parse_stage2_output_no_frontmatter() {
+    let raw = "## What This Is About\n\nA prose summary.\n";
+    let parsed = parse_stage2_output(raw);
+    // Default text-only frontmatter; body unchanged.
+    assert_eq!(parsed.frontmatter.shape, "text-only");
+    assert!(parsed.frontmatter.embed_slides.is_empty());
+    assert!(parsed.body.contains("## What This Is About"));
+}
+
+#[test]
+fn test_parse_stage2_output_garbled_frontmatter_falls_back_to_default() {
+    // Malformed YAML inside the frontmatter - we tolerate it and default to text-only.
+    let raw = "---\n!!! not yaml :: ?? \n---\n\nbody\n";
+    let parsed = parse_stage2_output(raw);
+    assert_eq!(parsed.frontmatter.shape, "text-only");
+    assert!(parsed.frontmatter.embed_slides.is_empty());
+    assert!(parsed.body.contains("body"));
+}
+
+#[test]
+fn test_enforce_shape_text_only_proposal_caps_llm() {
+    let manifest = SlideManifest {
+        trace_id: "ht-test".to_string(),
+        video: VideoMetaSnippet::default(),
+        extraction: ExtractionStats {
+            frames_after_mpdecimate: 30,
+            unique_slides: 2,
+            transitions_dropped: 0,
+            compression_ratio: 0.07,
+            proposed_note_shape: NoteShape::TextOnly,
+        },
+        slides: vec![],
+    };
+    // LLM tries to upgrade to slide-section; Stage 1 said text-only, so cap.
+    let (shape, slides) = enforce_shape(&manifest, "slide-section", &["s001".to_string()]);
+    assert_eq!(shape, NoteShape::TextOnly);
+    assert!(slides.is_empty());
+}
+
+#[test]
+fn test_enforce_shape_hero_proposal_caps_slide_section_request_to_one() {
+    let manifest = SlideManifest {
+        trace_id: "ht-test".to_string(),
+        video: VideoMetaSnippet::default(),
+        extraction: ExtractionStats {
+            frames_after_mpdecimate: 30,
+            unique_slides: 5,
+            transitions_dropped: 0,
+            compression_ratio: 0.16,
+            proposed_note_shape: NoteShape::Hero,
+        },
+        slides: vec![
+            Slide {
+                id: "s001".to_string(),
+                frame_path: PathBuf::new(),
+                start: 0.0,
+                end: 10.0,
+                duration: 10.0,
+                ocr: String::new(),
+                caption: None,
+                transcript: vec![],
+            },
+            Slide {
+                id: "s002".to_string(),
+                frame_path: PathBuf::new(),
+                start: 10.0,
+                end: 20.0,
+                duration: 10.0,
+                ocr: String::new(),
+                caption: None,
+                transcript: vec![],
+            },
+        ],
+    };
+    let (shape, slides) = enforce_shape(&manifest, "slide-section", &["s001".to_string(), "s002".to_string()]);
+    assert_eq!(shape, NoteShape::Hero);
+    assert_eq!(slides.len(), 1);
+    assert_eq!(slides[0], "s001");
+}
+
+#[test]
+fn test_enforce_shape_downgrade_to_text_only() {
+    let manifest = SlideManifest {
+        trace_id: "ht-test".to_string(),
+        video: VideoMetaSnippet::default(),
+        extraction: ExtractionStats {
+            frames_after_mpdecimate: 30,
+            unique_slides: 5,
+            transitions_dropped: 0,
+            compression_ratio: 0.16,
+            proposed_note_shape: NoteShape::SlideSection,
+        },
+        slides: vec![Slide {
+            id: "s001".to_string(),
+            frame_path: PathBuf::new(),
+            start: 0.0,
+            end: 10.0,
+            duration: 10.0,
+            ocr: String::new(),
+            caption: None,
+            transcript: vec![],
+        }],
+    };
+    // LLM's empty embed_slides means "downgrade to text-only"
+    let (shape, slides) = enforce_shape(&manifest, "text-only", &[]);
+    assert_eq!(shape, NoteShape::TextOnly);
+    assert!(slides.is_empty());
+}
+
+#[test]
+fn test_enforce_shape_drops_unknown_slide_ids() {
+    let manifest = SlideManifest {
+        trace_id: "ht-test".to_string(),
+        video: VideoMetaSnippet::default(),
+        extraction: ExtractionStats {
+            frames_after_mpdecimate: 30,
+            unique_slides: 5,
+            transitions_dropped: 0,
+            compression_ratio: 0.16,
+            proposed_note_shape: NoteShape::SlideSection,
+        },
+        slides: vec![Slide {
+            id: "s001".to_string(),
+            frame_path: PathBuf::new(),
+            start: 0.0,
+            end: 10.0,
+            duration: 10.0,
+            ocr: String::new(),
+            caption: None,
+            transcript: vec![],
+        }],
+    };
+    // s999 is hallucinated; gets dropped.
+    let (shape, slides) = enforce_shape(&manifest, "slide-section", &["s001".to_string(), "s999".to_string()]);
+    assert_eq!(shape, NoteShape::SlideSection);
+    assert_eq!(slides, vec!["s001"]);
+}
+
+#[test]
 fn test_write_manifest_round_trip() {
     let tmp = std::env::temp_dir().join("borg-test-slides-write-manifest");
     let _ = std::fs::remove_dir_all(&tmp);
