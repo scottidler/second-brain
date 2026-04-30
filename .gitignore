@@ -16,6 +16,9 @@ target
 # Local MCP config (use global ~/.mcp.json instead)
 .mcp.json
 
+# Claude Code runtime files
+**/.claude/scheduled_tasks.lock
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
