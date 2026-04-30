@@ -100,7 +100,10 @@ struct YouTubeResult {
 #[derive(Debug)]
 struct SlidePayload {
     manifest: crate::slides::SlideManifest,
-    stage2: crate::slides::StageTwoOutput,
+    summary: crate::slides::SummaryOutput,
+    /// Directory the slide JPEGs were materialized into; resolves the
+    /// manifest's relative `frame_path` for the publish step.
+    slides_source_root: PathBuf,
 }
 
 /// Extract the best title from fabric's markdown output.
@@ -495,7 +498,8 @@ async fn process_url_inner(
             &vault_root_resolved,
             &filename_stub,
             &payload.manifest,
-            &payload.stage2,
+            &payload.summary,
+            &payload.slides_source_root,
             &chrono::Utc::now(),
         ) {
             Ok(result) => {
@@ -680,11 +684,15 @@ async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
     let mut slide_summary: Option<String> = None;
     if config.youtube.slides.enabled {
         match try_extract_slides(url, &transcript, metadata.duration_secs, config).await {
-            Ok(Some((manifest, stage2))) => {
-                if !stage2.body.trim().is_empty() {
-                    slide_summary = Some(stage2.body.clone());
+            Ok(Some((manifest, summary, slides_source_root))) => {
+                if !summary.body.trim().is_empty() {
+                    slide_summary = Some(summary.body.clone());
                 }
-                slide_payload = Some(SlidePayload { manifest, stage2 });
+                slide_payload = Some(SlidePayload {
+                    manifest,
+                    summary,
+                    slides_source_root,
+                });
             }
             Ok(None) => {
                 log::debug!("Slide-aware path produced no manifest; using text-only summary");
@@ -752,7 +760,7 @@ async fn try_extract_slides(
     _transcript: &str,
     duration_secs: f64,
     config: &Config,
-) -> Result<Option<(crate::slides::SlideManifest, crate::slides::StageTwoOutput)>> {
+) -> Result<Option<(crate::slides::SlideManifest, crate::slides::SummaryOutput, PathBuf)>> {
     use crate::slides::{self, NoteShape};
     use crate::youtube;
 
@@ -844,11 +852,11 @@ async fn try_extract_slides(
         return Ok(None);
     }
 
-    // 4. Render pattern input + run new Fabric pattern.
+    // 5. Render pattern input + run new Fabric pattern.
     let pattern_input = slides::render_pattern_input(&manifest);
     let raw = fabric::run_pattern("obsidian-youtube-slides.md", &pattern_input, &config.fabric).await?;
-    let stage2 = slides::parse_stage2_output(&raw);
-    Ok(Some((manifest, stage2)))
+    let summary = slides::parse_summary_output(&raw);
+    Ok(Some((manifest, summary, work_dir)))
 }
 
 async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> Result<(String, String, ContentType)> {

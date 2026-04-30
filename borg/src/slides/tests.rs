@@ -380,9 +380,9 @@ fn test_render_pattern_input_includes_shape_and_slides() {
 }
 
 #[test]
-fn test_parse_stage2_output_with_frontmatter() {
+fn test_parse_summary_output_with_frontmatter() {
     let raw = "---\nshape: slide-section\nembed_slides: [s001, s002, s005]\nsections:\n  - slide: s001\n    title: Introduction\n  - slide: s002\n    title: How the pipeline works\n  - slide: s005\n    title: Cost and limits\n---\n\n## Introduction\nThe talk opens.\n\n## How the pipeline works\nThe presenter walks through.\n";
-    let parsed = parse_stage2_output(raw);
+    let parsed = parse_summary_output(raw);
     assert_eq!(parsed.frontmatter.shape, "slide-section");
     assert_eq!(parsed.frontmatter.embed_slides, vec!["s001", "s002", "s005"]);
     assert_eq!(parsed.frontmatter.sections.len(), 3);
@@ -392,9 +392,9 @@ fn test_parse_stage2_output_with_frontmatter() {
 }
 
 #[test]
-fn test_parse_stage2_output_no_frontmatter() {
+fn test_parse_summary_output_no_frontmatter() {
     let raw = "## What This Is About\n\nA prose summary.\n";
-    let parsed = parse_stage2_output(raw);
+    let parsed = parse_summary_output(raw);
     // Default text-only frontmatter; body unchanged.
     assert_eq!(parsed.frontmatter.shape, "text-only");
     assert!(parsed.frontmatter.embed_slides.is_empty());
@@ -402,10 +402,10 @@ fn test_parse_stage2_output_no_frontmatter() {
 }
 
 #[test]
-fn test_parse_stage2_output_garbled_frontmatter_falls_back_to_default() {
+fn test_parse_summary_output_garbled_frontmatter_falls_back_to_default() {
     // Malformed YAML inside the frontmatter - we tolerate it and default to text-only.
     let raw = "---\n!!! not yaml :: ?? \n---\n\nbody\n";
-    let parsed = parse_stage2_output(raw);
+    let parsed = parse_summary_output(raw);
     assert_eq!(parsed.frontmatter.shape, "text-only");
     assert!(parsed.frontmatter.embed_slides.is_empty());
     assert!(parsed.body.contains("body"));

@@ -509,7 +509,7 @@ pub fn render_pattern_input(manifest: &SlideManifest) -> String {
 /// One LLM-named section in the published note (slide id + human title).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub struct StageTwoSection {
+pub struct SummarySection {
     pub slide: String,
     pub title: String,
 }
@@ -520,15 +520,15 @@ pub struct StageTwoSection {
 /// LLM output) is mapped to a tidy Rust field via serde alias.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct StageTwoFrontmatter {
+pub struct SummaryFrontmatter {
     pub shape: String,
     #[serde(alias = "embed_slides")]
     pub embed_slides: Vec<String>,
     #[serde(default)]
-    pub sections: Vec<StageTwoSection>,
+    pub sections: Vec<SummarySection>,
 }
 
-impl Default for StageTwoFrontmatter {
+impl Default for SummaryFrontmatter {
     fn default() -> Self {
         Self {
             shape: "text-only".to_string(),
@@ -540,8 +540,8 @@ impl Default for StageTwoFrontmatter {
 
 /// Result of splitting the Stage 2 LLM output into frontmatter + body.
 #[derive(Debug, Clone)]
-pub struct StageTwoOutput {
-    pub frontmatter: StageTwoFrontmatter,
+pub struct SummaryOutput {
+    pub frontmatter: SummaryFrontmatter,
     pub body: String,
 }
 
@@ -549,7 +549,7 @@ pub struct StageTwoOutput {
 /// Tolerant: when no leading `---` frontmatter is present, treats the whole
 /// thing as body with a default `text-only` frontmatter (the pattern output
 /// for shape `text-only` may legitimately be just prose).
-pub fn parse_stage2_output(text: &str) -> StageTwoOutput {
+pub fn parse_summary_output(text: &str) -> SummaryOutput {
     let trimmed = text.trim_start_matches('\n');
     if let Some(rest) = trimmed.strip_prefix("---\n")
         && let Some(end_idx) = rest.find("\n---")
@@ -557,11 +557,11 @@ pub fn parse_stage2_output(text: &str) -> StageTwoOutput {
         let yaml = &rest[..end_idx];
         let after_close = &rest[end_idx + "\n---".len()..];
         let body = after_close.trim_start_matches('\n').to_string();
-        let frontmatter = serde_yaml::from_str::<StageTwoFrontmatter>(yaml).unwrap_or_default();
-        return StageTwoOutput { frontmatter, body };
+        let frontmatter = serde_yaml::from_str::<SummaryFrontmatter>(yaml).unwrap_or_default();
+        return SummaryOutput { frontmatter, body };
     }
-    StageTwoOutput {
-        frontmatter: StageTwoFrontmatter::default(),
+    SummaryOutput {
+        frontmatter: SummaryFrontmatter::default(),
         body: text.to_string(),
     }
 }

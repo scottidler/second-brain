@@ -3,7 +3,7 @@
 use super::*;
 
 use crate::slides::{
-    ExtractionStats, NoteShape, Slide, SlideManifest, StageTwoFrontmatter, StageTwoOutput, StageTwoSection,
+    ExtractionStats, NoteShape, Slide, SlideManifest, SummaryFrontmatter, SummaryOutput, SummarySection,
     VideoMetaSnippet,
 };
 use chrono::TimeZone;
@@ -61,15 +61,23 @@ fn test_publish_text_only_no_files_copied() {
     std::fs::create_dir_all(&vault).unwrap();
 
     let manifest = fixture_manifest(&staging, &["s001", "s002"]);
-    let stage2 = StageTwoOutput {
-        frontmatter: StageTwoFrontmatter {
+    let summary = SummaryOutput {
+        frontmatter: SummaryFrontmatter {
             shape: "text-only".to_string(),
             embed_slides: vec![],
             sections: vec![],
         },
         body: "## What This Is About\n\nA prose summary.\n".to_string(),
     };
-    let result = publish_slides(&vault, "my-talk", &manifest, &stage2, &fixed_now()).unwrap();
+    let result = publish_slides(
+        &vault,
+        "my-talk",
+        &manifest,
+        &summary,
+        &staging.join("slides"),
+        &fixed_now(),
+    )
+    .unwrap();
     assert_eq!(result.shape, NoteShape::TextOnly);
     assert!(result.slides.is_empty());
     assert!(result.body.contains("## What This Is About"));
@@ -91,15 +99,23 @@ fn test_publish_hero_copies_one_and_embeds() {
     let mut manifest = fixture_manifest(&staging, &["s001", "s002", "s003"]);
     manifest.extraction.proposed_note_shape = NoteShape::Hero;
 
-    let stage2 = StageTwoOutput {
-        frontmatter: StageTwoFrontmatter {
+    let summary = SummaryOutput {
+        frontmatter: SummaryFrontmatter {
             shape: "hero".to_string(),
             embed_slides: vec!["s001".to_string()],
             sections: vec![],
         },
         body: "> [!tldr]\n> A concise pitch.\n\n## What This Is About\n\nPara.\n".to_string(),
     };
-    let result = publish_slides(&vault, "my-talk", &manifest, &stage2, &fixed_now()).unwrap();
+    let result = publish_slides(
+        &vault,
+        "my-talk",
+        &manifest,
+        &summary,
+        &staging.join("slides"),
+        &fixed_now(),
+    )
+    .unwrap();
     assert_eq!(result.shape, NoteShape::Hero);
     assert_eq!(result.slides.len(), 1);
     assert!(result.slides[0].starts_with("system/attachments/images/2026-04/"));
@@ -125,20 +141,20 @@ fn test_publish_slide_section_per_section_embeds() {
 
     let manifest = fixture_manifest(&staging, &["s001", "s002", "s003"]);
 
-    let stage2 = StageTwoOutput {
-        frontmatter: StageTwoFrontmatter {
+    let summary = SummaryOutput {
+        frontmatter: SummaryFrontmatter {
             shape: "slide-section".to_string(),
             embed_slides: vec!["s001".to_string(), "s002".to_string(), "s003".to_string()],
             sections: vec![
-                StageTwoSection {
+                SummarySection {
                     slide: "s001".to_string(),
                     title: "Introduction".to_string(),
                 },
-                StageTwoSection {
+                SummarySection {
                     slide: "s002".to_string(),
                     title: "How it works".to_string(),
                 },
-                StageTwoSection {
+                SummarySection {
                     slide: "s003".to_string(),
                     title: "Cost and limits".to_string(),
                 },
@@ -148,7 +164,15 @@ fn test_publish_slide_section_per_section_embeds() {
             "## Introduction\n\nThe talk opens.\n\n## How it works\n\nThree steps.\n\n## Cost and limits\n\nBounded.\n"
                 .to_string(),
     };
-    let result = publish_slides(&vault, "my-talk", &manifest, &stage2, &fixed_now()).unwrap();
+    let result = publish_slides(
+        &vault,
+        "my-talk",
+        &manifest,
+        &summary,
+        &staging.join("slides"),
+        &fixed_now(),
+    )
+    .unwrap();
     assert_eq!(result.shape, NoteShape::SlideSection);
     assert_eq!(result.slides.len(), 3);
 
@@ -180,16 +204,16 @@ fn test_publish_slide_section_unmatched_section_is_appended() {
 
     // The body has section "Introduction" but the LLM section title says
     // "Welcome" - mismatch. The mismatched section should be appended at end.
-    let stage2 = StageTwoOutput {
-        frontmatter: StageTwoFrontmatter {
+    let summary = SummaryOutput {
+        frontmatter: SummaryFrontmatter {
             shape: "slide-section".to_string(),
             embed_slides: vec!["s001".to_string(), "s002".to_string()],
             sections: vec![
-                StageTwoSection {
+                SummarySection {
                     slide: "s001".to_string(),
                     title: "Welcome".to_string(),
                 },
-                StageTwoSection {
+                SummarySection {
                     slide: "s002".to_string(),
                     title: "How it works".to_string(),
                 },
@@ -197,7 +221,15 @@ fn test_publish_slide_section_unmatched_section_is_appended() {
         },
         body: "## Introduction\n\nDifferent name in the body.\n\n## How it works\n\nStuff.\n".to_string(),
     };
-    let result = publish_slides(&vault, "my-talk", &manifest, &stage2, &fixed_now()).unwrap();
+    let result = publish_slides(
+        &vault,
+        "my-talk",
+        &manifest,
+        &summary,
+        &staging.join("slides"),
+        &fixed_now(),
+    )
+    .unwrap();
     assert_eq!(result.shape, NoteShape::SlideSection);
     // Unmatched section ("Welcome" / s001) should be appended.
     assert!(result.body.contains("## Welcome"));
@@ -222,15 +254,23 @@ fn test_publish_collision_picks_new_sequence() {
 
     let mut manifest = fixture_manifest(&staging, &["s001"]);
     manifest.extraction.proposed_note_shape = NoteShape::Hero;
-    let stage2 = StageTwoOutput {
-        frontmatter: StageTwoFrontmatter {
+    let summary = SummaryOutput {
+        frontmatter: SummaryFrontmatter {
             shape: "hero".to_string(),
             embed_slides: vec!["s001".to_string()],
             sections: vec![],
         },
         body: "## summary\n".to_string(),
     };
-    let result = publish_slides(&vault, "my-talk", &manifest, &stage2, &fixed_now()).unwrap();
+    let result = publish_slides(
+        &vault,
+        "my-talk",
+        &manifest,
+        &summary,
+        &staging.join("slides"),
+        &fixed_now(),
+    )
+    .unwrap();
     assert_eq!(result.slides.len(), 1);
     // Collision => not -001, must be a different number.
     assert!(!result.slides[0].ends_with("my-talk-slide-001.jpg"));
@@ -255,16 +295,16 @@ fn test_publish_unknown_slide_id_dropped() {
 
     let manifest = fixture_manifest(&staging, &["s001"]);
 
-    let stage2 = StageTwoOutput {
-        frontmatter: StageTwoFrontmatter {
+    let summary = SummaryOutput {
+        frontmatter: SummaryFrontmatter {
             shape: "slide-section".to_string(),
             embed_slides: vec!["s001".to_string(), "s999".to_string()],
             sections: vec![
-                StageTwoSection {
+                SummarySection {
                     slide: "s001".to_string(),
                     title: "Real".to_string(),
                 },
-                StageTwoSection {
+                SummarySection {
                     slide: "s999".to_string(),
                     title: "Hallucinated".to_string(),
                 },
@@ -272,7 +312,15 @@ fn test_publish_unknown_slide_id_dropped() {
         },
         body: "## Real\n\nbody.\n".to_string(),
     };
-    let result = publish_slides(&vault, "ghost", &manifest, &stage2, &fixed_now()).unwrap();
+    let result = publish_slides(
+        &vault,
+        "ghost",
+        &manifest,
+        &summary,
+        &staging.join("slides"),
+        &fixed_now(),
+    )
+    .unwrap();
     assert_eq!(result.slides.len(), 1);
     assert!(result.slides[0].ends_with("ghost-slide-001.jpg"));
 

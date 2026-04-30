@@ -4,9 +4,9 @@
 
 use chrono::{DateTime, Datelike, Utc};
 use eyre::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::slides::{NoteShape, SlideManifest, StageTwoOutput, enforce_shape};
+use crate::slides::{NoteShape, SlideManifest, SummaryOutput, enforce_shape};
 
 /// Outcome of publishing slides for one note.
 #[derive(Debug, Clone)]
@@ -45,17 +45,18 @@ pub fn publish_slides(
     vault_root: &Path,
     slug: &str,
     manifest: &SlideManifest,
-    stage2: &StageTwoOutput,
+    summary: &SummaryOutput,
+    slides_source_root: &Path,
     now: &DateTime<Utc>,
 ) -> Result<PublishResult> {
     let (final_shape, final_slide_ids) =
-        enforce_shape(manifest, &stage2.frontmatter.shape, &stage2.frontmatter.embed_slides);
+        enforce_shape(manifest, &summary.frontmatter.shape, &summary.frontmatter.embed_slides);
 
     if matches!(final_shape, NoteShape::TextOnly) || final_slide_ids.is_empty() {
         return Ok(PublishResult {
             shape: NoteShape::TextOnly,
             slides: Vec::new(),
-            body: stage2.body.clone(),
+            body: summary.body.clone(),
         });
     }
 
@@ -72,9 +73,14 @@ pub fn publish_slides(
             Some(s) => s,
             None => continue,
         };
-        // Source file lives under transcripts/<trace_id>/slides/slide-NNN.jpg.
-        // The manifest stores the relative path; resolve against the manifest's transcripts dir.
-        let src = manifest_slide_source(manifest, &slide.frame_path)?;
+        // Source file path: when the manifest stores an absolute path use it
+        // directly; otherwise resolve against the caller-supplied source root
+        // (the staging / work directory the slides were materialized into).
+        let src = if slide.frame_path.is_absolute() {
+            slide.frame_path.clone()
+        } else {
+            slides_source_root.join(&slide.frame_path)
+        };
         let basename = pick_filename(slug, i + 1, &attachments_dir);
         let dest = attachments_dir.join(&basename);
         atomic_copy(&src, &dest).with_context(|| format!("publish slide {} -> {}", src.display(), dest.display()))?;
@@ -84,17 +90,17 @@ pub fn publish_slides(
     }
 
     let body = match final_shape {
-        NoteShape::TextOnly => stage2.body.clone(),
+        NoteShape::TextOnly => summary.body.clone(),
         NoteShape::Hero => {
             // Insert exactly one wikilink at the top of the body.
             let first = filenames_for_ids
                 .get(final_slide_ids.first().expect("hero requires one slide"))
                 .map(String::as_str)
                 .unwrap_or("");
-            format!("![[{first}]]\n\n{body}", body = stage2.body)
+            format!("![[{first}]]\n\n{body}", body = summary.body)
         }
         NoteShape::SlideSection => {
-            insert_section_embeds(&stage2.body, &stage2.frontmatter.sections, &filenames_for_ids)
+            insert_section_embeds(&summary.body, &summary.frontmatter.sections, &filenames_for_ids)
         }
     };
 
@@ -103,29 +109,6 @@ pub fn publish_slides(
         slides: owned,
         body,
     })
-}
-
-/// The slide JPEGs Stage 1 produced live under
-/// `<staging_root>/<trace_id>/slides/slide-NNN.jpg`. The manifest's
-/// `frame_path` is relative to the trace's transcript dir. For tests and the
-/// migration shim we accept the manifest carrying an absolute path; otherwise
-/// we attempt a best-effort resolve against `staging.root` from config.
-///
-/// Phase 2.1 keeps this simple: if `frame_path` is already absolute we use
-/// it; otherwise we treat the manifest's `trace_id` as the directory under
-/// the user's data-local `borg/stages/` and resolve from there. The
-/// authoritative path resolution will move to the staged-pipeline glue
-/// when YoutubeUrl migrates onto staging proper.
-fn manifest_slide_source(manifest: &SlideManifest, frame_path: &Path) -> Result<PathBuf> {
-    if frame_path.is_absolute() {
-        return Ok(frame_path.to_path_buf());
-    }
-    let staging_root = dirs::data_local_dir()
-        .ok_or_else(|| eyre::eyre!("could not resolve data_local_dir for staging root"))?
-        .join("borg")
-        .join("stages")
-        .join(&manifest.trace_id);
-    Ok(staging_root.join(frame_path))
 }
 
 /// Pick a filename `<slug>-slide-NNN.jpg` whose path does not yet exist in
@@ -160,7 +143,7 @@ fn atomic_copy(src: &Path, dest: &Path) -> Result<()> {
 /// section-title-versus-heading skew never silently drops a slide).
 fn insert_section_embeds(
     body: &str,
-    sections: &[crate::slides::StageTwoSection],
+    sections: &[crate::slides::SummarySection],
     filenames_for_ids: &std::collections::HashMap<String, String>,
 ) -> String {
     let mut out = String::with_capacity(body.len() + sections.len() * 64);
