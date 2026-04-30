@@ -749,7 +749,7 @@ async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
 /// caller can copy slides out of it.
 async fn try_extract_slides(
     url: &str,
-    transcript: &str,
+    _transcript: &str,
     duration_secs: f64,
     config: &Config,
 ) -> Result<Option<(crate::slides::SlideManifest, crate::slides::StageTwoOutput)>> {
@@ -807,13 +807,30 @@ async fn try_extract_slides(
         return Ok(None);
     }
 
-    // 3. Segment + OCR + transcript bind.
-    let manifest = slides::segment(
+    // 3. Fetch RAW VTT subtitles (timestamps preserved) and parse into pairs
+    //    so transcript binding can match each cue to its slide's time range.
+    //    The Fabric `--transcript` output that Stage 0 fetched is already
+    //    timestamp-stripped; we need the raw form here.
+    let transcript_pairs = match youtube::fetch_subtitles_raw(url).await {
+        Ok(Some(vtt)) => youtube::parse_vtt_segments(&vtt),
+        Ok(None) => {
+            log::warn!("No raw VTT available - slides will lack transcript context");
+            Vec::new()
+        }
+        Err(e) => {
+            log::warn!("VTT fetch for slide binding failed: {e:#}");
+            Vec::new()
+        }
+    };
+    log::debug!("Parsed {} VTT cues for slide binding", transcript_pairs.len());
+
+    // 4. Segment + OCR + transcript bind.
+    let manifest = slides::segment_with_pairs(
         &video_id,
         url,
         duration_secs,
         &frames,
-        transcript,
+        &transcript_pairs,
         &work_dir,
         &config.youtube.slides,
     )?;

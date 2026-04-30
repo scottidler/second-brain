@@ -67,6 +67,14 @@ pub fn fetch_metadata(url: &str) -> Result<VideoMetadata> {
 }
 
 pub async fn fetch_subtitles(url: &str) -> Result<Option<String>> {
+    let raw = fetch_subtitles_raw(url).await?;
+    Ok(raw.map(|v| clean_vtt(&v)))
+}
+
+/// Fetch the raw VTT for a video (timestamps preserved). Used by the
+/// frame-aware slide pipeline to bind transcript snippets to per-slide
+/// time ranges. Returns None when no English captions are available.
+pub async fn fetch_subtitles_raw(url: &str) -> Result<Option<String>> {
     log::debug!("yt-dlp: fetching subtitles for {url}");
     let output = Command::new("yt-dlp")
         .args([
@@ -98,31 +106,20 @@ pub async fn fetch_subtitles(url: &str) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    // Try to get the subtitle content from the JSON
     let subs: serde_json::Value = serde_json::from_str(trimmed).unwrap_or_default();
-    log::debug!(
-        "Parsed subtitles JSON keys: {:?}",
-        subs.as_object().map(|o| o.keys().collect::<Vec<_>>())
-    );
     if let Some(en_sub) = subs.get("en") {
-        // Prefer local filepath if yt-dlp wrote the file
         if let Some(filepath) = en_sub.get("filepath").and_then(|f| f.as_str()) {
             log::debug!("Reading subtitle file: {filepath}");
             let content = std::fs::read_to_string(filepath).context("Failed to read subtitle file")?;
-            let cleaned = clean_vtt(&content);
-            log::debug!("Subtitle file read and cleaned: {} chars", cleaned.len());
             let _ = std::fs::remove_file(filepath);
-            return Ok(Some(cleaned));
+            return Ok(Some(content));
         }
-        // Fall back to downloading from the URL
         if let Some(sub_url) = en_sub.get("url").and_then(|u| u.as_str()) {
             log::debug!("Downloading subtitles from URL: {sub_url}");
             let response = reqwest::get(sub_url).await.context("Failed to download subtitle VTT")?;
             if response.status().is_success() {
                 let content = response.text().await.context("Failed to read subtitle response")?;
-                let cleaned = clean_vtt(&content);
-                log::debug!("Downloaded and cleaned subtitles: {} chars", cleaned.len());
-                return Ok(Some(cleaned));
+                return Ok(Some(content));
             }
             log::warn!("Subtitle download returned status {}", response.status());
         }
@@ -130,6 +127,77 @@ pub async fn fetch_subtitles(url: &str) -> Result<Option<String>> {
 
     log::debug!("No usable 'en' subtitle entry found in JSON");
     Ok(None)
+}
+
+/// Parse a raw VTT subtitle file into `(start_secs, text)` segments. Each
+/// VTT cue begins with a `HH:MM:SS.mmm --> HH:MM:SS.mmm` line followed by
+/// one or more text lines; we keep only the start time and concatenate the
+/// text. HTML tags (`<c>`, `<i>`) are stripped. Returns segments in the
+/// shape that `slides::bind_transcript` consumes after format-rendering.
+pub fn parse_vtt_segments(vtt: &str) -> Vec<(f64, String)> {
+    let mut segments: Vec<(f64, String)> = Vec::new();
+    let mut current_start: Option<f64> = None;
+    let mut current_text = String::new();
+
+    let push_current = |segments: &mut Vec<(f64, String)>, start: &mut Option<f64>, text: &mut String| {
+        if let Some(s) = start.take() {
+            let cleaned = text
+                .replace("<c>", "")
+                .replace("</c>", "")
+                .replace("<i>", "")
+                .replace("</i>", "")
+                .trim()
+                .to_string();
+            if !cleaned.is_empty() {
+                // Drop verbatim duplicates of the previous segment (rolling
+                // captions emit the same words multiple times).
+                if !segments.last().map(|(_, t)| t == &cleaned).unwrap_or(false) {
+                    segments.push((s, cleaned));
+                }
+            }
+            text.clear();
+        }
+    };
+
+    for line in vtt.lines() {
+        let line = line.trim();
+        if line.starts_with("WEBVTT") || line.starts_with("Kind:") || line.starts_with("Language:") {
+            continue;
+        }
+        if let Some(arrow_idx) = line.find("-->") {
+            push_current(&mut segments, &mut current_start, &mut current_text);
+            let start_str = line[..arrow_idx].trim();
+            current_start = parse_vtt_timestamp(start_str);
+            continue;
+        }
+        if line.is_empty() {
+            push_current(&mut segments, &mut current_start, &mut current_text);
+            continue;
+        }
+        if line.parse::<u32>().is_ok() {
+            continue;
+        }
+        if !current_text.is_empty() {
+            current_text.push(' ');
+        }
+        current_text.push_str(line);
+    }
+    push_current(&mut segments, &mut current_start, &mut current_text);
+    segments
+}
+
+fn parse_vtt_timestamp(s: &str) -> Option<f64> {
+    // VTT timestamps: HH:MM:SS.mmm or MM:SS.mmm
+    let parts: Vec<&str> = s.split(':').collect();
+    let nums: Vec<f64> = parts
+        .iter()
+        .map(|p| p.parse::<f64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    match nums.len() {
+        2 => Some(nums[0] * 60.0 + nums[1]),
+        3 => Some(nums[0] * 3600.0 + nums[1] * 60.0 + nums[2]),
+        _ => None,
+    }
 }
 
 /// Extract audio bound for Whisper transcription. Output is mono 16kHz mp3
@@ -451,6 +519,35 @@ mod tests {
             "00:00:00.000 --> 00:00:01.000\nhello world how are you\n\n00:00:01.000 --> 00:00:02.000\nhello world";
         let result = clean_vtt(vtt);
         assert_eq!(result, "hello world how are you");
+    }
+
+    #[test]
+    fn test_parse_vtt_segments_extracts_start_and_text() {
+        let vtt = "WEBVTT\nKind: captions\nLanguage: en\n\n00:00:00.000 --> 00:00:05.000\nHello world\n\n00:00:05.000 --> 00:00:12.500\nthis is the second cue\n\n00:01:30.000 --> 00:01:35.000\nmuch later\n";
+        let segs = parse_vtt_segments(vtt);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0].0, 0.0);
+        assert_eq!(segs[0].1, "Hello world");
+        assert_eq!(segs[1].0, 5.0);
+        assert_eq!(segs[1].1, "this is the second cue");
+        assert_eq!(segs[2].0, 90.0);
+        assert_eq!(segs[2].1, "much later");
+    }
+
+    #[test]
+    fn test_parse_vtt_segments_strips_html_tags() {
+        let vtt = "00:00:00.000 --> 00:00:02.000\n<c>tagged</c> <i>text</i>";
+        let segs = parse_vtt_segments(vtt);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].1, "tagged text");
+    }
+
+    #[test]
+    fn test_parse_vtt_segments_dedupes_consecutive_duplicates() {
+        let vtt = "00:00:00.000 --> 00:00:02.000\nsame\n\n00:00:02.000 --> 00:00:04.000\nsame\n";
+        let segs = parse_vtt_segments(vtt);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].1, "same");
     }
 
     #[test]

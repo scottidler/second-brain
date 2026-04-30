@@ -250,6 +250,19 @@ fn parse_hms(s: &str) -> Option<f64> {
     }
 }
 
+/// Bind already-time-anchored `(start_secs, text)` pairs to slides. Used by
+/// callers that have raw VTT and parsed it directly (preserving timestamps
+/// the cleaned-text form would have stripped).
+pub fn bind_transcript_pairs(slides: &mut [Slide], pairs: &[(f64, String)]) {
+    for slide in slides.iter_mut() {
+        slide.transcript = pairs
+            .iter()
+            .filter(|(start, _)| *start >= slide.start && *start < slide.end)
+            .map(|(start, text)| format!("[{}] {}", format_mmss(*start), text))
+            .collect();
+    }
+}
+
 /// Bind transcript segments to slides. Each slide gets the segments whose
 /// `start` falls within its `[start, end)` range. Segments are formatted as
 /// `[MM:SS] text` for reproducibility in `slides.yml`.
@@ -318,6 +331,25 @@ pub fn materialize_slides(clusters: &[Cluster], slide_dir: &Path) -> Result<Vec<
         });
     }
     Ok(slides)
+}
+
+/// Variant of `segment` that takes already-parsed timestamped transcript
+/// pairs (as produced by `youtube::parse_vtt_segments`). The text-form
+/// `segment` builds these from a synthesized "[MM:SS] text" string, which
+/// only works if the caller already had timestamps - VTT is the canonical
+/// upstream form, so this lets the YouTube path skip the round-trip.
+pub fn segment_with_pairs(
+    trace_id: &str,
+    video_url: &str,
+    duration_secs: f64,
+    frames: &[FrameRef],
+    transcript_pairs: &[(f64, String)],
+    out_dir: &Path,
+    config: &YoutubeSlidesConfig,
+) -> Result<SlideManifest> {
+    let mut manifest = segment(trace_id, video_url, duration_secs, frames, "", out_dir, config)?;
+    bind_transcript_pairs(&mut manifest.slides, transcript_pairs);
+    Ok(manifest)
 }
 
 /// End-to-end Stage 1 segmentation: hash, cluster, drop transitions, copy
