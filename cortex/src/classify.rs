@@ -449,7 +449,10 @@ pub fn apply_classify(
         if let Some(parent) = dest_abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::rename(&abs_path, &dest_abs)?;
+        // copy+delete instead of rename: rename() emits MOVED_TO which Dataview
+        // doesn't re-index; copy produces a CREATE event that triggers indexing.
+        std::fs::copy(&abs_path, &dest_abs)?;
+        std::fs::remove_file(&abs_path)?;
 
         moves.push((note.path.clone(), dest_relative.clone()));
 
