@@ -1,9 +1,18 @@
 use eyre::{Context, Result, bail};
 use std::process::Command;
+use std::time::Duration;
 
-/// Run a Fabric pattern against input text.
+/// Run a Fabric pattern against input text with a per-call timeout.
+/// If the timeout fires, the child is killed and an error is returned.
 /// Returns the pattern output or an error.
-pub fn run_pattern(pattern: &str, input: &str, binary: &str, model: &str, max_chars: usize) -> Result<String> {
+pub fn run_pattern(
+    pattern: &str,
+    input: &str,
+    binary: &str,
+    model: &str,
+    max_chars: usize,
+    timeout_secs: u64,
+) -> Result<String> {
     let truncated = truncate_input(input, max_chars);
     let resolved = resolve_binary(binary);
 
@@ -25,7 +34,24 @@ pub fn run_pattern(pattern: &str, input: &str, binary: &str, model: &str, max_ch
             .context("Failed to write to fabric stdin")?;
     }
 
-    let output = child.wait_with_output().context("Failed to wait for fabric")?;
+    let timeout = Duration::from_secs(timeout_secs);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!("fabric -p {pattern} timed out after {timeout_secs}s");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => bail!("Failed to wait for fabric: {e}"),
+        }
+    }
+
+    let output = child.wait_with_output().context("Failed to collect fabric output")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -172,7 +172,37 @@ pub struct Config {
     pub tags: TagsConfig,
     pub staging: StagingConfig,
     pub youtube: YoutubeConfig,
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
     pub log_level: Option<String>,
+}
+
+/// Bounded-wait configuration for the ingestion pipeline. All timeouts are
+/// in seconds. Each per-call timeout is a backstop for an external tool or
+/// network call that could otherwise hang indefinitely. `hard_timeout_secs`
+/// wraps the whole `process_url_inner` future as a final backstop for any
+/// unbounded path the per-call timeouts miss; if it fires, that is a signal
+/// to investigate the underlying hang, not a feature.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct PipelineConfig {
+    pub hard_timeout_secs: u64,
+    pub subtitle_fetch_timeout_secs: u64,
+    pub yt_dlp_timeout_secs: u64,
+    pub ocr_timeout_secs: u64,
+    pub jina_timeout_secs: u64,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            hard_timeout_secs: 1800,
+            subtitle_fetch_timeout_secs: 30,
+            yt_dlp_timeout_secs: 600,
+            ocr_timeout_secs: 60,
+            jina_timeout_secs: 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -401,6 +431,10 @@ pub struct FabricConfig {
     pub condense_pattern: String,
     pub tag_pattern: String,
     pub max_content_chars: usize,
+    /// Per-call timeout in seconds for any fabric subprocess. The poll-based
+    /// timeout kills the child on elapsed so the calling thread does not
+    /// remain blocked indefinitely.
+    pub timeout_secs: u64,
 }
 
 impl Default for FabricConfig {
@@ -413,6 +447,7 @@ impl Default for FabricConfig {
             condense_pattern: "condense.md".to_string(),
             tag_pattern: "create_tags".to_string(),
             max_content_chars: 100000,
+            timeout_secs: 600,
         }
     }
 }

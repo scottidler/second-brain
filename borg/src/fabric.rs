@@ -1,8 +1,32 @@
-use eyre::{Result, bail};
+use eyre::{Context, Result, bail};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 use crate::config::FabricConfig;
+
+/// Wait for a child process with a per-call timeout. Kills the child on
+/// elapsed and returns an error. Caller still owns the `Child`; on success
+/// they call `wait_with_output()` to collect output. Mirrors the cortex
+/// pattern at `cortex/src/fabric.rs`.
+fn wait_with_timeout(child: &mut Child, timeout_secs: u64, label: &str) -> Result<()> {
+    let timeout = Duration::from_secs(timeout_secs);
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!("{label} timed out after {timeout_secs}s");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => bail!("Failed to wait for {label}: {e}"),
+        }
+    }
+}
 
 /// Resolve a pattern name to a file path.
 ///
@@ -31,6 +55,7 @@ pub async fn run_pattern(pattern: &str, input: &str, config: &FabricConfig) -> R
         &config.binary,
         &config.model,
         config.max_content_chars,
+        config.timeout_secs,
     )
 }
 
@@ -41,12 +66,17 @@ pub async fn run_pattern(pattern: &str, input: &str, config: &FabricConfig) -> R
 pub fn fetch_transcript(url: &str, config: &FabricConfig) -> Result<String> {
     let binary = vault::fabric::resolve_binary(&config.binary);
     log::debug!("fabric: fetching YouTube transcript for {url}");
-    let mut cmd = Command::new(&binary);
-    cmd.args(["-y", url, "--transcript"]);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
+    let mut child = Command::new(&binary)
+        .args(["-y", url, "--transcript"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn fabric")?;
 
-    let output = cmd.spawn()?.wait_with_output()?;
+    if wait_with_timeout(&mut child, config.timeout_secs, "fabric -y --transcript").is_err() {
+        return Ok(String::new());
+    }
+    let output = child.wait_with_output().context("Failed to collect fabric output")?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
@@ -60,29 +90,32 @@ pub async fn fetch_article(url: &str, config: &FabricConfig) -> Result<String> {
     // Primary: fabric -u <url>
     let binary = vault::fabric::resolve_binary(&config.binary);
     log::debug!("fabric: fetching article for {url}");
-    let mut cmd = Command::new(&binary);
-    cmd.args(["-u", url]);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
+    let mut child = Command::new(&binary)
+        .args(["-u", url])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn fabric")?;
 
-    let output = cmd.spawn()?.wait_with_output()?;
-    if output.status.success() {
+    if wait_with_timeout(&mut child, config.timeout_secs, "fabric -u").is_ok()
+        && let Ok(output) = child.wait_with_output()
+        && output.status.success()
+    {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !text.is_empty() {
             return Ok(text);
         }
     }
 
-    // Fallback: markitdown
+    // Fallback: markitdown - bounded by the same per-call timeout as fabric.
     log::debug!("fabric -u failed, trying markitdown for {url}");
-    let output = Command::new("markitdown")
+    if let Ok(mut markitdown) = Command::new("markitdown")
         .arg(url)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .and_then(|c| c.wait_with_output());
-
-    if let Ok(output) = output
+        && wait_with_timeout(&mut markitdown, config.timeout_secs, "markitdown").is_ok()
+        && let Ok(output) = markitdown.wait_with_output()
         && output.status.success()
     {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();

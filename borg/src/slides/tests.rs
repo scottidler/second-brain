@@ -266,7 +266,7 @@ fn test_segment_empty_frames_returns_text_only() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("create tmp");
 
-    let manifest = segment("ht-deadbeef", "https://x", 0.0, &[], "", &tmp, &cfg).expect("segment");
+    let manifest = segment("ht-deadbeef", "https://x", 0.0, &[], "", &tmp, &cfg, 60).expect("segment");
     assert_eq!(manifest.trace_id, "ht-deadbeef");
     assert!(manifest.slides.is_empty());
     assert_eq!(manifest.extraction.unique_slides, 0);
@@ -305,6 +305,7 @@ fn test_segment_two_color_blocks_yields_slides() {
         "[00:00] red phase\n[00:06] green phase",
         &out_dir,
         &cfg,
+        60,
     )
     .expect("segment");
 

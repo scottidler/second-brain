@@ -2,6 +2,7 @@ use base64::Engine;
 use eyre::{Context, Result};
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 use crate::config::{self, LlmConfig, VisionConfig};
 
@@ -15,8 +16,11 @@ pub struct VisionResult {
 
 /// Extract text from an image using tesseract CLI.
 /// Returns empty string if tesseract is not available or fails.
-pub fn ocr_extract(image_path: &Path) -> Result<String> {
-    let output = Command::new("/usr/bin/tesseract")
+/// Synchronous (called from both rayon `par_iter` and tokio `spawn_blocking`),
+/// bounded by `timeout_secs` via a poll-based internal timeout that kills the
+/// child process on elapsed.
+pub fn ocr_extract(image_path: &Path, timeout_secs: u64) -> Result<String> {
+    let mut child = Command::new("/usr/bin/tesseract")
         .args([
             image_path.to_str().unwrap_or_default(),
             "stdout",
@@ -25,17 +29,36 @@ pub fn ocr_extract(image_path: &Path) -> Result<String> {
             "--psm",
             "3",
         ])
-        .output()
-        .context("Failed to run tesseract")?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn tesseract")?;
 
+    let timeout = Duration::from_secs(timeout_secs);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    log::warn!("tesseract timed out after {timeout_secs}s");
+                    return Ok(String::new());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(eyre::eyre!("Failed to wait for tesseract: {e}")),
+        }
+    }
+
+    let output = child.wait_with_output().context("Failed to collect tesseract output")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::warn!("tesseract failed: {stderr}");
         return Ok(String::new());
     }
-
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(text)
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Extract text and describe an image using the Claude Vision API directly.
@@ -181,12 +204,41 @@ mod tests {
     #[test]
     fn test_ocr_extract_nonexistent_file() {
         // tesseract should fail gracefully on a nonexistent file
-        let result = ocr_extract(Path::new("/tmp/nonexistent-obsidian-borg-test.png"));
+        let result = ocr_extract(Path::new("/tmp/nonexistent-obsidian-borg-test.png"), 5);
         // Either returns an error (tesseract not installed) or empty/non-empty string
         if let Ok(text) = result {
-            // Any result is acceptable - just verify we got a string back
             let _ = text.len();
         }
+    }
+
+    #[test]
+    fn test_ocr_extract_short_timeout_terminates() {
+        // Use `sleep` as a stand-in tesseract that hangs. With a sub-second
+        // timeout, the internal kill path must fire and we must return Ok("")
+        // rather than blocking.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let timeout = Duration::from_millis(200);
+        let start = std::time::Instant::now();
+        let mut killed = false;
+        loop {
+            if let Some(_status) = child.try_wait().expect("try_wait") {
+                break;
+            }
+            if start.elapsed() > timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                killed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(killed, "expected timeout-driven kill");
     }
 
     #[test]

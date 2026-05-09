@@ -252,55 +252,79 @@ pub async fn process_url(
     trace_id: &str,
 ) -> IngestResult {
     let start = Instant::now();
-    match process_url_inner(url, tags, method, force, config, trace_id).await {
-        Ok(mut result) => {
+    let hard_timeout = std::time::Duration::from_secs(config.pipeline.hard_timeout_secs);
+    let outcome = tokio::time::timeout(
+        hard_timeout,
+        process_url_inner(url, tags, method, force, config, trace_id),
+    )
+    .await;
+
+    let make_failure = |reason: String, elapsed: std::time::Duration| -> IngestResult {
+        // Best-effort log failure to Borg Ledger
+        let canonical = hygiene::normalize_url(url, &config.canonicalization.rules).unwrap_or_else(|_| url.to_string());
+        let tz: chrono_tz::Tz = config
+            .frontmatter
+            .timezone
+            .parse()
+            .unwrap_or(chrono_tz::America::Los_Angeles);
+        let now = chrono::Utc::now().with_timezone(&tz);
+        let _ = ledger::append_entry(
+            &ledger::ledger_path(config),
+            &LedgerEntry {
+                date: now.format("%Y-%m-%d").to_string(),
+                time: now.format("%H:%M").to_string(),
+                method: method.into(),
+                status: LedgerStatus::Failed,
+                filename: None,
+                source: canonical.clone(),
+                domain: None,
+                trace_id: Some(trace_id.to_string()),
+            },
+        );
+        IngestResult {
+            status: IngestStatus::Failed { reason },
+            note_path: None,
+            title: None,
+            tags: vec![],
+            elapsed_secs: Some(elapsed.as_secs_f64()),
+            method: Some(method),
+            canonical_url: Some(canonical),
+            trace_id: None,
+            obsidian_url: None,
+        }
+    };
+
+    match outcome {
+        Ok(Ok(mut result)) => {
             let elapsed = start.elapsed();
             log::info!("[{trace_id}] Pipeline completed for {url} in {elapsed:.2?}");
             result.elapsed_secs = Some(elapsed.as_secs_f64());
             result
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let elapsed = start.elapsed();
             log::error!("[{trace_id}] Pipeline failed for {url} in {elapsed:.2?}: {e:?}");
-            let reason = format!("{:#}", e);
-
-            // Best-effort log failure to Borg Ledger
+            // Release inflight guard on failure (Phase 2 will replace this with
+            // an RAII guard whose Drop handles cleanup for all termination
+            // paths including timeout-driven cancellation).
             let canonical =
                 hygiene::normalize_url(url, &config.canonicalization.rules).unwrap_or_else(|_| url.to_string());
-
-            // Release inflight guard on failure
             INFLIGHT.lock().await.remove(&canonical);
-            let tz: chrono_tz::Tz = config
-                .frontmatter
-                .timezone
-                .parse()
-                .unwrap_or(chrono_tz::America::Los_Angeles);
-            let now = chrono::Utc::now().with_timezone(&tz);
-            let _ = ledger::append_entry(
-                &ledger::ledger_path(config),
-                &LedgerEntry {
-                    date: now.format("%Y-%m-%d").to_string(),
-                    time: now.format("%H:%M").to_string(),
-                    method: method.into(),
-                    status: LedgerStatus::Failed,
-                    filename: None,
-                    source: canonical.clone(),
-                    domain: None,
-                    trace_id: Some(trace_id.to_string()),
-                },
+            make_failure(format!("{:#}", e), elapsed)
+        }
+        Err(_elapsed) => {
+            let elapsed = start.elapsed();
+            log::error!(
+                "[{trace_id}] Pipeline timed out after {}s for {url}",
+                config.pipeline.hard_timeout_secs
             );
-
-            IngestResult {
-                status: IngestStatus::Failed { reason },
-                note_path: None,
-                title: None,
-                tags: vec![],
-                elapsed_secs: Some(elapsed.as_secs_f64()),
-                method: Some(method),
-                canonical_url: Some(canonical),
-                trace_id: None,
-                obsidian_url: None,
-            }
+            // The inner future was dropped when timeout fired. Release the
+            // inflight guard now so the URL can be retried; Phase 2's RAII
+            // guard will make this automatic.
+            let canonical =
+                hygiene::normalize_url(url, &config.canonicalization.rules).unwrap_or_else(|_| url.to_string());
+            INFLIGHT.lock().await.remove(&canonical);
+            make_failure("timeout".to_string(), elapsed)
         }
     }
 }
@@ -615,9 +639,10 @@ async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
     // Run metadata (yt-dlp) and transcript (fabric) concurrently.
     // These are independent - yt-dlp scrapes the page, fabric calls the captions API.
     let url_owned = url.to_string();
+    let yt_dlp_timeout = config.pipeline.yt_dlp_timeout_secs;
     let metadata_handle = tokio::task::spawn_blocking({
         let url = url_owned.clone();
-        move || youtube::fetch_metadata(&url)
+        move || youtube::fetch_metadata(&url, yt_dlp_timeout)
     });
 
     let transcript_future = async {
@@ -651,7 +676,7 @@ async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
         if use_fabric {
             log::warn!("Fabric returned empty transcript, falling back to yt-dlp subtitles");
         }
-        match youtube::fetch_subtitles(url).await? {
+        match youtube::fetch_subtitles(url, &config.pipeline).await? {
             Some(subs) => subs,
             None => {
                 log::warn!("No subtitles available, falling back to audio extraction + Groq");
@@ -772,7 +797,7 @@ async fn try_extract_slides(
     //    frames are reasonable and disk usage stays small.
     let video_path = work_dir.join(format!("{video_id}.mp4"));
     let output_template = video_path.to_string_lossy().to_string();
-    let dl = std::process::Command::new("yt-dlp")
+    let dl_fut = tokio::process::Command::new("yt-dlp")
         .args([
             "--no-warnings",
             "-f",
@@ -783,8 +808,17 @@ async fn try_extract_slides(
             &output_template,
             url,
         ])
-        .output()
-        .context("yt-dlp video download")?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("Failed to spawn yt-dlp for video download")?
+        .wait_with_output();
+    let yt_dlp_timeout = config.pipeline.yt_dlp_timeout_secs;
+    let dl = match tokio::time::timeout(std::time::Duration::from_secs(yt_dlp_timeout), dl_fut).await {
+        Ok(res) => res.context("yt-dlp video download")?,
+        Err(_) => eyre::bail!("yt-dlp video download timed out after {yt_dlp_timeout}s"),
+    };
     if !dl.status.success() {
         let stderr = String::from_utf8_lossy(&dl.stderr);
         eyre::bail!("yt-dlp failed: {stderr}");
@@ -816,7 +850,7 @@ async fn try_extract_slides(
     //    so transcript binding can match each cue to its slide's time range.
     //    The Fabric `--transcript` output that Stage 0 fetched is already
     //    timestamp-stripped; we need the raw form here.
-    let transcript_pairs = match youtube::fetch_subtitles_raw(url).await {
+    let transcript_pairs = match youtube::fetch_subtitles_raw(url, &config.pipeline).await {
         Ok(Some(vtt)) => youtube::parse_vtt_segments(&vtt),
         Ok(None) => {
             log::warn!("No raw VTT available - slides will lack transcript context");
@@ -838,6 +872,7 @@ async fn try_extract_slides(
         &transcript_pairs,
         &work_dir,
         &config.youtube.slides,
+        config.pipeline.ocr_timeout_secs,
     )?;
     let _ = slides::write_manifest(&manifest, &work_dir);
 
@@ -907,7 +942,7 @@ async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> R
 }
 
 async fn process_article_jina(url: &str, config: &Config, trace_id: &str) -> Result<(String, String, ContentType)> {
-    let article_md = jina::fetch_article_markdown(url).await?;
+    let article_md = jina::fetch_article_markdown(url, config.pipeline.jina_timeout_secs).await?;
     if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
         config,
         trace_id,
@@ -1017,8 +1052,9 @@ async fn process_image_inner(
 
     // Run tesseract (local) and vision API (remote) in parallel
     let ocr_temp_path = temp_path.clone();
+    let ocr_timeout = config.pipeline.ocr_timeout_secs;
     let ocr_handle = tokio::task::spawn_blocking(move || {
-        ocr::ocr_extract(&ocr_temp_path).unwrap_or_else(|e| {
+        ocr::ocr_extract(&ocr_temp_path, ocr_timeout).unwrap_or_else(|e| {
             log::warn!("OCR extraction failed: {e:#}");
             String::new()
         })
@@ -3348,3 +3384,6 @@ int main() {
         assert_eq!(content, original);
     }
 }
+
+#[cfg(test)]
+mod timeouts;

@@ -69,6 +69,7 @@ impl Summarizer for FabricSummarizer {
             &self.config.binary,
             &self.config.model,
             self.config.max_content_chars,
+            self.config.timeout_secs,
         )
     }
 }

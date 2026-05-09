@@ -3,8 +3,20 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
+use std::time::Duration;
+use tokio::process::Command as TokioCommand;
 
-use crate::config::YoutubeSlidesConfig;
+use crate::config::{PipelineConfig, YoutubeSlidesConfig};
+
+/// Shared HTTP client for ad-hoc YouTube subtitle URL downloads. Built lazily;
+/// the timeout below applies per-request (connect + body), so a hung CDN
+/// cannot leave the pipeline waiting forever.
+static SUBTITLE_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(60)) // hard ceiling; per-call timeout below tightens this
+        .build()
+        .expect("build subtitle reqwest client")
+});
 
 static VIDEO_ID_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
@@ -35,13 +47,33 @@ pub struct VideoMetadata {
     pub tags: Vec<String>,
 }
 
-pub fn fetch_metadata(url: &str) -> Result<VideoMetadata> {
+pub fn fetch_metadata(url: &str, timeout_secs: u64) -> Result<VideoMetadata> {
     log::debug!("yt-dlp: fetching metadata for {url}");
-    let output = Command::new("yt-dlp")
+    let mut child = Command::new("yt-dlp")
         .args(["--dump-json", "--no-download", "--no-warnings", url])
-        .output()
-        .context("Failed to run yt-dlp - is it installed?")?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn yt-dlp - is it installed?")?;
 
+    let timeout = Duration::from_secs(timeout_secs);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!("yt-dlp metadata timed out after {timeout_secs}s for {url}");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => bail!("Failed to wait for yt-dlp: {e}"),
+        }
+    }
+
+    let output = child.wait_with_output().context("Failed to collect yt-dlp output")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::error!("yt-dlp metadata failed (exit {}): {stderr}", output.status);
@@ -66,17 +98,22 @@ pub fn fetch_metadata(url: &str) -> Result<VideoMetadata> {
     })
 }
 
-pub async fn fetch_subtitles(url: &str) -> Result<Option<String>> {
-    let raw = fetch_subtitles_raw(url).await?;
+pub async fn fetch_subtitles(url: &str, pipeline: &PipelineConfig) -> Result<Option<String>> {
+    let raw = fetch_subtitles_raw(url, pipeline).await?;
     Ok(raw.map(|v| clean_vtt(&v)))
 }
 
 /// Fetch the raw VTT for a video (timestamps preserved). Used by the
 /// frame-aware slide pipeline to bind transcript snippets to per-slide
 /// time ranges. Returns None when no English captions are available.
-pub async fn fetch_subtitles_raw(url: &str) -> Result<Option<String>> {
+///
+/// Bounded by `pipeline.yt_dlp_timeout_secs` (yt-dlp child) and
+/// `pipeline.subtitle_fetch_timeout_secs` (the subtitle-URL HTTP fetch).
+/// `kill_on_drop(true)` on the yt-dlp child ensures the OS process is
+/// terminated when the timeout future is dropped.
+pub async fn fetch_subtitles_raw(url: &str, pipeline: &PipelineConfig) -> Result<Option<String>> {
     log::debug!("yt-dlp: fetching subtitles for {url}");
-    let output = Command::new("yt-dlp")
+    let yt_dlp_fut = TokioCommand::new("yt-dlp")
         .args([
             "--write-auto-sub",
             "--sub-lang",
@@ -88,8 +125,23 @@ pub async fn fetch_subtitles_raw(url: &str) -> Result<Option<String>> {
             "%(requested_subtitles)j",
             url,
         ])
-        .output()
-        .context("Failed to run yt-dlp for subtitles")?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("Failed to spawn yt-dlp - is it installed?")?
+        .wait_with_output();
+
+    let output = match tokio::time::timeout(Duration::from_secs(pipeline.yt_dlp_timeout_secs), yt_dlp_fut).await {
+        Ok(res) => res.context("Failed to wait for yt-dlp")?,
+        Err(_) => {
+            log::warn!(
+                "yt-dlp subtitles timed out after {}s for {url}",
+                pipeline.yt_dlp_timeout_secs
+            );
+            return Ok(None);
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -116,7 +168,21 @@ pub async fn fetch_subtitles_raw(url: &str) -> Result<Option<String>> {
         }
         if let Some(sub_url) = en_sub.get("url").and_then(|u| u.as_str()) {
             log::debug!("Downloading subtitles from URL: {sub_url}");
-            let response = reqwest::get(sub_url).await.context("Failed to download subtitle VTT")?;
+            let response = match tokio::time::timeout(
+                Duration::from_secs(pipeline.subtitle_fetch_timeout_secs),
+                SUBTITLE_HTTP_CLIENT.get(sub_url).send(),
+            )
+            .await
+            {
+                Ok(res) => res.context("Failed to download subtitle VTT")?,
+                Err(_) => {
+                    log::warn!(
+                        "subtitle URL fetch timed out after {}s",
+                        pipeline.subtitle_fetch_timeout_secs
+                    );
+                    return Ok(None);
+                }
+            };
             if response.status().is_success() {
                 let content = response.text().await.context("Failed to read subtitle response")?;
                 return Ok(Some(content));

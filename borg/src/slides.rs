@@ -288,13 +288,13 @@ fn format_mmss(secs: f64) -> String {
 /// `slides/` directory inside `transcripts/<trace_id>/`). Failures degrade
 /// gracefully to empty OCR text - we'd rather lose OCR for one slide than
 /// fail the whole ingestion.
-pub fn ocr_slides(slides: &mut [Slide], slide_dir: &Path) {
+pub fn ocr_slides(slides: &mut [Slide], slide_dir: &Path, timeout_secs: u64) {
     let results: Vec<(usize, String)> = slides
         .par_iter()
         .enumerate()
         .map(|(i, slide)| {
             let abs = slide_dir.join(slide.frame_path.file_name().unwrap_or_default());
-            let text = ocr::ocr_extract(&abs).unwrap_or_else(|e| {
+            let text = ocr::ocr_extract(&abs, timeout_secs).unwrap_or_else(|e| {
                 log::warn!("OCR failed for {}: {e:#}", abs.display());
                 String::new()
             });
@@ -346,8 +346,18 @@ pub fn segment_with_pairs(
     transcript_pairs: &[(f64, String)],
     out_dir: &Path,
     config: &YoutubeSlidesConfig,
+    ocr_timeout_secs: u64,
 ) -> Result<SlideManifest> {
-    let mut manifest = segment(trace_id, video_url, duration_secs, frames, "", out_dir, config)?;
+    let mut manifest = segment(
+        trace_id,
+        video_url,
+        duration_secs,
+        frames,
+        "",
+        out_dir,
+        config,
+        ocr_timeout_secs,
+    )?;
     bind_transcript_pairs(&mut manifest.slides, transcript_pairs);
     Ok(manifest)
 }
@@ -364,6 +374,7 @@ pub fn segment(
     transcript_text: &str,
     out_dir: &Path,
     config: &YoutubeSlidesConfig,
+    ocr_timeout_secs: u64,
 ) -> Result<SlideManifest> {
     log::debug!(
         "slides::segment: trace={trace_id} frames={} duration={duration_secs}",
@@ -412,7 +423,7 @@ pub fn segment(
     let slide_dir = out_dir.join("slides");
     let mut slides = materialize_slides(&kept, &slide_dir)?;
 
-    ocr_slides(&mut slides, &slide_dir);
+    ocr_slides(&mut slides, &slide_dir, ocr_timeout_secs);
 
     let segments = parse_transcript_segments(transcript_text);
     bind_transcript(&mut slides, &segments);
