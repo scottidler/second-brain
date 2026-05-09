@@ -428,7 +428,7 @@ pub async fn run_reingest(
             i + 1,
             entries.len(),
             entry.date,
-            entry.title,
+            entry.slug,
             entry.source
         );
 

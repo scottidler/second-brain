@@ -331,7 +331,7 @@ impl OracleMcpServer {
                 json!({
                     "date": e.date,
                     "method": e.method,
-                    "title": e.title,
+                    "slug": e.slug,
                     "filename": e.filename,
                     "source": e.source,
                     "domain": e.domain,

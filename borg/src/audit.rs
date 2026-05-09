@@ -109,19 +109,24 @@ pub async fn run_audit(config: &Config, fix: bool) -> Result<()> {
             }
         }
 
-        // 2. Blocked content / Raw URL titles (check from ledger title)
-        if let Some(reason) = quality::detect_blocked_content("", &entry.title) {
-            let note_path = note_index.get(&entry.source).and_then(|p| p.first()).cloned();
+        // 2. Blocked content / Raw URL titles. The ledger no longer carries
+        //    the human title, so read it from the note's frontmatter via the
+        //    note_index. Notes missing from the vault simply skip this check.
+        let note_path = note_index.get(&entry.source).and_then(|p| p.first()).cloned();
+        if let Some(ref path) = note_path
+            && let Some(note_title) = read_note_title(path)
+            && let Some(reason) = quality::detect_blocked_content("", &note_title)
+        {
             if reason.contains("raw URL") {
                 findings.push(AuditFinding::RawUrlTitle {
                     source: entry.source.clone(),
-                    title: entry.title.clone(),
+                    title: note_title,
                     note_path,
                 });
             } else {
                 findings.push(AuditFinding::BlockedContent {
                     source: entry.source.clone(),
-                    title: entry.title.clone(),
+                    title: note_title,
                     note_path,
                 });
             }
@@ -282,6 +287,12 @@ fn build_note_index(vault_root: &Path, skip_folders: &[String]) -> Result<HashMa
 fn read_note_type(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     extract_frontmatter_field(&content, "type")
+}
+
+/// Read the `title:` field from a note's frontmatter.
+fn read_note_title(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    extract_frontmatter_field(&content, "title")
 }
 
 /// Extract a simple string field from YAML frontmatter.

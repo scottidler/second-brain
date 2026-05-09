@@ -28,7 +28,6 @@ pub struct LedgerEntry {
     pub time: String,
     pub method: Method,
     pub status: LedgerStatus,
-    pub title: Option<String>,
     pub filename: Option<String>,
     pub source: String,
     pub domain: Option<String>,
@@ -52,14 +51,16 @@ All URLs ingested by obsidian-borg. This file is machine-maintained - do not edi
 
 See also: [[borg-dashboard]]
 
-| Date | Time | Method | Status | Title | Filename | Source | Domain | Trace |
-|------|------|--------|--------|-------|----------|--------|--------|-------|
+| Date | Time | Method | Status | Note | Source | Domain | Trace |
+|------|------|--------|--------|------|--------|--------|-------|
 "#;
 
 /// The canonical table header and separator - single source of truth for column
 /// names and order. Any code that reads or writes ledger rows must match this.
-const LEDGER_HEADER: &str = "| Date | Time | Method | Status | Title | Filename | Source | Domain | Trace |";
-const LEDGER_SEPARATOR: &str = "|------|------|--------|--------|-------|----------|--------|--------|-------|";
+/// `Note` holds a single `[[slug]]` wikilink whose target is the filename stem;
+/// it replaces the older two-column Title + Filename layout.
+const LEDGER_HEADER: &str = "| Date | Time | Method | Status | Note | Source | Domain | Trace |";
+const LEDGER_SEPARATOR: &str = "|------|------|--------|--------|------|--------|--------|-------|";
 
 /// Resolve the Borg Ledger path from a vault root.
 pub fn ledger_path(vault_root: &Path) -> PathBuf {
@@ -120,6 +121,39 @@ pub fn ensure_ledger_exists(ledger_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Indices into a `split('|')` of one ledger row, for either layout.
+///
+/// Current layout (8 fields, `cols.len() == 10`):
+///   `Date | Time | Method | Status | Note | Source | Domain | Trace`
+/// Legacy layout (9 fields, `cols.len() == 11`):
+///   `Date | Time | Method | Status | Title | Filename | Source | Domain | Trace`
+struct ColIdx {
+    note: usize,
+    filename: Option<usize>,
+    source: usize,
+    domain: usize,
+}
+
+fn col_idx(col_count: usize) -> Option<ColIdx> {
+    match col_count {
+        // New 8-field format: collapsed Note column.
+        10 => Some(ColIdx {
+            note: 5,
+            filename: None,
+            source: 6,
+            domain: 7,
+        }),
+        // Legacy 9-field format: separate Title + Filename columns.
+        n if n >= 11 => Some(ColIdx {
+            note: 5,
+            filename: Some(6),
+            source: 7,
+            domain: 8,
+        }),
+        _ => None,
+    }
+}
+
 /// Check if canonical URL exists in log with a completed status. Returns the date if found.
 pub fn check_duplicate(ledger_path: &Path, canonical_url: &str) -> Result<Option<String>> {
     if !ledger_path.exists() {
@@ -141,12 +175,11 @@ pub fn check_duplicate(ledger_path: &Path, canonical_url: &str) -> Result<Option
             continue;
         }
         let cols: Vec<&str> = line.split('|').collect();
-        if cols.len() < 8 {
+        let Some(idx) = col_idx(cols.len()) else {
             continue;
-        }
+        };
         let status = cols[4].trim();
-        // Source is at index 7 (new format, 10+ cols) or index 6 (old format)
-        let source = if cols.len() >= 11 { cols[7].trim() } else { cols[6].trim() };
+        let source = cols[idx.source].trim();
         if status == "\u{2705}" && source == canonical_url {
             return Ok(Some(cols[1].trim().to_string()));
         }
@@ -161,6 +194,22 @@ pub struct CompletedEntry {
     pub date: String,
     pub filename: String,
     pub line_number: usize,
+}
+
+/// Extract the wikilink target (the slug) from a `Note` cell. Accepts `[[stem]]`
+/// or `[[stem|alias]]` and returns the stem; returns the raw cell otherwise so
+/// pre-migration rows still surface something useful.
+fn parse_note_slug(cell: &str) -> String {
+    let inner = cell
+        .strip_prefix("[[")
+        .and_then(|s| s.strip_suffix("]]"))
+        .unwrap_or(cell);
+    inner
+        .split_once('|')
+        .map(|(stem, _)| stem)
+        .unwrap_or(inner)
+        .trim()
+        .to_string()
 }
 
 /// Find the most recent completed entry for a content key (canonical URL or normalized text).
@@ -186,14 +235,23 @@ pub fn find_completed(ledger_path: &Path, content_key: &str) -> Result<Option<Co
             continue;
         }
         let cols: Vec<&str> = line.split('|').collect();
-        if cols.len() < 8 {
+        let Some(idx) = col_idx(cols.len()) else {
             continue;
-        }
+        };
         let status = cols[4].trim();
-        let (source, filename) = if cols.len() >= 11 {
-            (cols[7].trim(), cols[6].trim().to_string())
-        } else {
-            (cols[6].trim(), "-".to_string())
+        let source = cols[idx.source].trim();
+        // Legacy rows have a dedicated filename column; new rows derive the
+        // filename from the [[slug]] in the Note column.
+        let filename = match idx.filename {
+            Some(i) => cols[i].trim().to_string(),
+            None => {
+                let slug = parse_note_slug(cols[idx.note].trim());
+                if slug.is_empty() || slug == "-" {
+                    "-".to_string()
+                } else {
+                    format!("{slug}.md")
+                }
+            }
         };
         if status == "\u{2705}" && source == content_key {
             last_match = Some(CompletedEntry {
@@ -247,7 +305,7 @@ pub struct EntryFilter {
 pub struct QueriedEntry {
     pub date: String,
     pub method: String,
-    pub title: String,
+    pub slug: String,
     pub filename: String,
     pub source: String,
     pub domain: String,
@@ -277,9 +335,9 @@ pub fn query_entries(ledger_path: &Path, filter: &EntryFilter) -> Result<Vec<Que
             continue;
         }
         let cols: Vec<&str> = line.split('|').collect();
-        if cols.len() < 8 {
+        let Some(idx) = col_idx(cols.len()) else {
             continue;
-        }
+        };
         let status = cols[4].trim();
         if status != "\u{2705}" {
             continue;
@@ -287,22 +345,16 @@ pub fn query_entries(ledger_path: &Path, filter: &EntryFilter) -> Result<Vec<Que
 
         let date = cols[1].trim().to_string();
         let method = cols[3].trim().to_string();
-        let title_raw = cols[5].trim();
-        let title = title_raw
-            .strip_prefix("[[")
-            .and_then(|s| s.strip_suffix("]]"))
-            .unwrap_or(title_raw)
-            .to_string();
-
-        let (filename, source, domain) = if cols.len() >= 11 {
-            (
-                cols[6].trim().to_string(),
-                cols[7].trim().to_string(),
-                cols[8].trim().to_string(),
-            )
-        } else {
-            ("-".to_string(), cols[6].trim().to_string(), cols[7].trim().to_string())
+        let slug = parse_note_slug(cols[idx.note].trim());
+        // Filename: legacy rows store it as a separate column; new rows
+        // derive it from the [[slug]] target.
+        let filename = match idx.filename {
+            Some(i) => cols[i].trim().to_string(),
+            None if slug.is_empty() || slug == "-" => "-".to_string(),
+            None => format!("{slug}.md"),
         };
+        let source = cols[idx.source].trim().to_string();
+        let domain = cols[idx.domain].trim().to_string();
 
         if let Some(ref f_source) = filter.source
             && source != *f_source
@@ -328,7 +380,7 @@ pub fn query_entries(ledger_path: &Path, filter: &EntryFilter) -> Result<Vec<Que
         entries.push(QueriedEntry {
             date,
             method,
-            title,
+            slug,
             filename,
             source,
             domain,
@@ -344,7 +396,10 @@ pub fn query_entries(ledger_path: &Path, filter: &EntryFilter) -> Result<Vec<Que
 pub struct ParsedLedgerRow {
     pub date: String,
     pub status: String,
-    pub title: String,
+    /// Filename stem from the `[[slug]]` link in the Note column. Pre-migration
+    /// rows surface their separate Filename cell here (with `.md` stripped) so
+    /// audit code can use this as the unique key for the note.
+    pub slug: String,
     pub source: String,
 }
 
@@ -360,24 +415,28 @@ pub fn parse_completed_entries(ledger_path: &Path) -> Result<Vec<ParsedLedgerRow
             continue;
         }
         let cols: Vec<&str> = line.split('|').collect();
-        if cols.len() < 8 {
+        let Some(idx) = col_idx(cols.len()) else {
             continue;
-        }
+        };
         let status = cols[4].trim().to_string();
         if status != "\u{2705}" {
             continue;
         }
-        let title_raw = cols[5].trim();
-        let title = title_raw
-            .strip_prefix("[[")
-            .and_then(|s| s.strip_suffix("]]"))
-            .unwrap_or(title_raw)
-            .to_string();
-        let source = if cols.len() >= 11 { cols[7].trim() } else { cols[6].trim() };
+        // Prefer the explicit Filename column on legacy rows; fall back to the
+        // [[slug]] target on migrated rows.
+        let slug = match idx.filename {
+            Some(i) => {
+                let raw = cols[i].trim();
+                let bare = raw.rsplit('/').next().unwrap_or(raw);
+                bare.strip_suffix(".md").unwrap_or(bare).to_string()
+            }
+            None => parse_note_slug(cols[idx.note].trim()),
+        };
+        let source = cols[idx.source].trim();
         entries.push(ParsedLedgerRow {
             date: cols[1].trim().to_string(),
             status,
-            title,
+            slug,
             source: source.to_string(),
         });
     }
@@ -397,30 +456,19 @@ pub fn append_entry(ledger_path: &Path, entry: &LedgerEntry) -> Result<()> {
     file.lock_exclusive()
         .context("Failed to acquire exclusive lock on Borg Ledger")?;
 
-    let title_display = entry
-        .title
-        .as_ref()
-        .map(|t| format!("[[{}]]", t.replace('|', "-")))
-        .unwrap_or_else(|| "-".to_string());
-    let filename_display = entry
+    let note_display = entry
         .filename
         .as_deref()
         .map(|p| p.rsplit('/').next().unwrap_or(p))
-        .unwrap_or("-");
+        .map(|name| name.strip_suffix(".md").unwrap_or(name))
+        .map(|stem| format!("[[{stem}]]"))
+        .unwrap_or_else(|| "-".to_string());
     let domain_display = entry.domain.as_deref().unwrap_or("-");
     let trace_display = entry.trace_id.as_deref().unwrap_or("-");
 
     let row = format!(
-        "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
-        entry.date,
-        entry.time,
-        entry.method,
-        entry.status,
-        title_display,
-        filename_display,
-        entry.source,
-        domain_display,
-        trace_display,
+        "| {} | {} | {} | {} | {} | {} | {} | {} |",
+        entry.date, entry.time, entry.method, entry.status, note_display, entry.source, domain_display, trace_display,
     );
 
     let content = fs::read_to_string(ledger_path).context("Failed to read Borg Ledger")?;
@@ -504,10 +552,9 @@ mod tests {
             time: "14:30".to_string(),
             method: Method::Cli,
             status: LedgerStatus::Completed,
-            title: Some("Test Article".to_string()),
             source: "https://example.com/article".to_string(),
             domain: Some("ai".to_string()),
-            filename: None,
+            filename: Some("test-article.md".to_string()),
             trace_id: None,
         };
         append_entry(&path, &entry).expect("append");
@@ -531,7 +578,6 @@ mod tests {
             time: "14:30".to_string(),
             method: Method::Telegram,
             status: LedgerStatus::Failed,
-            title: None,
             filename: None,
             source: "https://example.com/broken".to_string(),
             domain: None,
@@ -562,7 +608,6 @@ mod tests {
             time: "10:00".to_string(),
             method: Method::Cli,
             status: LedgerStatus::Completed,
-            title: Some("Test Note".to_string()),
             filename: Some("test-note.md".to_string()),
             source: "https://example.com/article".to_string(),
             domain: Some("ai".to_string()),
@@ -589,7 +634,6 @@ mod tests {
             time: "10:00".to_string(),
             method: Method::Cli,
             status: LedgerStatus::Completed,
-            title: Some("Test Note".to_string()),
             filename: Some("test-note.md".to_string()),
             source: "https://example.com/article".to_string(),
             domain: Some("ai".to_string()),
@@ -631,7 +675,6 @@ mod tests {
             time: "14:00".to_string(),
             method: Method::Http,
             status: LedgerStatus::Completed,
-            title: Some("New Note".to_string()),
             filename: Some("new-note.md".to_string()),
             source: "https://example.com/new".to_string(),
             domain: Some("ai".to_string()),
@@ -647,7 +690,7 @@ mod tests {
 
         // New entry should be FIRST (top of table), not last
         assert!(
-            data_lines[0].contains("New Note"),
+            data_lines[0].contains("[[new-note]]"),
             "newest entry should be at top, got: {}",
             data_lines[0]
         );
@@ -681,7 +724,6 @@ mod tests {
             time: "14:00".to_string(),
             method: Method::Http,
             status: LedgerStatus::Completed,
-            title: Some("Test".to_string()),
             filename: Some("test.md".to_string()),
             source: "https://example.com".to_string(),
             domain: Some("ai".to_string()),
@@ -691,8 +733,8 @@ mod tests {
 
         let result = fs::read_to_string(&path).expect("read");
         assert!(
-            result.contains("| Filename |"),
-            "header should be repaired to include Filename column"
+            result.contains("| Note |"),
+            "header should be repaired to canonical 8-column layout with Note column"
         );
         assert!(
             !result.contains("| Source | Domain |   |"),
@@ -715,7 +757,6 @@ mod tests {
             time: "14:00".to_string(),
             method: Method::Http,
             status: LedgerStatus::Completed,
-            title: Some("Strip Test".to_string()),
             filename: Some("inbox/should-strip-this.md".to_string()),
             source: "https://example.com/strip".to_string(),
             domain: Some("ai".to_string()),
@@ -726,7 +767,7 @@ mod tests {
         let result = fs::read_to_string(&path).expect("read");
         let data_line = result
             .lines()
-            .find(|l| l.contains("Strip Test"))
+            .find(|l| l.contains("should-strip-this"))
             .expect("should find data row");
 
         assert!(
@@ -734,8 +775,12 @@ mod tests {
             "path prefix should be stripped, got: {data_line}"
         );
         assert!(
-            data_line.contains("should-strip-this.md"),
-            "bare filename should be present, got: {data_line}"
+            data_line.contains("[[should-strip-this]]"),
+            "Note cell should be the bare slug as a wikilink, got: {data_line}"
+        );
+        assert!(
+            !data_line.contains("should-strip-this.md"),
+            ".md extension should not appear in the Note cell, got: {data_line}"
         );
 
         cleanup(&path);
@@ -763,8 +808,7 @@ mod tests {
                     time: time.to_string(),
                     method: Method::Http,
                     status: LedgerStatus::Completed,
-                    title: Some(title.to_string()),
-                    filename: None,
+                    filename: Some(format!("{}.md", title.to_lowercase())),
                     source: format!("https://example.com/{}", title.to_lowercase()),
                     domain: Some("ai".to_string()),
                     trace_id: None,
@@ -780,9 +824,21 @@ mod tests {
             .collect();
 
         assert_eq!(data_lines.len(), 3);
-        assert!(data_lines[0].contains("Third"), "newest should be first");
-        assert!(data_lines[1].contains("Second"), "middle should be second");
-        assert!(data_lines[2].contains("First"), "oldest should be last");
+        assert!(
+            data_lines[0].contains("[[third]]"),
+            "newest should be first, got: {}",
+            data_lines[0]
+        );
+        assert!(
+            data_lines[1].contains("[[second]]"),
+            "middle should be second, got: {}",
+            data_lines[1]
+        );
+        assert!(
+            data_lines[2].contains("[[first]]"),
+            "oldest should be last, got: {}",
+            data_lines[2]
+        );
 
         cleanup(&path);
     }

@@ -3,7 +3,7 @@ members = ["vault", "borg", "cortex", "oracle"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.35"
+version = "0.5.36"
 edition = "2024"
 authors = ["Scott Idler <scott.a.idler@gmail.com>"]
 

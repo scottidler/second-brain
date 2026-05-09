@@ -146,7 +146,6 @@ pub async fn run_migrate(config: &Config, apply: bool) -> Result<()> {
                 time: "00:00".to_string(),
                 method: IngestMethod::Cli.into(),
                 status: LedgerStatus::Completed,
-                title: fm.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 filename: rel_note_path.and_then(|p| p.rsplit('/').next().map(|s| s.to_string())),
                 source: source.to_string(),
                 domain: path
