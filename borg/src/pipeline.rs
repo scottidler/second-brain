@@ -15,12 +15,13 @@ use crate::transcription::TranscriptionClient;
 use crate::types::{AudioFormat, ContentKind, IngestMethod, IngestResult, IngestStatus};
 use crate::youtube;
 use eyre::{Context, Result};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
-use tokio::sync::Mutex;
 use vault::canonical::{self, CanonicalTagsFile, TagMapping};
+
+mod inflight;
+use inflight::InflightGuard;
 
 /// Cached canonical tag state loaded once at first use.
 struct CanonicalState {
@@ -32,7 +33,8 @@ struct CanonicalState {
 
 async fn get_or_init_canonical(config: &Config) -> Option<std::sync::Arc<CanonicalState>> {
     use std::sync::Arc;
-    static CACHED: LazyLock<Mutex<Option<Arc<CanonicalState>>>> = LazyLock::new(|| Mutex::new(None));
+    use tokio::sync::Mutex as TokioMutex;
+    static CACHED: LazyLock<TokioMutex<Option<Arc<CanonicalState>>>> = LazyLock::new(|| TokioMutex::new(None));
 
     let mut guard = CACHED.lock().await;
     if let Some(ref cached) = *guard {
@@ -176,11 +178,6 @@ fn extract_article_title(article_md: &str, url: &str) -> String {
     url.to_string()
 }
 
-/// In-memory dedup guard to prevent concurrent processing of the same canonical URL.
-/// The ledger file is the durable dedup index, but concurrent tasks can race past
-/// the ledger check before either writes its ✅ entry. This guard serializes that.
-static INFLIGHT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-
 /// Top-level pipeline entry point. Dispatches to type-specific handlers based on content kind.
 /// If `trace_id` is provided, it is used as-is; otherwise one is generated internally.
 pub async fn process_content(
@@ -304,12 +301,8 @@ pub async fn process_url(
         Ok(Err(e)) => {
             let elapsed = start.elapsed();
             log::error!("[{trace_id}] Pipeline failed for {url} in {elapsed:.2?}: {e:?}");
-            // Release inflight guard on failure (Phase 2 will replace this with
-            // an RAII guard whose Drop handles cleanup for all termination
-            // paths including timeout-driven cancellation).
-            let canonical =
-                hygiene::normalize_url(url, &config.canonicalization.rules).unwrap_or_else(|_| url.to_string());
-            INFLIGHT.lock().await.remove(&canonical);
+            // Inflight guard is held inside the inner future; Drop ran when
+            // the future returned Err and went out of scope.
             make_failure(format!("{:#}", e), elapsed)
         }
         Err(_elapsed) => {
@@ -318,12 +311,8 @@ pub async fn process_url(
                 "[{trace_id}] Pipeline timed out after {}s for {url}",
                 config.pipeline.hard_timeout_secs
             );
-            // The inner future was dropped when timeout fired. Release the
-            // inflight guard now so the URL can be retried; Phase 2's RAII
-            // guard will make this automatic.
-            let canonical =
-                hygiene::normalize_url(url, &config.canonicalization.rules).unwrap_or_else(|_| url.to_string());
-            INFLIGHT.lock().await.remove(&canonical);
+            // Same: when timeout fires, the inner future is dropped and the
+            // InflightGuard's Drop releases the entry automatically.
             make_failure("timeout".to_string(), elapsed)
         }
     }
@@ -361,35 +350,41 @@ async fn process_url_inner(
     let mut old_slides_frontmatter: Vec<String> = Vec::new();
     let ledger_file = ledger::ledger_path(config);
 
-    // Dedup guard: reject concurrent/duplicate ingestions (skip if --force)
-    if !force {
-        let mut inflight = INFLIGHT.lock().await;
-        if inflight.contains(&canonical) {
-            log::info!("[{trace_id}] Duplicate URL (inflight): {canonical}");
-            ledger::append_entry(
-                &ledger_file,
-                &LedgerEntry {
-                    date: log_date,
-                    time: log_time,
-                    method: method.into(),
-                    status: LedgerStatus::Skipped,
-                    filename: None,
-                    source: canonical.clone(),
-                    domain: None,
-                    trace_id: Some(trace_id.to_string()),
-                },
-            )?;
-            return Ok(IngestResult {
-                status: IngestStatus::Duplicate {
-                    original_date: "inflight".to_string(),
-                },
-                method: Some(method),
-                canonical_url: Some(canonical),
-                ..Default::default()
-            });
+    // Dedup guard: reject concurrent/duplicate ingestions (skip if --force).
+    // Holding `inflight_guard` for the rest of this function keeps the URL
+    // in the inflight set; on every return path (Ok, Err, panic-unwind, or
+    // future-cancel from the outer hard-timeout) Drop releases it.
+    let inflight_guard = if !force {
+        match InflightGuard::try_acquire(&canonical) {
+            Some(g) => Some(g),
+            None => {
+                log::info!("[{trace_id}] Duplicate URL (inflight): {canonical}");
+                ledger::append_entry(
+                    &ledger_file,
+                    &LedgerEntry {
+                        date: log_date,
+                        time: log_time,
+                        method: method.into(),
+                        status: LedgerStatus::Skipped,
+                        filename: None,
+                        source: canonical.clone(),
+                        domain: None,
+                        trace_id: Some(trace_id.to_string()),
+                    },
+                )?;
+                return Ok(IngestResult {
+                    status: IngestStatus::Duplicate {
+                        original_date: "inflight".to_string(),
+                    },
+                    method: Some(method),
+                    canonical_url: Some(canonical),
+                    ..Default::default()
+                });
+            }
         }
-        inflight.insert(canonical.clone());
-    }
+    } else {
+        None
+    };
 
     // Replace existing note if found. Runs for both normal and --force ingestions.
     // We preserve the original date and write location so the new note overwrites
@@ -612,8 +607,9 @@ async fn process_url_inner(
         },
     )?;
 
-    // Release inflight guard now that ledger has the ✅ entry
-    INFLIGHT.lock().await.remove(&canonical);
+    // Inflight guard releases automatically when `inflight_guard` goes out
+    // of scope at function return (success path here).
+    drop(inflight_guard);
 
     let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
 
