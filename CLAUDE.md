@@ -23,6 +23,7 @@ second-brain/
 
 - **Edition:** 2024
 - **Logging:** env_logger + log (unified; no tracing) for borg/cortex; tracing for oracle (rmcp compatibility)
+- **Parallelism:** `vault::note::scan_vault` and the CPU-bound per-note loops in `cortex::autotag`, `cortex::quality`, `borg::backfill`, `borg::audit`, and `cortex::migrate` use `rayon::par_iter` for data-parallel work. Async/LLM-bound loops stay tokio-based. The cortex daemon wraps its sync sweep calls in `tokio::task::block_in_place` so rayon worker threads do not starve the tokio runtime.
 - **Schema:** vault::schema is THE single source of truth for Domain, NoteType, Origin, Status, Method. vault enums have feature-gated `schemars::JsonSchema` derives for MCP tool schemas.
 - **Config:** borg reads ~/.config/borg/borg.yml; cortex reads ~/.config/obsidian-cortex/obsidian-cortex.yml; oracle reads ~/.config/oracle/oracle.yml
 - **Shared config:** ~/.config/second-brain/ has canonical-tags.yml, tag-mapping.yml, tag-proposals.yml (source of truth in `config/`). Both borg and cortex read from this shared directory.
