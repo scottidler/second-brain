@@ -20,7 +20,9 @@ use std::sync::LazyLock;
 use std::time::Instant;
 use vault::canonical::{self, CanonicalTagsFile, TagMapping};
 
+mod atomic;
 mod inflight;
+use atomic::{apply_cortex_fields, apply_original_date, write_atomic};
 use inflight::InflightGuard;
 
 /// Cached canonical tag state loaded once at first use.
@@ -348,6 +350,11 @@ async fn process_url_inner(
     let mut original_date: Option<String> = None;
     let mut cortex_fields: Vec<(String, String)> = Vec::new();
     let mut old_slides_frontmatter: Vec<String> = Vec::new();
+    // Phase 3: instead of deleting the old note up front (which would create
+    // a window where the vault has no copy of the URL's note while the rest
+    // of the pipeline runs), capture its path here and remove only after
+    // the atomic write of the new note succeeds.
+    let mut old_path_to_delete: Option<PathBuf> = None;
     let ledger_file = ledger::ledger_path(config);
 
     // Dedup guard: reject concurrent/duplicate ingestions (skip if --force).
@@ -420,8 +427,11 @@ async fn process_url_inner(
                 old_slides_frontmatter
             );
             log::debug!("[{trace_id}] Will overwrite in: {:?}", reingest_dest);
-            std::fs::remove_file(old_path).context("Failed to remove old note during reingest")?;
-            log::info!("[{trace_id}] Removed old note: {}", old_path.display());
+            // Phase 3: do NOT delete the old note here. The pipeline below
+            // produces the new note bytes; we delete the old path only after
+            // the atomic write of the new file succeeds. Track the old path
+            // for that final cleanup.
+            old_path_to_delete = Some(old_path.clone());
         }
         ledger::mark_replaced(&ledger_file, existing.line_number)?;
         log::info!("[{trace_id}] Marked ledger row {} as replaced", existing.line_number);
@@ -558,21 +568,43 @@ async fn process_url_inner(
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&filename);
-    std::fs::write(&note_path, &rendered).context("Failed to write note to vault")?;
 
-    // If replacing an existing note, restore its original ingestion date
+    // Phase 3: compose the FINAL note bytes in memory before any disk write.
+    // The original three-write publish path (write rendered, patch date, patch
+    // cortex) was non-atomic across the patches; a SIGKILL or panic between
+    // them would desync the body from its date / cortex frontmatter. Now the
+    // body, restored date, and cortex fields are baked into one string and
+    // written via a single atomic-rename publish.
+    let mut final_str = rendered;
     if let Some(ref orig_date) = original_date {
-        patch_note_date(&note_path, orig_date)?;
+        final_str = apply_original_date(&final_str, orig_date);
         log::info!("[{trace_id}] Restored original date: {orig_date}");
     }
-
-    // If replacing an existing note, restore cortex-managed fields
     if !cortex_fields.is_empty() {
-        patch_cortex_fields(&note_path, &cortex_fields)?;
+        final_str = apply_cortex_fields(&final_str, &cortex_fields);
         log::info!(
             "[{trace_id}] Restored cortex fields: {:?}",
             cortex_fields.iter().map(|(k, _)| k).collect::<Vec<_>>()
         );
+    }
+    write_atomic(&note_path, final_str.as_bytes()).context("Failed to atomically publish note")?;
+
+    // The new note exists at note_path. If we were replacing an old note at
+    // a different path (rare - happens when the dir heuristic resolves the
+    // new write to a different location than the old note lived in), delete
+    // it now. A failure here is non-fatal: the new note already exists; the
+    // user has a transient duplicate which cortex's existing duplicate
+    // detection will surface.
+    if let Some(old_path) = old_path_to_delete
+        && old_path != note_path
+    {
+        match std::fs::remove_file(&old_path) {
+            Ok(()) => log::info!("[{trace_id}] Removed old note: {}", old_path.display()),
+            Err(e) => log::warn!(
+                "[{trace_id}] Failed to remove old note {} after publishing new copy: {e}",
+                old_path.display()
+            ),
+        }
     }
 
     log::info!("[{trace_id}] Wrote note: {}", note_path.display());
@@ -2506,24 +2538,6 @@ fn read_note_date(path: &std::path::Path) -> Option<String> {
     None
 }
 
-/// Patch the `date:` field in a note file, preserving all other content.
-fn patch_note_date(path: &std::path::Path, new_date: &str) -> eyre::Result<()> {
-    let content = std::fs::read_to_string(path).context("Failed to read note for date patching")?;
-    let mut patched = String::with_capacity(content.len());
-    let mut found = false;
-    for line in content.lines() {
-        if !found && line.starts_with("date:") {
-            patched.push_str(&format!("date: {new_date}"));
-            found = true;
-        } else {
-            patched.push_str(line);
-        }
-        patched.push('\n');
-    }
-    std::fs::write(path, patched).context("Failed to write patched note")?;
-    Ok(())
-}
-
 const CORTEX_PRESERVE_KEYS: &[&str] = &[
     "domain",
     "status",
@@ -2562,34 +2576,6 @@ fn read_cortex_fields(path: &std::path::Path) -> Vec<(String, String)> {
         }
     }
     fields
-}
-
-fn patch_cortex_fields(path: &std::path::Path, fields: &[(String, String)]) -> eyre::Result<()> {
-    let content = std::fs::read_to_string(path).context("Failed to read note for cortex field patching")?;
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return Ok(());
-    }
-    let after_opening = trimmed.trim_start_matches("---").trim_start_matches(['\r', '\n']);
-    let end_pos = match after_opening.find("\n---") {
-        Some(p) => p,
-        None => return Ok(()),
-    };
-    let fm_block = &after_opening[..end_pos];
-    let rest = &after_opening[end_pos..];
-
-    let mut lines: Vec<String> = fm_block.lines().map(String::from).collect();
-    for (key, value) in fields {
-        // Remove existing line for this key if present
-        lines.retain(|line| !line.starts_with(&format!("{key}:")));
-        lines.push(format!("{key}: {value}"));
-    }
-
-    let offset = content.len() - trimmed.len();
-    let prefix = &content[..offset];
-    let result = format!("{prefix}---\n{}\n{rest}", lines.join("\n"));
-    std::fs::write(path, result).context("Failed to write cortex-patched note")?;
-    Ok(())
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
@@ -3321,64 +3307,9 @@ int main() {
         assert!(fields.is_empty());
     }
 
-    #[test]
-    fn test_patch_cortex_fields_inserts_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        let note = dir.path().join("test.md");
-        std::fs::write(
-            &note,
-            "---\ntitle: Test\ndate: 2026-03-20\ntags:\n  - rust\n---\nBody.\n",
-        )
-        .unwrap();
-
-        let fields = vec![
-            ("domain".to_string(), "tech".to_string()),
-            ("cortex-classified".to_string(), "true".to_string()),
-        ];
-        patch_cortex_fields(&note, &fields).unwrap();
-
-        let content = std::fs::read_to_string(&note).unwrap();
-        assert!(content.contains("domain: tech"));
-        assert!(content.contains("cortex-classified: true"));
-        assert!(content.contains("title: Test"));
-        assert!(content.contains("Body."));
-    }
-
-    #[test]
-    fn test_patch_cortex_fields_replaces_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        let note = dir.path().join("test.md");
-        std::fs::write(
-            &note,
-            "---\ntitle: Test\ndomain: ai\ncortex-classified: true\n---\nBody.\n",
-        )
-        .unwrap();
-
-        let fields = vec![
-            ("domain".to_string(), "tech".to_string()),
-            ("cortex-classified".to_string(), "true".to_string()),
-        ];
-        patch_cortex_fields(&note, &fields).unwrap();
-
-        let content = std::fs::read_to_string(&note).unwrap();
-        assert!(content.contains("domain: tech"));
-        // Should not have duplicate domain lines
-        assert_eq!(content.matches("domain:").count(), 1);
-    }
-
-    #[test]
-    fn test_patch_cortex_fields_no_frontmatter_is_noop() {
-        let dir = tempfile::tempdir().unwrap();
-        let note = dir.path().join("test.md");
-        let original = "Just plain text.\n";
-        std::fs::write(&note, original).unwrap();
-
-        let fields = vec![("domain".to_string(), "tech".to_string())];
-        patch_cortex_fields(&note, &fields).unwrap();
-
-        let content = std::fs::read_to_string(&note).unwrap();
-        assert_eq!(content, original);
-    }
+    // Phase 3 of borg-pipeline-resilience: the previous patch_cortex_fields
+    // tests have moved to pipeline/atomic.rs alongside the apply_cortex_fields
+    // and apply_original_date helpers that replaced the patch_* functions.
 }
 
 #[cfg(test)]
