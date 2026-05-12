@@ -1,5 +1,6 @@
 use crate::backoff::ExponentialBackoff;
 use crate::config::Config;
+use crate::intake::{self as intake_log, Kind as IntakeKind, Stage as DlqStage};
 use crate::notify::Notifier;
 use crate::pipeline;
 use crate::router::extract_url_from_text;
@@ -132,26 +133,65 @@ pub async fn run(
 
             backoff.reset();
 
-            let Some(parsed) = parse_message(&event.message) else {
-                log::info!("ntfy: empty message, skipping");
+            // Generate trace at the door so every event - including empty
+            // and undeliverable ones - gets a durable record.
+            let trace_id = trace::generate(IngestMethod::Ntfy);
+            let origin_ctx = format!("topic={topic}");
+            let parsed = parse_message(&event.message);
+            let (intake_kind, intake_preview) = match &parsed {
+                Some(ParsedMessage::Url { url, .. }) => (IntakeKind::Url, url.clone()),
+                Some(ParsedMessage::Text(text)) => (IntakeKind::Text, intake_log::preview_text(text)),
+                None => (IntakeKind::Empty, "[empty ntfy message]".to_string()),
+            };
+
+            if let Err(e) = intake_log::record_intake_with_sidecar(
+                &config,
+                IngestMethod::Ntfy,
+                &origin_ctx,
+                intake_kind,
+                &intake_preview,
+                event.message.as_bytes(),
+                &trace_id,
+            ) {
+                log::error!("ntfy: failed to record intake trace={trace_id}: {e:#}");
+                continue;
+            }
+
+            let Some(parsed) = parsed else {
+                log::info!("ntfy: empty message (trace={trace_id})");
+                intake_log::record_dlq(
+                    &config,
+                    IngestMethod::Ntfy,
+                    DlqStage::IntakeReject,
+                    "empty ntfy message",
+                    &intake_preview,
+                    &trace_id,
+                    None,
+                );
                 continue;
             };
 
             match parsed {
                 ParsedMessage::Url { url, tags, force } => {
-                    log::info!("ntfy: processing URL {url}");
+                    log::info!("ntfy: processing URL {url} (trace={trace_id})");
                     let cfg = config.clone();
                     let n = notifier.clone();
-                    let trace_id = trace::generate(IngestMethod::Ntfy);
                     if let Some(ref n) = notifier {
                         let _ = n.processing(&trace_id, "Processing...", None).await;
                     }
+                    let trace_for_spawn = trace_id.clone();
                     tokio::spawn(async move {
                         let display_source = url.clone();
                         let content = ContentKind::Url(url.clone());
-                        let result =
-                            pipeline::process_content(content, tags, IngestMethod::Ntfy, force, &cfg, Some(trace_id))
-                                .await;
+                        let result = pipeline::process_content(
+                            content,
+                            tags,
+                            IngestMethod::Ntfy,
+                            force,
+                            &cfg,
+                            Some(trace_for_spawn),
+                        )
+                        .await;
                         log::info!("ntfy: pipeline result for {url}: {:?}", result.status);
                         if let Some(n) = n {
                             n.result(&result, &display_source, None).await;
@@ -159,19 +199,25 @@ pub async fn run(
                     });
                 }
                 ParsedMessage::Text(text) => {
-                    log::info!("ntfy: processing text capture ({} chars)", text.len());
+                    log::info!("ntfy: processing text capture ({} chars, trace={trace_id})", text.len());
                     let cfg = config.clone();
                     let n = notifier.clone();
-                    let trace_id = trace::generate(IngestMethod::Ntfy);
                     let display = if text.len() > 50 { format!("{}...", &text[..50]) } else { text.clone() };
                     if let Some(ref n) = notifier {
                         let _ = n.processing(&trace_id, "Processing text...", None).await;
                     }
+                    let trace_for_spawn = trace_id.clone();
                     tokio::spawn(async move {
                         let content = ContentKind::Text(text);
-                        let result =
-                            pipeline::process_content(content, vec![], IngestMethod::Ntfy, false, &cfg, Some(trace_id))
-                                .await;
+                        let result = pipeline::process_content(
+                            content,
+                            vec![],
+                            IngestMethod::Ntfy,
+                            false,
+                            &cfg,
+                            Some(trace_for_spawn),
+                        )
+                        .await;
                         log::info!("ntfy: text capture result: {:?}", result.status);
                         if let Some(n) = n {
                             n.result(&result, &display, None).await;

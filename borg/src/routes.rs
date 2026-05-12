@@ -6,6 +6,7 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::assets;
 use crate::health::HealthResponse;
+use crate::intake::{self as intake_log, Kind as IntakeKind, Stage as DlqStage};
 use crate::pipeline;
 use crate::trace;
 use crate::types::{ContentKind, IngestMethod, IngestRequest, IngestResult, IngestStatus};
@@ -27,12 +28,34 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
     let method = request.method.unwrap_or(IngestMethod::Http);
     let trace_id = trace::generate(method);
 
+    // Durable intake BEFORE any pipeline dispatch. Failure -> 5xx-shaped
+    // result (Json IngestStatus::Failed) so the caller knows borg did not
+    // accept the input.
+    if let Err(e) = intake_log::record_intake(&state.config, method, "http", IntakeKind::Url, &request.url, &trace_id) {
+        log::error!("http/ingest: failed to record intake trace={trace_id}: {e:#}");
+        return Json(IngestResult {
+            status: IngestStatus::Failed {
+                reason: format!("borg failed to record intake: {e}"),
+            },
+            trace_id: Some(trace_id),
+            ..Default::default()
+        });
+    }
+
     if let Some(ref n) = state.notifier {
         let _ = n.processing(&trace_id, "Processing...", None).await;
     }
 
     let content = ContentKind::Url(request.url.clone());
-    let result = pipeline::process_content(content, tags, method, request.force, &state.config, Some(trace_id)).await;
+    let result = pipeline::process_content(
+        content,
+        tags,
+        method,
+        request.force,
+        &state.config,
+        Some(trace_id.clone()),
+    )
+    .await;
 
     if let Some(ref n) = state.notifier {
         n.result(&result, &request.url, None).await;
@@ -64,14 +87,40 @@ pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest
         request.text.clone()
     };
 
+    if let Err(e) = intake_log::record_intake_with_sidecar(
+        &state.config,
+        IngestMethod::Http,
+        "http",
+        IntakeKind::Text,
+        &intake_log::preview_text(&request.text),
+        request.text.as_bytes(),
+        &trace_id,
+    ) {
+        log::error!("http/note: failed to record intake trace={trace_id}: {e:#}");
+        return Json(IngestResult {
+            status: IngestStatus::Failed {
+                reason: format!("borg failed to record intake: {e}"),
+            },
+            trace_id: Some(trace_id),
+            ..Default::default()
+        });
+    }
+
     if let Some(ref n) = state.notifier {
         let _ = n.processing(&trace_id, "Processing note...", None).await;
     }
 
     let tags = request.tags.unwrap_or_default();
     let content = ContentKind::Text(request.text);
-    let result =
-        pipeline::process_content(content, tags, IngestMethod::Http, false, &state.config, Some(trace_id)).await;
+    let result = pipeline::process_content(
+        content,
+        tags,
+        IngestMethod::Http,
+        false,
+        &state.config,
+        Some(trace_id.clone()),
+    )
+    .await;
 
     if let Some(ref n) = state.notifier {
         n.result(&result, &display, None).await;
@@ -91,9 +140,13 @@ pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest
 }
 
 pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Multipart) -> Json<IngestResult> {
+    // Generate trace at the door. Any decode/validation failure below
+    // produces a DLQ row tied to this trace.
+    let trace_id = trace::generate(IngestMethod::Http);
     let mut file_data: Option<(Vec<u8>, String)> = None;
     let mut tags: Vec<String> = vec![];
     let mut force = false;
+    let mut decode_error: Option<String> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
@@ -106,12 +159,7 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
                     }
                     Err(e) => {
                         log::warn!("Failed to read file field: {e}");
-                        return Json(IngestResult {
-                            status: IngestStatus::Failed {
-                                reason: format!("Failed to read uploaded file: {e}"),
-                            },
-                            ..Default::default()
-                        });
+                        decode_error = Some(format!("Failed to read uploaded file: {e}"));
                     }
                 }
             }
@@ -135,16 +183,98 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
         }
     }
 
-    let Some((data, filename)) = file_data else {
+    let (intake_kind, intake_preview, intake_filename, intake_bytes) = match (&file_data, &decode_error) {
+        (Some((bytes, filename)), _) => {
+            let kind = if assets::is_image_extension(filename) {
+                IntakeKind::Photo
+            } else if assets::is_pdf_extension(filename) {
+                IntakeKind::Document
+            } else if assets::is_audio_extension(filename) {
+                IntakeKind::Audio
+            } else if assets::is_document_extension(filename) {
+                IntakeKind::Document
+            } else {
+                IntakeKind::Unknown
+            };
+            let preview = intake_log::binary_descriptor(kind, filename, bytes.len(), None);
+            (kind, preview, Some(filename.clone()), Some(bytes.clone()))
+        }
+        (None, Some(err)) => (
+            IntakeKind::Unknown,
+            format!("[multipart decode failed: {err}]"),
+            None,
+            None,
+        ),
+        (None, None) => (
+            IntakeKind::Empty,
+            "[multipart upload missing file field]".to_string(),
+            None,
+            None,
+        ),
+    };
+
+    // For multipart, the sidecar carries the descriptor (not the raw binary)
+    // so `system/intake/` stays small regardless of upload size.
+    let _ = intake_bytes; // we only needed the bytes for descriptor sizing above
+    if let Err(e) = intake_log::record_intake(
+        &state.config,
+        IngestMethod::Http,
+        "http",
+        intake_kind,
+        &intake_preview,
+        &trace_id,
+    ) {
+        log::error!("http/ingest_multipart: failed to record intake trace={trace_id}: {e:#}");
         return Json(IngestResult {
             status: IngestStatus::Failed {
-                reason: "No 'file' field in multipart upload".to_string(),
+                reason: format!("borg failed to record intake: {e}"),
             },
+            trace_id: Some(trace_id),
+            ..Default::default()
+        });
+    }
+
+    if let Some(err) = decode_error {
+        intake_log::record_dlq(
+            &state.config,
+            IngestMethod::Http,
+            DlqStage::IntakeReject,
+            &format!("bad-payload: {err}"),
+            &intake_preview,
+            &trace_id,
+            None,
+        );
+        return Json(IngestResult {
+            status: IngestStatus::Failed { reason: err },
+            trace_id: Some(trace_id),
+            ..Default::default()
+        });
+    }
+
+    let Some((data, filename)) = file_data else {
+        let reason = "No 'file' field in multipart upload".to_string();
+        intake_log::record_dlq(
+            &state.config,
+            IngestMethod::Http,
+            DlqStage::IntakeReject,
+            &format!("bad-payload: {reason}"),
+            &intake_preview,
+            &trace_id,
+            None,
+        );
+        return Json(IngestResult {
+            status: IngestStatus::Failed { reason },
+            trace_id: Some(trace_id),
             ..Default::default()
         });
     };
 
-    log::info!("Received multipart file upload: {filename} ({} bytes)", data.len());
+    log::info!(
+        "Received multipart file upload: {filename} ({} bytes) (trace={trace_id})",
+        data.len()
+    );
+
+    let _ = intake_filename;
 
     let content = if assets::is_image_extension(&filename) {
         ContentKind::Image { data, filename }
@@ -162,19 +292,27 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
             .chain(assets::AUDIO_EXTENSIONS.iter())
             .copied()
             .collect();
+        let reason = format!(
+            "Unsupported file type: {}. Supported extensions: {}",
+            filename,
+            all_extensions.join(", ")
+        );
+        intake_log::record_dlq(
+            &state.config,
+            IngestMethod::Http,
+            DlqStage::IntakeReject,
+            &reason,
+            &intake_preview,
+            &trace_id,
+            None,
+        );
         return Json(IngestResult {
-            status: IngestStatus::Failed {
-                reason: format!(
-                    "Unsupported file type: {}. Supported extensions: {}",
-                    filename,
-                    all_extensions.join(", ")
-                ),
-            },
+            status: IngestStatus::Failed { reason },
+            trace_id: Some(trace_id),
             ..Default::default()
         });
     };
 
-    let trace_id = trace::generate(IngestMethod::Http);
     let display_filename = match &content {
         ContentKind::Image { filename, .. }
         | ContentKind::Pdf { filename, .. }
@@ -189,8 +327,15 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
             .await;
     }
 
-    let result =
-        pipeline::process_content(content, tags, IngestMethod::Http, force, &state.config, Some(trace_id)).await;
+    let result = pipeline::process_content(
+        content,
+        tags,
+        IngestMethod::Http,
+        force,
+        &state.config,
+        Some(trace_id.clone()),
+    )
+    .await;
 
     if let Some(ref n) = state.notifier {
         n.result(&result, &format!("[file: {display_filename}]"), None).await;

@@ -1,6 +1,7 @@
 use crate::assets;
 use crate::backoff::ExponentialBackoff;
 use crate::config::{Config, DiscordConfig};
+use crate::intake::{self as intake_log, Kind as IntakeKind, Stage as DlqStage};
 use crate::pipeline;
 use crate::router::{extract_url_from_text, format_reply};
 use crate::trace;
@@ -68,7 +69,90 @@ struct Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: serenity::prelude::Context, msg: Message) {
-        if msg.channel_id.get() != self.channel_id || msg.author.bot {
+        // Bot-author messages are never user input - they're our own
+        // replies. Skip without producing an intake row.
+        if msg.author.bot {
+            return;
+        }
+
+        // Generate trace at the door so disallowed-channel messages and
+        // empty messages still get a durable record (and a DLQ row).
+        let trace_id = trace::generate(IngestMethod::Discord);
+        let origin_ctx = format!("channel={}", msg.channel_id);
+
+        let (intake_kind, intake_preview) = if let Some(att) = msg.attachments.first() {
+            let mime = att.content_type.as_deref();
+            let kind = match mime {
+                Some(m) if m.starts_with("image/") => IntakeKind::Photo,
+                Some(m) if m.starts_with("audio/") => IntakeKind::Audio,
+                Some("application/pdf") => IntakeKind::Document,
+                _ => {
+                    if assets::is_image_extension(&att.filename) {
+                        IntakeKind::Photo
+                    } else if assets::is_audio_extension(&att.filename) {
+                        IntakeKind::Audio
+                    } else if assets::is_pdf_extension(&att.filename) || assets::is_document_extension(&att.filename) {
+                        IntakeKind::Document
+                    } else {
+                        IntakeKind::Unknown
+                    }
+                }
+            };
+            let preview = intake_log::binary_descriptor(kind, &att.filename, att.size as usize, mime);
+            (kind, preview)
+        } else if let Some(url) = extract_url_from_text(&msg.content) {
+            (IntakeKind::Url, url)
+        } else if msg.content.trim().is_empty() {
+            (IntakeKind::Empty, "[empty discord message]".to_string())
+        } else {
+            (IntakeKind::Text, intake_log::preview_text(&msg.content))
+        };
+
+        if let Err(e) = intake_log::record_intake_with_sidecar(
+            &self.config,
+            IngestMethod::Discord,
+            &origin_ctx,
+            intake_kind,
+            &intake_preview,
+            msg.content.as_bytes(),
+            &trace_id,
+        ) {
+            log::error!("discord: failed to record intake trace={trace_id}: {e:#}");
+            let _ = msg
+                .channel_id
+                .say(&ctx.http, format!("[{trace_id}] borg failed to record input: {e}"))
+                .await;
+            return;
+        }
+
+        if msg.channel_id.get() != self.channel_id {
+            log::info!(
+                "discord: rejecting disallowed channel {} (trace={trace_id})",
+                msg.channel_id
+            );
+            intake_log::record_dlq(
+                &self.config,
+                IngestMethod::Discord,
+                DlqStage::IntakeReject,
+                &format!("channel {} not configured", msg.channel_id),
+                &intake_preview,
+                &trace_id,
+                None,
+            );
+            return;
+        }
+
+        if intake_kind == IntakeKind::Empty {
+            log::info!("discord: rejecting empty message (trace={trace_id})");
+            intake_log::record_dlq(
+                &self.config,
+                IngestMethod::Discord,
+                DlqStage::IntakeReject,
+                "empty discord message",
+                &intake_preview,
+                &trace_id,
+                None,
+            );
             return;
         }
 
@@ -119,7 +203,6 @@ impl EventHandler for Handler {
                         _ => "file",
                     };
                     let display_source = format!("[{}: {}]", kind_label, att_filename);
-                    let trace_id = trace::generate(IngestMethod::Discord);
 
                     let _ = msg
                         .channel_id
@@ -132,7 +215,7 @@ impl EventHandler for Handler {
                         IngestMethod::Discord,
                         false,
                         &self.config,
-                        Some(trace_id),
+                        Some(trace_id.clone()),
                     )
                     .await;
                     let _ = msg
@@ -164,22 +247,18 @@ impl EventHandler for Handler {
         }
 
         // Priority 2: URL in text
-        // Priority 3: Plain text
+        // Priority 3: Plain text. Empty was already routed to DLQ above.
         let (content, display_source) = if let Some(url) = extract_url_from_text(&msg.content) {
             (ContentKind::Url(url.clone()), url)
-        } else if !msg.content.trim().is_empty() {
+        } else {
             let display = if msg.content.len() > 50 {
                 format!("{}...", &msg.content[..50])
             } else {
                 msg.content.clone()
             };
             (ContentKind::Text(msg.content.clone()), display)
-        } else {
-            // Priority 4: Empty -> ignore
-            return;
         };
 
-        let trace_id = trace::generate(IngestMethod::Discord);
         let _ = msg
             .channel_id
             .say(&ctx.http, format!("[{trace_id}] Processing..."))
@@ -190,7 +269,7 @@ impl EventHandler for Handler {
             IngestMethod::Discord,
             false,
             &self.config,
-            Some(trace_id),
+            Some(trace_id.clone()),
         )
         .await;
         let _ = msg

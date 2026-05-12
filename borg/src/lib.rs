@@ -18,6 +18,7 @@ pub mod extraction;
 pub mod fabric;
 pub mod health;
 pub mod hygiene;
+pub mod intake;
 pub mod jina;
 pub mod ledger;
 pub mod logging;
@@ -94,6 +95,12 @@ pub async fn run_server(config: Config, _verbose: bool) -> Result<()> {
     }
     if let Err(e) = dashboard::ensure_dashboard_exists(&dashboard::dashboard_path(&config)) {
         log::warn!("Failed to ensure Borg Dashboard exists: {e:#}");
+    }
+    if let Err(e) = vault::intake::ensure_intake_exists(&intake::intake_path(&config)) {
+        log::warn!("Failed to ensure Borg Intake exists: {e:#}");
+    }
+    if let Err(e) = vault::dlq::ensure_dlq_exists(&intake::dlq_path(&config)) {
+        log::warn!("Failed to ensure Borg DLQ exists: {e:#}");
     }
 
     let config = Arc::new(config);
@@ -240,6 +247,18 @@ pub fn resolve_note_text(text: Option<String>, clipboard: bool) -> Result<String
 }
 
 pub async fn run_note(config: Config, text: String, tags: Option<Vec<String>>) -> Result<()> {
+    let trace_id = trace::generate(types::IngestMethod::Cli);
+    intake::record_intake_with_sidecar(
+        &config,
+        types::IngestMethod::Cli,
+        "cli",
+        intake::Kind::Text,
+        &intake::preview_text(&text),
+        text.as_bytes(),
+        &trace_id,
+    )
+    .context("Failed to record cli intake")?;
+
     let content = types::ContentKind::Text(text);
     let result = pipeline::process_content(
         content,
@@ -247,7 +266,7 @@ pub async fn run_note(config: Config, text: String, tags: Option<Vec<String>>) -
         types::IngestMethod::Cli,
         false,
         &config,
-        None,
+        Some(trace_id),
     )
     .await;
 
@@ -280,6 +299,27 @@ pub async fn run_file_ingest(
 
     let data = std::fs::read(&file_path).context(format!("Failed to read file: {}", file_path.display()))?;
 
+    let trace_id = trace::generate(types::IngestMethod::Cli);
+    let intake_kind = if assets::is_image_extension(&filename) {
+        intake::Kind::Photo
+    } else if assets::is_audio_extension(&filename) {
+        intake::Kind::Audio
+    } else if assets::is_pdf_extension(&filename) || assets::is_document_extension(&filename) {
+        intake::Kind::Document
+    } else {
+        intake::Kind::Unknown
+    };
+    let preview = intake::binary_descriptor(intake_kind, &filename, data.len(), None);
+    intake::record_intake(
+        &config,
+        types::IngestMethod::Cli,
+        "cli",
+        intake_kind,
+        &preview,
+        &trace_id,
+    )
+    .context("Failed to record cli intake")?;
+
     let content = if assets::is_image_extension(&filename) {
         types::ContentKind::Image { data, filename }
     } else if assets::is_pdf_extension(&filename) {
@@ -296,11 +336,21 @@ pub async fn run_file_ingest(
             .chain(assets::AUDIO_EXTENSIONS.iter())
             .copied()
             .collect();
-        eyre::bail!(
+        let reason = format!(
             "Unsupported file type: {}. Supported extensions: {}",
             filename,
             all_extensions.join(", ")
         );
+        intake::record_dlq(
+            &config,
+            types::IngestMethod::Cli,
+            intake::Stage::IntakeReject,
+            &reason,
+            &preview,
+            &trace_id,
+            None,
+        );
+        eyre::bail!("{reason}");
     };
 
     let result = pipeline::process_content(
@@ -309,7 +359,7 @@ pub async fn run_file_ingest(
         types::IngestMethod::Cli,
         force,
         &config,
-        None,
+        Some(trace_id),
     )
     .await;
 

@@ -1,6 +1,7 @@
 use crate::assets;
 use crate::backoff::ExponentialBackoff;
 use crate::config::{Config, TelegramConfig};
+use crate::intake::{self as intake_log, Kind as IntakeKind, Stage as DlqStage};
 use crate::notify;
 use crate::pipeline;
 use crate::router::extract_url_from_text;
@@ -93,6 +94,71 @@ async fn claim_polling_session(bot: &Bot) {
 
 // html_escape and format_telegram_reply moved to notify module
 
+/// Classify a Telegram message into an `IntakeKind` and produce a preview
+/// string for the intake table. Runs BEFORE any allowed-chat filter or
+/// dispatch branch, so unsupported media types still produce a row in the
+/// intake log.
+fn classify_telegram_message(message: &Message) -> (IntakeKind, String) {
+    if let Some(photos) = message.photo() {
+        let largest = photos.iter().max_by_key(|p| p.file.size);
+        let size = largest.map(|p| p.file.size as usize).unwrap_or(0);
+        let caption = message.caption().unwrap_or("");
+        let preview = if caption.is_empty() {
+            intake_log::binary_descriptor(IntakeKind::Photo, "telegram-photo.jpg", size, Some("image/jpeg"))
+        } else {
+            format!(
+                "{} caption={}",
+                intake_log::binary_descriptor(IntakeKind::Photo, "telegram-photo.jpg", size, Some("image/jpeg")),
+                intake_log::preview_text(caption)
+            )
+        };
+        return (IntakeKind::Photo, preview);
+    }
+    if let Some(voice) = message.voice() {
+        let size = voice.file.size as usize;
+        let preview = intake_log::binary_descriptor(IntakeKind::Voice, "voice.ogg", size, Some("audio/ogg"));
+        return (IntakeKind::Voice, preview);
+    }
+    if let Some(audio) = message.audio() {
+        let name = audio.file_name.as_deref().unwrap_or("audio.mp3");
+        let mime = audio.mime_type.as_ref().map(|m| m.as_ref());
+        let preview = intake_log::binary_descriptor(IntakeKind::Audio, name, audio.file.size as usize, mime);
+        return (IntakeKind::Audio, preview);
+    }
+    if let Some(doc) = message.document() {
+        let name = doc.file_name.as_deref().unwrap_or("document");
+        let mime = doc.mime_type.as_ref().map(|m| m.as_ref());
+        let preview = intake_log::binary_descriptor(IntakeKind::Document, name, doc.file.size as usize, mime);
+        return (IntakeKind::Document, preview);
+    }
+    if message.sticker().is_some() {
+        return (IntakeKind::Sticker, "[sticker]".to_string());
+    }
+    if message.video().is_some() || message.video_note().is_some() {
+        return (IntakeKind::Video, "[video]".to_string());
+    }
+    if message.animation().is_some() {
+        return (IntakeKind::Animation, "[animation]".to_string());
+    }
+    if message.poll().is_some() {
+        return (IntakeKind::Poll, "[poll]".to_string());
+    }
+    if message.location().is_some() {
+        return (IntakeKind::Location, "[location]".to_string());
+    }
+    if message.contact().is_some() {
+        return (IntakeKind::Contact, "[contact]".to_string());
+    }
+    let text = message.text().unwrap_or("");
+    if text.trim().is_empty() {
+        return (IntakeKind::Empty, "[empty]".to_string());
+    }
+    if let Some(url) = extract_url_from_text(text) {
+        return (IntakeKind::Url, url);
+    }
+    (IntakeKind::Text, intake_log::preview_text(text))
+}
+
 pub async fn run(
     token: String,
     tg_config: TelegramConfig,
@@ -132,12 +198,68 @@ pub async fn run(
             let allowed = tg.allowed_chat_ids.clone();
             let notifier = nfy.clone();
             async move {
-                if !allowed.is_empty() && !allowed.contains(&message.chat.id.0) {
+                let chat_id = message.chat.id;
+                let chat_id_override = Some(chat_id.0);
+                let chat_id_ctx = chat_id.0.to_string();
+
+                // ── Durable intake: BEFORE the allowed-chat filter, BEFORE
+                // dispatch. The trace_id generated here is reused by every
+                // downstream branch.
+                let trace_id = trace::generate(IngestMethod::Telegram);
+                let (kind, preview) = classify_telegram_message(&message);
+                if let Err(e) =
+                    intake_log::record_intake(&config, IngestMethod::Telegram, &chat_id_ctx, kind, &preview, &trace_id)
+                {
+                    log::error!("telegram: failed to record intake trace={trace_id}: {e:#}");
+                    let _ = bot
+                        .send_message(chat_id, format!("[{trace_id}] borg failed to record your input: {e}"))
+                        .await;
                     return Ok::<(), teloxide::RequestError>(());
                 }
 
-                let chat_id = message.chat.id;
-                let chat_id_override = Some(chat_id.0);
+                if !allowed.is_empty() && !allowed.contains(&message.chat.id.0) {
+                    log::info!("telegram: rejecting disallowed chat {chat_id} (trace={trace_id})");
+                    intake_log::record_dlq(
+                        &config,
+                        IngestMethod::Telegram,
+                        DlqStage::IntakeReject,
+                        &format!("chat {chat_id} not in allowed-chat-ids"),
+                        &preview,
+                        &trace_id,
+                        None,
+                    );
+                    return Ok::<(), teloxide::RequestError>(());
+                }
+
+                // Unsupported / empty kinds: silent today, dlq from here forward.
+                let unsupported = matches!(
+                    kind,
+                    IntakeKind::Sticker
+                        | IntakeKind::Video
+                        | IntakeKind::Animation
+                        | IntakeKind::Poll
+                        | IntakeKind::Location
+                        | IntakeKind::Contact
+                        | IntakeKind::Empty
+                );
+                if unsupported {
+                    log::info!("telegram: rejecting kind={kind} from chat {chat_id} (trace={trace_id})");
+                    let reason = if kind == IntakeKind::Empty {
+                        "empty message (no text, no recognized media)".to_string()
+                    } else {
+                        format!("unsupported media: {kind}")
+                    };
+                    intake_log::record_dlq(
+                        &config,
+                        IngestMethod::Telegram,
+                        DlqStage::IntakeReject,
+                        &reason,
+                        &preview,
+                        &trace_id,
+                        None,
+                    );
+                    return Ok::<(), teloxide::RequestError>(());
+                }
 
                 // Priority 1: Photo attachment
                 if let Some(photos) = message.photo() {
@@ -164,8 +286,6 @@ pub async fn run(
 
                     let filename = format!("telegram-photo-{}.jpg", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
                     let display_source = format!("[image: {}]", filename);
-                    let trace_id = trace::generate(IngestMethod::Telegram);
-
                     if let Some(ref n) = notifier {
                         let _ = n.processing(&trace_id, "Processing image...", chat_id_override).await;
                     }
@@ -214,8 +334,6 @@ pub async fn run(
 
                     let filename = format!("voice-{}.ogg", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
                     let display_source = format!("[voice: {}]", filename);
-                    let trace_id = trace::generate(IngestMethod::Telegram);
-
                     if let Some(ref n) = notifier {
                         let _ = n
                             .processing(&trace_id, "Processing voice note...", chat_id_override)
@@ -264,8 +382,6 @@ pub async fn run(
                     };
 
                     let display_source = format!("[audio: {}]", original_name);
-                    let trace_id = trace::generate(IngestMethod::Telegram);
-
                     if let Some(ref n) = notifier {
                         let _ = n.processing(&trace_id, "Processing audio...", chat_id_override).await;
                     }
@@ -331,8 +447,6 @@ pub async fn run(
                             let caption = message.caption().unwrap_or("").to_string();
                             let extra_tags: Vec<String> =
                                 if caption.is_empty() { vec![] } else { vec![format!("caption:{caption}")] };
-                            let trace_id = trace::generate(IngestMethod::Telegram);
-
                             if let Some(ref n) = notifier {
                                 let _ = n
                                     .processing(&trace_id, &format!("Processing {kind_label}..."), chat_id_override)
@@ -377,23 +491,24 @@ pub async fn run(
                     return Ok(());
                 }
 
-                // Priority 5 & 6: Text messages (URL or plain text)
+                // Priority 5 & 6: Text messages (URL or plain text). Empty
+                // text was already routed to DLQ via the unsupported check
+                // above, so we treat any text here as content to ingest.
                 let text = message.text().unwrap_or("");
                 log::debug!("Telegram message from chat {}: {text}", chat_id);
 
                 let (content, display_source) = if let Some(url) = extract_url_from_text(text) {
-                    log::info!("Telegram: processing URL {url} from chat {}", chat_id);
+                    log::info!(
+                        "Telegram: processing URL {url} from chat {} (trace={trace_id})",
+                        chat_id
+                    );
                     (ContentKind::Url(url.clone()), url)
-                } else if !text.trim().is_empty() {
-                    log::info!("Telegram: processing text from chat {}", chat_id);
+                } else {
+                    log::info!("Telegram: processing text from chat {} (trace={trace_id})", chat_id);
                     let display = if text.len() > 50 { format!("{}...", &text[..50]) } else { text.to_string() };
                     (ContentKind::Text(text.to_string()), display)
-                } else {
-                    log::debug!("Empty message, ignoring");
-                    return Ok(());
                 };
 
-                let trace_id = trace::generate(IngestMethod::Telegram);
                 if let Some(ref n) = notifier {
                     let _ = n.processing(&trace_id, "Processing...", chat_id_override).await;
                 }
