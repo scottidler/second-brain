@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
@@ -68,49 +69,62 @@ enum IssueSeverity {
 }
 
 /// Run quality scoring on all notes.
+///
+/// Parallel over `notes` via rayon: `assess_note` is a pure function of `(&Note, &HashSet, &Config)`,
+/// `compute_level` is pure, and the violation construction has no inter-iteration state. The
+/// `par_iter().filter_map().collect()` pattern preserves input order, so the final report
+/// matches the sequential version bit-for-bit on the same fixture.
 pub fn lint_quality(notes: &[Note], config: &QualityConfig) -> Report {
+    log::debug!("quality::lint_quality: notes={}", notes.len());
     let mut report = Report::default();
 
     // Build inbound link index
     let inbound_targets = build_inbound_index(notes);
 
-    for note in notes {
-        // Skip system-generated note types
-        if let Some(ref note_type) = note.frontmatter.note_type
-            && EXCLUDED_TYPES.contains(&note_type.as_str())
-        {
-            continue;
-        }
+    let violations: Vec<Violation> = notes
+        .par_iter()
+        .filter_map(|note| {
+            // Skip system-generated note types
+            if let Some(ref note_type) = note.frontmatter.note_type
+                && EXCLUDED_TYPES.contains(&note_type.as_str())
+            {
+                return None;
+            }
 
-        let issues = assess_note(note, &inbound_targets, config);
-        if issues.is_empty() {
-            continue;
-        }
+            let issues = assess_note(note, &inbound_targets, config);
+            if issues.is_empty() {
+                return None;
+            }
 
-        let level = compute_level(&issues);
-        let issue_names: Vec<String> = issues.iter().map(|i| i.name.clone()).collect();
+            let level = compute_level(&issues);
+            let issue_names: Vec<String> = issues.iter().map(|i| i.name.clone()).collect();
 
-        let severity = match level {
-            QualityLevel::Low => Severity::Warning,
-            QualityLevel::Medium => Severity::Info,
-            QualityLevel::High => continue, // Don't report high-quality notes
-        };
+            let severity = match level {
+                QualityLevel::Low => Severity::Warning,
+                QualityLevel::Medium => Severity::Info,
+                QualityLevel::High => return None, // Don't report high-quality notes
+            };
 
-        report.add(Violation {
-            path: note.path.clone(),
-            rule: "quality.score".to_string(),
-            severity,
-            message: format!("quality: {level} (issues: {})", issue_names.join(", ")),
-            fix: Some(Fix::SetCortexFields {
-                fields: vec![
-                    ("cortex-quality".to_string(), level.to_string()),
-                    (
-                        "cortex-quality-issues".to_string(),
-                        format!("[{}]", issue_names.join(", ")),
-                    ),
-                ],
-            }),
-        });
+            Some(Violation {
+                path: note.path.clone(),
+                rule: "quality.score".to_string(),
+                severity,
+                message: format!("quality: {level} (issues: {})", issue_names.join(", ")),
+                fix: Some(Fix::SetCortexFields {
+                    fields: vec![
+                        ("cortex-quality".to_string(), level.to_string()),
+                        (
+                            "cortex-quality-issues".to_string(),
+                            format!("[{}]", issue_names.join(", ")),
+                        ),
+                    ],
+                }),
+            })
+        })
+        .collect();
+
+    for v in violations {
+        report.add(v);
     }
 
     log::info!("quality lint complete: {} violation(s)", report.violations.len());
@@ -119,15 +133,30 @@ pub fn lint_quality(notes: &[Note], config: &QualityConfig) -> Report {
 
 /// Apply quality scoring: write cortex-quality fields to frontmatter.
 /// Also clears stale fields from notes that are now high quality.
+///
+/// Both write loops run in parallel via rayon. Plain `std::fs::write` does no explicit
+/// parent-directory fsync, so the kernel-level dirent-sync serialization that gates the borg
+/// `write_atomic` paths does not gate cortex writes. Error propagation uses
+/// `par_iter().try_reduce(...)` so a single write failure still aborts the apply with the same
+/// `Result<usize>` semantics as the sequential implementation.
 pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) -> eyre::Result<usize> {
+    log::debug!(
+        "quality::apply_quality: vault_root={} notes={}",
+        vault_root.display(),
+        notes.len()
+    );
     let report = lint_quality(notes, config);
-    let mut fixed_count = 0;
 
     let flagged_paths: HashSet<&Path> = report.violations.iter().map(|v| v.path.as_path()).collect();
 
-    // Apply: write quality fields to flagged notes
-    for violation in &report.violations {
-        if let Some(Fix::SetCortexFields { fields }) = &violation.fix {
+    // Apply: write quality fields to flagged notes (parallel).
+    let applied_count: usize = report
+        .violations
+        .par_iter()
+        .map(|violation| -> eyre::Result<usize> {
+            let Some(Fix::SetCortexFields { fields }) = &violation.fix else {
+                return Ok(0);
+            };
             let abs_path = vault_root.join(&violation.path);
             let content = std::fs::read_to_string(&abs_path)?;
 
@@ -135,7 +164,7 @@ pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) 
                 .iter()
                 .all(|(key, val)| content.contains(&format!("{key}: {val}")));
             if already_set {
-                continue;
+                return Ok(0);
             }
 
             let yaml_fields: Vec<(String, serde_yaml::Value)> = fields
@@ -146,34 +175,40 @@ pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) 
             if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &yaml_fields) {
                 std::fs::write(&abs_path, new_content)?;
                 log::info!("wrote quality fields: {}", violation.path.display());
-                fixed_count += 1;
+                Ok(1)
+            } else {
+                Ok(0)
             }
-        }
-    }
+        })
+        .try_reduce(|| 0usize, |a, b| Ok(a + b))?;
 
-    // Clear: remove quality fields from notes no longer flagged
+    // Clear: remove quality fields from notes no longer flagged (parallel).
     let cortex_keys = vec!["cortex-quality".to_string(), "cortex-quality-issues".to_string()];
-    for note in notes {
-        if flagged_paths.contains(note.path.as_path()) {
-            continue;
-        }
+    let cleared_count: usize = notes
+        .par_iter()
+        .map(|note| -> eyre::Result<usize> {
+            if flagged_paths.contains(note.path.as_path()) {
+                return Ok(0);
+            }
+            let has_cortex_fields = note.frontmatter.extra.contains_key("cortex-quality")
+                || note.frontmatter.extra.contains_key("cortex-quality-issues");
+            if !has_cortex_fields {
+                return Ok(0);
+            }
 
-        let has_cortex_fields = note.frontmatter.extra.contains_key("cortex-quality")
-            || note.frontmatter.extra.contains_key("cortex-quality-issues");
-        if !has_cortex_fields {
-            continue;
-        }
+            let abs_path = vault_root.join(&note.path);
+            let content = std::fs::read_to_string(&abs_path)?;
+            if let Some(new_content) = crate::scope::remove_frontmatter_fields(&content, &cortex_keys) {
+                std::fs::write(&abs_path, new_content)?;
+                log::info!("cleared stale quality fields: {}", note.path.display());
+                Ok(1)
+            } else {
+                Ok(0)
+            }
+        })
+        .try_reduce(|| 0usize, |a, b| Ok(a + b))?;
 
-        let abs_path = vault_root.join(&note.path);
-        let content = std::fs::read_to_string(&abs_path)?;
-        if let Some(new_content) = crate::scope::remove_frontmatter_fields(&content, &cortex_keys) {
-            std::fs::write(&abs_path, new_content)?;
-            log::info!("cleared stale quality fields: {}", note.path.display());
-            fixed_count += 1;
-        }
-    }
-
-    Ok(fixed_count)
+    Ok(applied_count + cleared_count)
 }
 
 /// Build a set of note stems/paths that are referenced by at least one wikilink.
@@ -504,5 +539,53 @@ mod tests {
         // Note: it may still have quality fields if it fails other checks (no-inbound-links),
         // but the old "empty-body" issue should not persist since it now has content
         assert!(!content.contains("empty-body"), "stale empty-body issue should be gone");
+    }
+
+    /// Phase 2a determinism guard: parallel `lint_quality` produces violations in the same order
+    /// as the sequential implementation would over the same input slice. Concretely, the
+    /// `path`-keyed sequence of violations must equal the sequence the input slice's path
+    /// ordering would dictate.
+    #[test]
+    fn lint_quality_violations_ordered_by_input_slice_under_par_iter() {
+        // Build 20 short-body notes whose names span the alphabet so the slice has a
+        // non-trivial ordering. Each note is short enough to be flagged as a "stub".
+        let mut notes = Vec::new();
+        for tag in &[
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet", "kilo",
+            "lima", "mike", "november", "oscar", "papa", "quebec", "romeo", "sierra", "tango",
+        ] {
+            let filename = format!("{tag}.md");
+            notes.push(
+                NoteBuilder::new(&filename)
+                    .title(tag)
+                    .note_type("note")
+                    .body("short stub")
+                    .build(),
+            );
+        }
+        let config = default_config();
+
+        let report = lint_quality(&notes, &config);
+
+        // Every violation has a path; that path sequence must equal the (filtered) input order.
+        let violation_paths: Vec<String> = report
+            .violations
+            .iter()
+            .map(|v| v.path.to_string_lossy().to_string())
+            .collect();
+        // Walk the input slice in order, retaining only entries that appear in violation_paths.
+        let expected: Vec<String> = notes
+            .iter()
+            .map(|n| n.path.to_string_lossy().to_string())
+            .filter(|p| violation_paths.contains(p))
+            .collect();
+        assert_eq!(
+            violation_paths, expected,
+            "par_iter().filter_map().collect() must preserve input-slice order"
+        );
+        assert!(
+            !report.violations.is_empty(),
+            "test fixture should produce at least one violation"
+        );
     }
 }

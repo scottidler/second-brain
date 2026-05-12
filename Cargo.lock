@@ -828,6 +828,7 @@ dependencies = [
  "fs2",
  "glob",
  "log",
+ "rayon",
  "regex",
  "serde",
  "serde_json",

@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -6,7 +7,18 @@ use crate::report::{Fix, Report, Severity, Violation};
 use crate::vault::Note;
 
 /// Lint notes that could benefit from auto-tagging.
+///
+/// Parallel over `notes` via rayon: each per-note assessment is pure CPU work over independent
+/// inputs. `par_iter().filter_map().collect()` preserves input order, so the final `Report`
+/// is bit-identical to the sequential version on the same fixture.
 pub fn lint_autotag(notes: &[Note], all_notes: &[Note], config: &AutoTagConfig) -> Report {
+    log::debug!(
+        "autotag::lint_autotag: notes={} all_notes={} enabled={} min_tags_threshold={}",
+        notes.len(),
+        all_notes.len(),
+        config.enabled,
+        config.min_tags_threshold
+    );
     let mut report = Report::default();
 
     if !config.enabled {
@@ -16,49 +28,56 @@ pub fn lint_autotag(notes: &[Note], all_notes: &[Note], config: &AutoTagConfig) 
     // Build canonical tag set: from config or auto-derived from vault
     let canonical = build_canonical_tags(all_notes, config);
 
-    for note in notes {
-        // Skip already processed
-        if note.frontmatter.extra.contains_key("cortex-tagged") {
-            continue;
-        }
+    let violations: Vec<Violation> = notes
+        .par_iter()
+        .filter_map(|note| {
+            // Skip already processed
+            if note.frontmatter.extra.contains_key("cortex-tagged") {
+                return None;
+            }
 
-        // Only process notes with few tags
-        let tag_count = note.frontmatter.tags.as_ref().map(|t| t.len()).unwrap_or(0);
-        if tag_count >= config.min_tags_threshold {
-            continue;
-        }
+            // Only process notes with few tags
+            let tag_count = note.frontmatter.tags.as_ref().map(|t| t.len()).unwrap_or(0);
+            if tag_count >= config.min_tags_threshold {
+                return None;
+            }
 
-        // Only process freshly ingested notes
-        let dominated = matches!(note.frontmatter.status.as_deref(), Some("unread") | Some("processed"))
-            || matches!(note.frontmatter.origin.as_deref(), Some("assisted"));
-        if !dominated {
-            continue;
-        }
+            // Only process freshly ingested notes
+            let dominated = matches!(note.frontmatter.status.as_deref(), Some("unread") | Some("processed"))
+                || matches!(note.frontmatter.origin.as_deref(), Some("assisted"));
+            if !dominated {
+                return None;
+            }
 
-        // Skip empty bodies
-        if note.body.trim().is_empty() {
-            continue;
-        }
+            // Skip empty bodies
+            if note.body.trim().is_empty() {
+                return None;
+            }
 
-        // Suggest tags based on content keywords matching canonical set
-        let suggested = suggest_tags_deterministic(&note.body, &canonical, note);
-        if suggested.is_empty() {
-            continue;
-        }
+            // Suggest tags based on content keywords matching canonical set
+            let suggested = suggest_tags_deterministic(&note.body, &canonical, note);
+            if suggested.is_empty() {
+                return None;
+            }
 
-        let suggested_str = suggested.join(", ");
-        report.add(Violation {
-            path: note.path.clone(),
-            rule: "autotag.suggestion".to_string(),
-            severity: Severity::Info,
-            message: format!("suggested tags: {suggested_str}"),
-            fix: Some(Fix::SetCortexFields {
-                fields: vec![
-                    ("cortex-suggested-tags".to_string(), format!("[{suggested_str}]")),
-                    ("cortex-tagged".to_string(), "true".to_string()),
-                ],
-            }),
-        });
+            let suggested_str = suggested.join(", ");
+            Some(Violation {
+                path: note.path.clone(),
+                rule: "autotag.suggestion".to_string(),
+                severity: Severity::Info,
+                message: format!("suggested tags: {suggested_str}"),
+                fix: Some(Fix::SetCortexFields {
+                    fields: vec![
+                        ("cortex-suggested-tags".to_string(), format!("[{suggested_str}]")),
+                        ("cortex-tagged".to_string(), "true".to_string()),
+                    ],
+                }),
+            })
+        })
+        .collect();
+
+    for v in violations {
+        report.add(v);
     }
 
     log::info!("autotag lint complete: {} violation(s)", report.violations.len());
