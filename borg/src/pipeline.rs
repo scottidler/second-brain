@@ -23,7 +23,7 @@ use vault::schema::CORTEX_PRESERVE_KEYS;
 
 mod atomic;
 mod inflight;
-use atomic::{apply_cortex_fields, apply_original_date, write_atomic};
+use atomic::{apply_cortex_fields, apply_ingested_date, apply_original_date, write_atomic};
 use inflight::InflightGuard;
 
 /// Cached canonical tag state loaded once at first use.
@@ -588,6 +588,12 @@ async fn process_url_inner(
             cortex_fields.iter().map(|(k, _)| k).collect::<Vec<_>>()
         );
     }
+    // `ingested:` records when borg LAST processed this note. Unconditional
+    // on every publish (original ingest AND reingest) so the dashboard's
+    // "this week" query can ask when borg did the work rather than when
+    // the content was originally learned.
+    final_str = apply_ingested_date(&final_str, &log_date);
+    log::debug!("[{trace_id}] Set ingested: {log_date}");
     write_atomic(&note_path, final_str.as_bytes()).context("Failed to atomically publish note")?;
 
     // The new note exists at note_path. If we were replacing an old note at

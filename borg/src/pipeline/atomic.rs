@@ -64,6 +64,71 @@ pub fn apply_original_date(rendered: &str, new_date: &str) -> String {
     out
 }
 
+/// Insert-or-replace the `ingested:` frontmatter line. Unlike
+/// `apply_original_date` (which only replaces an existing `date:` line),
+/// this helper INSERTS the field when missing - so notes written before
+/// the intake-log + DLQ design shipped (which had no `ingested:` field)
+/// receive one on every subsequent reingest. The field is positioned
+/// directly after the existing `date:` line so the pair sits visually
+/// together in the YAML block.
+pub fn apply_ingested_date(rendered: &str, ingested_date: &str) -> String {
+    let mut out = String::with_capacity(rendered.len() + 32);
+    let trailing_newline = rendered.ends_with('\n');
+    let mut found = false;
+    let mut date_idx: Option<usize> = None;
+    let lines: Vec<&str> = rendered.lines().collect();
+
+    for (i, line) in lines.iter().enumerate() {
+        if line.starts_with("ingested:") {
+            out.push_str(&format!("ingested: {ingested_date}"));
+            found = true;
+        } else {
+            out.push_str(line);
+            if date_idx.is_none() && line.starts_with("date:") {
+                date_idx = Some(i);
+            }
+        }
+        out.push('\n');
+    }
+
+    if !found {
+        // Insert after the `date:` line if we found one; otherwise insert
+        // right after the opening `---` (the frontmatter must already
+        // exist for this to be useful - if it doesn't, fall through
+        // unchanged).
+        let mut new_lines: Vec<String> = lines.iter().map(|l| (*l).to_string()).collect();
+        let insertion_idx = match date_idx {
+            Some(i) => i + 1,
+            None => {
+                let opening = new_lines.iter().position(|l| l.trim() == "---");
+                match opening {
+                    Some(i) => i + 1,
+                    None => {
+                        // No frontmatter at all - return input unchanged.
+                        let mut result = rendered.to_string();
+                        if !trailing_newline && result.ends_with('\n') {
+                            result.pop();
+                        }
+                        return result;
+                    }
+                }
+            }
+        };
+        new_lines.insert(insertion_idx, format!("ingested: {ingested_date}"));
+        let joined = new_lines.join("\n");
+        let mut result = format!("{joined}\n");
+        if !trailing_newline {
+            result.pop();
+        }
+        return result;
+    }
+
+    if !trailing_newline && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 /// Apply (insert or replace) the given cortex-managed frontmatter fields
 /// in `rendered`. Returns `rendered` unchanged when no `---` frontmatter
 /// is present. Pure-string form of the previous `patch_cortex_fields`
@@ -184,6 +249,55 @@ mod tests {
         assert!(out.contains("title: X"));
         assert!(out.contains("foo: bar"));
         assert!(out.contains("body"));
+    }
+
+    #[test]
+    fn test_apply_ingested_date_inserts_when_missing() {
+        let input = "---\ntitle: X\ndate: 2026-04-16\n---\nbody\n";
+        let out = apply_ingested_date(input, "2026-05-12");
+        assert!(out.contains("ingested: 2026-05-12"), "got: {out}");
+        // Original date untouched
+        assert!(out.contains("date: 2026-04-16"));
+        // `ingested:` appears AFTER `date:` (paired)
+        let date_pos = out.find("date: 2026-04-16").expect("date present");
+        let ing_pos = out.find("ingested: 2026-05-12").expect("ingested present");
+        assert!(ing_pos > date_pos, "ingested should follow date");
+    }
+
+    #[test]
+    fn test_apply_ingested_date_replaces_existing() {
+        let input = "---\ntitle: X\ndate: 2026-04-16\ningested: 2026-04-16\n---\nbody\n";
+        let out = apply_ingested_date(input, "2026-05-12");
+        assert!(out.contains("ingested: 2026-05-12"));
+        assert!(!out.contains("ingested: 2026-04-16"));
+        assert!(out.contains("date: 2026-04-16"));
+    }
+
+    #[test]
+    fn test_apply_ingested_date_preserves_other_fields() {
+        let input = "---\ntitle: X\ndate: 2026-04-16\ndomain: ai\ncortex-quality: ok\n---\nbody\n";
+        let out = apply_ingested_date(input, "2026-05-12");
+        assert!(out.contains("domain: ai"));
+        assert!(out.contains("cortex-quality: ok"));
+        assert!(out.contains("body"));
+    }
+
+    #[test]
+    fn test_apply_ingested_date_noop_without_frontmatter() {
+        let input = "no frontmatter";
+        let out = apply_ingested_date(input, "2026-05-12");
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn test_apply_ingested_date_no_date_line_inserts_after_open() {
+        let input = "---\ntitle: X\n---\nbody\n";
+        let out = apply_ingested_date(input, "2026-05-12");
+        assert!(out.contains("ingested: 2026-05-12"));
+        // ingested should appear before title (right after opening ---)
+        let title_pos = out.find("title: X").expect("title present");
+        let ing_pos = out.find("ingested: 2026-05-12").expect("ingested present");
+        assert!(ing_pos < title_pos);
     }
 
     #[test]

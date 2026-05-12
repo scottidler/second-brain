@@ -92,7 +92,10 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         ContentType::Code { .. } => "code",
     };
 
-    let mut fm = format!("---\ntitle: \"{}\"\ndate: {date}\n", escape_yaml_string(&note.title),);
+    let mut fm = format!(
+        "---\ntitle: \"{}\"\ndate: {date}\ningested: {date}\n",
+        escape_yaml_string(&note.title),
+    );
 
     if let Some(source) = &note.source_url {
         fm.push_str(&format!("source: \"{source}\"\n"));
@@ -218,6 +221,29 @@ mod tests {
             default_creator: String::new(),
             timezone: "UTC".to_string(),
         }
+    }
+
+    #[test]
+    fn test_render_includes_ingested_field() {
+        let note = NoteContent {
+            title: "Note".to_string(),
+            source_url: Some("https://example.com".to_string()),
+            asset_path: None,
+            tags: vec![],
+            summary: "S".to_string(),
+            content_type: ContentType::Article,
+            description: None,
+            embed_code: None,
+            method: None,
+            trace_id: None,
+            slides: Vec::new(),
+        };
+        let rendered = render_note(&note, &test_config());
+        assert!(rendered.contains("date: "), "date field should be present");
+        assert!(
+            rendered.contains("ingested: "),
+            "ingested field should be present on fresh ingest"
+        );
     }
 
     #[test]
