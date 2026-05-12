@@ -3,6 +3,7 @@ use crate::hygiene;
 use crate::ledger::{self, LedgerEntry, LedgerStatus};
 use crate::types::IngestMethod;
 use eyre::{Context, Result};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -296,32 +297,31 @@ pub async fn run_reingest_failed(config: &Config, dry_run: bool) -> Result<()> {
     }
     let md_files = collect_md_files(&vault_root, &config.migration.skip_folders)?;
 
-    // Walk every markdown file; for each, check whether the BODY (not the
-    // frontmatter) contains a failed-fetch signature and extract the source
-    // URL from the frontmatter to drive a re-ingestion.
-    let mut matches: Vec<(PathBuf, String)> = Vec::new();
-    for path in &md_files {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        let Some((frontmatter, body)) = split_frontmatter(&content) else {
-            continue;
-        };
-        if !body_has_failed_fetch_signature(&body) {
-            continue;
-        }
-        let Ok(fm) = serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(&frontmatter) else {
-            continue;
-        };
-        let Some(source) = fm.get("source").and_then(|v| v.as_str()).map(String::from) else {
-            log::warn!(
-                "reingest-failed: {} matches failed-fetch but has no source",
-                path.display()
-            );
-            continue;
-        };
-        matches.push((path.clone(), source));
-    }
+    // Walk every markdown file in parallel; for each, read + split frontmatter + check the body
+    // for the failed-fetch signature, and (on match) extract the source URL. Pure read-only I/O
+    // and CPU work; output is order-preserving thanks to rayon's collect, so the eventual HTTP
+    // reingest sequence below sees notes in the same order the previous sequential loop did.
+    let matches: Vec<(PathBuf, String)> = md_files
+        .par_iter()
+        .filter_map(|path| {
+            let content = std::fs::read_to_string(path).ok()?;
+            let (frontmatter, body) = split_frontmatter(&content)?;
+            if !body_has_failed_fetch_signature(&body) {
+                return None;
+            }
+            let fm: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(&frontmatter).ok()?;
+            match fm.get("source").and_then(|v| v.as_str()).map(String::from) {
+                Some(source) => Some((path.clone(), source)),
+                None => {
+                    log::warn!(
+                        "reingest-failed: {} matches failed-fetch but has no source",
+                        path.display()
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
 
     if matches.is_empty() {
         println!("reingest-failed: no failed-fetch notes found");

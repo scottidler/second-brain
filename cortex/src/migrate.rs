@@ -1,5 +1,6 @@
 use eyre::{Context, Result};
 use glob::Pattern;
+use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -211,34 +212,48 @@ fn update_wikilinks_for_moves(vault_root: &Path, notes: &[Note], renames: &[(Pat
 }
 
 /// Report what field transforms would be applied (dry-run).
+///
+/// Parallel over `notes`: each note can emit multiple violations (one per matching rename/drop),
+/// so we use `flat_map` instead of `filter_map`. `par_iter().flat_map().collect()` preserves
+/// the input-slice order over the per-note Vec<Violation>, so the final Report sequence is
+/// bit-identical to the previous sequential implementation.
 fn lint_field_transforms(notes: &[Note], migration: &MigrationConfig, report: &mut Report) {
     if migration.field_renames.is_empty() && migration.field_drops.is_empty() {
         return;
     }
 
-    for note in notes {
-        for (old_key, new_key) in &migration.field_renames {
-            if note.frontmatter.extra.contains_key(old_key) {
-                report.add(Violation {
-                    path: note.path.clone(),
-                    rule: format!("migrate.{}.rename", migration.name),
-                    severity: Severity::Info,
-                    message: format!("would rename field '{old_key}' to '{new_key}'"),
-                    fix: None,
-                });
+    let violations: Vec<Violation> = notes
+        .par_iter()
+        .flat_map(|note| {
+            let mut out = Vec::new();
+            for (old_key, new_key) in &migration.field_renames {
+                if note.frontmatter.extra.contains_key(old_key) {
+                    out.push(Violation {
+                        path: note.path.clone(),
+                        rule: format!("migrate.{}.rename", migration.name),
+                        severity: Severity::Info,
+                        message: format!("would rename field '{old_key}' to '{new_key}'"),
+                        fix: None,
+                    });
+                }
             }
-        }
-        for drop_key in &migration.field_drops {
-            if note.frontmatter.extra.contains_key(drop_key) {
-                report.add(Violation {
-                    path: note.path.clone(),
-                    rule: format!("migrate.{}.drop", migration.name),
-                    severity: Severity::Info,
-                    message: format!("would drop field '{drop_key}'"),
-                    fix: None,
-                });
+            for drop_key in &migration.field_drops {
+                if note.frontmatter.extra.contains_key(drop_key) {
+                    out.push(Violation {
+                        path: note.path.clone(),
+                        rule: format!("migrate.{}.drop", migration.name),
+                        severity: Severity::Info,
+                        message: format!("would drop field '{drop_key}'"),
+                        fix: None,
+                    });
+                }
             }
-        }
+            out
+        })
+        .collect();
+
+    for v in violations {
+        report.add(v);
     }
 }
 
@@ -340,34 +355,49 @@ fn extract_frontmatter_block(content: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// Report what value transforms would be applied (dry-run).
+///
+/// Parallel over `notes`: pure compute, flat_map handles the multiple-violations-per-note
+/// case the same way `lint_field_transforms` does. Output order matches the sequential
+/// implementation bit-for-bit.
 fn lint_value_transforms(notes: &[Note], migration: &MigrationConfig, report: &mut Report) {
     if migration.value_renames.is_empty() {
         return;
     }
 
-    for note in notes {
-        let abs_path_display = note.path.display().to_string();
-        for (field_name, value_map) in &migration.value_renames {
-            let current_value = match field_name.as_str() {
-                "domain" => note.frontmatter.domain.as_deref(),
-                "type" => note.frontmatter.note_type.as_deref(),
-                "origin" => note.frontmatter.origin.as_deref(),
-                "status" => note.frontmatter.status.as_deref(),
-                _ => note.frontmatter.extra.get(field_name).and_then(|v| v.as_str()),
-            };
+    let violations: Vec<Violation> = notes
+        .par_iter()
+        .flat_map(|note| {
+            let abs_path_display = note.path.display().to_string();
+            let mut out = Vec::new();
+            for (field_name, value_map) in &migration.value_renames {
+                let current_value = match field_name.as_str() {
+                    "domain" => note.frontmatter.domain.as_deref(),
+                    "type" => note.frontmatter.note_type.as_deref(),
+                    "origin" => note.frontmatter.origin.as_deref(),
+                    "status" => note.frontmatter.status.as_deref(),
+                    _ => note.frontmatter.extra.get(field_name).and_then(|v| v.as_str()),
+                };
 
-            if let Some(current) = current_value
-                && let Some(new_value) = value_map.get(current)
-            {
-                report.add(Violation {
-                    path: note.path.clone(),
-                    rule: format!("migrate.{}.value-rename", migration.name),
-                    severity: Severity::Info,
-                    message: format!("would rename {field_name}: '{current}' -> '{new_value}' in {abs_path_display}"),
-                    fix: None,
-                });
+                if let Some(current) = current_value
+                    && let Some(new_value) = value_map.get(current)
+                {
+                    out.push(Violation {
+                        path: note.path.clone(),
+                        rule: format!("migrate.{}.value-rename", migration.name),
+                        severity: Severity::Info,
+                        message: format!(
+                            "would rename {field_name}: '{current}' -> '{new_value}' in {abs_path_display}"
+                        ),
+                        fix: None,
+                    });
+                }
             }
-        }
+            out
+        })
+        .collect();
+
+    for v in violations {
+        report.add(v);
     }
 }
 
