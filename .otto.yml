@@ -200,9 +200,10 @@ tasks:
       echo "✅ Binaries installed to ~/.cargo/bin"
 
   deploy:
-    help: "Build and install release binaries"
+    help: "Build, install, and restart workspace binaries (oracle is on-demand, no restart)"
     bash: |
       cargo install --path borg
       cargo install --path cortex
       cargo install --path oracle
-      echo "✅ Deployed borg, cortex, and oracle"
+      systemctl --user restart borg cortex
+      echo "✅ Deployed borg, cortex, oracle; borg + cortex daemons restarted"
