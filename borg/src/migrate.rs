@@ -7,6 +7,152 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Per-note migration outcome produced by the parallel phase. The sequential drain afterward
+/// uses these to update `changed_count`, emit deterministic per-file `println!`s, and
+/// accumulate `ledger_entries` for the post-loop seeding step.
+struct MigrateOutcome {
+    rel_path: String,
+    ledger_entry: Option<LedgerEntry>,
+}
+
+/// Apply every per-path transform to a single note. Pure CPU + per-file I/O; safe to invoke
+/// from a rayon worker. Returns `Ok(None)` when the note does not change (no frontmatter,
+/// YAML parse failure, or no applicable transform).
+fn migrate_one_note(path: &Path, vault_root: &Path, apply: bool, config: &Config) -> Result<Option<MigrateOutcome>> {
+    let migration = &config.migration;
+    let content = std::fs::read_to_string(path).context("Failed to read file")?;
+    let Some((frontmatter, body)) = split_frontmatter(&content) else {
+        return Ok(None);
+    };
+
+    let mut fm: HashMap<String, serde_yaml::Value> = match serde_yaml::from_str(&frontmatter) {
+        Ok(map) => map,
+        Err(_) => return Ok(None),
+    };
+
+    let mut changed = false;
+
+    // 1. Field renames
+    for (old_name, new_name) in &migration.field_renames {
+        if fm.contains_key(old_name)
+            && !fm.contains_key(new_name)
+            && let Some(val) = fm.remove(old_name)
+        {
+            fm.insert(new_name.clone(), val);
+            changed = true;
+        }
+    }
+
+    // 2. Value renames
+    for (field, renames) in &migration.value_renames {
+        if let Some(val) = fm.get(field).and_then(|v| v.as_str()).map(|s| s.to_string())
+            && let Some(new_val) = renames.get(&val)
+        {
+            fm.insert(field.clone(), serde_yaml::Value::String(new_val.clone()));
+            changed = true;
+        }
+    }
+
+    // 3. Field transforms
+    for (field, transform) in &migration.field_transforms {
+        if let Some(val) = fm.get(field) {
+            match transform.as_str() {
+                "canonicalize" => {
+                    if let Some(url_str) = val.as_str() {
+                        match hygiene::normalize_url(url_str, &config.canonicalization.rules) {
+                            Ok(canonical) if canonical != url_str => {
+                                fm.insert(field.clone(), serde_yaml::Value::String(canonical));
+                                changed = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                "reclassify" => {
+                    if let Some(type_str) = val.as_str() {
+                        let needs_reclassify = type_str == "link" || type_str == "article";
+                        if needs_reclassify {
+                            let new_type = if let Some(source) = fm.get("source").and_then(|v| v.as_str()) {
+                                reclassify_type(source)
+                            } else {
+                                "article"
+                            };
+                            if new_type != type_str {
+                                fm.insert(field.clone(), serde_yaml::Value::String(new_type.to_string()));
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                "normalize" => {
+                    // Normalize tags: inline "#tag, #tag" → list, strip #
+                    if let Some(tag_str) = val.as_str() {
+                        let tags: Vec<serde_yaml::Value> = tag_str
+                            .split(',')
+                            .map(|t| t.trim().trim_start_matches('#').trim())
+                            .filter(|t| !t.is_empty())
+                            .map(|t| serde_yaml::Value::String(hygiene::sanitize_tag(t)))
+                            .collect();
+                        if !tags.is_empty() {
+                            fm.insert(field.clone(), serde_yaml::Value::Sequence(tags));
+                            changed = true;
+                        }
+                    }
+                }
+                _ => {
+                    log::warn!("Unknown transform: {transform}");
+                }
+            }
+        }
+    }
+
+    // 4. Title fallback
+    if migration.title_fallback && !fm.contains_key("title") {
+        let title = extract_title_from_body(&body)
+            .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
+            .unwrap_or_default();
+        if !title.is_empty() {
+            fm.insert("title".to_string(), serde_yaml::Value::String(title));
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return Ok(None);
+    }
+
+    let rel_path = path.strip_prefix(vault_root).unwrap_or(path).display().to_string();
+
+    if apply {
+        let new_content = render_frontmatter(&fm, &body);
+        std::fs::write(path, new_content).context("Failed to write migrated file")?;
+    }
+
+    let ledger_entry = if migration.seed_borg_log
+        && let Some(source) = fm.get("source").and_then(|v| v.as_str())
+    {
+        let date = fm.get("date").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        let rel_note_path = path.strip_prefix(vault_root).ok().map(|p| p.display().to_string());
+        Some(LedgerEntry {
+            date,
+            time: "00:00".to_string(),
+            method: IngestMethod::Cli.into(),
+            status: LedgerStatus::Completed,
+            filename: rel_note_path.and_then(|p| p.rsplit('/').next().map(|s| s.to_string())),
+            source: source.to_string(),
+            domain: path
+                .parent()
+                .and_then(|p| p.strip_prefix(vault_root).ok())
+                .map(|p| p.display().to_string()),
+            trace_id: None,
+        })
+    } else {
+        None
+    };
+
+    Ok(Some(MigrateOutcome { rel_path, ledger_entry }))
+}
+
 pub async fn run_migrate(config: &Config, apply: bool) -> Result<()> {
     let migration = &config.migration;
     let vault_root = expand_tilde(&config.vault.root_path);
@@ -22,139 +168,22 @@ pub async fn run_migrate(config: &Config, apply: bool) -> Result<()> {
     let md_files = collect_md_files(&vault_root, &migration.skip_folders)?;
     println!("Found {} markdown files to check", md_files.len());
 
-    let mut changed_count = 0;
+    // Parallel phase: read + transform + (conditional) write + (conditional) build LedgerEntry.
+    // Per-file independent; std::fs::write is the only side-effect and targets distinct paths.
+    // collect::<Result<Vec<_>>>() preserves input-slice order so the sequential drain below
+    // produces console output and ledger_entries in the same order as the previous loop.
+    let outcomes: Vec<Option<MigrateOutcome>> = md_files
+        .par_iter()
+        .map(|path| migrate_one_note(path, &vault_root, apply, config))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut changed_count = 0usize;
     let mut ledger_entries: Vec<LedgerEntry> = Vec::new();
-
-    for path in &md_files {
-        let content = std::fs::read_to_string(path).context("Failed to read file")?;
-        let Some((frontmatter, body)) = split_frontmatter(&content) else {
-            continue;
-        };
-
-        let mut fm: HashMap<String, serde_yaml::Value> = match serde_yaml::from_str(&frontmatter) {
-            Ok(map) => map,
-            Err(_) => continue,
-        };
-
-        let mut changed = false;
-
-        // 1. Field renames
-        for (old_name, new_name) in &migration.field_renames {
-            if fm.contains_key(old_name)
-                && !fm.contains_key(new_name)
-                && let Some(val) = fm.remove(old_name)
-            {
-                fm.insert(new_name.clone(), val);
-                changed = true;
-            }
-        }
-
-        // 2. Value renames
-        for (field, renames) in &migration.value_renames {
-            if let Some(val) = fm.get(field).and_then(|v| v.as_str()).map(|s| s.to_string())
-                && let Some(new_val) = renames.get(&val)
-            {
-                fm.insert(field.clone(), serde_yaml::Value::String(new_val.clone()));
-                changed = true;
-            }
-        }
-
-        // 3. Field transforms
-        for (field, transform) in &migration.field_transforms {
-            if let Some(val) = fm.get(field) {
-                match transform.as_str() {
-                    "canonicalize" => {
-                        if let Some(url_str) = val.as_str() {
-                            match hygiene::normalize_url(url_str, &config.canonicalization.rules) {
-                                Ok(canonical) if canonical != url_str => {
-                                    fm.insert(field.clone(), serde_yaml::Value::String(canonical));
-                                    changed = true;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    "reclassify" => {
-                        if let Some(type_str) = val.as_str() {
-                            let needs_reclassify = type_str == "link" || type_str == "article";
-                            if needs_reclassify {
-                                let new_type = if let Some(source) = fm.get("source").and_then(|v| v.as_str()) {
-                                    reclassify_type(source)
-                                } else {
-                                    "article"
-                                };
-                                if new_type != type_str {
-                                    fm.insert(field.clone(), serde_yaml::Value::String(new_type.to_string()));
-                                    changed = true;
-                                }
-                            }
-                        }
-                    }
-                    "normalize" => {
-                        // Normalize tags: inline "#tag, #tag" → list, strip #
-                        if let Some(tag_str) = val.as_str() {
-                            let tags: Vec<serde_yaml::Value> = tag_str
-                                .split(',')
-                                .map(|t| t.trim().trim_start_matches('#').trim())
-                                .filter(|t| !t.is_empty())
-                                .map(|t| serde_yaml::Value::String(hygiene::sanitize_tag(t)))
-                                .collect();
-                            if !tags.is_empty() {
-                                fm.insert(field.clone(), serde_yaml::Value::Sequence(tags));
-                                changed = true;
-                            }
-                        }
-                    }
-                    _ => {
-                        log::warn!("Unknown transform: {transform}");
-                    }
-                }
-            }
-        }
-
-        // 3. Title fallback
-        if migration.title_fallback && !fm.contains_key("title") {
-            let title = extract_title_from_body(&body)
-                .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
-                .unwrap_or_default();
-            if !title.is_empty() {
-                fm.insert("title".to_string(), serde_yaml::Value::String(title));
-                changed = true;
-            }
-        }
-
-        if !changed {
-            continue;
-        }
-
+    for outcome in outcomes.into_iter().flatten() {
         changed_count += 1;
-        let rel_path = path.strip_prefix(&vault_root).unwrap_or(path).display().to_string();
-        println!("  {mode}: {rel_path}");
-
-        if apply {
-            let new_content = render_frontmatter(&fm, &body);
-            std::fs::write(path, new_content).context("Failed to write migrated file")?;
-        }
-
-        // Collect borg log entries for seeding
-        if migration.seed_borg_log
-            && let Some(source) = fm.get("source").and_then(|v| v.as_str())
-        {
-            let date = fm.get("date").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-            let rel_note_path = path.strip_prefix(&vault_root).ok().map(|p| p.display().to_string());
-            ledger_entries.push(LedgerEntry {
-                date,
-                time: "00:00".to_string(),
-                method: IngestMethod::Cli.into(),
-                status: LedgerStatus::Completed,
-                filename: rel_note_path.and_then(|p| p.rsplit('/').next().map(|s| s.to_string())),
-                source: source.to_string(),
-                domain: path
-                    .parent()
-                    .and_then(|p| p.strip_prefix(&vault_root).ok())
-                    .map(|p| p.display().to_string()),
-                trace_id: None,
-            });
+        println!("  {mode}: {}", outcome.rel_path);
+        if let Some(entry) = outcome.ledger_entry {
+            ledger_entries.push(entry);
         }
     }
 
