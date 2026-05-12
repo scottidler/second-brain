@@ -18,6 +18,8 @@ tags:
 
 > Requires the [Dataview](https://github.com/blacksmithgu/obsidian-dataview) plugin.
 
+> Queries pivot on `origin = "assisted"` (every borg-produced note) and on `ingested` (the date borg last touched the note - bumped on every reingest). `date` remains the original content date.
+
 ## 📥 Added Today
 
 ```dataview
@@ -26,7 +28,7 @@ TABLE WITHOUT ID
   type as "Type",
   method as "Via",
   domain as "Domain"
-WHERE (source != null OR asset != null OR method != null) AND date = date(today)
+WHERE origin = "assisted" AND ingested = date(today)
 SORT file.ctime DESC
 ```
 
@@ -38,7 +40,7 @@ TABLE WITHOUT ID
   type as "Type",
   method as "Via",
   domain as "Domain"
-WHERE (source != null OR asset != null OR method != null) AND date = date(today) - dur(1 day)
+WHERE origin = "assisted" AND ingested = date(today) - dur(1 day)
 SORT file.ctime DESC
 ```
 
@@ -50,7 +52,7 @@ TABLE WITHOUT ID
   type as "Type",
   method as "Via",
   domain as "Domain"
-WHERE (source != null OR asset != null OR method != null) AND date >= date(today) - dur(7 day) AND date < date(today) - dur(1 day)
+WHERE origin = "assisted" AND ingested >= date(today) - dur(7 day) AND ingested < date(today) - dur(1 day)
 SORT file.ctime DESC
 ```
 
@@ -62,7 +64,7 @@ TABLE WITHOUT ID
   type as "Type",
   method as "Via",
   domain as "Domain"
-WHERE (source != null OR asset != null OR method != null) AND date >= date(today) - dur(30 day) AND date < date(today) - dur(7 day)
+WHERE origin = "assisted" AND ingested >= date(today) - dur(30 day) AND ingested < date(today) - dur(7 day)
 SORT file.ctime DESC
 ```
 
@@ -72,9 +74,17 @@ SORT file.ctime DESC
 TABLE WITHOUT ID
   length(rows) as "Count",
   rows.method as "Methods"
-WHERE source != null OR asset != null OR method != null
+WHERE origin = "assisted"
 GROUP BY type
 ```
+
+## ⚠️ Recently failed (DLQ)
+
+The full DLQ table lives at [[borg-dlq]]; this panel surfaces still-pending failures from the last week so they show up here without a manual click.
+
+## 🕳️ Intake without resolution (orphans)
+
+`borg audit` writes [[borg-orphans]] when an intake row has neither a ledger nor DLQ row within the deadline window. If that page is empty, the intake-log invariant is currently clean.
 "#;
 
 /// Resolve the dashboard path from config.
@@ -95,6 +105,21 @@ pub fn ensure_dashboard_exists(dashboard_path: &Path) -> Result<()> {
     let content = DASHBOARD_CONTENT.replace("{date}", &date);
     fs::write(dashboard_path, content).context("Failed to create Borg Dashboard")?;
     log::info!("Created Borg Dashboard at {}", dashboard_path.display());
+    Ok(())
+}
+
+/// Rewrite the dashboard file with the current canonical template. Used by
+/// `borg dashboard refresh` to upgrade dashboards that were generated
+/// before a schema change (e.g. the source != null -> origin = "assisted"
+/// + date -> ingested swap from the 2026-05-11 intake-log + DLQ design).
+pub fn refresh_dashboard(dashboard_path: &Path) -> Result<()> {
+    if let Some(parent) = dashboard_path.parent() {
+        fs::create_dir_all(parent).context("Failed to create dashboard directory")?;
+    }
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let content = DASHBOARD_CONTENT.replace("{date}", &date);
+    fs::write(dashboard_path, content).context("Failed to refresh Borg Dashboard")?;
+    log::info!("Refreshed Borg Dashboard at {}", dashboard_path.display());
     Ok(())
 }
 
@@ -157,6 +182,51 @@ mod tests {
         assert!(content.contains("This Week"));
         assert!(content.contains("This Month"));
         assert!(content.contains("Stats"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_dashboard_uses_origin_assisted_not_source_null() {
+        let path = temp_dashboard_path("test-origin-query.md");
+        cleanup(&path);
+        ensure_dashboard_exists(&path).expect("create");
+        let content = fs::read_to_string(&path).expect("read");
+        assert!(
+            content.contains("origin = \"assisted\""),
+            "dashboard should query origin = \"assisted\""
+        );
+        assert!(
+            !content.contains("source != null"),
+            "stale source != null filter should be gone"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_dashboard_pivots_on_ingested_not_date() {
+        let path = temp_dashboard_path("test-ingested-pivot.md");
+        cleanup(&path);
+        ensure_dashboard_exists(&path).expect("create");
+        let content = fs::read_to_string(&path).expect("read");
+        assert!(
+            content.contains("ingested = date(today)"),
+            "Added Today panel should filter by ingested"
+        );
+        assert!(
+            content.contains("ingested = date(today) - dur(1 day)"),
+            "Yesterday panel should filter by ingested"
+        );
+    }
+
+    #[test]
+    fn test_refresh_dashboard_overwrites_existing() {
+        let path = temp_dashboard_path("test-refresh-dashboard.md");
+        cleanup(&path);
+        fs::write(&path, "STALE CONTENT").expect("seed");
+        refresh_dashboard(&path).expect("refresh");
+        let content = fs::read_to_string(&path).expect("read");
+        assert!(!content.contains("STALE CONTENT"));
+        assert!(content.contains("# Borg Dashboard"));
         cleanup(&path);
     }
 }

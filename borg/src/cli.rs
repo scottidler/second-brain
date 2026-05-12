@@ -124,6 +124,21 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Manage the Borg Dashboard view (refresh to the latest template)
+    Dashboard(DashboardCliArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct DashboardCliArgs {
+    #[command(subcommand)]
+    pub action: DashboardAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DashboardAction {
+    /// Rewrite the dashboard with the current canonical template (used to
+    /// upgrade a dashboard that pre-dates a query-schema change).
+    Refresh,
 }
 
 #[derive(Parser, Debug)]

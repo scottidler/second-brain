@@ -1,4 +1,4 @@
-use borg::cli::{BlocklistAction, Cli, Command, RetentionAction};
+use borg::cli::{BlocklistAction, Cli, Command, DashboardAction, RetentionAction};
 use borg::config::Config;
 use borg::logging;
 use clap::Parser;
@@ -79,6 +79,9 @@ async fn main() -> Result<()> {
         },
         Some(Command::ReingestFailed { dry_run }) => borg::migrate::run_reingest_failed(&config, dry_run).await,
         Some(Command::BackfillIngested { dry_run }) => borg::backfill::run_backfill_ingested(&config, dry_run).await,
+        Some(Command::Dashboard(args)) => match args.action {
+            DashboardAction::Refresh => borg::dashboard::refresh_dashboard(&borg::dashboard::dashboard_path(&config)),
+        },
         Some(Command::Blocklist(args)) => {
             use borg::blocklist::{Blocklist, default_path};
             let path = default_path();
