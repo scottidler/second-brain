@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
             RetentionAction::Status => borg::retention::run_status(&config),
         },
         Some(Command::ReingestFailed { dry_run }) => borg::migrate::run_reingest_failed(&config, dry_run).await,
+        Some(Command::BackfillIngested { dry_run }) => borg::backfill::run_backfill_ingested(&config, dry_run).await,
         Some(Command::Blocklist(args)) => {
             use borg::blocklist::{Blocklist, default_path};
             let path = default_path();

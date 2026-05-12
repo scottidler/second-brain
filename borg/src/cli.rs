@@ -117,6 +117,13 @@ pub enum Command {
     },
     /// Manage the Gate-0 domain blocklist (list / remove / clear)
     Blocklist(BlocklistCliArgs),
+    /// Backfill the `ingested:` frontmatter field on assisted notes that
+    /// were written before the intake-log + DLQ design shipped.
+    BackfillIngested {
+        /// Preview the planned writes without modifying any files.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Parser, Debug)]

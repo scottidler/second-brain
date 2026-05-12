@@ -21,7 +21,7 @@ use std::time::Instant;
 use vault::canonical::{self, CanonicalTagsFile, TagMapping};
 use vault::schema::CORTEX_PRESERVE_KEYS;
 
-mod atomic;
+pub mod atomic;
 mod inflight;
 use atomic::{apply_cortex_fields, apply_ingested_date, apply_original_date, write_atomic};
 use inflight::InflightGuard;

@@ -30,6 +30,10 @@ second-brain/
 - **Tags:** 110 canonical tags, max 7 per note. Borg post-filters Fabric output through the canonical vocabulary. Cortex `sweep` command migrates and governs tags.
 - **Binary names:** `borg`, `cortex`, and `oracle` (no obsidian- prefix)
 
+## Borg durable-capture stores
+
+Every input borg receives is recorded in `system/views/borg-intake.md` synchronously at the door (BEFORE any allowed-chat check, classifier, or pipeline dispatch). Failed or rejected inputs are mirrored to `system/views/borg-dlq.md`. The invariant: every `trace_id` in `borg-intake.md` must also appear in `borg-ledger.md` (success path) or `borg-dlq.md` (failure path); `borg audit` walks that. Notes carry `ingested: <date>` in frontmatter (distinct from `date:`, which preserves the original content date across reingest) so the dashboard counts reingests as activity.
+
 ## Testing
 
 ```
