@@ -40,8 +40,13 @@ pub fn dlq_path(config: &Config) -> PathBuf {
     dlq::dlq_path(&vault_root(config))
 }
 
-fn now_date_time() -> (String, String) {
-    let now = chrono::Local::now();
+fn now_date_time(config: &Config) -> (String, String) {
+    let tz: chrono_tz::Tz = config
+        .frontmatter
+        .timezone
+        .parse()
+        .unwrap_or(chrono_tz::America::Los_Angeles);
+    let now = chrono::Utc::now().with_timezone(&tz);
     (now.format("%Y-%m-%d").to_string(), now.format("%H:%M").to_string())
 }
 
@@ -79,7 +84,7 @@ pub fn record_intake(
     );
     let root = vault_root(config);
     let intake_md = intake::intake_path(&root);
-    let (date, time) = now_date_time();
+    let (date, time) = now_date_time(config);
     let entry = IntakeEntry {
         date,
         time,
@@ -119,7 +124,7 @@ pub fn record_intake_with_sidecar(
     );
     let root = vault_root(config);
     let intake_md = intake::intake_path(&root);
-    let (date, time) = now_date_time();
+    let (date, time) = now_date_time(config);
     let entry = IntakeEntry {
         date,
         time,
@@ -154,7 +159,7 @@ pub fn record_dlq(
         "intake::record_dlq: trace={trace_id} method={method} stage={stage} reason={reason} replay_of={replay_of:?}"
     );
     let dlq_md = dlq_path(config);
-    let (date, time) = now_date_time();
+    let (date, time) = now_date_time(config);
     let entry = DlqEntry {
         date,
         time,

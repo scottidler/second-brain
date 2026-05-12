@@ -200,13 +200,22 @@ pub enum DlqAction {
     },
     /// Show one DLQ row + its intake row + the raw-input sidecar.
     Show { trace_id: String },
-    /// Mark a DLQ row as resolved (or another status).
+    /// Mark a DLQ row as resolved (or another status). When invoked with
+    /// `--resolved`, move every row whose status is already resolved or
+    /// abandoned to `borg-dlq-archive.md`.
     Archive {
-        trace_id: String,
+        /// Trace id to update. Omit when using `--resolved`.
+        trace_id: Option<String>,
         /// Status to write (resolved by default).
         #[arg(long, default_value = "resolved")]
         status: String,
+        /// Move every resolved/abandoned row to the archive file.
+        #[arg(long)]
+        resolved: bool,
     },
+    /// Replay a DLQ entry: generates a new trace_id with `replay_of`
+    /// pointing at the original and re-injects the input.
+    Replay { trace_id: String },
 }
 
 #[derive(Parser, Debug)]

@@ -63,6 +63,43 @@ fn intake_age_secs(row: &ParsedIntakeRow) -> Option<i64> {
     Some((now - local).num_seconds())
 }
 
+/// Compute current invariant health: how many intake rows have no ledger
+/// or DLQ resolution, and how old the oldest unresolved row is. Used by
+/// the `GET /health/audit` HTTP endpoint so operators can poll without
+/// re-reading the markdown tables.
+pub async fn audit_health_stats(config: &Config) -> Result<crate::routes::AuditHealth> {
+    let intake_md = intake_helper::intake_path(config);
+    let dlq_md = intake_helper::dlq_path(config);
+    let ledger_md = ledger::ledger_path(config);
+
+    let intake_rows = intake::parse_entries(&intake_md).context("parse intake")?;
+    let ledger_traces = ledger_trace_ids(&ledger_md).context("parse ledger")?;
+    let dlq_rows = dlq::parse_entries(&dlq_md).context("parse dlq")?;
+    let dlq_traces: std::collections::HashSet<String> = dlq_rows.iter().map(|r| r.trace_id.clone()).collect();
+
+    let mut orphan_count = 0usize;
+    let mut oldest_age: Option<i64> = None;
+    for row in &intake_rows {
+        if ledger_traces.contains(&row.trace_id) || dlq_traces.contains(&row.trace_id) {
+            continue;
+        }
+        if let Some(age) = intake_age_secs(row) {
+            orphan_count += 1;
+            oldest_age = Some(oldest_age.map_or(age, |o| o.max(age)));
+        }
+    }
+    let dlq_pending = dlq_rows.iter().filter(|r| r.status == "pending").count();
+
+    Ok(crate::routes::AuditHealth {
+        orphan_count,
+        oldest_orphan_secs: oldest_age,
+        intake_rows: intake_rows.len(),
+        ledger_rows: ledger_traces.len(),
+        dlq_rows: dlq_rows.len(),
+        dlq_pending,
+    })
+}
+
 /// Walk intake -> ledger / dlq and report orphans (intake rows older than
 /// `bound_secs` with no matching row in either store). Writes
 /// `system/views/borg-orphans.md`.
@@ -295,15 +332,144 @@ pub async fn run_dlq_show(config: &Config, trace_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_dlq_archive(config: &Config, trace_id: &str, status: &str) -> Result<()> {
-    let new_status = DlqStatus::from_str(status).map_err(|e| eyre::eyre!(e))?;
+pub async fn run_dlq_archive(
+    config: &Config,
+    trace_id: Option<String>,
+    status: &str,
+    resolved_mode: bool,
+) -> Result<()> {
     let dlq_md = intake_helper::dlq_path(config);
-    let changed = dlq::update_status(&dlq_md, trace_id, new_status)?;
+    if resolved_mode {
+        let archive_md = vault_root(config)
+            .join("system")
+            .join("views")
+            .join("borg-dlq-archive.md");
+        let moved = dlq::archive_resolved(&dlq_md, &archive_md).context("archive resolved rows")?;
+        println!(
+            "archive --resolved: moved {moved} resolved/abandoned row(s) to {}",
+            archive_md.display()
+        );
+        return Ok(());
+    }
+    let Some(trace_id) = trace_id else {
+        bail!("archive: provide a trace_id or use --resolved");
+    };
+    let new_status = DlqStatus::from_str(status).map_err(|e| eyre::eyre!(e))?;
+    let changed = dlq::update_status(&dlq_md, &trace_id, new_status)?;
     if changed {
         println!("updated dlq trace={trace_id} status={new_status}");
     } else {
         bail!("trace_id {trace_id} not found in DLQ");
     }
+    Ok(())
+}
+
+/// Replay a DLQ entry. Reads the intake row + sidecar for the original
+/// trace, generates a NEW trace_id (so the replay attempt is itself
+/// recorded), writes a new intake row with `replay_of = <original>`
+/// implicit context (preview prefixed), and re-injects the input through
+/// the same method's pipeline. The new attempt's DLQ entry (if it fails
+/// again) carries `replay_of: <original>`. Currently supports URL and
+/// text payloads; binary replay requires the sidecar to contain bytes,
+/// which today is a descriptor only - so binary inputs are rejected with
+/// a clear error rather than silently producing a wrong-bytes ingest.
+pub async fn run_dlq_replay(config: &Config, original_trace: &str) -> Result<()> {
+    log::debug!("triage::run_dlq_replay: original_trace={original_trace}");
+    let intake_md = intake_helper::intake_path(config);
+    let Some(orig) = intake::find_by_trace(&intake_md, original_trace)? else {
+        bail!("trace_id {original_trace} not found in intake log");
+    };
+
+    let method: crate::types::IngestMethod = match orig.method.as_str() {
+        "telegram" => crate::types::IngestMethod::Telegram,
+        "discord" => crate::types::IngestMethod::Discord,
+        "http" => crate::types::IngestMethod::Http,
+        "clipboard" => crate::types::IngestMethod::Clipboard,
+        "cli" => crate::types::IngestMethod::Cli,
+        "ntfy" => crate::types::IngestMethod::Ntfy,
+        other => bail!("replay: unknown method `{other}` on original intake row"),
+    };
+
+    let new_trace = crate::trace::generate(method);
+    let sidecar = intake::raw_input_path(&vault_root(config), original_trace);
+    let sidecar_bytes = if sidecar.exists() {
+        std::fs::read(&sidecar).context("read original sidecar")?
+    } else {
+        Vec::new()
+    };
+
+    let preview = format!("replay-of:{original_trace} | {}", orig.preview);
+
+    // Write the new intake row tying replay back to the original.
+    crate::intake::record_intake_with_sidecar(
+        config,
+        method,
+        &orig.origin_ctx,
+        intake::IntakeKind::from_str(&orig.kind).unwrap_or(intake::IntakeKind::Unknown),
+        &preview,
+        if sidecar_bytes.is_empty() { orig.preview.as_bytes() } else { &sidecar_bytes },
+        &new_trace,
+    )
+    .context("failed to record replay intake")?;
+
+    // Dispatch by kind. Only URL and Text are losslessly replayable from
+    // the sidecar; for everything else we record an immediate DLQ entry
+    // with the replay_of pointer so the operator knows the replay was
+    // attempted.
+    match orig.kind.as_str() {
+        "url" => {
+            let url = orig.preview.clone();
+            log::info!("replay: dispatching URL {url} new_trace={new_trace} original={original_trace}");
+            let result = crate::pipeline::process_content(
+                crate::types::ContentKind::Url(url.clone()),
+                vec![],
+                method,
+                /* force */ true,
+                config,
+                Some(new_trace.clone()),
+            )
+            .await;
+            println!(
+                "replay: trace={new_trace} replay_of={original_trace} result={:?}",
+                result.status
+            );
+        }
+        "text" => {
+            let text = if !sidecar_bytes.is_empty() {
+                String::from_utf8_lossy(&sidecar_bytes).into_owned()
+            } else {
+                orig.preview.clone()
+            };
+            log::info!("replay: dispatching text new_trace={new_trace} original={original_trace}");
+            let result = crate::pipeline::process_content(
+                crate::types::ContentKind::Text(text),
+                vec![],
+                method,
+                /* force */ true,
+                config,
+                Some(new_trace.clone()),
+            )
+            .await;
+            println!(
+                "replay: trace={new_trace} replay_of={original_trace} result={:?}",
+                result.status
+            );
+        }
+        other => {
+            let reason = format!("replay: binary kind `{other}` cannot be replayed from text sidecar");
+            crate::intake::record_dlq(
+                config,
+                method,
+                crate::intake::Stage::IntakeReject,
+                &reason,
+                &preview,
+                &new_trace,
+                Some(original_trace),
+            );
+            bail!("{reason}");
+        }
+    }
+
     Ok(())
 }
 

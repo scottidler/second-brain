@@ -174,6 +174,10 @@ pub fn dlq_path(vault_root: &Path) -> PathBuf {
     vault_root.join("system").join("views").join("borg-dlq.md")
 }
 
+pub fn dlq_archive_path(vault_root: &Path) -> PathBuf {
+    vault_root.join("system").join("views").join("borg-dlq-archive.md")
+}
+
 pub fn ensure_dlq_exists(dlq_path: &Path) -> Result<()> {
     if dlq_path.exists() {
         return Ok(());
@@ -350,6 +354,94 @@ pub fn update_status(dlq_path: &Path, trace_id: &str, new_status: DlqStatus) -> 
     }
 
     Ok(found)
+}
+
+/// Move every DLQ row whose status is `Resolved` or `Abandoned` from
+/// `borg-dlq.md` to `borg-dlq-archive.md` (created with the same header on
+/// first use). Returns the number of rows moved.
+pub fn archive_resolved(dlq_path: &Path, archive_path: &Path) -> Result<usize> {
+    log::debug!(
+        "dlq::archive_resolved: active={} archive={}",
+        dlq_path.display(),
+        archive_path.display()
+    );
+    if !dlq_path.exists() {
+        return Ok(0);
+    }
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dlq_path)
+        .context("Failed to open Borg DLQ for archive")?;
+    file.lock_exclusive()
+        .context("Failed to acquire exclusive lock on Borg DLQ")?;
+
+    let content = fs::read_to_string(dlq_path).context("Failed to read Borg DLQ")?;
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Find header for cell-index lookup.
+    let header_idx = lines.iter().position(|l| l.starts_with("| Date"));
+    let Some(hi) = header_idx else {
+        return Ok(0);
+    };
+    let header_cells: Vec<&str> = lines[hi].split('|').map(|c| c.trim()).collect();
+    let status_pos = header_cells.iter().position(|c| *c == COL_STATUS);
+    let Some(status_pos) = status_pos else {
+        return Ok(0);
+    };
+
+    let mut kept: Vec<String> = Vec::new();
+    let mut to_archive: Vec<String> = Vec::new();
+    for line in &lines {
+        if line.starts_with('|') && !line.starts_with("| Date") && !line.starts_with("|--") {
+            let cells: Vec<&str> = line.split('|').collect();
+            let status = cells.get(status_pos).map(|c| c.trim()).unwrap_or("");
+            if status == "resolved" || status == "abandoned" {
+                to_archive.push((*line).to_string());
+                continue;
+            }
+        }
+        kept.push((*line).to_string());
+    }
+
+    if to_archive.is_empty() {
+        return Ok(0);
+    }
+
+    // Append archived rows to the archive file.
+    ensure_dlq_archive_exists(archive_path)?;
+    table::ensure_header_matches(archive_path, DLQ_HEADER, DLQ_SEPARATOR, "Borg DLQ Archive")?;
+    let archive_content = fs::read_to_string(archive_path).context("Failed to read Borg DLQ Archive")?;
+    let mut archive_updated = archive_content;
+    for row in &to_archive {
+        archive_updated = table::insert_after_separator(&archive_updated, row);
+    }
+    fs::write(archive_path, archive_updated).context("Failed to write Borg DLQ Archive")?;
+
+    // Rewrite the active DLQ without the archived rows.
+    let trailing = if content.ends_with('\n') { "\n" } else { "" };
+    fs::write(dlq_path, format!("{}{trailing}", kept.join("\n"))).context("Failed to write Borg DLQ")?;
+    file.unlock().ok();
+
+    Ok(to_archive.len())
+}
+
+fn ensure_dlq_archive_exists(archive_path: &Path) -> Result<()> {
+    if archive_path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = archive_path.parent() {
+        fs::create_dir_all(parent).context("Failed to create Borg DLQ Archive directory")?;
+    }
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    // Reuse the active DLQ frontmatter but mark the title differently.
+    let content = DLQ_FRONTMATTER
+        .replace("{date}", &date)
+        .replace("Borg Dead Letter Queue", "Borg DLQ Archive");
+    fs::write(archive_path, content).context("Failed to create Borg DLQ Archive")?;
+    log::info!("Created Borg DLQ Archive at {}", archive_path.display());
+    Ok(())
 }
 
 #[cfg(test)]

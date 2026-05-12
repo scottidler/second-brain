@@ -41,6 +41,7 @@ pub mod trace;
 pub mod transcription;
 pub mod triage;
 pub mod types;
+pub mod watchdog;
 pub mod youtube;
 
 use axum::Router;
@@ -71,6 +72,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(routes::health))
+        .route("/health/audit", get(routes::health_audit))
         .route("/ingest", post(routes::ingest))
         .route("/ingest/file", post(routes::ingest_multipart))
         .route("/note", post(routes::note))
@@ -208,6 +210,19 @@ pub async fn run_server(config: Config, _verbose: bool) -> Result<()> {
                 ntfy_config.topic
             );
         }
+    }
+
+    // Watchdog: every minute, scan intake -> ledger/dlq and record
+    // watchdog-orphan DLQ rows for any trace_id that has not produced a
+    // resolution within `pipeline.hard_timeout_secs + buffer`.
+    {
+        let cfg = config.clone();
+        tasks.spawn(async move {
+            watchdog::run(cfg).await;
+            // run() loops forever; if it returns, that's a bug.
+            Err::<(), eyre::Report>(eyre::eyre!("watchdog exited unexpectedly"))
+        });
+        println!("{} watchdog active", "-->".green());
     }
 
     // Monitor tasks: log failures but keep the daemon alive as long as HTTP is running

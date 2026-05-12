@@ -76,7 +76,12 @@ async fn main() -> Result<()> {
                 limit,
             } => borg::triage::run_dlq_list(&config, method, stage, status, limit).await,
             DlqAction::Show { trace_id } => borg::triage::run_dlq_show(&config, &trace_id).await,
-            DlqAction::Archive { trace_id, status } => borg::triage::run_dlq_archive(&config, &trace_id, &status).await,
+            DlqAction::Archive {
+                trace_id,
+                status,
+                resolved,
+            } => borg::triage::run_dlq_archive(&config, trace_id, &status, resolved).await,
+            DlqAction::Replay { trace_id } => borg::triage::run_dlq_replay(&config, &trace_id).await,
         },
         Some(Command::Reingest {
             all,

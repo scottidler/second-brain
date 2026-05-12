@@ -21,6 +21,27 @@ pub async fn health() -> Json<HealthResponse> {
     crate::health::health_handler("obsidian-borg", env!("GIT_DESCRIBE")).await
 }
 
+#[derive(serde::Serialize, Default)]
+pub struct AuditHealth {
+    pub orphan_count: usize,
+    pub oldest_orphan_secs: Option<i64>,
+    pub intake_rows: usize,
+    pub ledger_rows: usize,
+    pub dlq_rows: usize,
+    pub dlq_pending: usize,
+}
+
+/// Live invariant status: how many intake rows currently have no ledger /
+/// DLQ resolution, and how old the oldest such row is. Operators can poll
+/// this to detect a silent-drop regression without reading the markdown
+/// tables.
+pub async fn health_audit(State(state): State<AppState>) -> Json<AuditHealth> {
+    let stats = crate::triage::audit_health_stats(&state.config)
+        .await
+        .unwrap_or_default();
+    Json(stats)
+}
+
 pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestRequest>) -> Json<IngestResult> {
     log::info!("Received ingest request for URL: {}", request.url);
 
