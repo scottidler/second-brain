@@ -27,6 +27,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 shellexpand = { workspace = true }
 walkdir = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.27"

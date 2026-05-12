@@ -4860,6 +4860,7 @@ dependencies = [
  "fs2",
  "log",
  "notify",
+ "rayon",
  "regex",
  "rusqlite",
  "schemars 1.2.1",

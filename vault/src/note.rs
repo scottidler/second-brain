@@ -1,4 +1,5 @@
 use eyre::{Context, Result};
+use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -33,10 +34,18 @@ pub fn parse_note(vault_root: &Path, path: &Path) -> Result<Note> {
     })
 }
 
-/// Scan an entire vault and return all parsed notes.
-pub fn scan_vault(vault_root: &Path, scan_config: &ScanConfig) -> Result<Vec<Note>> {
-    let mut notes = Vec::new();
-
+/// Collect the absolute paths of every `.md` file in the vault, respecting `ignore` directories.
+///
+/// Sequential by design: WalkDir is fast and the I/O is cheap (directory enumeration only).
+/// The expensive work - opening, reading, and YAML-parsing each note - happens later in
+/// `scan_vault` via `rayon::par_iter`.
+fn collect_md_paths(vault_root: &Path, scan_config: &ScanConfig) -> Result<Vec<PathBuf>> {
+    log::debug!(
+        "note::collect_md_paths: vault_root={} ignore={:?}",
+        vault_root.display(),
+        scan_config.ignore
+    );
+    let mut paths = Vec::new();
     for entry in WalkDir::new(vault_root)
         .follow_links(false)
         .into_iter()
@@ -56,14 +65,32 @@ pub fn scan_vault(vault_root: &Path, scan_config: &ScanConfig) -> Result<Vec<Not
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
+        paths.push(path.to_path_buf());
+    }
+    log::debug!("note::collect_md_paths: collected {} md path(s)", paths.len());
+    Ok(paths)
+}
 
-        match parse_note(vault_root, path) {
-            Ok(note) => notes.push(note),
+/// Scan an entire vault and return all parsed notes.
+///
+/// Walks the vault sequentially to discover `.md` paths, then parses them in parallel via
+/// `rayon::par_iter`. Parse failures are logged at `warn!` (matching the pre-parallel behavior)
+/// and excluded from the result. The returned vector is sorted by path for deterministic output
+/// regardless of parallel completion order.
+pub fn scan_vault(vault_root: &Path, scan_config: &ScanConfig) -> Result<Vec<Note>> {
+    log::debug!("note::scan_vault: vault_root={}", vault_root.display());
+    let paths = collect_md_paths(vault_root, scan_config)?;
+
+    let mut notes: Vec<Note> = paths
+        .par_iter()
+        .filter_map(|path| match parse_note(vault_root, path) {
+            Ok(note) => Some(note),
             Err(e) => {
                 log::warn!("failed to parse note {}: {e}", path.display());
+                None
             }
-        }
-    }
+        })
+        .collect();
 
     notes.sort_by(|a, b| a.path.cmp(&b.path));
     log::info!("vault parsed: {} notes", notes.len());
@@ -145,5 +172,50 @@ mod tests {
         };
         let notes = scan_vault(dir.path(), &config).expect("scan");
         assert_eq!(notes.len(), 2);
+    }
+
+    /// Phase 1 determinism guard: parallel `scan_vault` must return notes sorted by path,
+    /// independent of parallel completion order. Build a vault with notes whose unsorted
+    /// natural traversal order would differ from the sorted order, then assert the result is
+    /// sorted.
+    #[test]
+    fn scan_vault_returns_path_sorted_notes_under_par_iter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        // Names chosen so alphabetical order is not the FS-traversal order on most filesystems.
+        for name in &["zeta.md", "alpha.md", "mike.md", "bravo.md", "yankee.md"] {
+            fs::write(root.join(name), "---\ntitle: x\ntype: note\n---\nbody\n").expect("write");
+        }
+        let config = ScanConfig {
+            ignore: vec![".git".to_string(), ".obsidian".to_string()],
+        };
+        let notes = scan_vault(root, &config).expect("scan");
+        let mut sorted_paths: Vec<PathBuf> = notes.iter().map(|n| n.path.clone()).collect();
+        let original = sorted_paths.clone();
+        sorted_paths.sort();
+        assert_eq!(
+            original, sorted_paths,
+            "scan_vault output must be path-sorted regardless of parallel completion order"
+        );
+    }
+
+    /// Phase 1 error-path guard: an unreadable `.md` file (non-UTF-8 bytes) is warn-logged and
+    /// skipped without aborting the whole scan; sibling notes still parse. This exercises the
+    /// `parse_note` -> `fs::read_to_string` error branch, which is the only branch that returns
+    /// `Err` in practice (frontmatter parsing is lenient by design).
+    #[test]
+    fn scan_vault_skips_unreadable_notes_and_keeps_good_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("good.md"), "---\ntitle: ok\ntype: note\n---\nbody\n").expect("write good");
+        // Invalid UTF-8 bytes: read_to_string returns Err for this file.
+        fs::write(root.join("invalid-utf8.md"), [0xFFu8, 0xFE, 0xFD, 0xFC]).expect("write bytes");
+        let config = ScanConfig {
+            ignore: vec![".git".to_string(), ".obsidian".to_string()],
+        };
+        let notes = scan_vault(root, &config).expect("scan should not propagate parse error");
+        // Only the good note should be returned; the unreadable one is warn-logged and dropped.
+        assert_eq!(notes.len(), 1, "expected only the good note to survive parse");
+        assert_eq!(notes[0].path.to_string_lossy(), "good.md");
     }
 }
