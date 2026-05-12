@@ -1,4 +1,4 @@
-use borg::cli::{BlocklistAction, Cli, Command, DashboardAction, RetentionAction};
+use borg::cli::{BlocklistAction, Cli, Command, DashboardAction, DlqAction, IntakeAction, RetentionAction};
 use borg::config::Config;
 use borg::logging;
 use clap::Parser;
@@ -51,7 +51,33 @@ async fn main() -> Result<()> {
         Some(Command::Hotkey(opts)) => borg::run_hotkey(opts, &config).await,
         Some(Command::Sign) => borg::run_sign(&config).await,
         Some(Command::Migrate { dry_run: _, apply }) => borg::migrate::run_migrate(&config, apply).await,
-        Some(Command::Audit { fix }) => borg::audit::run_audit(&config, fix).await,
+        Some(Command::Audit {
+            fix,
+            invariant,
+            bound_secs,
+        }) => {
+            if invariant {
+                borg::triage::run_orphan_audit(&config, bound_secs).await
+            } else {
+                borg::audit::run_audit(&config, fix).await
+            }
+        }
+        Some(Command::Intake(args)) => match args.action {
+            IntakeAction::List { method, since, limit } => {
+                borg::triage::run_intake_list(&config, method, since, limit).await
+            }
+            IntakeAction::Show { trace_id } => borg::triage::run_intake_show(&config, &trace_id).await,
+        },
+        Some(Command::Dlq(args)) => match args.action {
+            DlqAction::List {
+                method,
+                stage,
+                status,
+                limit,
+            } => borg::triage::run_dlq_list(&config, method, stage, status, limit).await,
+            DlqAction::Show { trace_id } => borg::triage::run_dlq_show(&config, &trace_id).await,
+            DlqAction::Archive { trace_id, status } => borg::triage::run_dlq_archive(&config, &trace_id, &status).await,
+        },
         Some(Command::Reingest {
             all,
             r#type,

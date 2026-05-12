@@ -74,12 +74,26 @@ pub enum Command {
         #[arg(long)]
         apply: bool,
     },
-    /// Audit ledger and vault for misclassified or broken entries
+    /// Audit ledger and vault for misclassified or broken entries.
+    /// With --invariant, walk intake/ledger/dlq and report orphans -
+    /// trace_ids in the intake log that have no resolution.
     Audit {
         /// Fix misclassified types in vault notes
         #[arg(long)]
         fix: bool,
+        /// Run the intake -> ledger / dlq invariant audit instead of the
+        /// classification audit. Writes `system/views/borg-orphans.md`.
+        #[arg(long)]
+        invariant: bool,
+        /// Maximum seconds an intake row can lack a ledger/dlq resolution
+        /// before it is reported as an orphan.
+        #[arg(long, default_value_t = 1800)]
+        bound_secs: u64,
     },
+    /// Inspect the intake log (every input borg received).
+    Intake(IntakeCliArgs),
+    /// Inspect and replay the dead letter queue.
+    Dlq(DlqCliArgs),
     /// Reingest existing entries through the current pipeline
     Reingest {
         /// Reingest all completed entries
@@ -139,6 +153,60 @@ pub enum DashboardAction {
     /// Rewrite the dashboard with the current canonical template (used to
     /// upgrade a dashboard that pre-dates a query-schema change).
     Refresh,
+}
+
+#[derive(Parser, Debug)]
+pub struct IntakeCliArgs {
+    #[command(subcommand)]
+    pub action: IntakeAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IntakeAction {
+    /// List recent intake rows.
+    List {
+        /// Filter by ingest method (telegram, http, ntfy, discord, cli).
+        #[arg(long)]
+        method: Option<String>,
+        /// Only rows on or after this date (YYYY-MM-DD).
+        #[arg(long)]
+        since: Option<String>,
+        /// Maximum number of rows.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Show the intake row + raw-input sidecar for a single trace.
+    Show { trace_id: String },
+}
+
+#[derive(Parser, Debug)]
+pub struct DlqCliArgs {
+    #[command(subcommand)]
+    pub action: DlqAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DlqAction {
+    /// List DLQ rows.
+    List {
+        #[arg(long)]
+        method: Option<String>,
+        #[arg(long)]
+        stage: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Show one DLQ row + its intake row + the raw-input sidecar.
+    Show { trace_id: String },
+    /// Mark a DLQ row as resolved (or another status).
+    Archive {
+        trace_id: String,
+        /// Status to write (resolved by default).
+        #[arg(long, default_value = "resolved")]
+        status: String,
+    },
 }
 
 #[derive(Parser, Debug)]

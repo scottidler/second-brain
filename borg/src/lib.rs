@@ -39,6 +39,7 @@ pub mod stages;
 pub mod telegram;
 pub mod trace;
 pub mod transcription;
+pub mod triage;
 pub mod types;
 pub mod youtube;
 
