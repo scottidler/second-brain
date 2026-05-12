@@ -2,6 +2,19 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+/// Frontmatter keys owned by cortex. Borg preserves these across reingest so a
+/// fetch of an already-classified URL does not strip the classification work.
+/// Single source of truth; do not duplicate this list.
+pub const CORTEX_PRESERVE_KEYS: &[&str] = &[
+    "domain",
+    "status",
+    "cortex-classified",
+    "cortex-classified-by",
+    "cortex-confidence",
+    "cortex-quality",
+    "cortex-quality-issues",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]

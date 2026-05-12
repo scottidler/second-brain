@@ -17,16 +17,7 @@ use eyre::{Context, ContextCompat, Result};
 use std::io::Write;
 use std::path::Path;
 use tempfile::Builder;
-
-const CORTEX_PRESERVE_KEYS: &[&str] = &[
-    "domain",
-    "status",
-    "cortex-classified",
-    "cortex-classified-by",
-    "cortex-confidence",
-    "cortex-quality",
-    "cortex-quality-issues",
-];
+use vault::schema::CORTEX_PRESERVE_KEYS;
 
 /// Atomically write `bytes` to `dest`. Uses a sibling `.borg-tmp-<random>`
 /// file so a `SIGKILL` mid-write cannot leave the destination in a partial

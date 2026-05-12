@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
 use vault::canonical::{self, CanonicalTagsFile, TagMapping};
+use vault::schema::CORTEX_PRESERVE_KEYS;
 
 mod atomic;
 mod inflight;
@@ -2537,16 +2538,6 @@ fn read_note_date(path: &std::path::Path) -> Option<String> {
     }
     None
 }
-
-const CORTEX_PRESERVE_KEYS: &[&str] = &[
-    "domain",
-    "status",
-    "cortex-classified",
-    "cortex-classified-by",
-    "cortex-confidence",
-    "cortex-quality",
-    "cortex-quality-issues",
-];
 
 /// Read cortex-managed fields from frontmatter.
 /// Assumes all values are single-line (inline YAML). This holds for all current
