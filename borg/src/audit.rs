@@ -266,19 +266,36 @@ pub fn run_audit(config: &Config, fix: bool) -> Result<()> {
 }
 
 /// Build an index mapping source URL -> list of note file paths in the vault.
+///
+/// Parallel over the `.md` file list via rayon. `par_iter().filter_map().collect::<Vec<_>>()`
+/// preserves the input-slice order (which `collect_md_files` already sorts), so when we fold
+/// the `(source, path)` pairs into the final `HashMap<String, Vec<PathBuf>>` sequentially on
+/// the main thread the per-source `Vec<PathBuf>` ordering is identical to the previous
+/// sequential implementation.
 fn build_note_index(vault_root: &Path, skip_folders: &[String]) -> Result<HashMap<String, Vec<PathBuf>>> {
-    let mut index: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    use rayon::prelude::*;
+
+    log::debug!(
+        "audit::build_note_index: vault_root={} skip_folders={:?}",
+        vault_root.display(),
+        skip_folders
+    );
     let md_files = collect_md_files(vault_root, skip_folders)?;
 
-    for path in &md_files {
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        if let Some(source) = extract_frontmatter_field(&content, "source") {
-            index.entry(source).or_default().push(path.clone());
-        }
+    let pairs: Vec<(String, PathBuf)> = md_files
+        .par_iter()
+        .filter_map(|path| {
+            let content = std::fs::read_to_string(path).ok()?;
+            let source = extract_frontmatter_field(&content, "source")?;
+            Some((source, path.clone()))
+        })
+        .collect();
+
+    let mut index: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for (source, path) in pairs {
+        index.entry(source).or_default().push(path);
     }
+    log::debug!("audit::build_note_index: indexed {} source url(s)", index.len());
 
     Ok(index)
 }
@@ -497,5 +514,50 @@ mod tests {
         assert!(display.contains("[ORPHAN-REPLACE]"));
         assert!(display.contains("2026-03-18"));
         assert!(display.contains("no replacement"));
+    }
+
+    /// Phase 3 determinism guard: parallel `build_note_index` must produce the same per-source
+    /// `Vec<PathBuf>` ordering as the previous sequential implementation. The contract: notes
+    /// that share a source URL appear in the same order they would appear in the sorted
+    /// `collect_md_files` output. Build a fixture where two notes point at the same source URL
+    /// and verify both the key set and the per-key path order.
+    #[test]
+    fn build_note_index_per_source_order_matches_sorted_md_files_under_par_iter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        // Names chosen so the sorted order is alpha.md < bravo.md < charlie.md.
+        std::fs::write(
+            root.join("alpha.md"),
+            "---\ntitle: A\nsource: https://example.com/shared\n---\nbody\n",
+        )
+        .expect("write alpha");
+        std::fs::write(
+            root.join("bravo.md"),
+            "---\ntitle: B\nsource: https://example.com/unique\n---\nbody\n",
+        )
+        .expect("write bravo");
+        std::fs::write(
+            root.join("charlie.md"),
+            "---\ntitle: C\nsource: https://example.com/shared\n---\nbody\n",
+        )
+        .expect("write charlie");
+
+        let index = build_note_index(root, &[]).expect("index");
+
+        // Both "shared" entries should be present, in collect_md_files order: alpha then charlie.
+        let shared = index.get("https://example.com/shared").expect("shared key present");
+        assert_eq!(shared.len(), 2, "two notes share the same source URL");
+        let shared_names: Vec<String> = shared
+            .iter()
+            .map(|p| p.file_name().expect("path has filename").to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            shared_names,
+            vec!["alpha.md".to_string(), "charlie.md".to_string()],
+            "per-source path order must match sorted collect_md_files order, not par_iter completion order"
+        );
+
+        let unique = index.get("https://example.com/unique").expect("unique key present");
+        assert_eq!(unique.len(), 1);
     }
 }

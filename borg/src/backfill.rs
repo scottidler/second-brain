@@ -8,7 +8,9 @@
 use crate::config::Config;
 use crate::pipeline::atomic::{apply_ingested_date, write_atomic};
 use eyre::{Context, Result};
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Default)]
@@ -19,6 +21,26 @@ pub struct BackfillReport {
     pub skipped_recently_modified: usize,
     pub skipped_no_date: usize,
     pub backfilled: usize,
+}
+
+/// Per-path classification produced by the parallel scan phase. The sequential phase that
+/// follows simply tallies the counts and (for `Apply`) writes through `write_atomic`. Keeping
+/// the write phase sequential side-steps the parent-directory `fsync` contention that
+/// `write_atomic` would cause if 16 threads concurrently wrote into the same `inbox/<date>/`
+/// folder.
+enum BackfillDecision {
+    SkippedAuthored,
+    SkippedAlreadyPresent,
+    SkippedRecentlyModified,
+    SkippedNoDate,
+    ReadFailed,
+    MtimeError,
+    /// Note is eligible for backfill. `date` is the value to splice into the `ingested:` field.
+    Apply {
+        path: PathBuf,
+        content: String,
+        date: String,
+    },
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
@@ -84,6 +106,49 @@ fn is_recently_modified(path: &Path, min_age: Duration) -> Result<bool> {
     Ok(age < min_age)
 }
 
+/// Classify a single note file. Pure CPU + read-only I/O; safe to run from a rayon worker.
+fn classify_for_backfill(path: &Path, min_age: Duration) -> BackfillDecision {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("backfill-ingested: cannot read {}: {e}", path.display());
+            return BackfillDecision::ReadFailed;
+        }
+    };
+
+    let origin = extract_frontmatter_field(&content, "origin");
+    if origin.as_deref() != Some("assisted") {
+        return BackfillDecision::SkippedAuthored;
+    }
+    if extract_frontmatter_field(&content, "ingested").is_some() {
+        return BackfillDecision::SkippedAlreadyPresent;
+    }
+    let Some(date) = extract_frontmatter_field(&content, "date") else {
+        log::debug!("backfill-ingested: skipping {} (no date: field)", path.display());
+        return BackfillDecision::SkippedNoDate;
+    };
+
+    match is_recently_modified(path, min_age) {
+        Ok(true) => {
+            log::debug!(
+                "backfill-ingested: skipping {} (mtime within {:?})",
+                path.display(),
+                min_age
+            );
+            BackfillDecision::SkippedRecentlyModified
+        }
+        Ok(false) => BackfillDecision::Apply {
+            path: path.to_path_buf(),
+            content,
+            date,
+        },
+        Err(e) => {
+            log::warn!("backfill-ingested: mtime check failed for {}: {e}", path.display());
+            BackfillDecision::MtimeError
+        }
+    }
+}
+
 pub fn run_backfill_ingested(config: &Config, dry_run: bool) -> Result<()> {
     let vault_root = expand_tilde(&config.vault.root_path);
     log::debug!(
@@ -93,70 +158,76 @@ pub fn run_backfill_ingested(config: &Config, dry_run: bool) -> Result<()> {
     let md_files = collect_md_files(&vault_root, &config.migration.skip_folders).context("Failed to walk vault")?;
     log::info!("backfill-ingested: scanning {} note files", md_files.len());
 
-    let mut report = BackfillReport::default();
+    // Parallel classification phase: pure CPU + read-only I/O per note.
+    // Counters are aggregated lock-free via AtomicUsize; the only items that flow back to the
+    // sequential write phase are the `Apply` decisions.
     let min_age = Duration::from_secs(60);
+    let skipped_authored = AtomicUsize::new(0);
+    let skipped_already_present = AtomicUsize::new(0);
+    let skipped_recently_modified = AtomicUsize::new(0);
+    let skipped_no_date = AtomicUsize::new(0);
 
-    for path in &md_files {
-        report.scanned += 1;
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("backfill-ingested: cannot read {}: {e}", path.display());
-                continue;
+    let to_apply: Vec<BackfillDecision> = md_files
+        .par_iter()
+        .map(|path| classify_for_backfill(path, min_age))
+        .filter_map(|decision| match decision {
+            BackfillDecision::SkippedAuthored => {
+                skipped_authored.fetch_add(1, Ordering::Relaxed);
+                None
             }
+            BackfillDecision::SkippedAlreadyPresent => {
+                skipped_already_present.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            BackfillDecision::SkippedRecentlyModified => {
+                skipped_recently_modified.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            BackfillDecision::SkippedNoDate => {
+                skipped_no_date.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            BackfillDecision::ReadFailed | BackfillDecision::MtimeError => None,
+            apply @ BackfillDecision::Apply { .. } => Some(apply),
+        })
+        .collect();
+
+    // Sequential write phase: side-steps parent-directory fsync contention from write_atomic
+    // when many notes target the same inbox/<date>/ folder. If a future benchmark shows
+    // parallel writes outperform sequential ones here, swap this loop to a par_iter.
+    let mut backfilled: usize = 0;
+    for decision in to_apply {
+        let BackfillDecision::Apply { path, content, date } = decision else {
+            unreachable!("filter_map already kept only Apply variants");
         };
-
-        let origin = extract_frontmatter_field(&content, "origin");
-        if origin.as_deref() != Some("assisted") {
-            report.skipped_authored += 1;
-            continue;
-        }
-        if extract_frontmatter_field(&content, "ingested").is_some() {
-            report.skipped_already_present += 1;
-            continue;
-        }
-        let Some(date) = extract_frontmatter_field(&content, "date") else {
-            log::debug!("backfill-ingested: skipping {} (no date: field)", path.display());
-            report.skipped_no_date += 1;
-            continue;
-        };
-
-        match is_recently_modified(path, min_age) {
-            Ok(true) => {
-                log::debug!(
-                    "backfill-ingested: skipping {} (mtime within {:?})",
-                    path.display(),
-                    min_age
-                );
-                report.skipped_recently_modified += 1;
-                continue;
-            }
-            Ok(false) => {}
-            Err(e) => {
-                log::warn!("backfill-ingested: mtime check failed for {}: {e}", path.display());
-            }
-        }
 
         if dry_run {
-            log::info!("backfill-ingested: WOULD set ingested={} on {}", date, path.display());
-            report.backfilled += 1;
+            log::info!("backfill-ingested: WOULD set ingested={date} on {}", path.display());
+            backfilled += 1;
             continue;
         }
 
         let updated = apply_ingested_date(&content, &date);
         if updated == content {
-            // The helper returned no change: either no frontmatter, or the
-            // insertion path failed. Either way, skip rather than write.
             log::warn!(
                 "backfill-ingested: apply_ingested_date produced no change for {}",
                 path.display()
             );
             continue;
         }
-        write_atomic(path, updated.as_bytes()).with_context(|| format!("write {}", path.display()))?;
+        write_atomic(&path, updated.as_bytes()).with_context(|| format!("write {}", path.display()))?;
         log::info!("backfill-ingested: set ingested={date} on {}", path.display());
-        report.backfilled += 1;
+        backfilled += 1;
     }
+
+    let report = BackfillReport {
+        scanned: md_files.len(),
+        skipped_authored: skipped_authored.into_inner(),
+        skipped_already_present: skipped_already_present.into_inner(),
+        skipped_recently_modified: skipped_recently_modified.into_inner(),
+        skipped_no_date: skipped_no_date.into_inner(),
+        backfilled,
+    };
 
     println!(
         "backfill-ingested complete:\n  scanned: {}\n  backfilled: {}{}\n  skipped (already had ingested:): {}\n  skipped (origin != assisted): {}\n  skipped (recent mtime): {}\n  skipped (no date: field): {}",
