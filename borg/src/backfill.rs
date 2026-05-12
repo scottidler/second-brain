@@ -84,7 +84,7 @@ fn is_recently_modified(path: &Path, min_age: Duration) -> Result<bool> {
     Ok(age < min_age)
 }
 
-pub async fn run_backfill_ingested(config: &Config, dry_run: bool) -> Result<()> {
+pub fn run_backfill_ingested(config: &Config, dry_run: bool) -> Result<()> {
     let vault_root = expand_tilde(&config.vault.root_path);
     log::debug!(
         "backfill::run_backfill_ingested: vault={} dry_run={dry_run}",

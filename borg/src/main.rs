@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
             if invariant {
                 borg::triage::run_orphan_audit(&config, bound_secs).await
             } else {
-                borg::audit::run_audit(&config, fix).await
+                borg::audit::run_audit(&config, fix)
             }
         }
         Some(Command::Intake(args)) => match args.action {
@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
             RetentionAction::Status => borg::retention::run_status(&config),
         },
         Some(Command::ReingestFailed { dry_run }) => borg::migrate::run_reingest_failed(&config, dry_run).await,
-        Some(Command::BackfillIngested { dry_run }) => borg::backfill::run_backfill_ingested(&config, dry_run).await,
+        Some(Command::BackfillIngested { dry_run }) => borg::backfill::run_backfill_ingested(&config, dry_run),
         Some(Command::Dashboard(args)) => match args.action {
             DashboardAction::Refresh => borg::dashboard::refresh_dashboard(&borg::dashboard::dashboard_path(&config)),
         },

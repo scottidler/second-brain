@@ -111,10 +111,14 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let weekly = tokio::time::sleep(weekly_dur);
     tokio::pin!(weekly);
 
-    // Run a full sweep on startup
+    // Run a full sweep on startup.
+    // block_in_place isolates the blocking CPU+I/O sweep from the tokio worker thread, letting
+    // the watcher and timers continue to run; once Phase 1 rayon lands inside scan_vault, this
+    // wrap is the boundary between the async runtime and the rayon worker pool.
     log::info!("running initial full sweep");
     applying.store(true, Ordering::Relaxed);
-    let mut last_fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
+    let mut last_fingerprint =
+        tokio::task::block_in_place(|| run_configured_actions(vault_root, config, daemon_config, &[]));
     applying.store(false, Ordering::Relaxed);
 
     loop {
@@ -129,7 +133,9 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     println!("  changed: {}", path.display());
                 }
                 applying.store(true, Ordering::Relaxed);
-                let fingerprint = run_configured_actions(vault_root, config, daemon_config, &pending);
+                let fingerprint = tokio::task::block_in_place(|| {
+                    run_configured_actions(vault_root, config, daemon_config, &pending)
+                });
                 applying.store(false, Ordering::Relaxed);
                 // Real user edit - reset cycle detection so periodic sweeps re-enable
                 last_fingerprint = if fingerprint.is_empty() { SweepFingerprint::default() } else { fingerprint };
@@ -144,12 +150,14 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     // Don't run most actions - last sweep applied fixes, so running again risks repeating them.
                     // Exception: classify is inherently idempotent (marks notes cortex-classified: true),
                     // so it can never cause a cycle and must always run to promote new inbox notes.
-                    run_classify_only(vault_root, config, daemon_config);
+                    tokio::task::block_in_place(|| run_classify_only(vault_root, config, daemon_config));
                     // A real user edit will reset last_fingerprint and re-enable sweeps.
                 } else {
                     log::info!("running periodic sweep");
                     applying.store(true, Ordering::Relaxed);
-                    let fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
+                    let fingerprint = tokio::task::block_in_place(|| {
+                        run_configured_actions(vault_root, config, daemon_config, &[])
+                    });
                     applying.store(false, Ordering::Relaxed);
                     last_fingerprint = fingerprint;
                 }
@@ -163,7 +171,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     weekly: false,
                     output: None,
                 };
-                if let Err(e) = crate::run_intel(vault_root, config, &opts) {
+                if let Err(e) = tokio::task::block_in_place(|| crate::run_intel(vault_root, config, &opts)) {
                     log::error!("scheduled daily intel failed: {e}");
                 }
                 // Reschedule for next day
@@ -182,7 +190,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     weekly: true,
                     output: None,
                 };
-                if let Err(e) = crate::run_intel(vault_root, config, &opts) {
+                if let Err(e) = tokio::task::block_in_place(|| crate::run_intel(vault_root, config, &opts)) {
                     log::error!("scheduled weekly intel failed: {e}");
                 }
                 // Reschedule for next week
@@ -938,5 +946,32 @@ mod tests {
         let config = DaemonConfig::default();
         assert!(config.daily_at.is_none());
         assert!(config.weekly_at.is_none());
+    }
+
+    // Phase 0 smoke test: scan_vault wrapped in tokio::task::block_in_place runs to completion
+    // from a multi-thread tokio runtime without panicking. This is the guardrail for the design
+    // doc's Phase 0 wrapping pattern.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scan_vault_inside_block_in_place_does_not_panic() {
+        use crate::config::VaultConfig;
+        use std::fs;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        fs::write(
+            root.join("a.md"),
+            "---\ndomain: tools\ntype: knowledge\norigin: authored\nstatus: draft\nmethod: cli\n---\n# A\n",
+        )
+        .expect("write a");
+        fs::write(
+            root.join("b.md"),
+            "---\ndomain: tools\ntype: knowledge\norigin: authored\nstatus: draft\nmethod: cli\n---\n# B\n",
+        )
+        .expect("write b");
+
+        let vault_config = VaultConfig::default();
+        let notes = tokio::task::block_in_place(|| crate::vault::scan_vault(root, &vault_config))
+            .expect("scan_vault should succeed");
+        assert_eq!(notes.len(), 2, "expected 2 notes from tempdir scan");
     }
 }
