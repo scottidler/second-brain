@@ -49,9 +49,9 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
     let method = request.method.unwrap_or(IngestMethod::Http);
     let trace_id = trace::generate(method);
 
-    // Durable intake BEFORE any pipeline dispatch. Failure -> 5xx-shaped
-    // result (Json IngestStatus::Failed) so the caller knows borg did not
-    // accept the input.
+    // Durable intake BEFORE any pipeline dispatch. Synchronous so a write
+    // failure returns Failed to the caller; everything beyond this point
+    // runs on a detached task and is invisible to the client.
     if let Err(e) = intake_log::record_intake(&state.config, method, "http", IntakeKind::Url, &request.url, &trace_id) {
         log::error!("http/ingest: failed to record intake trace={trace_id}: {e:#}");
         return Json(IngestResult {
@@ -67,35 +67,45 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
         let _ = n.processing(&trace_id, "Processing...", None).await;
     }
 
-    let content = ContentKind::Url(request.url.clone());
-    let result = pipeline::process_content(
-        content,
-        tags,
-        method,
-        request.force,
-        &state.config,
-        Some(trace_id.clone()),
-    )
-    .await;
-
-    if let Some(ref n) = state.notifier {
-        n.result(&result, &request.url, None).await;
-    }
-
-    match &result.status {
-        IngestStatus::Failed { reason } => {
-            log::warn!("Ingest failed for {}: {reason}", request.url);
+    // Spawn the pipeline on a detached task. The HTTP response returns
+    // within milliseconds so the client's connection slot frees up. This
+    // also protects the pipeline from being cancelled if the client gives
+    // up - the previous synchronous-await pattern dropped the pipeline
+    // future the moment Firefox recycled its service worker, leaving an
+    // intake row with no ledger / DLQ resolution until the watchdog
+    // caught it 31 minutes later.
+    let url = request.url.clone();
+    let config = state.config.clone();
+    let notifier = state.notifier.clone();
+    let force = request.force;
+    let task_trace = trace_id.clone();
+    let task_url = url.clone();
+    tokio::spawn(async move {
+        let content = ContentKind::Url(task_url.clone());
+        let result = pipeline::process_content(content, tags, method, force, &config, Some(task_trace.clone())).await;
+        if let Some(n) = notifier {
+            n.result(&result, &task_url, None).await;
         }
-        IngestStatus::Completed => {
-            log::info!("Ingest completed for {}", request.url);
+        match &result.status {
+            IngestStatus::Failed { reason } => {
+                log::warn!("Ingest failed for {task_url}: {reason}");
+            }
+            IngestStatus::Completed => {
+                log::info!("Ingest completed for {task_url}");
+            }
+            IngestStatus::Duplicate { .. } => {
+                log::info!("Duplicate URL skipped for {task_url}");
+            }
+            IngestStatus::Queued => {}
         }
-        IngestStatus::Duplicate { .. } => {
-            log::info!("Duplicate URL skipped for {}", request.url);
-        }
-        IngestStatus::Queued => {}
-    }
+    });
 
-    Json(result)
+    Json(IngestResult {
+        status: IngestStatus::Queued,
+        trace_id: Some(trace_id),
+        canonical_url: Some(url),
+        ..Default::default()
+    })
 }
 
 pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest>) -> Json<IngestResult> {
@@ -131,33 +141,39 @@ pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest
         let _ = n.processing(&trace_id, "Processing note...", None).await;
     }
 
+    // Detach the pipeline from the HTTP handler - same reason as /ingest.
     let tags = request.tags.unwrap_or_default();
-    let content = ContentKind::Text(request.text);
-    let result = pipeline::process_content(
-        content,
-        tags,
-        IngestMethod::Http,
-        false,
-        &state.config,
-        Some(trace_id.clone()),
-    )
-    .await;
-
-    if let Some(ref n) = state.notifier {
-        n.result(&result, &display, None).await;
-    }
-
-    match &result.status {
-        IngestStatus::Failed { reason } => {
-            log::warn!("Note capture failed: {reason}");
+    let config = state.config.clone();
+    let notifier = state.notifier.clone();
+    let task_trace = trace_id.clone();
+    let task_display = display.clone();
+    let task_text = request.text;
+    tokio::spawn(async move {
+        let content = ContentKind::Text(task_text);
+        let result = pipeline::process_content(
+            content,
+            tags,
+            IngestMethod::Http,
+            false,
+            &config,
+            Some(task_trace.clone()),
+        )
+        .await;
+        if let Some(n) = notifier {
+            n.result(&result, &task_display, None).await;
         }
-        IngestStatus::Completed => {
-            log::info!("Note captured: {:?}", result.title);
+        match &result.status {
+            IngestStatus::Failed { reason } => log::warn!("Note capture failed: {reason}"),
+            IngestStatus::Completed => log::info!("Note captured: {:?}", result.title),
+            _ => {}
         }
-        _ => {}
-    }
+    });
 
-    Json(result)
+    Json(IngestResult {
+        status: IngestStatus::Queued,
+        trace_id: Some(trace_id),
+        ..Default::default()
+    })
 }
 
 pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Multipart) -> Json<IngestResult> {
@@ -348,32 +364,41 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
             .await;
     }
 
-    let result = pipeline::process_content(
-        content,
-        tags,
-        IngestMethod::Http,
-        force,
-        &state.config,
-        Some(trace_id.clone()),
-    )
-    .await;
-
-    if let Some(ref n) = state.notifier {
-        n.result(&result, &format!("[file: {display_filename}]"), None).await;
-    }
-
-    match &result.status {
-        IngestStatus::Failed { reason } => {
-            log::warn!(
-                "File ingest failed for {}: {reason}",
-                result.title.as_deref().unwrap_or("unknown")
-            );
+    // Detach the pipeline from the HTTP handler - same reason as /ingest.
+    let config = state.config.clone();
+    let notifier = state.notifier.clone();
+    let task_trace = trace_id.clone();
+    let task_display = display_filename.clone();
+    tokio::spawn(async move {
+        let result = pipeline::process_content(
+            content,
+            tags,
+            IngestMethod::Http,
+            force,
+            &config,
+            Some(task_trace.clone()),
+        )
+        .await;
+        if let Some(n) = notifier {
+            n.result(&result, &format!("[file: {task_display}]"), None).await;
         }
-        IngestStatus::Completed => {
-            log::info!("File ingest completed: {:?}", result.title);
+        match &result.status {
+            IngestStatus::Failed { reason } => {
+                log::warn!(
+                    "File ingest failed for {}: {reason}",
+                    result.title.as_deref().unwrap_or("unknown")
+                );
+            }
+            IngestStatus::Completed => {
+                log::info!("File ingest completed: {:?}", result.title);
+            }
+            _ => {}
         }
-        _ => {}
-    }
+    });
 
-    Json(result)
+    Json(IngestResult {
+        status: IngestStatus::Queued,
+        trace_id: Some(trace_id),
+        ..Default::default()
+    })
 }
