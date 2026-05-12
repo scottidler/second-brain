@@ -259,78 +259,85 @@ fn lint_field_transforms(notes: &[Note], migration: &MigrationConfig, report: &m
 
 /// Apply field renames and drops within frontmatter blocks.
 /// Operates on the raw text between `---` delimiters to preserve formatting.
+///
+/// Parallel over `notes` via rayon. Per-note read-modify-write is independent (each note is its
+/// own file, plain `std::fs::write` with no explicit fsync), so the same lock-contention
+/// argument as `apply_quality` applies. `try_reduce` aggregates the success counter and
+/// short-circuits on the first error to preserve sequential fail-fast semantics.
 fn apply_field_transforms(vault_root: &Path, notes: &[Note], migration: &MigrationConfig) -> Result<usize> {
-    let mut count = 0;
+    notes
+        .par_iter()
+        .map(|note| -> Result<usize> {
+            // Quick check: does this note have any fields to transform?
+            let has_rename_target = migration
+                .field_renames
+                .keys()
+                .any(|k| note.frontmatter.extra.contains_key(k));
+            let has_drop_target = migration
+                .field_drops
+                .iter()
+                .any(|k| note.frontmatter.extra.contains_key(k));
 
-    for note in notes {
-        // Quick check: does this note have any fields to transform?
-        let has_rename_target = migration
-            .field_renames
-            .keys()
-            .any(|k| note.frontmatter.extra.contains_key(k));
-        let has_drop_target = migration
-            .field_drops
-            .iter()
-            .any(|k| note.frontmatter.extra.contains_key(k));
+            if !has_rename_target && !has_drop_target {
+                return Ok(0);
+            }
 
-        if !has_rename_target && !has_drop_target {
-            continue;
-        }
+            let abs_path = vault_root.join(&note.path);
+            let content =
+                std::fs::read_to_string(&abs_path).context(format!("failed to read {}", abs_path.display()))?;
 
-        let abs_path = vault_root.join(&note.path);
-        let content = std::fs::read_to_string(&abs_path).context(format!("failed to read {}", abs_path.display()))?;
+            let Some((fm_block, before, after)) = extract_frontmatter_block(&content) else {
+                return Ok(0);
+            };
 
-        let Some((fm_block, before, after)) = extract_frontmatter_block(&content) else {
-            continue;
-        };
+            let mut lines: Vec<String> = fm_block.lines().map(String::from).collect();
+            let mut changed = false;
 
-        let mut lines: Vec<String> = fm_block.lines().map(String::from).collect();
-        let mut changed = false;
+            // Build set of existing keys for conflict detection
+            let existing_keys: HashSet<String> = lines
+                .iter()
+                .filter_map(|l| l.split(':').next().map(|k| k.trim().to_string()))
+                .collect();
 
-        // Build set of existing keys for conflict detection
-        let existing_keys: HashSet<String> = lines
-            .iter()
-            .filter_map(|l| l.split(':').next().map(|k| k.trim().to_string()))
-            .collect();
-
-        // Apply renames
-        for (old_key, new_key) in &migration.field_renames {
-            for line in &mut lines {
-                if line.starts_with(&format!("{old_key}:")) {
-                    if existing_keys.contains(new_key) {
-                        log::warn!(
-                            "skipping rename: target field already exists: {} ({old_key} -> {new_key})",
-                            note.path.display()
-                        );
-                    } else {
-                        *line = line.replacen(old_key, new_key, 1);
-                        changed = true;
+            // Apply renames
+            for (old_key, new_key) in &migration.field_renames {
+                for line in &mut lines {
+                    if line.starts_with(&format!("{old_key}:")) {
+                        if existing_keys.contains(new_key) {
+                            log::warn!(
+                                "skipping rename: target field already exists: {} ({old_key} -> {new_key})",
+                                note.path.display()
+                            );
+                        } else {
+                            *line = line.replacen(old_key, new_key, 1);
+                            changed = true;
+                        }
                     }
                 }
             }
-        }
 
-        // Apply drops
-        let original_len = lines.len();
-        lines.retain(|line| {
-            !migration
-                .field_drops
-                .iter()
-                .any(|dk| line.starts_with(&format!("{dk}:")))
-        });
-        if lines.len() != original_len {
-            changed = true;
-        }
+            // Apply drops
+            let original_len = lines.len();
+            lines.retain(|line| {
+                !migration
+                    .field_drops
+                    .iter()
+                    .any(|dk| line.starts_with(&format!("{dk}:")))
+            });
+            if lines.len() != original_len {
+                changed = true;
+            }
 
-        if changed {
-            let new_content = format!("{before}---\n{}\n---{after}", lines.join("\n"));
-            std::fs::write(&abs_path, new_content)?;
-            log::info!("applied field transforms: {}", note.path.display());
-            count += 1;
-        }
-    }
-
-    Ok(count)
+            if changed {
+                let new_content = format!("{before}---\n{}\n---{after}", lines.join("\n"));
+                std::fs::write(&abs_path, new_content)?;
+                log::info!("applied field transforms: {}", note.path.display());
+                Ok(1)
+            } else {
+                Ok(0)
+            }
+        })
+        .try_reduce(|| 0usize, |a, b| Ok(a + b))
 }
 
 /// Extract the frontmatter block from file content.
@@ -403,73 +410,79 @@ fn lint_value_transforms(notes: &[Note], migration: &MigrationConfig, report: &m
 
 /// Apply value renames within frontmatter fields.
 /// Operates on raw text to preserve formatting, same as field transforms.
+///
+/// Parallel over `notes`: per-note independent read-modify-write of plain `std::fs::write`,
+/// same lock-contention reasoning as `apply_field_transforms`. `try_reduce` aggregates the
+/// success counter and short-circuits on the first error.
 fn apply_value_transforms(vault_root: &Path, notes: &[Note], migration: &MigrationConfig) -> Result<usize> {
-    let mut count = 0;
-
-    for note in notes {
-        // Quick check: does this note have any values to transform?
-        let mut has_target = false;
-        for (field_name, value_map) in &migration.value_renames {
-            let current_value = match field_name.as_str() {
-                "domain" => note.frontmatter.domain.as_deref(),
-                "type" => note.frontmatter.note_type.as_deref(),
-                "origin" => note.frontmatter.origin.as_deref(),
-                "status" => note.frontmatter.status.as_deref(),
-                _ => note.frontmatter.extra.get(field_name).and_then(|v| v.as_str()),
-            };
-            if let Some(current) = current_value
-                && value_map.contains_key(current)
-            {
-                has_target = true;
-                break;
+    notes
+        .par_iter()
+        .map(|note| -> Result<usize> {
+            // Quick check: does this note have any values to transform?
+            let mut has_target = false;
+            for (field_name, value_map) in &migration.value_renames {
+                let current_value = match field_name.as_str() {
+                    "domain" => note.frontmatter.domain.as_deref(),
+                    "type" => note.frontmatter.note_type.as_deref(),
+                    "origin" => note.frontmatter.origin.as_deref(),
+                    "status" => note.frontmatter.status.as_deref(),
+                    _ => note.frontmatter.extra.get(field_name).and_then(|v| v.as_str()),
+                };
+                if let Some(current) = current_value
+                    && value_map.contains_key(current)
+                {
+                    has_target = true;
+                    break;
+                }
             }
-        }
 
-        if !has_target {
-            continue;
-        }
+            if !has_target {
+                return Ok(0);
+            }
 
-        let abs_path = vault_root.join(&note.path);
-        let content = std::fs::read_to_string(&abs_path).context(format!("failed to read {}", abs_path.display()))?;
+            let abs_path = vault_root.join(&note.path);
+            let content =
+                std::fs::read_to_string(&abs_path).context(format!("failed to read {}", abs_path.display()))?;
 
-        let Some((fm_block, before, after)) = extract_frontmatter_block(&content) else {
-            continue;
-        };
+            let Some((fm_block, before, after)) = extract_frontmatter_block(&content) else {
+                return Ok(0);
+            };
 
-        let mut lines: Vec<String> = fm_block.lines().map(String::from).collect();
-        let mut changed = false;
+            let mut lines: Vec<String> = fm_block.lines().map(String::from).collect();
+            let mut changed = false;
 
-        for (field_name, value_map) in &migration.value_renames {
-            for line in &mut lines {
-                for (old_value, new_value) in value_map {
-                    // Match both quoted and unquoted YAML values
-                    let unquoted = format!("{field_name}: {old_value}");
-                    let double_quoted = format!("{field_name}: \"{old_value}\"");
-                    let single_quoted = format!("{field_name}: '{old_value}'");
+            for (field_name, value_map) in &migration.value_renames {
+                for line in &mut lines {
+                    for (old_value, new_value) in value_map {
+                        // Match both quoted and unquoted YAML values
+                        let unquoted = format!("{field_name}: {old_value}");
+                        let double_quoted = format!("{field_name}: \"{old_value}\"");
+                        let single_quoted = format!("{field_name}: '{old_value}'");
 
-                    if *line == unquoted {
-                        *line = format!("{field_name}: {new_value}");
-                        changed = true;
-                    } else if *line == double_quoted {
-                        *line = format!("{field_name}: \"{new_value}\"");
-                        changed = true;
-                    } else if *line == single_quoted {
-                        *line = format!("{field_name}: '{new_value}'");
-                        changed = true;
+                        if *line == unquoted {
+                            *line = format!("{field_name}: {new_value}");
+                            changed = true;
+                        } else if *line == double_quoted {
+                            *line = format!("{field_name}: \"{new_value}\"");
+                            changed = true;
+                        } else if *line == single_quoted {
+                            *line = format!("{field_name}: '{new_value}'");
+                            changed = true;
+                        }
                     }
                 }
             }
-        }
 
-        if changed {
-            let new_content = format!("{before}---\n{}\n---{after}", lines.join("\n"));
-            std::fs::write(&abs_path, new_content)?;
-            log::info!("applied value transforms: {} ({})", note.path.display(), migration.name);
-            count += 1;
-        }
-    }
-
-    Ok(count)
+            if changed {
+                let new_content = format!("{before}---\n{}\n---{after}", lines.join("\n"));
+                std::fs::write(&abs_path, new_content)?;
+                log::info!("applied value transforms: {} ({})", note.path.display(), migration.name);
+                Ok(1)
+            } else {
+                Ok(0)
+            }
+        })
+        .try_reduce(|| 0usize, |a, b| Ok(a + b))
 }
 
 #[cfg(test)]

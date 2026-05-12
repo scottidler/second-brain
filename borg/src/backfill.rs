@@ -149,13 +149,16 @@ fn classify_for_backfill(path: &Path, min_age: Duration) -> BackfillDecision {
     }
 }
 
-pub fn run_backfill_ingested(config: &Config, dry_run: bool) -> Result<()> {
-    let vault_root = expand_tilde(&config.vault.root_path);
+/// Run the backfill end-to-end on an explicit vault root and return the resulting report.
+///
+/// Pure helper, no global Config dependency. Used both by the public `run_backfill_ingested`
+/// entry point (which then prints the report) and by the counter-correctness test.
+pub(crate) fn run_backfill_on(vault_root: &Path, skip_folders: &[String], dry_run: bool) -> Result<BackfillReport> {
     log::debug!(
-        "backfill::run_backfill_ingested: vault={} dry_run={dry_run}",
+        "backfill::run_backfill_on: vault={} dry_run={dry_run}",
         vault_root.display()
     );
-    let md_files = collect_md_files(&vault_root, &config.migration.skip_folders).context("Failed to walk vault")?;
+    let md_files = collect_md_files(vault_root, skip_folders).context("Failed to walk vault")?;
     log::info!("backfill-ingested: scanning {} note files", md_files.len());
 
     // Parallel classification phase: pure CPU + read-only I/O per note.
@@ -220,14 +223,19 @@ pub fn run_backfill_ingested(config: &Config, dry_run: bool) -> Result<()> {
         backfilled += 1;
     }
 
-    let report = BackfillReport {
+    Ok(BackfillReport {
         scanned: md_files.len(),
         skipped_authored: skipped_authored.into_inner(),
         skipped_already_present: skipped_already_present.into_inner(),
         skipped_recently_modified: skipped_recently_modified.into_inner(),
         skipped_no_date: skipped_no_date.into_inner(),
         backfilled,
-    };
+    })
+}
+
+pub fn run_backfill_ingested(config: &Config, dry_run: bool) -> Result<()> {
+    let vault_root = expand_tilde(&config.vault.root_path);
+    let report = run_backfill_on(&vault_root, &config.migration.skip_folders, dry_run)?;
 
     println!(
         "backfill-ingested complete:\n  scanned: {}\n  backfilled: {}{}\n  skipped (already had ingested:): {}\n  skipped (origin != assisted): {}\n  skipped (recent mtime): {}\n  skipped (no date: field): {}",

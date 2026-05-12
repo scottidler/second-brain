@@ -523,41 +523,64 @@ mod tests {
     /// and verify both the key set and the per-key path order.
     #[test]
     fn build_note_index_per_source_order_matches_sorted_md_files_under_par_iter() {
+        // Fixture of 50 notes - the size the design doc specifies. The 50 notes split across
+        // three source URLs so each URL's Vec<PathBuf> has many entries, making any par_iter
+        // ordering bug obvious. Names use zero-padded indices so sort-order matches numeric
+        // order independent of platform locale.
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
-        // Names chosen so the sorted order is alpha.md < bravo.md < charlie.md.
-        std::fs::write(
-            root.join("alpha.md"),
-            "---\ntitle: A\nsource: https://example.com/shared\n---\nbody\n",
-        )
-        .expect("write alpha");
-        std::fs::write(
-            root.join("bravo.md"),
-            "---\ntitle: B\nsource: https://example.com/unique\n---\nbody\n",
-        )
-        .expect("write bravo");
-        std::fs::write(
-            root.join("charlie.md"),
-            "---\ntitle: C\nsource: https://example.com/shared\n---\nbody\n",
-        )
-        .expect("write charlie");
+
+        let shared_url = "https://example.com/shared";
+        let other_url = "https://example.com/other";
+        let unique_url = "https://example.com/unique";
+
+        let mut expected_shared = Vec::new();
+        let mut expected_other = Vec::new();
+        for i in 0u32..50 {
+            let name = format!("note-{i:03}.md");
+            // Spread across three buckets: 25 shared, 24 other, 1 unique.
+            let src = if i == 25 {
+                unique_url
+            } else if i % 2 == 0 {
+                shared_url
+            } else {
+                other_url
+            };
+            std::fs::write(
+                root.join(&name),
+                format!("---\ntitle: N{i}\nsource: {src}\n---\nbody\n"),
+            )
+            .expect("write fixture note");
+            if src == shared_url {
+                expected_shared.push(name.clone());
+            } else if src == other_url {
+                expected_other.push(name.clone());
+            }
+        }
 
         let index = build_note_index(root, &[]).expect("index");
 
-        // Both "shared" entries should be present, in collect_md_files order: alpha then charlie.
-        let shared = index.get("https://example.com/shared").expect("shared key present");
-        assert_eq!(shared.len(), 2, "two notes share the same source URL");
+        let shared = index.get(shared_url).expect("shared key present");
         let shared_names: Vec<String> = shared
             .iter()
             .map(|p| p.file_name().expect("path has filename").to_string_lossy().to_string())
             .collect();
         assert_eq!(
-            shared_names,
-            vec!["alpha.md".to_string(), "charlie.md".to_string()],
-            "per-source path order must match sorted collect_md_files order, not par_iter completion order"
+            shared_names, expected_shared,
+            "per-source path order for {shared_url} must match sorted collect_md_files order"
         );
 
-        let unique = index.get("https://example.com/unique").expect("unique key present");
+        let other = index.get(other_url).expect("other key present");
+        let other_names: Vec<String> = other
+            .iter()
+            .map(|p| p.file_name().expect("path has filename").to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            other_names, expected_other,
+            "per-source path order for {other_url} must match sorted collect_md_files order"
+        );
+
+        let unique = index.get(unique_url).expect("unique key present");
         assert_eq!(unique.len(), 1);
     }
 }

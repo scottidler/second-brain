@@ -85,23 +85,38 @@ pub fn lint_autotag(notes: &[Note], all_notes: &[Note], config: &AutoTagConfig) 
 }
 
 /// Apply auto-tagging: write suggested tags and run Fabric if available.
+///
+/// The first phase (deterministic-suggestion writes) parallelizes via rayon: writes target
+/// distinct files and use plain `std::fs::write`, so the same lock-contention argument as
+/// `apply_quality` applies. The optional Fabric phase below stays sequential because each
+/// iteration shells out to an external LLM-style binary.
 pub fn apply_autotag(
     vault_root: &Path,
     notes: &[Note],
     all_notes: &[Note],
     config: &AutoTagConfig,
 ) -> eyre::Result<usize> {
+    log::debug!(
+        "autotag::apply_autotag: vault_root={} notes={} all_notes={}",
+        vault_root.display(),
+        notes.len(),
+        all_notes.len()
+    );
     let report = lint_autotag(notes, all_notes, config);
-    let mut fixed_count = 0;
 
-    for violation in &report.violations {
-        if let Some(Fix::SetCortexFields { fields }) = &violation.fix {
+    let applied_count: usize = report
+        .violations
+        .par_iter()
+        .map(|violation| -> eyre::Result<usize> {
+            let Some(Fix::SetCortexFields { fields }) = &violation.fix else {
+                return Ok(0);
+            };
             let abs_path = vault_root.join(&violation.path);
             let content = std::fs::read_to_string(&abs_path)?;
 
             // Check if already set
             if content.contains("cortex-tagged:") {
-                continue;
+                return Ok(0);
             }
 
             let yaml_fields: Vec<(String, serde_yaml::Value)> = fields
@@ -112,10 +127,13 @@ pub fn apply_autotag(
             if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &yaml_fields) {
                 std::fs::write(&abs_path, new_content)?;
                 log::info!("wrote suggested tags: {}", violation.path.display());
-                fixed_count += 1;
+                Ok(1)
+            } else {
+                Ok(0)
             }
-        }
-    }
+        })
+        .try_reduce(|| 0usize, |a, b| Ok(a + b))?;
+    let mut fixed_count = applied_count;
 
     // If Fabric is available and a pattern is configured, enhance suggestions
     if let Some(ref pattern) = config.fabric_pattern
