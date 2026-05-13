@@ -3,7 +3,7 @@
 **Author:** Scott Idler (drafted by Claude)
 **Date:** 2026-05-13
 **Status:** Implemented
-**Review Passes Completed:** 1/5
+**Review Passes Completed:** 2/5
 
 **Revision history.**
 - **v1:** Initial draft. Two `ThreadCount` knobs on `YoutubeConfig`, helper threads args through `extract_frames` only, `#[serde(untagged)]` enum for the parse/render.
@@ -12,6 +12,9 @@
   - `ThreadCount` serde shape switched from `#[serde(untagged)]` enum to a single newtype with hand-written `Deserialize` *and* `Serialize` impls. The untagged-enum form would have round-tripped `NprocOver { denom: 8 }` as a YAML map (`{denom: 8}`), not the symbolic string `"nproc/8"`, breaking `borg config dump` -> daemon reload.
   - Default population spelled out: field-level `#[serde(default = "...")]` functions, not a blanket `Default` impl on `ThreadCount`. Keeps the denominator (`8`) co-located with the field that uses it.
   - Clarified what `-threads` does and does not control in the slides pipeline (decoder + ffmpeg's worker pool; the `mjpeg` encoder is single-threaded regardless).
+- **v3:** After Architect implementation audit (post-ship, v0.5.46):
+  - Audit returned no completeness gaps, no unimplemented requirements, no contradictions, no quiet deferrals.
+  - One intentional improvement vs. the spec: `extract_frames` takes `&[String; 4]` (borrow) instead of `[String; 4]` (owned), avoiding an unnecessary clone at the single call site. Architect flagged this as positive.
 
 ## Summary
 
@@ -336,3 +339,43 @@ should show the configured values resolved against the host's `nproc`. During a 
 
 - **Q:** Does the transcriber service (`transcriber.url = http://localhost:8090`) have its own unbounded-thread risk?
   **A:** Almost certainly yes -- any BLAS / OpenMP-backed local whisper implementation will saturate cores by default unless its startup arguments pin a thread count. That risk lives entirely inside the transcriber service's own process tree, not `borg.service`, so it is out of scope for this doc. Track as a follow-up: when the transcriber service is next touched, audit its threading model and either pin a thread cap at the service entry point or place it under a systemd slice with `CPUQuota=`. The `borg`-side caps proposed here are not affected either way -- borg only sends HTTP to the transcriber.
+
+## Post-Implementation Audit
+
+**Date:** 2026-05-13
+**Shipped:** v0.5.46 (commit `f6a22d6`)
+**Audit form:** `/architect` implementation audit pass
+
+### Outcome
+
+Clean pass. The Architect walked the Implementation Plan phase-by-phase, bullet-by-bullet, against the code and found:
+
+- No completeness gaps. Every Phase 1-4 bullet implemented.
+- No unimplemented design requirements.
+- No code patterns contradicting the design's stated approach.
+- No quiet deferrals.
+
+### Intentional deviation from the spec
+
+One:
+
+- `extract_frames` takes `thread_args: &[String; 4]` (borrowed) instead of `thread_args: [String; 4]` (owned, as written in the design). Avoids an unnecessary clone at the single call site in `pipeline.rs`. Architect explicitly flagged this as a positive deviation.
+
+### Verified out-of-band
+
+The audit covered the static code footprint. The following were verified live, outside the audit prompt:
+
+- `otto ci` green on the implementation commit.
+- `v0.5.46` tagged on `main` after `bump`.
+- `git push --tags` shipped to remote.
+- `otto deploy` installed all three crates (`borg`, `cortex`, `oracle`) and restarted `borg` + `cortex` user daemons.
+- `journalctl --user -u borg` shows the new startup line emitting as designed: `ffmpeg thread caps: threads=4 filter_threads=4 (nproc=32, ffmpeg-threads=nproc/8, ffmpeg-filter-threads=nproc/8)`.
+
+### Empirical validation still owed
+
+Wait for the next YouTube burst large enough to saturate `HEAVY_PERMITS`. Expected observation:
+
+- Each `ffmpeg` child runs at roughly `resolved_threads * 100%` CPU (so ~400% with `threads=4`, down from the previously observed 400-600%).
+- 1-minute load average tops out near `heavy_cap * resolved_threads` plus daemon overhead (so ~16-20 on this box), not the previously observed ~60.
+
+If observed load still exceeds that ceiling materially, the next lever is dropping `youtube.ffmpeg-threads` (e.g., to `nproc/16`) rather than `pipeline.max-concurrent-heavy-traces`, since the cap proven to bite first is the per-process one.
