@@ -675,10 +675,7 @@ async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
     // These are independent - yt-dlp scrapes the page, fabric calls the captions API.
     let url_owned = url.to_string();
     let yt_dlp_timeout = config.pipeline.yt_dlp_timeout_secs;
-    let metadata_handle = tokio::task::spawn_blocking({
-        let url = url_owned.clone();
-        move || youtube::fetch_metadata(&url, yt_dlp_timeout)
-    });
+    let metadata_future = youtube::fetch_metadata(&url_owned, yt_dlp_timeout);
 
     let transcript_future = async {
         if use_fabric {
@@ -699,10 +696,8 @@ async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
         }
     };
 
-    let (metadata_result, fabric_transcript) = tokio::join!(metadata_handle, transcript_future);
-    let metadata = metadata_result
-        .context("yt-dlp metadata task panicked")?
-        .context("yt-dlp metadata failed")?;
+    let (metadata_result, fabric_transcript) = tokio::join!(metadata_future, transcript_future);
+    let metadata = metadata_result.context("yt-dlp metadata failed")?;
 
     // Transcript fallback chain: fabric -> yt-dlp subtitles -> audio extraction + Groq
     let transcript = if !fabric_transcript.is_empty() {

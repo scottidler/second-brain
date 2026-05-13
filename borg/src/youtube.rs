@@ -47,33 +47,22 @@ pub struct VideoMetadata {
     pub tags: Vec<String>,
 }
 
-pub fn fetch_metadata(url: &str, timeout_secs: u64) -> Result<VideoMetadata> {
-    log::debug!("yt-dlp: fetching metadata for {url}");
-    let mut child = Command::new("yt-dlp")
+pub async fn fetch_metadata(url: &str, timeout_secs: u64) -> Result<VideoMetadata> {
+    log::debug!("yt-dlp: fetching metadata for {url} (timeout={timeout_secs}s)");
+    let yt_dlp_fut = TokioCommand::new("yt-dlp")
         .args(["--dump-json", "--no-download", "--no-warnings", url])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
-        .context("Failed to spawn yt-dlp - is it installed?")?;
+        .context("Failed to spawn yt-dlp - is it installed?")?
+        .wait_with_output();
 
-    let timeout = Duration::from_secs(timeout_secs);
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    bail!("yt-dlp metadata timed out after {timeout_secs}s for {url}");
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => bail!("Failed to wait for yt-dlp: {e}"),
-        }
-    }
+    let output = match tokio::time::timeout(Duration::from_secs(timeout_secs), yt_dlp_fut).await {
+        Ok(res) => res.context("Failed to wait for yt-dlp")?,
+        Err(_) => bail!("yt-dlp metadata timed out after {timeout_secs}s for {url}"),
+    };
 
-    let output = child.wait_with_output().context("Failed to collect yt-dlp output")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::error!("yt-dlp metadata failed (exit {}): {stderr}", output.status);
