@@ -40,5 +40,20 @@ fn validate_cap(name: &str, cap: usize) -> Result<()> {
     Ok(())
 }
 
+/// Emit one INFO line summarizing the configured-vs-resolved ffmpeg thread
+/// caps, so an operator can confirm from the journal alone how `nproc/N`
+/// expressions resolved against this host's `nproc`.
+pub fn log_ffmpeg_thread_caps(cfg: &Config) {
+    let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let threads_resolved = cfg.youtube.ffmpeg_threads.resolve();
+    let filter_resolved = cfg.youtube.ffmpeg_filter_threads.resolve();
+    let threads_sym = cfg.youtube.ffmpeg_threads.symbolic();
+    let filter_sym = cfg.youtube.ffmpeg_filter_threads.symbolic();
+    log::info!(
+        "ffmpeg thread caps: threads={threads_resolved} filter_threads={filter_resolved} \
+         (nproc={nproc}, ffmpeg-threads={threads_sym}, ffmpeg-filter-threads={filter_sym})"
+    );
+}
+
 #[cfg(test)]
 mod tests;

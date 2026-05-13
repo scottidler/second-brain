@@ -261,9 +261,10 @@ fn parse_vtt_timestamp(s: &str) -> Option<f64> {
 /// post-processor args come from `claude-video/scripts/whisper.py` (lifted
 /// per the design doc). `-ac 1` matters: stereo doubles the upload bytes
 /// while Whisper down-mixes anyway.
-pub fn extract_audio(url: &str, output_dir: &str) -> Result<String> {
-    log::debug!("yt-dlp: extracting audio for {url} to {output_dir}");
+pub fn extract_audio(url: &str, output_dir: &str, ffmpeg_threads: usize) -> Result<String> {
+    log::debug!("yt-dlp: extracting audio for {url} to {output_dir} (ffmpeg-threads={ffmpeg_threads})");
     let output_template = format!("{output_dir}/%(id)s.%(ext)s");
+    let postprocessor_args = format!("ffmpeg:-threads {ffmpeg_threads} -vn -ac 1 -ar 16000 -b:a 64k");
 
     let output = Command::new("yt-dlp")
         .args([
@@ -271,8 +272,9 @@ pub fn extract_audio(url: &str, output_dir: &str) -> Result<String> {
             "--audio-format",
             "mp3",
             // Whisper-tuned ffmpeg args: drop video, mono, 16kHz, 64kbps.
+            // `-threads` capped per youtube.ffmpeg-threads config.
             "--postprocessor-args",
-            "ffmpeg:-vn -ac 1 -ar 16000 -b:a 64k",
+            &postprocessor_args,
             "-o",
             &output_template,
             url,
@@ -371,13 +373,14 @@ pub fn extract_frames(
     out_dir: &Path,
     duration_secs: f64,
     config: &YoutubeSlidesConfig,
+    thread_args: &[String; 4],
 ) -> Result<Vec<FrameRef>> {
     if !config.enabled {
         log::debug!("extract_frames: disabled by config; returning empty");
         return Ok(Vec::new());
     }
     log::debug!(
-        "extract_frames: video={} out_dir={} duration_secs={duration_secs}",
+        "extract_frames: video={} out_dir={} duration_secs={duration_secs} thread_args={thread_args:?}",
         video_path.display(),
         out_dir.display(),
     );
@@ -397,24 +400,31 @@ pub fn extract_frames(
     let frames_glob = out_dir.join("frame_%04d.jpg");
     let frames_arg = frames_glob.to_string_lossy().to_string();
 
+    let video_path_str = video_path.to_string_lossy().to_string();
+    let budget_str = budget.to_string();
+    let argv: [&str; 19] = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        &thread_args[0],
+        &thread_args[1],
+        &thread_args[2],
+        &thread_args[3],
+        "-i",
+        &video_path_str,
+        "-vf",
+        &filter,
+        "-frames:v",
+        &budget_str,
+        "-q:v",
+        "4",
+        "-vsync",
+        "vfr",
+        &frames_arg,
+    ];
     let output = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            &video_path.to_string_lossy(),
-            "-vf",
-            &filter,
-            "-frames:v",
-            &budget.to_string(),
-            "-q:v",
-            "4",
-            "-vsync",
-            "vfr",
-            &frames_arg,
-        ])
+        .args(argv)
         .output()
         .context("Failed to run ffmpeg - is it installed?")?;
 
@@ -712,8 +722,20 @@ mod tests {
         };
         let tmp = std::env::temp_dir().join("borg-test-frames-disabled");
         let _ = std::fs::remove_dir_all(&tmp);
-        let frames = extract_frames(Path::new("/nonexistent.mp4"), &tmp.join("frames"), 30.0, &cfg)
-            .expect("disabled path should not error");
+        let thread_args = [
+            "-threads".to_string(),
+            "2".to_string(),
+            "-filter_threads".to_string(),
+            "2".to_string(),
+        ];
+        let frames = extract_frames(
+            Path::new("/nonexistent.mp4"),
+            &tmp.join("frames"),
+            30.0,
+            &cfg,
+            &thread_args,
+        )
+        .expect("disabled path should not error");
         assert!(frames.is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -758,7 +780,13 @@ mod tests {
 
         let cfg = YoutubeSlidesConfig::default();
         let frames_dir = tmp.join("frames");
-        let frames = extract_frames(&video, &frames_dir, 10.0, &cfg).expect("extract_frames");
+        let thread_args = [
+            "-threads".to_string(),
+            "2".to_string(),
+            "-filter_threads".to_string(),
+            "2".to_string(),
+        ];
+        let frames = extract_frames(&video, &frames_dir, 10.0, &cfg, &thread_args).expect("extract_frames");
 
         assert!(
             !frames.is_empty(),

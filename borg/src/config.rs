@@ -212,10 +212,171 @@ impl Default for PipelineConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+/// Numerator-only fraction of `nproc` used for default ffmpeg thread counts.
+/// On a 32-core box this resolves to 4 threads per ffmpeg invocation;
+/// `MIN_FFMPEG_THREADS` enforces a floor for smaller hosts.
+const DEFAULT_FFMPEG_THREAD_DENOM: usize = 8;
+
+/// Minimum threads per ffmpeg invocation regardless of host size. ffmpeg's
+/// `-threads 1` is meaningfully slower than `-threads 2` for long videos at
+/// negligible CPU savings, so 2 is the floor.
+const MIN_FFMPEG_THREADS: usize = 2;
+
+/// Thread-count knob accepting either a literal integer or an `nproc`-derived
+/// expression. Defaults expressed as fractions of `nproc` so the same config
+/// behaves sensibly across host sizes; resolved at call time.
+///
+/// Accepted YAML forms:
+/// - Integer (e.g. `4`) -> a literal thread count.
+/// - String `"nproc"` -> all cores.
+/// - String `"nproc/N"` for positive integer `N` -> `nproc / N`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadCount(Spec);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Spec {
+    Absolute(usize),
+    NprocOver { denom: usize },
+}
+
+impl ThreadCount {
+    pub fn absolute(n: usize) -> Self {
+        Self(Spec::Absolute(n))
+    }
+
+    pub fn nproc_over(denom: usize) -> Self {
+        Self(Spec::NprocOver { denom })
+    }
+
+    /// Resolve the symbolic value against the host's available parallelism.
+    /// Always returns at least `MIN_FFMPEG_THREADS`.
+    pub fn resolve(self) -> usize {
+        let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let raw = match self.0 {
+            Spec::Absolute(n) => n,
+            Spec::NprocOver { denom } => nproc.saturating_div(denom.max(1)),
+        };
+        raw.max(MIN_FFMPEG_THREADS)
+    }
+
+    /// Symbolic form (inverse of the parser) for logs and config dumps.
+    pub fn symbolic(self) -> String {
+        match self.0 {
+            Spec::Absolute(n) => n.to_string(),
+            Spec::NprocOver { denom: 1 } => "nproc".to_string(),
+            Spec::NprocOver { denom } => format!("nproc/{denom}"),
+        }
+    }
+}
+
+impl Serialize for ThreadCount {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self.0 {
+            Spec::Absolute(n) => serializer.serialize_u64(n as u64),
+            Spec::NprocOver { denom: 1 } => serializer.serialize_str("nproc"),
+            Spec::NprocOver { denom } => serializer.serialize_str(&format!("nproc/{denom}")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ThreadCount {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = ThreadCount;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a positive integer, the string \"nproc\", or \"nproc/N\" for positive integer N")
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> std::result::Result<Self::Value, E> {
+                if v < 1 {
+                    return Err(E::custom(format!("thread count must be >= 1, got {v}")));
+                }
+                Ok(ThreadCount::absolute(v as usize))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> std::result::Result<Self::Value, E> {
+                if v < 1 {
+                    return Err(E::custom("thread count must be >= 1, got 0"));
+                }
+                Ok(ThreadCount::absolute(v as usize))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+                let trimmed = v.trim();
+                if trimmed == "nproc" {
+                    return Ok(ThreadCount::nproc_over(1));
+                }
+                if let Some(denom_str) = trimmed.strip_prefix("nproc/") {
+                    let denom: usize = denom_str
+                        .parse()
+                        .map_err(|_| E::custom(format!("expected positive integer denominator in {trimmed:?}")))?;
+                    if denom == 0 {
+                        return Err(E::custom("denominator must be >= 1"));
+                    }
+                    return Ok(ThreadCount::nproc_over(denom));
+                }
+                Err(E::custom(format!(
+                    "expected integer, \"nproc\", or \"nproc/N\", got {trimmed:?}"
+                )))
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+fn default_ffmpeg_threads() -> ThreadCount {
+    ThreadCount::nproc_over(DEFAULT_FFMPEG_THREAD_DENOM)
+}
+
+fn default_ffmpeg_filter_threads() -> ThreadCount {
+    ThreadCount::nproc_over(DEFAULT_FFMPEG_THREAD_DENOM)
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct YoutubeConfig {
     pub slides: YoutubeSlidesConfig,
+    /// ffmpeg `-threads` value for decoder/encoder threads. Applied to direct
+    /// ffmpeg invocations (slides extraction) and spliced into yt-dlp's
+    /// `--postprocessor-args` for the audio path.
+    #[serde(default = "default_ffmpeg_threads")]
+    pub ffmpeg_threads: ThreadCount,
+    /// ffmpeg `-filter_threads` value for filter-graph threading (mpdecimate).
+    /// Applied only to direct ffmpeg invocations that use a filter graph.
+    #[serde(default = "default_ffmpeg_filter_threads")]
+    pub ffmpeg_filter_threads: ThreadCount,
+}
+
+impl Default for YoutubeConfig {
+    fn default() -> Self {
+        Self {
+            slides: YoutubeSlidesConfig::default(),
+            ffmpeg_threads: default_ffmpeg_threads(),
+            ffmpeg_filter_threads: default_ffmpeg_filter_threads(),
+        }
+    }
+}
+
+impl YoutubeConfig {
+    /// Argv tokens for a direct `Command::new("ffmpeg")` invocation that runs
+    /// a filter graph. Returns `["-threads", "<n>", "-filter_threads", "<m>"]`
+    /// with values resolved against the host's `nproc`.
+    pub fn ffmpeg_thread_args(&self) -> [String; 4] {
+        [
+            "-threads".to_string(),
+            self.ffmpeg_threads.resolve().to_string(),
+            "-filter_threads".to_string(),
+            self.ffmpeg_filter_threads.resolve().to_string(),
+        ]
+    }
+
+    /// Thread count to splice into yt-dlp's `--postprocessor-args` string.
+    /// The audio path has no filter graph, so `-filter_threads` is omitted.
+    pub fn yt_dlp_postprocessor_threads(&self) -> usize {
+        self.ffmpeg_threads.resolve()
+    }
 }
 
 /// Frame-aware YouTube ingestion config (see docs/design/2026-04-29-frame-aware-youtube-ingestion.md).
@@ -706,6 +867,135 @@ pipeline:
         let config: Config = serde_yaml::from_str(yaml).expect("should parse");
         assert_eq!(config.pipeline.max_concurrent_traces, 12);
         assert_eq!(config.pipeline.max_concurrent_heavy_traces, 6);
+    }
+
+    #[test]
+    fn test_thread_count_parse_integer() {
+        let tc: ThreadCount = serde_yaml::from_str("4").expect("parse 4");
+        assert_eq!(tc, ThreadCount::absolute(4));
+    }
+
+    #[test]
+    fn test_thread_count_parse_nproc() {
+        let tc: ThreadCount = serde_yaml::from_str(r#""nproc""#).expect("parse nproc");
+        assert_eq!(tc, ThreadCount::nproc_over(1));
+    }
+
+    #[test]
+    fn test_thread_count_parse_nproc_over_n() {
+        let tc: ThreadCount = serde_yaml::from_str(r#""nproc/8""#).expect("parse nproc/8");
+        assert_eq!(tc, ThreadCount::nproc_over(8));
+    }
+
+    #[test]
+    fn test_thread_count_rejects_invalid() {
+        for bad in [
+            "\"nproc/0\"",
+            "\"-1\"",
+            "\"4cores\"",
+            "\"nproc/abc\"",
+            "\"\"",
+            "0",
+            "-3",
+        ] {
+            let result: std::result::Result<ThreadCount, _> = serde_yaml::from_str(bad);
+            assert!(result.is_err(), "expected error parsing {bad:?}, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn test_thread_count_resolve_floors_at_min() {
+        assert_eq!(ThreadCount::absolute(1).resolve(), MIN_FFMPEG_THREADS);
+        assert_eq!(ThreadCount::nproc_over(999).resolve(), MIN_FFMPEG_THREADS);
+    }
+
+    #[test]
+    fn test_thread_count_roundtrip_integer() {
+        let tc = ThreadCount::absolute(4);
+        let yaml = serde_yaml::to_string(&tc).expect("serialize");
+        let reparsed: ThreadCount = serde_yaml::from_str(&yaml).expect("reparse");
+        assert_eq!(reparsed, tc);
+    }
+
+    #[test]
+    fn test_thread_count_roundtrip_nproc() {
+        let tc = ThreadCount::nproc_over(1);
+        let yaml = serde_yaml::to_string(&tc).expect("serialize");
+        let reparsed: ThreadCount = serde_yaml::from_str(&yaml).expect("reparse");
+        assert_eq!(reparsed, tc);
+    }
+
+    #[test]
+    fn test_thread_count_roundtrip_nproc_over_n() {
+        let tc = ThreadCount::nproc_over(8);
+        let yaml = serde_yaml::to_string(&tc).expect("serialize");
+        let reparsed: ThreadCount = serde_yaml::from_str(&yaml).expect("reparse");
+        assert_eq!(reparsed, tc);
+        assert!(
+            yaml.contains("nproc/8"),
+            "expected serialized form to contain 'nproc/8', got {yaml:?}"
+        );
+    }
+
+    #[test]
+    fn test_thread_count_symbolic_forms() {
+        assert_eq!(ThreadCount::absolute(4).symbolic(), "4");
+        assert_eq!(ThreadCount::nproc_over(1).symbolic(), "nproc");
+        assert_eq!(ThreadCount::nproc_over(8).symbolic(), "nproc/8");
+    }
+
+    #[test]
+    fn test_youtube_config_default_uses_nproc_over_default_denom() {
+        let cfg = YoutubeConfig::default();
+        assert_eq!(cfg.ffmpeg_threads, ThreadCount::nproc_over(DEFAULT_FFMPEG_THREAD_DENOM));
+        assert_eq!(
+            cfg.ffmpeg_filter_threads,
+            ThreadCount::nproc_over(DEFAULT_FFMPEG_THREAD_DENOM)
+        );
+    }
+
+    #[test]
+    fn test_youtube_config_serde_default_matches_struct_default() {
+        let from_yaml: YoutubeConfig = serde_yaml::from_str("{}").expect("parse empty");
+        let from_default = YoutubeConfig::default();
+        assert_eq!(from_yaml.ffmpeg_threads, from_default.ffmpeg_threads);
+        assert_eq!(from_yaml.ffmpeg_filter_threads, from_default.ffmpeg_filter_threads);
+    }
+
+    #[test]
+    fn test_youtube_config_yaml_override() {
+        let yaml = r#"
+youtube:
+  ffmpeg-threads: 4
+  ffmpeg-filter-threads: "nproc/4"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+        assert_eq!(config.youtube.ffmpeg_threads, ThreadCount::absolute(4));
+        assert_eq!(config.youtube.ffmpeg_filter_threads, ThreadCount::nproc_over(4));
+    }
+
+    #[test]
+    fn test_youtube_config_ffmpeg_thread_args_shape() {
+        let cfg = YoutubeConfig {
+            slides: YoutubeSlidesConfig::default(),
+            ffmpeg_threads: ThreadCount::absolute(3),
+            ffmpeg_filter_threads: ThreadCount::absolute(5),
+        };
+        let args = cfg.ffmpeg_thread_args();
+        assert_eq!(args[0], "-threads");
+        assert_eq!(args[1], "3");
+        assert_eq!(args[2], "-filter_threads");
+        assert_eq!(args[3], "5");
+    }
+
+    #[test]
+    fn test_youtube_config_yt_dlp_postprocessor_threads_matches_ffmpeg_threads() {
+        let cfg = YoutubeConfig {
+            slides: YoutubeSlidesConfig::default(),
+            ffmpeg_threads: ThreadCount::absolute(3),
+            ffmpeg_filter_threads: ThreadCount::absolute(5),
+        };
+        assert_eq!(cfg.yt_dlp_postprocessor_threads(), 3);
     }
 
     #[test]

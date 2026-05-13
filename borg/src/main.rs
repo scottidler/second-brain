@@ -16,6 +16,7 @@ async fn main() -> Result<()> {
     log::debug!("Config: {:?}", config);
 
     borg::startup::init_permits(&config).context("Failed to initialize pipeline permits")?;
+    borg::startup::log_ffmpeg_thread_caps(&config);
 
     if cli.verbose {
         println!("{}", colored::Colorize::yellow("Verbose mode enabled"));

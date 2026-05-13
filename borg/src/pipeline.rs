@@ -730,7 +730,11 @@ async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
                 log::warn!("No subtitles available, falling back to audio extraction + Groq");
                 let temp_dir = std::env::temp_dir().join("obsidian-borg");
                 std::fs::create_dir_all(&temp_dir)?;
-                let audio_path = youtube::extract_audio(url, &temp_dir.to_string_lossy())?;
+                let audio_path = youtube::extract_audio(
+                    url,
+                    &temp_dir.to_string_lossy(),
+                    config.youtube.yt_dlp_postprocessor_threads(),
+                )?;
                 let audio_bytes = std::fs::read(&audio_path)?;
                 let _ = std::fs::remove_file(&audio_path);
 
@@ -888,7 +892,13 @@ async fn try_extract_slides(
 
     // 2. Extract frames.
     let frames_dir = work_dir.join("frames");
-    let frames = youtube::extract_frames(&actual_video, &frames_dir, duration_secs, &config.youtube.slides)?;
+    let frames = youtube::extract_frames(
+        &actual_video,
+        &frames_dir,
+        duration_secs,
+        &config.youtube.slides,
+        &config.youtube.ffmpeg_thread_args(),
+    )?;
     if frames.is_empty() {
         log::info!("No frames extracted; skipping slide-aware path");
         return Ok(None);
