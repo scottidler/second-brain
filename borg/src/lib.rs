@@ -36,6 +36,7 @@ pub mod router;
 pub mod routes;
 pub mod slides;
 pub mod stages;
+pub mod startup;
 pub mod telegram;
 pub mod trace;
 pub mod transcription;

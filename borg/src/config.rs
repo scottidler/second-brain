@@ -183,6 +183,9 @@ pub struct Config {
 /// wraps the whole `process_url_inner` future as a final backstop for any
 /// unbounded path the per-call timeouts miss; if it fires, that is a signal
 /// to investigate the underlying hang, not a feature.
+const DEFAULT_MAX_CONCURRENT_TRACES: usize = 8;
+const DEFAULT_MAX_CONCURRENT_HEAVY_TRACES: usize = 4;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct PipelineConfig {
@@ -191,6 +194,8 @@ pub struct PipelineConfig {
     pub yt_dlp_timeout_secs: u64,
     pub ocr_timeout_secs: u64,
     pub jina_timeout_secs: u64,
+    pub max_concurrent_traces: usize,
+    pub max_concurrent_heavy_traces: usize,
 }
 
 impl Default for PipelineConfig {
@@ -201,6 +206,8 @@ impl Default for PipelineConfig {
             yt_dlp_timeout_secs: 600,
             ocr_timeout_secs: 60,
             jina_timeout_secs: 60,
+            max_concurrent_traces: DEFAULT_MAX_CONCURRENT_TRACES,
+            max_concurrent_heavy_traces: DEFAULT_MAX_CONCURRENT_HEAVY_TRACES,
         }
     }
 }
@@ -677,6 +684,28 @@ mod tests {
         assert_eq!(config.transcriber.url, "http://localhost:8090");
         assert_eq!(config.groq.model, "whisper-large-v3");
         assert_eq!(config.llm.provider, "claude");
+    }
+
+    #[test]
+    fn test_pipeline_defaults_include_concurrency_caps() {
+        let config = Config::default();
+        assert_eq!(config.pipeline.max_concurrent_traces, DEFAULT_MAX_CONCURRENT_TRACES);
+        assert_eq!(
+            config.pipeline.max_concurrent_heavy_traces,
+            DEFAULT_MAX_CONCURRENT_HEAVY_TRACES
+        );
+    }
+
+    #[test]
+    fn test_pipeline_concurrency_caps_yaml_override() {
+        let yaml = r#"
+pipeline:
+  max-concurrent-traces: 12
+  max-concurrent-heavy-traces: 6
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+        assert_eq!(config.pipeline.max_concurrent_traces, 12);
+        assert_eq!(config.pipeline.max_concurrent_heavy_traces, 6);
     }
 
     #[test]

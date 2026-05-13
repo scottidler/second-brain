@@ -10,6 +10,7 @@
 use crate::config::Config;
 use crate::intake as intake_helper;
 use crate::ledger;
+use crate::pipeline::permits;
 use chrono::{Local, NaiveDateTime, TimeZone};
 use eyre::{Context, Result};
 use std::collections::HashSet;
@@ -56,7 +57,14 @@ fn intake_age_secs(row: &ParsedIntakeRow) -> Option<i64> {
 
 /// One scan: find orphans, append watchdog-orphan DLQ rows for each. Returns
 /// the number of orphans recorded.
-pub fn run_once(config: &Config) -> Result<usize> {
+///
+/// `active_traces` is a predicate the watchdog consults *after* the
+/// ledger/DLQ check: any trace ID that is currently inside `process_content`
+/// (queued for a permit or running) is excluded from orphan detection, even
+/// if its intake age has crossed `deadline`. Production passes
+/// `&permits::is_trace_active`; tests pass closures over a fixture set so
+/// the global `ACTIVE_TRACES` is never touched.
+pub fn run_once(config: &Config, active_traces: &dyn Fn(&str) -> bool) -> Result<usize> {
     log::debug!("watchdog::run_once: starting scan");
     let intake_md = intake_helper::intake_path(config);
     let dlq_md = intake_helper::dlq_path(config);
@@ -86,6 +94,14 @@ pub fn run_once(config: &Config) -> Result<usize> {
             continue;
         };
         if age < deadline {
+            continue;
+        }
+        if active_traces(&row.trace_id) {
+            log::debug!(
+                "watchdog: trace {} aged {}s but still active in pipeline; skipping",
+                row.trace_id,
+                age
+            );
             continue;
         }
         let method: vault::schema::Method = row.method.parse().unwrap_or(vault::schema::Method::Manual);
@@ -141,7 +157,7 @@ pub async fn run(config: Arc<Config>) {
         // Filesystem walk + parse runs in a blocking-safe context: it's
         // fast (no I/O proportional to size beyond reading three files) so
         // we run it on the current task.
-        let result = tokio::task::spawn_blocking(move || run_once(&cfg))
+        let result = tokio::task::spawn_blocking(move || run_once(&cfg, &permits::is_trace_active))
             .await
             .unwrap_or_else(|join_err| {
                 log::error!("watchdog: join error: {join_err}");

@@ -15,6 +15,8 @@ async fn main() -> Result<()> {
     log::debug!("Resolved log level: {log_level}");
     log::debug!("Config: {:?}", config);
 
+    borg::startup::init_permits(&config).context("Failed to initialize pipeline permits")?;
+
     if cli.verbose {
         println!("{}", colored::Colorize::yellow("Verbose mode enabled"));
     }

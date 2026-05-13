@@ -23,6 +23,7 @@ use vault::schema::CORTEX_PRESERVE_KEYS;
 
 pub mod atomic;
 mod inflight;
+pub mod permits;
 use atomic::{apply_cortex_fields, apply_ingested_date, apply_original_date, write_atomic};
 use inflight::InflightGuard;
 
@@ -193,6 +194,17 @@ pub async fn process_content(
 ) -> IngestResult {
     let trace_id = trace_id.unwrap_or_else(|| trace::generate(method));
     log::info!("[{trace_id}] Starting ingest: method={method}");
+
+    // Register the trace as active *before* any await so the watchdog sees
+    // it as live during the permit wait. Drop on scope exit (including
+    // panic-unwind and future-cancel) removes the entry.
+    let _active_guard = permits::ActiveTraceGuard::acquire(&trace_id);
+
+    // Acquire the general permit. Every trace passes through this cap.
+    log::debug!("process_content[{trace_id}]: acquiring general permit");
+    let _general_permit = permits::GENERAL_PERMITS.acquire().await;
+    log::debug!("process_content[{trace_id}]: general permit acquired");
+
     if let Err(err) = crate::stages::raw::stage_0_init(config, &content, method, &trace_id) {
         let reason = format!("{err:#}");
         log::warn!("[{trace_id}] Stage-0 rejected: {reason}");
@@ -669,6 +681,12 @@ async fn process_url_inner(
 /// Metadata and transcript run concurrently. Fabric is optional (gates transcript+summary).
 /// See docs/design/2026-03-22-youtube-metadata-pipeline-redesign.md.
 async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
+    // Heavy permit: yt-dlp + fabric + (optional) ffmpeg slides + vision all run
+    // under this handler. Held for the lifetime of the function.
+    log::debug!("process_youtube: acquiring heavy permit (url={url})");
+    let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
+    log::debug!("process_youtube: heavy permit acquired (url={url})");
+
     let use_fabric = fabric::is_available(&config.fabric);
 
     // Run metadata (yt-dlp) and transcript (fabric) concurrently.
@@ -922,6 +940,13 @@ async fn try_extract_slides(
 }
 
 async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> Result<(String, String, ContentType)> {
+    // Heavy permit: fabric -u may internally invoke yt-dlp for media URLs that
+    // were classified as "article" upstream, so this is a heavy path even
+    // though the dispatch site looks lightweight.
+    log::debug!("process_article_fabric[{trace_id}]: acquiring heavy permit");
+    let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
+    log::debug!("process_article_fabric[{trace_id}]: heavy permit acquired");
+
     let article_md = fabric::fetch_article(url, &config.fabric).await?;
     if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
         config,
@@ -1299,6 +1324,12 @@ async fn process_audio_inner(
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
+    // Heavy permit: Groq transcription + any ffmpeg pre-processing runs
+    // under this handler.
+    log::debug!("process_audio_inner[{trace_id}]: acquiring heavy permit");
+    let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
+    log::debug!("process_audio_inner[{trace_id}]: heavy permit acquired");
+
     let tz: chrono_tz::Tz = config
         .frontmatter
         .timezone
@@ -1540,6 +1571,12 @@ async fn process_document_file_inner(
     kind: DocumentKind,
     trace_id: &str,
 ) -> Result<IngestResult> {
+    // Heavy permit: OCR / markitdown / document::extract_text are subprocess-
+    // backed and CPU-heavy.
+    log::debug!("process_document_file_inner[{trace_id}]: acquiring heavy permit");
+    let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
+    log::debug!("process_document_file_inner[{trace_id}]: heavy permit acquired");
+
     let tz: chrono_tz::Tz = config
         .frontmatter
         .timezone
