@@ -1,9 +1,9 @@
 //! Stage 2 distillation entry point.
 //!
 //! Sits next to `summarize::Summarizer` and adds the structured `Distilled`
-//! contract. As of Phase 3 the stage routes Article (Fabric-backed) plus the
-//! no-LLM Idea / Image / VoiceNote kinds through the new dispatcher; Repo /
-//! Video / Thread still bail with an explicit Phases 4-6 message.
+//! contract. As of Phase 4 the stage routes Article and Repo through their
+//! Fabric-backed distillers and Idea / Image / VoiceNote through the no-LLM
+//! distillers; Video / Thread still bail with an explicit Phases 5-6 message.
 //!
 //! Borg never writes to SQLite. The output of this stage is a `Distilled`
 //! value that Stage 3 (publish) renders into the vault markdown file via
@@ -64,7 +64,7 @@ pub fn dispatcher_from_fabric_config(config: &FabricConfig) -> Dispatcher<Fabric
     Dispatcher::new(fabric, article_config)
 }
 
-/// Phase-3 entry point. Wraps the dispatcher with the IngestKind translation
+/// Stage-2 entry point. Wraps the dispatcher with the IngestKind translation
 /// borg's pipeline.rs needs. Generic over the FabricCaller so tests can
 /// inject `FakeFabric` while production uses `FabricShell`.
 #[derive(Debug, Clone)]
@@ -125,7 +125,7 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
 }
 
 /// Filename inside the per-trace staging directory where shadow-mode
-/// (Phase 3) and the future Stage-2 cutover write the structured payload.
+/// (Phases 3-4) and the future Stage-2 cutover write the structured payload.
 pub const DISTILLED_FILENAME: &str = "distilled.yml";
 
 /// Shadow-mode: run the article distiller against the raw article markdown
