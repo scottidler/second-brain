@@ -7,6 +7,7 @@ build = "build.rs"
 
 [dependencies]
 vault = { path = "../vault" }
+distillers = { path = "../distillers" }
 axum = { version = "0.8.8", features = ["multipart"] }
 chrono = { workspace = true }
 chrono-tz = "0.10"

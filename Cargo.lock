@@ -540,6 +540,7 @@ dependencies = [
  "clap",
  "colored",
  "dirs",
+ "distillers",
  "env_logger",
  "eyre",
  "filetime",
@@ -1099,6 +1100,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "distillers"
+version = "0.5.47"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "eyre",
+ "log",
+ "regex",
+ "serde",
+ "serde_yaml",
+ "tokio",
+ "vault",
 ]
 
 [[package]]
