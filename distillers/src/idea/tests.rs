@@ -7,6 +7,7 @@ async fn passthrough_summary_matches_transcript() {
         transcript: "Quick observation about distributed consensus.",
         source_url: None,
         title_hint: None,
+        repo_metadata: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
     assert_eq!(distilled.summary, "Quick observation about distributed consensus.");
@@ -25,6 +26,7 @@ async fn truncates_long_summary_at_char_limit() {
         transcript: &long_text,
         source_url: None,
         title_hint: None,
+        repo_metadata: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
     assert_eq!(distilled.summary.chars().count(), SUMMARY_CHAR_LIMIT);
@@ -42,6 +44,7 @@ async fn extracts_outbound_links_from_transcript() {
         transcript: "Check out https://example.com and also http://foo.bar/path?q=1 for context.",
         source_url: None,
         title_hint: None,
+        repo_metadata: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
     let urls: Vec<&str> = distilled.links.iter().map(|l| l.url.as_str()).collect();

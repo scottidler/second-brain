@@ -15,6 +15,7 @@ pub mod fabric;
 pub mod idea;
 pub mod passthrough;
 pub mod render;
+pub mod repo;
 pub mod validate;
 
 use async_trait::async_trait;
@@ -27,10 +28,11 @@ pub use fabric::{FabricCaller, FabricRequest, FabricShell, FakeFabric};
 pub use idea::IdeaDistiller;
 pub use passthrough::PassthroughDistiller;
 pub use render::{RenderedDistilled, render};
+pub use repo::{RepoConfig, RepoDistiller, RepoMetadata};
 pub use validate::{enforce_bounds, fallback_distilled};
 
 /// Inputs every distiller receives. Mirrors the Stage-1 / Stage-0 contract.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DistillInputs<'a> {
     /// Stage-1 transcript text (markitdown / VTT / thread render / OCR / user prose).
     pub transcript: &'a str,
@@ -39,6 +41,11 @@ pub struct DistillInputs<'a> {
     pub source_url: Option<&'a str>,
     /// Best-effort title hint (Telegram caption, video title, etc.).
     pub title_hint: Option<&'a str>,
+    /// Repo-specific Stage-0 metadata (stars, primary language, last commit,
+    /// topics). Populated by the GitHub fetcher; `None` for cortex backfill
+    /// or non-repo kinds. `RepoDistiller` reads it to construct
+    /// `Distilled.kind_specific`; other distillers ignore it.
+    pub repo_metadata: Option<&'a RepoMetadata>,
 }
 
 /// Per-kind extractor contract. Async because the LLM-bound distillers shell

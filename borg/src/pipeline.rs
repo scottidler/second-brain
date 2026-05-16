@@ -969,18 +969,27 @@ async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> R
     ) {
         log::warn!("[{trace_id}] persist_fetched (fabric) failed: {e:#}");
     }
-    // Phase 3 shadow-distill: run the structured distiller in the background
+    // Phases 3-4 shadow-distill: run the structured distiller in the background
     // and persist `distilled.yml` to the staging directory for empirical
     // analysis. Fires-and-forgets - never blocks or affects the legacy path.
+    // GitHub repo roots take the dedicated repo path (Phase 4) which calls
+    // the REST API for structured metadata; everything else falls through
+    // to the article distiller (Phase 3).
     {
         let fabric = config.fabric.clone();
         let staging = config.staging.clone();
         let trace_id = trace_id.to_string();
         let url = url.to_string();
         let article_md = article_md.clone();
-        tokio::spawn(async move {
-            crate::stages::distill::shadow_distill_article(fabric, staging, trace_id, url, article_md).await;
-        });
+        if crate::github::parse_repo_url(&url).is_some() {
+            tokio::spawn(async move {
+                crate::stages::distill::shadow_distill_repo(fabric, staging, trace_id, url).await;
+            });
+        } else {
+            tokio::spawn(async move {
+                crate::stages::distill::shadow_distill_article(fabric, staging, trace_id, url, article_md).await;
+            });
+        }
     }
     // Gate-1 fires only on the final fetched bytes, which in this flow is the
     // Jina path (see process_article_jina). If fabric -u returned a block

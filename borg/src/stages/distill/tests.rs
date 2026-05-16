@@ -93,12 +93,72 @@ async fn distill_stage_handles_article_through_fabric() {
 #[tokio::test]
 async fn distill_stage_bails_on_unwired_url_kinds() {
     let stage = make_stage();
-    let err = stage
-        .distill(IngestKind::GitHubUrl, "x", None, None)
+    for kind in [IngestKind::YoutubeUrl, IngestKind::ThreadUrl] {
+        let err = stage
+            .distill(kind, "x", None, None)
+            .await
+            .expect_err("video/thread should still bail in Phase 4");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Phases 5-6"),
+            "expected Phases 5-6 reference for {kind}; got {msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn distill_stage_handles_repo_through_fabric_with_metadata() {
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        "distill-repo",
+        "summary: \"A workspace.\"\nclaims: []\ntags: []\nlinks: []\ninstall: \"cargo install --path borg\"\n",
+    );
+    let stage = make_stage_with_fake(fake);
+    let metadata = distillers::RepoMetadata {
+        owner: "scottidler".to_string(),
+        repo: "second-brain".to_string(),
+        stars: Some(99),
+        primary_language: Some("Rust".to_string()),
+        last_commit: Some("2026-05-16T10:00:00Z".to_string()),
+        topics: vec!["obsidian".to_string()],
+    };
+    let distilled = stage
+        .distill_with_metadata(
+            IngestKind::GitHubUrl,
+            "README transcript",
+            Some("https://github.com/scottidler/second-brain"),
+            None,
+            Some(&metadata),
+        )
         .await
-        .expect_err("github should not dispatch in Phase 3");
-    let msg = format!("{err}");
-    assert!(msg.contains("Phases 4-6"), "expected Phases 4-6 reference; got {msg}");
+        .expect("distill");
+    assert_eq!(distilled.meta.extractor, "distill-repo-v1");
+    let Some(vault::distilled::KindPayload::Repo(payload)) = distilled.kind_specific else {
+        panic!("expected Repo payload");
+    };
+    assert_eq!(payload.stars, Some(99));
+    assert_eq!(payload.install.as_deref(), Some("cargo install --path borg"));
+}
+
+#[test]
+fn repo_metadata_from_fetch_copies_relevant_fields() {
+    let src = crate::github::RepoMetadata {
+        owner: "o".to_string(),
+        repo: "r".to_string(),
+        stars: Some(3),
+        primary_language: Some("Rust".to_string()),
+        last_commit: Some("2026-05-16T00:00:00Z".to_string()),
+        topics: vec!["a".to_string(), "b".to_string()],
+        default_branch: Some("main".to_string()),
+        description: Some("desc".to_string()),
+    };
+    let mapped = repo_metadata_from_fetch(&src);
+    assert_eq!(mapped.owner, "o");
+    assert_eq!(mapped.repo, "r");
+    assert_eq!(mapped.stars, Some(3));
+    assert_eq!(mapped.primary_language.as_deref(), Some("Rust"));
+    assert_eq!(mapped.last_commit.as_deref(), Some("2026-05-16T00:00:00Z"));
+    assert_eq!(mapped.topics, vec!["a", "b"]);
 }
 
 #[test]

@@ -16,10 +16,12 @@ pub trait Fetcher: Send + Sync {
     async fn fetch(&self, url: &str) -> Result<FetchResult>;
 }
 
-/// Chain of Stage-0 fetchers tried in order: Jina Reader → Fabric `-u` → browser-UA
+/// Chain of Stage-0 fetchers tried in order: github API (when the URL is a
+/// `github.com/<owner>/<repo>` root) → Jina Reader → Fabric `-u` → browser-UA
 /// (reqwest with a realistic Firefox User-Agent piped through markitdown).
 /// Each fetcher's failure is logged and the next is attempted.
 pub struct MultiFetcher {
+    github: crate::github::GitHubFetcher,
     jina: JinaFetcher,
     fabric: FabricFetcher,
     browser: BrowserUaFetcher,
@@ -28,6 +30,7 @@ pub struct MultiFetcher {
 impl MultiFetcher {
     pub fn new(fabric_cfg: FabricConfig) -> Self {
         Self {
+            github: crate::github::GitHubFetcher::new(),
             jina: JinaFetcher::new(),
             fabric: FabricFetcher::new(fabric_cfg),
             browser: BrowserUaFetcher::new(),
@@ -39,6 +42,18 @@ impl MultiFetcher {
 impl Fetcher for MultiFetcher {
     async fn fetch(&self, url: &str) -> Result<FetchResult> {
         let mut tried: Vec<String> = Vec::new();
+        if crate::github::parse_repo_url(url).is_some() {
+            match self.github.fetch(url).await {
+                Ok(mut r) => {
+                    r.meta.fallbacks_attempted = tried;
+                    return Ok(r);
+                }
+                Err(e) => {
+                    log::warn!("MultiFetcher: github API failed for {url}: {e:#}");
+                    tried.push("github".to_string());
+                }
+            }
+        }
         match self.jina.fetch(url).await {
             Ok(mut r) => {
                 r.meta.fallbacks_attempted = tried;

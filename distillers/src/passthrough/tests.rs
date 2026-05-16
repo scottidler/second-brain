@@ -7,6 +7,7 @@ async fn passthrough_summary_matches_transcript() {
         transcript: "OCR output for an image.",
         source_url: None,
         title_hint: None,
+        repo_metadata: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
     assert_eq!(distilled.summary, "OCR output for an image.");
@@ -23,6 +24,7 @@ async fn truncates_long_summary() {
         transcript: &long_text,
         source_url: None,
         title_hint: None,
+        repo_metadata: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
     assert_eq!(distilled.summary.chars().count(), SUMMARY_CHAR_LIMIT);

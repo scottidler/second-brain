@@ -17,6 +17,7 @@ pub mod discord;
 pub mod error;
 pub mod extraction;
 pub mod fabric;
+pub mod github;
 pub mod health;
 pub mod hygiene;
 pub mod intake;

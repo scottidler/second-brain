@@ -10,10 +10,27 @@
 //! `distillers::render`; VaultWatcher then triggers `index_vault`.
 
 use crate::config::{FabricConfig, StagingConfig};
+use crate::github::{GitHubFetcher, RepoFetch};
 use crate::types::IngestKind;
-use distillers::{ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell};
+use distillers::{
+    ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, RepoMetadata,
+};
 use eyre::{Context, Result, bail};
 use vault::distilled::Distilled;
+
+/// Translate borg's GitHub fetcher metadata into the distillers-crate
+/// `RepoMetadata`. Drops the extra fields (description, default_branch)
+/// the distiller doesn't use yet.
+pub fn repo_metadata_from_fetch(meta: &crate::github::RepoMetadata) -> RepoMetadata {
+    RepoMetadata {
+        owner: meta.owner.clone(),
+        repo: meta.repo.clone(),
+        stars: meta.stars,
+        primary_language: meta.primary_language.clone(),
+        last_commit: meta.last_commit.clone(),
+        topics: meta.topics.clone(),
+    }
+}
 
 /// Convert borg's `IngestKind` to the distillers crate's `DistillKind`.
 ///
@@ -75,17 +92,33 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
         source_url: Option<&str>,
         title_hint: Option<&str>,
     ) -> Result<Distilled> {
+        self.distill_with_metadata(kind, transcript, source_url, title_hint, None)
+            .await
+    }
+
+    /// Repo-aware variant. Phase 4's shadow path passes `repo_metadata` from
+    /// the GitHub REST API; non-repo dispatches leave it `None`.
+    pub async fn distill_with_metadata(
+        &self,
+        kind: IngestKind,
+        transcript: &str,
+        source_url: Option<&str>,
+        title_hint: Option<&str>,
+        repo_metadata: Option<&RepoMetadata>,
+    ) -> Result<Distilled> {
         log::debug!(
-            "DistillStage::distill: kind={} transcript_len={} source_url={:?}",
+            "DistillStage::distill: kind={} transcript_len={} source_url={:?} has_repo_metadata={}",
             kind,
             transcript.len(),
-            source_url
+            source_url,
+            repo_metadata.is_some()
         );
         let distill_kind = distill_kind_from_ingest(kind)?;
         let inputs = DistillInputs {
             transcript,
             source_url,
             title_hint,
+            repo_metadata,
         };
         self.dispatcher.distill(distill_kind, inputs).await
     }
@@ -153,6 +186,76 @@ pub async fn shadow_distill_article(
     if let Err(e) = write_distilled_yml(&staging, &trace_id, &distilled) {
         log::warn!(
             "[{trace_id}] shadow_distill_article: persist distilled.yml failed: {e:#} (shadow mode; legacy path unaffected)"
+        );
+    }
+}
+
+/// Shadow-mode: run the GitHub fetcher and `RepoDistiller` against a github
+/// URL in the background and persist `distilled.yml` to the staging
+/// directory. Fires-and-forgets - never blocks or affects the legacy path.
+///
+/// Phase 4's job: collect empirical telemetry on the new repo pattern and
+/// the GitHub REST fetcher against real captures, without risking the
+/// legacy publish path. The cutover that replaces the legacy github
+/// summary with the rendered Distilled body lands in a later phase.
+pub async fn shadow_distill_repo(fabric: FabricConfig, staging: StagingConfig, trace_id: String, url: String) {
+    if !staging.enabled {
+        return;
+    }
+    log::debug!("shadow_distill_repo: trace={trace_id} url={url}");
+    let Some((owner, repo)) = crate::github::parse_repo_url(&url) else {
+        log::warn!("[{trace_id}] shadow_distill_repo: url is not a github repo root: {url} (shadow mode; skipping)");
+        return;
+    };
+    let started = std::time::Instant::now();
+    let fetch_result: RepoFetch = match GitHubFetcher::new().fetch_repo(&owner, &repo).await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!(
+                "[{trace_id}] shadow_distill_repo: github fetch failed: {e:#} (shadow mode; legacy path unaffected)"
+            );
+            return;
+        }
+    };
+    let metadata = repo_metadata_from_fetch(&fetch_result.metadata);
+    let stage = DistillStage::from_fabric_config(&fabric);
+    let distilled = match stage
+        .distill_with_metadata(
+            IngestKind::GitHubUrl,
+            &fetch_result.transcript,
+            Some(&url),
+            None,
+            Some(&metadata),
+        )
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("[{trace_id}] shadow_distill_repo: dispatch error: {e:#} (shadow mode; legacy path unaffected)");
+            return;
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    let fallback = distilled
+        .meta
+        .validation
+        .fallback_reason
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    log::info!(
+        "[{trace_id}] shadow_distill_repo: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
+        distilled.meta.extractor,
+        distilled.meta.model,
+        distilled.claims.len(),
+        distilled.tags.len(),
+        distilled.links.len(),
+        fallback,
+        elapsed_ms,
+    );
+
+    if let Err(e) = write_distilled_yml(&staging, &trace_id, &distilled) {
+        log::warn!(
+            "[{trace_id}] shadow_distill_repo: persist distilled.yml failed: {e:#} (shadow mode; legacy path unaffected)"
         );
     }
 }
