@@ -9,6 +9,7 @@
 //! by `IngestKind` over concrete fields (no `Box<dyn>`), so the trait below
 //! exists mainly for per-impl testability.
 
+pub mod article;
 pub mod dispatcher;
 pub mod fabric;
 pub mod idea;
@@ -20,6 +21,7 @@ use async_trait::async_trait;
 use eyre::Result;
 use vault::distilled::Distilled;
 
+pub use article::{ArticleConfig, ArticleDistiller};
 pub use dispatcher::{Dispatch, Dispatcher, DistillKind};
 pub use fabric::{FabricCaller, FabricRequest, FabricShell, FakeFabric};
 pub use idea::IdeaDistiller;

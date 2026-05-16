@@ -27,6 +27,13 @@ pub trait FabricCaller: Send + Sync {
     async fn call(&self, request: FabricRequest) -> Result<String>;
 }
 
+#[async_trait]
+impl<F: FabricCaller + ?Sized> FabricCaller for std::sync::Arc<F> {
+    async fn call(&self, request: FabricRequest) -> Result<String> {
+        (**self).call(request).await
+    }
+}
+
 /// Production caller. Shells out to the `fabric` binary on the tokio blocking
 /// pool because the underlying helper is sync.
 #[derive(Debug, Clone)]

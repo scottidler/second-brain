@@ -6,15 +6,18 @@
 //! frontmatter `type:` + `source:`. This keeps the distillers crate free of
 //! borg/cortex deps.
 //!
-//! Phase 2 wires the no-LLM kinds (Idea / Image / VoiceNote). Phases 3-6
-//! extend the dispatcher with Fabric-backed kinds; the `Dispatcher` is
-//! intentionally a concrete struct so subsequent phases add fields without
-//! reshaping the trait surface.
+//! As of Phase 3 the dispatcher is generic over a `FabricCaller` so each
+//! Fabric-backed distiller (Article, Repo, Video, Thread) can be tested
+//! with `FakeFabric` and run in production with `FabricShell`. Phase 3
+//! wires Article; Repo / Video / Thread still bail with an explicit
+//! "ships in Phases 4-6" error.
 
 use async_trait::async_trait;
 use eyre::{Result, bail};
 
-use crate::{DistillExtractor, DistillInputs, IdeaDistiller, PassthroughDistiller};
+use crate::{
+    ArticleConfig, ArticleDistiller, DistillExtractor, DistillInputs, FabricCaller, IdeaDistiller, PassthroughDistiller,
+};
 
 /// Kinds the distillers crate knows how to produce a `Distilled` for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,23 +45,30 @@ impl DistillKind {
     }
 }
 
-/// Phase 2 dispatcher. Only the no-LLM distillers are wired; Fabric-backed
-/// kinds bail out so callers see an explicit error instead of a silent
-/// passthrough fallback. Phases 3-6 will extend this to dispatch every kind.
-#[derive(Debug, Default, Clone)]
-pub struct Dispatcher {
+/// Phase-3 dispatcher. Routes Idea / Image / VoiceNote through the no-LLM
+/// distillers and Article through the Fabric-backed `ArticleDistiller<F>`.
+/// Repo / Video / Thread still bail so callers see the cutover boundary.
+#[derive(Debug, Clone)]
+pub struct Dispatcher<F: FabricCaller + Clone> {
     pub idea: IdeaDistiller,
     pub passthrough: PassthroughDistiller,
+    pub article: ArticleDistiller<F>,
 }
 
-impl Dispatcher {
-    pub fn new() -> Self {
-        Self::default()
+impl<F: FabricCaller + Clone> Dispatcher<F> {
+    /// Build a dispatcher with a real `FabricCaller`. The article config is
+    /// per-pattern; the no-LLM distillers ignore the fabric caller entirely.
+    pub fn new(fabric: F, article_config: ArticleConfig) -> Self {
+        Self {
+            idea: IdeaDistiller,
+            passthrough: PassthroughDistiller,
+            article: ArticleDistiller::new(fabric, article_config),
+        }
     }
 }
 
 #[async_trait]
-impl Dispatch for Dispatcher {
+impl<F: FabricCaller + Clone> Dispatch for Dispatcher<F> {
     async fn distill(&self, kind: DistillKind, inputs: DistillInputs<'_>) -> Result<vault::distilled::Distilled> {
         log::debug!(
             "Dispatcher::distill: kind={} transcript_len={} source_url={:?}",
@@ -69,9 +79,10 @@ impl Dispatch for Dispatcher {
         match kind {
             DistillKind::Idea => self.idea.distill(inputs).await,
             DistillKind::Image | DistillKind::VoiceNote => self.passthrough.distill(inputs).await,
-            DistillKind::Article | DistillKind::Repo | DistillKind::Video | DistillKind::Thread => {
+            DistillKind::Article => self.article.distill(inputs).await,
+            DistillKind::Repo | DistillKind::Video | DistillKind::Thread => {
                 bail!(
-                    "dispatcher: kind {} is not wired in Phase 2; per-kind distillers ship in Phases 3-6",
+                    "dispatcher: kind {} is not wired yet; ships in Phases 4-6",
                     kind.as_str()
                 );
             }

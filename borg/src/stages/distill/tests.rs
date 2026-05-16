@@ -1,4 +1,14 @@
 use super::*;
+use distillers::{ArticleConfig, Dispatcher, FakeFabric};
+use std::sync::Arc;
+
+fn make_stage() -> DistillStage<Arc<FakeFabric>> {
+    DistillStage::with_dispatcher(Dispatcher::new(Arc::new(FakeFabric::new()), ArticleConfig::default()))
+}
+
+fn make_stage_with_fake(fake: Arc<FakeFabric>) -> DistillStage<Arc<FakeFabric>> {
+    DistillStage::with_dispatcher(Dispatcher::new(fake, ArticleConfig::default()))
+}
 
 #[test]
 fn ingest_kind_maps_to_distill_kind() {
@@ -40,7 +50,7 @@ fn vocabulary_kinds_bail() {
 
 #[tokio::test]
 async fn distill_stage_handles_idea_through_dispatcher() {
-    let stage = DistillStage::new();
+    let stage = make_stage();
     let distilled = stage
         .distill(IngestKind::Idea, "A small idea.", None, None)
         .await
@@ -51,7 +61,7 @@ async fn distill_stage_handles_idea_through_dispatcher() {
 
 #[tokio::test]
 async fn distill_stage_handles_image_through_passthrough() {
-    let stage = DistillStage::new();
+    let stage = make_stage();
     let distilled = stage
         .distill(IngestKind::Image, "ocr'd text", None, None)
         .await
@@ -60,12 +70,102 @@ async fn distill_stage_handles_image_through_passthrough() {
 }
 
 #[tokio::test]
-async fn distill_stage_bails_on_url_kinds_until_phase_3_plus() {
-    let stage = DistillStage::new();
-    let err = stage
-        .distill(IngestKind::ArticleUrl, "x", None, None)
+async fn distill_stage_handles_article_through_fabric() {
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        "distill-article",
+        "summary: \"An article.\"\nclaims: []\ntags: []\nlinks: []\n",
+    );
+    let stage = make_stage_with_fake(fake);
+    let distilled = stage
+        .distill(
+            IngestKind::ArticleUrl,
+            "Article body.",
+            Some("https://example.com"),
+            None,
+        )
         .await
-        .expect_err("article should not dispatch in Phase 2");
+        .expect("distill");
+    assert_eq!(distilled.meta.extractor, "distill-article-v1");
+    assert_eq!(distilled.summary, "An article.");
+}
+
+#[tokio::test]
+async fn distill_stage_bails_on_unwired_url_kinds() {
+    let stage = make_stage();
+    let err = stage
+        .distill(IngestKind::GitHubUrl, "x", None, None)
+        .await
+        .expect_err("github should not dispatch in Phase 3");
     let msg = format!("{err}");
-    assert!(msg.contains("Phases 3-6"), "expected Phases 3-6 reference; got {msg}");
+    assert!(msg.contains("Phases 4-6"), "expected Phases 4-6 reference; got {msg}");
+}
+
+#[test]
+fn write_distilled_yml_no_op_when_staging_disabled() {
+    use crate::config::{StagingConfig, StagingLayout};
+    use tempfile::TempDir;
+    use vault::distilled::{Distilled, DistilledMeta, ValidationMeta};
+
+    let tmp = TempDir::new().expect("tempdir");
+    let staging = StagingConfig {
+        enabled: false,
+        root: tmp.path().to_path_buf(),
+        layout: StagingLayout::PerTrace,
+        ..StagingConfig::default()
+    };
+    let distilled = Distilled {
+        summary: "s".to_string(),
+        claims: Vec::new(),
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: None,
+        meta: DistilledMeta {
+            extractor: "distill-article-v1".to_string(),
+            model: "test".to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            produced_at: "2026-05-16T14:03:22Z".to_string(),
+            validation: ValidationMeta::default(),
+        },
+    };
+    write_distilled_yml(&staging, "trace-1", &distilled).expect("no-op");
+    assert!(!tmp.path().join("trace-1").exists());
+}
+
+#[test]
+fn write_distilled_yml_persists_to_per_trace_dir() {
+    use crate::config::{StagingConfig, StagingLayout};
+    use tempfile::TempDir;
+    use vault::distilled::{Distilled, DistilledMeta, ValidationMeta};
+
+    let tmp = TempDir::new().expect("tempdir");
+    let staging = StagingConfig {
+        enabled: true,
+        root: tmp.path().to_path_buf(),
+        layout: StagingLayout::PerTrace,
+        ..StagingConfig::default()
+    };
+    let distilled = Distilled {
+        summary: "Hello.".to_string(),
+        claims: Vec::new(),
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: None,
+        meta: DistilledMeta {
+            extractor: "distill-article-v1".to_string(),
+            model: "test".to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            produced_at: "2026-05-16T14:03:22Z".to_string(),
+            validation: ValidationMeta::default(),
+        },
+    };
+    write_distilled_yml(&staging, "trace-1", &distilled).expect("write");
+    let path = tmp.path().join("trace-1").join(DISTILLED_FILENAME);
+    let bytes = std::fs::read_to_string(&path).expect("read");
+    assert!(bytes.contains("summary: Hello."), "yaml mismatch: {bytes}");
+    assert!(bytes.contains("distill-article-v1"));
+    // tmp suffix must not linger after the atomic rename.
+    assert!(!tmp.path().join("trace-1").join("distilled.yml.tmp").exists());
 }
