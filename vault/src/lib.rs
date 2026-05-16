@@ -5,6 +5,7 @@
 pub mod canonical;
 pub mod config;
 pub mod detail;
+pub mod distilled;
 pub mod dlq;
 pub mod fabric;
 pub mod frontmatter;
