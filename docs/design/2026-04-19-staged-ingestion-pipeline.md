@@ -77,7 +77,7 @@ Every stage artifact lives under a single per-trace directory keyed by `trace_id
 
 - Stage 0 writes `stages/<trace_id>/envelope.yml`, `body.*`, `attachments/*`, `fetched.*`
 - Stage 1 writes `stages/<trace_id>/transcript.md` + `transcript.yml`
-- Stage 2 writes `stages/<trace_id>/summary.md` + `summary.yml`
+- Stage 2 writes `stages/<trace_id>/distilled.yml` (the structured `Distilled` contract from [Doc 1](2026-05-16-extractor-contract-and-l2-summaries.md)). Pre-Doc-1 traces wrote `summary.md` + `summary.yml`; both shapes are read by `borg replay`.
 - Stage 3 writes `vault/notes/<slug>.md` with `trace: <trace_id>` in the frontmatter
 
 Given a `trace_id`, every artifact produced by that ingestion is reachable by one `ls stages/<trace_id>/` (staging) plus a grep of `vault/notes/` for `trace: <trace_id>` (vault). Replay, inspection, and deletion all use this single ID. The vault frontmatter field name is `trace:` (short form); the CLI flag, sidecar keys, and code use `trace_id`.
@@ -97,18 +97,19 @@ Stage responsibilities:
 
 **Stage 1 - Extract → `transcripts/`**
 - Produces text **from the bytes Stage 0 saved** - never from the network. This is the offline-replay guarantee: given a populated `raw/<trace_id>/`, Stage 1 must produce the identical `transcripts/<trace_id>.md` without any external call. The current live-URL extractors (`jina::fetch_article_markdown`, `fabric::fetch_article`) are Stage-0 tools (they fetch); they are not Stage-1 tools.
-- **Stage-1 primary extractor is `markitdown-cli` fed from disk** (`markitdown < raw/<trace_id>/fetched.html`). Markitdown handles HTML, PDF, docx, ipynb, and other formats we already use it for. For formats markitdown doesn't cover natively, per-kind extractors:
-  - `ArticleUrl` / `GitHubUrl` / `ThreadUrl`: markitdown on `fetched.html` (or `fetched.json` for thread JSON fed through a thin thread→markdown shim).
-  - `YoutubeUrl`: the Stage-0 capture saved the transcript (Fabric already does this); Stage 1 just reads it.
-  - `Image`: Groq vision / Tesseract OCR on `attachments/*.jpg|png`.
-  - `VoiceNote`: Whisper on `attachments/*.ogg|mp3`.
-  - `Idea` / `VocabularyEN` / `VocabularyES`: `body.txt` passthrough (vocab is parsed into structured yaml).
+- **Stage-1 primary extractor is `markitdown-cli` fed from disk** (`markitdown < raw/<trace_id>/fetched.html`). Markitdown handles HTML, PDF, docx, ipynb, and other formats we already use it for. For formats markitdown doesn't cover natively, per-kind extractors (current shape - see the Per-IngestKind table below for the full pipeline):
+  - `ArticleUrl` / `ThreadUrl`: markitdown on `fetched.html`. Thread URLs use the rendered markdown directly (no native JSON API in scope per Phase 6's audit decision).
+  - `GitHubUrl`: borg's `GitHubFetcher::render_transcript` (README + metadata block) - distinct from markitdown because the raw GitHub-API envelope is JSON, not HTML.
+  - `YoutubeUrl`: VTT segments parsed by `parse_vtt_segments` produce a timestamped transcript.
+  - `Image`: Vision API (Groq) description concat with Tesseract OCR text.
+  - `VoiceNote`: Groq Whisper transcription (plain text, no native anchors).
+  - `Idea` / `VocabularyEN` / `VocabularyES`: `body.txt` passthrough. Phase 9 added: the trimmed input becomes both `Distilled.summary` and `Distilled.transcript` (verbatim preservation, no LLM call) - see [extractor-contract-l2-phase-9-cleanup.md](2026-05-16-extractor-contract-l2-phase-9-cleanup.md).
 - Writes `transcripts/<trace_id>.md` (or `.yml` for structured forms) + metadata sidecar.
 - Gate-1: **block-page detection on the raw Stage-0 artifact.** Pattern match the saved `fetched.html` / `body.txt` for `"anonymous access to domain"`, `"blocked until"`, `"SecurityCompromiseError"`, HTTP 451 from Jina's response headers, etc. Reject BEFORE Stage 2 summarization runs. Record the domain to the blocklist.
 
-**Stage 2 - Summarize → `summaries/`**
-- Fabric / LLM processing appropriate to the input kind. Articles get Fabric summary. GitHub repos get a README-specific pattern. Vocabulary skips this stage entirely (no Fabric). Ideas can skip or use a short pattern.
-- Writes `summaries/<trace_id>.md` + metadata sidecar.
+**Stage 2 - Distill → `distilled.yml`**
+- Per-IngestKind dispatcher produces the structured [`Distilled`](2026-05-16-extractor-contract-and-l2-summaries.md) contract. URL kinds (`ArticleUrl`, `GitHubUrl`, `YoutubeUrl`, `ThreadUrl`) call Fabric (`distill-article` / `distill-repo` / `distill-video` / `distill-thread`; long videos and voicenotes use map-reduce chunk+reduce patterns). Non-URL kinds (`Image` via Fabric `distill-image`; `VoiceNote` via Fabric `distill-voicenote`; `Idea`, `VocabularyEN`, `VocabularyES` via `IdeaDistiller` with no Fabric call) all populate `Distilled.transcript = Some(input)` so the published note carries the verbatim source below the LLM-distilled summary.
+- Writes `distilled.yml` to the per-trace staging directory.
 - Gate-2: **failed-fetch paraphrase detection.** Pattern match for `"only an error message"`, `"no actual content"`, `"error message indicating"`. This is the backstop for block pages that slipped past Gate-1.
 
 **Stage 3 - Publish → `vault/notes/`**
@@ -134,18 +135,18 @@ A message with a photo AND a `vocab:en perro` caption saves both; the dispatcher
 
 All rows assume Stage 0 has already saved the **full capture event** (envelope + body + attachments + any fetched bytes). The "Stage 1" column describes which extractor runs against the Stage-0 bytes; it is a pure bytes→text transform with no network access.
 
-| IngestKind | Stage 0 fetch (online) | Stage 1 extract (offline, from disk) | Stage 2 summarize | Stage 3 publish |
+| IngestKind | Stage 0 fetch (online) | Stage 1 extract (offline, from disk) | Stage 2 distill | Stage 3 publish |
 |---|---|---|---|---|
-| `ArticleUrl` | Jina / Fabric-u / UA-fallback → `fetched.html` | `markitdown < fetched.html` | Fabric `summarize` (existing) | article note |
-| `GitHubUrl` | GitHub API → `fetched.json` (README + tree) | markitdown on README + shim for tree | Fabric `repo_summary` (new) | repo note |
-| `YoutubeUrl` | Fabric `-y` → `fetched.txt` (transcript) | passthrough | Fabric `summarize_video` (new) | video note |
-| `ThreadUrl` (X/Reddit/HN) | Jina/API → `fetched.json` | thread-JSON→markdown shim | Fabric `summarize_thread` (new) | thread note |
-| `Image` | n/a (bytes already in `attachments/`) | Groq vision / Tesseract OCR | optional summary if text-heavy | image note |
-| `VoiceNote` | n/a (bytes already in `attachments/`) | Whisper | Fabric `summarize` | voice note |
-| `Idea` | n/a | `body.txt` passthrough | optional | idea note |
-| `VocabularyEN` / `VocabularyES` † | n/a | `body.txt` → structured yaml (`word / pos / def / example / etymology`) | **skipped** (no Fabric) | vocab note (different template) |
+| `ArticleUrl` | Jina / Fabric-u / UA-fallback → `fetched.html` | `markitdown < fetched.html` → `transcript.md` | Fabric `distill-article` → `Distilled` | article note |
+| `GitHubUrl` | GitHub REST API (raw `{"repo": ..., "readme": ...}` envelope) → `fetched.html` | `render_transcript` (README + metadata block) → `transcript.md` (`extractor: github-render`) | Fabric `distill-repo` → `Distilled` (+ `KindPayload::Repo`) | repo note |
+| `YoutubeUrl` | yt-dlp metadata + VTT subtitles → staged | `parse_vtt_segments` → timestamped `transcript.md` | Fabric `distill-video` (short) or `distill-video-chunk` + `distill-video-reduce` (long, map-reduce) → `Distilled` (+ `KindPayload::Video`) | video note |
+| `ThreadUrl` (X/Reddit/HN) | Jina / Fabric-u / UA-fallback chain (no native API) → `fetched.html` | rendered markdown → `transcript.md` (`extractor: thread-markdown-shim`) | Fabric `distill-thread` → `Distilled` (+ `KindPayload::Thread`) | thread note |
+| `Image` | n/a (bytes in `attachments/`) | Vision API (Groq) + Tesseract OCR concat → `## Description` + `## Extracted Text` transcript | Fabric `distill-image` → `Distilled` with `transcript = Some(vision+OCR concat)` | image note |
+| `VoiceNote` | n/a (bytes in `attachments/`) | Groq Whisper transcription → plain text | Fabric `distill-voicenote` (short) or `distill-voicenote-chunk` + `distill-voicenote-reduce` (long, map-reduce) → `Distilled` with `transcript = Some(Groq output)` | voice note |
+| `Idea` | n/a | `body.txt` passthrough | `IdeaDistiller` (no Fabric) → `Distilled` with `transcript = Some(input)` | idea note |
+| `VocabularyEN` / `VocabularyES` | n/a | vocab body (Define / Clarify prose) | `IdeaDistiller` (no Fabric, degenerate) → `Distilled` with `transcript = Some(definition)` | vocab note |
 
-† `Vocabulary` is listed for completeness of the pipeline shape, but it depends on a new `NoteType::Vocabulary` variant in `vault/src/schema.rs` that does not yet exist. The vocab pipeline is **deferred to a follow-on** after that schema change lands. Phases 1–8 below do not implement vocab; they ship the infrastructure that makes the vocab variant a drop-in addition later.
+As of Phase 9 every IngestKind flows through the `Distilled` contract (`vault::distilled::Distilled` — see [2026-05-16-extractor-contract-and-l2-summaries.md](2026-05-16-extractor-contract-and-l2-summaries.md) Phases 1-8 and [2026-05-16-extractor-contract-l2-phase-9-cleanup.md](2026-05-16-extractor-contract-l2-phase-9-cleanup.md) for the non-URL distillers + verbatim preservation contract). Non-URL kinds populate `Distilled.transcript = Some(...)` so the published note carries the raw extracted text below the LLM-distilled `## Summary` / `## Claims` / `## Links`; URL kinds leave `transcript: None` because the origin URL is the recoverable archive.
 
 **`IngestKind` detection rules, evaluated top-down (first match wins). Classification is non-destructive: Stage 0 always keeps the full raw event; only the extractor + summarizer shape is selected by the match:**
 
@@ -228,8 +229,7 @@ fallbacks-attempted: []
     fetched.yml                # fetch metadata
     transcript.md              # Stage 1 output
     transcript.yml             # extractor used, fallbacks, token counts
-    summary.md                 # Stage 2 output
-    summary.yml                # fabric pattern, model, token counts
+    distilled.yml              # Stage 2 output (structured Distilled contract)
     rejection.yml              # gate, reason, artifact pointers (when rejected)
 ```
 
@@ -272,8 +272,8 @@ pub struct StagingConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum StagingLayout {
     #[default]
-    PerTrace,       // stages/<trace_id>/{envelope.yml,body.txt,attachments/*,fetched.*,transcript.*,summary.*}
-    PerStage,       // stages/raw/<trace_id>/*, stages/transcripts/<trace_id>.md, ...
+    PerTrace,       // stages/<trace_id>/{envelope.yml,body.txt,attachments/*,fetched.*,transcript.*,distilled.yml}
+    PerStage,       // stages/raw/<trace_id>/*, stages/transcripts/<trace_id>.md, stages/distilled/<trace_id>.yml, ...
 }
 ```
 
@@ -296,8 +296,7 @@ stages/
     fetched.yml
     transcript.md
     transcript.yml
-    summary.md
-    summary.yml
+    distilled.yml
 ```
 
 - Pros: the full-payload raw model from Fix-1 (envelope + body + attachments + fetched.*) is natively a directory, so per-trace layout matches the data shape. `ls stages/tg-26a031/` tells the whole story. `rm -rf stages/tg-26a031/` deletes one trace cleanly. Directory mtime on POSIX updates when any file inside is written, so retention sweep is `find stages/ -mindepth 1 -maxdepth 1 -type d -mtime +60 -exec rm -rf {} \;` - one flat directory-level scan, no per-file mtime check.
@@ -719,7 +718,7 @@ No breaking changes for other workspace crates - `cortex` and `oracle` continue 
 | Staged pipeline has more moving parts → more bugs | Med | Med | Phased rollout with double-write before cutover. Full integration test fixtures per `IngestKind`. |
 | Double-write doubles external fetch load on IP-sensitive domains | Med | High (triggers the bug we're fixing) | Double-write is write-through, not parallel fetch: the old pipeline's fetch result is intercepted and written to `stages/<trace_id>/fetched.*`; new stages read from disk. Net fetch count per ingestion stays at 1. Integration test asserts exactly one call to `Fetcher::fetch` per ingestion during double-write. |
 | Retention aging off a trace that's still needed for replay | Med | Low | Rejected traces retained 90d (vs 60d for successful). Graceful error message on replay-after-aging, with the user's current recourse (re-ask source) unchanged from today. |
-| Vocab pipeline needs a template cortex doesn't know about | Low | Med | Vocab is **deferred** from this doc's scope. Ships only after `vault::schema::NoteType::Vocabulary` lands in a follow-on; infrastructure here is designed to accept it as a drop-in `IngestKind`. |
+| ~~Vocab pipeline needs a template cortex doesn't know about~~ **Resolved (Phase 9c-hotfix)** | - | - | Vocab routes through `DistillKind::Vocabulary` -> `IdeaDistiller` (degenerate path, no Fabric call); the definition prose becomes both `Distilled.summary` and `Distilled.transcript`. No `NoteType::Vocabulary` schema variant turned out to be required - the existing schema plus the `vocab` content-type discriminator on the published note is sufficient. |
 | Migration replay wastes Fabric tokens on irrecoverable URLs | Low | Low | `borg migrate reingest-failed` respects Gate-1 and blocklist; XDA URLs that are still blocked get rejected for free and recorded to the blocklist, not sent to Fabric. |
 
 ## Open Questions
@@ -727,8 +726,8 @@ No breaking changes for other workspace crates - `cortex` and `oracle` continue 
 - [x] ~~**Storage layout (A/B/C).**~~ **Decided: Option B (per-trace directories)** after the architect review; directory mtime handles retention in one line, and the full-payload raw model is inherently directory-shaped. Option A remains available via `staging.layout: per-stage` config for users who prefer stage-level views.
 - [ ] **Alerting channel.** Telegram (reuse existing notifier) vs ntfy vs both. Author leans Telegram as default with ntfy as config option.
 - [ ] **Retention defaults.** 60 days for successful, 90 days for rejected - acceptable?
-- [ ] **Vocabulary schema.** The vocab pipeline is deferred until `vault::schema::NoteType` gains a `Vocabulary` variant (or a deliberate decision to reuse an existing variant with template-level routing). That's a separate design doc; this one ships the infrastructure only.
-- [ ] **Idea pipeline.** Do raw ideas get any LLM pass (tag suggestion, classification) or strict passthrough? Author leans strict passthrough with cortex doing classification later.
+- [x] ~~**Vocabulary schema.**~~ **Resolved (Phase 9c-hotfix):** vocab ships via `DistillKind::Vocabulary` -> `IdeaDistiller` without requiring a new `NoteType::Vocabulary` variant. The existing schema with the `vocab-en` / `vocab-es` tag plus `cortex-thread-platform`-style frontmatter discriminator is sufficient.
+- [x] ~~**Idea pipeline.**~~ **Resolved (Phase 9c-hotfix):** ideas go through `IdeaDistiller` - no Fabric call, just trim + link extraction + verbatim preservation in `Distilled.transcript`. Cortex's tagging/classification passes still run downstream on the published note.
 - [ ] **Haiku classifier reinstatement.** When do we promote from pattern-only Gate-1 to pattern + Haiku? Suggest: when we see 3 novel block-page formats in the same month that patterns miss.
 
 ## References
