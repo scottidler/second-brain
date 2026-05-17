@@ -396,14 +396,28 @@ impl SearchIndex {
 
     /// Insert a minimal `notes` row for tests in other crates. Only
     /// the columns required by the vector search path are populated;
-    /// the rest get sensible defaults.
+    /// the rest get sensible defaults. The body and summary are also
+    /// set so the FTS5 triggers index searchable content.
     pub fn insert_test_note_row(&self, path: &str, note_type: &str, modified_at: i64) -> Result<()> {
+        self.insert_test_note_full(path, note_type, "body", "summary", modified_at)
+    }
+
+    /// Same as [`insert_test_note_row`] but with explicit body and
+    /// summary so the FTS5 path can be exercised by tests.
+    pub fn insert_test_note_full(
+        &self,
+        path: &str,
+        note_type: &str,
+        body: &str,
+        summary: &str,
+        modified_at: i64,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 path, "T", "tech", note_type, "assisted", "", "2026-05-16",
-                "[]", "", "", "body", "summary", modified_at,
+                "[]", "", "", body, summary, modified_at,
             ],
         )?;
         Ok(())
