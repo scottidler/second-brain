@@ -172,8 +172,17 @@ impl<F: FabricCaller + Clone> DistillExtractor for ThreadDistiller<F> {
                 produced_at: Utc::now().to_rfc3339(),
                 validation: ValidationMeta::default(),
             },
-            // URL kind: origin URL is the recoverable archive.
-            transcript: None,
+            // Phase B2: preserve the concatenated post bodies so cortex
+            // can produce chunked transcript embeddings. A long X or
+            // Reddit thread distilled to a 4-sentence summary cannot
+            // represent a token that appears in a single mid-thread
+            // post; the transcript chunks make that token reachable
+            // via semantic query.
+            transcript: if inputs.transcript.trim().is_empty() {
+                None
+            } else {
+                Some(inputs.transcript.to_string())
+            },
         };
 
         let mut bounded = enforce_bounds(distilled);

@@ -120,9 +120,10 @@ pub fn run_embed(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result
         Some("summary") => vec![EmbeddingKind::Summary],
         Some("transcript-chunk") => vec![EmbeddingKind::TranscriptChunk],
         Some(other) => eyre::bail!("unknown --kind {other:?}; expected summary | transcript-chunk"),
-        // Phase A reads only summary rows; Phase B2 will extend the
-        // default to include transcript-chunk.
-        None => vec![EmbeddingKind::Summary],
+        // Phase B2 default: both summary and transcript-chunk. Cortex
+        // walks summary first (one row per note, fast) then transcript
+        // chunks (N rows per transcript-eligible note).
+        None => vec![EmbeddingKind::Summary, EmbeddingKind::TranscriptChunk],
     };
 
     let mut total = EmbedStats::default();
@@ -197,30 +198,38 @@ pub fn process_batch(
     vault_root: &Path,
     batch_size: usize,
 ) -> Result<EmbedStats> {
+    match kind {
+        EmbeddingKind::Summary => process_summary_batch(index, model, model_version, vault_root, batch_size),
+        EmbeddingKind::TranscriptChunk => process_transcript_batch(index, model, model_version, vault_root, batch_size),
+    }
+}
+
+/// Phase A5: one batch of summary embeddings. Read auto-commit, embed
+/// outside any transaction, flush in one short upsert.
+fn process_summary_batch(
+    index: &mut SearchIndex,
+    model: &dyn EmbeddingModel,
+    model_version: &str,
+    vault_root: &Path,
+    batch_size: usize,
+) -> Result<EmbedStats> {
     let mut stats = EmbedStats::default();
 
     // ---- 1. READ PHASE (auto-commit, no transaction). ----
-    let targets = index.stale_embedding_targets(kind, model_version, batch_size as u32)?;
+    let targets = index.stale_embedding_targets(EmbeddingKind::Summary, model_version, batch_size as u32)?;
     if targets.is_empty() {
         return Ok(stats);
     }
-    log::debug!(
-        "cortex::embed::process_batch: scanned={} kind={:?}",
-        targets.len(),
-        kind,
-    );
+    log::debug!("cortex::embed::process_summary_batch: scanned={}", targets.len());
 
     let mut work: Vec<EmbedWork> = Vec::with_capacity(targets.len());
     for t in &targets {
         stats.scanned += 1;
         let abs = vault_root.join(&t.note_path);
-        let text = match read_summary_text(&abs) {
+        let text = match read_section_text(&abs, "## Summary") {
             Some(s) if !s.trim().is_empty() => s,
             _ => {
-                log::warn!(
-                    "cortex::embed: skipping note {} (no summary text or empty)",
-                    t.note_path
-                );
+                log::warn!("cortex::embed: skipping note {} (no summary text)", t.note_path);
                 stats.skipped_empty += 1;
                 continue;
             }
@@ -231,7 +240,6 @@ pub fn process_batch(
             source_modified_at: t.modified_at,
         });
     }
-
     if work.is_empty() {
         return Ok(stats);
     }
@@ -257,16 +265,12 @@ pub fn process_batch(
     }
 
     // ---- 3. WRITE PHASE (one short transaction). ----
-    // upsert_embeddings_batch wraps BEGIN IMMEDIATE / COMMIT around a
-    // pure-SQL loop. No CPU work happens between BEGIN and COMMIT, so
-    // the lock window stays brief regardless of batch size. Phase A5's
-    // regression test asserts this wall-clock budget.
     let items: Vec<BatchUpsert<'_>> = work
         .iter()
         .zip(vectors.iter())
         .map(|(w, v)| BatchUpsert {
             note_path: &w.note_path,
-            kind,
+            kind: EmbeddingKind::Summary,
             chunk_index: 0,
             text: &w.text,
             embedding: v,
@@ -277,9 +281,120 @@ pub fn process_batch(
     let scanned_count = work.len();
     index.upsert_embeddings_batch(&items)?;
     stats.embedded += scanned_count as u64;
-
     Ok(stats)
 }
+
+/// Phase B2: one batch of transcript chunks. Each transcript-eligible
+/// note expands into N chunks via `vault::embedding::chunk_transcript`;
+/// the chunks are embedded in one batch and flushed via
+/// `swap_transcript_chunks`, which DELETE/INSERTs atomically per note
+/// to avoid leaving a half-replaced chunk set visible to hybrid search.
+///
+/// Phase B2's batch_size bounds the number of *notes* processed, not
+/// the number of chunks. A pathologically long transcript will still
+/// be flushed in one short transaction (delete + N inserts); the
+/// per-note CPU is dominated by chunk_count * inference latency, which
+/// is bounded by the chunker's max_tokens.
+fn process_transcript_batch(
+    index: &mut SearchIndex,
+    model: &dyn EmbeddingModel,
+    model_version: &str,
+    vault_root: &Path,
+    batch_size: usize,
+) -> Result<EmbedStats> {
+    let mut stats = EmbedStats::default();
+
+    // ---- 1. READ PHASE. ----
+    // The note_type filter inside stale_embedding_targets is load-
+    // bearing here: without it, every Article and Repo in the vault
+    // matches `e.id IS NULL` forever and this loop spins.
+    let targets = index.stale_embedding_targets(EmbeddingKind::TranscriptChunk, model_version, batch_size as u32)?;
+    if targets.is_empty() {
+        return Ok(stats);
+    }
+    log::debug!("cortex::embed::process_transcript_batch: scanned={}", targets.len());
+
+    let mut work: Vec<TranscriptWork> = Vec::with_capacity(targets.len());
+    for t in &targets {
+        stats.scanned += 1;
+        let abs = vault_root.join(&t.note_path);
+        let transcript = match read_section_text(&abs, "## Transcript") {
+            Some(s) if !s.trim().is_empty() => s,
+            _ => {
+                log::warn!(
+                    "cortex::embed: skipping {} (no ## Transcript section or empty)",
+                    t.note_path
+                );
+                stats.skipped_empty += 1;
+                continue;
+            }
+        };
+        let chunks = vault::embedding::chunk_transcript(&transcript, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS);
+        if chunks.is_empty() {
+            log::warn!("cortex::embed: chunk_transcript produced 0 chunks for {}", t.note_path);
+            stats.skipped_empty += 1;
+            continue;
+        }
+        work.push(TranscriptWork {
+            note_path: t.note_path.clone(),
+            chunks,
+            source_modified_at: t.modified_at,
+        });
+    }
+    if work.is_empty() {
+        return Ok(stats);
+    }
+
+    // ---- 2. INFERENCE PHASE. ----
+    // One flat batch of chunks across all notes - amortizes the model
+    // call. The per-note grouping happens on the way out.
+    let flat: Vec<&str> = work.iter().flat_map(|w| w.chunks.iter().map(|s| s.as_str())).collect();
+    let flat_vectors = match model.embed_batch(&flat) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("cortex::embed: embed_batch failed for transcripts: {e}");
+            stats.failed += flat.len() as u64;
+            return Ok(stats);
+        }
+    };
+    if flat_vectors.len() != flat.len() {
+        log::error!(
+            "cortex::embed: embed_batch returned {} vectors for {} chunk inputs",
+            flat_vectors.len(),
+            flat.len(),
+        );
+        stats.failed += flat.len() as u64;
+        return Ok(stats);
+    }
+
+    // ---- 3. WRITE PHASE. ----
+    // One short transaction per note (DELETE + N INSERTs). The
+    // transactions are sequential so the lock window per note stays
+    // bounded; the alternative (one transaction across all notes)
+    // would extend the write lock for the whole batch.
+    let mut cursor = 0;
+    for w in &work {
+        let n = w.chunks.len();
+        let mut pairs: Vec<(String, Vec<f32>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            pairs.push((w.chunks[i].clone(), flat_vectors[cursor + i].clone()));
+        }
+        cursor += n;
+        if let Err(e) = index.swap_transcript_chunks(&w.note_path, &pairs, model_version, w.source_modified_at) {
+            log::error!("cortex::embed: transcript chunk swap failed for {}: {e}", w.note_path);
+            stats.failed += n as u64;
+            continue;
+        }
+        stats.embedded += n as u64;
+    }
+    Ok(stats)
+}
+
+/// Chunk window defaults. The design pins these; future tuning happens
+/// here, not via per-call args, because the stale-target query and the
+/// chunker share the same notion of "what fits in one chunk."
+const CHUNK_MAX_TOKENS: usize = 400;
+const CHUNK_OVERLAP_TOKENS: usize = 50;
 
 struct EmbedWork {
     note_path: String,
@@ -287,13 +402,21 @@ struct EmbedWork {
     source_modified_at: i64,
 }
 
-/// Read the `## Summary` section out of a vault file. Returns `None`
-/// when the file is missing or unreadable; callers log + skip.
-fn read_summary_text(abs: &Path) -> Option<String> {
+struct TranscriptWork {
+    note_path: String,
+    chunks: Vec<String>,
+    source_modified_at: i64,
+}
+
+/// Read a single `## Heading` section out of a vault file. Returns
+/// `None` when the file is missing/unreadable or the section is absent;
+/// callers log + skip. `header` must include the leading `## ` and
+/// match the anchor exactly (case-sensitive).
+fn read_section_text(abs: &Path, header: &str) -> Option<String> {
     let body = std::fs::read_to_string(abs).ok()?;
     let mut lines = body.lines();
     while let Some(line) = lines.next() {
-        if line.trim() == "## Summary" {
+        if line.trim() == header {
             let mut collected = String::new();
             for next in lines.by_ref() {
                 if next.starts_with("## ") {

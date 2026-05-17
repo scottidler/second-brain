@@ -369,8 +369,13 @@ fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str
             produced_at: Utc::now().to_rfc3339(),
             validation: ValidationMeta::default(),
         },
-        // URL kind: YouTube URL is the recoverable archive.
-        transcript: None,
+        // Phase B2: populate transcript for chunked semantic recall.
+        // The summary alone cannot represent a single mention of e.g.
+        // "Temporal" at minute 45 of a 60-minute video; the chunked
+        // transcript embeddings close that gap. Upstream borg::youtube
+        // already strips VTT timestamps in clean_vtt, so the string
+        // arriving here is plain text.
+        transcript: if transcript.trim().is_empty() { None } else { Some(transcript.to_string()) },
     }
 }
 

@@ -289,6 +289,54 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Atomic swap of every `transcript-chunk` row for a single note,
+    /// inside one short write transaction (`BEGIN IMMEDIATE` → DELETE
+    /// → INSERTs → `COMMIT`).
+    ///
+    /// Phase B2's re-embed loop: when a transcript's text changes, the
+    /// chunk boundaries shift, so there is no stable per-chunk identity
+    /// to preserve. Wiping the existing chunks and writing the new ones
+    /// in one transaction means hybrid search never sees a half-replaced
+    /// chunk set.
+    pub fn swap_transcript_chunks(
+        &mut self,
+        note_path: &str,
+        chunks: &[(String, Vec<f32>)],
+        model_version: &str,
+        source_modified_at: i64,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("BEGIN IMMEDIATE;").ok();
+        tx.execute(
+            "DELETE FROM note_embeddings
+             WHERE note_path = ?1 AND kind = ?2",
+            params![note_path, EmbeddingKind::TranscriptChunk.as_str()],
+        )?;
+        let now = chrono::Utc::now().timestamp();
+        for (idx, (text, embedding)) in chunks.iter().enumerate() {
+            let bytes = encode_embedding_bytes(embedding);
+            tx.execute(
+                "INSERT INTO note_embeddings (
+                    note_path, kind, chunk_index, text, embedding, dim,
+                    model_version, produced_at, source_modified_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    note_path,
+                    EmbeddingKind::TranscriptChunk.as_str(),
+                    idx as i64,
+                    text,
+                    bytes,
+                    embedding.len() as i64,
+                    model_version,
+                    now,
+                    source_modified_at,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Update `embedding_config.active_model` and `active_dim` inside a
     /// single short transaction. Both rows must move together so oracle
     /// never sees a half-rolled-over config.
