@@ -1,10 +1,17 @@
 //! Stage 2 distillation entry point.
 //!
 //! Sits next to `summarize::Summarizer` and adds the structured `Distilled`
-//! contract. As of Phase 6 the stage routes all five URL kinds (Article,
+//! contract. As of Phase 6 the stage routes all four URL kinds (Article,
 //! Repo, Video, Thread) through their Fabric-backed distillers, plus
 //! Idea / Image / VoiceNote through the no-LLM distillers. Only the
 //! `Vocabulary*` kinds remain outside the contract (handled upstream).
+//!
+//! As of the post-Phase-6 cutover the `distill_for_publish_*` functions
+//! are the primary path: `pipeline.rs` awaits them, renders the result
+//! into the published note's body and frontmatter, and the legacy
+//! `fabric::summarize` prose path is gone for URL kinds. Each function
+//! also persists `distilled.yml` to the staging directory for forensics
+//! and `borg replay` support.
 //!
 //! Borg never writes to SQLite. The output of this stage is a `Distilled`
 //! value that Stage 3 (publish) renders into the vault markdown file via
@@ -196,41 +203,30 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
 /// (Phases 3-4) and the future Stage-2 cutover write the structured payload.
 pub const DISTILLED_FILENAME: &str = "distilled.yml";
 
-/// Shadow-mode: run the article distiller against the raw article markdown
-/// in the background and persist `distilled.yml` to the staging directory.
-/// Never mutates the legacy pipeline output and never propagates errors -
-/// the caller fires-and-forgets via `tokio::spawn` and any failure is logged.
-///
-/// Phase 3's job: collect empirical telemetry on the new pattern and
-/// validator against real article captures, without risking the legacy
-/// publish path. The cutover that replaces `process_article_fabric`'s
-/// returned summary with the rendered Distilled body lands in a later phase.
-pub async fn shadow_distill_article(
-    fabric: FabricConfig,
-    staging: StagingConfig,
-    trace_id: String,
-    url: String,
-    article_md: String,
-) {
-    if !staging.enabled {
-        return;
-    }
+/// Post-Phase-6 cutover: run the article distiller against the raw article
+/// markdown and return the `Distilled`. Persists `distilled.yml` to the
+/// staging directory on success for forensics and `borg replay` support.
+/// On any error (dispatch failure, etc.) returns a `fallback_distilled`
+/// with the appropriate reason tag so the caller always gets a usable
+/// payload - publish never blocks on distillation.
+pub async fn distill_for_publish_article(
+    fabric: &FabricConfig,
+    staging: &StagingConfig,
+    trace_id: &str,
+    url: &str,
+    article_md: &str,
+) -> Distilled {
     log::debug!(
-        "shadow_distill_article: trace={trace_id} url={url} transcript_len={}",
+        "distill_for_publish_article: trace={trace_id} url={url} transcript_len={}",
         article_md.len()
     );
-    let stage = DistillStage::from_fabric_config(&fabric);
+    let stage = DistillStage::from_fabric_config(fabric);
     let started = std::time::Instant::now();
-    let distilled = match stage
-        .distill(IngestKind::ArticleUrl, &article_md, Some(&url), None)
-        .await
-    {
+    let distilled = match stage.distill(IngestKind::ArticleUrl, article_md, Some(url), None).await {
         Ok(d) => d,
         Err(e) => {
-            log::warn!(
-                "[{trace_id}] shadow_distill_article: dispatch error: {e:#} (shadow mode; legacy path unaffected)"
-            );
-            return;
+            log::warn!("[{trace_id}] distill_for_publish_article: dispatch error: {e:#}; using fallback");
+            distillers::fallback_distilled("distill-article-v1", "dispatch-error", article_md, None)
         }
     };
     let elapsed_ms = started.elapsed().as_millis();
@@ -241,7 +237,7 @@ pub async fn shadow_distill_article(
         .clone()
         .unwrap_or_else(|| "none".to_string());
     log::info!(
-        "[{trace_id}] shadow_distill_article: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
+        "[{trace_id}] distill_for_publish_article: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
         distilled.meta.extractor,
         distilled.meta.model,
         distilled.claims.len(),
@@ -251,47 +247,46 @@ pub async fn shadow_distill_article(
         elapsed_ms,
     );
 
-    if let Err(e) = write_distilled_yml(&staging, &trace_id, &distilled) {
-        log::warn!(
-            "[{trace_id}] shadow_distill_article: persist distilled.yml failed: {e:#} (shadow mode; legacy path unaffected)"
-        );
+    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
+        log::warn!("[{trace_id}] distill_for_publish_article: persist distilled.yml failed: {e:#}");
     }
+    distilled
 }
 
-/// Shadow-mode: run the GitHub fetcher and `RepoDistiller` against a github
-/// URL in the background and persist `distilled.yml` to the staging
-/// directory. Fires-and-forgets - never blocks or affects the legacy path.
-///
-/// Phase 4's job: collect empirical telemetry on the new repo pattern and
-/// the GitHub REST fetcher against real captures, without risking the
-/// legacy publish path. The cutover that replaces the legacy github
-/// summary with the rendered Distilled body lands in a later phase.
-pub async fn shadow_distill_repo(fabric: FabricConfig, staging: StagingConfig, trace_id: String, url: String) {
-    if !staging.enabled {
-        return;
-    }
-    log::debug!("shadow_distill_repo: trace={trace_id} url={url}");
-    let Some((owner, repo)) = crate::github::parse_repo_url(&url) else {
-        log::warn!("[{trace_id}] shadow_distill_repo: url is not a github repo root: {url} (shadow mode; skipping)");
-        return;
+/// Post-Phase-6 cutover: fetch the github repo's README + metadata via the
+/// REST API and distill into a `Distilled`. Persists `distilled.yml` on
+/// success. On any error (URL not a repo root, REST fetch failed, dispatch
+/// failure) returns a `fallback_distilled` so publish always has a payload
+/// to render - degraded distillation never blocks the note from landing.
+pub async fn distill_for_publish_repo(
+    fabric: &FabricConfig,
+    staging: &StagingConfig,
+    trace_id: &str,
+    url: &str,
+    article_md_fallback: &str,
+) -> Distilled {
+    log::debug!("distill_for_publish_repo: trace={trace_id} url={url}");
+    let Some((owner, repo)) = crate::github::parse_repo_url(url) else {
+        log::warn!("[{trace_id}] distill_for_publish_repo: url is not a github repo root: {url}; using fallback");
+        return distillers::fallback_distilled("distill-repo-v1", "not-a-repo-root", article_md_fallback, None);
     };
     let started = std::time::Instant::now();
     let fetch_result: RepoFetch = match GitHubFetcher::new().fetch_repo(&owner, &repo).await {
         Ok(r) => r,
         Err(e) => {
             log::warn!(
-                "[{trace_id}] shadow_distill_repo: github fetch failed: {e:#} (shadow mode; legacy path unaffected)"
+                "[{trace_id}] distill_for_publish_repo: github fetch failed: {e:#}; falling back to article_md path"
             );
-            return;
+            return distillers::fallback_distilled("distill-repo-v1", "github-fetch-error", article_md_fallback, None);
         }
     };
     let metadata = repo_metadata_from_fetch(&fetch_result.metadata);
-    let stage = DistillStage::from_fabric_config(&fabric);
+    let stage = DistillStage::from_fabric_config(fabric);
     let distilled = match stage
         .distill_with_metadata(
             IngestKind::GitHubUrl,
             &fetch_result.transcript,
-            Some(&url),
+            Some(url),
             None,
             Some(&metadata),
         )
@@ -299,8 +294,8 @@ pub async fn shadow_distill_repo(fabric: FabricConfig, staging: StagingConfig, t
     {
         Ok(d) => d,
         Err(e) => {
-            log::warn!("[{trace_id}] shadow_distill_repo: dispatch error: {e:#} (shadow mode; legacy path unaffected)");
-            return;
+            log::warn!("[{trace_id}] distill_for_publish_repo: dispatch error: {e:#}; using fallback");
+            distillers::fallback_distilled("distill-repo-v1", "dispatch-error", &fetch_result.transcript, None)
         }
     };
     let elapsed_ms = started.elapsed().as_millis();
@@ -311,7 +306,7 @@ pub async fn shadow_distill_repo(fabric: FabricConfig, staging: StagingConfig, t
         .clone()
         .unwrap_or_else(|| "none".to_string());
     log::info!(
-        "[{trace_id}] shadow_distill_repo: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
+        "[{trace_id}] distill_for_publish_repo: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
         distilled.meta.extractor,
         distilled.meta.model,
         distilled.claims.len(),
@@ -321,45 +316,44 @@ pub async fn shadow_distill_repo(fabric: FabricConfig, staging: StagingConfig, t
         elapsed_ms,
     );
 
-    if let Err(e) = write_distilled_yml(&staging, &trace_id, &distilled) {
-        log::warn!(
-            "[{trace_id}] shadow_distill_repo: persist distilled.yml failed: {e:#} (shadow mode; legacy path unaffected)"
-        );
+    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
+        log::warn!("[{trace_id}] distill_for_publish_repo: persist distilled.yml failed: {e:#}");
     }
+    distilled
 }
 
-/// Shadow-mode: run the YouTube distiller against a fetched timestamped
-/// transcript and persist `distilled.yml` to the staging directory. Fetches
-/// the raw VTT separately (cheap parallel work) so the distiller sees real
-/// timestamps regardless of which path the legacy `transcript` came from.
-/// Fires-and-forgets - never blocks or affects the legacy publish path.
-pub async fn shadow_distill_video(
-    fabric: FabricConfig,
-    pipeline: PipelineConfig,
-    staging: StagingConfig,
-    trace_id: String,
-    url: String,
-) {
-    if !staging.enabled {
-        return;
-    }
-    log::debug!("shadow_distill_video: trace={trace_id} url={url}");
+/// Post-Phase-6 cutover: run the YouTube distiller. Fetches yt-dlp metadata
+/// and raw VTT subtitles in parallel so the distiller sees real timestamps,
+/// rather than the legacy transcript that strips them. Persists
+/// `distilled.yml` on success. On any error returns a `fallback_distilled`
+/// using the supplied `transcript_fallback` so publish always has a payload
+/// even when yt-dlp / VTT parsing fails.
+pub async fn distill_for_publish_video(
+    fabric: &FabricConfig,
+    pipeline: &PipelineConfig,
+    staging: &StagingConfig,
+    trace_id: &str,
+    url: &str,
+    transcript_fallback: &str,
+    title_hint: Option<&str>,
+) -> Distilled {
+    log::debug!("distill_for_publish_video: trace={trace_id} url={url}");
 
-    // Two concurrent yt-dlp calls: metadata (json) and raw subtitles (VTT).
-    // They are independent and take longest in the legacy hot path; the
-    // shadow path can wait without blocking the legacy publish.
     let yt_dlp_timeout = pipeline.yt_dlp_timeout_secs;
-    let metadata_future = crate::youtube::fetch_metadata(&url, yt_dlp_timeout);
-    let subtitles_future = crate::youtube::fetch_subtitles_raw(&url, &pipeline);
+    let metadata_future = crate::youtube::fetch_metadata(url, yt_dlp_timeout);
+    let subtitles_future = crate::youtube::fetch_subtitles_raw(url, pipeline);
     let (metadata_result, subs_result) = tokio::join!(metadata_future, subtitles_future);
 
     let metadata = match metadata_result {
         Ok(m) => m,
         Err(e) => {
-            log::warn!(
-                "[{trace_id}] shadow_distill_video: yt-dlp metadata failed: {e:#} (shadow mode; legacy path unaffected)"
+            log::warn!("[{trace_id}] distill_for_publish_video: yt-dlp metadata failed: {e:#}; using fallback");
+            return distillers::fallback_distilled(
+                "distill-video-v1",
+                "yt-dlp-metadata-error",
+                transcript_fallback,
+                None,
             );
-            return;
         }
     };
     let video_metadata = video_metadata_from_yt_dlp(&metadata);
@@ -367,41 +361,44 @@ pub async fn shadow_distill_video(
         Ok(Some(vtt)) => {
             let segments = crate::youtube::parse_vtt_segments(&vtt);
             if segments.is_empty() {
-                log::warn!("[{trace_id}] shadow_distill_video: empty VTT segments; aborting (shadow mode)");
-                return;
+                log::warn!("[{trace_id}] distill_for_publish_video: empty VTT segments; using transcript_fallback");
+                transcript_fallback.to_string()
+            } else {
+                render_timestamped_transcript(&segments)
             }
-            render_timestamped_transcript(&segments)
         }
         Ok(None) => {
-            log::warn!("[{trace_id}] shadow_distill_video: no subtitles available; aborting (shadow mode)");
-            return;
+            log::warn!("[{trace_id}] distill_for_publish_video: no subtitles available; using transcript_fallback");
+            transcript_fallback.to_string()
         }
         Err(e) => {
             log::warn!(
-                "[{trace_id}] shadow_distill_video: subtitle fetch failed: {e:#} (shadow mode; legacy path unaffected)"
+                "[{trace_id}] distill_for_publish_video: subtitle fetch failed: {e:#}; using transcript_fallback"
             );
-            return;
+            transcript_fallback.to_string()
         }
     };
 
-    let stage = DistillStage::from_fabric_config(&fabric);
+    let stage = DistillStage::from_fabric_config(fabric);
     let started = std::time::Instant::now();
+    let resolved_title = title_hint
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| metadata.title.clone());
     let distilled = match stage
         .distill_with_video_metadata(
             IngestKind::YoutubeUrl,
             &transcript,
-            Some(&url),
-            Some(metadata.title.as_str()),
+            Some(url),
+            Some(resolved_title.as_str()),
             Some(&video_metadata),
         )
         .await
     {
         Ok(d) => d,
         Err(e) => {
-            log::warn!(
-                "[{trace_id}] shadow_distill_video: dispatch error: {e:#} (shadow mode; legacy path unaffected)"
-            );
-            return;
+            log::warn!("[{trace_id}] distill_for_publish_video: dispatch error: {e:#}; using fallback");
+            distillers::fallback_distilled("distill-video-v1", "dispatch-error", &transcript, None)
         }
     };
     let elapsed_ms = started.elapsed().as_millis();
@@ -412,7 +409,7 @@ pub async fn shadow_distill_video(
         .clone()
         .unwrap_or_else(|| "none".to_string());
     log::info!(
-        "[{trace_id}] shadow_distill_video: extractor={} model={} claims={} tags={} links={} anchors_stripped={} fallback={} elapsed_ms={}",
+        "[{trace_id}] distill_for_publish_video: extractor={} model={} claims={} tags={} links={} anchors_stripped={} fallback={} elapsed_ms={}",
         distilled.meta.extractor,
         distilled.meta.model,
         distilled.claims.len(),
@@ -423,11 +420,10 @@ pub async fn shadow_distill_video(
         elapsed_ms,
     );
 
-    if let Err(e) = write_distilled_yml(&staging, &trace_id, &distilled) {
-        log::warn!(
-            "[{trace_id}] shadow_distill_video: persist distilled.yml failed: {e:#} (shadow mode; legacy path unaffected)"
-        );
+    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
+        log::warn!("[{trace_id}] distill_for_publish_video: persist distilled.yml failed: {e:#}");
     }
+    distilled
 }
 
 /// Shadow-mode: run the thread distiller against the markdown rendered by
@@ -439,29 +435,24 @@ pub async fn shadow_distill_video(
 /// (X/Reddit/HN APIs) is out of scope for this phase. The rendered markdown
 /// is sufficient input for empirical telemetry on `distill-thread`'s pattern
 /// quality before cutover.
-pub async fn shadow_distill_thread(
-    fabric: FabricConfig,
-    staging: StagingConfig,
-    trace_id: String,
-    url: String,
-    thread_md: String,
-) {
-    if !staging.enabled {
-        return;
-    }
+pub async fn distill_for_publish_thread(
+    fabric: &FabricConfig,
+    staging: &StagingConfig,
+    trace_id: &str,
+    url: &str,
+    thread_md: &str,
+) -> Distilled {
     log::debug!(
-        "shadow_distill_thread: trace={trace_id} url={url} transcript_len={}",
+        "distill_for_publish_thread: trace={trace_id} url={url} transcript_len={}",
         thread_md.len()
     );
-    let stage = DistillStage::from_fabric_config(&fabric);
+    let stage = DistillStage::from_fabric_config(fabric);
     let started = std::time::Instant::now();
-    let distilled = match stage.distill(IngestKind::ThreadUrl, &thread_md, Some(&url), None).await {
+    let distilled = match stage.distill(IngestKind::ThreadUrl, thread_md, Some(url), None).await {
         Ok(d) => d,
         Err(e) => {
-            log::warn!(
-                "[{trace_id}] shadow_distill_thread: dispatch error: {e:#} (shadow mode; legacy path unaffected)"
-            );
-            return;
+            log::warn!("[{trace_id}] distill_for_publish_thread: dispatch error: {e:#}; using fallback");
+            distillers::fallback_distilled("distill-thread-v1", "dispatch-error", thread_md, None)
         }
     };
     let elapsed_ms = started.elapsed().as_millis();
@@ -476,7 +467,7 @@ pub async fn shadow_distill_thread(
         _ => "unknown",
     };
     log::info!(
-        "[{trace_id}] shadow_distill_thread: extractor={} model={} platform={} claims={} tags={} links={} fallback={} elapsed_ms={}",
+        "[{trace_id}] distill_for_publish_thread: extractor={} model={} platform={} claims={} tags={} links={} fallback={} elapsed_ms={}",
         distilled.meta.extractor,
         distilled.meta.model,
         platform,
@@ -487,11 +478,10 @@ pub async fn shadow_distill_thread(
         elapsed_ms,
     );
 
-    if let Err(e) = write_distilled_yml(&staging, &trace_id, &distilled) {
-        log::warn!(
-            "[{trace_id}] shadow_distill_thread: persist distilled.yml failed: {e:#} (shadow mode; legacy path unaffected)"
-        );
+    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
+        log::warn!("[{trace_id}] distill_for_publish_thread: persist distilled.yml failed: {e:#}");
     }
+    distilled
 }
 
 /// Persist `distilled.yml` into the per-trace staging directory. Atomic

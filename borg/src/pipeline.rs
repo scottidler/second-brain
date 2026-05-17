@@ -8,7 +8,6 @@ use crate::jina;
 use crate::ledger::{self, LedgerEntry, LedgerStatus};
 use crate::markdown::{self, ContentType, NoteContent};
 use crate::ocr;
-use crate::quality;
 use crate::router;
 use crate::trace;
 use crate::transcription::TranscriptionClient;
@@ -93,7 +92,10 @@ async fn finalize_tags(tags: &mut Vec<String>, config: &Config) {
 
 struct YouTubeResult {
     title: String,
-    summary: String,
+    /// Structured distillation produced by the video distiller. After the
+    /// post-Phase-6 cutover this replaces the legacy prose summary; the
+    /// caller renders it via `distillers::render` into the published note.
+    distilled: vault::distilled::Distilled,
     content_type: ContentType,
     description: String,
     yt_tags: Vec<String>,
@@ -462,46 +464,92 @@ async fn process_url_inner(
         log::warn!("[{trace_id}] Fabric binary not available, transcript/summary will use fallbacks");
     }
 
+    // Post-Phase-6 cutover: every URL kind produces a structured `Distilled`
+    // which becomes the source of truth for the note body and for the
+    // `cortex-*` frontmatter additions. The legacy prose-summary path is gone
+    // for URL kinds; image/audio/text/vocab paths still flow through the
+    // older `summary: String` field unchanged.
     let mut slide_payload: Option<SlidePayload> = None;
-    let (title, summary, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
+    let (title, distilled, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
         let yt_result = process_youtube(&url_match.url, config, trace_id).await?;
         slide_payload = yt_result.slide_payload;
         (
             yt_result.title,
-            yt_result.summary,
+            yt_result.distilled,
             yt_result.content_type,
             Some(yt_result.description),
             yt_result.yt_tags,
         )
     } else {
-        // Determine content type from link classification
         let ct = match url_match.link_name.as_str() {
             "github" => ContentType::GitHub,
             "social" => ContentType::Social,
             "reddit" => ContentType::Reddit,
             _ => ContentType::Article,
         };
-        if use_fabric {
+        let (title, article_md) = if use_fabric {
             match process_article_fabric(&url_match.url, config, trace_id).await {
-                Ok((title, summary, _)) => (title, summary, ct, None, Vec::new()),
+                Ok((title, article_md, _)) => (title, article_md),
                 Err(e) => {
                     log::warn!("Fabric article fetch failed: {e:#}, falling back to Jina");
-                    let (title, summary, _) = process_article_jina(&url_match.url, config, trace_id).await?;
-                    (title, summary, ct, None, Vec::new())
+                    let (title, article_md, _) = process_article_jina(&url_match.url, config, trace_id).await?;
+                    (title, article_md)
                 }
             }
         } else {
-            let (title, summary, _) = process_article_jina(&url_match.url, config, trace_id).await?;
-            (title, summary, ct, None, Vec::new())
-        }
+            let (title, article_md, _) = process_article_jina(&url_match.url, config, trace_id).await?;
+            (title, article_md)
+        };
+        // Dispatch by URL kind: github roots → repo distiller (fetches REST
+        // metadata internally); X/Reddit/HN → thread distiller; everything
+        // else → article distiller. The repo path uses `article_md` only as
+        // a fallback when the GitHub API call fails.
+        let distilled = if crate::github::parse_repo_url(&url_match.url).is_some() {
+            crate::stages::distill::distill_for_publish_repo(
+                &config.fabric,
+                &config.staging,
+                trace_id,
+                &url_match.url,
+                &article_md,
+            )
+            .await
+        } else if crate::stages::raw::is_thread_url(&url_match.url) {
+            crate::stages::distill::distill_for_publish_thread(
+                &config.fabric,
+                &config.staging,
+                trace_id,
+                &url_match.url,
+                &article_md,
+            )
+            .await
+        } else {
+            crate::stages::distill::distill_for_publish_article(
+                &config.fabric,
+                &config.staging,
+                trace_id,
+                &url_match.url,
+                &article_md,
+            )
+            .await
+        };
+        // Gate-2 runs against the concise Distilled summary, which is what
+        // we now display to users; it is also what `fabric::generate_tags`
+        // consumes below.
+        crate::stages::raw::run_gate_2(config, trace_id, Some(&url_match.url), &distilled.summary)?;
+        (title, distilled, ct, None, Vec::new())
     };
 
-    // Quality gate: detect blocked/garbage content before creating a note
-    if let Some(reason) = crate::quality::detect_blocked_content(&summary, &title) {
+    // Quality gate: detect blocked/garbage content before creating a note.
+    // Runs against the structured Distilled summary, which is shorter and
+    // more deterministic than the legacy fabric-summarize prose.
+    if let Some(reason) = crate::quality::detect_blocked_content(&distilled.summary, &title) {
         eyre::bail!("Content quality check failed: {reason}");
     }
 
     let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
+    // Extractor-produced tags also flow into the tag pipeline so canonical
+    // filtering applies to them uniformly.
+    all_tags.extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
 
     // Extract hashtags from YouTube description and merge yt-dlp tags
     if let Some(ref desc) = raw_description {
@@ -510,16 +558,15 @@ async fn process_url_inner(
     }
     all_tags.extend(yt_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
 
-    // Generate tags via Fabric (graceful failure)
-    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&summary, &config.fabric).await {
+    // Generate tags via Fabric (graceful failure). Now driven by the
+    // concise Distilled summary rather than a long prose body.
+    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&distilled.summary, &config.fabric).await {
         all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
     }
     finalize_tags(&mut all_tags, config).await;
 
-    // Filter YouTube description for the note callout
     let filtered_description = raw_description.as_deref().and_then(description::filter_description);
 
-    // Generate embed code for YouTube
     let embed_code = if url_match.is_youtube_type() {
         youtube::extract_video_id(&url_match.url)
             .map(|vid| youtube::generate_embed_code(&vid, url_match.width, url_match.height))
@@ -527,13 +574,16 @@ async fn process_url_inner(
         None
     };
 
-    // Slide-aware publish: when frame extraction produced a non-text-only
-    // payload, copy slides into the vault attachment area and replace the
-    // summary body with the section-structured form (with wikilink embeds).
+    // Render the Distilled into a structured body + frontmatter additions.
+    // For slide-aware YouTube, `publish_slides` produces its own structured
+    // body and we use that instead - the slide body is the user-visible
+    // value of the slide pipeline. The Distilled-derived frontmatter
+    // additions (cortex-video-*, distilled flag) still apply.
     let filename_stub = hygiene::sanitize_filename(&title);
     let vault_root = std::path::Path::new(&config.vault.root_path);
     let vault_root_resolved: PathBuf = shellexpand::tilde(&vault_root.to_string_lossy()).to_string().into();
-    let (final_summary, slide_paths) = if let Some(payload) = slide_payload.as_ref() {
+    let rendered_distilled = distillers::render(&distilled);
+    let (distilled_body, slide_paths) = if let Some(payload) = slide_payload.as_ref() {
         match crate::slides::publish::publish_slides(
             &vault_root_resolved,
             &filename_stub,
@@ -551,12 +601,12 @@ async fn process_url_inner(
                 (result.body, result.slides)
             }
             Err(e) => {
-                log::warn!("[{trace_id}] Slide publish failed: {e:#} - using prose summary");
-                (summary, Vec::new())
+                log::warn!("[{trace_id}] Slide publish failed: {e:#} - using rendered Distilled body");
+                (rendered_distilled.body_markdown.clone(), Vec::new())
             }
         }
     } else {
-        (summary, Vec::new())
+        (rendered_distilled.body_markdown.clone(), Vec::new())
     };
 
     let note = NoteContent {
@@ -564,13 +614,15 @@ async fn process_url_inner(
         source_url: Some(url_match.url.clone()),
         asset_path: None,
         tags: all_tags.clone(),
-        summary: final_summary,
+        summary: distilled.summary.clone(),
         description: filtered_description,
         content_type,
         embed_code,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: slide_paths.clone(),
+        distilled_body: Some(distilled_body),
+        frontmatter_additions: rendered_distilled.frontmatter_additions,
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -687,20 +739,6 @@ async fn process_youtube(url: &str, config: &Config, trace_id: &str) -> Result<Y
     let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
     log::debug!("process_youtube: heavy permit acquired (url={url})");
 
-    // Phase 5 shadow-distill: spawn the structured video distiller in the
-    // background; it re-fetches the raw VTT to get timestamps the legacy
-    // path strips. Fires-and-forgets - never blocks or affects publish.
-    {
-        let fabric = config.fabric.clone();
-        let pipeline = config.pipeline.clone();
-        let staging = config.staging.clone();
-        let trace_id = trace_id.to_string();
-        let url = url.to_string();
-        tokio::spawn(async move {
-            crate::stages::distill::shadow_distill_video(fabric, pipeline, staging, trace_id, url).await;
-        });
-    }
-
     let use_fabric = fabric::is_available(&config.fabric);
 
     // Run metadata (yt-dlp) and transcript (fabric) concurrently.
@@ -791,33 +829,33 @@ async fn process_youtube(url: &str, config: &Config, trace_id: &str) -> Result<Y
         }
     }
 
-    // Summarize via Fabric (text-only fallback / when slide path didn't run).
-    let summary = if let Some(s) = slide_summary {
-        s
-    } else if use_fabric {
-        let initial = fabric::summarize(&transcript, true, &config.fabric)
-            .await
-            .unwrap_or_else(|e| {
-                log::warn!("Fabric summarization failed: {e:#}");
-                transcript.clone()
-            });
-
-        // Quality gate: check for truncation artifacts in the summary
-        if let Some(reason) = quality::detect_truncation_artifacts(&initial) {
-            log::warn!("Quality gate failed: {reason}");
-            log::info!("Re-summarizing with forced chunked approach");
-            fabric::summarize_forced_chunked(&transcript, true, &config.fabric)
-                .await
-                .unwrap_or_else(|e| {
-                    log::warn!("Chunked re-summarization also failed: {e:#}");
-                    initial
-                })
-        } else {
-            initial
-        }
-    } else {
-        transcript.clone()
-    };
+    // Post-Phase-6 cutover: replace the legacy `fabric::summarize` prose
+    // path with the structured video distiller. The distiller re-fetches
+    // raw VTT internally so claims carry real timestamp anchors; the
+    // `transcript` we already have above is the fallback when VTT fetch
+    // fails. When the slide-aware path produced a body, we still run the
+    // distiller (to populate `cortex-video-*` frontmatter, tags, and the
+    // summary used by the quality gate) but the slide body wins at render
+    // time - that decision lives in `process_url_inner`.
+    let distilled = crate::stages::distill::distill_for_publish_video(
+        &config.fabric,
+        &config.pipeline,
+        &config.staging,
+        trace_id,
+        url,
+        &transcript,
+        Some(metadata.title.as_str()),
+    )
+    .await;
+    if slide_summary.is_some() {
+        log::debug!("[{trace_id}] process_youtube: slide-aware body will override Distilled body at publish time");
+    }
+    // Suppress the unused-warning until the slide-aware body integration
+    // settles. The slide path produces its own structured body via
+    // publish_slides; we keep `slide_summary` reachable for callers that
+    // want it without forcing them through publish_slides.
+    let _ = slide_summary;
+    let _ = use_fabric;
 
     let content_type = ContentType::YouTube {
         uploader: metadata.uploader,
@@ -826,7 +864,7 @@ async fn process_youtube(url: &str, config: &Config, trace_id: &str) -> Result<Y
 
     Ok(YouTubeResult {
         title: metadata.title,
-        summary,
+        distilled,
         content_type,
         description: metadata.description,
         yt_tags: metadata.tags,
@@ -983,33 +1021,6 @@ async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> R
     ) {
         log::warn!("[{trace_id}] persist_fetched (fabric) failed: {e:#}");
     }
-    // Phases 3-6 shadow-distill: run the structured distiller in the background
-    // and persist `distilled.yml` to the staging directory for empirical
-    // analysis. Fires-and-forgets - never blocks or affects the legacy path.
-    // GitHub repo roots take the dedicated repo path (Phase 4) which calls
-    // the REST API for structured metadata; X/Reddit/HN thread URLs take the
-    // Phase 6 thread path; everything else falls through to the article
-    // distiller (Phase 3).
-    {
-        let fabric = config.fabric.clone();
-        let staging = config.staging.clone();
-        let trace_id = trace_id.to_string();
-        let url = url.to_string();
-        let article_md = article_md.clone();
-        if crate::github::parse_repo_url(&url).is_some() {
-            tokio::spawn(async move {
-                crate::stages::distill::shadow_distill_repo(fabric, staging, trace_id, url).await;
-            });
-        } else if crate::stages::raw::is_thread_url(&url) {
-            tokio::spawn(async move {
-                crate::stages::distill::shadow_distill_thread(fabric, staging, trace_id, url, article_md).await;
-            });
-        } else {
-            tokio::spawn(async move {
-                crate::stages::distill::shadow_distill_article(fabric, staging, trace_id, url, article_md).await;
-            });
-        }
-    }
     // Gate-1 fires only on the final fetched bytes, which in this flow is the
     // Jina path (see process_article_jina). If fabric -u returned a block
     // page the caller (process_url_inner) will catch our bail and fall back
@@ -1019,34 +1030,20 @@ async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> R
     }
 
     let title = extract_article_title(&article_md, url);
+    // Post-Phase-6 cutover: return the fetched markdown as the transcript;
+    // the caller (`process_url_inner`) dispatches to the appropriate
+    // `distill_for_publish_*` based on URL kind. The legacy
+    // `fabric::summarize` prose path is gone for URL kinds. Gate-2 runs
+    // against the rendered Distilled summary at the dispatch site instead
+    // of against the prose summary that used to live here.
 
-    // Summarize via Fabric (graceful failure)
-    let initial = fabric::summarize(&article_md, false, &config.fabric)
-        .await
-        .unwrap_or_else(|e| {
-            log::warn!("Fabric summarization failed: {e:#}");
-            article_md.clone()
-        });
-
-    // Quality gate: check for truncation artifacts
-    let summary = if let Some(reason) = quality::detect_truncation_artifacts(&initial) {
-        log::warn!("Quality gate failed for article: {reason}");
-        log::info!("Re-summarizing article with forced chunked approach");
-        fabric::summarize_forced_chunked(&article_md, false, &config.fabric)
-            .await
-            .unwrap_or_else(|e| {
-                log::warn!("Chunked re-summarization also failed: {e:#}");
-                initial
-            })
-    } else {
-        initial
-    };
-
-    crate::stages::raw::run_gate_2(config, trace_id, Some(url), &summary)?;
-
-    Ok((title, summary, ContentType::Article))
+    Ok((title, article_md, ContentType::Article))
 }
 
+/// Returns `(title, article_md, ContentType)` - same shape as
+/// `process_article_fabric` so callers can pipe either source into the
+/// post-Phase-6 distillation step uniformly. Gate-1 still runs against
+/// the fetched bytes here.
 async fn process_article_jina(url: &str, config: &Config, trace_id: &str) -> Result<(String, String, ContentType)> {
     let article_md = jina::fetch_article_markdown(url, config.pipeline.jina_timeout_secs).await?;
     if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
@@ -1063,32 +1060,7 @@ async fn process_article_jina(url: &str, config: &Config, trace_id: &str) -> Res
     crate::stages::raw::run_gate_1(config, trace_id, url, article_md.as_bytes(), 200)?;
 
     let title = extract_article_title(&article_md, url);
-
-    let summary = if fabric::is_available(&config.fabric) {
-        let initial = fabric::summarize(&article_md, false, &config.fabric)
-            .await
-            .unwrap_or_else(|e| {
-                log::warn!("[{trace_id}] Fabric summarization failed (jina/browser-UA fallback): {e:#}");
-                article_md.clone()
-            });
-        if let Some(reason) = quality::detect_truncation_artifacts(&initial) {
-            log::warn!("[{trace_id}] Quality gate failed (jina/browser-UA fallback): {reason}");
-            fabric::summarize_forced_chunked(&article_md, false, &config.fabric)
-                .await
-                .unwrap_or_else(|e| {
-                    log::warn!("[{trace_id}] Chunked re-summarization also failed: {e:#}");
-                    initial
-                })
-        } else {
-            initial
-        }
-    } else {
-        article_md
-    };
-
-    crate::stages::raw::run_gate_2(config, trace_id, Some(url), &summary)?;
-
-    Ok((title, summary, ContentType::Article))
+    Ok((title, article_md, ContentType::Article))
 }
 
 async fn process_image(
@@ -1266,6 +1238,7 @@ async fn process_image_inner(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        ..NoteContent::default()
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1492,6 +1465,7 @@ async fn process_audio_inner(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        ..NoteContent::default()
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1745,6 +1719,7 @@ async fn process_document_file_inner(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        ..NoteContent::default()
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1934,6 +1909,7 @@ async fn process_text_inner(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        ..NoteContent::default()
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -2083,6 +2059,7 @@ async fn process_vocab(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        ..NoteContent::default()
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -2479,6 +2456,7 @@ async fn process_code_snippet(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        ..NoteContent::default()
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -2999,6 +2977,7 @@ int main() {
             method: Some(IngestMethod::Cli),
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = markdown::render_note(
             &note,

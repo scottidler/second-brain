@@ -1,9 +1,11 @@
 use chrono::Utc;
 use chrono_tz::Tz;
+use std::collections::BTreeMap;
 
 use crate::config::FrontmatterConfig;
 use crate::types::IngestMethod;
 
+#[derive(Default)]
 pub struct NoteContent {
     pub title: String,
     pub source_url: Option<String>,
@@ -18,8 +20,20 @@ pub struct NoteContent {
     /// Vault-relative paths to slide JPEGs the note owns. Rendered into the
     /// `slides:` frontmatter list so cleanup on replay can find them.
     pub slides: Vec<String>,
+    /// Post-Phase-6 cutover: pre-rendered structured body produced by
+    /// `distillers::render`. When `Some`, replaces the legacy
+    /// `## Summary\n\n{summary}` block - the rendered Distilled already
+    /// carries `## Summary` / `## Claims` / `## Links` headings of its own.
+    /// `None` for non-URL kinds (image, audio, vocab, idea) that still use
+    /// the legacy prose-summary body.
+    pub distilled_body: Option<String>,
+    /// Additional frontmatter keys merged into the rendered YAML before the
+    /// closing `---`. Populated by `distillers::render` with `distilled:
+    /// true`, `distilled-extractor`, and per-kind `cortex-*` fields.
+    pub frontmatter_additions: BTreeMap<String, serde_yaml::Value>,
 }
 
+#[derive(Default)]
 pub enum ContentType {
     YouTube {
         uploader: String,
@@ -39,6 +53,7 @@ pub enum ContentType {
         asset_path: String,
         duration_secs: Option<f64>,
     },
+    #[default]
     Note,
     VocabDefine {
         word: String,
@@ -154,6 +169,13 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         _ => {}
     }
 
+    // Post-Phase-6 cutover: merge any frontmatter additions produced by
+    // `distillers::render` (distilled flag, extractor id, per-kind
+    // `cortex-*` keys). Sorted alphabetically for stable diffs.
+    for (key, value) in &note.frontmatter_additions {
+        fm.push_str(&format!("{key}: {}\n", serialize_yaml_value(value)));
+    }
+
     fm.push_str("---\n\n");
 
     // Heading
@@ -188,8 +210,24 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         body.push('\n');
     }
 
-    // Summary section
-    if !note.summary.is_empty() {
+    // Body: post-Phase-6 cutover prefers the pre-rendered structured body
+    // produced by `distillers::render` (it already carries `## Summary` /
+    // `## Claims` / `## Links` headings). The legacy `## Summary` wrapper
+    // around `note.summary` is the fallback for non-URL kinds and for URL
+    // kinds whose distillation produced no body (extreme fallback, never
+    // expected in steady state because `fallback_distilled` always emits
+    // a summary).
+    if let Some(rendered) = &note.distilled_body
+        && !rendered.trim().is_empty()
+    {
+        body.push_str(rendered);
+        if !rendered.ends_with('\n') {
+            body.push('\n');
+        }
+        if !rendered.ends_with("\n\n") {
+            body.push('\n');
+        }
+    } else if !note.summary.is_empty() {
         body.push_str("## Summary\n\n");
         body.push_str(&note.summary);
         body.push_str("\n\n");
@@ -205,6 +243,35 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
 
 fn escape_yaml_string(s: &str) -> String {
     s.replace('"', "\\\"")
+}
+
+/// Serialize a single `serde_yaml::Value` for inline insertion into the
+/// hand-built frontmatter string. Scalars render bare; everything else
+/// goes through `serde_yaml::to_string` and is reformatted to fit a
+/// single key entry without disturbing the surrounding hand-built YAML.
+fn serialize_yaml_value(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::String(s) => format!("\"{}\"", escape_yaml_string(s)),
+        serde_yaml::Value::Null => "null".to_string(),
+        // Sequences and mappings: serialize, drop the leading newline that
+        // `serde_yaml::to_string` emits for non-scalar values, and indent
+        // each subsequent line with two spaces so the YAML stays valid
+        // under the `key:` prefix.
+        other => {
+            let raw = serde_yaml::to_string(other).unwrap_or_default();
+            let trimmed = raw.trim_end();
+            let mut out = String::from("\n");
+            for line in trimmed.lines() {
+                out.push_str("  ");
+                out.push_str(line);
+                out.push('\n');
+            }
+            out.pop();
+            out
+        }
+    }
 }
 
 pub fn sanitize_filename(title: &str) -> String {
@@ -224,6 +291,60 @@ mod tests {
     }
 
     #[test]
+    fn test_distilled_body_replaces_legacy_summary_block() {
+        let mut additions = BTreeMap::new();
+        additions.insert("distilled".to_string(), serde_yaml::Value::Bool(true));
+        additions.insert(
+            "distilled-extractor".to_string(),
+            serde_yaml::Value::String("distill-article-v1".to_string()),
+        );
+        additions.insert(
+            "cortex-thread-platform".to_string(),
+            serde_yaml::Value::String("x".to_string()),
+        );
+        let note = NoteContent {
+            title: "T".to_string(),
+            source_url: Some("https://x.com/u/status/1".to_string()),
+            tags: vec!["thread".to_string()],
+            summary: "Short concise summary.".to_string(),
+            content_type: ContentType::Article,
+            distilled_body: Some("## Summary\n\nShort concise summary.\n\n## Claims\n\n- One claim.\n\n".to_string()),
+            frontmatter_additions: additions,
+            ..Default::default()
+        };
+        let rendered = render_note(&note, &test_config());
+        // Pre-rendered Distilled body lands in the note body.
+        assert!(rendered.contains("## Summary\n\nShort concise summary."));
+        assert!(rendered.contains("## Claims\n\n- One claim."));
+        // Frontmatter additions are spliced in.
+        assert!(rendered.contains("distilled: true"));
+        assert!(rendered.contains("distilled-extractor: \"distill-article-v1\""));
+        assert!(rendered.contains("cortex-thread-platform: \"x\""));
+        // The legacy double-`## Summary` wrap is NOT applied on top of the
+        // already-structured body.
+        let count = rendered.matches("## Summary").count();
+        assert_eq!(
+            count, 1,
+            "rendered body must not stack ## Summary headings:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_legacy_summary_path_still_wraps_in_summary_section() {
+        let note = NoteContent {
+            title: "Legacy".to_string(),
+            source_url: Some("https://example.com/".to_string()),
+            tags: vec![],
+            summary: "Plain prose summary.".to_string(),
+            content_type: ContentType::Article,
+            ..NoteContent::default()
+        };
+        let rendered = render_note(&note, &test_config());
+        // No distilled_body -> legacy ## Summary wrap.
+        assert!(rendered.contains("## Summary\n\nPlain prose summary."));
+    }
+
+    #[test]
     fn test_render_includes_ingested_field() {
         let note = NoteContent {
             title: "Note".to_string(),
@@ -237,6 +358,7 @@ mod tests {
             method: None,
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("date: "), "date field should be present");
@@ -260,6 +382,7 @@ mod tests {
             method: None,
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("title: \"Test Article\""));
@@ -288,6 +411,7 @@ mod tests {
             method: Some(IngestMethod::Telegram),
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: youtube"));
@@ -317,6 +441,7 @@ mod tests {
             method: None,
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &config);
         assert!(rendered.contains("  - ai"));
@@ -338,6 +463,7 @@ mod tests {
             method: Some(IngestMethod::Telegram),
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: note"));
@@ -361,6 +487,7 @@ mod tests {
             method: Some(IngestMethod::Cli),
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: image"));
@@ -382,6 +509,7 @@ mod tests {
             method: Some(IngestMethod::Telegram),
             trace_id: Some("tg-7f3a2c".to_string()),
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("trace: tg-7f3a2c"));
@@ -406,6 +534,7 @@ mod tests {
             method: None,
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         assert!(!rendered.contains("trace:"));
@@ -425,6 +554,7 @@ mod tests {
             method: Some(IngestMethod::Telegram),
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: github"));
@@ -444,6 +574,7 @@ mod tests {
             method: Some(IngestMethod::Telegram),
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: social"));
@@ -463,6 +594,7 @@ mod tests {
             method: Some(IngestMethod::Telegram),
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: reddit"));
@@ -485,6 +617,7 @@ mod tests {
             method: Some(IngestMethod::Telegram),
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         // Callout header
@@ -517,6 +650,7 @@ mod tests {
             method: None,
             trace_id: None,
             slides: Vec::new(),
+            ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
         assert!(!rendered.contains("[!info]"), "no callout when description is None");
