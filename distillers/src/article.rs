@@ -228,7 +228,7 @@ fn strip_fences(raw: &str) -> &str {
 /// Rough character-to-token approximation. ~4 chars per token is a common
 /// rule of thumb for English prose; good enough for budget reporting.
 fn approx_tokens(chars: usize) -> u32 {
-    (chars / 4).min(u32::MAX as usize) as u32
+    (chars / 4) as u32
 }
 
 #[cfg(test)]

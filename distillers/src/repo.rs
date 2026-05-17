@@ -261,7 +261,7 @@ fn strip_fences(raw: &str) -> &str {
 }
 
 fn approx_tokens(chars: usize) -> u32 {
-    (chars / 4).min(u32::MAX as usize) as u32
+    (chars / 4) as u32
 }
 
 #[cfg(test)]

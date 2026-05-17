@@ -17,6 +17,7 @@ pub mod passthrough;
 pub mod render;
 pub mod repo;
 pub mod validate;
+pub mod video;
 
 use async_trait::async_trait;
 use eyre::Result;
@@ -30,6 +31,7 @@ pub use passthrough::PassthroughDistiller;
 pub use render::{RenderedDistilled, render};
 pub use repo::{RepoConfig, RepoDistiller, RepoMetadata};
 pub use validate::{enforce_bounds, fallback_distilled};
+pub use video::{VideoConfig, VideoDistiller, VideoMetadata};
 
 /// Inputs every distiller receives. Mirrors the Stage-1 / Stage-0 contract.
 #[derive(Debug, Clone, Default)]
@@ -46,6 +48,12 @@ pub struct DistillInputs<'a> {
     /// or non-repo kinds. `RepoDistiller` reads it to construct
     /// `Distilled.kind_specific`; other distillers ignore it.
     pub repo_metadata: Option<&'a RepoMetadata>,
+    /// Video-specific Stage-0 metadata (channel, duration, published_at).
+    /// Populated by borg's yt-dlp metadata; `None` for cortex backfill or
+    /// non-video kinds. `VideoDistiller` reads it for anchor validation
+    /// (`duration_seconds`) and `Distilled.kind_specific`; other distillers
+    /// ignore it.
+    pub video_metadata: Option<&'a VideoMetadata>,
 }
 
 /// Per-kind extractor contract. Async because the LLM-bound distillers shell

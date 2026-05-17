@@ -15,6 +15,7 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
+futures = "0.3.32"
 
 [dev-dependencies]
 # Tests round-trip rendered markdown through the vault::search body parsers,

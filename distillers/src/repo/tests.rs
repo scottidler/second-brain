@@ -44,6 +44,7 @@ install: "cargo install --path borg"
             source_url: Some("https://github.com/scottidler/second-brain"),
             title_hint: None,
             repo_metadata: Some(&metadata),
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -73,6 +74,7 @@ async fn fabric_timeout_still_attaches_metadata() {
             source_url: None,
             title_hint: None,
             repo_metadata: Some(&metadata),
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -99,6 +101,7 @@ async fn fabric_error_falls_back_without_metadata() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -122,6 +125,7 @@ async fn malformed_yaml_falls_back_with_raw_output() {
             source_url: None,
             title_hint: None,
             repo_metadata: Some(&metadata),
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -150,6 +154,7 @@ async fn empty_summary_falls_back() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -174,6 +179,7 @@ async fn install_over_500_chars_is_dropped() {
             source_url: None,
             title_hint: None,
             repo_metadata: Some(&metadata),
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -195,6 +201,7 @@ async fn no_metadata_no_install_leaves_kind_specific_unset() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -216,6 +223,7 @@ async fn no_metadata_with_install_attaches_install_only_payload() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -242,6 +250,7 @@ async fn strips_yaml_code_fence_if_present() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -262,6 +271,7 @@ async fn lowercases_tag_strings() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");

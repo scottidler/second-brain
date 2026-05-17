@@ -1109,6 +1109,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "eyre",
+ "futures",
  "log",
  "regex",
  "serde",

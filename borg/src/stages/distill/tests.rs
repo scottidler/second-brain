@@ -91,19 +91,17 @@ async fn distill_stage_handles_article_through_fabric() {
 }
 
 #[tokio::test]
-async fn distill_stage_bails_on_unwired_url_kinds() {
+async fn distill_stage_bails_on_unwired_thread_kind() {
     let stage = make_stage();
-    for kind in [IngestKind::YoutubeUrl, IngestKind::ThreadUrl] {
-        let err = stage
-            .distill(kind, "x", None, None)
-            .await
-            .expect_err("video/thread should still bail in Phase 4");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("Phases 5-6"),
-            "expected Phases 5-6 reference for {kind}; got {msg}"
-        );
-    }
+    let err = stage
+        .distill(IngestKind::ThreadUrl, "x", None, None)
+        .await
+        .expect_err("thread should still bail in Phase 5");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("Phase 6"),
+        "expected Phase 6 reference for ThreadUrl; got {msg}"
+    );
 }
 
 #[tokio::test]
@@ -159,6 +157,82 @@ fn repo_metadata_from_fetch_copies_relevant_fields() {
     assert_eq!(mapped.primary_language.as_deref(), Some("Rust"));
     assert_eq!(mapped.last_commit.as_deref(), Some("2026-05-16T00:00:00Z"));
     assert_eq!(mapped.topics, vec!["a", "b"]);
+}
+
+#[test]
+fn video_metadata_from_yt_dlp_maps_uploader_and_duration() {
+    let src = crate::youtube::VideoMetadata {
+        title: "Talk title".to_string(),
+        uploader: "Some Channel".to_string(),
+        duration_secs: 612.4,
+        description: "x".to_string(),
+        tags: Vec::new(),
+    };
+    let mapped = video_metadata_from_yt_dlp(&src);
+    assert_eq!(mapped.channel.as_deref(), Some("Some Channel"));
+    assert_eq!(mapped.duration_seconds, Some(612));
+    assert!(mapped.published_at.is_none());
+}
+
+#[test]
+fn video_metadata_from_yt_dlp_drops_sentinel_uploader() {
+    let src = crate::youtube::VideoMetadata {
+        title: String::new(),
+        uploader: "Unknown".to_string(),
+        duration_secs: 0.0,
+        description: String::new(),
+        tags: Vec::new(),
+    };
+    let mapped = video_metadata_from_yt_dlp(&src);
+    assert!(mapped.channel.is_none());
+    assert!(mapped.duration_seconds.is_none());
+}
+
+#[test]
+fn render_timestamped_transcript_formats_segments() {
+    let segments = vec![
+        (0.0, "Welcome to the talk.".to_string()),
+        (12.5, "Today we will discuss consensus.".to_string()),
+        (3725.0, "And finally, in conclusion.".to_string()),
+    ];
+    let rendered = render_timestamped_transcript(&segments);
+    let expected = "\
+[00:00:00] Welcome to the talk.
+[00:00:12] Today we will discuss consensus.
+[01:02:05] And finally, in conclusion.
+";
+    assert_eq!(rendered, expected);
+}
+
+#[tokio::test]
+async fn distill_stage_handles_video_through_fabric_with_metadata() {
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        "distill-video",
+        "summary: \"A short talk.\"\nclaims:\n  - text: \"Claim one.\"\n    anchor: \"00:00:30\"\ntags: []\nlinks: []\n",
+    );
+    let stage = make_stage_with_fake(fake);
+    let metadata = distillers::VideoMetadata {
+        channel: Some("Channel".to_string()),
+        duration_seconds: Some(60),
+        published_at: None,
+    };
+    let distilled = stage
+        .distill_with_video_metadata(
+            IngestKind::YoutubeUrl,
+            "[00:00:00] Welcome.\n[00:00:30] Main claim here.",
+            Some("https://youtu.be/abc"),
+            Some("Title"),
+            Some(&metadata),
+        )
+        .await
+        .expect("distill");
+    assert_eq!(distilled.meta.extractor, "distill-video-v1");
+    let Some(vault::distilled::KindPayload::Video(payload)) = distilled.kind_specific else {
+        panic!("expected Video payload");
+    };
+    assert_eq!(payload.duration_seconds, Some(60));
+    assert_eq!(distilled.claims[0].anchor.as_deref(), Some("00:00:30"));
 }
 
 #[test]

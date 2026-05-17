@@ -30,6 +30,7 @@ links:
             source_url: Some("https://example.com/raft-vs-paxos"),
             title_hint: Some("Raft vs Paxos"),
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -58,6 +59,7 @@ async fn fabric_timeout_falls_back() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -82,6 +84,7 @@ async fn fabric_error_falls_back_with_error_reason() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -103,6 +106,7 @@ async fn malformed_yaml_falls_back_with_raw_output() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -128,6 +132,7 @@ async fn empty_summary_falls_back() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -152,6 +157,7 @@ async fn strips_yaml_code_fence_if_present() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -172,6 +178,7 @@ async fn strips_bare_code_fence_if_present() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -195,6 +202,7 @@ async fn truncates_excess_claims_via_enforce_bounds() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -224,6 +232,7 @@ async fn drops_empty_claim_texts_and_anchors() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -247,6 +256,7 @@ async fn lowercases_tag_strings() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");
@@ -265,6 +275,7 @@ async fn records_request_pattern_in_fake_history() {
             source_url: None,
             title_hint: None,
             repo_metadata: None,
+            video_metadata: None,
         })
         .await
         .expect("distill");

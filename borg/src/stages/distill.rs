@@ -9,11 +9,12 @@
 //! value that Stage 3 (publish) renders into the vault markdown file via
 //! `distillers::render`; VaultWatcher then triggers `index_vault`.
 
-use crate::config::{FabricConfig, StagingConfig};
+use crate::config::{FabricConfig, PipelineConfig, StagingConfig};
 use crate::github::{GitHubFetcher, RepoFetch};
 use crate::types::IngestKind;
 use distillers::{
     ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, RepoMetadata,
+    VideoMetadata,
 };
 use eyre::{Context, Result, bail};
 use vault::distilled::Distilled;
@@ -30,6 +31,42 @@ pub fn repo_metadata_from_fetch(meta: &crate::github::RepoMetadata) -> RepoMetad
         last_commit: meta.last_commit.clone(),
         topics: meta.topics.clone(),
     }
+}
+
+/// Translate borg's yt-dlp metadata into the distillers-crate `VideoMetadata`.
+/// `channel` is yt-dlp's `uploader`; sentinel "Unknown" maps to None so the
+/// distiller doesn't write that into frontmatter.
+pub fn video_metadata_from_yt_dlp(meta: &crate::youtube::VideoMetadata) -> VideoMetadata {
+    let channel = match meta.uploader.as_str() {
+        "" | "Unknown" => None,
+        other => Some(other.to_string()),
+    };
+    let duration_seconds = if meta.duration_secs > 0.0 {
+        Some(meta.duration_secs.round() as u32)
+    } else {
+        None
+    };
+    VideoMetadata {
+        channel,
+        duration_seconds,
+        published_at: None,
+    }
+}
+
+/// Render parsed VTT segments as a timestamped transcript the distill-video
+/// pattern expects. Each line is `[HH:MM:SS] text`.
+pub fn render_timestamped_transcript(segments: &[(f64, String)]) -> String {
+    let mut out = String::new();
+    for (start_secs, text) in segments {
+        let total = start_secs.max(0.0) as u32;
+        let h = total / 3600;
+        let m = (total % 3600) / 60;
+        let s = total % 60;
+        out.push_str(&format!("[{h:02}:{m:02}:{s:02}] "));
+        out.push_str(text.trim());
+        out.push('\n');
+    }
+    out
 }
 
 /// Convert borg's `IngestKind` to the distillers crate's `DistillKind`.
@@ -119,6 +156,36 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
             source_url,
             title_hint,
             repo_metadata,
+            video_metadata: None,
+        };
+        self.dispatcher.distill(distill_kind, inputs).await
+    }
+
+    /// Video-aware variant. Phase 5's shadow path passes `video_metadata`
+    /// alongside the transcript so the distiller can validate anchors
+    /// against `duration_seconds` and attach `KindPayload::Video`.
+    pub async fn distill_with_video_metadata(
+        &self,
+        kind: IngestKind,
+        transcript: &str,
+        source_url: Option<&str>,
+        title_hint: Option<&str>,
+        video_metadata: Option<&distillers::VideoMetadata>,
+    ) -> Result<Distilled> {
+        log::debug!(
+            "DistillStage::distill_with_video_metadata: kind={} transcript_len={} source_url={:?} has_video_metadata={}",
+            kind,
+            transcript.len(),
+            source_url,
+            video_metadata.is_some()
+        );
+        let distill_kind = distill_kind_from_ingest(kind)?;
+        let inputs = DistillInputs {
+            transcript,
+            source_url,
+            title_hint,
+            repo_metadata: None,
+            video_metadata,
         };
         self.dispatcher.distill(distill_kind, inputs).await
     }
@@ -256,6 +323,108 @@ pub async fn shadow_distill_repo(fabric: FabricConfig, staging: StagingConfig, t
     if let Err(e) = write_distilled_yml(&staging, &trace_id, &distilled) {
         log::warn!(
             "[{trace_id}] shadow_distill_repo: persist distilled.yml failed: {e:#} (shadow mode; legacy path unaffected)"
+        );
+    }
+}
+
+/// Shadow-mode: run the YouTube distiller against a fetched timestamped
+/// transcript and persist `distilled.yml` to the staging directory. Fetches
+/// the raw VTT separately (cheap parallel work) so the distiller sees real
+/// timestamps regardless of which path the legacy `transcript` came from.
+/// Fires-and-forgets - never blocks or affects the legacy publish path.
+pub async fn shadow_distill_video(
+    fabric: FabricConfig,
+    pipeline: PipelineConfig,
+    staging: StagingConfig,
+    trace_id: String,
+    url: String,
+) {
+    if !staging.enabled {
+        return;
+    }
+    log::debug!("shadow_distill_video: trace={trace_id} url={url}");
+
+    // Two concurrent yt-dlp calls: metadata (json) and raw subtitles (VTT).
+    // They are independent and take longest in the legacy hot path; the
+    // shadow path can wait without blocking the legacy publish.
+    let yt_dlp_timeout = pipeline.yt_dlp_timeout_secs;
+    let metadata_future = crate::youtube::fetch_metadata(&url, yt_dlp_timeout);
+    let subtitles_future = crate::youtube::fetch_subtitles_raw(&url, &pipeline);
+    let (metadata_result, subs_result) = tokio::join!(metadata_future, subtitles_future);
+
+    let metadata = match metadata_result {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!(
+                "[{trace_id}] shadow_distill_video: yt-dlp metadata failed: {e:#} (shadow mode; legacy path unaffected)"
+            );
+            return;
+        }
+    };
+    let video_metadata = video_metadata_from_yt_dlp(&metadata);
+    let transcript = match subs_result {
+        Ok(Some(vtt)) => {
+            let segments = crate::youtube::parse_vtt_segments(&vtt);
+            if segments.is_empty() {
+                log::warn!("[{trace_id}] shadow_distill_video: empty VTT segments; aborting (shadow mode)");
+                return;
+            }
+            render_timestamped_transcript(&segments)
+        }
+        Ok(None) => {
+            log::warn!("[{trace_id}] shadow_distill_video: no subtitles available; aborting (shadow mode)");
+            return;
+        }
+        Err(e) => {
+            log::warn!(
+                "[{trace_id}] shadow_distill_video: subtitle fetch failed: {e:#} (shadow mode; legacy path unaffected)"
+            );
+            return;
+        }
+    };
+
+    let stage = DistillStage::from_fabric_config(&fabric);
+    let started = std::time::Instant::now();
+    let distilled = match stage
+        .distill_with_video_metadata(
+            IngestKind::YoutubeUrl,
+            &transcript,
+            Some(&url),
+            Some(metadata.title.as_str()),
+            Some(&video_metadata),
+        )
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!(
+                "[{trace_id}] shadow_distill_video: dispatch error: {e:#} (shadow mode; legacy path unaffected)"
+            );
+            return;
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    let fallback = distilled
+        .meta
+        .validation
+        .fallback_reason
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    log::info!(
+        "[{trace_id}] shadow_distill_video: extractor={} model={} claims={} tags={} links={} anchors_stripped={} fallback={} elapsed_ms={}",
+        distilled.meta.extractor,
+        distilled.meta.model,
+        distilled.claims.len(),
+        distilled.tags.len(),
+        distilled.links.len(),
+        distilled.meta.validation.anchors_stripped,
+        fallback,
+        elapsed_ms,
+    );
+
+    if let Err(e) = write_distilled_yml(&staging, &trace_id, &distilled) {
+        log::warn!(
+            "[{trace_id}] shadow_distill_video: persist distilled.yml failed: {e:#} (shadow mode; legacy path unaffected)"
         );
     }
 }

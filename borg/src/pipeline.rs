@@ -464,7 +464,7 @@ async fn process_url_inner(
 
     let mut slide_payload: Option<SlidePayload> = None;
     let (title, summary, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
-        let yt_result = process_youtube(&url_match.url, config).await?;
+        let yt_result = process_youtube(&url_match.url, config, trace_id).await?;
         slide_payload = yt_result.slide_payload;
         (
             yt_result.title,
@@ -680,12 +680,26 @@ async fn process_url_inner(
 /// Unified YouTube processing: yt-dlp for metadata, fabric for transcript+summary.
 /// Metadata and transcript run concurrently. Fabric is optional (gates transcript+summary).
 /// See docs/design/2026-03-22-youtube-metadata-pipeline-redesign.md.
-async fn process_youtube(url: &str, config: &Config) -> Result<YouTubeResult> {
+async fn process_youtube(url: &str, config: &Config, trace_id: &str) -> Result<YouTubeResult> {
     // Heavy permit: yt-dlp + fabric + (optional) ffmpeg slides + vision all run
     // under this handler. Held for the lifetime of the function.
     log::debug!("process_youtube: acquiring heavy permit (url={url})");
     let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
     log::debug!("process_youtube: heavy permit acquired (url={url})");
+
+    // Phase 5 shadow-distill: spawn the structured video distiller in the
+    // background; it re-fetches the raw VTT to get timestamps the legacy
+    // path strips. Fires-and-forgets - never blocks or affects publish.
+    {
+        let fabric = config.fabric.clone();
+        let pipeline = config.pipeline.clone();
+        let staging = config.staging.clone();
+        let trace_id = trace_id.to_string();
+        let url = url.to_string();
+        tokio::spawn(async move {
+            crate::stages::distill::shadow_distill_video(fabric, pipeline, staging, trace_id, url).await;
+        });
+    }
 
     let use_fabric = fabric::is_available(&config.fabric);
 
