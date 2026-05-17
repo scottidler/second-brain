@@ -19,6 +19,7 @@ use eyre::Result;
 use rusqlite::params;
 
 use super::SearchIndex;
+use crate::schema::NoteType;
 
 /// One row of the `note_embeddings` scan. Phase A returns these directly;
 /// Phase A6's RRF dispatch fuses them with BM25 hits.
@@ -380,16 +381,24 @@ impl SearchIndex {
     /// to `notes.modified_at`. Cortex's re-embed loop drives this list.
     ///
     /// Summary rows: every note is a candidate.
-    /// Transcript-chunk rows: filtered to transcript-eligible kinds
-    /// (Image, VoiceNote, Idea, Vocabulary, Video, Thread). Without
-    /// that filter, every Article and Repo in the vault matches
-    /// `e.id IS NULL` permanently and the cortex daemon spins.
+    /// Transcript-chunk rows: filtered to the kinds listed in
+    /// `NoteType::transcript_eligible()`. Without that filter, every
+    /// Article and Repo in the vault matches `e.id IS NULL` permanently
+    /// and the cortex daemon spins. Driving the filter from the schema
+    /// enum (rather than a hand-typed SQL string list) means a future
+    /// `NoteType` variant rename cannot silently re-break this path.
     pub fn stale_embedding_targets(
         &self,
         kind: EmbeddingKind,
         model_version: &str,
         limit: u32,
     ) -> Result<Vec<StaleTarget>> {
+        let transcript_eligible_in_clause = NoteType::transcript_eligible()
+            .iter()
+            .map(|t| format!("'{}'", t.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+
         let sql = match kind {
             EmbeddingKind::Summary => {
                 "SELECT n.path, n.note_type, n.modified_at
@@ -402,26 +411,24 @@ impl SearchIndex {
                     OR e.source_modified_at < n.modified_at
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
+                    .to_string()
             }
-            EmbeddingKind::TranscriptChunk => {
+            EmbeddingKind::TranscriptChunk => format!(
                 "SELECT n.path, n.note_type, n.modified_at
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
                   AND e.kind = ?1
                   AND e.model_version = ?2
-                 WHERE n.note_type IN (
-                         'image', 'voice-note', 'idea', 'vocabulary',
-                         'video', 'thread'
-                       )
+                 WHERE n.note_type IN ({transcript_eligible_in_clause})
                    AND (e.id IS NULL
                         OR e.source_modified_at < n.modified_at)
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
-            }
+            ),
         };
 
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params![kind.as_str(), model_version, limit as i64], |row| {
                 Ok(StaleTarget {

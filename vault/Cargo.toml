@@ -32,4 +32,10 @@ rayon = { workspace = true }
 fastembed = { version = "5.13.4", optional = true }
 
 [dev-dependencies]
+criterion = "0.8.2"
 tempfile = "3.27"
+
+[[bench]]
+name = "hybrid"
+harness = false
+required-features = ["vec"]

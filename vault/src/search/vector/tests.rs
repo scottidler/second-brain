@@ -294,18 +294,57 @@ fn stale_embedding_targets_transcript_kind_filters_by_note_type() {
     // produce 1 stale target for transcript-chunk (the VoiceNote only),
     // not 101. Without the note_type filter, every Article matches
     // `e.id IS NULL` forever.
+    //
+    // The schema enum string for VoiceNote is `audio` (see
+    // `NoteType::Audio` in `vault::schema`); the design doc's conceptual
+    // "voice-note" name never lands in the DB.
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
     for i in 0..100 {
         insert_note(&index, &format!("notes/a{i}.md"), "tech", "article", 100);
     }
-    insert_note(&index, "notes/v.md", "tech", "voice-note", 100);
+    insert_note(&index, "notes/v.md", "tech", "audio", 100);
 
     let targets = index
         .stale_embedding_targets(EmbeddingKind::TranscriptChunk, m.model_version(), 1000)
         .expect("targets");
-    assert_eq!(targets.len(), 1, "only the voice-note must surface");
+    assert_eq!(targets.len(), 1, "only the voice-note (audio) must surface");
     assert_eq!(targets[0].note_path, "notes/v.md");
+}
+
+#[test]
+fn stale_embedding_targets_transcript_kind_covers_all_transcript_eligible_kinds() {
+    // Regression for the design-doc-vs-schema mismatch: the filter must
+    // accept every kind in `NoteType::transcript_eligible()`. Hardcoded
+    // string lists drift; this test would have caught the original
+    // `'voice-note'/'idea'/'vocabulary'/'thread'` SQL that never matched
+    // any real note.
+    use crate::schema::NoteType;
+
+    let index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-test-v1");
+    let eligible = NoteType::transcript_eligible();
+    for (i, t) in eligible.iter().enumerate() {
+        insert_note(&index, &format!("notes/n{i}.md"), "tech", t.as_str(), 100);
+    }
+    // A non-eligible kind that must NOT surface.
+    insert_note(&index, "notes/article.md", "tech", "article", 100);
+
+    let targets = index
+        .stale_embedding_targets(EmbeddingKind::TranscriptChunk, m.model_version(), 1000)
+        .expect("targets");
+    assert_eq!(
+        targets.len(),
+        eligible.len(),
+        "every transcript-eligible kind must surface and nothing else; got {} of {}",
+        targets.len(),
+        eligible.len()
+    );
+    let paths: std::collections::HashSet<&str> = targets.iter().map(|t| t.note_path.as_str()).collect();
+    assert!(
+        !paths.contains("notes/article.md"),
+        "article (non-eligible) must not surface"
+    );
 }
 
 #[test]
@@ -388,7 +427,7 @@ fn search_vector_returns_one_row_per_note_when_chunks_exist() {
     let m = MockEmbedder::new(16, "mock-maxpool");
     index.set_active_embedding(m.model_version(), m.dim()).expect("set");
 
-    insert_note(&index, "notes/v.md", "tech", "voice-note", 100);
+    insert_note(&index, "notes/v.md", "tech", "audio", 100);
 
     // Seed a summary + 3 transcript chunks for the same note.
     upsert_summary(&index, &m, "notes/v.md", "summary text", 100);
@@ -419,7 +458,7 @@ fn search_vector_max_pool_picks_best_representation_min_distance() {
     let m = MockEmbedder::new(16, "mock-maxpool");
     index.set_active_embedding(m.model_version(), m.dim()).expect("set");
 
-    insert_note(&index, "notes/note.md", "tech", "voice-note", 100);
+    insert_note(&index, "notes/note.md", "tech", "audio", 100);
 
     // Summary text deliberately orthogonal; transcript chunk matches
     // the query verbatim.

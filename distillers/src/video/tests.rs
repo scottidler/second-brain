@@ -234,6 +234,39 @@ links: []
     assert_eq!(distilled.summary, "Reduced full-video summary.");
     assert!(!distilled.claims.is_empty(), "claims should be merged from chunks");
     assert!(distilled.meta.validation.fallback_reason.is_none());
+    // Regression: the map-reduce (long) path must also populate the
+    // transcript field so Phase B2 chunk-embedding has a source to work
+    // from. Earlier wiring left this `None` and silently dropped every
+    // long video from the chunked-embedding pass.
+    assert_eq!(
+        distilled.transcript.as_deref(),
+        Some(transcript.as_str()),
+        "distill_long must populate transcript for chunked semantic recall"
+    );
+}
+
+#[tokio::test]
+async fn short_transcript_populates_transcript_field() {
+    // Sibling regression: assert the short path also lands in transcript.
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN_SHORT,
+        "summary: \"Short video summary.\"\nclaims: []\ntags: []\nlinks: []\n",
+    );
+    let distiller = make_distiller(fake);
+    let transcript = "Short transcript body for the embed pipeline.";
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+        })
+        .await
+        .expect("distill");
+
+    assert_eq!(distilled.transcript.as_deref(), Some(transcript));
 }
 
 #[tokio::test]

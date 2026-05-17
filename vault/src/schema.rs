@@ -176,6 +176,32 @@ impl NoteType {
             Self::System,
         ]
     }
+
+    /// Note kinds whose published body carries a `## Transcript` section that
+    /// Phase B chunks and embeds. Drives the SQL `note_type IN (...)` filter
+    /// in `vault::search::vector::stale_embedding_targets` so it can never
+    /// drift from the actual enum strings. Adding a new transcript-bearing
+    /// kind means adding a variant here, not editing SQL.
+    ///
+    /// The conceptual buckets from the hybrid-retrieval design doc map to
+    /// these enum variants:
+    /// - Image            -> `Image`
+    /// - VoiceNote / Audio -> `Audio`
+    /// - Idea             -> `Note`
+    /// - Vocabulary       -> `Vocab`
+    /// - Video            -> `Video`
+    /// - Thread           -> `Social` (X/Twitter) and `Reddit`
+    pub fn transcript_eligible() -> &'static [Self] {
+        &[
+            Self::Image,
+            Self::Audio,
+            Self::Note,
+            Self::Vocab,
+            Self::Video,
+            Self::Social,
+            Self::Reddit,
+        ]
+    }
 }
 
 impl fmt::Display for NoteType {

@@ -112,10 +112,25 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
 
         let mut distilled = distilled?;
         validate_anchors(&mut distilled, inputs.video_metadata);
+        // Phase B2: populate transcript for chunked semantic recall AFTER
+        // distill_short / distill_long so neither path needs to know about
+        // it (mirrors `voicenote.rs`). build_distilled, fallback_distilled,
+        // and the map-reduce return in distill_long all default to None;
+        // we override here so chunking works for all videos, including
+        // long ones routed through the map-reduce path.
+        let transcript_owned = if transcript.trim().is_empty() {
+            None
+        } else {
+            Some(transcript.to_string())
+        };
+        distilled.transcript = transcript_owned.clone();
         let mut bounded = enforce_bounds(distilled);
         debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
         bounded.tags.iter_mut().for_each(|t| *t = t.to_lowercase());
         attach_payload(&mut bounded, inputs.video_metadata);
+        // Defensive re-set after enforce_bounds and attach_payload in case
+        // any future bounds logic touches the transcript field.
+        bounded.transcript = transcript_owned;
         Ok(bounded)
     }
 }
@@ -276,7 +291,8 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
                 produced_at: Utc::now().to_rfc3339(),
                 validation,
             },
-            // URL kind: YouTube URL is the recoverable archive.
+            // transcript is populated by the outer `distill()` after this
+            // returns; the map-reduce path doesn't need to track it.
             transcript: None,
         })
     }
@@ -369,13 +385,10 @@ fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str
             produced_at: Utc::now().to_rfc3339(),
             validation: ValidationMeta::default(),
         },
-        // Phase B2: populate transcript for chunked semantic recall.
-        // The summary alone cannot represent a single mention of e.g.
-        // "Temporal" at minute 45 of a 60-minute video; the chunked
-        // transcript embeddings close that gap. Upstream borg::youtube
-        // already strips VTT timestamps in clean_vtt, so the string
-        // arriving here is plain text.
-        transcript: if transcript.trim().is_empty() { None } else { Some(transcript.to_string()) },
+        // transcript is populated by the outer `distill()` after both the
+        // short and map-reduce paths return; leaving it None here keeps
+        // the assignment in one place. See `VideoDistiller::distill`.
+        transcript: None,
     }
 }
 

@@ -1,29 +1,20 @@
-//! Phase A7: regression and latency tests for the hybrid retrieval path.
+//! Phase A7 regression tests for the hybrid retrieval path.
 //!
-//! Two test bodies live here:
+//! These run on every `cargo test --features vec` against a synthetic
+//! 20-note vault. For each of 20 fixed queries the hybrid result list
+//! must contain at least the top-3 hits of the union of BM25 and pure-
+//! vector results. The 18/20 tolerance follows the design's threshold
+//! for ranker noise; with the deterministic `MockEmbedder` it is unused
+//! but kept so a future swap to a real model does not have to
+//! renegotiate the threshold.
 //!
-//! 1. **Regression** (`hybrid_recovers_union_top3`): runs on every
-//!    `cargo test`. Uses `MockEmbedder` against a synthetic 20-note
-//!    vault and asserts that for each of 20 fixed queries, the hybrid
-//!    result list contains at least the top-3 hits of the union of
-//!    BM25 and pure-vector results. The tolerance follows the design's
-//!    18/20 threshold for ranker noise; with a deterministic mock
-//!    embedder the tolerance is unused but kept so a future swap to a
-//!    real model does not have to renegotiate the threshold.
-//!
-//! 2. **Latency** (`hybrid_p50_latency_under_200ms`): marked `#[ignore]`
-//!    so it runs only when explicitly requested. Builds a synthetic
-//!    7 K-note + 21 K-note SQLite DB, runs 100 queries through the
-//!    full hybrid dispatch (embedding + BM25 + vector + RRF), and
-//!    asserts the p50 wall-clock stays under 200 ms.
-//!
-//! Run with:
+//! Latency lives in `vault/benches/hybrid.rs` (criterion-driven) so the
+//! statistical work happens where the rest of the bench suite expects
+//! it. Run the bench with:
 //!
 //! ```text
-//! cargo test --package vault --features vec --test hybrid_retrieval -- --include-ignored
+//! cargo bench --package vault --features vec --bench hybrid
 //! ```
-
-#![cfg(feature = "vec")]
 
 use std::collections::HashSet;
 
@@ -187,10 +178,15 @@ fn build_index() -> SearchIndex {
 /// max-pool aggregation in Phase B3).
 fn transcript_corpus() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
     // (path, note_type, summary, transcript)
+    //
+    // note_type values are the actual NoteType enum serializations
+    // (see `vault::schema::NoteType`); the design doc's conceptual
+    // "voice-note"/"idea"/"thread" names do not appear in the DB:
+    // VoiceNote -> "audio", Idea -> "note", Thread -> "social"/"reddit".
     vec![
         (
             "notes/v1.md",
-            "voice-note",
+            "audio",
             "weekly review of household tasks",
             "I want to schedule a temporal workflow for the inbox triage cron job. \
              Restate could work too but temporal is more battle-tested for this kind \
@@ -198,14 +194,14 @@ fn transcript_corpus() -> Vec<(&'static str, &'static str, &'static str, &'stati
         ),
         (
             "notes/v2.md",
-            "voice-note",
+            "audio",
             "morning thoughts on parenting",
             "Discussed hnsw with the team. They prefer brute force at our scale \
              since the index would only be useful past 100k vectors.",
         ),
         (
             "notes/v3.md",
-            "idea",
+            "note",
             "snippet for the design notes",
             "RRF (reciprocal rank fusion) handles the BM25 plus vector ensemble \
              cleanly. The k=60 constant comes from Cormack 2009.",
@@ -219,7 +215,7 @@ fn transcript_corpus() -> Vec<(&'static str, &'static str, &'static str, &'stati
         ),
         (
             "notes/thread1.md",
-            "thread",
+            "social",
             "X thread on observability",
             "Several replies reference playwright-mcp as a useful tool for the \
              browser automation layer when you want claude to use a browser.",
@@ -351,61 +347,3 @@ fn hybrid_recovers_union_top3() {
     );
 }
 
-#[test]
-#[ignore]
-fn hybrid_p50_latency_under_200ms() {
-    // Builds a 7K-note synthetic index, runs the hybrid dispatch 100
-    // times, asserts p50 < 200ms. With MockEmbedder this is a pure
-    // pure-Rust workload; substitute FastEmbedModel for end-to-end
-    // numbers.
-    use std::time::Instant;
-
-    const N: usize = 7_000;
-    const ITERS: usize = 100;
-    const BUDGET_MS: u128 = 200;
-
-    let mut index = SearchIndex::open_memory().expect("open");
-    let m = MockEmbedder::new(384, "mock-latency-v1");
-    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
-
-    // Build the index.
-    let texts: Vec<String> = (0..N).map(|i| format!("synthetic note {i} body content")).collect();
-    for (i, text) in texts.iter().enumerate() {
-        let path = format!("notes/synth-{i:05}.md");
-        index.insert_test_note_row(&path, "article", 100).expect("insert");
-        let v = m.embed_one(text).expect("embed");
-        index
-            .upsert_embeddings_batch(&[BatchUpsert {
-                note_path: &path,
-                kind: EmbeddingKind::Summary,
-                chunk_index: 0,
-                text,
-                embedding: &v,
-                model_version: m.model_version(),
-                source_modified_at: 100,
-            }])
-            .expect("upsert");
-    }
-
-    let mut samples = Vec::with_capacity(ITERS);
-    for i in 0..ITERS {
-        let q = format!("query {i} synthetic body");
-        let start = Instant::now();
-
-        let q_vec = m.embed_one(&q).expect("q vec");
-        let bm25 = index.search(&q, None, None, None, Some(K_RRF_INPUT)).expect("bm25");
-        let vec_hits = index.search_vector(&q_vec, K_RRF_INPUT, None, None, None).expect("vec");
-        let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
-        let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();
-        let _fused = reciprocal_rank_fusion(&bm25_paths, &vec_paths, RRF_K, 10);
-
-        samples.push(start.elapsed().as_millis());
-    }
-    samples.sort_unstable();
-    let p50 = samples[samples.len() / 2];
-    println!("hybrid p50 @ N={N} iters={ITERS}: {p50} ms (budget {BUDGET_MS} ms)");
-    assert!(
-        p50 < BUDGET_MS,
-        "hybrid p50 latency {p50} ms exceeds budget {BUDGET_MS} ms"
-    );
-}
