@@ -17,6 +17,8 @@ pub struct Config {
     pub migrations: Vec<MigrationConfig>,
     pub llm: LlmConfig,
     pub sweep: SweepConfig,
+    pub backfill: BackfillConfig,
+    pub fabric: FabricConfig,
 }
 
 impl Default for Config {
@@ -31,6 +33,54 @@ impl Default for Config {
             migrations: Vec::new(),
             llm: LlmConfig::default(),
             sweep: SweepConfig::default(),
+            backfill: BackfillConfig::default(),
+            fabric: FabricConfig::default(),
+        }
+    }
+}
+
+/// Phase-7 backfill knobs. `max-concurrent` defaults to 2 so a one-pass
+/// `--since 30d` over the inbox doesn't hammer Fabric harder than borg's
+/// own pipeline.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct BackfillConfig {
+    #[serde(rename = "max-concurrent")]
+    pub max_concurrent: u32,
+    /// Filename of the resume checkpoint inside `state.cache-dir`.
+    #[serde(rename = "checkpoint-file")]
+    pub checkpoint_file: String,
+}
+
+impl Default for BackfillConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 2,
+            checkpoint_file: "backfill-state.json".to_string(),
+        }
+    }
+}
+
+/// Subset of borg's FabricConfig that the distillers crate needs. Mirrored
+/// here (rather than imported) so cortex stays decoupled from borg.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct FabricConfig {
+    pub binary: String,
+    pub model: String,
+    #[serde(rename = "max-content-chars")]
+    pub max_content_chars: usize,
+    #[serde(rename = "timeout-secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for FabricConfig {
+    fn default() -> Self {
+        Self {
+            binary: "fabric".to_string(),
+            model: String::new(),
+            max_content_chars: 32_000,
+            timeout_secs: 120,
         }
     }
 }

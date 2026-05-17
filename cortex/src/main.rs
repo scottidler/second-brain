@@ -52,6 +52,16 @@ async fn main() -> Result<()> {
         Command::Sweep(opts) => {
             cortex::run_sweep(&vault_root, &config, opts)?;
         }
+        Command::Summarize(opts) => {
+            let summary = cortex::run_summarize(&vault_root, &config, opts).await?;
+            log::info!(
+                "summarize complete: attempted={} distilled={} skipped={} failed={}",
+                summary.attempted,
+                summary.distilled,
+                summary.skipped,
+                summary.failed,
+            );
+        }
     }
 
     Ok(())

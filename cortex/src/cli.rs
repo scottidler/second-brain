@@ -78,6 +78,8 @@ pub enum Command {
     Migrate(MigrateOpts),
     /// Sweep tags: consolidate to canonical vocabulary
     Sweep(SweepOpts),
+    /// Distill legacy notes into the structured L2 contract (backfill)
+    Summarize(SummarizeOpts),
 }
 
 #[derive(Parser)]
@@ -183,4 +185,44 @@ pub struct SweepOpts {
     /// Scan for non-canonical tags and generate proposals
     #[arg(long)]
     pub proposals: bool,
+}
+
+#[derive(Parser)]
+pub struct SummarizeOpts {
+    /// Backfill legacy notes into the structured L2 (`Distilled`) contract.
+    /// Required: this is the only mode `cortex summarize` ships today.
+    #[arg(long)]
+    pub backfill: bool,
+
+    /// Only re-distill notes whose `date:` is within the last <duration>.
+    /// Accepts a number suffixed with `d` / `w` / `mo` (e.g. `30d`, `2w`,
+    /// `3mo`). Omit to scan the entire vault.
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Only re-distill notes whose `domain:` frontmatter matches <name>.
+    #[arg(long)]
+    pub domain: Option<String>,
+
+    /// Force re-distill against a specific extractor id (e.g.
+    /// `distill-article-v2`), bypassing the `distilled: true` skip-guard.
+    /// Use this to regenerate notes against a newer pattern version.
+    #[arg(long)]
+    pub extractor: Option<String>,
+
+    /// Print what would be rewritten without touching any files.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Resume from the saved checkpoint (default: true). Pass
+    /// `--resume false` (or `--resume=false`) to start a fresh pass.
+    #[arg(
+        long,
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    pub resume: bool,
 }

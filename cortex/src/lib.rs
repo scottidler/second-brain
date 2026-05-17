@@ -17,6 +17,7 @@ pub mod quality;
 pub mod report;
 pub mod scope;
 pub mod state;
+pub mod summarize;
 pub mod sweep;
 pub mod tags;
 pub mod testutil;
@@ -27,10 +28,11 @@ use eyre::Result;
 use std::path::Path;
 
 use classify::ClassifyOpts;
-use cli::{IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts, SweepOpts};
+use cli::{IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts, SummarizeOpts, SweepOpts};
 use config::Config;
 use report::Report;
 use state::VaultManifest;
+use summarize::BackfillSummary;
 use vault::{Note, scan_vault};
 
 /// Check if a note's path matches any glob pattern in the list.
@@ -369,6 +371,11 @@ pub fn run_intel(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result
     log::info!("starting intel command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
     intel::run_intel(vault_root, &notes, &config.actions.intel, &config.llm, opts)
+}
+
+pub async fn run_summarize(vault_root: &Path, config: &Config, opts: &SummarizeOpts) -> Result<BackfillSummary> {
+    log::info!("starting summarize command (vault_root={})", vault_root.display());
+    summarize::run_backfill(vault_root, config, opts).await
 }
 
 #[cfg(test)]

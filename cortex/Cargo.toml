@@ -28,6 +28,8 @@ ureq = { version = "3.2.0", features = ["json"] }
 walkdir = { workspace = true }
 which = "8.0.2"
 rayon.workspace = true
+distillers = { version = "0.5.47", path = "../distillers" }
+url = "2.5.8"
 
 [dev-dependencies]
 tempfile = "3.27"
