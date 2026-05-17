@@ -282,6 +282,9 @@ pub async fn distill_for_publish_repo(
             return distillers::fallback_distilled("distill-repo-v1", "github-fetch-error", article_md_fallback, None);
         }
     };
+    if let Err(e) = persist_github_stage_0_1_if_staging(staging, trace_id, url, &fetch_result) {
+        log::warn!("[{trace_id}] distill_for_publish_repo: persist github artifacts failed: {e:#}");
+    }
     let metadata = repo_metadata_from_fetch(&fetch_result.metadata);
     let stage = DistillStage::from_fabric_config(fabric);
     let distilled = match stage
@@ -490,6 +493,56 @@ pub async fn distill_for_publish_thread(
         log::warn!("[{trace_id}] distill_for_publish_thread: persist distilled.yml failed: {e:#}");
     }
     distilled
+}
+
+/// Persist the GitHub-API JSON envelope (Stage 0) and rendered repo transcript
+/// (Stage 1) into the per-trace staging directory so `borg replay --from-stage 1`
+/// can re-run distillation against the same input without re-hitting the
+/// GitHub API. The article-fetch chain does not run for github root URLs (the
+/// repo path is dispatched directly in `pipeline.rs`), so without this helper
+/// neither `fetched.html` nor `transcript.md` lands for github traces.
+///
+/// Stage-0 artifact: `fetched.html` carries the raw `{"repo": ..., "readme": ...}`
+/// JSON envelope; `fetched.yml` carries `extractor: github-api` /
+/// `content_type: application/json`.
+///
+/// Stage-1 artifact: `transcript.md` carries the rendered transcript the
+/// distiller saw; `transcript.yml` carries `extractor: github-render` to
+/// distinguish from upstream article-fetch transcripts.
+///
+/// No-op when `staging.enabled = false`. Failures of either write WARN-log
+/// individually rather than propagating; the distillation downstream is the
+/// authoritative path.
+pub fn persist_github_stage_0_1_if_staging(
+    staging: &StagingConfig,
+    trace_id: &str,
+    url: &str,
+    fetch_result: &RepoFetch,
+) -> Result<()> {
+    if !staging.enabled {
+        return Ok(());
+    }
+    let store = FsArtifactStore::from_config(staging);
+    let fetched_meta = crate::types::FetchMeta {
+        source: url.to_string(),
+        extractor: "github-api".to_string(),
+        status: 200,
+        content_type: Some("application/json".to_string()),
+        bytes: fetch_result.raw_json.len() as u64,
+        sha256: crate::stages::artifact::sha256_hex(&fetch_result.raw_json),
+        fallbacks_attempted: Vec::new(),
+    };
+    if let Err(e) = store.write_fetched(trace_id, &fetch_result.raw_json, &fetched_meta) {
+        log::warn!("[{trace_id}] persist_github_stage_0_1: fetched.html write failed: {e:#}");
+    }
+    let trace_meta = TraceMeta {
+        extractor: "github-render".to_string(),
+        ..TraceMeta::default()
+    };
+    if let Err(e) = store.write_transcript(trace_id, &fetch_result.transcript, &trace_meta) {
+        log::warn!("[{trace_id}] persist_github_stage_0_1: transcript.md write failed: {e:#}");
+    }
+    Ok(())
 }
 
 /// Persist the rendered thread markdown (the input the thread distiller saw)

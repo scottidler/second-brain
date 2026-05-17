@@ -47,6 +47,13 @@ pub struct RepoMetadata {
 pub struct RepoFetch {
     pub transcript: String,
     pub metadata: RepoMetadata,
+    /// Raw GitHub-API JSON envelope captured before deserialization:
+    /// `{"repo": <unparsed-/repos-response>, "readme": <unparsed-/readme-response>}`.
+    /// Persisted as Stage-0 `fetched.html` (with `extractor: "github-api"` and
+    /// `content_type: "application/json"`) by `distill_for_publish_repo` so a
+    /// future `borg replay --from-stage 1` can reconstruct the distiller's
+    /// input without re-hitting the GitHub API.
+    pub raw_json: Vec<u8>,
 }
 
 /// Parse a github.com URL into (owner, repo) if it points at a repo root.
@@ -165,15 +172,26 @@ impl GitHubFetcher {
     }
 
     /// Fetch repo metadata + README and render a transcript. Returns
-    /// `RepoFetch` (structured + transcript) rather than `FetchResult` so the
-    /// distiller can keep the metadata.
+    /// `RepoFetch` (structured + transcript + raw envelope) rather than
+    /// `FetchResult` so the distiller can keep the metadata and the staging
+    /// layer can persist the raw bytes for replay.
     pub async fn fetch_repo(&self, owner: &str, repo: &str) -> Result<RepoFetch> {
         log::debug!("GitHubFetcher::fetch_repo: owner={owner} repo={repo}");
-        let repo_meta = self.fetch_repo_meta(owner, repo).await?;
-        let readme_md = self.fetch_readme(owner, repo).await.unwrap_or_else(|e| {
-            log::warn!("GitHubFetcher: readme fetch failed for {owner}/{repo}: {e:#}; using empty README");
-            String::new()
-        });
+        let repo_bytes = self.fetch_repo_meta_bytes(owner, repo).await?;
+        let repo_meta: RepoResponse = serde_json::from_slice(&repo_bytes).context("github: /repos parse failed")?;
+
+        let readme_bytes = self.fetch_readme_bytes(owner, repo).await.ok();
+        let readme_md = match &readme_bytes {
+            Some(bytes) => decode_readme_from_bytes(bytes).unwrap_or_else(|e| {
+                log::warn!("GitHubFetcher: readme decode failed for {owner}/{repo}: {e:#}; using empty README");
+                String::new()
+            }),
+            None => {
+                log::warn!("GitHubFetcher: readme fetch failed for {owner}/{repo}; using empty README");
+                String::new()
+            }
+        };
+
         let metadata = RepoMetadata {
             owner: owner.to_string(),
             repo: repo.to_string(),
@@ -185,10 +203,28 @@ impl GitHubFetcher {
             description: repo_meta.description,
         };
         let transcript = render_transcript(&readme_md, &metadata);
-        Ok(RepoFetch { transcript, metadata })
+
+        // Build the Stage-0 JSON envelope from the raw bytes the API returned.
+        // Inlining as serde_json::Value preserves the exact response shape
+        // (whitespace not preserved, but field set is whole) without forcing
+        // Serialize derives on RepoResponse/ReadmeResponse.
+        let envelope = serde_json::json!({
+            "repo": serde_json::from_slice::<serde_json::Value>(&repo_bytes).unwrap_or(serde_json::Value::Null),
+            "readme": readme_bytes
+                .as_deref()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+                .unwrap_or(serde_json::Value::Null),
+        });
+        let raw_json = serde_json::to_vec(&envelope).context("github: envelope serialize failed")?;
+
+        Ok(RepoFetch {
+            transcript,
+            metadata,
+            raw_json,
+        })
     }
 
-    async fn fetch_repo_meta(&self, owner: &str, repo: &str) -> Result<RepoResponse> {
+    async fn fetch_repo_meta_bytes(&self, owner: &str, repo: &str) -> Result<Vec<u8>> {
         let url = format!("{API_BASE}/repos/{owner}/{repo}");
         let mut req = self.client.get(&url).header("Accept", "application/vnd.github+json");
         if let Some(token) = &self.token {
@@ -199,10 +235,11 @@ impl GitHubFetcher {
         if !status.is_success() {
             bail!("github /repos/{owner}/{repo} returned HTTP {}", status.as_u16());
         }
-        response.json().await.context("github: /repos parse failed")
+        let bytes = response.bytes().await.context("github: /repos bytes failed")?;
+        Ok(bytes.to_vec())
     }
 
-    async fn fetch_readme(&self, owner: &str, repo: &str) -> Result<String> {
+    async fn fetch_readme_bytes(&self, owner: &str, repo: &str) -> Result<Vec<u8>> {
         let url = format!("{API_BASE}/repos/{owner}/{repo}/readme");
         let mut req = self.client.get(&url).header("Accept", "application/vnd.github+json");
         if let Some(token) = &self.token {
@@ -213,13 +250,20 @@ impl GitHubFetcher {
         if !status.is_success() {
             bail!("github /repos/{owner}/{repo}/readme returned HTTP {}", status.as_u16());
         }
-        let body: ReadmeResponse = response.json().await.context("github: /readme parse failed")?;
-        let content = body.content.unwrap_or_default();
-        match body.encoding.as_deref() {
-            Some("base64") => decode_base64_readme(&content),
-            None | Some("") => Ok(content),
-            Some(other) => bail!("github: unknown readme encoding: {other}"),
-        }
+        let bytes = response.bytes().await.context("github: /readme bytes failed")?;
+        Ok(bytes.to_vec())
+    }
+}
+
+/// Decode a `/readme` JSON response body's `content` field into raw README
+/// markdown. Returns an empty string if `content` is missing or empty.
+fn decode_readme_from_bytes(bytes: &[u8]) -> Result<String> {
+    let body: ReadmeResponse = serde_json::from_slice(bytes).context("github: /readme parse failed")?;
+    let content = body.content.unwrap_or_default();
+    match body.encoding.as_deref() {
+        Some("base64") => decode_base64_readme(&content),
+        None | Some("") => Ok(content),
+        Some(other) => bail!("github: unknown readme encoding: {other}"),
     }
 }
 

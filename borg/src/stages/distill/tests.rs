@@ -332,6 +332,83 @@ fn persist_thread_transcript_no_op_when_staging_disabled() {
 }
 
 #[test]
+fn persist_github_stage_0_1_writes_fetched_and_transcript() {
+    use crate::config::{StagingConfig, StagingLayout};
+    use crate::github::{RepoFetch, RepoMetadata};
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let staging = StagingConfig {
+        enabled: true,
+        root: tmp.path().to_path_buf(),
+        layout: StagingLayout::PerTrace,
+        ..StagingConfig::default()
+    };
+    let fetch_result = RepoFetch {
+        transcript: "# Repository Metadata\n- repo: o/r\n# README\n\nbody".to_string(),
+        metadata: RepoMetadata {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            ..Default::default()
+        },
+        raw_json: br#"{"repo":{"name":"r"},"readme":{"content":"Ym9keQ==","encoding":"base64"}}"#.to_vec(),
+    };
+    persist_github_stage_0_1_if_staging(&staging, "trace-9b", "https://github.com/o/r", &fetch_result).expect("write");
+
+    let fetched_path = tmp.path().join("trace-9b").join("fetched.html");
+    let fetched_yml = tmp.path().join("trace-9b").join("fetched.yml");
+    let transcript_md = tmp.path().join("trace-9b").join("transcript.md");
+    let transcript_yml = tmp.path().join("trace-9b").join("transcript.yml");
+
+    let raw = std::fs::read(&fetched_path).expect("read fetched.html");
+    assert_eq!(
+        raw, fetch_result.raw_json,
+        "fetched.html should be the raw JSON envelope"
+    );
+
+    let fetched_meta_text = std::fs::read_to_string(&fetched_yml).expect("read fetched.yml");
+    assert!(
+        fetched_meta_text.contains("extractor: github-api"),
+        "missing extractor in fetched.yml: {fetched_meta_text}"
+    );
+    assert!(
+        fetched_meta_text.contains("content-type: application/json"),
+        "missing content-type in fetched.yml: {fetched_meta_text}"
+    );
+
+    let transcript = std::fs::read_to_string(&transcript_md).expect("read transcript.md");
+    assert_eq!(transcript, fetch_result.transcript);
+    let transcript_meta = std::fs::read_to_string(&transcript_yml).expect("read transcript.yml");
+    assert!(
+        transcript_meta.contains("extractor: github-render"),
+        "missing extractor in transcript.yml: {transcript_meta}"
+    );
+}
+
+#[test]
+fn persist_github_stage_0_1_no_op_when_staging_disabled() {
+    use crate::config::{StagingConfig, StagingLayout};
+    use crate::github::{RepoFetch, RepoMetadata};
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let staging = StagingConfig {
+        enabled: false,
+        root: tmp.path().to_path_buf(),
+        layout: StagingLayout::PerTrace,
+        ..StagingConfig::default()
+    };
+    let fetch_result = RepoFetch {
+        transcript: "x".to_string(),
+        metadata: RepoMetadata::default(),
+        raw_json: b"{}".to_vec(),
+    };
+    persist_github_stage_0_1_if_staging(&staging, "trace-9b-off", "https://github.com/o/r", &fetch_result)
+        .expect("no-op");
+    assert!(!tmp.path().join("trace-9b-off").exists());
+}
+
+#[test]
 fn persist_thread_transcript_writes_md_and_yml() {
     use crate::config::{StagingConfig, StagingLayout};
     use tempfile::TempDir;

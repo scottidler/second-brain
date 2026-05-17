@@ -87,3 +87,24 @@ fn decode_base64_readme_strips_whitespace() {
     let decoded = decode_base64_readme(wrapped).expect("decode");
     assert_eq!(decoded, "Hello, world!\n");
 }
+
+#[test]
+fn decode_readme_from_bytes_handles_base64_body() {
+    let body = br#"{"content": "SGVsbG8s\nIHdvcmxk\nIQo=\n", "encoding": "base64"}"#;
+    let decoded = decode_readme_from_bytes(body).expect("decode");
+    assert_eq!(decoded, "Hello, world!\n");
+}
+
+#[test]
+fn decode_readme_from_bytes_handles_plain_body() {
+    let body = br#"{"content": "plain markdown body", "encoding": ""}"#;
+    let decoded = decode_readme_from_bytes(body).expect("decode");
+    assert_eq!(decoded, "plain markdown body");
+}
+
+#[test]
+fn decode_readme_from_bytes_handles_missing_content() {
+    let body = br#"{}"#;
+    let decoded = decode_readme_from_bytes(body).expect("decode");
+    assert_eq!(decoded, "");
+}
