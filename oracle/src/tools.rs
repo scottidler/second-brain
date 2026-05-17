@@ -9,7 +9,26 @@ use serde::Deserialize;
 use vault::detail::DetailLevel;
 use vault::schema::{Domain, NoteType, Status};
 
-/// Search the vault's ingested knowledge using full-text search with optional filters.
+/// Retrieval mode for `knowledge_search`.
+///
+/// - `bm25`: pure FTS5 keyword search. Best for proper nouns, exact
+///   terms, and "I know I saved that word" queries.
+/// - `vector`: pure semantic search via fastembed + brute-force cosine
+///   over `note_embeddings`. Best for conceptual recall.
+/// - `hybrid`: BM25 and vector fused via reciprocal rank fusion (the
+///   default; recovers both behaviors).
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SearchMode {
+    Bm25,
+    Vector,
+    Hybrid,
+}
+
+/// Search the vault's ingested knowledge.
+///
+/// Phase A6 added the `mode` parameter; omitting it defaults to
+/// hybrid retrieval (BM25 ∪ vector fused via RRF).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct KnowledgeSearchRequest {
     /// The search query (full-text search across titles, bodies, tags, and summaries)
@@ -37,6 +56,12 @@ pub struct KnowledgeSearchRequest {
     /// Maximum number of results
     #[schemars(description = "Maximum number of results to return (default: 10)")]
     pub limit: Option<u32>,
+
+    /// Retrieval mode. Default: hybrid.
+    #[schemars(
+        description = "Retrieval mode: bm25 (FTS5 keyword search), vector (semantic, brute-force cosine over embeddings), or hybrid (BM25 + vector fused via RRF). Default: hybrid."
+    )]
+    pub mode: Option<SearchMode>,
 }
 
 /// Read a specific note by its vault-relative path.

@@ -138,6 +138,48 @@ impl OracleMcpServer {
         McpError::internal_error(e.to_string(), None)
     }
 
+    /// Look up `NoteRow`s for an ordered list of paths. Preserves order
+    /// (callers pass an RRF-ranked list) and silently skips paths that
+    /// no longer resolve (a note may have been deleted between embed
+    /// time and query time).
+    fn resolve_note_paths<'a, I>(db: &::vault::search::SearchIndex, paths: I) -> Result<Vec<NoteRow>, McpError>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut out = Vec::new();
+        for path in paths {
+            match db.get_note(path).map_err(Self::err)? {
+                Some(note) => out.push(note),
+                None => warn!("knowledge_search: vector hit references missing note: {path}"),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Emit a one-shot WARN the first time a vector / hybrid call comes
+    /// back empty against a vault that has no embedded notes at all.
+    /// The intent is to surface "cortex embed has not run on this DB"
+    /// without flooding the log when the user genuinely searches for
+    /// something with no hits.
+    fn warn_if_no_embeddings<T>(&self, db: &::vault::search::SearchIndex, hits: &[T]) -> Result<(), McpError> {
+        if !hits.is_empty() {
+            return Ok(());
+        }
+        let count = db.count_embeddings(None).map_err(Self::err)?;
+        if count == 0 {
+            // log once per process via the AtomicBool below
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "knowledge_search: vault has zero embeddings; run `cortex embed --backfill` to populate them. \
+                     Pure-BM25 queries (mode=bm25) still work."
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Format a NoteRow according to the requested detail level
     fn format_note(note: &NoteRow, detail_level: &DetailLevel) -> serde_json::Value {
         let metadata = json!({
@@ -192,30 +234,65 @@ impl OracleMcpServer {
 
 #[tool_router]
 impl OracleMcpServer {
-    /// Search the vault's ingested knowledge using full-text search
+    /// Search the vault's ingested knowledge.
     #[tool(
-        description = "Search the vault's ingested knowledge using full-text search. Filter by domain, note type, or status. Control content verbosity with the detail parameter: metadata, tldr, summary, full."
+        description = "Search the vault's ingested knowledge. Modes: bm25 (FTS5 keyword search), vector (semantic, brute-force cosine over embeddings), or hybrid (BM25 + vector fused via RRF; default). Filter by domain, note type, or status. Control content verbosity with the detail parameter: metadata, tldr, summary, full."
     )]
     async fn knowledge_search(&self, params: Parameters<KnowledgeSearchRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
+        if req.query.trim().is_empty() {
+            return Err(Self::err("query is empty"));
+        }
         let detail_level = req.detail.unwrap_or(DetailLevel::Summary);
         let limit = req.limit.unwrap_or(10);
+        let mode = req.mode.unwrap_or(SearchMode::Hybrid);
 
         let db = self.db.lock().map_err(Self::err)?;
-        let notes = db
-            .search(
-                &req.query,
-                req.domain.as_ref().map(|d| d.as_str()),
-                req.note_type.as_ref().map(|t| t.as_str()),
-                req.status.as_ref().map(|s| s.as_str()),
-                Some(limit),
-            )
-            .map_err(Self::err)?;
+        let domain = req.domain.as_ref().map(|d| d.as_str());
+        let note_type = req.note_type.as_ref().map(|t| t.as_str());
+        let status = req.status.as_ref().map(|s| s.as_str());
+
+        let notes = match mode {
+            SearchMode::Bm25 => db
+                .search(&req.query, domain, note_type, status, Some(limit))
+                .map_err(Self::err)?,
+            SearchMode::Vector => {
+                let active_model = db.active_embedding_model().map_err(Self::err)?;
+                let q_vec = vault::embedding::embed_query(&req.query, &active_model).map_err(Self::err)?;
+                let hits = db
+                    .search_vector(&q_vec, limit, domain, note_type, status)
+                    .map_err(Self::err)?;
+                self.warn_if_no_embeddings(&db, &hits)?;
+                Self::resolve_note_paths(&db, hits.iter().map(|h| h.note_path.as_str()))?
+            }
+            SearchMode::Hybrid => {
+                let active_model = db.active_embedding_model().map_err(Self::err)?;
+                let q_vec = vault::embedding::embed_query(&req.query, &active_model).map_err(Self::err)?;
+                let bm25 = db
+                    .search(&req.query, domain, note_type, status, Some(vault::search::K_RRF_INPUT))
+                    .map_err(Self::err)?;
+                let vec_hits = db
+                    .search_vector(&q_vec, vault::search::K_RRF_INPUT, domain, note_type, status)
+                    .map_err(Self::err)?;
+                self.warn_if_no_embeddings(&db, &vec_hits)?;
+
+                let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
+                let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();
+                let fused = vault::search::reciprocal_rank_fusion(
+                    &bm25_paths,
+                    &vec_paths,
+                    vault::search::RRF_K,
+                    limit as usize,
+                );
+                Self::resolve_note_paths(&db, fused.iter().map(|h| h.note_path.as_str()))?
+            }
+        };
 
         let results: Vec<serde_json::Value> = notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
 
         Ok(CallToolResult::success(vec![Content::json(json!({
             "count": results.len(),
+            "mode": match mode { SearchMode::Bm25 => "bm25", SearchMode::Vector => "vector", SearchMode::Hybrid => "hybrid" },
             "results": results,
         }))?]))
     }
