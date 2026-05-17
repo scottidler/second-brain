@@ -858,7 +858,7 @@ No breaking changes for oracle: the MCP tools continue to read through the same 
 
 ## Open Questions
 
-- [ ] **Thread Stage 0 implementation status.** 2026-04-19 declares `ThreadUrl` but I have not verified the X/Reddit/HN fetcher is implemented. If not, Phase 6 includes Stage 0 work; if yes, only Stage 2 work. Worth a 10-minute audit before Phase 6 starts.
+- [x] ~~**Thread Stage 0 implementation status.**~~ **Resolved (Phase 9a audit):** the rendered markdown produced by the existing MultiFetcher chain (Jina/fabric/browser-UA) is sufficient input for `distill-thread`. No dedicated X/Reddit/HN JSON fetcher is required. Native JSON fetchers are noted as a potential future enhancement in `2026-05-16-extractor-contract-l2-phase-9-cleanup.md`. Phase 9a also adds Stage-1 `transcript.md` persistence so `borg replay` can re-run distillation against the staged input.
 - [x] ~~**Distilled location for cortex backfill.**~~ **Resolved (architect Round 1):** shared `distillers/` workspace crate consumed by both borg and cortex as a library. Shelling out per note at ~21k notes is unacceptable due to process startup overhead.
 - [ ] **Image distiller.** OCR output is sometimes paragraph-shaped (a screenshot of an article) and sometimes structured (a screenshot of a tweet). One pattern or two?
 - [ ] **Vocabulary kind alignment.** The staged pipeline doc defers vocabulary to a follow-on. When vocab lands, does it produce a `Distilled` (probably degenerate: summary = definition, claims = empty) or skip the contract? Lean toward producing degenerate Distilled for consistency.

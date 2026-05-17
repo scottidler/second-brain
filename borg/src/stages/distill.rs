@@ -20,7 +20,8 @@
 
 use crate::config::{FabricConfig, PipelineConfig, StagingConfig};
 use crate::github::{GitHubFetcher, RepoFetch};
-use crate::types::IngestKind;
+use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
+use crate::types::{IngestKind, TraceMeta};
 use distillers::{
     ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, RepoMetadata,
     VideoMetadata,
@@ -427,15 +428,18 @@ pub async fn distill_for_publish_video(
     distilled
 }
 
-/// Shadow-mode: run the thread distiller against the markdown rendered by
-/// the standard Stage-0 fetcher chain (Jina / fabric -u / browser-UA +
-/// markitdown) for X/Reddit/HN URLs. Persist `distilled.yml` to the staging
-/// directory. Fires-and-forgets - never blocks or affects the legacy path.
+/// Post-Phase-6 cutover: run the thread distiller against the markdown rendered
+/// by the standard Stage-0 fetcher chain (Jina / fabric -u / browser-UA +
+/// markitdown) for X/Reddit/HN URLs. The returned `Distilled` is the source of
+/// truth for the published note's body and `cortex-thread-*` frontmatter.
 ///
-/// Phase 6 ships in shadow mode only: a dedicated thread JSON fetcher
-/// (X/Reddit/HN APIs) is out of scope for this phase. The rendered markdown
-/// is sufficient input for empirical telemetry on `distill-thread`'s pattern
-/// quality before cutover.
+/// Persists two artifacts in the per-trace staging directory:
+/// - `transcript.md` + `transcript.yml` (the rendered markdown the distiller
+///   saw, with `extractor: thread-markdown-shim`). The Phase-6 audit verified
+///   the rendered markdown is sufficient input for `distill-thread`; a
+///   dedicated X/Reddit/HN JSON fetcher remains tracked as a potential future
+///   enhancement but is not required.
+/// - `distilled.yml` (the structured contract for replay).
 pub async fn distill_for_publish_thread(
     fabric: &FabricConfig,
     staging: &StagingConfig,
@@ -447,6 +451,9 @@ pub async fn distill_for_publish_thread(
         "distill_for_publish_thread: trace={trace_id} url={url} transcript_len={}",
         thread_md.len()
     );
+    if let Err(e) = persist_thread_transcript_if_staging(staging, trace_id, thread_md) {
+        log::warn!("[{trace_id}] distill_for_publish_thread: persist transcript.md failed: {e:#}");
+    }
     let stage = DistillStage::from_fabric_config(fabric);
     let started = std::time::Instant::now();
     let distilled = match stage.distill(IngestKind::ThreadUrl, thread_md, Some(url), None).await {
@@ -483,6 +490,27 @@ pub async fn distill_for_publish_thread(
         log::warn!("[{trace_id}] distill_for_publish_thread: persist distilled.yml failed: {e:#}");
     }
     distilled
+}
+
+/// Persist the rendered thread markdown (the input the thread distiller saw)
+/// as Stage-1 `transcript.md` + `transcript.yml`. Mirrors the `fetched.html`
+/// persistence the article-fetch chain already performs for thread URLs, so a
+/// future `borg replay --from-stage 2` has both Stage-0 (fetched bytes) and
+/// Stage-1 (rendered markdown) artifacts available without re-fetching.
+///
+/// `extractor: "thread-markdown-shim"` distinguishes this transcript from the
+/// upstream article-fetch transcripts. No-op when `staging.enabled = false`.
+pub fn persist_thread_transcript_if_staging(staging: &StagingConfig, trace_id: &str, thread_md: &str) -> Result<()> {
+    if !staging.enabled {
+        return Ok(());
+    }
+    let store = FsArtifactStore::from_config(staging);
+    let meta = TraceMeta {
+        extractor: "thread-markdown-shim".to_string(),
+        ..TraceMeta::default()
+    };
+    store.write_transcript(trace_id, thread_md, &meta)?;
+    Ok(())
 }
 
 /// Persist `distilled.yml` into the per-trace staging directory. Atomic

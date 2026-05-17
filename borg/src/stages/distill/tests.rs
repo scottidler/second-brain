@@ -314,3 +314,44 @@ fn write_distilled_yml_persists_to_per_trace_dir() {
     // tmp suffix must not linger after the atomic rename.
     assert!(!tmp.path().join("trace-1").join("distilled.yml.tmp").exists());
 }
+
+#[test]
+fn persist_thread_transcript_no_op_when_staging_disabled() {
+    use crate::config::{StagingConfig, StagingLayout};
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let staging = StagingConfig {
+        enabled: false,
+        root: tmp.path().to_path_buf(),
+        layout: StagingLayout::PerTrace,
+        ..StagingConfig::default()
+    };
+    persist_thread_transcript_if_staging(&staging, "trace-1", "# thread body").expect("no-op");
+    assert!(!tmp.path().join("trace-1").exists());
+}
+
+#[test]
+fn persist_thread_transcript_writes_md_and_yml() {
+    use crate::config::{StagingConfig, StagingLayout};
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let staging = StagingConfig {
+        enabled: true,
+        root: tmp.path().to_path_buf(),
+        layout: StagingLayout::PerTrace,
+        ..StagingConfig::default()
+    };
+    let thread_md = "# Some thread\n\nFirst post.\nSecond post.\n";
+    persist_thread_transcript_if_staging(&staging, "trace-9a", thread_md).expect("write");
+    let md_path = tmp.path().join("trace-9a").join("transcript.md");
+    let yml_path = tmp.path().join("trace-9a").join("transcript.yml");
+    let md = std::fs::read_to_string(&md_path).expect("read md");
+    assert_eq!(md, thread_md);
+    let yml = std::fs::read_to_string(&yml_path).expect("read yml");
+    assert!(
+        yml.contains("extractor: thread-markdown-shim"),
+        "expected extractor in yml: {yml}"
+    );
+}
