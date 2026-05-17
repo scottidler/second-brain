@@ -1443,34 +1443,45 @@ async fn process_audio_inner(
         title_from_filename(filename)
     };
 
+    // Phase 9c-voicenote cutover: route the Groq transcript through the
+    // VoiceNote distiller (short-path single call, long-path map-reduce).
+    // The full Groq output lands verbatim in `distilled.transcript` so the
+    // published note carries the exact words below the LLM summary.
+    let distilled = crate::stages::distill::distill_for_publish_voicenote(
+        &config.fabric,
+        &config.staging,
+        trace_id,
+        &transcript_text,
+        Some(&title),
+    )
+    .await;
+
     let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
     all_tags.push("audio".to_string());
+    all_tags.extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
 
-    // Generate tags via Fabric from transcription or filename
-    let tag_source = if !transcript_text.is_empty() {
+    // Generate tags via Fabric from the distilled summary (denser than the
+    // raw transcript; falls back to filename when distillation produced no
+    // summary or transcript was empty).
+    let tag_source = if !distilled.summary.is_empty() {
+        distilled.summary.clone()
+    } else if !transcript_text.is_empty() {
         transcript_text.clone()
     } else {
         format!("Audio file: {filename}")
     };
-
     if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&tag_source, &config.fabric).await {
         all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
     }
     finalize_tags(&mut all_tags, config).await;
 
-    // Build summary
-    let summary = if !transcript_text.is_empty() {
-        format!("## Transcript\n\n{transcript_text}")
-    } else {
-        String::new()
-    };
-
+    let rendered_distilled = distillers::render(&distilled);
     let note = NoteContent {
         title: title.clone(),
         source_url: None,
         asset_path: Some(rel_path.clone()),
         tags: all_tags.clone(),
-        summary,
+        summary: distilled.summary.clone(),
         description: None,
         content_type: ContentType::Audio {
             asset_path: rel_path,
@@ -1480,7 +1491,8 @@ async fn process_audio_inner(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
-        ..NoteContent::default()
+        distilled_body: Some(rendered_distilled.body_markdown),
+        frontmatter_additions: rendered_distilled.frontmatter_additions,
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);

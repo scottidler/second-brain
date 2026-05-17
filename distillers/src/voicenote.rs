@@ -1,0 +1,473 @@
+//! Voice-note distiller.
+//!
+//! Ports the structural template from `VideoDistiller` with timestamp
+//! handling stripped: Groq ASR transcripts come back as plain text with no
+//! anchors, so claim `anchor` fields are always `None`.
+//!
+//! Short transcripts go straight to `distill-voicenote` (single Fabric call).
+//! Long transcripts split at sentence boundaries into ~8K-token chunks; each
+//! chunk runs through `distill-voicenote-chunk` in parallel and produces a
+//! partial `Distilled`. Chunk claims are concatenated; chunk summaries are
+//! reduced via a single `distill-voicenote-reduce` call into the final
+//! summary.
+//!
+//! Phase 9c-voicenote contract: `Distilled.transcript` always carries the
+//! full raw Groq output so the published vault note is a verbatim archive
+//! even after the LLM-distilled summary collapses the original. This is the
+//! sole structural difference vs. URL kinds (which leave transcript as None).
+
+use async_trait::async_trait;
+use chrono::Utc;
+use eyre::Result;
+use futures::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
+use vault::distilled::{Claim, Distilled, DistilledMeta, Link, ValidationMeta};
+
+use crate::{
+    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled,
+    validate::MAX_SUMMARY_CHARS,
+};
+
+const ID: &str = "distill-voicenote-v1";
+const PATTERN_SHORT: &str = "distill-voicenote";
+const PATTERN_CHUNK: &str = "distill-voicenote-chunk";
+const PATTERN_REDUCE: &str = "distill-voicenote-reduce";
+
+/// Token threshold above which we switch to the map-reduce path. Mirrors
+/// `VideoDistiller::SINGLE_CALL_TOKEN_THRESHOLD` (12K tokens).
+pub const SINGLE_CALL_TOKEN_THRESHOLD: usize = 12_000;
+/// Target chunk size (in approximate tokens) for the map step.
+pub const CHUNK_TOKEN_TARGET: usize = 8_000;
+/// 4 chars per token is a common rule of thumb for English prose.
+const CHARS_PER_TOKEN: usize = 4;
+/// Default parallelism for chunk distillation. I/O bound (fabric subprocess).
+const DEFAULT_CHUNK_CONCURRENCY: usize = 4;
+
+/// Tunables for the voicenote distiller. Same shape as `VideoConfig`.
+#[derive(Debug, Clone)]
+pub struct VoiceNoteConfig {
+    pub model: String,
+    pub max_chars: usize,
+    pub timeout_secs: u64,
+    pub chunk_concurrency: usize,
+}
+
+impl Default for VoiceNoteConfig {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            max_chars: 32_000,
+            timeout_secs: 60,
+            chunk_concurrency: DEFAULT_CHUNK_CONCURRENCY,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VoiceNoteDistiller<F: FabricCaller + Clone> {
+    fabric: F,
+    config: VoiceNoteConfig,
+}
+
+impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
+    pub fn new(fabric: F, config: VoiceNoteConfig) -> Self {
+        Self { fabric, config }
+    }
+}
+
+#[async_trait]
+impl<F: FabricCaller + Clone> DistillExtractor for VoiceNoteDistiller<F> {
+    fn id(&self) -> &'static str {
+        ID
+    }
+
+    async fn distill(&self, inputs: DistillInputs<'_>) -> Result<Distilled> {
+        let transcript = inputs.transcript;
+        let token_estimate = approx_tokens(transcript.len());
+        log::debug!(
+            "VoiceNoteDistiller::distill: transcript_len={} approx_tokens={} title_hint={:?}",
+            transcript.len(),
+            token_estimate,
+            inputs.title_hint
+        );
+
+        let mut distilled = if token_estimate <= SINGLE_CALL_TOKEN_THRESHOLD {
+            self.distill_short(transcript).await?
+        } else {
+            self.distill_long(transcript).await?
+        };
+
+        // Verbatim preservation contract. Set AFTER distill_short / distill_long
+        // so neither path needs to know about transcript; both produce a
+        // Distilled with transcript = None and we override here.
+        distilled.transcript = Some(transcript.to_string());
+
+        let mut bounded = enforce_bounds(distilled);
+        debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
+        bounded.tags.iter_mut().for_each(|t| *t = t.to_lowercase());
+        // Re-set transcript after enforce_bounds in case any future bounds
+        // logic touches it. enforce_bounds today only clips summary/claims/tags
+        // but defensive about future drift.
+        bounded.transcript = Some(transcript.to_string());
+        Ok(bounded)
+    }
+}
+
+impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
+    /// Single-call path for transcripts under the threshold.
+    async fn distill_short(&self, transcript: &str) -> Result<Distilled> {
+        let raw = match self.call_fabric(PATTERN_SHORT, transcript).await {
+            Ok(r) => r,
+            Err((reason, _)) => return Ok(fallback_distilled(ID, &reason, transcript, None)),
+        };
+        match parse_voicenote_yaml(&raw) {
+            Ok(parsed) => Ok(build_distilled(parsed, transcript, &raw, &self.config.model)),
+            Err(_) => Ok(fallback_distilled(ID, "yaml-parse-error", transcript, Some(&raw))),
+        }
+    }
+
+    /// Map-reduce path for long transcripts.
+    async fn distill_long(&self, transcript: &str) -> Result<Distilled> {
+        let chunks = chunk_transcript(transcript, CHUNK_TOKEN_TARGET);
+        log::debug!(
+            "VoiceNoteDistiller::distill_long: chunks={} threshold_tokens={} target_tokens={}",
+            chunks.len(),
+            SINGLE_CALL_TOKEN_THRESHOLD,
+            CHUNK_TOKEN_TARGET
+        );
+        if chunks.is_empty() {
+            return Ok(fallback_distilled(ID, "empty-transcript", transcript, None));
+        }
+
+        let concurrency = self.config.chunk_concurrency.max(1);
+        let chunk_results: Vec<(usize, Result<String>)> = stream::iter(chunks.iter().cloned().enumerate())
+            .map(|(idx, chunk)| {
+                let fabric = self.fabric.clone();
+                let model = self.config.model.clone();
+                let max_chars = self.config.max_chars;
+                let timeout_secs = self.config.timeout_secs;
+                async move {
+                    let request = FabricRequest {
+                        pattern: PATTERN_CHUNK.to_string(),
+                        input: chunk,
+                        model,
+                        max_chars,
+                        timeout_secs,
+                    };
+                    let result = fabric.call(request).await;
+                    (idx, result)
+                }
+            })
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
+        let mut chunk_results = chunk_results;
+        chunk_results.sort_by_key(|(idx, _)| *idx);
+
+        let mut chunk_summaries: Vec<String> = Vec::with_capacity(chunk_results.len());
+        let mut combined_claims: Vec<Claim> = Vec::new();
+        let mut combined_links: Vec<Link> = Vec::new();
+        let mut any_chunk_failed = false;
+        let mut output_chars: usize = 0;
+
+        for (_, result) in chunk_results {
+            let raw = match result {
+                Ok(r) => r,
+                Err(err) => {
+                    let msg = format!("{err}");
+                    log::warn!("VoiceNoteDistiller: chunk fabric call failed: {msg}");
+                    any_chunk_failed = true;
+                    continue;
+                }
+            };
+            output_chars += raw.len();
+            let parsed = match parse_voicenote_yaml(&raw) {
+                Ok(p) => p,
+                Err(err) => {
+                    log::warn!("VoiceNoteDistiller: chunk yaml parse failed: {err}");
+                    any_chunk_failed = true;
+                    continue;
+                }
+            };
+            if let Some(s) = parsed.summary.clone()
+                && !s.trim().is_empty()
+            {
+                chunk_summaries.push(s.trim().to_string());
+            }
+            combined_claims.extend(parsed.claims.unwrap_or_default().into_iter().filter_map(|c| {
+                let text = c.text.trim().to_string();
+                if text.is_empty() {
+                    return None;
+                }
+                Some(Claim {
+                    text,
+                    // Voice notes have no anchors at this layer regardless of
+                    // what the pattern produced.
+                    anchor: None,
+                })
+            }));
+            combined_links.extend(parsed.links.unwrap_or_default().into_iter().filter_map(|l| {
+                let url = l.url.trim().to_string();
+                if url.is_empty() {
+                    return None;
+                }
+                Some(Link {
+                    url,
+                    label: l.label.filter(|s| !s.is_empty()),
+                })
+            }));
+        }
+
+        if chunk_summaries.is_empty() {
+            log::warn!("VoiceNoteDistiller: all chunks failed; using map-reduce fallback");
+            return Ok(fallback_distilled(ID, "chunk-failures", transcript, None));
+        }
+
+        // Reduce step.
+        let joined = chunk_summaries.join("\n\n");
+        let summary = match self.call_fabric(PATTERN_REDUCE, &joined).await {
+            Ok(raw) => match parse_reduce_yaml(&raw) {
+                Ok(parsed) => parsed
+                    .summary
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| joined.clone()),
+                Err(err) => {
+                    log::warn!("VoiceNoteDistiller: reduce yaml parse failed: {err}; falling back to concat");
+                    joined.clone()
+                }
+            },
+            Err((reason, _)) => {
+                log::warn!(
+                    "VoiceNoteDistiller: reduce fabric call failed ({reason}); falling back to concatenated chunks"
+                );
+                joined.clone()
+            }
+        };
+
+        let mut validation = ValidationMeta::default();
+        if any_chunk_failed {
+            validation.fallback_reason = Some("partial-chunk-failure".to_string());
+        }
+        let input_tokens = approx_tokens(transcript.len()) as u32;
+        let output_tokens = approx_tokens(output_chars) as u32;
+        Ok(Distilled {
+            summary,
+            claims: combined_claims,
+            tags: Vec::new(),
+            links: combined_links,
+            kind_specific: None,
+            meta: DistilledMeta {
+                extractor: ID.to_string(),
+                model: if self.config.model.is_empty() {
+                    "default".to_string()
+                } else {
+                    self.config.model.clone()
+                },
+                input_tokens,
+                output_tokens,
+                produced_at: Utc::now().to_rfc3339(),
+                validation,
+            },
+            // Caller (`distill` above) overrides this with Some(transcript)
+            // after both short and long paths return; staying None here keeps
+            // the helper internals symmetric with URL kinds.
+            transcript: None,
+        })
+    }
+
+    async fn call_fabric(&self, pattern: &str, input: &str) -> std::result::Result<String, (String, String)> {
+        let request = FabricRequest {
+            pattern: pattern.to_string(),
+            input: input.to_string(),
+            model: self.config.model.clone(),
+            max_chars: self.config.max_chars,
+            timeout_secs: self.config.timeout_secs,
+        };
+        match self.fabric.call(request).await {
+            Ok(text) => Ok(text),
+            Err(err) => {
+                let msg = format!("{err}");
+                let reason = if msg.contains("timed out") {
+                    "fabric-timeout".to_string()
+                } else {
+                    "fabric-error".to_string()
+                };
+                log::warn!("VoiceNoteDistiller::call_fabric: pattern={pattern} reason={reason} err={msg}");
+                Err((reason, msg))
+            }
+        }
+    }
+}
+
+fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str) -> Distilled {
+    let summary = parsed.summary.unwrap_or_default().trim().to_string();
+    if summary.is_empty() {
+        return fallback_distilled(ID, "missing-summary", transcript, Some(raw));
+    }
+    let claims: Vec<Claim> = parsed
+        .claims
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|c| {
+            let text = c.text.trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            Some(Claim { text, anchor: None })
+        })
+        .collect();
+    let tags: Vec<String> = parsed
+        .tags
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let links: Vec<Link> = parsed
+        .links
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|l| {
+            let url = l.url.trim().to_string();
+            if url.is_empty() {
+                return None;
+            }
+            Some(Link {
+                url,
+                label: l.label.filter(|s| !s.is_empty()),
+            })
+        })
+        .collect();
+
+    let word_count = transcript.split_whitespace().count();
+    if claims.is_empty() && word_count > 200 {
+        log::warn!("VoiceNoteDistiller: empty claims for transcript with {word_count} words (possible pattern drift)");
+    }
+
+    Distilled {
+        summary,
+        claims,
+        tags,
+        links,
+        kind_specific: None,
+        meta: DistilledMeta {
+            extractor: ID.to_string(),
+            model: if model.is_empty() { "default".to_string() } else { model.to_string() },
+            input_tokens: approx_tokens(transcript.len()) as u32,
+            output_tokens: approx_tokens(raw.len()) as u32,
+            produced_at: Utc::now().to_rfc3339(),
+            validation: ValidationMeta::default(),
+        },
+        transcript: None,
+    }
+}
+
+/// Split a transcript into chunks at sentence boundaries within the target
+/// token budget. Mirrors the video chunker; sentences are defined as text
+/// terminated by `.`, `!`, or `?` followed by whitespace.
+pub fn chunk_transcript(transcript: &str, target_tokens: usize) -> Vec<String> {
+    let target_chars = target_tokens.saturating_mul(CHARS_PER_TOKEN);
+    if target_chars == 0 || transcript.is_empty() {
+        return Vec::new();
+    }
+    let bytes = transcript.as_bytes();
+    let len = bytes.len();
+    let mut chunks: Vec<String> = Vec::new();
+    let mut start: usize = 0;
+    while start < len {
+        let mut end = (start + target_chars).min(len);
+        if end < len {
+            end = find_boundary(transcript, start, end);
+        }
+        if end <= start {
+            end = (start + target_chars).min(len);
+        }
+        chunks.push(transcript[start..end].to_string());
+        start = end;
+    }
+    chunks
+}
+
+fn find_boundary(transcript: &str, start: usize, end: usize) -> usize {
+    let bytes = transcript.as_bytes();
+    let lookback = end.saturating_sub(start).min(2048);
+    let floor = end.saturating_sub(lookback);
+    let mut i = end;
+    while i > floor {
+        i -= 1;
+        let b = bytes[i];
+        if b == b'\n' {
+            return i + 1;
+        }
+        if (b == b'.' || b == b'!' || b == b'?') && i + 1 < bytes.len() && bytes[i + 1].is_ascii_whitespace() {
+            return i + 1;
+        }
+    }
+    end
+}
+
+pub fn approx_tokens(chars: usize) -> usize {
+    chars / CHARS_PER_TOKEN
+}
+
+fn parse_voicenote_yaml(raw: &str) -> Result<PatternYaml> {
+    let yaml_body = strip_fences(raw);
+    let parsed: PatternYaml = serde_yaml::from_str(yaml_body)?;
+    Ok(parsed)
+}
+
+fn parse_reduce_yaml(raw: &str) -> Result<ReduceYaml> {
+    let yaml_body = strip_fences(raw);
+    let parsed: ReduceYaml = serde_yaml::from_str(yaml_body)?;
+    Ok(parsed)
+}
+
+fn strip_fences(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    let without_open = trimmed
+        .strip_prefix("```yaml")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed);
+    let stripped = without_open.trim_start_matches('\n');
+    if let Some(close) = stripped.rfind("```") {
+        stripped[..close].trim_end()
+    } else {
+        stripped
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PatternYaml {
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    claims: Option<Vec<PatternClaim>>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    links: Option<Vec<PatternLink>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PatternClaim {
+    text: String,
+    #[serde(default)]
+    anchor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PatternLink {
+    url: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ReduceYaml {
+    #[serde(default)]
+    summary: Option<String>,
+}
+
+#[cfg(test)]
+mod tests;

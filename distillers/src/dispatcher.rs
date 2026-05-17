@@ -21,7 +21,7 @@ use eyre::Result;
 use crate::{
     ArticleConfig, ArticleDistiller, DistillExtractor, DistillInputs, FabricCaller, IdeaDistiller, ImageConfig,
     ImageDistiller, PassthroughDistiller, RepoConfig, RepoDistiller, ThreadConfig, ThreadDistiller, VideoConfig,
-    VideoDistiller,
+    VideoDistiller, VoiceNoteConfig, VoiceNoteDistiller,
 };
 
 /// Kinds the distillers crate knows how to produce a `Distilled` for.
@@ -62,6 +62,7 @@ pub struct Dispatcher<F: FabricCaller + Clone> {
     pub idea: IdeaDistiller,
     pub passthrough: PassthroughDistiller,
     pub image: ImageDistiller<F>,
+    pub voicenote: VoiceNoteDistiller<F>,
     pub article: ArticleDistiller<F>,
     pub repo: RepoDistiller<F>,
     pub video: VideoDistiller<F>,
@@ -95,10 +96,17 @@ impl<F: FabricCaller + Clone> Dispatcher<F> {
             max_chars: article_config.max_chars,
             timeout_secs: article_config.timeout_secs,
         };
+        let voicenote_config = VoiceNoteConfig {
+            model: article_config.model.clone(),
+            max_chars: article_config.max_chars,
+            timeout_secs: article_config.timeout_secs,
+            ..VoiceNoteConfig::default()
+        };
         Self {
             idea: IdeaDistiller,
             passthrough: PassthroughDistiller,
             image: ImageDistiller::new(fabric.clone(), image_config),
+            voicenote: VoiceNoteDistiller::new(fabric.clone(), voicenote_config),
             article: ArticleDistiller::new(fabric.clone(), article_config),
             repo: RepoDistiller::new(fabric.clone(), repo_config),
             video: VideoDistiller::new(fabric.clone(), video_config),
@@ -116,11 +124,13 @@ impl<F: FabricCaller + Clone> Dispatcher<F> {
         video_config: VideoConfig,
         thread_config: ThreadConfig,
         image_config: ImageConfig,
+        voicenote_config: VoiceNoteConfig,
     ) -> Self {
         Self {
             idea: IdeaDistiller,
             passthrough: PassthroughDistiller,
             image: ImageDistiller::new(fabric.clone(), image_config),
+            voicenote: VoiceNoteDistiller::new(fabric.clone(), voicenote_config),
             article: ArticleDistiller::new(fabric.clone(), article_config),
             repo: RepoDistiller::new(fabric.clone(), repo_config),
             video: VideoDistiller::new(fabric.clone(), video_config),
@@ -140,11 +150,12 @@ impl<F: FabricCaller + Clone> Dispatch for Dispatcher<F> {
         );
         match kind {
             DistillKind::Idea | DistillKind::Vocabulary => self.idea.distill(inputs).await,
-            // Phase 9c-image: Image now routes to its own Fabric-backed
-            // distiller. VoiceNote remains on the passthrough stub until
-            // Phase 9c-voicenote replaces it with the map-reduce distiller.
             DistillKind::Image => self.image.distill(inputs).await,
-            DistillKind::VoiceNote => self.passthrough.distill(inputs).await,
+            // Phase 9c-voicenote: VoiceNote now routes to its own Fabric-backed
+            // distiller with map-reduce orchestration for long Groq transcripts.
+            // PassthroughDistiller has zero consumers from this point forward
+            // but stays in the crate as a stub.
+            DistillKind::VoiceNote => self.voicenote.distill(inputs).await,
             DistillKind::Article => self.article.distill(inputs).await,
             DistillKind::Repo => self.repo.distill(inputs).await,
             DistillKind::Video => self.video.distill(inputs).await,

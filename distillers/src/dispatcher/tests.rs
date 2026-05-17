@@ -63,7 +63,11 @@ async fn dispatches_image_to_image_distiller() {
 }
 
 #[tokio::test]
-async fn dispatches_voice_note_to_passthrough() {
+async fn dispatches_voice_note_to_voicenote_distiller() {
+    // Phase 9c-voicenote: VoiceNote now routes to VoiceNoteDistiller (Fabric-
+    // backed with map-reduce for long transcripts). With a stub FakeFabric
+    // (no canned response) the short path falls back; the fallback id matches
+    // the live extractor.
     let dispatcher = make_dispatcher();
     let inputs = DistillInputs {
         transcript: "transcribed audio",
@@ -76,7 +80,10 @@ async fn dispatches_voice_note_to_passthrough() {
         .distill(DistillKind::VoiceNote, inputs)
         .await
         .expect("distill");
-    assert_eq!(distilled.meta.extractor, "distill-passthrough-v1");
+    assert_eq!(distilled.meta.extractor, "distill-voicenote-v1");
+    // Verbatim preservation contract: even on the fallback path the raw
+    // transcript survives into the published note.
+    assert_eq!(distilled.transcript.as_deref(), Some("transcribed audio"));
 }
 
 #[tokio::test]

@@ -20,6 +20,7 @@ pub mod repo;
 pub mod thread;
 pub mod validate;
 pub mod video;
+pub mod voicenote;
 
 use async_trait::async_trait;
 use eyre::Result;
@@ -36,6 +37,7 @@ pub use repo::{RepoConfig, RepoDistiller, RepoMetadata};
 pub use thread::{ThreadConfig, ThreadDistiller, infer_platform};
 pub use validate::{enforce_bounds, fallback_distilled};
 pub use video::{VideoConfig, VideoDistiller, VideoMetadata};
+pub use voicenote::{VoiceNoteConfig, VoiceNoteDistiller};
 
 /// Inputs every distiller receives. Mirrors the Stage-1 / Stage-0 contract.
 #[derive(Debug, Clone, Default)]

@@ -255,6 +255,56 @@ pub async fn distill_for_publish_article(
     distilled
 }
 
+/// Phase 9c-voicenote cutover: run the VoiceNote distiller against a Groq ASR
+/// transcript. Short transcripts dispatch a single Fabric call; long
+/// transcripts (>12K tokens) go through map-reduce. The raw Groq output is
+/// always preserved in `Distilled.transcript` so the published note is a
+/// verbatim archive of what the speaker actually said.
+pub async fn distill_for_publish_voicenote(
+    fabric: &FabricConfig,
+    staging: &StagingConfig,
+    trace_id: &str,
+    transcript: &str,
+    title_hint: Option<&str>,
+) -> Distilled {
+    log::debug!(
+        "distill_for_publish_voicenote: trace={trace_id} transcript_len={} title_hint={title_hint:?}",
+        transcript.len()
+    );
+    let stage = DistillStage::from_fabric_config(fabric);
+    let started = std::time::Instant::now();
+    let distilled = match stage.distill(IngestKind::VoiceNote, transcript, None, title_hint).await {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("[{trace_id}] distill_for_publish_voicenote: dispatch error: {e:#}; using fallback");
+            let mut fb = distillers::fallback_distilled("distill-voicenote-v1", "dispatch-error", transcript, None);
+            fb.transcript = Some(transcript.to_string());
+            fb
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    let fallback = distilled
+        .meta
+        .validation
+        .fallback_reason
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    log::info!(
+        "[{trace_id}] distill_for_publish_voicenote: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
+        distilled.meta.extractor,
+        distilled.meta.model,
+        distilled.claims.len(),
+        distilled.tags.len(),
+        distilled.links.len(),
+        fallback,
+        elapsed_ms,
+    );
+    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
+        log::warn!("[{trace_id}] distill_for_publish_voicenote: persist distilled.yml failed: {e:#}");
+    }
+    distilled
+}
+
 /// Phase 9c-image cutover: run the Image distiller against the Vision+OCR
 /// transcript. The full input is preserved as `Distilled.transcript` so the
 /// published note carries verbatim extracted text below the LLM-distilled
