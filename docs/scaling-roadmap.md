@@ -109,7 +109,7 @@ The work splits into three design docs along orthogonal axes. Doc 1 is the found
 
 ### Doc 2 - Hybrid Retrieval (FTS5 + Vector + RRF)
 
-**Status:** Phase A Implemented (BLOB column, fastembed adapter, brute-force cosine, RRF fusion, cortex embed loop with transaction discipline, oracle mode dispatch, regression fixture, opt-in latency benchmark). [design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md](design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md). Phase B (transcript chunking + max-pool aggregation + distillers amendment) implements next.
+**Status:** Implemented (Phase A + Phase B). [design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md](design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md). BLOB-column vector storage co-located with FTS5, fastembed bge-small-en-v1.5 adapter, brute-force cosine + RRF fusion, cortex embed loop with transaction discipline, oracle bm25/vector/hybrid mode dispatch, transcript chunking + atomic chunk swap for Image/VoiceNote/Idea/Vocabulary/Video/Thread (Video and Thread distillers populate `transcript: Some(...)` for chunk-level recall), max-pool aggregation across summary + transcript-chunk rows in `search_vector`, regression + latency fixtures.
 
 **Goal:** semantic discovery on top of the existing keyword retrieval. BM25 (FTS5) wins on proper nouns, exact terms, and rare tokens; vector embeddings win on conceptual overlap. Reciprocal rank fusion combines both with one screen of code.
 

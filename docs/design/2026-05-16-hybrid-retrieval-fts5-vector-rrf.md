@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-05-16
-**Status:** In Review
+**Status:** Implemented
 **Review Passes Completed:** 5/5 + 3 architect rounds (Round 3 caught: search-blackout from index_vault deletion, inverted max-pool math, allocation foot-gun in BLOB decode, FK PRAGMA explicit doc)
 **Parent:** [docs/scaling-roadmap.md](../scaling-roadmap.md) (Doc 2)
 
