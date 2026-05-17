@@ -77,16 +77,28 @@ second-brain/
     logging.rs     -- Unified env_logger + log setup
     fabric.rs      -- Fabric subprocess wrapper
     trace.rs       -- Trace ID generation
+    distilled.rs   -- Distilled struct + KindPayload variants (added by Doc 1)
 
-  borg (binary crate) depends on vault
+  distillers (library crate) depends on vault
+    Per-kind Stage-2 distillers: article, repo, video, thread, idea, passthrough.
+    FabricCaller port (FabricShell production, FakeFabric tests). Dispatcher
+    keyed by DistillKind. Render module produces body markdown + frontmatter
+    additions consumed by both borg's publish and cortex's backfill.
+
+  borg (binary crate) depends on vault, distillers
     Borg-specific: pipeline, telegram, discord, ntfy, routes, youtube,
     transcription, ocr, assets, markdown, router, notify, etc.
-    Uses vault::schema::Domain, vault::frontmatter::Frontmatter, etc.
+    Post-Phase-6 cutover: Stage-2 calls `distill_for_publish_*` and writes
+    the rendered Distilled into the published note body + frontmatter.
+    Never depends on `rusqlite` (one-way data flow).
 
-  cortex (binary crate) depends on vault
+  cortex (binary crate) depends on vault, distillers
     Cortex-specific: daemon, linking, duplicates, quality, naming, tags,
-    scope, autotag, intel, report, state, etc.
-    Uses vault::schema for validation instead of config-defined enum lists.
+    scope, autotag, intel, report, state, summarize.
+    `summarize --backfill` walks the vault, infers DistillKind from
+    frontmatter + source URL, and rewrites legacy notes through the
+    shared distillers crate. VaultWatcher (oracle) picks up the mtime
+    change and reindexes.
 ```
 
 ### Data Model

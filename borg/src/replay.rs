@@ -176,9 +176,10 @@ async fn replay_trace(config: &Config, trace_id: &str, from_stage: u8, dry_run: 
     let envelope = store.read_envelope(trace_id)?;
     // For now, re-running a URL trace means: read the URL back out of the
     // envelope body (Stage-0 writes the URL into body.txt for URL captures)
-    // and re-ingest via the daemon. More elaborate --from-stage N handling
-    // (re-summarize only, re-extract only, etc.) lands in a follow-on once
-    // the FabricSummarizer path is wired through pipeline.rs.
+    // and re-ingest via the daemon. More elaborate `--from-stage N` handling
+    // (re-distill only against a staged transcript, re-extract only, etc.)
+    // is a follow-on; the staged `distilled.yml` artifact written by Phase
+    // 6 / cutover gives us the data we'd need.
     let source = String::from_utf8(store.read_body(trace_id)?).context("read body as utf-8")?;
     let source = source.trim().to_string();
     println!("replay trace {trace_id}: {source}");

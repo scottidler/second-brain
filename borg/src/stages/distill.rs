@@ -1,10 +1,11 @@
 //! Stage 2 distillation entry point.
 //!
-//! Sits next to `summarize::Summarizer` and adds the structured `Distilled`
-//! contract. As of Phase 6 the stage routes all four URL kinds (Article,
-//! Repo, Video, Thread) through their Fabric-backed distillers, plus
-//! Idea / Image / VoiceNote through the no-LLM distillers. Only the
-//! `Vocabulary*` kinds remain outside the contract (handled upstream).
+//! Sits alongside the Gate-2 detector in `summarize.rs` and produces the
+//! structured `Distilled` contract. As of Phase 6 the stage routes all
+//! four URL kinds (Article, Repo, Video, Thread) through their Fabric-
+//! backed distillers, plus Idea / Image / VoiceNote through the no-LLM
+//! distillers. Only the `Vocabulary*` kinds remain outside the contract
+//! (handled upstream).
 //!
 //! As of the post-Phase-6 cutover the `distill_for_publish_*` functions
 //! are the primary path: `pipeline.rs` awaits them, renders the result

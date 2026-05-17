@@ -12,4 +12,4 @@ pub use distill::{DistillStage, distill_kind_from_ingest};
 pub use extract::{Extractor, PassthroughExtractor};
 pub use fetcher::{BrowserUaFetcher, FabricFetcher, Fetcher, FsCachingFetcher, JinaFetcher, MultiFetcher};
 pub use raw::{extract_first_url, persist_fetched_if_staging, run_gate_1, run_gate_2, stage_0_init, write_capture};
-pub use summarize::{FabricSummarizer, GATE_2_PARAPHRASE_PATTERNS, Summarizer, detect_paraphrased_block};
+pub use summarize::{GATE_2_PARAPHRASE_PATTERNS, detect_paraphrased_block};
