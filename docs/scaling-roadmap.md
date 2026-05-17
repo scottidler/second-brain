@@ -26,13 +26,13 @@ The existing system is more mature than a casual read of CLAUDE.md suggests. Ver
 
 **Real gaps** (where this roadmap focuses):
 
-- FTS5 has a `summary` column but nothing populates it - distilled summaries are not produced at ingest.
-- No `Distilled` struct or extractor trait - YouTube and article extraction are bespoke functions.
-- No source-type-aware handling for GitHub repos or X/Twitter threads.
-- No vector embeddings - `find_similar` is FTS5-term overlap, not semantic.
-- No reciprocal-rank-fusion or hybrid retrieval.
-- No decay/promotion signal tracking (open counts, search clicks, last-opened).
-- No cold-note surfacing report.
+- ~~FTS5 has a `summary` column but nothing populates it - distilled summaries are not produced at ingest.~~ **Closed by Doc 1 (Phases 1-9).**
+- ~~No `Distilled` struct or extractor trait - YouTube and article extraction are bespoke functions.~~ **Closed by Doc 1.**
+- ~~No source-type-aware handling for GitHub repos or X/Twitter threads.~~ **Closed by Doc 1 (Phases 4 and 6).**
+- No vector embeddings - `find_similar` is FTS5-term overlap, not semantic. (Doc 2 territory.)
+- No reciprocal-rank-fusion or hybrid retrieval. (Doc 2 territory.)
+- No decay/promotion signal tracking (open counts, search clicks, last-opened). (Doc 3 territory.)
+- No cold-note surfacing report. (Doc 3 territory.)
 
 ## Architectural Rule: One-Way Data Flow
 
@@ -81,13 +81,13 @@ The work splits into three design docs along orthogonal axes. Doc 1 is the found
 
 ### Doc 1 - Extractor Contract and L2 Distilled Summaries
 
-**Drafted:** [design/2026-05-16-extractor-contract-and-l2-summaries.md](design/2026-05-16-extractor-contract-and-l2-summaries.md) (status: In Review, 5/5 passes)
+**Status:** **Implemented (Phases 1-9).** [design/2026-05-16-extractor-contract-and-l2-summaries.md](design/2026-05-16-extractor-contract-and-l2-summaries.md) shipped Phases 1-8; [design/2026-05-16-extractor-contract-l2-phase-9-cleanup.md](design/2026-05-16-extractor-contract-l2-phase-9-cleanup.md) shipped Phase 9 (deferred-item cleanup + non-URL distillers + verbatim preservation).
 
 **Goal:** stop letting the vault grow at raw-byte density. Every ingested source produces a structured distilled artifact alongside the raw note; that distilled summary populates the existing FTS5 `summary` column and becomes the substrate that every downstream tool (search, vector embed, brief synthesis) actually runs against.
 
 **Drafting points:**
 
-- Define `Distilled { summary, claims, tags, links }` (or similar) - the single contract every source-type extractor produces. Decide: where it lives (`vault::distilled`? `borg::extractor`?), whether `claims` is `Vec<String>` or richer (e.g. timestamped for YouTube).
+- Define `Distilled { summary, claims, tags, links, kind_specific, meta, transcript }` - the single contract every source-type extractor produces. Decide: where it lives (`vault::distilled`? `borg::extractor`?), whether `claims` is `Vec<String>` or richer (e.g. timestamped for YouTube). (**Implemented as shipped:** `vault::distilled::Distilled` with `claims: Vec<Claim>` where `Claim { text, anchor: Option<String> }` for YouTube timestamps; `transcript: Option<String>` added in Phase 9 for verbatim preservation on non-URL kinds whose published note is the only persistent source.)
 - Define the `Extractor` trait shape: input is the raw capture (URL + content blob), output is `Distilled`. Decide on async vs sync, error model.
 - Ingest-time vs cortex-backfill decision: should `Distilled` be produced synchronously in borg's intake path (added latency, simpler model) or asynchronously by cortex on a follow-up sweep (decoupled, complicates the staged-pipeline gates)? Cross-reference `docs/design/2026-04-19-staged-ingestion-pipeline.md`.
 - Wire `Distilled.summary` into the existing `vault::search` `summary` FTS5 column. Confirm the FTS5 triggers fire correctly on update.
@@ -116,6 +116,11 @@ The work splits into three design docs along orthogonal axes. Doc 1 is the found
 - Add `sqlite-vec` as an optional vault feature flag (`vec`?) alongside the existing `search` feature, so vector storage co-locates with the SQLite database file already used by `vault::search`.
 - Embedding model: local-only via `fastembed-rs`. Candidates: `bge-small-en-v1.5` (~33M params, ~100MB, fast on CPU) or `nomic-embed-text` (better quality, larger). Decide and justify.
 - What to embed: the L2 `summary` from Doc 1, **not** the raw note body. Smaller, denser, cheaper to re-embed on model change. The summary is read from the vault file's `## Summary` body section (parsed by `index_vault`, per the one-way data flow rule); embeddings never bypass that path.
+- **Transcript embedding for non-URL kinds** (must resolve - new in Phase 9): Doc 1's Phase 9 added a `## Transcript` body section for Image, VoiceNote, Idea, and Vocabulary notes carrying the verbatim Vision+OCR / Groq / user-text input. URL kinds (Article, Repo, Video, Thread) leave `transcript: None` because the origin URL is the recoverable archive. For non-URL kinds the summary is necessarily a lossy collapse of richer source material - a 60-minute meeting transcript collapsed into 2-4 sentences loses the verbatim phrasing the user remembers six months later. Three paths Doc 2 must choose between:
+  - **Embed only `summary` for all kinds** (current stance). Simple. Non-URL search-by-meaning misses the verbatim layer.
+  - **Embed `summary` for URL kinds; embed `summary + transcript` chunked for non-URL kinds.** Asymmetric per kind. Captures verbatim semantic content. Doubles the embedding row count for non-URL kinds.
+  - **Embed `summary` for all kinds; expose `## Transcript` to FTS5 only** (which already happens via the `body` column). Non-URL semantic search stays on summary; verbatim recall lives in keyword search. Cheapest. Asymmetric capability per kind.
+  - The choice depends on the chunking decision below: if Doc 2 picks a long-context model (`bge-m3` at 8K tokens), embedding summary+transcript as one row for short non-URL notes is viable; long voicenote transcripts still need chunking.
 - **Token limits and chunking** (must resolve): `bge-small-en-v1.5` has a 512-token limit. An L2 summary plus claims (especially timestamped YouTube claims) will exceed that and silently truncate. Two paths:
   - Chunk the `Distilled` into multiple vector rows (summary, claims-batch-1, claims-batch-2…) and aggregate at retrieval (max-pool or mean-pool the scores).
   - Pick a longer-context model: `bge-m3` handles 8K tokens at a larger model footprint.

@@ -492,7 +492,7 @@ New file: `distillers/src/voicenote.rs`. Verbatim ports the structural template 
 - `const PATTERN_SHORT: &str = "distill-voicenote";`
 - `const PATTERN_CHUNK: &str = "distill-voicenote-chunk";`
 - `const PATTERN_REDUCE: &str = "distill-voicenote-reduce";`
-- `const SHORT_TRANSCRIPT_TOKEN_THRESHOLD: usize = 8000;` (mirror video's threshold)
+- `const SINGLE_CALL_TOKEN_THRESHOLD: usize = 12_000;` (mirror video's threshold; the chunk target stays at 8K - see CHUNK_TOKEN_TARGET below)
 - `async fn distill_short(&self, transcript: &str) -> Result<Distilled>` — single Fabric call against `distill-voicenote`.
 - `async fn distill_long(&self, transcript: &str) -> Result<Distilled>` — chunk via `video::chunk_transcript` (or a copy of its logic), parallel `distill-voicenote-chunk` calls bounded by `borg.fabric.max-concurrent`, then a single `distill-voicenote-reduce` call against the concatenated chunk summaries.
 
@@ -506,7 +506,7 @@ New file: `distillers/src/voicenote.rs`. Verbatim ports the structural template 
 impl<F: FabricCaller + Clone + Send + Sync> VoiceNoteDistiller<F> {
     pub async fn distill_inner(&self, transcript: &str) -> Result<Distilled> {
         let token_estimate = transcript.chars().count() / 4;  // same heuristic as video
-        let mut distilled = if token_estimate <= SHORT_TRANSCRIPT_TOKEN_THRESHOLD {
+        let mut distilled = if token_estimate <= SINGLE_CALL_TOKEN_THRESHOLD {
             self.distill_short(transcript).await?
         } else {
             self.distill_long(transcript).await?
@@ -572,7 +572,7 @@ For 9c-image and 9c-voicenote the Fabric-call failures fall through to `fallback
 ### Long-transcript handling
 
 - Image: single-call. The vision+OCR concatenation is bounded by `process_image_inner`'s existing extraction (~few KB max).
-- VoiceNote: map-reduce path ports the video distiller's structure. Threshold `SHORT_TRANSCRIPT_TOKEN_THRESHOLD = 8000` (mirror video).
+- VoiceNote: map-reduce path ports the video distiller's structure. Threshold `SINGLE_CALL_TOKEN_THRESHOLD = 12_000` (mirror video); chunk target `CHUNK_TOKEN_TARGET = 8_000`.
 - Idea/Vocab: no LLM call; the full input flows straight to `distilled.transcript` and `summary` (subject to the global 2000-char cap on the latter).
 
 ### Backfill plan
@@ -652,7 +652,7 @@ Out of scope: a `--kind <image|voicenote|idea|vocab>` flag on `cortex summarize 
 
 - Author three patterns: `borg/patterns/distill-voicenote.md` (short path; for transcripts < ~8K tokens), `borg/patterns/distill-voicenote-chunk.md` (map step), `borg/patterns/distill-voicenote-reduce.md` (reduce step). Use `borg/patterns/distill-video*.md` as the structural template; strip timestamp-handling instructions.
 - New `distillers/src/voicenote.rs`. Mirror `distillers/src/video.rs:125-281`:
-  - `SHORT_TRANSCRIPT_TOKEN_THRESHOLD = 8000`
+  - `SINGLE_CALL_TOKEN_THRESHOLD = 12_000` (mirrors video's actual short-path threshold; chunk target stays at 8K)
   - `distill_short` and `distill_long` methods.
   - `parallel_distill_chunks` bounded by `borg.fabric.max-concurrent`.
   - `parse_reduce_yaml` analog for voicenote shape.
