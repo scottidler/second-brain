@@ -1,5 +1,12 @@
 //! Idea-kind distiller. No LLM call - the user's text becomes the summary
-//! verbatim, claims stay empty, links are regex-extracted.
+//! verbatim, claims stay empty, links are regex-extracted. The full input
+//! is preserved as `Distilled.transcript` so the published note is a
+//! verbatim archive even after the global `MAX_SUMMARY_CHARS` cap in
+//! `validate::enforce_bounds` clips the summary.
+//!
+//! As of Phase 9c-hotfix the per-distiller 280-char cap (a Rev-1 design
+//! defect that silently truncated multi-paragraph idea text) has been
+//! removed. The global 2000-char cap is the only schema protection now.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -9,8 +16,7 @@ use vault::distilled::{Distilled, DistilledMeta, Link, ValidationMeta};
 
 use crate::{DistillExtractor, DistillInputs};
 
-const ID: &str = "distill-idea-v1";
-const SUMMARY_CHAR_LIMIT: usize = 280;
+const ID: &str = "distill-idea-v2";
 
 #[derive(Debug, Default, Clone)]
 pub struct IdeaDistiller;
@@ -35,20 +41,10 @@ impl DistillExtractor for IdeaDistiller {
         );
 
         let trimmed = inputs.transcript.trim();
-        let (summary, truncations) = if trimmed.chars().count() > SUMMARY_CHAR_LIMIT {
-            let summary: String = trimmed.chars().take(SUMMARY_CHAR_LIMIT).collect();
-            (
-                summary,
-                vec![format!("summary:{}>{SUMMARY_CHAR_LIMIT}", trimmed.chars().count())],
-            )
-        } else {
-            (trimmed.to_string(), Vec::new())
-        };
-
         let links = extract_links(trimmed);
 
         Ok(Distilled {
-            summary,
+            summary: trimmed.to_string(),
             claims: Vec::new(),
             tags: Vec::new(),
             links,
@@ -61,11 +57,12 @@ impl DistillExtractor for IdeaDistiller {
                 produced_at: Utc::now().to_rfc3339(),
                 validation: ValidationMeta {
                     fallback_reason: None,
-                    bounds_truncations: truncations,
+                    bounds_truncations: Vec::new(),
                     anchors_stripped: 0,
                     raw_output: None,
                 },
             },
+            transcript: Some(trimmed.to_string()),
         })
     }
 }

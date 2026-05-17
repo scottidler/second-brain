@@ -17,7 +17,32 @@ async fn dispatches_idea_to_idea_distiller() {
         video_metadata: None,
     };
     let distilled = dispatcher.distill(DistillKind::Idea, inputs).await.expect("distill");
-    assert_eq!(distilled.meta.extractor, "distill-idea-v1");
+    // Phase 9c-hotfix: IdeaDistiller ID bumped to v2 after 280-cap deletion.
+    assert_eq!(distilled.meta.extractor, "distill-idea-v2");
+}
+
+#[tokio::test]
+async fn dispatches_vocabulary_to_idea_distiller() {
+    // Phase 9c-hotfix: Vocabulary is now wired in the dispatcher and routes
+    // through IdeaDistiller (degenerate path - full verbatim text preserved
+    // in Distilled.transcript with no Fabric call).
+    let dispatcher = make_dispatcher();
+    let inputs = DistillInputs {
+        transcript: "definir: to define (Spanish infinitive)",
+        source_url: None,
+        title_hint: None,
+        repo_metadata: None,
+        video_metadata: None,
+    };
+    let distilled = dispatcher
+        .distill(DistillKind::Vocabulary, inputs)
+        .await
+        .expect("distill");
+    assert_eq!(distilled.meta.extractor, "distill-idea-v2");
+    assert_eq!(
+        distilled.transcript.as_deref(),
+        Some("definir: to define (Spanish infinitive)")
+    );
 }
 
 #[tokio::test]

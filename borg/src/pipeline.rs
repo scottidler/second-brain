@@ -1889,27 +1889,43 @@ async fn process_text_inner(
     // Generate title from text (first line or LLM-generated)
     let title = generate_text_title(text, use_fabric, config).await;
 
-    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
+    // Phase 9c-hotfix cutover: route the general text branch through the
+    // Idea distiller so the published note carries `distilled: true` plus the
+    // structured `## Summary` / `## Claims` / `## Links` / `## Transcript`
+    // body sections. IdeaDistiller is synthesis-only (no Fabric call); the
+    // full input lands verbatim in `distilled.transcript`.
+    let distilled =
+        crate::stages::distill::distill_for_publish_idea(&config.fabric, &config.staging, trace_id, text, Some(&title))
+            .await;
 
-    // Generate tags via Fabric
-    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(text, &config.fabric).await {
+    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
+    all_tags.extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
+
+    // Generate tags via Fabric (driven by the distilled summary so we send
+    // less text over the wire than the raw input would).
+    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&distilled.summary, &config.fabric).await {
         all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
     }
     finalize_tags(&mut all_tags, config).await;
 
+    let rendered_distilled = distillers::render(&distilled);
     let note = NoteContent {
         title: title.clone(),
         source_url: None,
         asset_path: None,
         tags: all_tags.clone(),
-        summary: text.to_string(),
+        // Keep `summary` populated for downstream IngestResult callers and
+        // ledger entries that surface a one-line preview; the structured
+        // body comes from `distilled_body`.
+        summary: distilled.summary.clone(),
         description: None,
         content_type: ContentType::Note,
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
-        ..NoteContent::default()
+        distilled_body: Some(rendered_distilled.body_markdown),
+        frontmatter_additions: rendered_distilled.frontmatter_additions,
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -2037,7 +2053,31 @@ async fn process_vocab(
         _ => unreachable!("process_vocab called with non-vocab pattern"),
     };
 
+    // Phase 9c-hotfix cutover: route the vocab body through the distiller
+    // dispatcher (which maps Vocabulary to IdeaDistiller). The vocab
+    // definition prose is preserved verbatim in `distilled.transcript`.
+    let ingest_kind = match &content_type {
+        ContentType::VocabDefine { language, .. } | ContentType::VocabClarify { language, .. } => {
+            if language == "es" {
+                crate::types::IngestKind::VocabularyEs
+            } else {
+                crate::types::IngestKind::VocabularyEn
+            }
+        }
+        _ => crate::types::IngestKind::VocabularyEn,
+    };
+    let distilled = crate::stages::distill::distill_for_publish_vocab(
+        &config.fabric,
+        &config.staging,
+        trace_id,
+        ingest_kind,
+        &body,
+        Some(&title),
+    )
+    .await;
+
     let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
+    all_tags.extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
     let vocab_tag = match &content_type {
         ContentType::VocabDefine { language, .. } | ContentType::VocabClarify { language, .. } => {
             format!("{language}-vocab")
@@ -2047,19 +2087,21 @@ async fn process_vocab(
     all_tags.push(hygiene::sanitize_tag(&vocab_tag));
     finalize_tags(&mut all_tags, config).await;
 
+    let rendered_distilled = distillers::render(&distilled);
     let note = NoteContent {
         title: title.clone(),
         source_url: None,
         asset_path: None,
         tags: all_tags.clone(),
-        summary: body,
+        summary: distilled.summary.clone(),
         description: None,
         content_type,
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
-        ..NoteContent::default()
+        distilled_body: Some(rendered_distilled.body_markdown),
+        frontmatter_additions: rendered_distilled.frontmatter_additions,
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);

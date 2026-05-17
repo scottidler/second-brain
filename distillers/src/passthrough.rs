@@ -1,6 +1,14 @@
-//! Passthrough distiller for kinds whose dedicated pattern hasn't shipped yet
-//! (Image, VoiceNote). Mirrors `IdeaDistiller` semantically but records a
-//! distinct extractor id so the source of the passthrough is auditable.
+//! Passthrough distiller for trivial-input kinds. As of Phase 9c-image and
+//! 9c-voicenote both Image and VoiceNote route to their own Fabric-backed
+//! distillers; this struct remains in the crate as a stub for any future
+//! kind whose published note is the verbatim input without LLM synthesis.
+//!
+//! The 280-char Rev-1 summary cap was a data-loss defect — multi-paragraph
+//! Vision+OCR text or Groq transcripts routed through here would have been
+//! silently truncated. As of Phase 9c-hotfix the cap is gone; the global
+//! 2000-char `MAX_SUMMARY_CHARS` in `validate::enforce_bounds` is the only
+//! schema protection, and the full input is preserved verbatim in
+//! `Distilled.transcript`.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -10,7 +18,6 @@ use vault::distilled::{Distilled, DistilledMeta, ValidationMeta};
 use crate::{DistillExtractor, DistillInputs};
 
 const ID: &str = "distill-passthrough-v1";
-const SUMMARY_CHAR_LIMIT: usize = 280;
 
 #[derive(Debug, Default, Clone)]
 pub struct PassthroughDistiller;
@@ -35,18 +42,9 @@ impl DistillExtractor for PassthroughDistiller {
         );
 
         let trimmed = inputs.transcript.trim();
-        let (summary, truncations) = if trimmed.chars().count() > SUMMARY_CHAR_LIMIT {
-            let summary: String = trimmed.chars().take(SUMMARY_CHAR_LIMIT).collect();
-            (
-                summary,
-                vec![format!("summary:{}>{SUMMARY_CHAR_LIMIT}", trimmed.chars().count())],
-            )
-        } else {
-            (trimmed.to_string(), Vec::new())
-        };
 
         Ok(Distilled {
-            summary,
+            summary: trimmed.to_string(),
             claims: Vec::new(),
             tags: Vec::new(),
             links: Vec::new(),
@@ -59,11 +57,12 @@ impl DistillExtractor for PassthroughDistiller {
                 produced_at: Utc::now().to_rfc3339(),
                 validation: ValidationMeta {
                     fallback_reason: None,
-                    bounds_truncations: truncations,
+                    bounds_truncations: Vec::new(),
                     anchors_stripped: 0,
                     raw_output: None,
                 },
             },
+            transcript: Some(trimmed.to_string()),
         })
     }
 }

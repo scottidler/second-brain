@@ -166,6 +166,9 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
                 produced_at: Utc::now().to_rfc3339(),
                 validation: ValidationMeta::default(),
             },
+            // URL kind: origin URL is the recoverable archive, so no verbatim
+            // transcript in the published note.
+            transcript: None,
         };
 
         let mut bounded = enforce_bounds(distilled);

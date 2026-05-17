@@ -276,6 +276,8 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
                 produced_at: Utc::now().to_rfc3339(),
                 validation,
             },
+            // URL kind: YouTube URL is the recoverable archive.
+            transcript: None,
         })
     }
 
@@ -367,6 +369,8 @@ fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str
             produced_at: Utc::now().to_rfc3339(),
             validation: ValidationMeta::default(),
         },
+        // URL kind: YouTube URL is the recoverable archive.
+        transcript: None,
     }
 }
 

@@ -519,6 +519,7 @@ fn rewrite_note_file_is_atomic_and_merges_frontmatter() {
             produced_at: "2026-05-16T00:00:00Z".to_string(),
             validation: ::vault::distilled::ValidationMeta::default(),
         },
+        transcript: None,
     };
 
     rewrite_note_file(&path, &parsed.frontmatter, &distilled).expect("rewrite");

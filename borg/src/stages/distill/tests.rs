@@ -43,9 +43,16 @@ fn ingest_kind_maps_to_distill_kind() {
 }
 
 #[test]
-fn vocabulary_kinds_bail() {
-    assert!(distill_kind_from_ingest(IngestKind::VocabularyEn).is_err());
-    assert!(distill_kind_from_ingest(IngestKind::VocabularyEs).is_err());
+fn vocabulary_kinds_map_to_vocabulary_distill_kind() {
+    // Phase 9c-hotfix: Vocabulary is now wired (routes through IdeaDistiller).
+    assert_eq!(
+        distill_kind_from_ingest(IngestKind::VocabularyEn).expect("map vocab-en"),
+        DistillKind::Vocabulary
+    );
+    assert_eq!(
+        distill_kind_from_ingest(IngestKind::VocabularyEs).expect("map vocab-es"),
+        DistillKind::Vocabulary
+    );
 }
 
 #[tokio::test]
@@ -56,7 +63,29 @@ async fn distill_stage_handles_idea_through_dispatcher() {
         .await
         .expect("distill");
     assert_eq!(distilled.summary, "A small idea.");
-    assert_eq!(distilled.meta.extractor, "distill-idea-v1");
+    // Phase 9c-hotfix: IdeaDistiller ID bumped to v2 after 280-cap deletion.
+    assert_eq!(distilled.meta.extractor, "distill-idea-v2");
+    assert_eq!(distilled.transcript.as_deref(), Some("A small idea."));
+}
+
+#[tokio::test]
+async fn distill_stage_handles_vocabulary_through_idea_distiller() {
+    let stage = make_stage();
+    let distilled = stage
+        .distill(
+            IngestKind::VocabularyEn,
+            "definir: a Spanish-style infinitive",
+            None,
+            None,
+        )
+        .await
+        .expect("distill");
+    // Both EN and ES route through IdeaDistiller in the degenerate cutover.
+    assert_eq!(distilled.meta.extractor, "distill-idea-v2");
+    assert_eq!(
+        distilled.transcript.as_deref(),
+        Some("definir: a Spanish-style infinitive")
+    );
 }
 
 #[tokio::test]
@@ -273,6 +302,7 @@ fn write_distilled_yml_no_op_when_staging_disabled() {
             produced_at: "2026-05-16T14:03:22Z".to_string(),
             validation: ValidationMeta::default(),
         },
+        transcript: None,
     };
     write_distilled_yml(&staging, "trace-1", &distilled).expect("no-op");
     assert!(!tmp.path().join("trace-1").exists());
@@ -305,6 +335,7 @@ fn write_distilled_yml_persists_to_per_trace_dir() {
             produced_at: "2026-05-16T14:03:22Z".to_string(),
             validation: ValidationMeta::default(),
         },
+        transcript: None,
     };
     write_distilled_yml(&staging, "trace-1", &distilled).expect("write");
     let path = tmp.path().join("trace-1").join(DISTILLED_FILENAME);

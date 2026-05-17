@@ -27,6 +27,7 @@ fn enforce_bounds_truncates_excess_claims() {
         links: Vec::new(),
         kind_specific: None,
         meta: meta("distill-article-v1"),
+        transcript: None,
     };
 
     let bounded = enforce_bounds(distilled);
@@ -51,6 +52,7 @@ fn enforce_bounds_truncates_excess_tags() {
         links: Vec::new(),
         kind_specific: None,
         meta: meta("distill-article-v1"),
+        transcript: None,
     };
 
     let bounded = enforce_bounds(distilled);
@@ -78,6 +80,7 @@ fn enforce_bounds_truncates_summary_at_sentence() {
         links: Vec::new(),
         kind_specific: None,
         meta: meta("distill-article-v1"),
+        transcript: None,
     };
 
     let bounded = enforce_bounds(distilled);
@@ -104,6 +107,7 @@ fn enforce_bounds_leaves_within_limit_payload_untouched() {
         }],
         kind_specific: None,
         meta: meta("distill-article-v1"),
+        transcript: None,
     };
 
     let bounded = enforce_bounds(distilled);

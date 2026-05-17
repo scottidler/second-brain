@@ -26,7 +26,7 @@ use distillers::{
     ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, RepoMetadata,
     VideoMetadata,
 };
-use eyre::{Context, Result, bail};
+use eyre::{Context, Result};
 use vault::distilled::Distilled;
 
 /// Translate borg's GitHub fetcher metadata into the distillers-crate
@@ -81,8 +81,10 @@ pub fn render_timestamped_transcript(segments: &[(f64, String)]) -> String {
 
 /// Convert borg's `IngestKind` to the distillers crate's `DistillKind`.
 ///
-/// `Vocabulary*` is the only kind without a counterpart - it is explicitly
-/// deferred per the staged pipeline doc.
+/// As of Phase 9c-hotfix every `IngestKind` has a counterpart - `Vocabulary*`
+/// routes through `DistillKind::Vocabulary`, which the dispatcher dispatches
+/// to `IdeaDistiller` (degenerate Distilled: summary = definition prose,
+/// claims empty, full verbatim text preserved in `Distilled.transcript`).
 pub fn distill_kind_from_ingest(kind: IngestKind) -> Result<DistillKind> {
     match kind {
         IngestKind::ArticleUrl => Ok(DistillKind::Article),
@@ -92,9 +94,7 @@ pub fn distill_kind_from_ingest(kind: IngestKind) -> Result<DistillKind> {
         IngestKind::Image => Ok(DistillKind::Image),
         IngestKind::VoiceNote => Ok(DistillKind::VoiceNote),
         IngestKind::Idea => Ok(DistillKind::Idea),
-        IngestKind::VocabularyEn | IngestKind::VocabularyEs => {
-            bail!("distillation not yet supported for vocabulary kinds")
-        }
+        IngestKind::VocabularyEn | IngestKind::VocabularyEs => Ok(DistillKind::Vocabulary),
     }
 }
 
@@ -251,6 +251,110 @@ pub async fn distill_for_publish_article(
 
     if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
         log::warn!("[{trace_id}] distill_for_publish_article: persist distilled.yml failed: {e:#}");
+    }
+    distilled
+}
+
+/// Phase 9c-hotfix cutover: run the Idea distiller against a free-form text
+/// note. No Fabric call (synthesis-only); the full input is preserved as
+/// `Distilled.transcript` so the published note is a verbatim archive even
+/// after the global `MAX_SUMMARY_CHARS` cap clips the summary. Persists
+/// `distilled.yml` on success. On any error returns a `fallback_distilled`.
+pub async fn distill_for_publish_idea(
+    fabric: &FabricConfig,
+    staging: &StagingConfig,
+    trace_id: &str,
+    transcript: &str,
+    title_hint: Option<&str>,
+) -> Distilled {
+    log::debug!(
+        "distill_for_publish_idea: trace={trace_id} transcript_len={} title_hint={title_hint:?}",
+        transcript.len()
+    );
+    let stage = DistillStage::from_fabric_config(fabric);
+    let started = std::time::Instant::now();
+    let distilled = match stage.distill(IngestKind::Idea, transcript, None, title_hint).await {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("[{trace_id}] distill_for_publish_idea: dispatch error: {e:#}; using fallback");
+            // IdeaDistiller emits distill-idea-v2 on success after the 9c-hotfix
+            // cap deletion; the fallback path mirrors that ID. Preserve the
+            // transcript so the published note still carries verbatim text.
+            let mut fb = distillers::fallback_distilled("distill-idea-v2", "dispatch-error", transcript, None);
+            fb.transcript = Some(transcript.to_string());
+            fb
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    let fallback = distilled
+        .meta
+        .validation
+        .fallback_reason
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    log::info!(
+        "[{trace_id}] distill_for_publish_idea: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
+        distilled.meta.extractor,
+        distilled.meta.model,
+        distilled.claims.len(),
+        distilled.tags.len(),
+        distilled.links.len(),
+        fallback,
+        elapsed_ms,
+    );
+    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
+        log::warn!("[{trace_id}] distill_for_publish_idea: persist distilled.yml failed: {e:#}");
+    }
+    distilled
+}
+
+/// Phase 9c-hotfix cutover: run the Vocabulary kind through the distiller
+/// dispatcher (which routes to `IdeaDistiller` as a degenerate path - the
+/// vocab definition is preserved verbatim in `Distilled.transcript`). Takes
+/// the `IngestKind` so EN vs ES can flow through to translation; both map
+/// to `DistillKind::Vocabulary` inside `DistillStage`.
+pub async fn distill_for_publish_vocab(
+    fabric: &FabricConfig,
+    staging: &StagingConfig,
+    trace_id: &str,
+    kind: IngestKind,
+    transcript: &str,
+    title_hint: Option<&str>,
+) -> Distilled {
+    log::debug!(
+        "distill_for_publish_vocab: trace={trace_id} kind={kind} transcript_len={} title_hint={title_hint:?}",
+        transcript.len()
+    );
+    let stage = DistillStage::from_fabric_config(fabric);
+    let started = std::time::Instant::now();
+    let distilled = match stage.distill(kind, transcript, None, title_hint).await {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("[{trace_id}] distill_for_publish_vocab: dispatch error: {e:#}; using fallback");
+            let mut fb = distillers::fallback_distilled("distill-idea-v2", "dispatch-error", transcript, None);
+            fb.transcript = Some(transcript.to_string());
+            fb
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    let fallback = distilled
+        .meta
+        .validation
+        .fallback_reason
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    log::info!(
+        "[{trace_id}] distill_for_publish_vocab: kind={kind} extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
+        distilled.meta.extractor,
+        distilled.meta.model,
+        distilled.claims.len(),
+        distilled.tags.len(),
+        distilled.links.len(),
+        fallback,
+        elapsed_ms,
+    );
+    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
+        log::warn!("[{trace_id}] distill_for_publish_vocab: persist distilled.yml failed: {e:#}");
     }
     distilled
 }

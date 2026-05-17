@@ -15,13 +15,23 @@ async fn passthrough_summary_matches_transcript() {
     assert!(distilled.claims.is_empty());
     assert!(distilled.tags.is_empty());
     assert!(distilled.kind_specific.is_none());
-    assert_eq!(distilled.meta.extractor, "distill-idea-v1");
+    assert_eq!(distilled.meta.extractor, "distill-idea-v2");
     assert!(distilled.meta.validation.fallback_reason.is_none());
+    // Phase 9c-hotfix: the full input lands in `transcript` so the published
+    // note is a verbatim archive.
+    assert_eq!(
+        distilled.transcript.as_deref(),
+        Some("Quick observation about distributed consensus.")
+    );
 }
 
 #[tokio::test]
-async fn truncates_long_summary_at_char_limit() {
-    let long_text = "a".repeat(SUMMARY_CHAR_LIMIT + 50);
+async fn preserves_long_input_verbatim_in_transcript() {
+    // Phase 9c-hotfix: the per-distiller 280-char cap was deleted; the global
+    // 2000-char cap in `validate::enforce_bounds` is the only schema protection.
+    // IdeaDistiller itself returns the full trimmed input as summary; the
+    // `transcript` field is the verbatim archive regardless.
+    let long_text = "a".repeat(5000);
     let distiller = IdeaDistiller::new();
     let inputs = DistillInputs {
         transcript: &long_text,
@@ -31,12 +41,13 @@ async fn truncates_long_summary_at_char_limit() {
         video_metadata: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
-    assert_eq!(distilled.summary.chars().count(), SUMMARY_CHAR_LIMIT);
-    let trunc = &distilled.meta.validation.bounds_truncations;
-    assert!(
-        trunc.iter().any(|t| t.starts_with("summary:")),
-        "expected summary truncation tag, got {trunc:?}"
-    );
+    // Distiller does not truncate; only enforce_bounds (called by URL kinds
+    // via wrapper helpers) would trim summary. For idea/vocab the call path
+    // goes through DistillStage which does not invoke enforce_bounds, so the
+    // full summary is preserved here too. Transcript is always verbatim.
+    assert_eq!(distilled.summary.chars().count(), 5000);
+    assert_eq!(distilled.transcript.as_deref().map(|s| s.chars().count()), Some(5000));
+    assert!(distilled.meta.validation.bounds_truncations.is_empty());
 }
 
 #[tokio::test]

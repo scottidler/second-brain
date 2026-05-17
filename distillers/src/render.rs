@@ -29,6 +29,7 @@ pub fn render(distilled: &Distilled) -> RenderedDistilled {
     push_summary(&mut body, &distilled.summary);
     push_claims(&mut body, &distilled.claims);
     push_links(&mut body, &distilled.links);
+    push_transcript(&mut body, distilled.transcript.as_deref());
 
     let mut fm: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
     fm.insert("distilled".to_string(), serde_yaml::Value::Bool(true));
@@ -142,6 +143,19 @@ fn push_claims(body: &mut String, claims: &[Claim]) {
         body.push('\n');
     }
     body.push('\n');
+}
+
+fn push_transcript(body: &mut String, transcript: Option<&str>) {
+    let Some(text) = transcript else {
+        return;
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    body.push_str("## Transcript\n\n");
+    body.push_str(trimmed);
+    body.push_str("\n\n");
 }
 
 fn push_links(body: &mut String, links: &[vault::distilled::Link]) {

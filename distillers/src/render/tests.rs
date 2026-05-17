@@ -35,6 +35,7 @@ fn render_emits_managed_sections_in_canonical_order() {
         }],
         kind_specific: None,
         meta: base_meta("distill-article-v1"),
+        transcript: None,
     };
 
     let rendered = render(&distilled);
@@ -60,6 +61,7 @@ fn render_omits_empty_sections() {
         links: Vec::new(),
         kind_specific: None,
         meta: base_meta("distill-idea-v1"),
+        transcript: None,
     };
 
     let body = render(&distilled).body_markdown;
@@ -77,6 +79,7 @@ fn render_emits_control_frontmatter_fields() {
         links: Vec::new(),
         kind_specific: None,
         meta: base_meta("distill-idea-v1"),
+        transcript: None,
     };
 
     let fm = render(&distilled).frontmatter_additions;
@@ -102,6 +105,7 @@ fn render_emits_repo_frontmatter() {
             install: Some("cargo install foo".to_string()),
         })),
         meta: base_meta("distill-repo-v1"),
+        transcript: None,
     };
 
     let fm = render(&distilled).frontmatter_additions;
@@ -143,6 +147,7 @@ fn render_drops_oversized_install_string() {
             install: Some(install),
         })),
         meta: base_meta("distill-repo-v1"),
+        transcript: None,
     };
     let fm = render(&distilled).frontmatter_additions;
     assert!(!fm.contains_key("cortex-repo-install"));
@@ -161,6 +166,7 @@ fn render_emits_video_frontmatter() {
             published_at: Some("2026-04-22".to_string()),
         })),
         meta: base_meta("distill-video-v1"),
+        transcript: None,
     };
     let fm = render(&distilled).frontmatter_additions;
     assert_eq!(
@@ -190,6 +196,7 @@ fn render_emits_thread_frontmatter() {
             platform: "x".to_string(),
         })),
         meta: base_meta("distill-thread-v1"),
+        transcript: None,
     };
     let fm = render(&distilled).frontmatter_additions;
     assert_eq!(
@@ -226,6 +233,7 @@ fn render_round_trips_through_vault_body_parsers() {
         links: Vec::new(),
         kind_specific: None,
         meta: base_meta("distill-idea-v1"),
+        transcript: None,
     };
 
     let body = render(&distilled).body_markdown;
@@ -238,4 +246,70 @@ fn render_round_trips_through_vault_body_parsers() {
     assert!(parsed_claims[0].anchor.is_none());
     assert_eq!(parsed_claims[1].text, "Beta claim.");
     assert_eq!(parsed_claims[1].anchor.as_deref(), Some("00:42"));
+}
+
+#[test]
+fn render_emits_transcript_section_when_present() {
+    // Phase 9c-hotfix: non-URL kinds populate `Distilled.transcript` with the
+    // raw input so the published note is a verbatim archive even after the
+    // LLM-distilled summary collapses the text.
+    let distilled = Distilled {
+        summary: "Distilled gloss.".to_string(),
+        claims: Vec::new(),
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: None,
+        meta: base_meta("distill-idea-v2"),
+        transcript: Some("The user's full original text, all five paragraphs of it.".to_string()),
+    };
+
+    let body = render(&distilled).body_markdown;
+    let summary_pos = body.find("## Summary").expect("summary section");
+    let transcript_pos = body.find("## Transcript").expect("transcript section");
+    assert!(
+        transcript_pos > summary_pos,
+        "Transcript should follow Summary in canonical order"
+    );
+    assert!(
+        body.contains("The user's full original text, all five paragraphs of it."),
+        "transcript body missing: {body}"
+    );
+}
+
+#[test]
+fn render_omits_transcript_section_when_none() {
+    // URL kinds (Article/Repo/Video/Thread) leave transcript: None — the
+    // source URL is the recoverable archive, no verbatim section needed.
+    let distilled = Distilled {
+        summary: "URL article summary.".to_string(),
+        claims: Vec::new(),
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: None,
+        meta: base_meta("distill-article-v1"),
+        transcript: None,
+    };
+
+    let body = render(&distilled).body_markdown;
+    assert!(
+        !body.contains("## Transcript"),
+        "URL-kind body should not contain ## Transcript: {body}"
+    );
+}
+
+#[test]
+fn render_omits_transcript_section_when_empty_string() {
+    // Defensive: a distiller that fills transcript with whitespace-only text
+    // should not produce an empty `## Transcript\n\n\n` block.
+    let distilled = Distilled {
+        summary: "x".to_string(),
+        claims: Vec::new(),
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: None,
+        meta: base_meta("distill-idea-v2"),
+        transcript: Some("   \n\n  ".to_string()),
+    };
+    let body = render(&distilled).body_markdown;
+    assert!(!body.contains("## Transcript"));
 }

@@ -15,11 +15,17 @@ async fn passthrough_summary_matches_transcript() {
     assert!(distilled.claims.is_empty());
     assert!(distilled.links.is_empty());
     assert_eq!(distilled.meta.extractor, "distill-passthrough-v1");
+    // Phase 9c-hotfix: verbatim archive preservation.
+    assert_eq!(distilled.transcript.as_deref(), Some("OCR output for an image."));
 }
 
 #[tokio::test]
-async fn truncates_long_summary() {
-    let long_text = "x".repeat(SUMMARY_CHAR_LIMIT + 50);
+async fn preserves_long_input_verbatim_in_transcript() {
+    // Phase 9c-hotfix: the 280-char per-distiller cap was deleted to fix a
+    // data-loss regression for Vision+OCR and Groq-transcript inputs. The
+    // global 2000-char cap in `validate::enforce_bounds` is the only schema
+    // protection on summary; transcript is uncapped at the distiller level.
+    let long_text = "x".repeat(5000);
     let distiller = PassthroughDistiller::new();
     let inputs = DistillInputs {
         transcript: &long_text,
@@ -29,5 +35,7 @@ async fn truncates_long_summary() {
         video_metadata: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
-    assert_eq!(distilled.summary.chars().count(), SUMMARY_CHAR_LIMIT);
+    assert_eq!(distilled.summary.chars().count(), 5000);
+    assert_eq!(distilled.transcript.as_deref().map(|s| s.chars().count()), Some(5000));
+    assert!(distilled.meta.validation.bounds_truncations.is_empty());
 }

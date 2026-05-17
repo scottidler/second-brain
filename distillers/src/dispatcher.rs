@@ -9,8 +9,11 @@
 //! As of Phase 6 the dispatcher is generic over a `FabricCaller` so each
 //! Fabric-backed distiller (Article, Repo, Video, Thread) can be tested
 //! with `FakeFabric` and run in production with `FabricShell`. All four
-//! Fabric-backed kinds are wired; only `Vocabulary*` (handled by borg
-//! before the dispatcher sees it) remains outside the contract.
+//! Fabric-backed kinds are wired.
+//!
+//! As of Phase 9c-hotfix `DistillKind::Vocabulary` is also wired (degenerate:
+//! routes through `IdeaDistiller` for full verbatim preservation in
+//! `Distilled.transcript` with no Fabric call).
 
 use async_trait::async_trait;
 use eyre::Result;
@@ -26,6 +29,7 @@ pub enum DistillKind {
     Idea,
     Image,
     VoiceNote,
+    Vocabulary,
     Article,
     Repo,
     Video,
@@ -38,6 +42,7 @@ impl DistillKind {
             Self::Idea => "idea",
             Self::Image => "image",
             Self::VoiceNote => "voice-note",
+            Self::Vocabulary => "vocabulary",
             Self::Article => "article",
             Self::Repo => "repo",
             Self::Video => "video",
@@ -123,7 +128,7 @@ impl<F: FabricCaller + Clone> Dispatch for Dispatcher<F> {
             inputs.source_url
         );
         match kind {
-            DistillKind::Idea => self.idea.distill(inputs).await,
+            DistillKind::Idea | DistillKind::Vocabulary => self.idea.distill(inputs).await,
             DistillKind::Image | DistillKind::VoiceNote => self.passthrough.distill(inputs).await,
             DistillKind::Article => self.article.distill(inputs).await,
             DistillKind::Repo => self.repo.distill(inputs).await,

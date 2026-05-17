@@ -32,6 +32,7 @@ fn roundtrip_article_distilled() {
         }],
         kind_specific: None,
         meta: sample_meta(),
+        transcript: None,
     };
 
     let yaml = serde_yaml::to_string(&original).expect("serialize");
@@ -62,6 +63,7 @@ fn roundtrip_repo_payload() {
             install: Some("cargo install foo".to_string()),
         })),
         meta: sample_meta(),
+        transcript: None,
     };
 
     let yaml = serde_yaml::to_string(&original).expect("serialize");
@@ -95,6 +97,7 @@ fn roundtrip_video_payload() {
             published_at: Some("2026-04-22".to_string()),
         })),
         meta: sample_meta(),
+        transcript: None,
     };
 
     let yaml = serde_yaml::to_string(&original).expect("serialize");
@@ -123,6 +126,7 @@ fn roundtrip_thread_payload() {
             platform: "x".to_string(),
         })),
         meta: sample_meta(),
+        transcript: None,
     };
 
     let yaml = serde_yaml::to_string(&original).expect("serialize");
@@ -186,6 +190,7 @@ fn kebab_case_keys_on_serialize() {
                 raw_output: None,
             },
         },
+        transcript: None,
     };
 
     let yaml = serde_yaml::to_string(&original).expect("serialize");

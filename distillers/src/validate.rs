@@ -95,6 +95,10 @@ pub fn fallback_distilled(
                 raw_output: raw_output.map(|s| s.to_string()),
             },
         },
+        // fallback_distilled defaults to None. Non-URL callers (Image,
+        // VoiceNote, Idea, Vocab) post-process to set transcript = Some
+        // when they want verbatim preservation; URL callers leave it None.
+        transcript: None,
     }
 }
 
