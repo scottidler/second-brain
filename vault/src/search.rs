@@ -15,6 +15,15 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
+
+/// Busy-timeout for every SQLite connection opened through `SearchIndex`.
+///
+/// Two writers can briefly contend for the WAL writer lock (cortex's embed
+/// loop and oracle's `index_vault` updates). Five seconds comfortably
+/// covers the worst-case write transaction (one embedding upsert batch,
+/// under 200ms) without masking real deadlocks.
+const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
 
 /// Manages the SQLite FTS5 index of vault notes
 pub struct SearchIndex {
@@ -184,6 +193,7 @@ impl SearchIndex {
 
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
 
         let index = Self { conn };
         index.ensure_schema()?;
@@ -194,6 +204,8 @@ impl SearchIndex {
     #[cfg(test)]
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         let index = Self { conn };
         index.ensure_schema()?;
         Ok(index)
@@ -255,6 +267,60 @@ impl SearchIndex {
         // with "trigger already exists" on the recreate path.
         self.ensure_fts5_schema()?;
 
+        #[cfg(feature = "vec")]
+        self.ensure_vec_schema()?;
+
+        Ok(())
+    }
+
+    /// Create the embedding tables and the `embedding_config` key/value row
+    /// used as the single source of truth for the active embedding model.
+    ///
+    /// Storage shape is deliberately boring: one regular table with a `BLOB`
+    /// column for the f32 vector and an explicit `dim` column for length
+    /// validation. No virtual table, no SQLite extension, no triggers; FK
+    /// CASCADE works natively. The hybrid retrieval path runs FTS5 and
+    /// vector as two separate queries and fuses them with RRF in Rust, so
+    /// there is no single-query SQL composition that would benefit from
+    /// a `vec0` virtual table.
+    ///
+    /// Idempotent: every statement uses `IF NOT EXISTS` (or `INSERT OR
+    /// IGNORE` for the config row) so existing DBs upgrade without data
+    /// loss.
+    #[cfg(feature = "vec")]
+    fn ensure_vec_schema(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS note_embeddings (
+                id INTEGER PRIMARY KEY,
+                note_path TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('summary', 'transcript-chunk')),
+                chunk_index INTEGER NOT NULL DEFAULT 0,
+                text TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                dim INTEGER NOT NULL,
+                model_version TEXT NOT NULL,
+                produced_at INTEGER NOT NULL,
+                source_modified_at INTEGER NOT NULL,
+                FOREIGN KEY (note_path) REFERENCES notes(path) ON DELETE CASCADE,
+                UNIQUE (note_path, kind, chunk_index, model_version)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_note_embeddings_path
+                ON note_embeddings(note_path);
+            CREATE INDEX IF NOT EXISTS idx_note_embeddings_stale
+                ON note_embeddings(source_modified_at);
+            CREATE INDEX IF NOT EXISTS idx_note_embeddings_kind_model
+                ON note_embeddings(kind, model_version);
+
+            CREATE TABLE IF NOT EXISTS embedding_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO embedding_config (key, value)
+                VALUES ('active_model', 'bge-small-en-v1.5');
+            INSERT OR IGNORE INTO embedding_config (key, value)
+                VALUES ('active_dim', '384');",
+        )?;
         Ok(())
     }
 
@@ -2259,5 +2325,473 @@ mod tests {
             hits.iter().any(|n| n.path == "notes/distinctclaim.md"),
             "expected FTS5 to index claims column; got {hits:?}"
         );
+    }
+
+    // --- Phase A1: vec feature schema ------------------------------------
+
+    /// Test-local encoder. The production encoder/decoder land in Phase A3
+    /// alongside `search_vector` which calls them on every row.
+    #[cfg(feature = "vec")]
+    fn encode_le_f32(vector: &[f32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(vector.len() * 4);
+        for v in vector {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    /// Test-local validator. Phase A3's `search_vector` will run the same
+    /// check (length == dim * 4) before its inner dot-product loop.
+    #[cfg(feature = "vec")]
+    fn validate_le_f32_len(bytes: &[u8], dim: usize) -> eyre::Result<()> {
+        if bytes.len() != dim * 4 {
+            eyre::bail!(
+                "embedding BLOB length mismatch: got {} bytes, expected dim={} ({} bytes)",
+                bytes.len(),
+                dim,
+                dim * 4,
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn vec_schema_creates_note_embeddings_table() {
+        let index = SearchIndex::open_memory().expect("open");
+        let count: i64 = index
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'note_embeddings'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query master");
+        assert_eq!(count, 1, "note_embeddings table should be created");
+
+        let mut stmt = index
+            .conn
+            .prepare("PRAGMA table_info(note_embeddings)")
+            .expect("table_info");
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .filter_map(|r| r.ok())
+            .collect();
+        for expected in [
+            "id",
+            "note_path",
+            "kind",
+            "chunk_index",
+            "text",
+            "embedding",
+            "dim",
+            "model_version",
+            "produced_at",
+            "source_modified_at",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == expected),
+                "note_embeddings missing column {expected}; got {cols:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn vec_schema_seeds_active_model_config() {
+        let index = SearchIndex::open_memory().expect("open");
+        let model: String = index
+            .conn
+            .query_row(
+                "SELECT value FROM embedding_config WHERE key = 'active_model'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("active_model row");
+        assert_eq!(model, "bge-small-en-v1.5");
+
+        let dim: String = index
+            .conn
+            .query_row(
+                "SELECT value FROM embedding_config WHERE key = 'active_dim'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("active_dim row");
+        assert_eq!(dim, "384");
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn vec_schema_is_idempotent() {
+        // Two consecutive ensure_schema calls must not error and must not
+        // double-insert the embedding_config seed rows.
+        let index = SearchIndex::open_memory().expect("open");
+        index.ensure_schema().expect("re-ensure");
+        let count: i64 = index
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM embedding_config WHERE key = 'active_model'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 1, "active_model must remain a single row across re-ensure");
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn vec_schema_migrates_old_db_without_note_embeddings() {
+        // Build an old DB with notes only (no note_embeddings) and confirm a
+        // fresh open creates the new tables idempotently and preserves the
+        // existing notes row.
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").expect("fk on");
+        conn.execute_batch(
+            "CREATE TABLE notes (
+                path TEXT PRIMARY KEY,
+                title TEXT,
+                domain TEXT,
+                note_type TEXT,
+                origin TEXT,
+                status TEXT,
+                date TEXT,
+                tags TEXT,
+                source TEXT,
+                creator TEXT,
+                body TEXT,
+                summary TEXT,
+                modified_at INTEGER
+            );
+            INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+            VALUES ('notes/old.md', 'Old', 'tech', 'article', 'assisted', '', '2026-03-21', '[]', '', '', 'old body', 'old summary', 0);",
+        )
+        .expect("seed old schema");
+
+        let index = SearchIndex { conn };
+        index.ensure_schema().expect("migrate");
+
+        // note_embeddings table was created
+        let count: i64 = index
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'note_embeddings'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query master");
+        assert_eq!(count, 1);
+
+        // Pre-existing notes row preserved
+        let title: String = index
+            .conn
+            .query_row("SELECT title FROM notes WHERE path = 'notes/old.md'", [], |row| {
+                row.get(0)
+            })
+            .expect("legacy row");
+        assert_eq!(title, "Old");
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn vec_schema_fk_cascade_deletes_embeddings_with_note() {
+        // Insert a note + embedding row, delete the note, confirm the
+        // embedding row vanishes via the native FK CASCADE. No trigger.
+        let index = SearchIndex::open_memory().expect("open");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    "notes/cascade.md",
+                    "T", "tech", "article", "assisted", "", "2026-03-21",
+                    "[]", "", "", "body", "summary", 0_i64,
+                ],
+            )
+            .expect("insert note");
+        let bytes = encode_le_f32(&[0.1_f32, 0.2, 0.3, 0.4]);
+        index
+            .conn
+            .execute(
+                "INSERT INTO note_embeddings (
+                    note_path, kind, chunk_index, text, embedding, dim,
+                    model_version, produced_at, source_modified_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    "notes/cascade.md",
+                    "summary",
+                    0_i64,
+                    "summary text",
+                    bytes,
+                    4_i64,
+                    "test-model",
+                    0_i64,
+                    0_i64,
+                ],
+            )
+            .expect("insert embedding");
+
+        let before: i64 = index
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM note_embeddings WHERE note_path = ?1",
+                params!["notes/cascade.md"],
+                |row| row.get(0),
+            )
+            .expect("count before");
+        assert_eq!(before, 1);
+
+        index
+            .conn
+            .execute("DELETE FROM notes WHERE path = ?1", params!["notes/cascade.md"])
+            .expect("delete note");
+
+        let after: i64 = index
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM note_embeddings WHERE note_path = ?1",
+                params!["notes/cascade.md"],
+                |row| row.get(0),
+            )
+            .expect("count after");
+        assert_eq!(after, 0, "FK CASCADE must remove embeddings when note is deleted");
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn vec_schema_fk_pragma_must_be_on_for_cascade() {
+        // Defensive: if a future change disables PRAGMA foreign_keys=ON, the
+        // FK CASCADE silently no-ops and orphans accumulate. Mimic the broken
+        // case here and assert the orphan-detection signal so the regression
+        // is loud.
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").expect("fk off");
+        let index = SearchIndex { conn };
+        index.ensure_schema().expect("schema");
+
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    "notes/orphan.md",
+                    "T", "tech", "article", "assisted", "", "2026-03-21",
+                    "[]", "", "", "body", "summary", 0_i64,
+                ],
+            )
+            .expect("insert note");
+        let bytes = encode_le_f32(&[1.0_f32, 0.0]);
+        index
+            .conn
+            .execute(
+                "INSERT INTO note_embeddings (
+                    note_path, kind, chunk_index, text, embedding, dim,
+                    model_version, produced_at, source_modified_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    "notes/orphan.md",
+                    "summary",
+                    0_i64,
+                    "t",
+                    bytes,
+                    2_i64,
+                    "m",
+                    0_i64,
+                    0_i64,
+                ],
+            )
+            .expect("insert embedding");
+
+        index
+            .conn
+            .execute("DELETE FROM notes WHERE path = ?1", params!["notes/orphan.md"])
+            .expect("delete");
+
+        let orphan_count: i64 = index
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM note_embeddings WHERE note_path = ?1",
+                params!["notes/orphan.md"],
+                |row| row.get(0),
+            )
+            .expect("orphan count");
+        // With FK enforcement OFF this must produce an orphan. If a future
+        // refactor accidentally re-enables FK enforcement at the connection
+        // level (or moves CASCADE into a trigger), this assertion fails
+        // loudly and the maintainer is forced to re-think the regression.
+        assert_eq!(
+            orphan_count, 1,
+            "with foreign_keys=OFF an orphan row must remain; \
+             if FK enforcement is bolted on somewhere else, this test is the canary"
+        );
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn validate_le_f32_len_rejects_mismatched_length() {
+        // Length not divisible by 4 -> error.
+        let bytes = vec![0u8; 7];
+        let err = validate_le_f32_len(&bytes, 4).expect_err("expected error");
+        let msg = format!("{err}");
+        assert!(msg.contains("length mismatch"), "got: {msg}");
+
+        // Length divisible by 4 but != dim*4 -> error.
+        let bytes = vec![0u8; 12]; // 3 floats
+        let err = validate_le_f32_len(&bytes, 4).expect_err("expected error");
+        let msg = format!("{err}");
+        assert!(msg.contains("length mismatch"), "got: {msg}");
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn validate_le_f32_len_accepts_exact_length() {
+        let v = [1.5_f32, -0.25, 0.0, 7.5];
+        let bytes = encode_le_f32(&v);
+        validate_le_f32_len(&bytes, v.len()).expect("valid length");
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn vec_schema_kind_check_constraint_rejects_unknown_kind() {
+        // The CHECK (kind IN ('summary', 'transcript-chunk')) constraint must
+        // reject anything else. This protects the staleness queries from
+        // ever seeing rows with a typo'd kind value.
+        let index = SearchIndex::open_memory().expect("open");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    "notes/x.md",
+                    "T", "tech", "article", "assisted", "", "2026-03-21",
+                    "[]", "", "", "body", "summary", 0_i64,
+                ],
+            )
+            .expect("insert note");
+
+        let bytes = encode_le_f32(&[0.0_f32]);
+        let result = index.conn.execute(
+            "INSERT INTO note_embeddings (
+                note_path, kind, chunk_index, text, embedding, dim,
+                model_version, produced_at, source_modified_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                "notes/x.md",
+                "garbage-kind",
+                0_i64,
+                "t",
+                bytes,
+                1_i64,
+                "m",
+                0_i64,
+                0_i64,
+            ],
+        );
+        assert!(result.is_err(), "CHECK constraint must reject unknown kinds");
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn vec_schema_unique_constraint_replaces_on_upsert_intent() {
+        // The UNIQUE (note_path, kind, chunk_index, model_version) is the
+        // upsert key used by Phase A5's re-embed loop. Direct INSERT must
+        // fail on the second attempt, and INSERT OR REPLACE must succeed.
+        let index = SearchIndex::open_memory().expect("open");
+        index
+            .conn
+            .execute(
+                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    "notes/up.md",
+                    "T", "tech", "article", "assisted", "", "2026-03-21",
+                    "[]", "", "", "body", "summary", 0_i64,
+                ],
+            )
+            .expect("insert note");
+
+        let bytes_a = encode_le_f32(&[1.0_f32, 0.0]);
+        let bytes_b = encode_le_f32(&[0.0_f32, 1.0]);
+        index
+            .conn
+            .execute(
+                "INSERT INTO note_embeddings (
+                    note_path, kind, chunk_index, text, embedding, dim,
+                    model_version, produced_at, source_modified_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    "notes/up.md",
+                    "summary",
+                    0_i64,
+                    "a",
+                    bytes_a,
+                    2_i64,
+                    "bge-small-en-v1.5",
+                    0_i64,
+                    0_i64,
+                ],
+            )
+            .expect("first insert");
+
+        // Re-insert same (path, kind, chunk_index, model_version) must fail.
+        let dup = index.conn.execute(
+            "INSERT INTO note_embeddings (
+                note_path, kind, chunk_index, text, embedding, dim,
+                model_version, produced_at, source_modified_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                "notes/up.md",
+                "summary",
+                0_i64,
+                "b",
+                bytes_b.clone(),
+                2_i64,
+                "bge-small-en-v1.5",
+                0_i64,
+                0_i64,
+            ],
+        );
+        assert!(dup.is_err(), "duplicate (path,kind,chunk,model) must be rejected");
+
+        // INSERT OR REPLACE must replace cleanly.
+        index
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO note_embeddings (
+                    note_path, kind, chunk_index, text, embedding, dim,
+                    model_version, produced_at, source_modified_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    "notes/up.md",
+                    "summary",
+                    0_i64,
+                    "b",
+                    bytes_b,
+                    2_i64,
+                    "bge-small-en-v1.5",
+                    1_i64,
+                    1_i64,
+                ],
+            )
+            .expect("replace");
+
+        let (text, produced): (String, i64) = index
+            .conn
+            .query_row(
+                "SELECT text, produced_at FROM note_embeddings \
+                 WHERE note_path = ?1 AND kind = ?2 AND chunk_index = ?3 \
+                   AND model_version = ?4",
+                params!["notes/up.md", "summary", 0_i64, "bge-small-en-v1.5"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read replaced");
+        assert_eq!(text, "b");
+        assert_eq!(produced, 1);
     }
 }

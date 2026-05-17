@@ -9,6 +9,7 @@ description = "Shared library crate for Obsidian vault types, frontmatter, and u
 schemars = ["dep:schemars"]
 search = ["dep:rusqlite"]
 watcher = ["dep:notify", "dep:tokio"]
+vec = ["search", "dep:fastembed"]
 
 [dependencies]
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
@@ -28,6 +29,7 @@ serde_yaml = { workspace = true }
 shellexpand = { workspace = true }
 walkdir = { workspace = true }
 rayon = { workspace = true }
+fastembed = { version = "5.13.4", optional = true }
 
 [dev-dependencies]
 tempfile = "3.27"
