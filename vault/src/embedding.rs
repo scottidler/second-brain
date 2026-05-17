@@ -193,6 +193,58 @@ fn get_or_load_model(model_version: &str) -> Result<Arc<FastEmbedModel>> {
     Ok(model)
 }
 
+/// Sliding-window chunker for transcript text.
+///
+/// Phase B1 of the hybrid retrieval design. Splits `text` into
+/// overlapping chunks suitable for embedding. The window is measured
+/// in whitespace-separated words, which is a coarse approximation of
+/// the BPE token count. For English with the bge-small-en-v1.5
+/// tokenizer the word:token ratio is ~0.75, so the default
+/// `max_tokens = 400` yields chunks of about 530 BPE tokens - right
+/// up against the model's 512-token limit. fastembed truncates
+/// gracefully on overshoot; if profiling shows truncation hurts
+/// recall, drop `max_tokens` to 300.
+///
+/// `overlap_tokens` is the size of the trailing window each new chunk
+/// shares with the previous chunk. The default of 50 keeps claims
+/// that straddle a chunk boundary visible in both chunks.
+///
+/// Edge cases:
+/// - Empty or whitespace-only input: returns `Vec::new()`.
+/// - Input shorter than `max_tokens`: returns one chunk containing
+///   the whole text (no padding, no trailing whitespace).
+/// - A single very long word (no whitespace): returns one chunk
+///   containing the full word; truncation falls to fastembed.
+/// - `overlap_tokens >= max_tokens`: overlap is clamped to
+///   `max_tokens - 1` so the loop always makes forward progress.
+pub fn chunk_transcript(text: &str, max_tokens: usize, overlap_tokens: usize) -> Vec<String> {
+    if max_tokens == 0 {
+        return Vec::new();
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    if words.len() <= max_tokens {
+        return vec![words.join(" ")];
+    }
+
+    let overlap = overlap_tokens.min(max_tokens.saturating_sub(1));
+    let stride = max_tokens - overlap;
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < words.len() {
+        let end = (start + max_tokens).min(words.len());
+        let chunk = words[start..end].join(" ");
+        chunks.push(chunk);
+        if end == words.len() {
+            break;
+        }
+        start += stride;
+    }
+    chunks
+}
+
 /// Deterministic test embedder.
 ///
 /// Produces vectors derived from a 64-bit hash of the input text. The
