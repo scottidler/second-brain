@@ -111,6 +111,14 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let weekly = tokio::time::sleep(weekly_dur);
     tokio::pin!(weekly);
 
+    // Phase A5 / B2: periodic embed tick. Most ticks find zero stale
+    // rows and return in <1 ms; the load only spikes when borg has
+    // just ingested new content. The cadence is decoupled from the
+    // sweep cadence because embed is a CPU-bound batch operation and
+    // the sweep cadence is governed by debounce_secs.
+    let mut embed_interval = tokio::time::interval(crate::embed::daemon_cadence(config));
+    embed_interval.tick().await; // consume the immediate first tick
+
     // Run a full sweep on startup.
     // block_in_place isolates the blocking CPU+I/O sweep from the tokio worker thread, letting
     // the watcher and timers continue to run; once Phase 1 rayon lands inside scan_vault, this
@@ -198,6 +206,25 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     let next = duration_until_next(schedule_str);
                     log::info!("weekly intel rescheduled: next in {}s", next.as_secs());
                     weekly.as_mut().reset(Instant::now() + next);
+                }
+            }
+            _ = embed_interval.tick() => {
+                // Phase A5 / B2 embed tick. block_in_place because the
+                // embed loop runs SQLite IO + fastembed CPU inference
+                // (when there are stale rows); we don't want to starve
+                // the watcher or the scheduled-intel timers if the
+                // embedder is currently chewing on a batch.
+                match tokio::task::block_in_place(|| crate::embed::daemon_tick(vault_root, config)) {
+                    Ok(stats) if stats.scanned > 0 => {
+                        log::info!(
+                            "daemon embed tick: scanned={} embedded={} skipped_empty={} failed={}",
+                            stats.scanned, stats.embedded, stats.skipped_empty, stats.failed,
+                        );
+                    }
+                    Ok(_) => {
+                        // Idle tick - nothing to embed. Stay quiet to keep the log readable.
+                    }
+                    Err(e) => log::error!("daemon embed tick failed: {e}"),
                 }
             }
             _ = tokio::signal::ctrl_c() => {
