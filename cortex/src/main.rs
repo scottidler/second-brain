@@ -62,6 +62,16 @@ async fn main() -> Result<()> {
                 summary.failed,
             );
         }
+        Command::Embed(opts) => {
+            let stats = cortex::embed::run_embed(&vault_root, &config, opts)?;
+            log::info!(
+                "embed complete: scanned={} embedded={} skipped_empty={} failed={}",
+                stats.scanned,
+                stats.embedded,
+                stats.skipped_empty,
+                stats.failed,
+            );
+        }
     }
 
     Ok(())

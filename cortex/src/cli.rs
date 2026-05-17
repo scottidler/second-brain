@@ -80,6 +80,8 @@ pub enum Command {
     Sweep(SweepOpts),
     /// Distill legacy notes into the structured L2 contract (backfill)
     Summarize(SummarizeOpts),
+    /// Embed note summaries (and Phase B transcripts) into the search DB
+    Embed(EmbedOpts),
 }
 
 #[derive(Parser)]
@@ -185,6 +187,42 @@ pub struct SweepOpts {
     /// Scan for non-canonical tags and generate proposals
     #[arg(long)]
     pub proposals: bool,
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct EmbedOpts {
+    /// One-shot pass over every note that is missing or stale. Alias
+    /// for the default behavior; explicit for the first run on a new
+    /// install.
+    #[arg(long)]
+    pub backfill: bool,
+
+    /// Restrict the pass to a single embedding kind. Accepts
+    /// `summary` (Phase A default) or `transcript-chunk` (Phase B).
+    #[arg(long)]
+    pub kind: Option<String>,
+
+    /// Override the active model. Omit to use whatever
+    /// `embedding_config.active_model` holds in the DB.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Tune memory vs throughput. The transaction-discipline test
+    /// asserts the write transaction wall-clock stays under 200 ms at
+    /// the default of 64.
+    #[arg(long, default_value_t = crate::embed::DEFAULT_BATCH_SIZE)]
+    pub batch_size: usize,
+
+    /// Download the model weights to the fastembed cache and exit
+    /// without embedding anything. Use this on install machines that
+    /// have network during install but may be offline at oracle's
+    /// first-query time.
+    #[arg(long)]
+    pub prefetch_model: bool,
+
+    /// Use the deterministic MockEmbedder. Test-only.
+    #[arg(long, hide = true)]
+    pub use_mock: bool,
 }
 
 #[derive(Parser)]

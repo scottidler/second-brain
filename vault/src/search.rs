@@ -184,7 +184,9 @@ pub enum IndexAction {
 mod vector;
 
 #[cfg(feature = "vec")]
-pub use vector::{EmbeddingKind, FusedHit, K_RRF_INPUT, RRF_K, StaleTarget, VectorHit, reciprocal_rank_fusion};
+pub use vector::{
+    BatchUpsert, EmbeddingKind, FusedHit, K_RRF_INPUT, RRF_K, StaleTarget, VectorHit, reciprocal_rank_fusion,
+};
 
 impl SearchIndex {
     /// Open (or create) the search index at the given path
@@ -206,8 +208,8 @@ impl SearchIndex {
         Ok(index)
     }
 
-    /// Open an in-memory search index (for testing)
-    #[cfg(test)]
+    /// Open an in-memory search index. Used by unit and integration
+    /// tests across the workspace; cortex's embed tests rely on this.
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;

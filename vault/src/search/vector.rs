@@ -50,6 +50,21 @@ impl EmbeddingKind {
     }
 }
 
+/// One row of input to [`SearchIndex::upsert_embeddings_batch`].
+///
+/// Lifetime is bounded to the call - the caller owns the underlying
+/// `text` and `embedding` storage so we can avoid copying every row's
+/// vector twice (once for the inputs Vec, once for the encoded bytes).
+pub struct BatchUpsert<'a> {
+    pub note_path: &'a str,
+    pub kind: EmbeddingKind,
+    pub chunk_index: u32,
+    pub text: &'a str,
+    pub embedding: &'a [f32],
+    pub model_version: &'a str,
+    pub source_modified_at: i64,
+}
+
 /// One row identifying a note whose `kind` embedding is missing or stale
 /// relative to `notes.modified_at`. Cortex's re-embed loop drives this
 /// list (see Phase A5).
@@ -238,6 +253,59 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Upsert a batch of embedding rows inside a single short write
+    /// transaction (`BEGIN IMMEDIATE` → upserts → `COMMIT`).
+    ///
+    /// **DO NOT** call this from inside a context that holds the
+    /// embedding model: the transaction discipline mandates that
+    /// inference runs in auto-commit, then this short transaction
+    /// flushes the results. Per row work is just an INSERT OR REPLACE,
+    /// so a 64-row batch comfortably runs under 200 ms even on slow
+    /// disks. Phase A5's regression test asserts the budget.
+    pub fn upsert_embeddings_batch(&mut self, items: &[BatchUpsert<'_>]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("BEGIN IMMEDIATE;").ok();
+        for item in items {
+            let bytes = encode_embedding_bytes(item.embedding);
+            tx.execute(
+                "INSERT OR REPLACE INTO note_embeddings (
+                    note_path, kind, chunk_index, text, embedding, dim,
+                    model_version, produced_at, source_modified_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    item.note_path,
+                    item.kind.as_str(),
+                    item.chunk_index as i64,
+                    item.text,
+                    bytes,
+                    item.embedding.len() as i64,
+                    item.model_version,
+                    chrono::Utc::now().timestamp(),
+                    item.source_modified_at,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Update `embedding_config.active_model` and `active_dim` inside a
+    /// single short transaction. Both rows must move together so oracle
+    /// never sees a half-rolled-over config.
+    pub fn set_active_embedding(&mut self, model_version: &str, dim: usize) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE embedding_config SET value = ?1 WHERE key = 'active_model'",
+            params![model_version],
+        )?;
+        tx.execute(
+            "UPDATE embedding_config SET value = ?1 WHERE key = 'active_dim'",
+            params![dim.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Delete every embedding row for a note. Normally unnecessary
     /// because `ON DELETE CASCADE` runs automatically when the
     /// matching `notes` row is removed; cortex calls this explicitly
@@ -306,6 +374,39 @@ impl SearchIndex {
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
+    }
+
+    /// Count embedding rows matching an optional kind. Used by tests
+    /// outside the vault crate (e.g. cortex's embed integration tests)
+    /// to assert the write phase produced the expected number of rows
+    /// without reaching into the private `conn` field.
+    pub fn count_embeddings(&self, kind: Option<EmbeddingKind>) -> Result<i64> {
+        let count: i64 = match kind {
+            Some(k) => self.conn.query_row(
+                "SELECT COUNT(*) FROM note_embeddings WHERE kind = ?1",
+                params![k.as_str()],
+                |row| row.get(0),
+            )?,
+            None => self
+                .conn
+                .query_row("SELECT COUNT(*) FROM note_embeddings", [], |row| row.get(0))?,
+        };
+        Ok(count)
+    }
+
+    /// Insert a minimal `notes` row for tests in other crates. Only
+    /// the columns required by the vector search path are populated;
+    /// the rest get sensible defaults.
+    pub fn insert_test_note_row(&self, path: &str, note_type: &str, modified_at: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                path, "T", "tech", note_type, "assisted", "", "2026-05-16",
+                "[]", "", "", "body", "summary", modified_at,
+            ],
+        )?;
+        Ok(())
     }
 
     /// Read the active embedding model identifier from `embedding_config`.

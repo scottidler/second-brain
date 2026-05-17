@@ -571,4 +571,14 @@ impl Config {
         }
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
+
+    /// Path to oracle's search database. Cortex's embed loop reads from
+    /// and writes to the same DB file oracle's indexer maintains, so
+    /// both processes see the same notes + embeddings on every query.
+    pub fn oracle_db_path(&self) -> PathBuf {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("~/.local/share"))
+            .join("oracle")
+            .join("oracle.db")
+    }
 }
