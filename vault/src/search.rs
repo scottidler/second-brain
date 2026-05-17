@@ -180,6 +180,12 @@ pub enum IndexAction {
     Updated,
 }
 
+#[cfg(feature = "vec")]
+mod vector;
+
+#[cfg(feature = "vec")]
+pub use vector::{EmbeddingKind, FusedHit, K_RRF_INPUT, RRF_K, StaleTarget, VectorHit, reciprocal_rank_fusion};
+
 impl SearchIndex {
     /// Open (or create) the search index at the given path
     pub fn open(db_path: &Path) -> Result<Self> {
