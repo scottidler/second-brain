@@ -379,3 +379,78 @@ fn active_embedding_model_reads_the_default_seed() {
     let d = index.active_embedding_dim().expect("dim");
     assert_eq!(d, 384);
 }
+
+// --- Phase B3: max-pool aggregation over summary + transcript-chunk -----
+
+#[test]
+fn search_vector_returns_one_row_per_note_when_chunks_exist() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-maxpool");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    insert_note(&index, "notes/v.md", "tech", "voice-note", 100);
+
+    // Seed a summary + 3 transcript chunks for the same note.
+    upsert_summary(&index, &m, "notes/v.md", "summary text", 100);
+    let chunk_pairs: Vec<(String, Vec<f32>)> = ["chunk one", "chunk two", "chunk three"]
+        .iter()
+        .map(|t| (t.to_string(), m.embed_one(t).expect("c")))
+        .collect();
+    index
+        .swap_transcript_chunks("notes/v.md", &chunk_pairs, m.model_version(), 100)
+        .expect("swap");
+
+    let q = m.embed_one("query").expect("q");
+    let hits = index.search_vector(&q, 10, None, None, None).expect("search");
+    // Even though 4 rows back this note (1 summary + 3 chunks), the
+    // result must contain exactly one entry for it.
+    let v_hits: Vec<&VectorHit> = hits.iter().filter(|h| h.note_path == "notes/v.md").collect();
+    assert_eq!(
+        v_hits.len(),
+        1,
+        "max-pool must return one row per note; got {}",
+        v_hits.len()
+    );
+}
+
+#[test]
+fn search_vector_max_pool_picks_best_representation_min_distance() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-maxpool");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    insert_note(&index, "notes/note.md", "tech", "voice-note", 100);
+
+    // Summary text deliberately orthogonal; transcript chunk matches
+    // the query verbatim.
+    upsert_summary(&index, &m, "notes/note.md", "kubernetes operator pattern", 100);
+    let query_text = "temporal durable execution restate";
+    let q_vec = m.embed_one(query_text).expect("q");
+    // Pre-compute the chunk vector independently so we can verify the
+    // pool picks its distance, not the summary's.
+    let chunk_vec = m.embed_one(query_text).expect("chunk equals query");
+    index
+        .swap_transcript_chunks(
+            "notes/note.md",
+            &[(query_text.to_string(), chunk_vec.clone())],
+            m.model_version(),
+            100,
+        )
+        .expect("swap");
+
+    let hits = index.search_vector(&q_vec, 10, None, None, None).expect("search");
+    let h = hits
+        .iter()
+        .find(|h| h.note_path == "notes/note.md")
+        .expect("note must be present");
+
+    // The chunk_vec is the query_vec (same text through the
+    // deterministic mock), so the dot product is 1.0 and distance is
+    // 0.0. The summary's distance is much larger. Max-pool must pick
+    // the chunk distance (the smaller one).
+    assert!(
+        h.distance < 1e-5,
+        "max-pool must surface the matching chunk (distance ~= 0.0); got {}",
+        h.distance
+    );
+}

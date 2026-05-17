@@ -126,14 +126,21 @@ fn dot_product_from_bytes(query_vec: &[f32], stored: &[u8]) -> f32 {
 impl SearchIndex {
     /// Brute-force cosine-similarity search over `note_embeddings`.
     ///
-    /// Phase A returns rows with `kind = 'summary'` only. The note-side
-    /// filters (`domain`, `note_type`, `status`) are pushed into SQL so
-    /// the scan only visits rows that pass the filter; the dot-product
-    /// loop then ranks the survivors.
+    /// Reads every row (`summary` and `transcript-chunk`) for the
+    /// active model and aggregates by note via max-pool: a note's
+    /// score is `min(distances across all rows for that note)` - the
+    /// single best-matching representation wins. In cosine-distance
+    /// space smaller is closer, so the minimum over the rows is the
+    /// max-pool similarity.
     ///
-    /// Performance contract: at 21 K vectors / 384 dims this runs in
-    /// well under 20 ms single-threaded. Phase A7's benchmark enforces
-    /// the budget.
+    /// The note-side filters (`domain`, `note_type`, `status`) are
+    /// pushed into SQL so the scan only visits rows that pass them;
+    /// the dot-product loop then ranks the survivors.
+    ///
+    /// Performance contract: at ~25 K total rows (21 K summary + a
+    /// handful of chunks for transcript-eligible notes at the three-
+    /// year horizon) the scan runs in well under 20 ms single-
+    /// threaded. Phase A7's benchmark enforces the budget.
     pub fn search_vector(
         &self,
         query_vec: &[f32],
@@ -156,14 +163,10 @@ impl SearchIndex {
             "SELECT e.note_path, e.embedding, e.dim
              FROM note_embeddings e
              JOIN notes n ON n.path = e.note_path
-             WHERE e.kind = ?1
-               AND e.model_version = ?2",
+             WHERE e.model_version = ?1",
         );
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-            Box::new(EmbeddingKind::Summary.as_str().to_string()),
-            Box::new(active_model),
-        ];
-        let mut param_idx = 3;
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(active_model)];
+        let mut param_idx = 2;
         if let Some(d) = domain {
             sql.push_str(&format!(" AND n.domain = ?{param_idx}"));
             param_values.push(Box::new(d.to_string()));
@@ -184,11 +187,11 @@ impl SearchIndex {
         let mut stmt = self.conn.prepare(&sql)?;
         let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
 
-        // Greater (negated) distance is sorted higher in a BinaryHeap, but
-        // we want the smallest distances. Collect and sort: at 21 K rows
-        // a single sort is ~100 us, far cheaper than a heap's per-push
-        // overhead at this size.
-        let mut hits: Vec<VectorHit> = Vec::new();
+        // Walk every row, compute distance, and reduce-by-note via min.
+        // A HashMap is faster than a Vec<(path,best)> linear scan once
+        // candidate counts cross ~500.
+        use std::collections::HashMap;
+        let mut best: HashMap<String, f32> = HashMap::new();
         let mut rows = stmt.query(params_refs.as_slice())?;
         while let Some(row) = rows.next()? {
             let note_path: String = row.get(0)?;
@@ -196,8 +199,6 @@ impl SearchIndex {
             let dim: i64 = row.get(2)?;
             validate_embedding_bytes(&bytes, dim as usize)?;
             if dim as usize != query_vec.len() {
-                // dim mismatch on a row whose model_version matched is a
-                // schema bug; refuse to score it.
                 eyre::bail!(
                     "row dim ({}) does not match query dim ({}) for note {note_path}",
                     dim,
@@ -206,9 +207,19 @@ impl SearchIndex {
             }
             let dot = dot_product_from_bytes(query_vec, &bytes);
             let distance = 1.0_f32 - dot;
-            hits.push(VectorHit { note_path, distance });
+            best.entry(note_path)
+                .and_modify(|d| {
+                    if distance < *d {
+                        *d = distance;
+                    }
+                })
+                .or_insert(distance);
         }
 
+        let mut hits: Vec<VectorHit> = best
+            .into_iter()
+            .map(|(note_path, distance)| VectorHit { note_path, distance })
+            .collect();
         hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
         hits.truncate(limit as usize);
         Ok(hits)
