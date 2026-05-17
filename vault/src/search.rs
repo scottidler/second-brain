@@ -2800,4 +2800,202 @@ mod tests {
         assert_eq!(text, "b");
         assert_eq!(produced, 1);
     }
+
+    // --- Phase A4: index_vault staleness contract ----------------------
+    //
+    // The contract: index_one's UPDATE branch does NOT touch
+    // note_embeddings. Old embedding rows survive across reindex so
+    // hybrid search never goes through a search-blackout window. Cortex's
+    // stale_embedding_targets surfaces the row on its next tick and
+    // upserts the new vector via the UNIQUE constraint.
+    //
+    // For remove_stale_notes (path absent from the next scan), the FK
+    // CASCADE deletes matching note_embeddings rows automatically. No
+    // trigger; foreign_keys=ON does the work.
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn index_one_update_preserves_existing_embedding_rows() {
+        let index = SearchIndex::open_memory().expect("open");
+        let note = make_test_note("inbox/stale.md", "# T\n\n## Summary\n\nv1.\n");
+        index.index_one(&note, 100).expect("first index");
+
+        // Seed an embedding row that snapshotted notes.modified_at = 100.
+        let bytes = encode_le_f32(&[0.1_f32, 0.2, 0.3]);
+        index
+            .conn
+            .execute(
+                "INSERT INTO note_embeddings (
+                    note_path, kind, chunk_index, text, embedding, dim,
+                    model_version, produced_at, source_modified_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    "inbox/stale.md",
+                    "summary",
+                    0_i64,
+                    "v1.",
+                    bytes,
+                    3_i64,
+                    "bge-small-en-v1.5",
+                    100_i64,
+                    100_i64,
+                ],
+            )
+            .expect("seed embedding");
+
+        // Reindex with new body + new mtime. This is the moment the
+        // contract is load-bearing: if the UPDATE branch deletes the
+        // embedding, hybrid search loses this note until cortex's next
+        // re-embed tick (up to 10 minutes of blackout).
+        let updated = make_test_note("inbox/stale.md", "# T\n\n## Summary\n\nv2.\n");
+        index.index_one(&updated, 300).expect("reindex");
+
+        let count: i64 = index
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM note_embeddings WHERE note_path = 'inbox/stale.md'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            count, 1,
+            "index_one must not delete embeddings on UPDATE (blackout-free contract)"
+        );
+
+        // The row's source_modified_at is still 100, but notes.modified_at
+        // is now 300. stale_embedding_targets must flag it.
+        let targets = index
+            .stale_embedding_targets(EmbeddingKind::Summary, "bge-small-en-v1.5", 100)
+            .expect("targets");
+        let paths: Vec<&str> = targets.iter().map(|t| t.note_path.as_str()).collect();
+        assert!(
+            paths.contains(&"inbox/stale.md"),
+            "stale-target scan must flag the modified note: {paths:?}"
+        );
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn note_deletion_via_remove_stale_cascades_to_embeddings() {
+        // Simulate the index_vault end-of-pass cleanup: a note's path
+        // disappears from the scan list, remove_stale_notes deletes the
+        // notes row, and the FK CASCADE removes every matching
+        // note_embeddings row. No trigger involved.
+        let index = SearchIndex::open_memory().expect("open");
+        let note = make_test_note("inbox/gone.md", "# T\n\n## Summary\n\nGoing.\n");
+        index.index_one(&note, 100).expect("index");
+        let bytes = encode_le_f32(&[0.5_f32, 0.5]);
+        index
+            .conn
+            .execute(
+                "INSERT INTO note_embeddings (
+                    note_path, kind, chunk_index, text, embedding, dim,
+                    model_version, produced_at, source_modified_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    "inbox/gone.md",
+                    "summary",
+                    0_i64,
+                    "Going.",
+                    bytes,
+                    2_i64,
+                    "bge-small-en-v1.5",
+                    100_i64,
+                    100_i64,
+                ],
+            )
+            .expect("seed");
+
+        // Drive remove_stale_notes with an empty current-paths list: every
+        // existing row is stale.
+        let removed = index.remove_stale_notes(&[]).expect("remove_stale");
+        assert!(removed >= 1);
+
+        let leftover: i64 = index
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM note_embeddings WHERE note_path = 'inbox/gone.md'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(leftover, 0, "FK CASCADE must remove all embeddings for a deleted note");
+    }
+
+    #[cfg(feature = "vec")]
+    #[test]
+    fn cortex_upsert_after_stale_flag_replaces_old_row_atomically() {
+        // End-to-end of the staleness loop: a stale row exists, cortex
+        // computes a new embedding and upserts (INSERT OR REPLACE keyed
+        // by UNIQUE constraint). Exactly one row must remain afterward,
+        // with the new source_modified_at.
+        let index = SearchIndex::open_memory().expect("open");
+        let note = make_test_note("inbox/loop.md", "# T\n\n## Summary\n\nv1.\n");
+        index.index_one(&note, 100).expect("index v1");
+
+        let stale = encode_le_f32(&[0.1_f32, 0.2]);
+        index
+            .conn
+            .execute(
+                "INSERT INTO note_embeddings (
+                    note_path, kind, chunk_index, text, embedding, dim,
+                    model_version, produced_at, source_modified_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    "inbox/loop.md",
+                    "summary",
+                    0_i64,
+                    "v1",
+                    stale,
+                    2_i64,
+                    "bge-small-en-v1.5",
+                    100_i64,
+                    100_i64,
+                ],
+            )
+            .expect("seed stale");
+
+        // Reindex with bumped mtime so the row is stale.
+        let updated = make_test_note("inbox/loop.md", "# T\n\n## Summary\n\nv2 latest.\n");
+        index.index_one(&updated, 300).expect("reindex");
+
+        // Cortex catches up: produce a new vector and upsert.
+        let fresh = [0.7_f32, 0.3];
+        index
+            .upsert_embedding(
+                "inbox/loop.md",
+                EmbeddingKind::Summary,
+                0,
+                "v2 latest",
+                &fresh,
+                "bge-small-en-v1.5",
+                300,
+            )
+            .expect("cortex upsert");
+
+        let (count, source_mod, text): (i64, i64, String) = index
+            .conn
+            .query_row(
+                "SELECT COUNT(*), MAX(source_modified_at), MAX(text)
+                 FROM note_embeddings
+                 WHERE note_path = 'inbox/loop.md' AND kind = 'summary' AND chunk_index = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("post-upsert");
+        assert_eq!(count, 1, "UNIQUE must keep exactly one row");
+        assert_eq!(source_mod, 300, "source_modified_at must advance");
+        assert_eq!(text, "v2 latest");
+
+        // And the note is no longer flagged stale.
+        let targets = index
+            .stale_embedding_targets(EmbeddingKind::Summary, "bge-small-en-v1.5", 100)
+            .expect("targets");
+        let paths: Vec<&str> = targets.iter().map(|t| t.note_path.as_str()).collect();
+        assert!(
+            !paths.contains(&"inbox/loop.md"),
+            "post-upsert the row must not appear as stale: {paths:?}"
+        );
+    }
 }
