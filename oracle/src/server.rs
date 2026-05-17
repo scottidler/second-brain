@@ -833,7 +833,9 @@ impl ServerHandler for OracleMcpServer {
         let mut info = ServerInfo::default();
         info.instructions = Some(
             "Oracle - knowledge retrieval MCP for a second-brain Obsidian vault. \
-             Search ingested knowledge by domain, type, or full-text query. \
+             Search ingested knowledge by domain, type, or full-text query. knowledge_search \
+             defaults to hybrid mode (BM25 + vector embeddings fused via RRF); pass mode=bm25 \
+             for pure keyword search or mode=vector for pure semantic similarity. \
              Control content verbosity with the 'detail' parameter: \
              metadata (fields only), tldr (one-liner), summary (summary section), full (complete body). \
              Use vault_overview for the big picture, domain_brief for domain-specific intelligence, \

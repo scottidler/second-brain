@@ -12,11 +12,11 @@ Cargo workspace consolidating obsidian-borg (ingestion daemon), obsidian-cortex 
 
 ```
 second-brain/
-  vault/       -- shared library crate (schema, frontmatter, note, ledger, hygiene, canonical, config, logging, fabric, trace, distilled)
+  vault/       -- shared library crate (schema, frontmatter, note, ledger, hygiene, canonical, config, logging, fabric, trace, distilled, embedding)
   distillers/  -- per-kind Stage-2 distillers (article, repo, video, thread, idea, passthrough) + Fabric port + dispatcher + render
   borg/        -- ingestion binary (Telegram, Discord, ntfy, HTTP, clipboard, CLI)
-  cortex/      -- governance binary (lint, link, intel, sweep, daemon, migrate, summarize --backfill)
-  oracle/      -- knowledge retrieval MCP server (search, browse, domain briefs, ledger queries)
+  cortex/      -- governance binary (lint, link, intel, sweep, daemon, migrate, summarize --backfill, embed)
+  oracle/      -- knowledge retrieval MCP server (search [bm25/vector/hybrid], browse, domain briefs, ledger queries)
   config/      -- shared config source of truth (canonical-tags.yml, tag-mapping.yml, tag-proposals.yml)
 ```
 
@@ -33,6 +33,16 @@ second-brain/
 - **Tags:** 110 canonical tags, max 7 per note. Borg post-filters Fabric output through the canonical vocabulary. Cortex `sweep` command migrates and governs tags.
 - **One-way data flow:** Borg writes only to the vault filesystem (markdown files + staged artifacts). Oracle owns the SQLite FTS5 index and refreshes it via VaultWatcher when the vault changes. Borg's `Cargo.toml` does NOT depend on `rusqlite`.
 - **Binary names:** `borg`, `cortex`, and `oracle` (no obsidian- prefix)
+
+## Hybrid retrieval (Doc 2)
+
+Oracle's `knowledge_search` accepts a `mode` parameter:
+
+- `bm25` (FTS5 keyword search; the legacy mode)
+- `vector` (semantic - fastembed `bge-small-en-v1.5` embedded query against `note_embeddings` BLOB rows, brute-force cosine)
+- `hybrid` (default; pulls 50 candidates from each list and fuses via reciprocal rank fusion, k=60)
+
+Embeddings live in the same SQLite file oracle reads for FTS5. Cortex is the only writer: `cortex embed [--backfill]` runs a read/inference/write loop (the write transaction stays under 200 ms regardless of batch size because `embed_batch` runs outside the transaction). The cortex daemon picks up the same code path on a configurable cadence (default 10 min). Active model and dimension are pinned in `embedding_config` so oracle and cortex cannot drift apart.
 
 ## Borg durable-capture stores
 
@@ -59,6 +69,9 @@ cargo install --path cortex && systemctl --user restart cortex
 cargo install --path oracle
 cp borg/patterns/*.md ~/.config/borg/patterns/
 mkdir -p ~/.config/second-brain && cp config/canonical-tags.yml config/tag-mapping.yml config/tag-proposals.yml ~/.config/second-brain/
+# First run only: prefetch the fastembed model (~100 MB to the fastembed cache) so
+# the next oracle/cortex invocation does not need network.
+cortex embed --prefetch-model
 ```
 
 borg and cortex run as systemd user daemons and must be restarted after install.

@@ -109,7 +109,7 @@ The work splits into three design docs along orthogonal axes. Doc 1 is the found
 
 ### Doc 2 - Hybrid Retrieval (FTS5 + Vector + RRF)
 
-**Status:** Drafted (5/5 passes). [design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md](design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md). Awaiting human review and execution.
+**Status:** Phase A Implemented (BLOB column, fastembed adapter, brute-force cosine, RRF fusion, cortex embed loop with transaction discipline, oracle mode dispatch, regression fixture, opt-in latency benchmark). [design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md](design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md). Phase B (transcript chunking + max-pool aggregation + distillers amendment) implements next.
 
 **Goal:** semantic discovery on top of the existing keyword retrieval. BM25 (FTS5) wins on proper nouns, exact terms, and rare tokens; vector embeddings win on conceptual overlap. Reciprocal rank fusion combines both with one screen of code.
 
