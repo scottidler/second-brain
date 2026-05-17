@@ -3,12 +3,14 @@
 **Author:** Scott Idler
 **Date:** 2026-05-16
 **Status:** In Review
-**Review Passes Completed:** 5/5 + 2 architect rounds
+**Review Passes Completed:** 5/5 + 3 architect rounds (Round 3 caught: search-blackout from index_vault deletion, inverted max-pool math, allocation foot-gun in BLOB decode, FK PRAGMA explicit doc)
 **Parent:** [docs/scaling-roadmap.md](../scaling-roadmap.md) (Doc 2)
 
 ## Summary
 
-Add local-only semantic retrieval on top of the existing FTS5 keyword index, fused via reciprocal rank fusion (RRF). Doc 1's distilled L2 summary becomes the embedding substrate; sqlite-vec stores vectors co-located with the existing search database; cortex owns the re-embed loop; oracle's `knowledge_search` gains a `mode: bm25 | vector | hybrid` parameter defaulting to `hybrid`. Ship in two implementation phases executed back-to-back: Phase A delivers summary-only hybrid retrieval end-to-end; Phase B adds chunked transcript embedding for Image, VoiceNote, Idea, Vocabulary, Video, and Thread. Phase B includes the borg/distillers amendment needed to render `## Transcript` for Video and Thread - the amendment is part of the work, not a prerequisite that blocks it.
+Add local-only semantic retrieval on top of the existing FTS5 keyword index, fused via reciprocal rank fusion (RRF). Doc 1's distilled L2 summary becomes the embedding substrate; vectors are stored as a `BLOB` column on a regular SQLite table colocated with `notes`; semantic search is a pure-Rust brute-force cosine scan over the BLOB column; cortex owns the re-embed loop; oracle's `knowledge_search` gains a `mode: bm25 | vector | hybrid` parameter defaulting to `hybrid`. Ship in two implementation phases executed back-to-back: Phase A delivers summary-only hybrid retrieval end-to-end; Phase B adds chunked transcript embedding for Image, VoiceNote, Idea, Vocabulary, Video, and Thread. Phase B includes the borg/distillers amendment needed to render `## Transcript` for Video and Thread - the amendment is part of the work, not a prerequisite that blocks it.
+
+**Storage choice rationale (deliberately boring):** the hybrid retrieval path runs BM25 and vector as two separate queries and fuses them with RRF in Rust. There is no single-query SQL composition of vector and FTS5; the design never benefits from a virtual table. So a regular `BLOB` column plus pure-Rust cosine in Rust code matches the actual usage perfectly, eliminates the `sqlite-vec` extension and its `unsafe` FFI transmute, removes the virtual-table FK-CASCADE trigger gymnastics, and at our scale (1,345 notes today, ~21K at the three-year horizon) is faster than walking an HNSW graph anyway. If we ever cross ~50-100K vectors, `hnsw_rs` (pure Rust, zero `unsafe` in caller code) can be added as a recoverable sidecar without changing the storage shape.
 
 ## Problem Statement
 
@@ -52,8 +54,8 @@ The existing system answers "find notes lexically similar to this query" well. I
 
 Three additions to the existing system:
 
-1. **A new `vec` feature on the `vault` crate** that introduces a `note_embeddings` table and a `sqlite-vec` virtual table inside the same SQLite database file already used by `vault::search`. One DB file, one backup, one WAL.
-2. **A new `vault::embedding` module** containing an `EmbeddingModel` port (trait) and a `FastEmbedModel` adapter that loads `bge-small-en-v1.5` once and exposes batch and single-query embedding. Lives in `vault` (not `oracle`) so both the cortex re-embed loop and the oracle query path share one loader.
+1. **A new `vec` feature on the `vault` crate** that introduces a single `note_embeddings` regular table (BLOB column for the f32 vector) inside the same SQLite database file already used by `vault::search`. No virtual tables, no SQLite extension to load, no `unsafe` in our code. One DB file, one backup, one WAL.
+2. **A new `vault::embedding` module** containing an `EmbeddingModel` port (trait), a `FastEmbedModel` adapter that loads `bge-small-en-v1.5` once and exposes batch and single-query embedding, and a pure-Rust `cosine_similarity` helper. Lives in `vault` so both the cortex re-embed loop and the oracle query path share one loader.
 3. **A new `cortex embed` subcommand** (one-shot backfill) and a periodic re-embed job in the cortex daemon. Cortex is the single writer to `note_embeddings`; oracle reads only. This keeps `index_vault` focused on vault-derived data and respects the spirit of the one-way data flow rule (the embedding writer is a separate process operating on already-indexed SQLite content, not on the vault).
 
 The hybrid query path in oracle:
@@ -71,7 +73,7 @@ knowledge_search(query, mode=hybrid, limit=10)
   │
   ├─► vault::search::search_vector(query_vec, limit=50, kind_filter=summary)
   │      │
-  │      └─► top_50_vec:  Vec<(path, rank)>       # KNN over sqlite-vec
+  │      └─► top_50_vec:  Vec<(path, rank)>       # brute-force cosine over BLOB rows
   │
   └─► reciprocal_rank_fusion(top_50_bm25, top_50_vec, k=60)
          │
@@ -93,11 +95,12 @@ In Phase B, `search_vector` aggregates summary and transcript-chunk rows for the
 │   - trait EmbeddingModel { embed_one, embed_batch, dim() }     │
 │   - struct FastEmbedModel (bge-small-en-v1.5, lazy load)       │
 │   - fn embed_query(&str) -> Vec<f32>                           │
+│   - fn cosine_similarity(&[f32], &[f32]) -> f32                │
 │   - fn chunk_transcript(...) (Phase B only)                    │
 │                                                                │
 │  feature flags:                                                │
 │   - search (existing)                                          │
-│   - vec    (new - adds sqlite-vec dep, embedding tables)       │
+│   - vec    (new - adds fastembed dep, note_embeddings table)   │
 └────────────────────────────────────────────────────────────────┘
                           │
         ┌─────────────────┼──────────────────┐
@@ -119,18 +122,25 @@ In Phase B, `search_vector` aggregates summary and transcript-chunk rows for the
 
 #### Schema additions to the existing search DB
 
-One new content table and one sqlite-vec virtual table. Both live in the same SQLite file as `notes` / `notes_fts`.
+One new content table. Lives in the same SQLite file as `notes` / `notes_fts`. No virtual tables, no SQLite extensions, no triggers.
 
 ```sql
 -- One row per (note, kind, chunk_index). Summary rows: chunk_index = 0.
--- Transcript chunks (Phase B): chunk_index = 0..N. URL kinds have no
--- chunks; the summary row is the only row.
+-- Transcript chunks (Phase B): chunk_index = 0..N. Kinds without
+-- transcripts have a single summary row only.
+--
+-- `embedding` is a BLOB of little-endian f32 values, `dim * 4` bytes
+-- long. The `dim` column is stored explicitly so the decode step can
+-- assert length matches without consulting embedding_config on every
+-- row.
 CREATE TABLE IF NOT EXISTS note_embeddings (
     id INTEGER PRIMARY KEY,
     note_path TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('summary', 'transcript-chunk')),
     chunk_index INTEGER NOT NULL DEFAULT 0,
     text TEXT NOT NULL,                  -- the source text that was embedded
+    embedding BLOB NOT NULL,             -- little-endian f32, len = dim * 4
+    dim INTEGER NOT NULL,                -- redundant w/ model_version, cheap
     model_version TEXT NOT NULL,         -- e.g. 'bge-small-en-v1.5'
     produced_at INTEGER NOT NULL,        -- unix seconds
     source_modified_at INTEGER NOT NULL, -- snapshot of notes.modified_at at embed time
@@ -142,14 +152,8 @@ CREATE INDEX IF NOT EXISTS idx_note_embeddings_path
     ON note_embeddings(note_path);
 CREATE INDEX IF NOT EXISTS idx_note_embeddings_stale
     ON note_embeddings(source_modified_at);
-
--- sqlite-vec virtual table. Dimension is fixed per index file.
--- The schema commits to 384 dims for bge-small-en-v1.5 at Phase A.
--- Cross-dimension model bumps are handled via schema migration; see
--- "Model Bumps and Dimension Changes."
-CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
-    embedding FLOAT[384]
-);
+CREATE INDEX IF NOT EXISTS idx_note_embeddings_kind_model
+    ON note_embeddings(kind, model_version);
 
 -- Active model identifier. Single source of truth between oracle (query
 -- embedder) and cortex (stored-embedding writer). Cortex updates this row
@@ -163,20 +167,34 @@ INSERT OR IGNORE INTO embedding_config (key, value)
     VALUES ('active_model', 'bge-small-en-v1.5');
 INSERT OR IGNORE INTO embedding_config (key, value)
     VALUES ('active_dim', '384');
-
--- vec0 is a virtual table; SQLite foreign keys do not propagate to
--- virtual tables. The FK CASCADE on notes -> note_embeddings handles
--- the real-table side automatically; this trigger completes the chain
--- by deleting the matching vec0 row when its note_embeddings parent
--- goes away (whether via FK CASCADE from notes deletion or via direct
--- DELETE from cortex's re-embed loop).
-CREATE TRIGGER IF NOT EXISTS note_embeddings_ad
-AFTER DELETE ON note_embeddings BEGIN
-    DELETE FROM vec_embeddings WHERE rowid = old.id;
-END;
 ```
 
-The vec0 table is keyed by rowid; `vec_embeddings.rowid` equals `note_embeddings.id`. Insert is mirrored explicitly inside `upsert_embedding`'s transaction; delete is mirrored via the trigger above (one delete path covers both FK CASCADE from notes and direct deletes from the re-embed loop).
+**Why no virtual table:** the hybrid query path runs FTS5 and vector as two separate queries and fuses with RRF in Rust. There is no single-query SQL composition of vector and FTS5 that would benefit from `vec0` or any other virtual-table-backed KNN index. The boring shape (regular table, regular column, FK CASCADE, query in Rust) is the right shape for how the design actually uses the data.
+
+**FK CASCADE works natively.** When a row is removed from `notes` (e.g. `remove_stale_notes` during reindex), every matching row in `note_embeddings` is deleted automatically by the foreign-key constraint. No triggers, no manual cleanup, no virtual-table gymnastics. This eliminates an entire category of Round-1 architect risk.
+
+**Decoding the BLOB - zero-allocation dot product (load-bearing).** Do NOT materialize each stored vector into a `Vec<f32>` per query row. Allocating 21,000 `Vec<f32>` instances per query (~32 MB of allocator churn) would blow the latency budget. Instead, fold the byte iteration and the dot product into a single pass that never allocates:
+
+```rust
+// query_vec: &[f32] of length `dim` (the embedded query, kept in scope
+//            for the whole scan)
+// stored:    &[u8] of length `dim * 4` (one row's BLOB, borrowed from
+//            the rusqlite Row, never copied)
+fn dot_product_from_bytes(query_vec: &[f32], stored: &[u8]) -> f32 {
+    debug_assert_eq!(stored.len(), query_vec.len() * 4);
+    let mut dot = 0.0f32;
+    for (i, c) in stored.chunks_exact(4).enumerate() {
+        dot += query_vec[i] * f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+    }
+    dot
+}
+```
+
+Because bge-small outputs L2-normalized vectors, the query vector is also L2-normalized, and `cosine_similarity = dot_product`. No separate normalization step at query time. Distance is `1.0 - dot_product`.
+
+No `unsafe`, no `bytemuck`, no `transmute`, no per-row allocation. The `dim` column on `note_embeddings` lets the decoder cheaply validate `stored.len() == dim * 4` before the loop - any mismatch is a clean validation error, not a panic.
+
+**Scale envelope.** At 1,345 notes today and ~21K at the three-year projection, a brute-force cosine scan in pure Rust runs in single-digit milliseconds. If we ever cross ~50-100K vectors and the scan becomes user-visible, `hnsw_rs` (pure Rust, zero `unsafe` in caller code) drops in as a recoverable sidecar that consumes the same `embedding BLOB` rows - the storage shape does not change, and the API surface absorbs the upgrade behind `search_vector`.
 
 #### Staleness contract (load-bearing)
 
@@ -287,9 +305,13 @@ The trait exists so cortex tests can inject a deterministic fake (`MockEmbedder`
 
 ```rust
 impl SearchIndex {
-    /// KNN search over the vec_embeddings table.
-    /// Phase A: only summary rows. Phase B: aggregates summary +
+    /// Brute-force cosine-similarity search over `note_embeddings` BLOB rows.
+    /// Phase A: only `kind = 'summary'` rows. Phase B: aggregates summary +
     /// transcript-chunk rows per note via max-pool.
+    ///
+    /// Performance contract: at 21K vectors / 384 dims this runs in
+    /// well under 20ms single-threaded; the regression benchmark in
+    /// Phase A7 enforces the budget.
     pub fn search_vector(
         &self,
         query_vec: &[f32],
@@ -333,7 +355,7 @@ impl SearchIndex {
 
 pub struct VectorHit {
     pub note_path: String,
-    pub distance: f32,    // sqlite-vec returns cosine distance
+    pub distance: f32,    // cosine distance: 1.0 - cosine_similarity
 }
 
 pub enum EmbeddingKind { Summary, TranscriptChunk }
@@ -422,14 +444,14 @@ The plan ships in two phases executed back-to-back. Phase A delivers the hybrid 
 
 #### Phase A1: vault `vec` feature flag + schema scaffolding
 **Model:** sonnet
-- `cargo add sqlite-vec --optional` in `vault/Cargo.toml`, gated behind the `vec` feature
-- `cargo add fastembed --optional`; same feature
-- **Load the sqlite-vec extension into every SQLite connection inside `SearchIndex::open`** before `ensure_schema` runs. Use `sqlite_vec::sqlite3_vec_init` via rusqlite's auto-extension or `conn.load_extension` API. This is load-bearing for the FK CASCADE chain: when `index_vault` (in oracle's process) deletes from `notes`, the `note_embeddings_ad` trigger evaluates `DELETE FROM vec_embeddings`. If `vec0` isn't loaded, the trigger panics with `no such module: vec0` and crashes the oracle indexer. Cortex needs the same load path; both crates inherit it for free by routing through `SearchIndex::open`
-- Add the `note_embeddings` table, `vec_embeddings` virtual table, `embedding_config` table, and the `note_embeddings_ad` delete trigger to `ensure_schema`, gated by the feature
+- `cargo add fastembed --optional` in `vault/Cargo.toml`, gated behind the new `vec` feature
+- No `sqlite-vec`, no other extension - the storage shape is a regular table with a `BLOB` column
+- Add the `note_embeddings` table (BLOB column for the f32 vector, `dim` column for length validation, `model_version`, `source_modified_at`) and the `embedding_config` key/value table to `ensure_schema`, gated by the feature. No virtual tables, no triggers
 - Set `PRAGMA busy_timeout = 5000` at connection open in `SearchIndex::open` so oracle and cortex serialize cleanly when their writers overlap
 - Wire `vec` into oracle's and cortex's feature flags on `vault`
 - Migration test: existing DB with `notes` only opens cleanly under the new schema; new tables are created idempotently
-- Migration test: deleting a note via FK CASCADE removes both `note_embeddings` and `vec_embeddings` rows (proves the trigger fires through the cascade chain *and* that the extension is loaded - this test fails loudly if A1's load-extension step regresses)
+- Migration test: deleting a row from `notes` cascades cleanly to `note_embeddings` via the native FK CASCADE (no trigger needed, no virtual table to worry about)
+- Migration test: a malformed BLOB (length not divisible by 4, or length mismatched with `dim`) is rejected at decode time with a clean error, not a panic
 
 #### Phase A2: `vault::embedding` module - port + FastEmbed adapter
 **Model:** opus
@@ -450,11 +472,14 @@ The plan ships in two phases executed back-to-back. Phase A delivers the hybrid 
 
 #### Phase A4: index\_vault staleness wiring
 **Model:** opus
-- In `index_one`'s UPDATE branch, after the row is updated, run:
-  - `DELETE FROM note_embeddings WHERE note_path = ? AND source_modified_at < ?` (the new `notes.modified_at`)
+- **`index_vault` does NOT delete embeddings on UPDATE.** This is a deliberate design contract: deleting on reindex would create a search-blackout window (the note disappears from hybrid search for up to one cortex cadence interval = 10 minutes) every time it is reindexed. A slightly-stale embedding still serves the query meaningfully; a missing one does not. The staleness signal is just `source_modified_at < notes.modified_at`, which cortex's re-embed loop discovers on its next tick. When cortex writes the new embedding, the `UNIQUE (note_path, kind, chunk_index, model_version)` constraint causes an upsert that atomically replaces the stale row - no blackout, no orphans.
+- **Verify `PRAGMA foreign_keys = ON` is set in `SearchIndex::open`.** SQLite disables FK enforcement by default for backwards compatibility. Without this PRAGMA, `ON DELETE CASCADE` silently fails and `note_embeddings` slowly fills with orphaned rows after every `remove_stale_notes` pass. The PRAGMA must run BEFORE the first INSERT into `notes` to be effective. This is already in place at `vault/src/search.rs:186` for FK enforcement in general; the test below confirms it is still enforced after the new schema lands.
 - New-row INSERT branch needs no embedding handling - cortex's stale-target scan picks up the missing rows
-- Note deletion (in `remove_stale_notes`) triggers the FK CASCADE automatically; verify
-- Tests: index a note, embed it via a stub, modify the note, re-index, verify the embedding row is gone and cortex's stale-target scan picks it up
+- Note deletion (in `remove_stale_notes`) triggers the native FK CASCADE; verify
+- Tests:
+  - Index a note, embed it via a stub, modify the note, re-index. Assert the OLD embedding row is still present (no blackout); assert cortex's stale-target scan flags it. After cortex's upsert runs, assert there is exactly one row (the new one replaced the old via UNIQUE constraint)
+  - Delete a note from the vault, re-run `index_vault`. Assert all matching `note_embeddings` rows are gone (FK CASCADE works)
+  - Disable the PRAGMA temporarily in a test fixture, repeat the deletion test, assert orphans remain. This guards against a future "performance optimization" disabling FK enforcement
 
 #### Phase A5: `cortex embed` subcommand + daemon job
 **Model:** opus
@@ -512,15 +537,16 @@ The plan ships in two phases executed back-to-back. Phase A delivers the hybrid 
 - Extend the cortex re-embed loop to read `## Transcript` from notes whose kind is one of: Image, VoiceNote, Idea, Vocabulary, Video, Thread
 - **The Phase B stale-target query MUST filter by `notes.note_type`.** Without it, every Article and Repo in the vault matches `e.id IS NULL` permanently (they have no transcript and never will), causing the cortex daemon to pull thousands of ineligible note paths every tick and write zero rows. The filter restricts the scan to the kinds whose `## Transcript` body section is actually populated. The exact SQL is in the "Staleness contract" section
 - Add a regression test: in a synthetic vault with 100 Articles and 1 VoiceNote, after one full embed pass, the next `stale_embedding_targets(kind=TranscriptChunk)` call returns zero paths. A regression in the `note_type` filter (e.g. someone removes it for "performance") immediately fails this test
-- Chunk, embed batch, upsert with `kind = 'transcript-chunk'`, `chunk_index = 0..N`
-- The Phase A4 staleness wiring already deletes chunk rows on note modification - Phase B just relies on it
+- Chunk, embed batch, then perform an **atomic chunk swap** for the note inside the Phase A5 write transaction: `BEGIN IMMEDIATE; DELETE FROM note_embeddings WHERE note_path = ? AND kind = 'transcript-chunk'; INSERT ... (one row per new chunk); COMMIT;`. The DELETE is necessary because re-chunking shifts boundaries - there is no stable chunk-identity to preserve across edits, so old chunks must be removed before new ones are written. Keeping the delete-and-insert in one transaction means hybrid search never sees a half-replaced chunk set
+- Important: `index_vault` does NOT delete transcript chunks on update either (same blackout-avoidance contract as Phase A4 summary rows). Cortex's re-embed loop owns the chunk lifecycle in its entirety. The staleness signal is `source_modified_at < notes.modified_at`, same as summary rows
 - Backfill: after the amendment lands, existing Video and Thread notes in the vault do not yet have `## Transcript` body sections. Run `cortex summarize --backfill --kind=video,thread` to re-render those notes with the new transcript section before the embed pass picks them up. This reuses Doc 1's existing backfill machinery.
 
 #### Phase B3: max-pool aggregation in `search_vector`
 **Model:** opus
-- For each candidate note, take `max(summary_distance, min(chunk_distances))` (smaller distance = closer in cosine space; min over chunks then max with summary scores it back to "best-of")
+- For each candidate note, compute its score as `min(summary_distance, chunk_distances...)` - the single best-matching representation wins. In cosine-distance space, smaller is closer, so the minimum distance across {summary row, every transcript-chunk row} is the "max-pool similarity" of the note. The earlier draft of this doc had it inverted (taking the *worst* representation's distance); that bug would have catastrophically penalized notes whose value lives in a single transcript chunk, e.g. the architect's hardest-question example of a 60-minute video with one mention of "Temporal" at minute 45
+- Implementation note: a single SQL query returns all rows for the candidate notes (summary + chunks); the aggregation runs in Rust. With the zero-allocation dot product per row, even 21K candidates * average 1.2 rows per note = ~25K rows aggregated in single-digit milliseconds
 - Return one row per note
-- Regression-test that a transcript-only match (no summary lexical overlap) is reachable via vector search for non-URL kinds
+- Regression test: a transcript-only match (the query token only appears in a chunk, not in the summary) is reachable via vector search for non-URL kinds. The test fixture has one note where the summary is intentionally orthogonal to the chunk's content; the query that matches the chunk must surface this note in top-3
 
 #### Phase B4: regression fixture extension + rollout
 **Model:** sonnet
@@ -562,7 +588,7 @@ The plan ships in two phases executed back-to-back. Phase A delivers the hybrid 
 
 - **Description:** Vectors live in a separate file/process from FTS5.
 - **Pros:** Optimized ANN indexes (HNSW), parallel scaling, mature tooling.
-- **Cons:** Two indexes to keep in sync. Two backup paths. Two file locks. A second process to run on the user's machine. sqlite-vec at 7K-21K vectors does brute-force KNN in ~5-20ms - well within budget; HNSW only matters at 100K+.
+- **Cons:** Two indexes to keep in sync. Two backup paths. Two file locks. A second process to run on the user's machine. Pure-Rust brute-force cosine at 7K-21K vectors runs in ~5-20ms - well within budget; HNSW only matters at 100K+.
 - **Why not chosen:** Co-located in the existing search DB is the simpler model and the scale doesn't justify a separate store. Revisit at 100K+ vectors.
 
 ### Alternative 6: Embed in oracle directly (skip cortex)
@@ -577,16 +603,17 @@ The plan ships in two phases executed back-to-back. Phase A delivers the hybrid 
 ### Dependencies
 
 New:
-- `sqlite-vec` (Rust bindings or compiled extension) - local vector storage in SQLite. Verify it ships as a bundled SQL extension or requires `LOAD_EXTENSION`.
 - `fastembed` - local embedding inference. Bundles ONNX runtime; first load downloads the model from HuggingFace.
 
-Both are optional features (`vec`). Crates not using retrieval (e.g. borg) do not pull them in.
+That is the entire dependency footprint. No `sqlite-vec`, no SQLite extension to load, no FFI bindings beyond what rusqlite already brings. Vector storage is a regular `BLOB` column on a regular table; vector similarity is a pure-Rust cosine function. The `vec` feature gates only `fastembed`, the `note_embeddings` schema, and the new `vault::embedding` module.
 
 ### Performance
 
 - **Embedding query (CPU, bge-small):** ~10-20ms per query string
 - **FTS5 BM25 over 7K notes:** <5ms
-- **sqlite-vec brute-force KNN over 7K 384-dim vectors:** ~10-20ms (10MB scan)
+- **Pure-Rust brute-force cosine over 1,345 384-dim vectors (today):** <2ms
+- **Pure-Rust brute-force cosine over 7K 384-dim vectors:** ~5-10ms (~10MB scan)
+- **Pure-Rust brute-force cosine over 21K 384-dim vectors (3-year):** ~15-25ms (~32MB scan)
 - **RRF fusion:** <1ms (in-memory sort)
 - **Total p50 hybrid query budget:** ≤ 200ms (includes detail-level formatting and JSON serialization)
 
@@ -601,13 +628,14 @@ The `model_version` column handles **same-dimension** model swaps (e.g. `bge-sma
 1. Run `cortex embed --model bge-small-en-v1.6 --backfill`. This updates the `embedding_config.active_model` row in SQLite and writes new rows with `model_version = 'v1.6'` alongside existing `v1.5` rows.
 2. While the backfill runs, oracle sees `active_model = 'v1.6'` and immediately starts embedding queries with the new model. Hybrid queries against still-old-model notes degrade to BM25 for those notes during the rollover window (the new-model rows aren't present yet for them).
 3. Backfill completes; the rollover window closes.
-4. `cortex embed --gc-old-models` (or manual `DELETE FROM note_embeddings WHERE model_version != 'v1.6'`) reclaims space. The trigger deletes the matching `vec_embeddings` rows.
+4. `cortex embed --gc-old-models` (or manual `DELETE FROM note_embeddings WHERE model_version != 'v1.6'`) reclaims space.
 
-**Cross-dimension model swaps** (e.g. 384 → 1024) are a schema migration, not a rolling re-embed:
+**Cross-dimension model swaps** (e.g. 384 → 1024) are dramatically simpler than they would be with a virtual table:
 
-1. The `vec_embeddings` virtual table is fixed-dimension. A new dimension needs a new vec table (`vec_embeddings_1024`).
-2. Migration plan: create `vec_embeddings_1024`, dual-write during transition, query the new table, drop the old one.
-3. Document this in the cortex config when the bump is contemplated; do not pretend it is an in-place update.
+1. The `dim` column on `note_embeddings` carries the dimension per row. Different model_versions can have different `dim` values living in the same table.
+2. The `embedding_config.active_dim` row tells oracle which dimension to expect at query time, so it can filter to matching rows: `SELECT ... WHERE model_version = ? AND dim = ?`.
+3. Migration: run `cortex embed --model bge-m3-1024 --backfill`. Old `dim=384` rows stay until garbage-collected. Oracle queries against `dim=1024` rows once backfill completes.
+4. No schema migration. No new table. No virtual-table dim lock. This is the single biggest practical win of the BLOB-column shape over the virtual-table shape.
 
 ### Security
 
@@ -638,7 +666,6 @@ The benchmark and regression fixture both live under `vault/benches/` and `vault
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
 | fastembed first-load downloads from HuggingFace; offline systems fail | Med | High | Document the requirement; consider a `fastembed-prefetch` build-time step that bundles the model. Cache path is OS-standard; subsequent runs are offline. |
-| sqlite-vec extension load failure on some platforms | Low | High | Pin the version; CI matrix covers Linux x86_64 and macOS arm64; fall back to a runtime error with a clear "feature `vec` requires sqlite-vec" message |
 | WAL bloat during backfill | Med | Med | Bound batch size to 64; `PRAGMA wal_autocheckpoint = 1000` (default). If a daemon-driven backfill grows WAL beyond 100MB, add an explicit `PRAGMA wal_checkpoint(TRUNCATE)` between batches |
 | Re-embed loop starves oracle queries / index_vault writes via SQLite lock contention | Low | High | **Structural fix**: Phase A5's transaction discipline mandates that the SQLite write lock is acquired only around the upsert (post-inference). `embed_batch` runs in auto-commit context with no lock held. Write transactions stay under ~50ms regardless of batch size. **Belt-and-suspenders**: `PRAGMA busy_timeout = 5000` at connection open in both crates handles the residual overlap window. If Phase A5 regresses (someone wraps the inference call inside `BEGIN`), the A5 invariant test catches it: a `cortex embed` batch with N=64 must produce a write transaction wall-clock under 200ms in CI |
 | Distillers amendment for Video/Thread `## Transcript` rendering breaks existing notes | Low | Med | Amendment is a kind-conditional in `distillers::render`; existing renders for non-URL kinds are unchanged. Backfill for existing Video and Thread notes runs via `cortex summarize --backfill --kind=video,thread` once the amendment lands. Snapshot test on a fixture Video note guards the render output |
@@ -652,14 +679,14 @@ The benchmark and regression fixture both live under `vault/benches/` and `vault
 Resolved during Round 1 of architect review (kept here as decisions of record):
 
 - [x] **Where does `embed_query` actually live at process boundaries?** Resolved: function lives in `vault::embedding`; both oracle and cortex pull the same code. Oracle loads the model lazily on the first non-BM25 call; cortex loads eagerly at the start of each embed invocation. See Phase A2.
-- [x] **`sqlite-vec` extension loading mechanism.** Resolved: loaded inside `SearchIndex::open` so every process inherits it. See Phase A1.
+- [x] **Vector storage shape (`sqlite-vec` virtual table vs `BLOB` column).** Resolved during Round 2 conversation: BLOB column on a regular table. The design's RRF-in-Rust fusion never benefits from a virtual table's SQL-level KNN composition, and the BLOB shape eliminates the `unsafe` FFI transmute, the FK-CASCADE-through-virtual-table trigger, and the dim-locked-in-virtual-table migration headache. Cosine similarity is a 15-line pure-Rust function. See "Schema additions" and Phase A1.
 - [x] **URL-kind verbatim recall (Video and Thread).** Resolved: Video and Thread both join the chunked-transcript group in Phase B2. The distillers amendment to render `## Transcript` for both kinds is part of Phase B2's work. See "What gets embedded per kind."
 
 Still open:
 
 - [ ] **fastembed first-load behavior:** verify whether fastembed-rs downloads the model from HuggingFace on first `TextEmbedding::try_new(...)` or whether the crate bundles weights. Affects `--prefetch-model` semantics. Resolve before Phase A8 documentation goes out.
 - [ ] **Should the default `K_RRF_INPUT` be tuneable per query?** Pulling 50 from each list before fusion is a reasonable default but heavy queries may want 100. Leave as a constant for Phase A; revisit if regression fixture reveals systematic miss patterns.
-- [ ] **Cosine vs L2 distance metric.** sqlite-vec supports both; bge-small embeddings are L2-normalized at output, so cosine and inner-product produce identical rankings. Pick one and document; cosine is the standard expectation.
+- [ ] **Cosine vs L2 distance metric.** bge-small embeddings are L2-normalized at output, so cosine, inner-product, and (negative) L2 produce identical rankings for ranking purposes. Pure-Rust cosine is the simplest to implement and matches the standard expectation. Decision: implement cosine; document the normalization invariant so future model swaps don't silently break the assumption.
 - [ ] **Test isolation strategy for fastembed.** Loading the real model in `cargo test --all` adds ~2s per test process. `MockEmbedder` handles unit tests, but integration tests need the real model. Use a `OnceCell<Arc<FastEmbedModel>>` at test-crate level so the model loads once per `cargo test` invocation.
 
 ## References
@@ -672,6 +699,6 @@ Still open:
 - [docs/design/2026-03-22-vault-watcher-oracle-reindex.md](2026-03-22-vault-watcher-oracle-reindex.md) - watcher → reindex; the staleness contract hooks into this path
 - `vault/src/search.rs:202-389` - the existing FTS5 schema and triggers Phase A1 extends
 - `vault/src/distilled.rs` - the L2 contract; `Distilled.summary` is the Phase A embedding target
-- [sqlite-vec](https://github.com/asg017/sqlite-vec) - vector extension for SQLite
 - [fastembed-rs](https://github.com/Anush008/fastembed-rs) - Rust bindings for local ONNX embeddings
+- [hnsw_rs](https://crates.io/crates/hnsw_rs) - pure-Rust HNSW; the documented future-scale upgrade path (sidecar) if brute-force latency becomes user-visible
 - [Reciprocal Rank Fusion paper](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) - Cormack et al., 2009
