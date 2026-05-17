@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-05-16
-**Status:** Draft (Revision 2 - post-Architect-review)
+**Status:** Implemented
 **Review Passes Completed:** 2/5
 
 **Amends:** [2026-05-16-extractor-contract-and-l2-summaries.md](2026-05-16-extractor-contract-and-l2-summaries.md) (the "L2 doc"). That doc currently carries `Status: Implemented`; this addendum reopens it on three deferred items surfaced by the post-implementation architect audit plus a verbatim-data-loss defect surfaced by the design-review architect pass. After Phase 9 lands, the L2 doc returns to `Status: Implemented` and Phase 9 is recorded as the completion step.
