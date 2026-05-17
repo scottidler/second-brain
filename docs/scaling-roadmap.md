@@ -109,6 +109,8 @@ The work splits into three design docs along orthogonal axes. Doc 1 is the found
 
 ### Doc 2 - Hybrid Retrieval (FTS5 + Vector + RRF)
 
+**Status:** Drafted (5/5 passes). [design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md](design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md). Awaiting human review and execution.
+
 **Goal:** semantic discovery on top of the existing keyword retrieval. BM25 (FTS5) wins on proper nouns, exact terms, and rare tokens; vector embeddings win on conceptual overlap. Reciprocal rank fusion combines both with one screen of code.
 
 **Drafting points:**
@@ -137,7 +139,7 @@ The work splits into three design docs along orthogonal axes. Doc 1 is the found
 - Latency budget: target sub-200ms for typical hybrid query on a ~7k-note vault. Measure and document.
 - WAL inflation: vector BLOBs co-located in the existing search SQLite file (per `docs/design/2026-04-20-sqlite-ledger-and-views.md`) will balloon the WAL during rolling re-embed passes. Bound batch size; consider `PRAGMA wal_autocheckpoint` tuning or a dedicated vector database file if growth becomes unacceptable.
 - Regression tests: 10-20 known queries with expected hit sets, run on every PR that touches retrieval.
-- Out of scope for this doc: reranking via a cross-encoder (defer until empirical evidence the hybrid alone is insufficient).
+- Out of scope for this doc: reranking via a cross-encoder.
 
 ### Doc 3 - Decay and Promotion Signals + Cold-Note Review
 
