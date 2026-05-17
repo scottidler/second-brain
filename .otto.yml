@@ -52,11 +52,15 @@ tasks:
   check:
     help: "Run all quality checks (compile, clippy, format)"
     bash: |
+      # vault's `vec-candle` + `vec-fastembed` features are mutually
+      # exclusive at compile time (compile_error! guard). Drive CI with
+      # `--features vec` (the public flag that resolves to Candle today)
+      # rather than `--all-features`, which would trip the guard.
       echo "=== Checking compilation ==="
-      cargo check --workspace --all-targets --all-features
+      cargo check --workspace --all-targets --features vec
       echo ""
       echo "=== Running Clippy ==="
-      cargo clippy --workspace --all-targets --all-features -- -D warnings
+      cargo clippy --workspace --all-targets --features vec -- -D warnings
       echo ""
       echo "=== Checking format ==="
       cargo fmt --all --check
@@ -66,7 +70,7 @@ tasks:
   test:
     help: "Run all tests"
     bash: |
-      cargo test --workspace --all-features
+      cargo test --workspace --features vec
 
   cov:
     help: "Run tests with coverage via llvm-cov"

@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use eyre::{Context, Result};
 use fs2::FileExt;
-use vault::embedding::{BGE_SMALL_EN_V15_NAME, EmbeddingModel, FastEmbedModel, MockEmbedder};
+use vault::embedding::{ACTIVE_MODEL_VERSION, ActiveModel, EmbeddingModel, MockEmbedder};
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
 use crate::cli::EmbedOpts;
@@ -91,12 +91,12 @@ pub fn run_embed(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result
     let model_version = opts.model.clone().unwrap_or_else(|| {
         index
             .active_embedding_model()
-            .unwrap_or_else(|_| BGE_SMALL_EN_V15_NAME.to_string())
+            .unwrap_or_else(|_| ACTIVE_MODEL_VERSION.to_string())
     });
 
     if opts.prefetch_model {
         log::info!("cortex::embed: prefetching model {model_version}");
-        let _ = FastEmbedModel::load().wrap_err("failed to prefetch fastembed model")?;
+        ActiveModel::load().wrap_err("failed to prefetch embedding model")?;
         println!("Prefetched embedding model {model_version}.");
         return Ok(EmbedStats::default());
     }
@@ -108,8 +108,8 @@ pub fn run_embed(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result
         log::warn!("cortex::embed: using MockEmbedder (test-only)");
         Box::new(MockEmbedder::default_384())
     } else {
-        log::info!("cortex::embed: loading fastembed model {model_version}");
-        Box::new(FastEmbedModel::load().wrap_err("failed to load fastembed model")?)
+        log::info!("cortex::embed: loading embedding model {model_version}");
+        Box::new(ActiveModel::load().wrap_err("failed to load embedding model")?)
     };
 
     // Make sure embedding_config matches the model we're about to write

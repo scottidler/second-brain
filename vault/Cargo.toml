@@ -9,7 +9,27 @@ description = "Shared library crate for Obsidian vault types, frontmatter, and u
 schemars = ["dep:schemars"]
 search = ["dep:rusqlite"]
 watcher = ["dep:notify", "dep:tokio"]
-vec = ["search", "dep:fastembed"]
+
+# vec stays the public "embedding is on" flag. It pulls in `search` and
+# the Candle backend (no AVX2 floor) so downstream crates that just say
+# `--features vec` get a working install on any x86_64 CPU.
+vec = ["vec-candle"]
+
+# Backend-specific flags. Either pulls in `search` so a build that says
+# `--features vec-fastembed` (no `vec`) still wires up the SQL layer.
+# Enabling both is a compile error.
+vec-candle = [
+    "search",
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:hf-hub",
+]
+vec-fastembed = [
+    "search",
+    "dep:fastembed",
+]
 
 [dependencies]
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
@@ -30,6 +50,11 @@ shellexpand = { workspace = true }
 walkdir = { workspace = true }
 rayon = { workspace = true }
 fastembed = { version = "5.13.4", optional = true }
+candle-core = { version = "0.10.2", optional = true }
+candle-nn = { version = "0.10.2", optional = true }
+candle-transformers = { version = "0.10.2", optional = true }
+tokenizers = { version = "0.23.1", optional = true }
+hf-hub = { version = "0.5.0", optional = true }
 
 [dev-dependencies]
 criterion = "0.8.2"

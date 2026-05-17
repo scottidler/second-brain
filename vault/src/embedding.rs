@@ -1,6 +1,9 @@
-//! Local text embedding via fastembed's ONNX runtime.
+//! Local text embedding for hybrid retrieval.
 //!
-//! Phase A2 of the hybrid retrieval design (`docs/design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md`).
+//! Phase A2 of the hybrid retrieval design
+//! (`docs/design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md`) and
+//! Phase 1 of the backend-swap design
+//! (`docs/design/2026-05-17-candle-embedding-backend.md`).
 //!
 //! Two roles share this module:
 //!
@@ -14,12 +17,28 @@
 //!   need embeddings.
 //!
 //! Both processes pin `bge-small-en-v1.5` (384 dims, L2-normalized output).
+//! The active backend (Candle by default, fastembed via feature flag) is
+//! a compile-time choice; the `EmbeddingModel` trait is the shared seam.
 //! The model identifier is stored in the search DB's `embedding_config`
 //! table as `active_model`; oracle and cortex read it on every dispatch so
 //! the two processes cannot drift onto different models.
 
-use eyre::{Result, WrapErr};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use eyre::Result;
+#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+use std::sync::{Arc, OnceLock, RwLock};
+
+#[cfg(all(feature = "vec-candle", feature = "vec-fastembed"))]
+compile_error!("Enable exactly one embedding backend, not both");
+
+#[cfg(feature = "vec-candle")]
+pub mod candle;
+#[cfg(feature = "vec-fastembed")]
+pub mod fastembed;
+
+#[cfg(feature = "vec-candle")]
+pub use candle::CandleBertModel;
+#[cfg(feature = "vec-fastembed")]
+pub use fastembed::FastEmbedModel;
 
 /// Pin: `bge-small-en-v1.5` outputs 384-dim L2-normalized vectors. Cosine
 /// similarity reduces to a plain dot product because both query and stored
@@ -27,26 +46,43 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 pub const BGE_SMALL_EN_V15_DIM: usize = 384;
 
 /// Canonical model identifier written into `note_embeddings.model_version`
-/// and `embedding_config.active_model`. Oracle and cortex compare against
-/// this value when deciding which rows to read or refresh.
-pub const BGE_SMALL_EN_V15_NAME: &str = "bge-small-en-v1.5";
+/// and `embedding_config.active_model`. The value depends on the active
+/// backend feature: switching families (Candle ↔ fastembed) changes this
+/// string, which triggers the existing stale-detection path in
+/// `vault::search::vector::stale_embedding_targets` to re-embed.
+///
+/// Kernel variants within a family (Candle scalar → AVX2 → MKL) keep the
+/// same string; fp32 drift across kernels is within cosine top-K tolerance.
+#[cfg(feature = "vec-candle")]
+pub const ACTIVE_MODEL_VERSION: &str = candle::CANDLE_MODEL_VERSION;
+#[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
+pub const ACTIVE_MODEL_VERSION: &str = fastembed::FASTEMBED_MODEL_VERSION;
+
+/// Type alias for the active embedding backend. Downstream crates (cortex,
+/// oracle) construct and store an `Arc<ActiveModel>` directly; the alias
+/// keeps their code free of `#[cfg]` blocks.
+#[cfg(feature = "vec-candle")]
+pub type ActiveModel = CandleBertModel;
+#[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
+pub type ActiveModel = FastEmbedModel;
 
 /// Port for the embedding model.
 ///
 /// The trait is the seam tests use to inject [`MockEmbedder`] without
-/// loading the real ~100 MB ONNX model. Production code calls the trait
-/// through [`FastEmbedModel`] or the [`embed_query`] convenience.
+/// loading the real ~100 MB model. Production code calls the trait
+/// through the active backend impl or the [`embed_query`] convenience.
 ///
-/// `Send + Sync` so a single instance can be shared across threads (cortex
-/// holds one in its daemon; oracle's [`embed_query`] keeps process-local
-/// instances behind a `RwLock`).
+/// `Send + Sync` so a single instance can be shared across threads
+/// (cortex holds one in its daemon; oracle's [`embed_query`] keeps
+/// process-local instances behind a `RwLock`).
 pub trait EmbeddingModel: Send + Sync {
     /// Dimensionality of the output vectors.
     fn dim(&self) -> usize;
 
-    /// Stable model identifier, e.g. `"bge-small-en-v1.5"`. Written into
-    /// `note_embeddings.model_version` so a future model-version bump
-    /// can co-exist with old rows.
+    /// Stable model identifier, e.g. `"bge-small-en-v1.5-candle"`.
+    /// Written into `note_embeddings.model_version` so a backend swap
+    /// can co-exist with old rows (and the stale-detection path
+    /// invalidates them on a backend family change).
     fn model_version(&self) -> &str;
 
     /// Embed one text. Returns a vector of length `self.dim()`.
@@ -54,120 +90,51 @@ pub trait EmbeddingModel: Send + Sync {
 
     /// Embed a batch of texts. Returns a vector of vectors, one per input
     /// in the same order. The default batches one-at-a-time; adapters
-    /// that can amortize tokenization or GPU launches override this.
+    /// that can amortize tokenization, GPU launches, or internal worker
+    /// pools override this.
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         texts.iter().map(|t| self.embed_one(t)).collect()
     }
 }
 
-/// fastembed-backed adapter that pins `bge-small-en-v1.5`.
-///
-/// Loading the model is expensive (~100 MB cache + ~1-2 s session
-/// initialization), so callers should hold a single instance for the
-/// lifetime of the work. Cortex's daemon keeps one across embed ticks;
-/// oracle keeps one process-local instance behind [`embed_query`].
-///
-/// `fastembed::TextEmbedding::embed` takes `&mut self`, so the inner
-/// model lives behind a `Mutex` to keep the public surface `&self`. Embed
-/// calls are CPU-bound but typically take ~10-50 ms; the lock window is
-/// brief and bounded.
-#[cfg(feature = "vec")]
-pub struct FastEmbedModel {
-    inner: Mutex<fastembed::TextEmbedding>,
-    dim: usize,
-    model_version: String,
-}
-
-#[cfg(feature = "vec")]
-impl FastEmbedModel {
-    /// Load the default `bge-small-en-v1.5` model.
-    ///
-    /// Cost: first call downloads ~100 MB to the fastembed cache (HF Hub)
-    /// and initializes the ONNX runtime session (~1-2 s). Subsequent
-    /// calls within the same process should reuse the returned handle.
-    pub fn load() -> Result<Self> {
-        let options = fastembed::TextInitOptions::new(fastembed::EmbeddingModel::BGESmallENV15);
-        let model = fastembed::TextEmbedding::try_new(options)
-            .map_err(|e| eyre::eyre!("failed to load bge-small-en-v1.5: {e}"))
-            .wrap_err("FastEmbedModel::load")?;
-        Ok(Self {
-            inner: Mutex::new(model),
-            dim: BGE_SMALL_EN_V15_DIM,
-            model_version: BGE_SMALL_EN_V15_NAME.to_string(),
-        })
-    }
-}
-
-#[cfg(feature = "vec")]
-impl EmbeddingModel for FastEmbedModel {
-    fn dim(&self) -> usize {
-        self.dim
-    }
-
-    fn model_version(&self) -> &str {
-        &self.model_version
-    }
-
-    fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
-        let vectors = self.embed_batch(&[text])?;
-        vectors
-            .into_iter()
-            .next()
-            .ok_or_else(|| eyre::eyre!("fastembed returned 0 embeddings for 1 input; this is a model bug"))
-    }
-
-    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let mut model = self
-            .inner
-            .lock()
-            .map_err(|_| eyre::eyre!("FastEmbedModel mutex poisoned"))?;
-        let owned: Vec<String> = texts.iter().map(|t| (*t).to_string()).collect();
-        let embeddings = model
-            .embed(owned, None)
-            .map_err(|e| eyre::eyre!("fastembed embed call failed: {e}"))?;
-        Ok(embeddings)
-    }
-}
-
-#[cfg(feature = "vec")]
-type RegistryEntry = (String, Arc<FastEmbedModel>);
+#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+type RegistryEntry = (String, Arc<ActiveModel>);
 
 /// Process-local registry of loaded models, keyed by `model_version`.
 ///
 /// Oracle dispatches every query embedding through [`embed_query`]; the
 /// first call for a given `model_version` performs the lazy load, stores
-/// the `Arc<FastEmbedModel>` in the registry, and returns. Subsequent
-/// calls hit the registry at ~0 ms overhead. Model bumps are rare, so
-/// holding multiple models resident is acceptable.
-#[cfg(feature = "vec")]
+/// the `Arc<ActiveModel>` in the registry, and returns. Subsequent calls
+/// hit the registry at ~0 ms overhead. Model bumps are rare, so holding
+/// multiple models resident is acceptable.
+#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
 static MODEL_REGISTRY: OnceLock<RwLock<Vec<RegistryEntry>>> = OnceLock::new();
 
-#[cfg(feature = "vec")]
+#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
 fn registry() -> &'static RwLock<Vec<RegistryEntry>> {
     MODEL_REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
 
-/// Lazy-load a fastembed model for `model_version` and embed `text`.
+/// Lazy-load the active backend's model for `model_version` and embed `text`.
 ///
 /// Used by oracle's hybrid/vector dispatch where every query needs an
 /// embedding and the model identifier comes from the DB's
 /// `embedding_config.active_model`. Cortex does NOT use this; it loads a
-/// concrete [`FastEmbedModel`] at the start of every `cortex embed`
-/// invocation because every call uses inference, so the lazy registry
-/// adds no value there.
+/// concrete model at the start of every `cortex embed` invocation because
+/// every call uses inference, so the lazy registry adds no value there.
 ///
-/// Currently only `bge-small-en-v1.5` is recognized; passing any other
-/// `model_version` returns an error. Adding new models requires explicit
-/// support in this function because the dimension and model identifier
-/// must round-trip through the rest of the pipeline.
-#[cfg(feature = "vec")]
+/// Only the active backend's `model_version` is recognized. Passing any
+/// other value returns a clear error pointing at the expected string;
+/// this protects against silent misuse when a downstream caller has stale
+/// hardcoded model_version strings after a backend swap.
+#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
 pub fn embed_query(text: &str, model_version: &str) -> Result<Vec<f32>> {
     let model = get_or_load_model(model_version)?;
     model.embed_one(text)
 }
 
-#[cfg(feature = "vec")]
-fn get_or_load_model(model_version: &str) -> Result<Arc<FastEmbedModel>> {
+#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+fn get_or_load_model(model_version: &str) -> Result<Arc<ActiveModel>> {
     {
         let guard = registry()
             .read()
@@ -176,13 +143,13 @@ fn get_or_load_model(model_version: &str) -> Result<Arc<FastEmbedModel>> {
             return Ok(entry.1.clone());
         }
     }
-    if model_version != BGE_SMALL_EN_V15_NAME {
+    if model_version != ACTIVE_MODEL_VERSION {
         eyre::bail!(
-            "unknown embedding model_version {model_version:?}; \
-             only {BGE_SMALL_EN_V15_NAME:?} is currently supported"
+            "unknown or backend-mismatched model_version: {model_version:?} \
+             (this binary expects: {ACTIVE_MODEL_VERSION:?})"
         );
     }
-    let model = Arc::new(FastEmbedModel::load()?);
+    let model = Arc::new(ActiveModel::load()?);
     let mut guard = registry()
         .write()
         .map_err(|_| eyre::eyre!("MODEL_REGISTRY write lock poisoned"))?;
@@ -201,7 +168,7 @@ fn get_or_load_model(model_version: &str) -> Result<Arc<FastEmbedModel>> {
 /// the BPE token count. For English with the bge-small-en-v1.5
 /// tokenizer the word:token ratio is ~0.75, so the default
 /// `max_tokens = 400` yields chunks of about 530 BPE tokens - right
-/// up against the model's 512-token limit. fastembed truncates
+/// up against the model's 512-token limit. The active backend truncates
 /// gracefully on overshoot; if profiling shows truncation hurts
 /// recall, drop `max_tokens` to 300.
 ///
@@ -214,7 +181,7 @@ fn get_or_load_model(model_version: &str) -> Result<Arc<FastEmbedModel>> {
 /// - Input shorter than `max_tokens`: returns one chunk containing
 ///   the whole text (no padding, no trailing whitespace).
 /// - A single very long word (no whitespace): returns one chunk
-///   containing the full word; truncation falls to fastembed.
+///   containing the full word; truncation falls to the embedder.
 /// - `overlap_tokens >= max_tokens`: overlap is clamped to
 ///   `max_tokens - 1` so the loop always makes forward progress.
 pub fn chunk_transcript(text: &str, max_tokens: usize, overlap_tokens: usize) -> Vec<String> {
@@ -254,7 +221,7 @@ pub fn chunk_transcript(text: &str, max_tokens: usize, overlap_tokens: usize) ->
 /// same input is stable across calls and across processes.
 ///
 /// Used by Phase A3+ tests that need a real `EmbeddingModel` without the
-/// ~1-2 s fastembed load cost.
+/// ~1-2 s real-model load cost.
 pub struct MockEmbedder {
     dim: usize,
     model_version: String,

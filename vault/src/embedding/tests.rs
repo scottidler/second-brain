@@ -70,7 +70,10 @@ fn embed_query_rejects_unknown_model_version() {
     // function must error cleanly without attempting a download.
     let err = embed_query("hello", "not-a-real-model").expect_err("must fail");
     let msg = format!("{err}");
-    assert!(msg.contains("unknown embedding model_version"), "got: {msg}");
+    assert!(
+        msg.contains("unknown or backend-mismatched model_version"),
+        "got: {msg}"
+    );
 }
 
 // --- Phase B1: chunker ------------------------------------------------

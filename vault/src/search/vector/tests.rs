@@ -414,7 +414,7 @@ fn rrf_empty_inputs_return_empty() {
 fn active_embedding_model_reads_the_default_seed() {
     let index = SearchIndex::open_memory().expect("open");
     let m = index.active_embedding_model().expect("read");
-    assert_eq!(m, "bge-small-en-v1.5");
+    assert_eq!(m, "bge-small-en-v1.5-candle");
     let d = index.active_embedding_dim().expect("dim");
     assert_eq!(d, 384);
 }

@@ -297,6 +297,11 @@ impl SearchIndex {
     /// loss.
     #[cfg(feature = "vec")]
     fn ensure_vec_schema(&self) -> Result<()> {
+        // Two-step setup: the static DDL runs as a batch, the
+        // backend-dependent seed for `active_model` runs separately so
+        // the model_version string stays a Rust const (driven by the
+        // active embedding-backend feature) rather than baked into a SQL
+        // string literal.
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS note_embeddings (
                 id INTEGER PRIMARY KEY,
@@ -325,9 +330,11 @@ impl SearchIndex {
                 value TEXT NOT NULL
             );
             INSERT OR IGNORE INTO embedding_config (key, value)
-                VALUES ('active_model', 'bge-small-en-v1.5');
-            INSERT OR IGNORE INTO embedding_config (key, value)
                 VALUES ('active_dim', '384');",
+        )?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO embedding_config (key, value) VALUES ('active_model', ?1)",
+            rusqlite::params![crate::embedding::ACTIVE_MODEL_VERSION],
         )?;
         Ok(())
     }
@@ -2418,7 +2425,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("active_model row");
-        assert_eq!(model, "bge-small-en-v1.5");
+        assert_eq!(model, "bge-small-en-v1.5-candle");
 
         let dim: String = index
             .conn
