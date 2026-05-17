@@ -400,8 +400,7 @@ impl SearchIndex {
             .join(", ");
 
         let sql = match kind {
-            EmbeddingKind::Summary => {
-                "SELECT n.path, n.note_type, n.modified_at
+            EmbeddingKind::Summary => "SELECT n.path, n.note_type, n.modified_at
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -411,8 +410,7 @@ impl SearchIndex {
                     OR e.source_modified_at < n.modified_at
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
-                    .to_string()
-            }
+                .to_string(),
             EmbeddingKind::TranscriptChunk => format!(
                 "SELECT n.path, n.note_type, n.modified_at
                  FROM notes n

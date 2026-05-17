@@ -118,11 +118,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
         // and the map-reduce return in distill_long all default to None;
         // we override here so chunking works for all videos, including
         // long ones routed through the map-reduce path.
-        let transcript_owned = if transcript.trim().is_empty() {
-            None
-        } else {
-            Some(transcript.to_string())
-        };
+        let transcript_owned = if transcript.trim().is_empty() { None } else { Some(transcript.to_string()) };
         distilled.transcript = transcript_owned.clone();
         let mut bounded = enforce_bounds(distilled);
         debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);

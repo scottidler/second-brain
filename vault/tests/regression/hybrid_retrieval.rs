@@ -346,4 +346,3 @@ fn hybrid_recovers_union_top3() {
         "hybrid recovered union top-3 for {recovered}/{total}; threshold is 18/20"
     );
 }
-
