@@ -1191,28 +1191,10 @@ async fn process_image_inner(
         .and_then(|v| (!v.extracted_text.is_empty()).then_some(v.extracted_text.clone()))
         .unwrap_or_else(|| ocr_text.clone());
 
-    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
-    all_tags.push("image".to_string());
-
-    // Include vision tags
-    if let Some(ref v) = vision {
-        all_tags.extend(v.suggested_tags.iter().map(|t| hygiene::sanitize_tag(t)));
-    }
-
-    // Generate tags via Fabric from extracted text or filename
-    let tag_source = if !extracted_text.is_empty() {
-        extracted_text.clone()
-    } else {
-        format!("Image file: {filename}")
-    };
-
-    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&tag_source, &config.fabric).await {
-        all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
-    }
-    finalize_tags(&mut all_tags, config).await;
-
-    // Build summary: include vision description and extracted text
-    let summary = {
+    // Phase 9c-image cutover: build the Vision+OCR concat that becomes the
+    // distiller's input AND the verbatim `## Transcript` archive in the
+    // published note.
+    let image_transcript = {
         let mut parts = Vec::new();
         if let Some(ref v) = vision
             && !v.description.is_empty()
@@ -1226,19 +1208,52 @@ async fn process_image_inner(
         parts.join("\n\n")
     };
 
+    let distilled = crate::stages::distill::distill_for_publish_image(
+        &config.fabric,
+        &config.staging,
+        trace_id,
+        &image_transcript,
+        Some(&title),
+    )
+    .await;
+
+    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
+    all_tags.push("image".to_string());
+    all_tags.extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
+
+    // Include vision tags
+    if let Some(ref v) = vision {
+        all_tags.extend(v.suggested_tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    }
+
+    // Generate tags via Fabric from the distilled summary (denser than the
+    // raw Vision+OCR concat, so cheaper and more on-topic). Falls back to
+    // the filename when distillation produced no summary.
+    let tag_source = if !distilled.summary.is_empty() {
+        distilled.summary.clone()
+    } else {
+        format!("Image file: {filename}")
+    };
+    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&tag_source, &config.fabric).await {
+        all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+    }
+    finalize_tags(&mut all_tags, config).await;
+
+    let rendered_distilled = distillers::render(&distilled);
     let note = NoteContent {
         title: title.clone(),
         source_url: None,
         asset_path: Some(rel_path.clone()),
         tags: all_tags.clone(),
-        summary,
+        summary: distilled.summary.clone(),
         description: None,
         content_type: ContentType::Image { asset_path: rel_path },
         embed_code: None,
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
-        ..NoteContent::default()
+        distilled_body: Some(rendered_distilled.body_markdown),
+        frontmatter_additions: rendered_distilled.frontmatter_additions,
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);

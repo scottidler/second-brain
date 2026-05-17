@@ -46,7 +46,10 @@ async fn dispatches_vocabulary_to_idea_distiller() {
 }
 
 #[tokio::test]
-async fn dispatches_image_to_passthrough() {
+async fn dispatches_image_to_image_distiller() {
+    // Phase 9c-image: Image now routes to ImageDistiller (Fabric-backed).
+    // With a stub FakeFabric (no canned response) the call falls back; the
+    // fallback path mirrors the live extractor id.
     let dispatcher = make_dispatcher();
     let inputs = DistillInputs {
         transcript: "ocr text",
@@ -56,7 +59,7 @@ async fn dispatches_image_to_passthrough() {
         video_metadata: None,
     };
     let distilled = dispatcher.distill(DistillKind::Image, inputs).await.expect("distill");
-    assert_eq!(distilled.meta.extractor, "distill-passthrough-v1");
+    assert_eq!(distilled.meta.extractor, "distill-image-v1");
 }
 
 #[tokio::test]
