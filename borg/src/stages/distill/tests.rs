@@ -91,17 +91,28 @@ async fn distill_stage_handles_article_through_fabric() {
 }
 
 #[tokio::test]
-async fn distill_stage_bails_on_unwired_thread_kind() {
-    let stage = make_stage();
-    let err = stage
-        .distill(IngestKind::ThreadUrl, "x", None, None)
-        .await
-        .expect_err("thread should still bail in Phase 5");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("Phase 6"),
-        "expected Phase 6 reference for ThreadUrl; got {msg}"
+async fn distill_stage_handles_thread_through_fabric() {
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        "distill-thread",
+        "summary: \"Thread.\"\nclaims: []\ntags: []\nlinks: []\nauthor: \"u/spez\"\npost-count: 4\n",
     );
+    let stage = make_stage_with_fake(fake);
+    let distilled = stage
+        .distill(
+            IngestKind::ThreadUrl,
+            "Thread body.",
+            Some("https://www.reddit.com/r/rust/comments/abc/x/"),
+            None,
+        )
+        .await
+        .expect("distill");
+    assert_eq!(distilled.meta.extractor, "distill-thread-v1");
+    let Some(vault::distilled::KindPayload::Thread(payload)) = distilled.kind_specific else {
+        panic!("expected Thread payload");
+    };
+    assert_eq!(payload.platform, "reddit");
+    assert_eq!(payload.post_count, 4);
 }
 
 #[tokio::test]

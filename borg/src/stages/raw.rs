@@ -48,16 +48,31 @@ fn classify_url(url: &str) -> IngestKind {
     if host.ends_with("youtube.com") || host == "youtu.be" || host.ends_with(".youtube.com") {
         return IngestKind::YoutubeUrl;
     }
-    if host == "x.com"
+    if is_thread_host(&host) {
+        return IngestKind::ThreadUrl;
+    }
+    IngestKind::ArticleUrl
+}
+
+/// Predicate over the host list `classify_url` recognises as a thread
+/// (X / Reddit / Hacker News). Exposed so the Phase 6 shadow-distill site
+/// in `pipeline.rs` can branch without re-parsing the URL through the full
+/// classifier.
+pub fn is_thread_url(url: &str) -> bool {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .unwrap_or_default();
+    is_thread_host(&host)
+}
+
+fn is_thread_host(host: &str) -> bool {
+    host == "x.com"
         || host.ends_with(".x.com")
         || host == "twitter.com"
         || host.ends_with(".twitter.com")
         || host.ends_with("reddit.com")
         || host.ends_with("news.ycombinator.com")
-    {
-        return IngestKind::ThreadUrl;
-    }
-    IngestKind::ArticleUrl
 }
 
 /// Extract the first http(s) URL in a text body, if any.

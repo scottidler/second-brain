@@ -1,9 +1,10 @@
 //! Stage 2 distillation entry point.
 //!
 //! Sits next to `summarize::Summarizer` and adds the structured `Distilled`
-//! contract. As of Phase 4 the stage routes Article and Repo through their
-//! Fabric-backed distillers and Idea / Image / VoiceNote through the no-LLM
-//! distillers; Video / Thread still bail with an explicit Phases 5-6 message.
+//! contract. As of Phase 6 the stage routes all five URL kinds (Article,
+//! Repo, Video, Thread) through their Fabric-backed distillers, plus
+//! Idea / Image / VoiceNote through the no-LLM distillers. Only the
+//! `Vocabulary*` kinds remain outside the contract (handled upstream).
 //!
 //! Borg never writes to SQLite. The output of this stage is a `Distilled`
 //! value that Stage 3 (publish) renders into the vault markdown file via
@@ -425,6 +426,70 @@ pub async fn shadow_distill_video(
     if let Err(e) = write_distilled_yml(&staging, &trace_id, &distilled) {
         log::warn!(
             "[{trace_id}] shadow_distill_video: persist distilled.yml failed: {e:#} (shadow mode; legacy path unaffected)"
+        );
+    }
+}
+
+/// Shadow-mode: run the thread distiller against the markdown rendered by
+/// the standard Stage-0 fetcher chain (Jina / fabric -u / browser-UA +
+/// markitdown) for X/Reddit/HN URLs. Persist `distilled.yml` to the staging
+/// directory. Fires-and-forgets - never blocks or affects the legacy path.
+///
+/// Phase 6 ships in shadow mode only: a dedicated thread JSON fetcher
+/// (X/Reddit/HN APIs) is out of scope for this phase. The rendered markdown
+/// is sufficient input for empirical telemetry on `distill-thread`'s pattern
+/// quality before cutover.
+pub async fn shadow_distill_thread(
+    fabric: FabricConfig,
+    staging: StagingConfig,
+    trace_id: String,
+    url: String,
+    thread_md: String,
+) {
+    if !staging.enabled {
+        return;
+    }
+    log::debug!(
+        "shadow_distill_thread: trace={trace_id} url={url} transcript_len={}",
+        thread_md.len()
+    );
+    let stage = DistillStage::from_fabric_config(&fabric);
+    let started = std::time::Instant::now();
+    let distilled = match stage.distill(IngestKind::ThreadUrl, &thread_md, Some(&url), None).await {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!(
+                "[{trace_id}] shadow_distill_thread: dispatch error: {e:#} (shadow mode; legacy path unaffected)"
+            );
+            return;
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    let fallback = distilled
+        .meta
+        .validation
+        .fallback_reason
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    let platform = match &distilled.kind_specific {
+        Some(vault::distilled::KindPayload::Thread(p)) => p.platform.as_str(),
+        _ => "unknown",
+    };
+    log::info!(
+        "[{trace_id}] shadow_distill_thread: extractor={} model={} platform={} claims={} tags={} links={} fallback={} elapsed_ms={}",
+        distilled.meta.extractor,
+        distilled.meta.model,
+        platform,
+        distilled.claims.len(),
+        distilled.tags.len(),
+        distilled.links.len(),
+        fallback,
+        elapsed_ms,
+    );
+
+    if let Err(e) = write_distilled_yml(&staging, &trace_id, &distilled) {
+        log::warn!(
+            "[{trace_id}] shadow_distill_thread: persist distilled.yml failed: {e:#} (shadow mode; legacy path unaffected)"
         );
     }
 }

@@ -6,18 +6,18 @@
 //! frontmatter `type:` + `source:`. This keeps the distillers crate free of
 //! borg/cortex deps.
 //!
-//! As of Phase 5 the dispatcher is generic over a `FabricCaller` so each
+//! As of Phase 6 the dispatcher is generic over a `FabricCaller` so each
 //! Fabric-backed distiller (Article, Repo, Video, Thread) can be tested
-//! with `FakeFabric` and run in production with `FabricShell`. Phases 3-5
-//! wired Article, Repo, and Video; Thread still bails with an explicit
-//! "ships in Phase 6" error.
+//! with `FakeFabric` and run in production with `FabricShell`. All four
+//! Fabric-backed kinds are wired; only `Vocabulary*` (handled by borg
+//! before the dispatcher sees it) remains outside the contract.
 
 use async_trait::async_trait;
-use eyre::{Result, bail};
+use eyre::Result;
 
 use crate::{
     ArticleConfig, ArticleDistiller, DistillExtractor, DistillInputs, FabricCaller, IdeaDistiller,
-    PassthroughDistiller, RepoConfig, RepoDistiller, VideoConfig, VideoDistiller,
+    PassthroughDistiller, RepoConfig, RepoDistiller, ThreadConfig, ThreadDistiller, VideoConfig, VideoDistiller,
 };
 
 /// Kinds the distillers crate knows how to produce a `Distilled` for.
@@ -46,10 +46,11 @@ impl DistillKind {
     }
 }
 
-/// Phase-4 dispatcher. Routes Idea / Image / VoiceNote through the no-LLM
+/// Phase-6 dispatcher. Routes Idea / Image / VoiceNote through the no-LLM
 /// distillers, Article through `ArticleDistiller<F>`, Repo through
-/// `RepoDistiller<F>`, and Video through `VideoDistiller<F>`. Thread still
-/// bails so callers see the cutover boundary.
+/// `RepoDistiller<F>`, Video through `VideoDistiller<F>`, and Thread
+/// through `ThreadDistiller<F>`. All four Fabric-backed kinds are now
+/// wired; the dispatcher no longer bails for any `DistillKind`.
 #[derive(Debug, Clone)]
 pub struct Dispatcher<F: FabricCaller + Clone> {
     pub idea: IdeaDistiller,
@@ -57,12 +58,14 @@ pub struct Dispatcher<F: FabricCaller + Clone> {
     pub article: ArticleDistiller<F>,
     pub repo: RepoDistiller<F>,
     pub video: VideoDistiller<F>,
+    pub thread: ThreadDistiller<F>,
 }
 
 impl<F: FabricCaller + Clone> Dispatcher<F> {
-    /// Build a dispatcher with a real `FabricCaller`. The article, repo, and
-    /// video configs share `fabric` so cloning the caller once is enough;
-    /// the no-LLM distillers ignore the fabric caller entirely.
+    /// Build a dispatcher with a real `FabricCaller`. The Fabric-backed
+    /// distillers share the same model / max_chars / timeout from the
+    /// article config; the no-LLM distillers ignore the fabric caller
+    /// entirely.
     pub fn new(fabric: F, article_config: ArticleConfig) -> Self {
         let repo_config = RepoConfig {
             model: article_config.model.clone(),
@@ -75,12 +78,18 @@ impl<F: FabricCaller + Clone> Dispatcher<F> {
             timeout_secs: article_config.timeout_secs,
             ..VideoConfig::default()
         };
+        let thread_config = ThreadConfig {
+            model: article_config.model.clone(),
+            max_chars: article_config.max_chars,
+            timeout_secs: article_config.timeout_secs,
+        };
         Self {
             idea: IdeaDistiller,
             passthrough: PassthroughDistiller,
             article: ArticleDistiller::new(fabric.clone(), article_config),
             repo: RepoDistiller::new(fabric.clone(), repo_config),
-            video: VideoDistiller::new(fabric, video_config),
+            video: VideoDistiller::new(fabric.clone(), video_config),
+            thread: ThreadDistiller::new(fabric, thread_config),
         }
     }
 
@@ -91,13 +100,15 @@ impl<F: FabricCaller + Clone> Dispatcher<F> {
         article_config: ArticleConfig,
         repo_config: RepoConfig,
         video_config: VideoConfig,
+        thread_config: ThreadConfig,
     ) -> Self {
         Self {
             idea: IdeaDistiller,
             passthrough: PassthroughDistiller,
             article: ArticleDistiller::new(fabric.clone(), article_config),
             repo: RepoDistiller::new(fabric.clone(), repo_config),
-            video: VideoDistiller::new(fabric, video_config),
+            video: VideoDistiller::new(fabric.clone(), video_config),
+            thread: ThreadDistiller::new(fabric, thread_config),
         }
     }
 }
@@ -117,9 +128,7 @@ impl<F: FabricCaller + Clone> Dispatch for Dispatcher<F> {
             DistillKind::Article => self.article.distill(inputs).await,
             DistillKind::Repo => self.repo.distill(inputs).await,
             DistillKind::Video => self.video.distill(inputs).await,
-            DistillKind::Thread => {
-                bail!("dispatcher: kind {} is not wired yet; ships in Phase 6", kind.as_str());
-            }
+            DistillKind::Thread => self.thread.distill(inputs).await,
         }
     }
 }

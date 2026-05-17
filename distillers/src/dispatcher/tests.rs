@@ -131,22 +131,26 @@ async fn dispatches_video_to_fabric_backed_distiller() {
 }
 
 #[tokio::test]
-async fn unwired_fabric_kinds_bail_until_phase_6() {
-    let dispatcher = make_dispatcher();
+async fn dispatches_thread_to_fabric_backed_distiller() {
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        "distill-thread",
+        "summary: \"Thread summary.\"\nclaims: []\ntags: []\nlinks: []\nauthor: \"@simonw\"\npost-count: 5\n",
+    );
+    let dispatcher = Dispatcher::new(fake, ArticleConfig::default());
     let inputs = DistillInputs {
-        transcript: "x",
-        source_url: None,
+        transcript: "Thread body.",
+        source_url: Some("https://x.com/simonw/status/12345"),
         title_hint: None,
         repo_metadata: None,
         video_metadata: None,
     };
-    let err = dispatcher
-        .distill(DistillKind::Thread, inputs)
-        .await
-        .expect_err("phase-5 dispatcher must not handle Thread yet");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("Phase 6"),
-        "error should reference Phase 6 for Thread; got {msg}"
-    );
+    let distilled = dispatcher.distill(DistillKind::Thread, inputs).await.expect("distill");
+    assert_eq!(distilled.meta.extractor, "distill-thread-v1");
+    let Some(vault::distilled::KindPayload::Thread(payload)) = distilled.kind_specific else {
+        panic!("expected Thread payload from dispatcher");
+    };
+    assert_eq!(payload.platform, "x");
+    assert_eq!(payload.post_count, 5);
+    assert_eq!(payload.author.as_deref(), Some("@simonw"));
 }

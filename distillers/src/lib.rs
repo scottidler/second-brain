@@ -16,6 +16,7 @@ pub mod idea;
 pub mod passthrough;
 pub mod render;
 pub mod repo;
+pub mod thread;
 pub mod validate;
 pub mod video;
 
@@ -30,6 +31,7 @@ pub use idea::IdeaDistiller;
 pub use passthrough::PassthroughDistiller;
 pub use render::{RenderedDistilled, render};
 pub use repo::{RepoConfig, RepoDistiller, RepoMetadata};
+pub use thread::{ThreadConfig, ThreadDistiller, infer_platform};
 pub use validate::{enforce_bounds, fallback_distilled};
 pub use video::{VideoConfig, VideoDistiller, VideoMetadata};
 
