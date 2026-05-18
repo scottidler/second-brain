@@ -143,6 +143,8 @@ The work splits into three design docs along orthogonal axes. Doc 1 is the found
 
 ### Doc 3 - Decay and Promotion Signals + Cold-Note Review
 
+**Status:** Drafted, ready for implementation. [design/2026-05-18-decay-signals-cold-note-review.md](design/2026-05-18-decay-signals-cold-note-review.md). Five phases: `bump_access` on `note_read` only, `recompute_inbound_link_counts` on a dedicated 10-minute oracle background task (decoupled from the sub-second watcher reindex path), `pinned: bool` frontmatter floor (strict-bool parsing), `cortex sweep --cold` writing `system/views/cold-notes.md`, cortex daemon `cold_interval` tick (weekly default). Single SQLite writer per column: oracle owns every Doc 3 signal write; cortex is a pure consumer.
+
 **Goal:** make the corpus self-curate by surfacing what is not being used. Never auto-delete - always surface for review. The output is a report, not an action.
 
 **Drafting points:**
