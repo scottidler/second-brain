@@ -840,6 +840,60 @@ impl SearchIndex {
         Ok(row)
     }
 
+    /// Read the Doc 3 signal triple for `path`: `(search_hit_count,
+    /// last_accessed_at, inbound_link_count)`. Returns `None` if the path
+    /// is not in the index. Used by callers that need to observe signal
+    /// state without joining on the full row (e.g. tests, future
+    /// signal-aware tooling).
+    pub fn note_signals(&self, path: &str) -> Result<Option<(i64, Option<i64>, i64)>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT search_hit_count, last_accessed_at, inbound_link_count
+                 FROM notes WHERE path = ?1",
+                params![path],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .ok();
+        Ok(row)
+    }
+
+    /// Increment `search_hit_count` and stamp `last_accessed_at = now` for `path`.
+    ///
+    /// **Sole intended caller: `oracle::note_read`.** Counting `knowledge_search`
+    /// matches as access would create a positive-feedback loop where high-BM25-
+    /// scoring notes become immortal and the entire decay premise collapses
+    /// (parent roadmap, decay-signals section). The
+    /// `knowledge_search_does_not_bump_access` oracle test is the load-bearing
+    /// regression guard for this rule.
+    ///
+    /// Best-effort signal: a missing row (the note was deleted between read
+    /// and bump) results in `rows_affected = 0` and `Ok(())`; not surfaced.
+    pub fn bump_access(&self, path: &str) -> Result<()> {
+        log::debug!("bump_access: path={path}");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let updated = self.conn.execute(
+            "UPDATE notes
+                SET search_hit_count = search_hit_count + 1,
+                    last_accessed_at = ?2
+              WHERE path = ?1",
+            params![path, now],
+        )?;
+        if updated == 0 {
+            log::trace!("bump_access: path={path} not present in index, ignored");
+        }
+        Ok(())
+    }
+
     /// Get vault statistics including schema gaps
     pub fn stats(&self) -> Result<VaultStats> {
         let total: u64 = self
@@ -2199,6 +2253,35 @@ mod tests {
             })
             .expect("summary");
         assert_eq!(summary, "Revised body.");
+    }
+
+    #[test]
+    fn bump_access_increments_and_stamps_timestamp() {
+        let index = SearchIndex::open_memory().expect("open");
+        let note = make_test_note("notes/bump.md", "# T\n\n## Summary\n\nBody.\n");
+        index.index_one(&note, 100).expect("index_one");
+
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("now")
+            .as_secs() as i64;
+
+        index.bump_access("notes/bump.md").expect("first bump");
+        index.bump_access("notes/bump.md").expect("second bump");
+
+        let (hits, last, _inbound) = signal_row(&index, "notes/bump.md");
+        assert_eq!(hits, 2, "two bumps -> count 2");
+        let last = last.expect("last_accessed_at set after bump");
+        assert!(last >= before, "stamp should be at-or-after before-bump time");
+    }
+
+    #[test]
+    fn bump_access_is_noop_on_missing_path() {
+        // The note may have been deleted between knowledge_search and note_read;
+        // the bump is best-effort and must not error.
+        let index = SearchIndex::open_memory().expect("open");
+        let result = index.bump_access("nonexistent/path.md");
+        assert!(result.is_ok(), "missing path is silent: {result:?}");
     }
 
     #[test]

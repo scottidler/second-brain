@@ -308,6 +308,12 @@ impl OracleMcpServer {
         let db = self.db.lock().map_err(Self::err)?;
         match db.get_note(&req.path).map_err(Self::err)? {
             Some(note) => {
+                // Explicit human-intent read - the only signal we count.
+                // knowledge_search does NOT bump; see the load-bearing
+                // regression test `knowledge_search_does_not_bump_access`.
+                if let Err(e) = db.bump_access(&req.path) {
+                    warn!(path = %req.path, error = %e, "bump_access failed");
+                }
                 let result = Self::format_note(&note, &detail_level);
                 Ok(CallToolResult::success(vec![Content::json(&result)?]))
             }
@@ -844,5 +850,94 @@ impl ServerHandler for OracleMcpServer {
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use vault::frontmatter::Frontmatter;
+    use vault::note::Note;
+    use vault::search::SearchIndex;
+
+    fn seed_one_article(db: &SearchIndex, path: &str, title: &str, body: &str) {
+        let fm = Frontmatter {
+            title: Some(title.to_string()),
+            note_type: Some("article".to_string()),
+            origin: Some("assisted".to_string()),
+            domain: Some("ai".to_string()),
+            ..Frontmatter::default()
+        };
+        let note = Note {
+            path: PathBuf::from(path),
+            frontmatter: fm,
+            body: body.to_string(),
+            raw: format!("---\n---\n{body}"),
+        };
+        db.index_one(&note, 100).expect("seed note");
+    }
+
+    /// Load-bearing regression guard for the decay model.
+    ///
+    /// `knowledge_search` must NOT bump `search_hit_count` / `last_accessed_at`.
+    /// Counting BM25 / hybrid matches as access creates a positive feedback
+    /// loop where high-scoring notes become immortal and the entire decay
+    /// premise collapses (parent roadmap: "high-BM25-scoring notes become
+    /// immortal and the entire decay premise collapses"). Only an explicit
+    /// `note_read` is a human-intent signal. If a future refactor adds a
+    /// `bump_access` call into `knowledge_search`, this test must fail.
+    #[tokio::test]
+    async fn knowledge_search_does_not_bump_access() {
+        let db = SearchIndex::open_memory().expect("open db");
+        seed_one_article(
+            &db,
+            "notes/ai/transformer.md",
+            "Transformer",
+            "Transformer attention mechanism.",
+        );
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        // BM25 mode avoids the embedding-model lookup; the rule we are
+        // guarding applies to every mode of knowledge_search.
+        let search_args = json!({"query": "transformer", "mode": "bm25"});
+        let result = server
+            .dispatch("knowledge_search", search_args)
+            .await
+            .expect("knowledge_search dispatch");
+        assert_ne!(result.is_error, Some(true), "knowledge_search returned an error");
+
+        let signals_after_search = {
+            let db = server.db.lock().expect("lock");
+            db.note_signals("notes/ai/transformer.md")
+                .expect("signals")
+                .expect("present")
+        };
+        assert_eq!(
+            signals_after_search.0, 0,
+            "knowledge_search must not bump search_hit_count",
+        );
+        assert!(
+            signals_after_search.1.is_none(),
+            "knowledge_search must not stamp last_accessed_at",
+        );
+
+        // Now note_read MUST bump.
+        let read_args = json!({"path": "notes/ai/transformer.md"});
+        let result = server
+            .dispatch("note_read", read_args)
+            .await
+            .expect("note_read dispatch");
+        assert_ne!(result.is_error, Some(true), "note_read returned an error");
+
+        let signals_after_read = {
+            let db = server.db.lock().expect("lock");
+            db.note_signals("notes/ai/transformer.md")
+                .expect("signals")
+                .expect("present")
+        };
+        assert_eq!(signals_after_read.0, 1, "note_read must bump search_hit_count");
+        assert!(signals_after_read.1.is_some(), "note_read must stamp last_accessed_at",);
     }
 }
