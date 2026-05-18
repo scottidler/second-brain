@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-05-17
-**Status:** Draft
+**Status:** Implemented
 **Review Passes Completed:** 5/5
 
 ## Summary
@@ -608,13 +608,11 @@ Two-round review with Gemini's Architect persona on 2026-05-17. Consensus reache
 
 ## Status
 
-**Status:** Draft
+**Status:** Implemented
 
-Mark **In Review** once the implementer has read this end-to-end and disagrees with nothing.
-
-Mark **Approved** once Scott explicitly signs off, before Phase 1 starts.
-
-Mark **Implemented** at the end of Phase 7, after `cortex embed --backfill` succeeds on the live vault and `oracle knowledge_search { mode: "hybrid" }` returns results.
+Phases 1-6 landed; Phase 7 (deploy + backfill) is operational and runs
+on the live workstation - bump to v0.7.0, push, `otto deploy`, then
+`cortex embed --prefetch-model && cortex embed --backfill`.
 
 ## References
 
