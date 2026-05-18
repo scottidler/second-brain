@@ -213,7 +213,7 @@ fn process_summary_batch(
     index: &mut SearchIndex,
     model: &dyn EmbeddingModel,
     model_version: &str,
-    vault_root: &Path,
+    _vault_root: &Path,
     batch_size: usize,
 ) -> Result<EmbedStats> {
     let mut stats = EmbedStats::default();
@@ -225,21 +225,29 @@ fn process_summary_batch(
     }
     log::debug!("cortex::embed::process_summary_batch: scanned={}", targets.len());
 
+    // Use the snapshot of `notes.summary` returned by
+    // stale_embedding_targets directly. The indexer populates that
+    // column via vault::search::parse_body_summary (with
+    // detail::extract_summary as a fallback), so it is the canonical
+    // source of summary text and is always non-empty (the SQL filter
+    // excludes empty rows). No file I/O on the hot path; no
+    // "skipped without writing" loop on notes that lack a ## Summary
+    // heading in the markdown body.
     let mut work: Vec<EmbedWork> = Vec::with_capacity(targets.len());
     for t in &targets {
         stats.scanned += 1;
-        let abs = vault_root.join(&t.note_path);
-        let text = match read_section_text(&abs, "## Summary") {
-            Some(s) if !s.trim().is_empty() => s,
-            _ => {
-                log::warn!("cortex::embed: skipping note {} (no summary text)", t.note_path);
-                stats.skipped_empty += 1;
-                continue;
-            }
-        };
+        let text = t.summary.trim();
+        if text.is_empty() {
+            // Defensive: stale_embedding_targets's SQL filter already
+            // excludes these, but keep the skip path so a future schema
+            // drift cannot reintroduce the infinite-loop bug.
+            log::warn!("cortex::embed: skipping note {} (empty summary)", t.note_path);
+            stats.skipped_empty += 1;
+            continue;
+        }
         work.push(EmbedWork {
             note_path: t.note_path.clone(),
-            text,
+            text: text.to_string(),
             source_modified_at: t.modified_at,
         });
     }

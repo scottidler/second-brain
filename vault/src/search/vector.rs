@@ -78,6 +78,12 @@ pub struct StaleTarget {
     /// the next scan sees a consistent watermark even if the note is
     /// re-modified between read and write.
     pub modified_at: i64,
+    /// Snapshot of `notes.summary` at query time. For Summary embeddings
+    /// cortex uses this directly as the input text (no file I/O on hot
+    /// path; no skip-without-write loop on notes missing a `## Summary`
+    /// heading). For TranscriptChunk this is always an empty string;
+    /// cortex reads the `## Transcript` section from disk for those.
+    pub summary: String,
 }
 
 /// Validate that a stored embedding BLOB matches its declared `dim`.
@@ -380,7 +386,15 @@ impl SearchIndex {
     /// List notes whose `kind` embedding is missing or stale relative
     /// to `notes.modified_at`. Cortex's re-embed loop drives this list.
     ///
-    /// Summary rows: every note is a candidate.
+    /// Summary rows: every note with a non-empty `notes.summary` column
+    /// is a candidate. The indexer fills that column via
+    /// `parse_body_summary` with `detail::extract_summary` as a fallback,
+    /// so the only notes excluded here are ones whose entire body the
+    /// indexer judged unworth summarising. Without this filter, notes
+    /// with no summary text would never get an `note_embeddings` row
+    /// written and would re-appear in every batch forever (the cortex
+    /// embed loop has no skip-sentinel mechanism).
+    ///
     /// Transcript-chunk rows: filtered to the kinds listed in
     /// `NoteType::transcript_eligible()`. Without that filter, every
     /// Article and Repo in the vault matches `e.id IS NULL` permanently
@@ -400,19 +414,20 @@ impl SearchIndex {
             .join(", ");
 
         let sql = match kind {
-            EmbeddingKind::Summary => "SELECT n.path, n.note_type, n.modified_at
+            EmbeddingKind::Summary => "SELECT n.path, n.note_type, n.modified_at, n.summary
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
                   AND e.kind = ?1
                   AND e.model_version = ?2
-                 WHERE e.id IS NULL
-                    OR e.source_modified_at < n.modified_at
+                 WHERE (n.summary IS NOT NULL AND n.summary != '')
+                   AND (e.id IS NULL
+                        OR e.source_modified_at < n.modified_at)
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
                 .to_string(),
             EmbeddingKind::TranscriptChunk => format!(
-                "SELECT n.path, n.note_type, n.modified_at
+                "SELECT n.path, n.note_type, n.modified_at, ''
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -433,6 +448,7 @@ impl SearchIndex {
                     note_path: row.get(0)?,
                     note_type: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
                     modified_at: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 })
             })?
             .filter_map(|r| r.ok())

@@ -78,14 +78,19 @@ fn process_batch_embeds_stale_summary_rows() {
 
 #[test]
 fn process_batch_skips_notes_with_empty_summary() {
+    // Notes whose `notes.summary` column is empty are filtered out at
+    // the SQL level by `stale_embedding_targets`, so the embed loop
+    // never sees them. This protects against an infinite-loop bug:
+    // before this filter, a note with no summary text would be picked
+    // up every batch, skipped (no embedding row written), then re-
+    // picked up indefinitely.
     let mut index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-batch-test");
     index.set_active_embedding(m.model_version(), m.dim()).expect("set");
 
     let tmp = TempDir::new().expect("tmp");
-    write_note_with_summary(tmp.path(), "notes/empty.md", "   ");
     index
-        .insert_test_note_row("notes/empty.md", "article", 100)
+        .insert_test_note_full("notes/empty.md", "article", "body text", "", 100)
         .expect("note");
 
     let stats = process_batch(
@@ -97,9 +102,9 @@ fn process_batch_skips_notes_with_empty_summary() {
         16,
     )
     .expect("process");
-    assert_eq!(stats.scanned, 1);
+    assert_eq!(stats.scanned, 0, "SQL filter must exclude empty-summary notes");
     assert_eq!(stats.embedded, 0);
-    assert_eq!(stats.skipped_empty, 1);
+    assert_eq!(stats.skipped_empty, 0);
 }
 
 #[test]
