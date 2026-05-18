@@ -115,6 +115,31 @@ fn registry() -> &'static RwLock<Vec<RegistryEntry>> {
     MODEL_REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
 
+/// Idempotent backend-agnostic prefetch.
+///
+/// Candle: downloads `config.json`, `tokenizer.json`, and
+/// `model.safetensors` into the hf-hub cache without instantiating the
+/// BertModel (cheap; no weight loading).
+///
+/// fastembed: calls `FastEmbedModel::load()` because fastembed has no
+/// separate prefetch path - the model session ships alongside the
+/// download.
+///
+/// Used by `cortex embed --prefetch-model` so the first real embedding
+/// call does not pay network latency.
+#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+pub fn prefetch_active_model() -> Result<()> {
+    #[cfg(feature = "vec-candle")]
+    {
+        candle::CandleBertModel::prefetch_bge_small()
+    }
+    #[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
+    {
+        let _model = fastembed::FastEmbedModel::load()?;
+        Ok(())
+    }
+}
+
 /// Lazy-load the active backend's model for `model_version` and embed `text`.
 ///
 /// Used by oracle's hybrid/vector dispatch where every query needs an

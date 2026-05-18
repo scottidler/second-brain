@@ -96,7 +96,7 @@ pub fn run_embed(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result
 
     if opts.prefetch_model {
         log::info!("cortex::embed: prefetching model {model_version}");
-        ActiveModel::load().wrap_err("failed to prefetch embedding model")?;
+        vault::embedding::prefetch_active_model().wrap_err("failed to prefetch embedding model")?;
         println!("Prefetched embedding model {model_version}.");
         return Ok(EmbedStats::default());
     }
