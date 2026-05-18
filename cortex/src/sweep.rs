@@ -160,6 +160,15 @@ fn rewrite_note_tags(path: &Path, new_tags: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Entry point invoked by the cortex daemon's `cold_interval` tick.
+/// Thin wrapper over `run_cold` that matches the
+/// `crate::embed::daemon_tick` shape, so the daemon's `select!` arm is
+/// a one-liner. Errors are propagated; the daemon translates them to
+/// log lines so the runtime keeps ticking.
+pub fn daemon_cold_tick(vault_root: &Path, config: &Config) -> Result<ColdStats> {
+    run_cold(vault_root, config)
+}
+
 /// Generate the cold-note review report.
 ///
 /// Opens the oracle search DB, runs the cold query, groups by domain,
@@ -246,15 +255,30 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Render the cold-note report. Public for snapshot testing in
-/// `cortex/src/sweep/tests.rs` (or here in-line) so the report's exact
-/// shape can be locked against unintended changes.
+/// Render the cold-note report with the current wall-clock timestamp.
+/// Thin wrapper over `render_cold_report_at` so production code stays
+/// terse; tests use the `_at` variant directly for byte-exact snapshot
+/// comparison against a checked-in fixture.
 pub fn render_cold_report(rows: &[ColdNote], stats: &ColdStats, older_than_days: u32) -> String {
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let now = chrono::Utc::now();
+    render_cold_report_at(rows, stats, older_than_days, now)
+}
+
+/// Render the cold-note report with an explicit `now` for the
+/// `generated-at` frontmatter field. Splitting the timestamp out as a
+/// parameter is what makes the snapshot fixture in
+/// `cortex/src/sweep/fixtures/cold-notes-expected.md` reproducible.
+pub fn render_cold_report_at(
+    rows: &[ColdNote],
+    stats: &ColdStats,
+    older_than_days: u32,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let generated_at = now.format("%Y-%m-%dT%H:%M:%SZ");
 
     let mut out = String::new();
     out.push_str("---\n");
-    out.push_str(&format!("generated-at: {now}\n"));
+    out.push_str(&format!("generated-at: {generated_at}\n"));
     out.push_str("generator: cortex sweep --cold\n");
     out.push_str(&format!("older-than-days: {older_than_days}\n"));
     out.push_str(&format!("total-surfaced: {}\n", stats.surfaced));
@@ -276,35 +300,39 @@ pub fn render_cold_report(rows: &[ColdNote], stats: &ColdStats, older_than_days:
     );
 
     if rows.is_empty() {
-        out.push_str("No cold notes at the current threshold.\n");
-        return out;
-    }
-
-    // Group rows by domain, preserving stable order for snapshot tests.
-    let mut groups: BTreeMap<String, Vec<&ColdNote>> = BTreeMap::new();
-    for row in rows {
-        let key = if row.domain.is_empty() {
-            "(no domain)".to_string()
-        } else {
-            row.domain.clone()
-        };
-        groups.entry(key).or_default().push(row);
-    }
-
-    for (domain, domain_rows) in &groups {
-        out.push_str(&format!("## {domain} ({count})\n\n", count = domain_rows.len()));
-        for row in domain_rows {
-            let date_str = chrono::DateTime::<chrono::Utc>::from_timestamp(row.modified_at, 0)
-                .map(|d| d.format("%Y-%m-%d").to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let title = if row.title.is_empty() { "(untitled)".to_string() } else { row.title.clone() };
-            out.push_str(&format!(
-                "- [ ] `{path}` - \"{title}\" - last modified {date_str}\n",
-                path = row.path,
-            ));
+        out.push_str("No cold notes at the current threshold.\n\n");
+    } else {
+        // Group rows by domain, preserving stable order for snapshot tests.
+        let mut groups: BTreeMap<String, Vec<&ColdNote>> = BTreeMap::new();
+        for row in rows {
+            let key = if row.domain.is_empty() {
+                "(no domain)".to_string()
+            } else {
+                row.domain.clone()
+            };
+            groups.entry(key).or_default().push(row);
         }
-        out.push('\n');
+
+        for (domain, domain_rows) in &groups {
+            out.push_str(&format!("## {domain} ({count})\n\n", count = domain_rows.len()));
+            for row in domain_rows {
+                let date_str = chrono::DateTime::<chrono::Utc>::from_timestamp(row.modified_at, 0)
+                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let title = if row.title.is_empty() { "(untitled)".to_string() } else { row.title.clone() };
+                out.push_str(&format!(
+                    "- [ ] `{path}` - \"{title}\" - last modified {date_str}\n",
+                    path = row.path,
+                ));
+            }
+            out.push('\n');
+        }
     }
+
+    // Footer cross-references the dashboard view so a reviewer can hop
+    // back to the broader vault overview after triaging.
+    out.push_str("---\n\n");
+    out.push_str("See also: [[borg-dashboard]] for vault activity overview.\n");
 
     out
 }
@@ -348,6 +376,60 @@ mod tests {
             domain: domain.to_string(),
             modified_at,
         }
+    }
+
+    /// Fixed input used by both the snapshot assertion and the
+    /// (ignored) regeneration test. Keeping the construction in a
+    /// shared helper guarantees the regen path and the comparison
+    /// path see identical input.
+    fn snapshot_fixture_input() -> (Vec<ColdNote>, ColdStats, u32, chrono::DateTime<chrono::Utc>) {
+        let rows = vec![
+            // 2025-08-12T00:00:00Z = 1_754_956_800
+            make_cold_note("notes/ai/old-paper.md", "Old Paper", "ai", 1_754_956_800),
+            make_cold_note("notes/ai/forgotten.md", "Forgotten Thread", "ai", 1_754_956_800),
+            make_cold_note("notes/diy/unused-jig.md", "Unused Jig", "diy", 1_754_956_800),
+        ];
+        let stats = ColdStats {
+            scanned: 1_345,
+            surfaced: 3,
+            pinned_excluded: 7,
+        };
+        let now = chrono::DateTime::<chrono::Utc>::from_timestamp(1_747_569_600, 0).expect("fixed now");
+        (rows, stats, 180, now)
+    }
+
+    const SNAPSHOT_FIXTURE_PATH: &str = "src/sweep/fixtures/cold-notes-expected.md";
+
+    /// Byte-exact equality between `render_cold_report_at` output and
+    /// the checked-in fixture. If this fails after an intentional format
+    /// change, run `cargo test -p cortex regenerate_cold_report_snapshot
+    /// -- --ignored` and review the diff before re-committing.
+    #[test]
+    fn cold_report_matches_snapshot_fixture() {
+        let (rows, stats, days, now) = snapshot_fixture_input();
+        let rendered = render_cold_report_at(&rows, &stats, days, now);
+        let expected = std::fs::read_to_string(SNAPSHOT_FIXTURE_PATH).unwrap_or_else(|e| {
+            panic!(
+                "missing snapshot fixture at {SNAPSHOT_FIXTURE_PATH}: {e}. \
+                 Regenerate with `cargo test -p cortex regenerate_cold_report_snapshot -- --ignored`."
+            )
+        });
+        assert_eq!(
+            rendered, expected,
+            "cold-report snapshot drift; regenerate with --ignored after reviewing the diff",
+        );
+    }
+
+    /// Regenerate the snapshot fixture. Run with `cargo test -p cortex
+    /// regenerate_cold_report_snapshot -- --ignored` after an
+    /// intentional format change, then inspect the diff and re-commit.
+    #[test]
+    #[ignore = "writes a checked-in fixture; opt in via --ignored"]
+    fn regenerate_cold_report_snapshot() {
+        let (rows, stats, days, now) = snapshot_fixture_input();
+        let rendered = render_cold_report_at(&rows, &stats, days, now);
+        std::fs::write(SNAPSHOT_FIXTURE_PATH, &rendered).expect("write snapshot fixture");
+        eprintln!("wrote snapshot fixture to {SNAPSHOT_FIXTURE_PATH}");
     }
 
     #[test]
@@ -398,6 +480,96 @@ mod tests {
         };
         let out = render_cold_report(&rows, &stats, 180);
         assert!(out.contains("## (no domain) (1)"));
+    }
+
+    /// `test_daemon_cold_tick_fires` per the design doc. Goes through
+    /// `sweep::daemon_cold_tick` - the exact entry point the daemon's
+    /// `select!` arm invokes - so a regression in (a) the daemon ->
+    /// sweep wiring, (b) `config.oracle_db_path()` resolution, or (c)
+    /// the run_cold body would all break this test. We intentionally do
+    /// NOT drive `start_watching` in a spawned task: the tokio
+    /// `interval` firing is tokio's responsibility, and the surrounding
+    /// daemon orchestration (watcher, initial sweep, intel scheduling)
+    /// pulls in heavy machinery for a path that's already covered by
+    /// the surrounding unit tests. The chronology the design doc
+    /// specifies ("a few seconds") is collapsed to a single synchronous
+    /// invocation here.
+    ///
+    /// Linux-only because we redirect `dirs::data_local_dir()` via
+    /// `XDG_DATA_HOME`. macOS resolves data_local_dir via system APIs
+    /// that ignore env vars (see the `dirs` crate platform notes).
+    #[cfg(target_os = "linux")]
+    #[serial_test::serial(xdg_data_home)]
+    #[test]
+    fn test_daemon_cold_tick_fires() {
+        use std::path::PathBuf;
+        use vault::frontmatter::Frontmatter;
+        use vault::note::Note;
+        use vault::search::SearchIndex;
+
+        let xdg_tmp = tempfile::tempdir().expect("xdg tmpdir");
+        let vault_tmp = tempfile::tempdir().expect("vault tmpdir");
+
+        // Redirect `dirs::data_local_dir()` so config.oracle_db_path()
+        // resolves under our tempdir instead of the real user store.
+        // safety: behind serial_test::serial(xdg_data_home), no
+        // concurrent test mutates XDG_DATA_HOME.
+        let prior = std::env::var_os("XDG_DATA_HOME");
+        // SAFETY: tests serialized by the `xdg_data_home` lock; no
+        // concurrent reader exists, so the mutation is sound here.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", xdg_tmp.path());
+        }
+
+        let result = std::panic::catch_unwind(|| {
+            // Resolve the DB path the same way production does.
+            let config = crate::config::Config::default();
+            let db_path = config.oracle_db_path();
+            assert!(
+                db_path.starts_with(xdg_tmp.path()),
+                "XDG_DATA_HOME redirect did not take: db_path={}",
+                db_path.display(),
+            );
+            std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("mkdir db parent");
+
+            // Pre-seed the DB with a cold note (no signals, old mtime).
+            let index = SearchIndex::open(&db_path).expect("open db");
+            let fm = Frontmatter {
+                title: Some("Stale Note".to_string()),
+                note_type: Some("article".to_string()),
+                origin: Some("assisted".to_string()),
+                domain: Some("ai".to_string()),
+                ..Frontmatter::default()
+            };
+            let note = Note {
+                path: PathBuf::from("notes/ai/stale.md"),
+                frontmatter: fm,
+                body: "## Summary\n\nS.\n".to_string(),
+                raw: String::new(),
+            };
+            index.index_one(&note, 1_000).expect("seed cold note");
+            drop(index);
+
+            // Invoke the same function the daemon's select! arm calls.
+            let stats = daemon_cold_tick(vault_tmp.path(), &config).expect("daemon_cold_tick");
+            assert_eq!(stats.surfaced, 1, "the cold note must surface");
+
+            let report = vault_tmp.path().join("system").join("views").join("cold-notes.md");
+            assert!(report.exists(), "report file must appear at {}", report.display());
+            let body = std::fs::read_to_string(&report).expect("read report");
+            assert!(body.contains("`notes/ai/stale.md`"), "report must list the cold note");
+        });
+
+        // SAFETY: same serialization guarantee as the set_var above.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     #[test]

@@ -237,10 +237,12 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
             }
             _ = cold_interval.tick() => {
                 // Doc 3 cold-note sweep tick. block_in_place because
-                // run_cold opens a SQLite connection and does a single
-                // SELECT + atomic write; bounded and fast, but blocking.
+                // daemon_cold_tick opens a SQLite connection and does a
+                // single SELECT + atomic write; bounded and fast, but
+                // blocking. Matches the embed-tick shape so the
+                // daemon's select! arms stay symmetric.
                 log::info!("running periodic cold-note sweep");
-                match tokio::task::block_in_place(|| crate::sweep::run_cold(vault_root, config)) {
+                match tokio::task::block_in_place(|| crate::sweep::daemon_cold_tick(vault_root, config)) {
                     Ok(stats) => log::info!(
                         "daemon cold sweep: scanned={} surfaced={} pinned_excluded={}",
                         stats.scanned, stats.surfaced, stats.pinned_excluded,

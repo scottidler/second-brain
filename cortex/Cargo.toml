@@ -32,4 +32,5 @@ distillers = { path = "../distillers" }
 url = "2.5.8"
 
 [dev-dependencies]
+serial_test = "3.4.0"
 tempfile = "3.27"
