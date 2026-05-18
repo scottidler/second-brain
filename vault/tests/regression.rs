@@ -10,3 +10,7 @@
 
 #[path = "regression/hybrid_retrieval.rs"]
 mod hybrid_retrieval;
+
+#[cfg(feature = "vec-candle")]
+#[path = "regression/candle_parity.rs"]
+mod candle_parity;
