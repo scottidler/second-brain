@@ -487,6 +487,11 @@ pub struct DaemonConfig {
     pub daily_at: Option<String>,
     #[serde(rename = "weekly-at")]
     pub weekly_at: Option<String>,
+    /// Cadence (seconds) for the cold-note sweep tick. Default 604_800
+    /// (1 week): the cold report is a review surface, not a watchdog;
+    /// reviewing more often than weekly out-paces the user.
+    #[serde(rename = "cold-interval-secs")]
+    pub cold_interval_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -519,6 +524,7 @@ impl Default for DaemonConfig {
             poll_interval: 300,
             daily_at: None,
             weekly_at: None,
+            cold_interval_secs: 604_800,
         }
     }
 }

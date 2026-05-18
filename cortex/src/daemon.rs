@@ -119,6 +119,14 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut embed_interval = tokio::time::interval(crate::embed::daemon_cadence(config));
     embed_interval.tick().await; // consume the immediate first tick
 
+    // Doc 3 cold-note sweep tick. Default cadence is one week; the
+    // report is a checklist for review, not a polling watchdog. The
+    // cold sweep is a pure consumer of the index oracle materializes;
+    // cortex writes nothing to the `notes` table here, just the report
+    // file at system/views/cold-notes.md.
+    let mut cold_interval = tokio::time::interval(Duration::from_secs(daemon_config.cold_interval_secs));
+    cold_interval.tick().await; // consume the immediate first tick
+
     // Run a full sweep on startup.
     // block_in_place isolates the blocking CPU+I/O sweep from the tokio worker thread, letting
     // the watcher and timers continue to run; once Phase 1 rayon lands inside scan_vault, this
@@ -225,6 +233,19 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                         // Idle tick - nothing to embed. Stay quiet to keep the log readable.
                     }
                     Err(e) => log::error!("daemon embed tick failed: {e}"),
+                }
+            }
+            _ = cold_interval.tick() => {
+                // Doc 3 cold-note sweep tick. block_in_place because
+                // run_cold opens a SQLite connection and does a single
+                // SELECT + atomic write; bounded and fast, but blocking.
+                log::info!("running periodic cold-note sweep");
+                match tokio::task::block_in_place(|| crate::sweep::run_cold(vault_root, config)) {
+                    Ok(stats) => log::info!(
+                        "daemon cold sweep: scanned={} surfaced={} pinned_excluded={}",
+                        stats.scanned, stats.surfaced, stats.pinned_excluded,
+                    ),
+                    Err(e) => log::error!("daemon cold sweep failed: {e}"),
                 }
             }
             _ = tokio::signal::ctrl_c() => {

@@ -183,11 +183,24 @@ pub fn run_cold(vault_root: &Path, config: &Config) -> Result<ColdStats> {
         )
     })?;
 
+    run_cold_with_index(vault_root, &index, &config.sweep.cold)
+}
+
+/// Inner cold-sweep entrypoint that takes an already-open `SearchIndex`.
+/// Lets tests synthesize an in-memory DB and exercise the full render +
+/// write path without going through `config.oracle_db_path()`. The
+/// daemon tick uses the outer `run_cold` so it stays a one-line `select!`
+/// arm matching the embed-tick shape.
+pub fn run_cold_with_index(
+    vault_root: &Path,
+    index: &SearchIndex,
+    cold: &crate::config::ColdConfig,
+) -> Result<ColdStats> {
     let now = chrono::Utc::now().timestamp();
-    let older_than = now - (config.sweep.cold.older_than_days as i64) * 86_400;
+    let older_than = now - (cold.older_than_days as i64) * 86_400;
     let query = ColdQuery {
         older_than,
-        limit: config.sweep.cold.limit,
+        limit: cold.limit,
     };
 
     let rows = index.cold_notes(&query).wrap_err("cold_notes query failed")?;
@@ -202,7 +215,7 @@ pub fn run_cold(vault_root: &Path, config: &Config) -> Result<ColdStats> {
         pinned_excluded,
     };
 
-    let report = render_cold_report(&rows, &stats, config.sweep.cold.older_than_days);
+    let report = render_cold_report(&rows, &stats, cold.older_than_days);
     let out_path = vault_root.join("system").join("views").join("cold-notes.md");
     atomic_write(&out_path, &report).wrap_err_with(|| format!("failed to write {}", out_path.display()))?;
 
@@ -377,6 +390,61 @@ mod tests {
         };
         let out = render_cold_report(&rows, &stats, 180);
         assert!(out.contains("## (no domain) (1)"));
+    }
+
+    #[test]
+    fn run_cold_with_index_writes_report_atomically() {
+        // The same fixture pattern the daemon test would otherwise need
+        // (driving the daemon for a few seconds and asserting the file
+        // appears). Going through `run_cold_with_index` directly skips
+        // the tokio interval but exercises every other step the daemon
+        // tick runs, so a regression in the SQL, render, or atomic
+        // write will surface here.
+        use std::path::PathBuf;
+        use vault::frontmatter::Frontmatter;
+        use vault::note::Note;
+        use vault::search::SearchIndex;
+
+        let index = SearchIndex::open_memory().expect("open");
+        let fm_cold = Frontmatter {
+            title: Some("Old Paper".to_string()),
+            note_type: Some("article".to_string()),
+            origin: Some("assisted".to_string()),
+            domain: Some("ai".to_string()),
+            ..Frontmatter::default()
+        };
+        let cold_note = Note {
+            path: PathBuf::from("notes/ai/old.md"),
+            frontmatter: fm_cold,
+            body: "## Summary\n\nO.\n".to_string(),
+            raw: String::new(),
+        };
+        index.index_one(&cold_note, 1_000).expect("index");
+
+        let vault_root = tempfile::tempdir().expect("tmpdir");
+        let cold_config = crate::config::ColdConfig {
+            older_than_days: 30,
+            limit: 100,
+        };
+        let stats = run_cold_with_index(vault_root.path(), &index, &cold_config).expect("run_cold");
+
+        assert_eq!(stats.scanned, 1);
+        assert_eq!(stats.surfaced, 1);
+        assert_eq!(stats.pinned_excluded, 0);
+
+        let report_path = vault_root.path().join("system").join("views").join("cold-notes.md");
+        assert!(
+            report_path.exists(),
+            "report file should exist at {}",
+            report_path.display()
+        );
+        let body = std::fs::read_to_string(&report_path).expect("read report");
+        assert!(body.contains("## ai (1)"));
+        assert!(body.contains("`notes/ai/old.md`"));
+        assert!(body.contains("\"Old Paper\""));
+        // Atomic write: temp file should not survive the rename.
+        let tmp_path = report_path.with_extension("md.tmp");
+        assert!(!tmp_path.exists(), "temp file should not linger");
     }
 
     #[test]
