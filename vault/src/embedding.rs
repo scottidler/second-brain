@@ -115,6 +115,29 @@ fn registry() -> &'static RwLock<Vec<RegistryEntry>> {
     MODEL_REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
 
+/// Backend-agnostic active-model loader.
+///
+/// Candle accepts a worker count for its internal replica pool; pass
+/// `0` to let it pick the platform-aware default. fastembed ignores the
+/// count (ONNX MLAS handles its own threading), so the parameter is
+/// honored only on the Candle backend.
+#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+pub fn load_active_model(workers: usize) -> Result<ActiveModel> {
+    #[cfg(feature = "vec-candle")]
+    {
+        if workers == 0 {
+            candle::CandleBertModel::load()
+        } else {
+            candle::CandleBertModel::load_with_workers(workers)
+        }
+    }
+    #[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
+    {
+        let _ = workers;
+        fastembed::FastEmbedModel::load()
+    }
+}
+
 /// Idempotent backend-agnostic prefetch.
 ///
 /// Candle: downloads `config.json`, `tokenizer.json`, and

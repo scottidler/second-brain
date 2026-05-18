@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use eyre::{Context, Result};
 use fs2::FileExt;
-use vault::embedding::{ACTIVE_MODEL_VERSION, ActiveModel, EmbeddingModel, MockEmbedder};
+use vault::embedding::{ACTIVE_MODEL_VERSION, EmbeddingModel, MockEmbedder, load_active_model};
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
 use crate::cli::EmbedOpts;
@@ -108,8 +108,11 @@ pub fn run_embed(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result
         log::warn!("cortex::embed: using MockEmbedder (test-only)");
         Box::new(MockEmbedder::default_384())
     } else {
-        log::info!("cortex::embed: loading embedding model {model_version}");
-        Box::new(ActiveModel::load().wrap_err("failed to load embedding model")?)
+        log::info!(
+            "cortex::embed: loading embedding model {model_version} workers={}",
+            config.embed.workers
+        );
+        Box::new(load_active_model(config.embed.workers).wrap_err("failed to load embedding model")?)
     };
 
     // Make sure embedding_config matches the model we're about to write

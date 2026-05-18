@@ -320,6 +320,7 @@ impl TestVault {
             sweep: SweepConfig::default(),
             backfill: BackfillConfig::default(),
             fabric: FabricConfig::default(),
+            embed: crate::config::EmbedConfig::default(),
         }
     }
 

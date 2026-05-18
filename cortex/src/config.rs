@@ -19,6 +19,7 @@ pub struct Config {
     pub sweep: SweepConfig,
     pub backfill: BackfillConfig,
     pub fabric: FabricConfig,
+    pub embed: EmbedConfig,
 }
 
 impl Default for Config {
@@ -35,8 +36,22 @@ impl Default for Config {
             sweep: SweepConfig::default(),
             backfill: BackfillConfig::default(),
             fabric: FabricConfig::default(),
+            embed: EmbedConfig::default(),
         }
     }
+}
+
+/// Knobs for `cortex embed` and the daemon's embed tick.
+///
+/// `workers` controls the internal replica pool inside the Candle
+/// backend. The default of 0 means "let the backend pick its own
+/// platform-aware default" (currently `min(8, available_parallelism)`).
+/// A non-zero value pins an explicit count; the backend clamps it to
+/// its own `[1, MAX_WORKERS]` range.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct EmbedConfig {
+    pub workers: usize,
 }
 
 /// Phase-7 backfill knobs. `max-concurrent` defaults to 2 so a one-pass
