@@ -209,6 +209,14 @@ pub fn run_cold_with_index(
         .wrap_err("count_pinned_excluded failed")?;
     let scanned = index.count_notes().wrap_err("count_notes failed")?;
 
+    if scanned == 0 {
+        // First-run-no-oracle case (or genuinely empty vault): write the
+        // placeholder report and surface a hint so an operator who ran
+        // `cortex sweep --cold` before oracle ever indexed knows what
+        // happened.
+        log::warn!("run_cold: notes table is empty - oracle reindex has not yet run, or vault is brand new");
+    }
+
     let stats = ColdStats {
         scanned,
         surfaced: rows.len() as u64,
@@ -390,6 +398,66 @@ mod tests {
         };
         let out = render_cold_report(&rows, &stats, 180);
         assert!(out.contains("## (no domain) (1)"));
+    }
+
+    #[test]
+    fn run_cold_with_index_counts_pinned_excluded() {
+        use std::path::PathBuf;
+        use vault::frontmatter::Frontmatter;
+        use vault::note::Note;
+        use vault::search::SearchIndex;
+
+        let index = SearchIndex::open_memory().expect("open");
+        // Old, otherwise-cold, pinned: should be counted as
+        // pinned_excluded, NOT surfaced.
+        let fm_pinned = Frontmatter {
+            title: Some("Pinned".to_string()),
+            note_type: Some("article".to_string()),
+            origin: Some("assisted".to_string()),
+            domain: Some("ai".to_string()),
+            pinned: Some(true),
+            ..Frontmatter::default()
+        };
+        let pinned_note = Note {
+            path: PathBuf::from("notes/ai/pinned.md"),
+            frontmatter: fm_pinned,
+            body: "## Summary\n\nP.\n".to_string(),
+            raw: String::new(),
+        };
+        index.index_one(&pinned_note, 1_000).expect("index pinned");
+
+        // Old, unpinned, cold: should surface.
+        let fm_cold = Frontmatter {
+            title: Some("Cold".to_string()),
+            note_type: Some("article".to_string()),
+            origin: Some("assisted".to_string()),
+            domain: Some("ai".to_string()),
+            ..Frontmatter::default()
+        };
+        let cold_note = Note {
+            path: PathBuf::from("notes/ai/cold.md"),
+            frontmatter: fm_cold,
+            body: "## Summary\n\nC.\n".to_string(),
+            raw: String::new(),
+        };
+        index.index_one(&cold_note, 1_000).expect("index cold");
+
+        let vault_root = tempfile::tempdir().expect("tmpdir");
+        let cold_config = crate::config::ColdConfig {
+            older_than_days: 30,
+            limit: 100,
+        };
+        let stats = run_cold_with_index(vault_root.path(), &index, &cold_config).expect("run_cold");
+
+        assert_eq!(stats.scanned, 2, "two indexed notes");
+        assert_eq!(stats.surfaced, 1, "only the unpinned one surfaces");
+        assert_eq!(stats.pinned_excluded, 1, "the pinned one counts in the floor stat");
+
+        let report_path = vault_root.path().join("system").join("views").join("cold-notes.md");
+        let body = std::fs::read_to_string(&report_path).expect("read");
+        assert!(body.contains("`notes/ai/cold.md`"));
+        assert!(!body.contains("`notes/ai/pinned.md`"), "pinned must not surface");
+        assert!(body.contains("pinned-excluded: 1"));
     }
 
     #[test]
