@@ -144,6 +144,24 @@ pub fn run_embed(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result
             if batch_stats.scanned == 0 {
                 break;
             }
+            // Termination guard against the all-skips-no-writes pattern:
+            // if a batch scanned rows but wrote nothing (every target was
+            // skipped because the file lacked the expected section), the
+            // next batch will return the same targets - infinite loop.
+            // Bail out so the loop cannot spin. The skipped notes will
+            // simply remain "stale" until either (a) cortex grows a
+            // skip-sentinel mechanism, or (b) the underlying notes gain
+            // the missing content.
+            if batch_stats.embedded == 0 && batch_stats.scanned == batch_stats.skipped_empty {
+                log::warn!(
+                    "cortex::embed: kind={:?} batch scanned={} all skipped; \
+                     halting to avoid an infinite loop. Stale rows remain pending \
+                     until the underlying notes gain the missing section.",
+                    kind,
+                    batch_stats.scanned,
+                );
+                break;
+            }
         }
     }
 
