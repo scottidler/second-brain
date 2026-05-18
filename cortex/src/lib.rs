@@ -337,6 +337,20 @@ pub fn run_classify(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> 
 
 pub fn run_sweep(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<()> {
     log::info!("starting sweep command (vault_root={})", vault_root.display());
+
+    if opts.cold && (opts.migrate || opts.proposals) {
+        eyre::bail!("--cold cannot be combined with --migrate or --proposals");
+    }
+
+    if opts.cold {
+        let stats = sweep::run_cold(vault_root, config)?;
+        println!(
+            "Cold sweep: scanned={} surfaced={} pinned_excluded={}",
+            stats.scanned, stats.surfaced, stats.pinned_excluded
+        );
+        return Ok(());
+    }
+
     let notes = scan_vault(vault_root, &config.vault)?;
 
     if opts.migrate {

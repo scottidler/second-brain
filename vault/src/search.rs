@@ -887,6 +887,70 @@ impl SearchIndex {
         Ok(row)
     }
 
+    /// Select notes that satisfy every cold-rule floor. A note that scores
+    /// anywhere on any axis is excluded:
+    ///
+    /// - `search_hit_count = 0` AND `last_accessed_at IS NULL`: never read
+    ///   via oracle.
+    /// - `inbound_link_count = 0`: nothing else in the vault links here.
+    /// - `pinned = 0`: not promoted.
+    /// - `modified_at < older_than`: old enough.
+    ///
+    /// Ordered by `modified_at ASC` so the oldest cold notes surface first.
+    pub fn cold_notes(&self, q: &ColdQuery) -> Result<Vec<ColdNote>> {
+        log::debug!("cold_notes: older_than={} limit={}", q.older_than, q.limit);
+        let mut stmt = self.conn.prepare(
+            "SELECT path, title, domain, modified_at
+             FROM notes
+             WHERE search_hit_count = 0
+               AND last_accessed_at IS NULL
+               AND inbound_link_count = 0
+               AND pinned = 0
+               AND modified_at < ?1
+             ORDER BY modified_at ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![q.older_than, q.limit as i64], |row| {
+                Ok(ColdNote {
+                    path: row.get(0)?,
+                    title: row.get::<_, String>(1).unwrap_or_default(),
+                    domain: row.get::<_, String>(2).unwrap_or_default(),
+                    modified_at: row.get::<_, i64>(3).unwrap_or(0),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Count rows that would have qualified for the cold report except
+    /// they are pinned. Surfaces visibility into how often the promotion
+    /// floor rescues notes from the report.
+    pub fn count_pinned_excluded(&self, older_than: i64) -> Result<u64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM notes
+             WHERE search_hit_count = 0
+               AND last_accessed_at IS NULL
+               AND inbound_link_count = 0
+               AND pinned = 1
+               AND modified_at < ?1",
+            params![older_than],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
+    }
+
+    /// Total number of rows in the `notes` table; cheap to fetch
+    /// alongside the cold report so callers can publish "scanned N"
+    /// stats without a second prepare.
+    pub fn count_notes(&self) -> Result<u64> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
     /// Walk every note's body, count wikilink targets, materialize the
     /// `inbound_link_count` column for every row. Idempotent, bounded by
     /// vault size, single pass.
@@ -1809,6 +1873,25 @@ pub struct ClassifyStats {
     pub unclassified: u64,
 }
 
+/// Parameters for `SearchIndex::cold_notes`. `older_than` is a Unix-seconds
+/// boundary; the cold query keeps everything in integer seconds so the
+/// `idx_notes_modified_at` index stays usable.
+#[derive(Debug, Clone, Copy)]
+pub struct ColdQuery {
+    pub older_than: i64,
+    pub limit: u32,
+}
+
+/// Subset of `notes` returned by `cold_notes` - just the fields the
+/// review report needs. Saves a row body load.
+#[derive(Debug, Clone, Serialize)]
+pub struct ColdNote {
+    pub path: String,
+    pub title: String,
+    pub domain: String,
+    pub modified_at: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2558,6 +2641,100 @@ mod tests {
             0,
             "removing pinned: true must clear the column on reindex",
         );
+    }
+
+    fn cold_query(older_than: i64) -> ColdQuery {
+        ColdQuery { older_than, limit: 100 }
+    }
+
+    #[test]
+    fn cold_notes_returns_only_floor_satisfying_rows() {
+        let index = SearchIndex::open_memory().expect("open");
+        // Cold candidate: zero signals, old, not pinned.
+        index
+            .index_one(&make_test_note("notes/cold.md", "## Summary\n\nC.\n"), 1_000)
+            .expect("cold");
+        // Recent: shouldn't surface.
+        index
+            .index_one(&make_test_note("notes/recent.md", "## Summary\n\nR.\n"), 9_000)
+            .expect("recent");
+        // Pinned: shouldn't surface.
+        index
+            .index_one(
+                &make_pinned_note("notes/pin.md", Some(true), "## Summary\n\nP.\n"),
+                1_000,
+            )
+            .expect("pin");
+        // Has inbound (seed signal directly to avoid running recompute):
+        index
+            .index_one(&make_test_note("notes/linked.md", "## Summary\n\nL.\n"), 1_000)
+            .expect("linked");
+        index
+            .conn
+            .execute(
+                "UPDATE notes SET inbound_link_count = 2 WHERE path = 'notes/linked.md'",
+                [],
+            )
+            .expect("seed inbound");
+
+        let rows = index.cold_notes(&cold_query(5_000)).expect("cold");
+        let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["notes/cold.md"]);
+    }
+
+    #[test]
+    fn cold_notes_orders_oldest_first() {
+        let index = SearchIndex::open_memory().expect("open");
+        index
+            .index_one(&make_test_note("notes/middle.md", "## Summary\n\nM.\n"), 3_000)
+            .expect("m");
+        index
+            .index_one(&make_test_note("notes/oldest.md", "## Summary\n\nO.\n"), 1_000)
+            .expect("o");
+        index
+            .index_one(&make_test_note("notes/newer.md", "## Summary\n\nN.\n"), 4_000)
+            .expect("n");
+
+        let rows = index.cold_notes(&cold_query(5_000)).expect("cold");
+        let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["notes/oldest.md", "notes/middle.md", "notes/newer.md"]);
+    }
+
+    #[test]
+    fn cold_notes_excludes_once_read_notes() {
+        let index = SearchIndex::open_memory().expect("open");
+        index
+            .index_one(&make_test_note("notes/once.md", "## Summary\n\nO.\n"), 1_000)
+            .expect("once");
+        // One bump suffices to mark the note permanently warm under the
+        // binary decay rule.
+        index.bump_access("notes/once.md").expect("bump");
+
+        let rows = index.cold_notes(&cold_query(5_000)).expect("cold");
+        assert!(rows.is_empty(), "any prior read disqualifies: got {rows:?}");
+    }
+
+    #[test]
+    fn count_pinned_excluded_counts_only_pinned_floor_satisfiers() {
+        let index = SearchIndex::open_memory().expect("open");
+        index
+            .index_one(&make_pinned_note("notes/p.md", Some(true), "## Summary\n\nP.\n"), 1_000)
+            .expect("pinned");
+        // Recent pinned: would not have qualified for the cold report
+        // because it's not old enough, so should NOT count toward
+        // pinned_excluded.
+        index
+            .index_one(
+                &make_pinned_note("notes/p-recent.md", Some(true), "## Summary\n\nN.\n"),
+                9_000,
+            )
+            .expect("pinned-recent");
+        index
+            .index_one(&make_test_note("notes/not-pinned.md", "## Summary\n\nU.\n"), 1_000)
+            .expect("unpinned");
+
+        let count = index.count_pinned_excluded(5_000).expect("count");
+        assert_eq!(count, 1, "only old, otherwise-cold, pinned rows count");
     }
 
     #[test]

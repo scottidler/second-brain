@@ -231,6 +231,7 @@ pub struct SweepConfig {
     pub proposals_path: String,
     pub sweep_interval: String,
     pub proposal_threshold: usize,
+    pub cold: ColdConfig,
 }
 
 impl Default for SweepConfig {
@@ -241,6 +242,29 @@ impl Default for SweepConfig {
             proposals_path: "~/.config/second-brain/tag-proposals.yml".to_string(),
             sweep_interval: "1h".to_string(),
             proposal_threshold: 3,
+            cold: ColdConfig::default(),
+        }
+    }
+}
+
+/// Knobs for `cortex sweep --cold`. The defaults are calibrated for a
+/// vault entering its first audit moment with no prior signal state:
+/// 180 days is long enough that short-term reference notes do not
+/// surface before they have a chance to accrue signals, short enough
+/// that the long tail surfaces within a year; 500 rows is the largest
+/// list a reviewer can chew through in one sitting.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ColdConfig {
+    pub older_than_days: u32,
+    pub limit: u32,
+}
+
+impl Default for ColdConfig {
+    fn default() -> Self {
+        Self {
+            older_than_days: 180,
+            limit: 500,
         }
     }
 }

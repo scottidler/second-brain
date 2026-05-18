@@ -187,6 +187,13 @@ pub struct SweepOpts {
     /// Scan for non-canonical tags and generate proposals
     #[arg(long)]
     pub proposals: bool,
+
+    /// Produce the cold-note review report at
+    /// `system/views/cold-notes.md`. Reads the materialized signals;
+    /// does not modify any note files. Mutually exclusive with
+    /// `--migrate` and `--proposals`.
+    #[arg(long)]
+    pub cold: bool,
 }
 
 #[derive(Parser, Debug, Clone)]

@@ -1,12 +1,23 @@
 use eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use vault::canonical::{self, CanonicalTagsFile};
+use vault::search::{ColdNote, ColdQuery, SearchIndex};
 
-use crate::config::SweepConfig;
+use crate::config::{Config, SweepConfig};
 use crate::tags::replace_tags_in_frontmatter;
 use crate::vault::Note;
+
+/// Stats from a single cold-sweep run. Surfaced in the cortex log and
+/// embedded in the report's frontmatter so a reviewer can tell at a
+/// glance how the floor is doing.
+#[derive(Debug, Clone, Copy)]
+pub struct ColdStats {
+    pub scanned: u64,
+    pub surfaced: u64,
+    pub pinned_excluded: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -149,6 +160,134 @@ fn rewrite_note_tags(path: &Path, new_tags: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Generate the cold-note review report.
+///
+/// Opens the oracle search DB, runs the cold query, groups by domain,
+/// renders a markdown checklist, writes it atomically to
+/// `<vault_root>/system/views/cold-notes.md`. Cortex writes nothing to
+/// the `notes` table; the inbound counts it reads are whatever oracle's
+/// periodic recompute most recently materialized.
+pub fn run_cold(vault_root: &Path, config: &Config) -> Result<ColdStats> {
+    log::debug!(
+        "run_cold: vault_root={} older_than_days={} limit={}",
+        vault_root.display(),
+        config.sweep.cold.older_than_days,
+        config.sweep.cold.limit,
+    );
+
+    let db_path = config.oracle_db_path();
+    let index = SearchIndex::open(&db_path).wrap_err_with(|| {
+        format!(
+            "failed to open oracle search DB at {} - has oracle ever indexed this vault?",
+            db_path.display()
+        )
+    })?;
+
+    let now = chrono::Utc::now().timestamp();
+    let older_than = now - (config.sweep.cold.older_than_days as i64) * 86_400;
+    let query = ColdQuery {
+        older_than,
+        limit: config.sweep.cold.limit,
+    };
+
+    let rows = index.cold_notes(&query).wrap_err("cold_notes query failed")?;
+    let pinned_excluded = index
+        .count_pinned_excluded(older_than)
+        .wrap_err("count_pinned_excluded failed")?;
+    let scanned = index.count_notes().wrap_err("count_notes failed")?;
+
+    let stats = ColdStats {
+        scanned,
+        surfaced: rows.len() as u64,
+        pinned_excluded,
+    };
+
+    let report = render_cold_report(&rows, &stats, config.sweep.cold.older_than_days);
+    let out_path = vault_root.join("system").join("views").join("cold-notes.md");
+    atomic_write(&out_path, &report).wrap_err_with(|| format!("failed to write {}", out_path.display()))?;
+
+    log::info!(
+        "run_cold: scanned={} surfaced={} pinned_excluded={} report={}",
+        stats.scanned,
+        stats.surfaced,
+        stats.pinned_excluded,
+        out_path.display(),
+    );
+    Ok(stats)
+}
+
+fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("md.tmp");
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Render the cold-note report. Public for snapshot testing in
+/// `cortex/src/sweep/tests.rs` (or here in-line) so the report's exact
+/// shape can be locked against unintended changes.
+pub fn render_cold_report(rows: &[ColdNote], stats: &ColdStats, older_than_days: u32) -> String {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(&format!("generated-at: {now}\n"));
+    out.push_str("generator: cortex sweep --cold\n");
+    out.push_str(&format!("older-than-days: {older_than_days}\n"));
+    out.push_str(&format!("total-surfaced: {}\n", stats.surfaced));
+    out.push_str(&format!("pinned-excluded: {}\n", stats.pinned_excluded));
+    // The report itself carries pinned: true so it can never qualify
+    // as cold once oracle reindexes it as a system-view note.
+    out.push_str("pinned: true\n");
+    out.push_str("---\n\n");
+
+    out.push_str("# Cold Notes\n\n");
+    out.push_str(&format!(
+        "Notes older than **{older_than_days} days** with no reads, no inbound links, and not pinned. \
+         Decide per row: archive, delete, leave, promote.\n\n"
+    ));
+    out.push_str(
+        "This file is regenerated weekly by `cortex sweep --cold`. Do not edit \
+         manually; pin a note (`pinned: true` in its frontmatter) to remove it \
+         from this report.\n\n",
+    );
+
+    if rows.is_empty() {
+        out.push_str("No cold notes at the current threshold.\n");
+        return out;
+    }
+
+    // Group rows by domain, preserving stable order for snapshot tests.
+    let mut groups: BTreeMap<String, Vec<&ColdNote>> = BTreeMap::new();
+    for row in rows {
+        let key = if row.domain.is_empty() {
+            "(no domain)".to_string()
+        } else {
+            row.domain.clone()
+        };
+        groups.entry(key).or_default().push(row);
+    }
+
+    for (domain, domain_rows) in &groups {
+        out.push_str(&format!("## {domain} ({count})\n\n", count = domain_rows.len()));
+        for row in domain_rows {
+            let date_str = chrono::DateTime::<chrono::Utc>::from_timestamp(row.modified_at, 0)
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let title = if row.title.is_empty() { "(untitled)".to_string() } else { row.title.clone() };
+            out.push_str(&format!(
+                "- [ ] `{path}` - \"{title}\" - last modified {date_str}\n",
+                path = row.path,
+            ));
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,7 +316,79 @@ mod tests {
             proposals_path: proposals_path.to_string_lossy().to_string(),
             sweep_interval: "1h".to_string(),
             proposal_threshold: 2,
+            cold: crate::config::ColdConfig::default(),
         }
+    }
+
+    fn make_cold_note(path: &str, title: &str, domain: &str, modified_at: i64) -> ColdNote {
+        ColdNote {
+            path: path.to_string(),
+            title: title.to_string(),
+            domain: domain.to_string(),
+            modified_at,
+        }
+    }
+
+    #[test]
+    fn render_cold_report_groups_by_domain_and_includes_metadata() {
+        let rows = vec![
+            // 2025-08-12T00:00:00Z = 1_754_956_800
+            make_cold_note("notes/ai/a.md", "A Paper", "ai", 1_754_956_800),
+            make_cold_note("notes/ai/b.md", "B Thing", "ai", 1_754_956_800),
+            make_cold_note("notes/diy/c.md", "C Hack", "diy", 1_754_956_800),
+        ];
+        let stats = ColdStats {
+            scanned: 100,
+            surfaced: 3,
+            pinned_excluded: 7,
+        };
+        let out = render_cold_report(&rows, &stats, 180);
+
+        assert!(out.starts_with("---\n"), "frontmatter present");
+        assert!(out.contains("older-than-days: 180"));
+        assert!(out.contains("total-surfaced: 3"));
+        assert!(out.contains("pinned-excluded: 7"));
+        assert!(out.contains("pinned: true"), "report file marks itself pinned");
+        assert!(out.contains("## ai (2)"));
+        assert!(out.contains("## diy (1)"));
+        assert!(out.contains("- [ ] `notes/ai/a.md`"));
+        assert!(out.contains("\"A Paper\""));
+        assert!(out.contains("last modified 2025-08-12"));
+    }
+
+    #[test]
+    fn render_cold_report_empty_writes_placeholder() {
+        let stats = ColdStats {
+            scanned: 100,
+            surfaced: 0,
+            pinned_excluded: 0,
+        };
+        let out = render_cold_report(&[], &stats, 180);
+        assert!(out.contains("No cold notes at the current threshold."));
+    }
+
+    #[test]
+    fn render_cold_report_groups_empty_domain_as_no_domain() {
+        let rows = vec![make_cold_note("notes/loose.md", "Loose", "", 1_754_956_800)];
+        let stats = ColdStats {
+            scanned: 1,
+            surfaced: 1,
+            pinned_excluded: 0,
+        };
+        let out = render_cold_report(&rows, &stats, 180);
+        assert!(out.contains("## (no domain) (1)"));
+    }
+
+    #[test]
+    fn render_cold_report_handles_missing_title() {
+        let rows = vec![make_cold_note("notes/a.md", "", "ai", 1_754_956_800)];
+        let stats = ColdStats {
+            scanned: 1,
+            surfaced: 1,
+            pinned_excluded: 0,
+        };
+        let out = render_cold_report(&rows, &stats, 180);
+        assert!(out.contains("\"(untitled)\""));
     }
 
     #[test]
