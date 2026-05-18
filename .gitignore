@@ -16,6 +16,9 @@ target
 # Local MCP config (use global ~/.mcp.json instead)
 .mcp.json
 
+# fastembed-downloaded ONNX model cache (legacy backend artifacts)
+.fastembed_cache/
+
 # Claude Code runtime files
 **/.claude/scheduled_tasks.lock
 
