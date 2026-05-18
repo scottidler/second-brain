@@ -13,6 +13,13 @@ pub struct Frontmatter {
     pub tags: Option<Vec<String>>,
     pub source: Option<String>,
     pub creator: Option<String>,
+    /// Set to `Some(true)` to mark a note as pinned: it is excluded from
+    /// the cold-note report and treated as L3 (promoted) for any future
+    /// signal-aware tooling. Strict bool-only: `pinned: "true"`,
+    /// `pinned: 1`, and `pinned:` (null) all parse as `None` and index
+    /// as 0; a typo in the user's frontmatter is silently treated as
+    /// "not pinned" rather than breaking reindex.
+    pub pinned: Option<bool>,
     pub extra: HashMap<String, serde_yaml::Value>,
 }
 
@@ -34,6 +41,7 @@ impl Frontmatter {
         let mut tags = None;
         let mut source = None;
         let mut creator = None;
+        let mut pinned: Option<bool> = None;
         let mut extra = HashMap::new();
 
         for (key, val) in mapping {
@@ -107,6 +115,17 @@ impl Frontmatter {
                         other => Some(format!("{other:?}")),
                     };
                 }
+                "pinned" => {
+                    // Strict bool-only: a typo (`pinned: "yes"`, `pinned: 1`)
+                    // resolves to None / indexed as 0 rather than breaking
+                    // reindex. The lenient `format!("{other:?}")` branch the
+                    // string fields use would yield `Some("Bool(true)")`
+                    // which is the wrong shape for a typed bool.
+                    pinned = match val {
+                        serde_yaml::Value::Bool(b) => Some(b),
+                        _ => None,
+                    };
+                }
                 _ => {
                     extra.insert(key_str, val);
                 }
@@ -123,6 +142,7 @@ impl Frontmatter {
             tags,
             source,
             creator,
+            pinned,
             extra,
         })
     }
@@ -188,6 +208,12 @@ impl Frontmatter {
                 serde_yaml::Value::String(creator.clone()),
             );
         }
+        if let Some(pinned) = self.pinned {
+            mapping.insert(
+                serde_yaml::Value::String("pinned".to_string()),
+                serde_yaml::Value::Bool(pinned),
+            );
+        }
 
         // Add extra fields alphabetically
         let mut extra_keys: Vec<&String> = self.extra.keys().collect();
@@ -214,6 +240,7 @@ impl Frontmatter {
             && self.tags.is_none()
             && self.source.is_none()
             && self.creator.is_none()
+            && self.pinned.is_none()
             && self.extra.is_empty()
     }
 }
@@ -295,6 +322,46 @@ mod tests {
         let (fm, _) = parse_frontmatter(raw).expect("parse");
         assert_eq!(fm.title.as_deref(), Some("Test"));
         assert!(fm.extra.contains_key("custom"));
+    }
+
+    #[test]
+    fn pinned_roundtrips_through_yaml() {
+        let raw = "---\ntitle: P\npinned: true\n---\nBody.";
+        let (fm, _) = parse_frontmatter(raw).expect("parse");
+        assert_eq!(fm.pinned, Some(true));
+
+        let emitted = fm.to_yaml().expect("to_yaml");
+        assert!(emitted.contains("pinned: true"), "yaml omitted pinned: {emitted}");
+
+        // Round-trip back.
+        let raw2 = format!("---\n{emitted}---\n");
+        let (fm2, _) = parse_frontmatter(&raw2).expect("reparse");
+        assert_eq!(fm2.pinned, Some(true));
+    }
+
+    #[test]
+    fn pinned_missing_is_none() {
+        let raw = "---\ntitle: X\n---\nBody.";
+        let (fm, _) = parse_frontmatter(raw).expect("parse");
+        assert!(fm.pinned.is_none());
+    }
+
+    #[test]
+    fn pinned_strict_bool_only() {
+        // pinned: "true" (string), pinned: 1 (int), and a null pinned: all
+        // resolve to None rather than `Some` of something weird. Indexing
+        // these as 0 keeps a typo from breaking reindex.
+        let raw = "---\ntitle: X\npinned: \"true\"\n---\nBody.";
+        let (fm, _) = parse_frontmatter(raw).expect("string");
+        assert_eq!(fm.pinned, None, "string value must not parse as Some");
+
+        let raw = "---\ntitle: X\npinned: 1\n---\nBody.";
+        let (fm, _) = parse_frontmatter(raw).expect("int");
+        assert_eq!(fm.pinned, None, "int value must not parse as Some");
+
+        let raw = "---\ntitle: X\npinned: ~\n---\nBody.";
+        let (fm, _) = parse_frontmatter(raw).expect("null");
+        assert_eq!(fm.pinned, None, "explicit null must not parse as Some");
     }
 
     #[test]

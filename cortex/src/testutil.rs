@@ -458,6 +458,7 @@ impl NoteBuilder {
                 tags: self.tags,
                 source: self.source,
                 creator: self.creator,
+                pinned: None,
                 extra: self.extra,
             },
             body: self.body,

@@ -255,13 +255,17 @@ impl SearchIndex {
                 cortex_thread_author TEXT,
                 search_hit_count INTEGER DEFAULT 0,
                 last_accessed_at INTEGER,
-                inbound_link_count INTEGER DEFAULT 0
+                inbound_link_count INTEGER DEFAULT 0,
+                pinned INTEGER DEFAULT 0
             );
 
             CREATE INDEX IF NOT EXISTS idx_notes_domain ON notes(domain);
             CREATE INDEX IF NOT EXISTS idx_notes_note_type ON notes(note_type);
             CREATE INDEX IF NOT EXISTS idx_notes_status ON notes(status);
-            CREATE INDEX IF NOT EXISTS idx_notes_date ON notes(date);",
+            CREATE INDEX IF NOT EXISTS idx_notes_date ON notes(date);
+            -- Doc 3 cold-note SELECT filters on `modified_at < ?`. Without
+            -- this index the query is a sequential scan over every note.
+            CREATE INDEX IF NOT EXISTS idx_notes_modified_at ON notes(modified_at);",
         )?;
 
         // Migrate older DBs: add columns the CREATE TABLE above lists but
@@ -390,6 +394,7 @@ impl SearchIndex {
             ("search_hit_count", "INTEGER DEFAULT 0"),
             ("last_accessed_at", "INTEGER"),
             ("inbound_link_count", "INTEGER DEFAULT 0"),
+            ("pinned", "INTEGER DEFAULT 0"),
         ];
 
         for (col, col_type) in distilled_columns {
@@ -398,6 +403,12 @@ impl SearchIndex {
                     .execute_batch(&format!("ALTER TABLE notes ADD COLUMN {col} {col_type};"))?;
             }
         }
+
+        // Doc 3 cold-note query filters on `modified_at`; ensure the index
+        // exists on already-deployed DBs whose CREATE TABLE predates the
+        // index addition.
+        self.conn
+            .execute_batch("CREATE INDEX IF NOT EXISTS idx_notes_modified_at ON notes(modified_at);")?;
 
         Ok(())
     }
@@ -585,10 +596,17 @@ impl SearchIndex {
         let source = fm.source.as_deref().unwrap_or("");
         let creator = fm.creator.as_deref().unwrap_or("");
 
+        // `pinned` is vault-derived: the user edits `pinned: true` in their
+        // note's frontmatter. None or false -> 0; true -> 1. The flip-test
+        // in `index_one_pinned_clears_when_frontmatter_drops_field` locks
+        // the UPDATE path's responsibility for clearing the flag.
+        let pinned_value: i64 = fm.pinned.unwrap_or(false) as i64;
+
         if exists {
             // UPDATE only vault-derived columns. Signal columns
             // (search_hit_count, last_accessed_at, inbound_link_count) are
             // intentionally excluded so reindex never clobbers Doc 3 state.
+            // `pinned` IS vault-derived so it IS updated.
             self.conn.execute(
                 "UPDATE notes SET
                     title = ?2, domain = ?3, note_type = ?4, origin = ?5, status = ?6,
@@ -601,7 +619,8 @@ impl SearchIndex {
                     cortex_video_duration_seconds = ?24, cortex_video_channel = ?25,
                     cortex_video_published_at = ?26,
                     cortex_thread_platform = ?27, cortex_thread_post_count = ?28,
-                    cortex_thread_author = ?29
+                    cortex_thread_author = ?29,
+                    pinned = ?30
                  WHERE path = ?1",
                 params![
                     path_str.as_ref(),
@@ -633,6 +652,7 @@ impl SearchIndex {
                     thread_platform,
                     thread_post_count,
                     thread_author,
+                    pinned_value,
                 ],
             )?;
             Ok(IndexAction::Updated)
@@ -649,12 +669,14 @@ impl SearchIndex {
                     cortex_video_published_at,
                     cortex_thread_platform, cortex_thread_post_count,
                     cortex_thread_author,
-                    search_hit_count, last_accessed_at, inbound_link_count
+                    search_hit_count, last_accessed_at, inbound_link_count,
+                    pinned
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                     ?15, ?16, ?17, ?18, ?19, ?20,
                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29,
-                    0, NULL, 0
+                    0, NULL, 0,
+                    ?30
                 )",
                 params![
                     path_str.as_ref(),
@@ -686,6 +708,7 @@ impl SearchIndex {
                     thread_platform,
                     thread_post_count,
                     thread_author,
+                    pinned_value,
                 ],
             )?;
             Ok(IndexAction::Inserted)
@@ -2457,6 +2480,83 @@ mod tests {
             signal_row(&index, "notes/target.md").2,
             1,
             "[[folder/note]] should match the stem",
+        );
+    }
+
+    fn pinned_value(index: &SearchIndex, path: &str) -> i64 {
+        index
+            .conn
+            .query_row("SELECT pinned FROM notes WHERE path = ?1", params![path], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("pinned row")
+    }
+
+    fn make_pinned_note(path: &str, pinned: Option<bool>, body: &str) -> Note {
+        use crate::frontmatter::Frontmatter;
+        use std::path::PathBuf;
+        let fm = Frontmatter {
+            title: Some(format!("title for {path}")),
+            note_type: Some("article".to_string()),
+            origin: Some("assisted".to_string()),
+            pinned,
+            ..Frontmatter::default()
+        };
+        Note {
+            path: PathBuf::from(path),
+            frontmatter: fm,
+            body: body.to_string(),
+            raw: format!("---\n---\n{body}"),
+        }
+    }
+
+    #[test]
+    fn index_one_persists_pinned_true() {
+        let index = SearchIndex::open_memory().expect("open");
+        let note = make_pinned_note("notes/pinned.md", Some(true), "## Summary\n\nP.\n");
+        index.index_one(&note, 100).expect("index");
+        assert_eq!(pinned_value(&index, "notes/pinned.md"), 1);
+    }
+
+    #[test]
+    fn index_one_pinned_defaults_to_zero() {
+        let index = SearchIndex::open_memory().expect("open");
+        let note = make_pinned_note("notes/unpinned.md", None, "## Summary\n\nU.\n");
+        index.index_one(&note, 100).expect("index");
+        assert_eq!(pinned_value(&index, "notes/unpinned.md"), 0);
+    }
+
+    #[test]
+    fn index_one_pinned_survives_reindex_without_frontmatter_change() {
+        let index = SearchIndex::open_memory().expect("open");
+        let note = make_pinned_note("notes/keep.md", Some(true), "## Summary\n\nFirst.\n");
+        index.index_one(&note, 100).expect("first");
+        assert_eq!(pinned_value(&index, "notes/keep.md"), 1);
+
+        // Reindex with new body but same pinned: true.
+        let updated = make_pinned_note("notes/keep.md", Some(true), "## Summary\n\nSecond.\n");
+        index.index_one(&updated, 200).expect("reindex");
+        assert_eq!(
+            pinned_value(&index, "notes/keep.md"),
+            1,
+            "pinned survives content reindex when frontmatter unchanged",
+        );
+    }
+
+    #[test]
+    fn index_one_pinned_clears_when_frontmatter_drops_field() {
+        let index = SearchIndex::open_memory().expect("open");
+        let note = make_pinned_note("notes/flip.md", Some(true), "## Summary\n\nP.\n");
+        index.index_one(&note, 100).expect("first");
+        assert_eq!(pinned_value(&index, "notes/flip.md"), 1);
+
+        // User removes pinned: true from frontmatter; reindex.
+        let updated = make_pinned_note("notes/flip.md", None, "## Summary\n\nU.\n");
+        index.index_one(&updated, 200).expect("reindex");
+        assert_eq!(
+            pinned_value(&index, "notes/flip.md"),
+            0,
+            "removing pinned: true must clear the column on reindex",
         );
     }
 

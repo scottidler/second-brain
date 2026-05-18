@@ -276,6 +276,7 @@ fn clone_frontmatter(fm: &Frontmatter) -> Frontmatter {
         tags: fm.tags.clone(),
         source: fm.source.clone(),
         creator: fm.creator.clone(),
+        pinned: fm.pinned,
         extra: fm.extra.clone(),
     }
 }
