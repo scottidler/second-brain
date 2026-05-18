@@ -106,6 +106,39 @@ async fn run_serve(config: Config) -> Result<()> {
         }
     }
 
+    // Periodic inbound-link recompute. NOT wired into the watcher path:
+    // the watcher fires sub-second on every Obsidian save, and at vault
+    // scale a full-table wikilink scan inside the SearchIndex mutex would
+    // block every concurrent note_read / knowledge_search. The cold
+    // report runs weekly; a 10-minute cadence keeps inbound counts at
+    // most minutes stale relative to the consumer.
+    {
+        let db_handle = server.db_handle();
+        let interval_secs = config.inbound_recompute_interval_secs;
+        tracing::info!("Inbound-link recompute task starting (interval: {interval_secs}s)");
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            // Skip the immediate first tick - tokio's interval fires at t=0
+            // by default, and we don't want a full-table scan on startup
+            // before the initial index_vault has even returned.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let changed = match db_handle.lock() {
+                    Ok(mut db) => db.recompute_inbound_link_counts(),
+                    Err(e) => {
+                        tracing::warn!("inbound recompute: db mutex poisoned: {e}");
+                        continue;
+                    }
+                };
+                match changed {
+                    Ok(n) => tracing::info!("inbound recompute: {n} rows changed"),
+                    Err(e) => tracing::warn!("inbound recompute failed: {e}"),
+                }
+            }
+        });
+    }
+
     let transport = (tokio::io::stdin(), tokio::io::stdout());
     let service = server.serve(transport).await?;
 

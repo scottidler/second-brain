@@ -864,6 +864,92 @@ impl SearchIndex {
         Ok(row)
     }
 
+    /// Walk every note's body, count wikilink targets, materialize the
+    /// `inbound_link_count` column for every row. Idempotent, bounded by
+    /// vault size, single pass.
+    ///
+    /// **Key normalization is symmetric**: HashMap keys are
+    /// `target.to_ascii_lowercase()` (taking the last `/`-segment so that
+    /// `[[folder/note]]` matches a row whose path stem is `note`); the
+    /// per-row lookup key is `file_stem(path).to_ascii_lowercase()`. Both
+    /// sides are lowercased before the lookup, so any case parity is
+    /// automatic. Anything that compares stems without lowercasing first
+    /// is a bug.
+    ///
+    /// Self-links are NOT counted: a note whose body contains `[[self]]`
+    /// gets no structural credit for it.
+    ///
+    /// **Sole intended caller: oracle's 10-minute periodic background
+    /// task.** Must NOT be called from `index_vault` / the watcher path:
+    /// the watcher fires sub-second on every Obsidian auto-save, and at
+    /// three-year scale a full-table wikilink scan holding the SearchIndex
+    /// mutex would block every concurrent `note_read` / `knowledge_search`.
+    ///
+    /// Returns the number of rows whose stored count changed.
+    pub fn recompute_inbound_link_counts(&mut self) -> Result<usize> {
+        log::debug!("recompute_inbound_link_counts: scanning vault");
+
+        let rows: Vec<(String, String, i64)> = {
+            let mut stmt = self.conn.prepare("SELECT path, body, inbound_link_count FROM notes")?;
+            let mapped = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            mapped.filter_map(|r| r.ok()).collect()
+        };
+
+        let mut counts: HashMap<String, u64> = HashMap::new();
+        for (path, body, _stored) in &rows {
+            let source_stem = Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            for raw_target in extract_wikilinks(body) {
+                // `[[folder/note]]` -> "note"; everything is lowercased so
+                // the per-row lookup key matches symmetrically.
+                let target_stem = raw_target.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+                if target_stem.is_empty() {
+                    continue;
+                }
+                if target_stem == source_stem {
+                    // Self-link: no structural signal.
+                    continue;
+                }
+                *counts.entry(target_stem).or_insert(0) += 1;
+            }
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut changed: usize = 0;
+        {
+            let mut stmt = tx.prepare("UPDATE notes SET inbound_link_count = ?1 WHERE path = ?2")?;
+            for (path, _body, stored) in &rows {
+                let row_stem = Path::new(path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let new_count = *counts.get(&row_stem).unwrap_or(&0) as i64;
+                if new_count != *stored {
+                    stmt.execute(params![new_count, path])?;
+                    changed += 1;
+                }
+            }
+        }
+        tx.commit()?;
+
+        log::debug!(
+            "recompute_inbound_link_counts: scanned={} changed={}",
+            rows.len(),
+            changed
+        );
+        Ok(changed)
+    }
+
     /// Increment `search_hit_count` and stamp `last_accessed_at = now` for `path`.
     ///
     /// **Sole intended caller: `oracle::note_read`.** Counting `knowledge_search`
@@ -2273,6 +2359,105 @@ mod tests {
         assert_eq!(hits, 2, "two bumps -> count 2");
         let last = last.expect("last_accessed_at set after bump");
         assert!(last >= before, "stamp should be at-or-after before-bump time");
+    }
+
+    #[test]
+    fn recompute_inbound_link_counts_basic() {
+        let mut index = SearchIndex::open_memory().expect("open");
+        index
+            .index_one(&make_test_note("notes/a.md", "Refer to [[b]]."), 100)
+            .expect("a");
+        index
+            .index_one(&make_test_note("notes/b.md", "## Summary\n\nB.\n"), 100)
+            .expect("b");
+        index
+            .index_one(&make_test_note("notes/c.md", "See [[b]] and [[a]]."), 100)
+            .expect("c");
+
+        let changed = index.recompute_inbound_link_counts().expect("recompute");
+        assert!(changed >= 2, "at least a and b should have changed: {changed}");
+
+        assert_eq!(signal_row(&index, "notes/a.md").2, 1, "a is linked from c");
+        assert_eq!(signal_row(&index, "notes/b.md").2, 2, "b is linked from a and c");
+        assert_eq!(signal_row(&index, "notes/c.md").2, 0, "c has no inbound");
+    }
+
+    #[test]
+    fn recompute_inbound_link_counts_handles_link_removal() {
+        let mut index = SearchIndex::open_memory().expect("open");
+        index
+            .index_one(&make_test_note("notes/a.md", "Link to [[b]]."), 100)
+            .expect("a");
+        index
+            .index_one(&make_test_note("notes/b.md", "## Summary\n\nB.\n"), 100)
+            .expect("b");
+
+        index.recompute_inbound_link_counts().expect("first");
+        assert_eq!(signal_row(&index, "notes/b.md").2, 1);
+
+        // Edit A to drop the link to B.
+        index
+            .index_one(&make_test_note("notes/a.md", "No link here."), 200)
+            .expect("re-a");
+        index.recompute_inbound_link_counts().expect("second");
+        assert_eq!(signal_row(&index, "notes/b.md").2, 0, "removed link drops to 0");
+    }
+
+    #[test]
+    fn recompute_inbound_link_counts_excludes_self_links() {
+        let mut index = SearchIndex::open_memory().expect("open");
+        index
+            .index_one(&make_test_note("notes/a.md", "I reference [[a]] - myself."), 100)
+            .expect("a");
+
+        index.recompute_inbound_link_counts().expect("recompute");
+        assert_eq!(
+            signal_row(&index, "notes/a.md").2,
+            0,
+            "self-link must not bump the note's own inbound count",
+        );
+    }
+
+    #[test]
+    fn recompute_inbound_link_counts_is_case_insensitive() {
+        let mut index = SearchIndex::open_memory().expect("open");
+        // Target file uses lowercase-hyphenated stem; source spells it
+        // with mixed case in the wikilink. Should still match.
+        index
+            .index_one(&make_test_note("notes/some-note.md", "## Summary\n\nT.\n"), 100)
+            .expect("target");
+        index
+            .index_one(&make_test_note("notes/a.md", "See [[Some-Note]] for more."), 100)
+            .expect("source");
+
+        index.recompute_inbound_link_counts().expect("recompute");
+        assert_eq!(
+            signal_row(&index, "notes/some-note.md").2,
+            1,
+            "case-insensitive stem match",
+        );
+    }
+
+    #[test]
+    fn recompute_inbound_link_counts_strips_path_prefix() {
+        // `[[folder/note]]` should match a row whose stem is `note`.
+        let mut index = SearchIndex::open_memory().expect("open");
+        index
+            .index_one(&make_test_note("notes/target.md", "## Summary\n\nT.\n"), 100)
+            .expect("target");
+        index
+            .index_one(
+                &make_test_note("notes/source.md", "Link [[notes/target]] with path."),
+                100,
+            )
+            .expect("source");
+
+        index.recompute_inbound_link_counts().expect("recompute");
+        assert_eq!(
+            signal_row(&index, "notes/target.md").2,
+            1,
+            "[[folder/note]] should match the stem",
+        );
     }
 
     #[test]

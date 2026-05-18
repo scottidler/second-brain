@@ -21,6 +21,18 @@ pub struct Config {
     /// File watcher configuration
     #[serde(default)]
     pub watcher: WatcherConfig,
+
+    /// How often (seconds) oracle recomputes `inbound_link_count` for
+    /// every note. Modeled on the cortex embed-tick cadence: long enough
+    /// that the cost is amortized over many vault edits, short enough
+    /// that the cold-note report's structural signal is at worst minutes
+    /// stale. Cold reports run weekly; a 10-minute cadence is several
+    /// orders of magnitude faster than the consumer.
+    #[serde(
+        default = "default_inbound_recompute_interval_secs",
+        rename = "inbound-recompute-interval-secs"
+    )]
+    pub inbound_recompute_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,6 +101,10 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+fn default_inbound_recompute_interval_secs() -> u64 {
+    600
+}
+
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let config_path = if let Some(p) = path { p.to_path_buf() } else { Self::find_config_file()? };
@@ -139,6 +155,7 @@ impl Default for Config {
             db_path: default_db_path(),
             logging: LogConfig::default(),
             watcher: WatcherConfig::default(),
+            inbound_recompute_interval_secs: default_inbound_recompute_interval_secs(),
         }
     }
 }
