@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use crate::config::FabricConfig;
+use crate::config::{FabricConfig, PipelineConfig};
 
 /// Wait for a child process with a per-call timeout. Kills the child on
 /// elapsed and returns an error. Caller still owns the `Child`; on success
@@ -63,9 +63,14 @@ pub async fn run_pattern(pattern: &str, input: &str, config: &FabricConfig) -> R
 /// Returns the transcript text, or an empty string if unavailable.
 /// Metadata is NOT fetched here - yt-dlp is the authoritative source for all metadata.
 /// See docs/design/2026-03-22-youtube-metadata-pipeline-redesign.md.
-pub fn fetch_transcript(url: &str, config: &FabricConfig) -> Result<String> {
-    let binary = vault::fabric::resolve_binary(&config.binary);
-    log::debug!("fabric: fetching YouTube transcript for {url}");
+///
+/// Timeout is `pipeline.fabric_transcript_timeout_secs` - decoupled from
+/// `config.fabric.timeout_secs` (which governs LLM pattern completions)
+/// so a stuck transcript fetch can't burn the LLM budget.
+pub fn fetch_transcript(url: &str, fabric: &FabricConfig, pipeline: &PipelineConfig) -> Result<String> {
+    let binary = vault::fabric::resolve_binary(&fabric.binary);
+    let timeout_secs = pipeline.fabric_transcript_timeout_secs;
+    log::debug!("fabric: fetching YouTube transcript for {url} (timeout={timeout_secs}s)");
     let mut child = Command::new(&binary)
         .args(["-y", url, "--transcript"])
         .stdout(std::process::Stdio::piped())
@@ -73,7 +78,7 @@ pub fn fetch_transcript(url: &str, config: &FabricConfig) -> Result<String> {
         .spawn()
         .context("Failed to spawn fabric")?;
 
-    if wait_with_timeout(&mut child, config.timeout_secs, "fabric -y --transcript").is_err() {
+    if wait_with_timeout(&mut child, timeout_secs, "fabric -y --transcript").is_err() {
         return Ok(String::new());
     }
     let output = child.wait_with_output().context("Failed to collect fabric output")?;
@@ -86,10 +91,19 @@ pub fn fetch_transcript(url: &str, config: &FabricConfig) -> Result<String> {
     }
 }
 
-pub async fn fetch_article(url: &str, config: &FabricConfig) -> Result<String> {
-    // Primary: fabric -u <url>
-    let binary = vault::fabric::resolve_binary(&config.binary);
-    log::debug!("fabric: fetching article for {url}");
+/// Fetch article markdown by trying `fabric -u`, falling back to `markitdown`,
+/// each bounded by its own pipeline-level timeout. Returns the first non-empty
+/// extraction or bails so the caller can fall back further (Jina, etc.).
+///
+/// The two subprocess timeouts (`pipeline.fabric_url_timeout_secs` and
+/// `pipeline.markitdown_timeout_secs`) are deliberately distinct from
+/// `config.fabric.timeout_secs` (LLM completion). URL scrapes should
+/// complete in under a minute; an LLM pattern call genuinely can need
+/// several. Conflating them lets a hung scrape burn the LLM budget.
+pub async fn fetch_article(url: &str, fabric: &FabricConfig, pipeline: &PipelineConfig) -> Result<String> {
+    let binary = vault::fabric::resolve_binary(&fabric.binary);
+    let fabric_timeout = pipeline.fabric_url_timeout_secs;
+    log::debug!("fabric: fetching article for {url} (timeout={fabric_timeout}s)");
     let mut child = Command::new(&binary)
         .args(["-u", url])
         .stdout(std::process::Stdio::piped())
@@ -97,7 +111,7 @@ pub async fn fetch_article(url: &str, config: &FabricConfig) -> Result<String> {
         .spawn()
         .context("Failed to spawn fabric")?;
 
-    if wait_with_timeout(&mut child, config.timeout_secs, "fabric -u").is_ok()
+    if wait_with_timeout(&mut child, fabric_timeout, "fabric -u").is_ok()
         && let Ok(output) = child.wait_with_output()
         && output.status.success()
     {
@@ -107,14 +121,14 @@ pub async fn fetch_article(url: &str, config: &FabricConfig) -> Result<String> {
         }
     }
 
-    // Fallback: markitdown - bounded by the same per-call timeout as fabric.
-    log::debug!("fabric -u failed, trying markitdown for {url}");
+    let markitdown_timeout = pipeline.markitdown_timeout_secs;
+    log::debug!("fabric -u failed, trying markitdown for {url} (timeout={markitdown_timeout}s)");
     if let Ok(mut markitdown) = Command::new("markitdown")
         .arg(url)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        && wait_with_timeout(&mut markitdown, config.timeout_secs, "markitdown").is_ok()
+        && wait_with_timeout(&mut markitdown, markitdown_timeout, "markitdown").is_ok()
         && let Ok(output) = markitdown.wait_with_output()
         && output.status.success()
     {

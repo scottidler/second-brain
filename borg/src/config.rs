@@ -186,6 +186,18 @@ pub struct Config {
 const DEFAULT_MAX_CONCURRENT_TRACES: usize = 8;
 const DEFAULT_MAX_CONCURRENT_HEAVY_TRACES: usize = 4;
 
+/// Per-subprocess fetch timeouts. Each external tool needs its own bound
+/// because their expected latencies differ by orders of magnitude:
+/// `fabric -u` and `markitdown` are URL scrapes that should complete in
+/// under a minute; `fabric -y --transcript` hits a captions API whose
+/// payload can be larger; LLM completions via `fabric -p <pattern>`
+/// (governed by `fabric.timeout_secs`, default 600s) genuinely can need
+/// minutes. Conflating them under a single value lets a hung URL fetch
+/// burn the LLM budget; separating them caps the blast radius.
+const DEFAULT_FABRIC_URL_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_FABRIC_TRANSCRIPT_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_MARKITDOWN_TIMEOUT_SECS: u64 = 60;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct PipelineConfig {
@@ -194,6 +206,9 @@ pub struct PipelineConfig {
     pub yt_dlp_timeout_secs: u64,
     pub ocr_timeout_secs: u64,
     pub jina_timeout_secs: u64,
+    pub fabric_url_timeout_secs: u64,
+    pub fabric_transcript_timeout_secs: u64,
+    pub markitdown_timeout_secs: u64,
     pub max_concurrent_traces: usize,
     pub max_concurrent_heavy_traces: usize,
 }
@@ -206,6 +221,9 @@ impl Default for PipelineConfig {
             yt_dlp_timeout_secs: 600,
             ocr_timeout_secs: 60,
             jina_timeout_secs: 60,
+            fabric_url_timeout_secs: DEFAULT_FABRIC_URL_TIMEOUT_SECS,
+            fabric_transcript_timeout_secs: DEFAULT_FABRIC_TRANSCRIPT_TIMEOUT_SECS,
+            markitdown_timeout_secs: DEFAULT_MARKITDOWN_TIMEOUT_SECS,
             max_concurrent_traces: DEFAULT_MAX_CONCURRENT_TRACES,
             max_concurrent_heavy_traces: DEFAULT_MAX_CONCURRENT_HEAVY_TRACES,
         }
@@ -599,9 +617,10 @@ pub struct FabricConfig {
     pub condense_pattern: String,
     pub tag_pattern: String,
     pub max_content_chars: usize,
-    /// Per-call timeout in seconds for any fabric subprocess. The poll-based
-    /// timeout kills the child on elapsed so the calling thread does not
-    /// remain blocked indefinitely.
+    /// Per-call timeout in seconds for `fabric -p <pattern>` LLM completions.
+    /// URL scrapes (`fabric -u`, `markitdown`) and YouTube transcript fetches
+    /// (`fabric -y`) use their own pipeline-level timeouts so a stuck fetch
+    /// cannot consume the LLM budget - see `PipelineConfig`.
     pub timeout_secs: u64,
 }
 
@@ -1195,5 +1214,50 @@ canonicalization:
     fn test_resolve_secret_missing() {
         let result = resolve_secret("NONEXISTENT_VAR_OBSBORG_TEST_999");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pipeline_config_defaults_for_split_fetch_timeouts() {
+        // Per docs/design/2026-05-18-fabric-pattern-resolve-and-distill-dlq.md
+        // the article-fetch path got split into per-subprocess timeouts so a
+        // stuck `fabric -u` can no longer eat the LLM completion budget.
+        let p = PipelineConfig::default();
+        assert_eq!(p.fabric_url_timeout_secs, 60, "fabric -u: URL scrape, 60s ceiling");
+        assert_eq!(
+            p.fabric_transcript_timeout_secs, 120,
+            "fabric -y: transcript fetch, 120s ceiling"
+        );
+        assert_eq!(p.markitdown_timeout_secs, 60, "markitdown fallback: 60s ceiling");
+    }
+
+    #[test]
+    fn test_pipeline_config_split_fetch_timeouts_from_yaml() {
+        // YAML keys are kebab-case (rename_all = "kebab-case"); user-supplied
+        // values must override the defaults. This locks the public surface
+        // for the operator-tunable timeouts.
+        let yaml = "\
+fabric-url-timeout-secs: 45
+fabric-transcript-timeout-secs: 90
+markitdown-timeout-secs: 30
+";
+        let p: PipelineConfig = serde_yaml::from_str(yaml).expect("parse pipeline yaml");
+        assert_eq!(p.fabric_url_timeout_secs, 45);
+        assert_eq!(p.fabric_transcript_timeout_secs, 90);
+        assert_eq!(p.markitdown_timeout_secs, 30);
+        // Other defaults are preserved (serde(default) on PipelineConfig).
+        assert_eq!(p.hard_timeout_secs, 1800);
+        assert_eq!(p.jina_timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_pipeline_config_split_fetch_timeouts_independent_of_fabric_pattern_timeout() {
+        // `fabric.timeout_secs` (LLM pattern completion, currently 600s default)
+        // must not be tied to any of the three new subprocess timeouts. This
+        // test pins the invariant: changing one cannot change another.
+        let p = PipelineConfig::default();
+        let f = FabricConfig::default();
+        assert_ne!(p.fabric_url_timeout_secs, f.timeout_secs);
+        assert_ne!(p.fabric_transcript_timeout_secs, f.timeout_secs);
+        assert_ne!(p.markitdown_timeout_secs, f.timeout_secs);
     }
 }

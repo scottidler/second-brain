@@ -750,13 +750,15 @@ async fn process_youtube(url: &str, config: &Config, trace_id: &str) -> Result<Y
     let transcript_future = async {
         if use_fabric {
             let config_fabric = config.fabric.clone();
+            let config_pipeline = config.pipeline.clone();
             let url = url_owned.clone();
-            let result = tokio::task::spawn_blocking(move || fabric::fetch_transcript(&url, &config_fabric))
-                .await
-                .unwrap_or_else(|e| {
-                    log::warn!("Fabric transcript task panicked: {e}");
-                    Ok(String::new())
-                });
+            let result =
+                tokio::task::spawn_blocking(move || fabric::fetch_transcript(&url, &config_fabric, &config_pipeline))
+                    .await
+                    .unwrap_or_else(|e| {
+                        log::warn!("Fabric transcript task panicked: {e}");
+                        Ok(String::new())
+                    });
             result.unwrap_or_else(|e| {
                 log::warn!("Fabric transcript failed: {e:#}");
                 String::new()
@@ -1009,7 +1011,7 @@ async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> R
     let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
     log::debug!("process_article_fabric[{trace_id}]: heavy permit acquired");
 
-    let article_md = fabric::fetch_article(url, &config.fabric).await?;
+    let article_md = fabric::fetch_article(url, &config.fabric, &config.pipeline).await?;
     if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
         config,
         trace_id,
