@@ -63,7 +63,16 @@ impl MiniVault {
 }
 
 fn note(fm: &str, body: &str) -> String {
-    format!("---\n{fm}---\n{body}")
+    // Default fixtures to `origin: assisted` so they survive the
+    // ingested-notes-only filter in `filter_notes`. Tests that need an
+    // authored note can pass `origin: <other>` in the frontmatter
+    // explicitly; an existing `origin:` line is honored as-is.
+    let fm_with_origin = if fm.contains("origin:") {
+        fm.to_string()
+    } else {
+        format!("{fm}origin: assisted\n")
+    };
+    format!("---\n{fm_with_origin}---\n{body}")
 }
 
 fn fake_with_response(pattern: &str, yaml: &str) -> Arc<FakeFabric> {
@@ -196,6 +205,57 @@ fn note_date_at_or_after_filters_old_notes() {
         raw: String::new(),
     };
     assert!(!note_date_at_or_after(&n, cutoff));
+}
+
+#[tokio::test]
+async fn backfill_filters_to_ingested_notes_only() {
+    // Only borg-ingested notes (origin: assisted) enter the candidate pool.
+    // Authored variants (`authored` / `human`) are excluded - daily journals,
+    // MOC pages, system views, CLAUDE.md, home.md, etc. must never get
+    // rewritten by backfill, even if they happen to carry a recognised
+    // `type:` field. See [[feedback_ingested_only]].
+    let v = MiniVault::new();
+    v.add(
+        "ingested.md",
+        &note(
+            "title: A\ntype: article\nsource: https://example.com/x\norigin: assisted\n",
+            "Ingested article prose.\n",
+        ),
+    );
+    v.add(
+        "authored.md",
+        &note(
+            // CLAUDE.md shape: looks like a video but is hand-written.
+            "title: Notes\ntype: youtube\norigin: authored\n",
+            "Hand-written.\n",
+        ),
+    );
+    v.add(
+        "journal.md",
+        &note(
+            "title: 2025-02-14\ntype: daily\norigin: human\n",
+            "Daily journal entry.\n",
+        ),
+    );
+
+    let dispatcher = dispatcher_for(fake_with_response(
+        "distill-article",
+        "summary: \"S\"\nclaims: []\ntags: []\nlinks: []\n",
+    ));
+    let cfg = v.config();
+    let opts = opts_default();
+    let summary = run_backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
+        .await
+        .expect("run");
+
+    // Only the ingested note is a candidate; the authored + human ones never
+    // appear in the candidate count (not even as skips).
+    assert_eq!(summary.attempted, 1, "only assisted notes enter the pool");
+    assert_eq!(summary.distilled, 1);
+    assert_eq!(summary.skipped, 0);
+    // Authored notes are byte-identical to what we wrote - no rewrite.
+    assert!(v.read("authored.md").contains("Hand-written."));
+    assert!(v.read("journal.md").contains("Daily journal entry."));
 }
 
 #[tokio::test]

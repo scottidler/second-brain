@@ -131,3 +131,27 @@ fn fallback_distilled_records_reason_and_raw_output() {
     assert_eq!(fb.meta.validation.raw_output.as_deref(), Some("raw fabric stdout"));
     assert!(fb.claims.is_empty());
 }
+
+#[test]
+fn fallback_distilled_preserves_transcript_so_no_user_content_is_lost() {
+    // Universal preservation: on any hard failure, the full input transcript
+    // survives in Distilled.transcript so render emits `## Transcript\n\n<body>`
+    // and the user retains their content. Previously only video/voicenote
+    // distillers post-processed to set this; article/repo/thread fallbacks
+    // left it None, which caused real data loss during the 2026-05-18 cortex
+    // backfill (2 untracked github notes overwritten with just a 280-char
+    // snippet and no recovery path).
+    let original = "The full legacy note body with multiple paragraphs.\n\nSecond paragraph contains more detail that must survive on yaml-parse-error.";
+    let fb = fallback_distilled("distill-article-v1", "yaml-parse-error", original, None);
+    assert_eq!(fb.transcript.as_deref(), Some(original));
+    // Summary still leads with the sentinel + 280-char snippet for triage.
+    assert!(fb.summary.starts_with("[yaml-parse-error]"));
+}
+
+#[test]
+fn fallback_distilled_empty_transcript_stays_none() {
+    // Empty input -> no transcript to preserve; render skips the `## Transcript`
+    // section entirely. Prevents a stray empty-headed block on truly empty inputs.
+    let fb = fallback_distilled("distill-article-v1", "empty-transcript", "", None);
+    assert_eq!(fb.transcript, None);
+}

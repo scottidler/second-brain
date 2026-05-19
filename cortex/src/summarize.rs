@@ -20,7 +20,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ::vault::distilled::Distilled;
-use distillers::{ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, render};
+use distillers::{
+    ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, demote_headings, render,
+};
 
 use crate::cli::SummarizeOpts;
 use crate::config::Config;
@@ -228,8 +230,16 @@ async fn process_one<F: FabricCaller + Clone>(
         return Ok(ProcessOutcome::Skipped("no body content to distill"));
     }
 
+    // Backfill reads the entire legacy note body as the "transcript" input.
+    // For video/voicenote kinds the distiller preserves that input verbatim
+    // inside Distilled.transcript, and render.rs emits it under `## Transcript`.
+    // Any H1/H2 in the legacy body would collide with the new L2 section
+    // headings (## Summary / ## Claims / ## Links), so we demote them two
+    // levels here at the source. See docs/design/2026-05-18-fabric-pattern-
+    // resolve-and-distill-dlq.md follow-up.
+    let demoted_body = demote_headings(&note.body, 2);
     let inputs = DistillInputs {
-        transcript: note.body.as_str(),
+        transcript: demoted_body.as_str(),
         source_url: note.frontmatter.source.as_deref(),
         title_hint: note.frontmatter.title.as_deref(),
         repo_metadata: None,
@@ -361,6 +371,15 @@ pub fn filter_notes(notes: &[Note], opts: &SummarizeOpts, resume_after: Option<&
             {
                 past_resume = true;
             }
+            continue;
+        }
+        // Backfill targets only borg-INGESTED notes. Authored frontmatter -
+        // `origin: authored` (CLAUDE.md, home.md, MOCs, system views) or
+        // `origin: human` (daily journals) - is out of scope and must never
+        // enter the candidate pool. Filtering here (instead of relying on
+        // per-note skip-at-scan) keeps the candidate count honest and avoids
+        // log noise from 142+ "unrecognised note type" skips per run.
+        if note.frontmatter.origin.as_deref() != Some("assisted") {
             continue;
         }
         if let Some(cutoff) = cutoff

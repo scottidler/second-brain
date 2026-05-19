@@ -154,7 +154,11 @@ fn push_transcript(body: &mut String, transcript: Option<&str>) {
         return;
     }
     body.push_str("## Transcript\n\n");
-    body.push_str(trimmed);
+    // Defense-in-depth: even if a caller passes pre-formatted markdown as
+    // the transcript (cortex backfill demotes upstream already, but other
+    // callers might not), demote any H1/H2 inside so the embedded headings
+    // can't collide with the surrounding L2 section structure.
+    body.push_str(&crate::text::demote_headings(trimmed, 2));
     body.push_str("\n\n");
 }
 

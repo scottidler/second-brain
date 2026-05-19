@@ -67,7 +67,18 @@ fn truncate_at_sentence_boundary(text: &str, max_chars: usize) -> String {
 /// Construct a fallback `Distilled` for distillers whose Fabric call failed
 /// or produced unparseable output. The summary leads with the fallback tag
 /// followed by a short snippet of the transcript so the user has something
-/// to read while triaging.
+/// to read while triaging. The full transcript is preserved in
+/// `Distilled.transcript` so the renderer can emit it under `## Transcript`
+/// and no user content is silently lost on hard-failure publishes.
+///
+/// This used to default `transcript = None` (with video/voicenote distillers
+/// post-processing to override). That asymmetry caused real data loss during
+/// the 2026-05-18 cortex backfill: article and repo distillers hit
+/// `yaml-parse-error` for short or pattern-mismatched inputs, and the full
+/// legacy body was replaced by the 280-char snippet alone. Untracked notes
+/// could not be recovered. Preserving the full transcript universally
+/// removes the gap; the only cost is slightly larger note files on
+/// fresh-ingest failures (an acceptable trade vs. silent data loss).
 pub fn fallback_distilled(
     extractor: &str,
     reason: &str,
@@ -76,6 +87,11 @@ pub fn fallback_distilled(
 ) -> Distilled {
     let snippet: String = transcript_snippet.chars().take(280).collect();
     let summary = format!("[{reason}]\n\n{snippet}");
+    let transcript = if transcript_snippet.is_empty() {
+        None
+    } else {
+        Some(transcript_snippet.to_string())
+    };
     Distilled {
         summary,
         claims: Vec::new(),
@@ -95,10 +111,7 @@ pub fn fallback_distilled(
                 raw_output: raw_output.map(|s| s.to_string()),
             },
         },
-        // fallback_distilled defaults to None. Non-URL callers (Image,
-        // VoiceNote, Idea, Vocab) post-process to set transcript = Some
-        // when they want verbatim preservation; URL callers leave it None.
-        transcript: None,
+        transcript,
     }
 }
 
