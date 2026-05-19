@@ -1,7 +1,7 @@
 # Cortex Embed Memory Bounding
 
 **Date:** 2026-05-19
-**Status:** Proposed
+**Status:** Implemented (shipped in v0.8.1, commit 3a0333a)
 **Author:** Scott (with claude)
 **Tracking:** [[project-cortex-embed-memory-leak]]
 
@@ -190,3 +190,52 @@ None - the evidence is unambiguous and the fix is narrow.
 - Bounded `embed_batch` calls within a tick are functionally identical to one big call - the vectors come out in the same order, the index is upserted the same way.
 - The rayon fan-out inside `embed_inner` still runs with 8 replicas; just on smaller sub-batches at a time. Per-call throughput is the same (8 sub-chunks of 8 chunks each = 64 chunks parallel). Wall-clock per tick may be slightly higher only if there were enough chunks to swamp the system without bound - exactly the case this fix is meant to prevent.
 - Failure semantics match today: any sub-batch error marks `stats.failed = flat.len()` and the tick aborts. Stale rows retry next tick. No partial commits to the DB; the write-path cursor math at `embed.rs:404-417` stays correct because `flat_vectors.len() == flat.len()` is preserved on the success path.
+
+## Addendum: Does sub-batching change the embeddings?
+
+Question raised after the fix shipped: does breaking the input into batches of 64 instead of one batch of N produce different vectors for the same input?
+
+**Answer: no.** BERT embedding is intrinsically per-document. The batch axis is throughput-only, not semantic. For any input `i` in a batch of size N, the output `v_i` depends only on `texts[i]`. The BGE-small-en-v1.5 inference pipeline for one input is:
+
+1. Tokenize that one string into token ids.
+2. Forward through 12 BERT layers. Self-attention is intra-sequence; tokens in input `j` never attend to tokens in input `i`. Layer-norm is per-token across the hidden dimension, not per-batch.
+3. Mean-pool across the token positions of that one sequence.
+4. L2-normalize the pooled vector.
+
+None of those steps cross sequence boundaries. There is no batch-norm anywhere in BERT. Therefore for any split point `k`:
+
+```
+embed_batch([t_0, ..., t_{N-1}]) == embed_batch([t_0, ..., t_{k-1}]) ++ embed_batch([t_k, ..., t_{N-1}])
+```
+
+The only things that change with batch size are wall-clock time (smaller batches saturate the rayon fan-out less effectively) and peak memory (smaller batches allocate fewer concurrent activation tensors). Exactly the trade we wanted.
+
+### How the regression test encodes this
+
+`cortex/src/embed/tests.rs::embed_in_sub_batches_caps_inputs_and_preserves_order` asserts:
+
+```rust
+assert_eq!(vectors[0], expected_first);    // m.embed_one("doc-0")
+assert_eq!(vectors[249], expected_last);   // m.embed_one("doc-249")
+```
+
+Output of batched-with-cap equals output of computing each input independently. If a future refactor accidentally pooled across the batch axis, shuffled outputs, or mixed inputs, this test fails.
+
+### Caveat: defense-in-depth for the real candle backend
+
+The test above runs against `MockEmbedder` (deterministic per-text seed). The same independence holds for the real candle BGE model by virtue of BERT's architecture, but is not explicitly checked in this repo. If we wanted belt-and-suspenders coverage, add a parity test under `vault/tests/regression.rs`:
+
+```rust
+// Pseudocode for the parity test
+let m = CandleBertModel::load_with_workers(1).unwrap();
+let texts = ["the quick brown fox", "jumps over the lazy dog", "second-brain note one", ...];
+let single = m.embed_batch(&texts).unwrap();
+let mut split: Vec<Vec<f32>> = Vec::new();
+split.extend(m.embed_batch(&texts[..3]).unwrap());
+split.extend(m.embed_batch(&texts[3..]).unwrap());
+for (a, b) in single.iter().zip(split.iter()) {
+    assert!(cosine_distance(a, b) < 1e-6, "batched != split: should match within fp epsilon");
+}
+```
+
+Not added in this design because BERT's per-document semantics are architecturally guaranteed and the mock test already catches refactor regressions in the sub-batching layer. Worth doing if we ever swap the candle backend for a different embedder where batch independence is less obvious (e.g., an embedder with batch-norm or contrastive-batch tricks).
