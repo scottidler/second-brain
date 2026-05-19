@@ -34,6 +34,7 @@ fn process_batch_returns_zero_when_no_stale_targets() {
         m.model_version(),
         tmp.path(),
         16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
     )
     .expect("process");
     assert_eq!(stats.scanned, 0);
@@ -65,6 +66,7 @@ fn process_batch_embeds_stale_summary_rows() {
         m.model_version(),
         tmp.path(),
         16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
     )
     .expect("process");
     assert_eq!(stats.scanned, 2);
@@ -100,6 +102,7 @@ fn process_batch_skips_notes_with_empty_summary() {
         m.model_version(),
         tmp.path(),
         16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
     )
     .expect("process");
     assert_eq!(stats.scanned, 0, "SQL filter must exclude empty-summary notes");
@@ -161,4 +164,95 @@ fn write_transaction_for_batch_64_stays_under_200ms() {
 fn lock_path_lives_under_data_local_dir() {
     let p = lock_path();
     assert!(p.ends_with(PathBuf::from("cortex/embed.lock")));
+}
+
+/// Records every `embed_batch` call's input length so a test can
+/// assert sub-batching obeys the configured cap. Delegates the actual
+/// embedding to `MockEmbedder` so vector dimensions stay consistent.
+struct CountingMockEmbedder {
+    inner: MockEmbedder,
+    call_sizes: std::sync::Mutex<Vec<usize>>,
+}
+
+impl CountingMockEmbedder {
+    fn new() -> Self {
+        Self {
+            inner: MockEmbedder::default_384(),
+            call_sizes: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn calls(&self) -> Vec<usize> {
+        self.call_sizes.lock().expect("calls mutex").clone()
+    }
+}
+
+impl vault::embedding::EmbeddingModel for CountingMockEmbedder {
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+    fn model_version(&self) -> &str {
+        self.inner.model_version()
+    }
+    fn embed_one(&self, t: &str) -> eyre::Result<Vec<f32>> {
+        self.inner.embed_one(t)
+    }
+    fn embed_batch(&self, texts: &[&str]) -> eyre::Result<Vec<Vec<f32>>> {
+        self.call_sizes.lock().expect("calls mutex").push(texts.len());
+        self.inner.embed_batch(texts)
+    }
+}
+
+/// Regression guard for the 2026-05-19 OOM. If a future refactor
+/// removes or bypasses the sub-batching loop in `process_transcript_batch`,
+/// this test fails because `embed_batch` would be called once with
+/// the full input length instead of in capped sub-batches. RSS bounds
+/// are not assertable in a unit test; call counts and per-call sizes
+/// are.
+#[test]
+fn embed_in_sub_batches_caps_inputs_and_preserves_order() {
+    let m = CountingMockEmbedder::new();
+    // 250 inputs with stable identifiers so we can verify input order
+    // is preserved across sub-batches.
+    let texts: Vec<String> = (0..250).map(|i| format!("doc-{i}")).collect();
+    let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+
+    let vectors = embed_in_sub_batches(&m, &refs, 64).expect("embed");
+
+    assert_eq!(vectors.len(), 250, "must return one vector per input");
+
+    let calls = m.calls();
+    assert_eq!(calls.len(), 4, "250 inputs / cap=64 -> ceil(250/64) = 4 calls");
+    assert!(
+        calls.iter().all(|&n| n <= 64),
+        "no sub-batch may exceed the cap; got {calls:?}"
+    );
+    assert_eq!(calls.iter().sum::<usize>(), 250, "every input is covered exactly once");
+
+    // Order preservation: the seeded MockEmbedder is deterministic, so
+    // recomputing each input via embed_one yields the expected vector
+    // in the same slot.
+    let expected_first = m.embed_one("doc-0").expect("e0");
+    let expected_last = m.embed_one("doc-249").expect("e249");
+    assert_eq!(vectors[0], expected_first);
+    assert_eq!(vectors[249], expected_last);
+}
+
+#[test]
+fn embed_in_sub_batches_handles_empty_input() {
+    let m = CountingMockEmbedder::new();
+    let vectors = embed_in_sub_batches(&m, &[], 64).expect("embed");
+    assert!(vectors.is_empty());
+    assert!(m.calls().is_empty(), "no embed_batch call for empty input");
+}
+
+#[test]
+fn embed_in_sub_batches_treats_zero_cap_as_no_cap() {
+    let m = CountingMockEmbedder::new();
+    let texts: Vec<String> = (0..30).map(|i| format!("doc-{i}")).collect();
+    let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+    let vectors = embed_in_sub_batches(&m, &refs, 0).expect("embed");
+    assert_eq!(vectors.len(), 30);
+    let calls = m.calls();
+    assert_eq!(calls, vec![30], "cap=0 means one call with the full input");
 }

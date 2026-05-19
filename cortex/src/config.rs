@@ -48,10 +48,27 @@ impl Default for Config {
 /// platform-aware default" (currently `min(8, available_parallelism)`).
 /// A non-zero value pins an explicit count; the backend clamps it to
 /// its own `[1, MAX_WORKERS]` range.
-#[derive(Debug, Default, Deserialize)]
+///
+/// `max_chunks_per_call` bounds the input size of any single
+/// `embed_batch` invocation, regardless of how many notes the read
+/// phase pulled. Without this cap, a backlog of transcript-eligible
+/// notes can flatten to thousands of chunks and trigger an 8-replica
+/// rayon fan-out that allocates tens of GB. See
+/// docs/design/2026-05-19-cortex-embed-memory-bounding.md.
+#[derive(Debug, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct EmbedConfig {
     pub workers: usize,
+    pub max_chunks_per_call: usize,
+}
+
+impl Default for EmbedConfig {
+    fn default() -> Self {
+        Self {
+            workers: 0,
+            max_chunks_per_call: crate::embed::DEFAULT_MAX_CHUNKS_PER_CALL,
+        }
+    }
 }
 
 /// Phase-7 backfill knobs. `max-concurrent` defaults to 2 so a one-pass

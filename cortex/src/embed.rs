@@ -54,6 +54,16 @@ pub const DEFAULT_BATCH_SIZE: usize = 64;
 /// leave only a handful of rows for a typical day.
 pub const DEFAULT_CADENCE_SECS: u64 = 600;
 
+/// Cap on the input size of any single `embed_batch` call. The flat
+/// fan-out in `process_transcript_batch` can produce thousands of
+/// chunks when a backlog of transcript-eligible notes drains in one
+/// tick; passing that many strings to candle's 8-replica rayon
+/// fan-out at once peaks activation memory at tens of GB. Sub-batching
+/// at this cap bounds peak per-call memory to roughly 64 strings ×
+/// 512 tokens × 384 hidden × 12 layers × 4 bytes ≈ 600 MB across the
+/// replica pool. See docs/design/2026-05-19-cortex-embed-memory-bounding.md.
+pub const DEFAULT_MAX_CHUNKS_PER_CALL: usize = 64;
+
 /// One pass / batch of work the embed loop produces. Surfaced so the
 /// daemon and CLI can both log uniformly.
 #[derive(Debug, Default, Clone, Copy)]
@@ -139,6 +149,7 @@ pub fn run_embed(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result
                 model.model_version(),
                 vault_root,
                 opts.batch_size,
+                config.embed.max_chunks_per_call,
             )?;
             total.merge(&batch_stats);
             if batch_stats.scanned == 0 {
@@ -218,10 +229,15 @@ pub fn process_batch(
     model_version: &str,
     vault_root: &Path,
     batch_size: usize,
+    max_chunks_per_call: usize,
 ) -> Result<EmbedStats> {
     match kind {
-        EmbeddingKind::Summary => process_summary_batch(index, model, model_version, vault_root, batch_size),
-        EmbeddingKind::TranscriptChunk => process_transcript_batch(index, model, model_version, vault_root, batch_size),
+        EmbeddingKind::Summary => {
+            process_summary_batch(index, model, model_version, vault_root, batch_size, max_chunks_per_call)
+        }
+        EmbeddingKind::TranscriptChunk => {
+            process_transcript_batch(index, model, model_version, vault_root, batch_size, max_chunks_per_call)
+        }
     }
 }
 
@@ -233,6 +249,7 @@ fn process_summary_batch(
     model_version: &str,
     _vault_root: &Path,
     batch_size: usize,
+    max_chunks_per_call: usize,
 ) -> Result<EmbedStats> {
     let mut stats = EmbedStats::default();
 
@@ -274,8 +291,15 @@ fn process_summary_batch(
     }
 
     // ---- 2. INFERENCE PHASE (no SQLite contact). ----
+    // Sub-batch the inputs so any one `embed_batch` call sees at most
+    // `max_chunks_per_call` strings. With batch_size=64 summaries this
+    // is usually a no-op (one sub-batch); the cap matters mostly for
+    // the transcript path. Any failure aborts the whole tick - vectors
+    // from earlier sub-batches are discarded so the write phase's
+    // `vectors.len() == work.len()` invariant holds. Stale rows retry
+    // next tick.
     let texts: Vec<&str> = work.iter().map(|w| w.text.as_str()).collect();
-    let vectors = match model.embed_batch(&texts) {
+    let vectors = match embed_in_sub_batches(model, &texts, max_chunks_per_call) {
         Ok(v) => v,
         Err(e) => {
             log::error!("cortex::embed: embed_batch failed: {e}");
@@ -330,6 +354,7 @@ fn process_transcript_batch(
     model_version: &str,
     vault_root: &Path,
     batch_size: usize,
+    max_chunks_per_call: usize,
 ) -> Result<EmbedStats> {
     let mut stats = EmbedStats::default();
 
@@ -376,9 +401,15 @@ fn process_transcript_batch(
 
     // ---- 2. INFERENCE PHASE. ----
     // One flat batch of chunks across all notes - amortizes the model
-    // call. The per-note grouping happens on the way out.
+    // call. The per-note grouping happens on the way out. Sub-batched
+    // at `max_chunks_per_call` to bound peak activation memory inside
+    // candle's 8-replica rayon fan-out; an unbounded flat batch of
+    // thousands of chunks would allocate tens of GB and OOM-kill the
+    // daemon (observed 2026-05-19). Any failure aborts the whole tick;
+    // the write phase below depends on
+    // `flat_vectors.len() == flat.len()` for cursor alignment.
     let flat: Vec<&str> = work.iter().flat_map(|w| w.chunks.iter().map(|s| s.as_str())).collect();
-    let flat_vectors = match model.embed_batch(&flat) {
+    let flat_vectors = match embed_in_sub_batches(model, &flat, max_chunks_per_call) {
         Ok(v) => v,
         Err(e) => {
             log::error!("cortex::embed: embed_batch failed for transcripts: {e}");
@@ -424,6 +455,44 @@ fn process_transcript_batch(
 /// chunker share the same notion of "what fits in one chunk."
 const CHUNK_MAX_TOKENS: usize = 400;
 const CHUNK_OVERLAP_TOKENS: usize = 50;
+
+/// Call `embed_batch` repeatedly with at most `max_chunks_per_call`
+/// inputs at a time, preserving input order. A `max_chunks_per_call`
+/// of 0 is treated as "no cap" (one call with the full input).
+///
+/// Any single sub-batch failure aborts the whole sequence and
+/// propagates the error. Vectors from earlier successful sub-batches
+/// in this call are discarded - callers depend on
+/// `result.len() == texts.len()` and a partial result would break
+/// downstream cursor alignment (see `process_transcript_batch`).
+fn embed_in_sub_batches(
+    model: &dyn EmbeddingModel,
+    texts: &[&str],
+    max_chunks_per_call: usize,
+) -> Result<Vec<Vec<f32>>> {
+    log::debug!(
+        "cortex::embed::embed_in_sub_batches: total={} max_per_call={}",
+        texts.len(),
+        max_chunks_per_call,
+    );
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cap = if max_chunks_per_call == 0 { texts.len() } else { max_chunks_per_call };
+    let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+    for sub in texts.chunks(cap) {
+        let part = model.embed_batch(sub)?;
+        if part.len() != sub.len() {
+            eyre::bail!(
+                "embed_batch returned {} vectors for {} inputs in sub-batch",
+                part.len(),
+                sub.len(),
+            );
+        }
+        out.extend(part);
+    }
+    Ok(out)
+}
 
 struct EmbedWork {
     note_path: String,
