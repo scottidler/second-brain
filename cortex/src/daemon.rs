@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use vault::watcher::{VaultWatcher, WatcherConfig};
 
-use crate::cli::DaemonOpts;
+use crate::opts::DaemonOpts;
 use crate::config::{Config, DaemonConfig};
 
 /// Fingerprint of a single sweep's apply results.
@@ -182,7 +182,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 // Scheduled daily intel
                 log::info!("running scheduled daily intel");
                 println!("[daemon] running scheduled daily intel");
-                let opts = crate::cli::IntelOpts {
+                let opts = crate::opts::IntelOpts {
                     daily: true,
                     weekly: false,
                     output: None,
@@ -201,7 +201,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 // Scheduled weekly intel
                 log::info!("running scheduled weekly intel");
                 println!("[daemon] running scheduled weekly intel");
-                let opts = crate::cli::IntelOpts {
+                let opts = crate::opts::IntelOpts {
                     daily: false,
                     weekly: true,
                     output: None,
@@ -268,7 +268,7 @@ fn run_classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonC
     if !daemon_config.enabled_actions().contains(&"classify") {
         return;
     }
-    let opts = crate::classify::ClassifyOpts {
+    let opts = crate::opts::ClassifyOpts {
         apply: true,
         path: None,
         force: false,
@@ -308,7 +308,7 @@ fn run_configured_actions(
         match *action {
             "classify" => {
                 // Classify runs first - moves inbox notes to notes/ before other actions
-                let opts = crate::classify::ClassifyOpts {
+                let opts = crate::opts::ClassifyOpts {
                     apply: true,
                     path: None,
                     force: false,
@@ -333,7 +333,7 @@ fn run_configured_actions(
             }
             "lint" => {
                 let auto = daemon_config.is_enabled("lint");
-                let opts = crate::cli::LintOpts {
+                let opts = crate::opts::LintOpts {
                     apply: auto,
                     format: "human".to_string(),
                     rule: Vec::new(),
@@ -374,13 +374,13 @@ fn run_configured_actions(
                 if auto {
                     // Lint first to check if there's work, then apply only if needed.
                     // Previously fingerprinted unconditionally, permanently triggering cycle detection.
-                    let lint_opts = crate::cli::LinkOpts {
+                    let lint_opts = crate::opts::LinkOpts {
                         apply: false,
                         scan: "all".to_string(),
                     };
                     match crate::run_link(vault_root, config, &lint_opts) {
                         Ok(report) if !report.is_empty() => {
-                            let apply_opts = crate::cli::LinkOpts {
+                            let apply_opts = crate::opts::LinkOpts {
                                 apply: true,
                                 scan: "all".to_string(),
                             };
@@ -397,7 +397,7 @@ fn run_configured_actions(
                         Err(e) => log::error!("link lint failed: {e}"),
                     }
                 } else {
-                    let opts = crate::cli::LinkOpts {
+                    let opts = crate::opts::LinkOpts {
                         apply: false,
                         scan: "all".to_string(),
                     };
@@ -483,7 +483,7 @@ fn run_configured_actions(
                 }
             }
             "intel" => {
-                let opts = crate::cli::IntelOpts {
+                let opts = crate::opts::IntelOpts {
                     daily: true,
                     weekly: false,
                     output: None,
@@ -493,7 +493,7 @@ fn run_configured_actions(
                 }
             }
             "state" => {
-                let opts = crate::cli::StateOpts {
+                let opts = crate::opts::StateOpts {
                     refresh: true,
                     diff: false,
                 };

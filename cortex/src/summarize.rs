@@ -24,7 +24,7 @@ use distillers::{
     ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, demote_headings, render,
 };
 
-use crate::cli::SummarizeOpts;
+use crate::opts::SummarizeOpts;
 use crate::config::Config;
 use crate::vault::{Frontmatter, Note, scan_vault};
 

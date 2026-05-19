@@ -1,6 +1,5 @@
 pub mod autotag;
 pub mod classify;
-pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod duplicates;
@@ -14,6 +13,7 @@ pub mod llm;
 pub mod logging;
 pub mod migrate;
 pub mod naming;
+pub mod opts;
 pub mod quality;
 pub mod report;
 pub mod scope;
@@ -28,8 +28,7 @@ use colored::Colorize;
 use eyre::Result;
 use std::path::Path;
 
-use classify::ClassifyOpts;
-use cli::{IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts, SummarizeOpts, SweepOpts};
+use opts::{ClassifyOpts, IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts, SummarizeOpts, SweepOpts};
 use config::Config;
 use report::Report;
 use state::VaultManifest;

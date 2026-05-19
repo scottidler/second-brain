@@ -2,7 +2,7 @@ use chrono::{Datelike, Local, NaiveDate};
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::cli::IntelOpts;
+use crate::opts::IntelOpts;
 use crate::config::{IntelConfig, LlmConfig};
 use crate::vault::Note;
 

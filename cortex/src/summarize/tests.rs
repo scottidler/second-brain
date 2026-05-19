@@ -1,5 +1,5 @@
 use super::*;
-use crate::cli::SummarizeOpts;
+use crate::opts::SummarizeOpts;
 use crate::config::{BackfillConfig, Config, StateConfig, VaultConfig};
 use distillers::{Dispatcher, FakeFabric};
 use std::sync::Arc;

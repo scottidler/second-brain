@@ -215,30 +215,6 @@ impl ClassifyMethod {
     }
 }
 
-/// CLI options for the classify command
-#[derive(Debug, clap::Parser)]
-pub struct ClassifyOpts {
-    /// Move notes (default: dry-run showing planned moves)
-    #[arg(long)]
-    pub apply: bool,
-
-    /// Process specific files
-    #[arg(long)]
-    pub path: Option<String>,
-
-    /// Reclassify notes that already have cortex-classified: true
-    #[arg(long)]
-    pub force: bool,
-
-    /// Only process notes with cortex-needs-review: true
-    #[arg(long)]
-    pub review_only: bool,
-
-    /// Reclassify all notes with this domain (e.g., --reclassify-domain resources)
-    #[arg(long)]
-    pub reclassify_domain: Option<String>,
-}
-
 /// Dry-run: returns planned classifications as violations in a Report
 pub fn lint_classify(notes: &[Note], config: &ClassifyConfig, search_index: Option<&SearchIndex>) -> Report {
     let mut report = Report::default();
