@@ -2,6 +2,27 @@ use eyre::{Context, Result, bail};
 use std::process::Command;
 use std::time::Duration;
 
+/// Map a bare pattern name (e.g. `distill-article`) to its absolute file path
+/// inside `~/.config/borg/patterns/`. Tries the literal name first, then with
+/// `.md` appended. Path-like inputs (`/`, `.`, `~`) pass through unchanged.
+/// Falls back to the bare name when nothing matches, letting fabric's own
+/// pattern-loader take a try.
+fn resolve_pattern(name: &str) -> String {
+    if name.starts_with('/') || name.starts_with('.') || name.starts_with('~') {
+        return name.to_string();
+    }
+    if let Some(home) = dirs::home_dir() {
+        let base = home.join(".config/borg/patterns");
+        for candidate in [base.join(name), base.join(format!("{name}.md"))] {
+            if candidate.exists() {
+                log::debug!("resolve_pattern: {name} -> {}", candidate.display());
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
+    name.to_string()
+}
+
 /// Run a Fabric pattern against input text with a per-call timeout.
 /// If the timeout fires, the child is killed and an error is returned.
 /// Returns the pattern output or an error.
@@ -13,11 +34,8 @@ pub fn run_pattern(
     max_chars: usize,
     timeout_secs: u64,
 ) -> Result<String> {
-    let truncated = truncate_input(input, max_chars);
-    let resolved = resolve_binary(binary);
-
-    let mut cmd = Command::new(&resolved);
-    cmd.args(["-p", pattern]);
+    let mut cmd = Command::new(resolve_binary(binary));
+    cmd.args(["-p", &resolve_pattern(pattern)]);
     if !model.is_empty() {
         cmd.args(["-m", model]);
     }
@@ -30,7 +48,7 @@ pub fn run_pattern(
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         stdin
-            .write_all(truncated.as_bytes())
+            .write_all(truncate_input(input, max_chars).as_bytes())
             .context("Failed to write to fabric stdin")?;
     }
 
@@ -145,5 +163,21 @@ mod tests {
         assert_eq!(truncate_input("hello world", 5), "hello");
         assert_eq!(truncate_input("hello", 10), "hello");
         assert_eq!(truncate_input("hello", 0), "hello");
+    }
+
+    #[test]
+    fn test_resolve_pattern_passes_paths_through() {
+        // Path-like inputs return unchanged regardless of filesystem state.
+        assert_eq!(resolve_pattern("/abs/path.md"), "/abs/path.md");
+        assert_eq!(resolve_pattern("./rel.md"), "./rel.md");
+        assert_eq!(resolve_pattern("~/in-home.md"), "~/in-home.md");
+    }
+
+    #[test]
+    fn test_resolve_pattern_unknown_name_passes_through() {
+        // No file at ~/.config/borg/patterns/this-pattern-does-not-exist*
+        // so the bare name is returned and fabric's own loader can try.
+        let result = resolve_pattern("this-pattern-does-not-exist-xyz-12345");
+        assert_eq!(result, "this-pattern-does-not-exist-xyz-12345");
     }
 }

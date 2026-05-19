@@ -198,19 +198,51 @@ tasks:
       cargo clean
       echo "✅ Build artifacts cleaned"
 
-  install:
-    help: "Install workspace binaries locally via cargo"
+  update:
+    help: "Refresh Cargo.lock to pick up newer transitive dep versions"
     bash: |
-      cargo install --path borg
-      cargo install --path cortex
-      cargo install --path oracle
-      echo "✅ Binaries installed to ~/.cargo/bin"
+      cargo update
+      echo "✅ Cargo.lock refreshed; run 'otto deploy' to install with the new lock"
+
+  install:
+    help: "Install workspace binaries locally (one parallel cargo build, locked)"
+    bash: |
+      cargo build --release --locked --workspace --bins
+      BINS=$(cargo metadata --format-version 1 --no-deps \
+        | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name' \
+        | sort -u)
+      for bin in $BINS; do
+        install -m 0755 "target/release/$bin" "$HOME/.cargo/bin/$bin"
+      done
+      echo "✅ Installed to ~/.cargo/bin: $(echo $BINS | tr '\n' ' ')"
 
   deploy:
-    help: "Build, install, and restart workspace binaries (oracle is on-demand, no restart)"
+    help: "Build, install assets + bins, and restart any workspace bins that have systemd user units"
     bash: |
-      cargo install --path borg
-      cargo install --path cortex
-      cargo install --path oracle
-      systemctl --user restart borg cortex
-      echo "✅ Deployed borg, cortex, oracle; borg + cortex daemons restarted"
+      cargo build --release --locked --workspace --bins
+      BINS=$(cargo metadata --format-version 1 --no-deps \
+        | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name' \
+        | sort -u)
+      DAEMONS=""
+      for bin in $BINS; do
+        install -m 0755 "target/release/$bin" "$HOME/.cargo/bin/$bin"
+        if systemctl --user cat "$bin.service" >/dev/null 2>&1; then
+          DAEMONS="$DAEMONS $bin"
+        fi
+      done
+
+      # Sync borg fabric patterns to where vault::fabric::resolve_pattern looks.
+      # Source-of-truth lives in borg/patterns/; this avoids drift between repo
+      # state and the deployed install location (the gap that caused the
+      # 2026-05-16 fabric-error regression).
+      mkdir -p "$HOME/.config/borg/patterns"
+      cp -f borg/patterns/*.md "$HOME/.config/borg/patterns/"
+
+      # Sync shared config (canonical tags, tag mapping, tag proposals) so
+      # borg + cortex agree on the canonical vocabulary.
+      mkdir -p "$HOME/.config/second-brain"
+      cp -f config/*.yml "$HOME/.config/second-brain/"
+
+      [ -n "$DAEMONS" ] && systemctl --user restart $DAEMONS
+      echo "✅ Deployed$(echo $BINS | tr '\n' ' ' | sed 's/^/ /'); restarted:${DAEMONS:- (none)}"
+      echo "✅ Synced patterns -> ~/.config/borg/patterns/ and shared config -> ~/.config/second-brain/"
