@@ -9,7 +9,6 @@ pub mod audit;
 pub mod backfill;
 pub mod backoff;
 pub mod blocklist;
-pub mod cli;
 pub mod config;
 pub mod dashboard;
 pub mod description;
@@ -29,6 +28,7 @@ pub mod migrate;
 pub mod notify;
 pub mod ntfy;
 pub mod ocr;
+pub mod opts;
 pub mod pipeline;
 pub mod quality;
 pub mod replay;
@@ -765,7 +765,7 @@ pub async fn run_sign(config: &config::Config) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_hotkey(opts: cli::HotkeyOpts, config: &Config) -> Result<()> {
+pub async fn run_hotkey(opts: opts::HotkeyOpts, config: &Config) -> Result<()> {
     // CLI args override config; if CLI has default values, fall back to config
     let host = if opts.host == "localhost" { config.hotkey.host.clone() } else { opts.host };
     let port = if opts.port == 8181 { config.hotkey.port } else { opts.port };
@@ -781,8 +781,8 @@ pub async fn run_hotkey(opts: cli::HotkeyOpts, config: &Config) -> Result<()> {
     }
 }
 
-pub async fn run_daemon(config: Config, verbose: bool, opts: cli::DaemonOpts) -> Result<()> {
-    use cli::DaemonOpts;
+pub async fn run_daemon(config: Config, verbose: bool, opts: opts::DaemonOpts) -> Result<()> {
+    use crate::opts::DaemonOpts;
 
     match opts {
         DaemonOpts { install: true, .. } => install_service().await,
