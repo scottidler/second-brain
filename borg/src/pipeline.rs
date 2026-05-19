@@ -470,11 +470,13 @@ async fn process_url_inner(
     // for URL kinds; image/audio/text/vocab paths still flow through the
     // older `summary: String` field unchanged.
     let mut slide_payload: Option<SlidePayload> = None;
-    let (title, distilled, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
+    let (title, scraped_title, distilled, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
         let yt_result = process_youtube(&url_match.url, config, trace_id).await?;
         slide_payload = yt_result.slide_payload;
+        let yt_title = yt_result.title;
         (
-            yt_result.title,
+            yt_title.clone(),
+            yt_title,
             yt_result.distilled,
             yt_result.content_type,
             Some(yt_result.description),
@@ -487,7 +489,7 @@ async fn process_url_inner(
             "reddit" => ContentType::Reddit,
             _ => ContentType::Article,
         };
-        let (title, article_md) = if use_fabric {
+        let (scraped_title, article_md) = if use_fabric {
             match process_article_fabric(&url_match.url, config, trace_id).await {
                 Ok((title, article_md, _)) => (title, article_md),
                 Err(e) => {
@@ -500,11 +502,23 @@ async fn process_url_inner(
             let (title, article_md, _) = process_article_jina(&url_match.url, config, trace_id).await?;
             (title, article_md)
         };
+        // For github repo URLs, the HTML <title> is unreliable: auth-walled
+        // pages collapse to a generic login title, so distinct repos slug to
+        // the same filename and clobber each other. The URL itself is the
+        // canonical name, so derive `title` from parse_repo_url. The original
+        // `scraped_title` is preserved so the quality gate below can still
+        // see what the fetcher actually returned (and bail on auth-wall
+        // bodies via BLOCKED_TITLE_INDICATORS).
+        let github_repo = crate::github::parse_repo_url(&url_match.url);
+        let title = match &github_repo {
+            Some((owner, repo)) => format!("{owner}/{repo}"),
+            None => scraped_title.clone(),
+        };
         // Dispatch by URL kind: github roots → repo distiller (fetches REST
         // metadata internally); X/Reddit/HN → thread distiller; everything
         // else → article distiller. The repo path uses `article_md` only as
         // a fallback when the GitHub API call fails.
-        let distilled = if crate::github::parse_repo_url(&url_match.url).is_some() {
+        let distilled = if github_repo.is_some() {
             crate::stages::distill::distill_for_publish_repo(
                 &config.fabric,
                 &config.staging,
@@ -536,13 +550,16 @@ async fn process_url_inner(
         // we now display to users; it is also what `fabric::generate_tags`
         // consumes below.
         crate::stages::raw::run_gate_2(config, trace_id, Some(&url_match.url), &distilled.summary)?;
-        (title, distilled, ct, None, Vec::new())
+        (title, scraped_title, distilled, ct, None, Vec::new())
     };
 
     // Quality gate: detect blocked/garbage content before creating a note.
-    // Runs against the structured Distilled summary, which is shorter and
-    // more deterministic than the legacy fabric-summarize prose.
-    if let Some(reason) = crate::quality::detect_blocked_content(&distilled.summary, &title) {
+    // Runs against the structured Distilled summary and `scraped_title` -
+    // the title the fetcher actually returned, not any URL-derived override.
+    // For github repo URLs `title` is `owner/repo`, which would never match
+    // an auth-wall indicator; using `scraped_title` here keeps the gate
+    // honest about what the fetcher saw.
+    if let Some(reason) = crate::quality::detect_blocked_content(&distilled.summary, &scraped_title) {
         eyre::bail!("Content quality check failed: {reason}");
     }
 

@@ -32,6 +32,22 @@ fn parse_repo_url_rejects_non_github_hosts() {
 }
 
 #[test]
+fn parse_repo_url_rejects_gist_subdomain() {
+    // gist.github.com URLs look like github.com/owner/hash but route to a
+    // different service. The REST /repos endpoint 404s for them, which would
+    // force the pipeline into the fallback path and persist gist HTML under
+    // a structured-looking but inaccurate owner-hash filename. Reject here
+    // so gists fall through to the regular article path instead.
+    assert!(parse_repo_url("https://gist.github.com/scottidler/abc123def456").is_none());
+}
+
+#[test]
+fn parse_repo_url_rejects_other_github_subdomains() {
+    assert!(parse_repo_url("https://api.github.com/repos/scottidler/second-brain").is_none());
+    assert!(parse_repo_url("https://raw.githubusercontent.com/scottidler/second-brain/main/README.md").is_none());
+}
+
+#[test]
 fn parse_repo_url_rejects_owner_only() {
     assert!(parse_repo_url("https://github.com/scottidler").is_none());
     assert!(parse_repo_url("https://github.com/").is_none());

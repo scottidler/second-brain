@@ -208,6 +208,23 @@ mod tests {
         assert_eq!(sanitize_filename("abc123"), "abc123");
     }
 
+    #[test]
+    fn test_sanitize_filename_github_owner_repo() {
+        // Borg derives github note slugs from `owner/repo` (see
+        // pipeline.rs github_repo override). Lock in the slash-to-hyphen
+        // mapping so two distinct repos never collide on the same filename.
+        assert_eq!(sanitize_filename("coleam00/archon"), "coleam00-archon");
+        assert_eq!(
+            sanitize_filename("matt1398/claude-devtools"),
+            "matt1398-claude-devtools"
+        );
+        // Different repos must never produce identical slugs.
+        assert_ne!(
+            sanitize_filename("coleam00/archon"),
+            sanitize_filename("matt1398/claude-devtools")
+        );
+    }
+
     // ---- sanitize_filename: apostrophes and quotes ----
 
     #[test]

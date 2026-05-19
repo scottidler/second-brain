@@ -35,6 +35,7 @@ const BLOCKED_TITLE_INDICATORS: &[&str] = &[
     "access denied",
     "one more step",
     "please verify you are a human",
+    "search code, repositories, users, issues, pull requests",
 ];
 
 /// Known block page content patterns (require short content to trigger)
@@ -156,6 +157,20 @@ mod tests {
     fn test_case_insensitive_title() {
         let result = detect_blocked_content("content", "JUST A MOMENT...");
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_detect_github_auth_wall_title() {
+        // GitHub's universal login redirect serves this title for any
+        // unauthenticated scrape that hits an auth wall. Without this
+        // indicator the gate would pass auth-wall bodies through.
+        let body = "x".repeat(600); // long enough to bypass the short-content path
+        let result = detect_blocked_content(
+            &body,
+            "Search code, repositories, users, issues, pull requests · GitHub",
+        );
+        assert!(result.is_some());
+        assert!(result.as_ref().is_some_and(|r| r.contains("Blocked content")));
     }
 
     #[test]

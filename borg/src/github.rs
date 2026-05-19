@@ -63,7 +63,7 @@ pub struct RepoFetch {
 pub fn parse_repo_url(url: &str) -> Option<(String, String)> {
     let parsed = url::Url::parse(url).ok()?;
     let host = parsed.host_str()?.to_ascii_lowercase();
-    if host != "github.com" && !host.ends_with(".github.com") {
+    if host != "github.com" && host != "www.github.com" {
         return None;
     }
     let mut segments = parsed.path_segments()?.filter(|s| !s.is_empty());
