@@ -264,7 +264,17 @@ pub fn resolve_note_text(text: Option<String>, clipboard: bool) -> Result<String
     eyre::bail!("No text provided. Use a text argument or --clipboard")
 }
 
-pub async fn note(config: Config, text: String, tags: Option<Vec<String>>) -> Result<()> {
+/// Outcome of a borg ingest / note / ingest-file invocation. sb maps each
+/// variant to the corresponding stdout/stderr/exit-code combo.
+#[derive(Debug)]
+pub enum IngestOutcome {
+    Captured { title: String, path: String },
+    Duplicate { original_date: String },
+    Failed { reason: String },
+    Queued,
+}
+
+pub async fn note(config: Config, text: String, tags: Option<Vec<String>>) -> Result<IngestOutcome> {
     let trace_id = trace::generate(types::IngestMethod::Cli);
     intake::record_intake_with_sidecar(
         &config,
@@ -288,20 +298,15 @@ pub async fn note(config: Config, text: String, tags: Option<Vec<String>>) -> Re
     )
     .await;
 
-    match &result.status {
-        types::IngestStatus::Completed => {
-            let title = result.title.as_deref().unwrap_or("Untitled");
-            let path = result.note_path.as_deref().unwrap_or("unknown");
-            println!("Captured: \"{title}\" -> {path}");
-        }
-        types::IngestStatus::Failed { reason } => {
-            eprintln!("Error: {reason}");
-            std::process::exit(1);
-        }
-        _ => {}
-    }
-
-    Ok(())
+    Ok(match result.status {
+        types::IngestStatus::Completed => IngestOutcome::Captured {
+            title: result.title.unwrap_or_else(|| "Untitled".to_string()),
+            path: result.note_path.unwrap_or_else(|| "unknown".to_string()),
+        },
+        types::IngestStatus::Failed { reason } => IngestOutcome::Failed { reason },
+        types::IngestStatus::Duplicate { original_date } => IngestOutcome::Duplicate { original_date },
+        types::IngestStatus::Queued => IngestOutcome::Queued,
+    })
 }
 
 pub async fn ingest_file(
@@ -309,7 +314,7 @@ pub async fn ingest_file(
     file_path: std::path::PathBuf,
     tags: Option<Vec<String>>,
     force: bool,
-) -> Result<()> {
+) -> Result<IngestOutcome> {
     let filename = file_path
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
@@ -381,20 +386,15 @@ pub async fn ingest_file(
     )
     .await;
 
-    match &result.status {
-        types::IngestStatus::Completed => {
-            let title = result.title.as_deref().unwrap_or("Untitled");
-            let path = result.note_path.as_deref().unwrap_or("unknown");
-            println!("Captured: \"{title}\" -> {path}");
-        }
-        types::IngestStatus::Failed { reason } => {
-            eprintln!("Error: {reason}");
-            std::process::exit(1);
-        }
-        _ => {}
-    }
-
-    Ok(())
+    Ok(match result.status {
+        types::IngestStatus::Completed => IngestOutcome::Captured {
+            title: result.title.unwrap_or_else(|| "Untitled".to_string()),
+            path: result.note_path.unwrap_or_else(|| "unknown".to_string()),
+        },
+        types::IngestStatus::Failed { reason } => IngestOutcome::Failed { reason },
+        types::IngestStatus::Duplicate { original_date } => IngestOutcome::Duplicate { original_date },
+        types::IngestStatus::Queued => IngestOutcome::Queued,
+    })
 }
 
 pub fn resolve_ingest_url(url: Option<String>, clipboard: bool) -> Result<String> {
@@ -557,7 +557,7 @@ pub async fn ingest(
     force: bool,
     notify: bool,
     method: types::IngestMethod,
-) -> Result<()> {
+) -> Result<IngestOutcome> {
     let host = &config.hotkey.host;
     let port = config.hotkey.port;
     let endpoint = format!("http://{host}:{port}/ingest");
@@ -576,7 +576,7 @@ pub async fn ingest(
     let client = reqwest::Client::new();
     let response = client.post(&endpoint).json(&body).send().await.map_err(|e| {
         let msg = if e.is_connect() {
-            format!("cannot reach obsidian-borg at http://{host}:{port} — is the daemon running?")
+            format!("cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?")
         } else {
             format!("{e}")
         };
@@ -588,37 +588,34 @@ pub async fn ingest(
 
     let result: types::IngestResult = response.json().await.context("Failed to parse response from daemon")?;
 
-    match &result.status {
+    Ok(match result.status {
         types::IngestStatus::Completed => {
-            let title = result.title.as_deref().unwrap_or("Untitled");
-            let path = result.note_path.as_deref().unwrap_or("unknown");
-            println!("Captured: \"{title}\" -> {path}");
+            let title = result.title.unwrap_or_else(|| "Untitled".to_string());
+            let path = result.note_path.unwrap_or_else(|| "unknown".to_string());
             if notify {
-                send_notification("Saved", title);
+                send_notification("Saved", &title);
             }
+            IngestOutcome::Captured { title, path }
         }
         types::IngestStatus::Duplicate { original_date } => {
-            println!("Duplicate: already ingested on {original_date}");
             if notify {
                 send_notification("Duplicate", &format!("Already ingested on {original_date}"));
             }
+            IngestOutcome::Duplicate { original_date }
         }
         types::IngestStatus::Failed { reason } => {
             if notify {
-                send_notification("Failed", reason);
+                send_notification("Failed", &reason);
             }
-            eprintln!("Error: {reason}");
-            std::process::exit(1);
+            IngestOutcome::Failed { reason }
         }
         types::IngestStatus::Queued => {
-            println!("Queued for processing.");
             if notify {
                 send_notification("Queued", &url);
             }
+            IngestOutcome::Queued
         }
-    }
-
-    Ok(())
+    })
 }
 
 fn send_notification(summary: &str, body: &str) {
@@ -709,13 +706,22 @@ fn generate_manifest(config: &config::Config) -> serde_json::Value {
     })
 }
 
-pub async fn sign(config: &config::Config) -> Result<()> {
+/// Outcome of `borg::sign`. sb prints "Signing extension v{version} in {dir}"
+/// and "Extension signed successfully. Check {dir}/web-ext-artifacts/" from
+/// these fields.
+#[derive(Debug)]
+pub struct SignResult {
+    pub extension_dir: PathBuf,
+    pub version: String,
+}
+
+pub async fn sign(config: &config::Config) -> Result<SignResult> {
     let repo_root = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .context("Failed to run git")?;
     if !repo_root.status.success() {
-        eyre::bail!("Not inside a git repository — cannot locate extension directory");
+        eyre::bail!("Not inside a git repository - cannot locate extension directory");
     }
     let root = PathBuf::from(String::from_utf8_lossy(&repo_root.stdout).trim().to_string());
     let extension_dir = root.join("clients/extension");
@@ -735,7 +741,7 @@ pub async fn sign(config: &config::Config) -> Result<()> {
     let jwt_secret =
         std::env::var("MOZILLA_JWT_SECRET").context("MOZILLA_JWT_SECRET env var must be set (AMO API secret)")?;
 
-    println!("Signing extension v{cargo_version} in {}", extension_dir.display());
+    log::info!("signing extension v{cargo_version} in {}", extension_dir.display());
 
     let status = std::process::Command::new("web-ext")
         .args([
@@ -751,32 +757,51 @@ pub async fn sign(config: &config::Config) -> Result<()> {
         ])
         .current_dir(&extension_dir)
         .status()
-        .context("Failed to run web-ext — is it installed?")?;
+        .context("Failed to run web-ext - is it installed?")?;
 
     if !status.success() {
         eyre::bail!("web-ext sign failed");
     }
 
-    println!(
-        "Extension signed successfully. Check {}/web-ext-artifacts/",
-        extension_dir.display()
-    );
-    Ok(())
+    Ok(SignResult {
+        extension_dir,
+        version: cargo_version.to_string(),
+    })
 }
 
-pub async fn hotkey(opts: opts::HotkeyOpts, config: &Config) -> Result<()> {
+/// Outcome of `borg::hotkey`. sb prints the user-facing summary for each
+/// variant; `NoAction` is a usage-help case that sb maps to an exit-1.
+#[derive(Debug)]
+pub enum HotkeyOutcome {
+    Installed {
+        key: String,
+        host: String,
+        port: u16,
+        post_install: Option<String>,
+    },
+    Uninstalled,
+    NoAction,
+}
+
+pub async fn hotkey(opts: opts::HotkeyOpts, config: &Config) -> Result<HotkeyOutcome> {
     // CLI args override config; if CLI has default values, fall back to config
     let host = if opts.host == "localhost" { config.hotkey.host.clone() } else { opts.host };
     let port = if opts.port == 8181 { config.hotkey.port } else { opts.port };
     let key = if opts.key == "<Ctrl><Shift>b" { config.hotkey.key.clone() } else { opts.key };
 
     if opts.install {
-        install_hotkey(&host, port, &key).await
+        let post_install = install_hotkey(&host, port, &key).await?;
+        Ok(HotkeyOutcome::Installed {
+            key,
+            host,
+            port,
+            post_install,
+        })
     } else if opts.uninstall {
-        uninstall_hotkey().await
+        uninstall_hotkey().await?;
+        Ok(HotkeyOutcome::Uninstalled)
     } else {
-        eprintln!("No hotkey action specified. See: obsidian-borg hotkey --help");
-        Ok(())
+        Ok(HotkeyOutcome::NoAction)
     }
 }
 
@@ -1060,23 +1085,26 @@ async fn uninstall_launchd() -> Result<()> {
 const GNOME_KEYBINDINGS_SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";
 const GNOME_KEYBINDING_PATH: &str = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/obsidian-borg/";
 
-async fn install_hotkey(host: &str, port: u16, key: &str) -> Result<()> {
+/// Install (best-effort) the keyboard shortcut and return a non-Linux
+/// fallback message when applicable. On Linux, returns None - sb prints
+/// the standard installed banner.
+async fn install_hotkey(host: &str, port: u16, key: &str) -> Result<Option<String>> {
+    let _ = (host, port);
     let exe_path = std::env::current_exe().context("Failed to detect binary path")?;
     let command = format!("{} ingest --clipboard", exe_path.display());
 
     if cfg!(target_os = "linux") {
         install_gnome_keybinding(&command, key)?;
+        Ok(None)
     } else {
-        println!("Bind this command to {} in your OS settings:\n  {}", key, command);
-        return Ok(());
+        Ok(Some(format!(
+            "Bind this command to {key} in your OS settings:\n  {command}"
+        )))
     }
-
-    println!("Hotkey installed: {key} -> obsidian-borg ingest --clipboard");
-    println!("Daemon target: http://{host}:{port}/ingest (from config)");
-    Ok(())
 }
 
 fn install_gnome_keybinding(command: &str, key: &str) -> Result<()> {
+    let _ = command;
     // Get current custom keybinding paths
     let output = std::process::Command::new("gsettings")
         .args(["get", GNOME_KEYBINDINGS_SCHEMA, "custom-keybindings"])
@@ -1118,7 +1146,7 @@ fn install_gnome_keybinding(command: &str, key: &str) -> Result<()> {
         }
     }
 
-    println!("Registered GNOME keybinding: {key} -> {command}");
+    log::info!("registered GNOME keybinding: {key} -> {command}");
     Ok(())
 }
 
@@ -1126,8 +1154,6 @@ async fn uninstall_hotkey() -> Result<()> {
     if cfg!(target_os = "linux") {
         uninstall_gnome_keybinding()?;
     }
-
-    println!("Hotkey uninstalled.");
     Ok(())
 }
 
@@ -1174,9 +1200,9 @@ fn uninstall_gnome_keybinding() -> Result<()> {
                 .status();
         }
 
-        println!("Removed GNOME keybinding");
+        log::info!("removed GNOME keybinding");
     } else {
-        println!("No GNOME keybinding found to remove");
+        log::info!("no GNOME keybinding found to remove");
     }
 
     Ok(())

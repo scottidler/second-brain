@@ -300,8 +300,8 @@ impl BorgCli {
                 tags,
                 force,
             }) => {
-                if let Some(file_path) = file {
-                    borg::ingest_file(config, file_path, tags, force).await
+                let outcome = if let Some(file_path) = file {
+                    borg::ingest_file(config, file_path, tags, force).await?
                 } else {
                     let resolved_url = borg::resolve_ingest_url(url, clipboard)?;
                     let method = if clipboard {
@@ -309,15 +309,53 @@ impl BorgCli {
                     } else {
                         borg::types::IngestMethod::Cli
                     };
-                    borg::ingest(config, resolved_url, tags, force, clipboard, method).await
-                }
+                    borg::ingest(config, resolved_url, tags, force, clipboard, method).await?
+                };
+                print_ingest_outcome(&outcome)
             }
             Some(Command::Note { text, clipboard, tags }) => {
                 let resolved_text = borg::resolve_note_text(text, clipboard)?;
-                borg::note(config, resolved_text, tags).await
+                let outcome = borg::note(config, resolved_text, tags).await?;
+                print_ingest_outcome(&outcome)
             }
-            Some(Command::Hotkey(a)) => borg::hotkey(a.into(), &config).await,
-            Some(Command::Sign) => borg::sign(&config).await,
+            Some(Command::Hotkey(a)) => {
+                let outcome = borg::hotkey(a.into(), &config).await?;
+                match outcome {
+                    borg::HotkeyOutcome::Installed {
+                        key,
+                        host,
+                        port,
+                        post_install,
+                    } => {
+                        if let Some(msg) = post_install {
+                            println!("{msg}");
+                        } else {
+                            println!("Hotkey installed: {key} -> obsidian-borg ingest --clipboard");
+                            println!("Daemon target: http://{host}:{port}/ingest (from config)");
+                        }
+                    }
+                    borg::HotkeyOutcome::Uninstalled => {
+                        println!("Hotkey uninstalled.");
+                    }
+                    borg::HotkeyOutcome::NoAction => {
+                        eprintln!("No hotkey action specified. See: sb borg hotkey --help");
+                    }
+                }
+                Ok(())
+            }
+            Some(Command::Sign) => {
+                let result = borg::sign(&config).await?;
+                println!(
+                    "Signing extension v{} in {}",
+                    result.version,
+                    result.extension_dir.display()
+                );
+                println!(
+                    "Extension signed successfully. Check {}/web-ext-artifacts/",
+                    result.extension_dir.display()
+                );
+                Ok(())
+            }
             Some(Command::Migrate { dry_run: _, apply }) => borg::migrate::run(&config, apply).await,
             Some(Command::Audit {
                 fix,
@@ -435,6 +473,27 @@ impl BorgCli {
             },
         }
     }
+}
+
+/// Format and emit a borg `IngestOutcome`. Failed outcomes write to stderr
+/// and exit with code 1 to preserve the prior shell contract.
+fn print_ingest_outcome(outcome: &borg::IngestOutcome) -> Result<()> {
+    match outcome {
+        borg::IngestOutcome::Captured { title, path } => {
+            println!("Captured: \"{title}\" -> {path}");
+        }
+        borg::IngestOutcome::Duplicate { original_date } => {
+            println!("Duplicate: already ingested on {original_date}");
+        }
+        borg::IngestOutcome::Queued => {
+            println!("Queued for processing.");
+        }
+        borg::IngestOutcome::Failed { reason } => {
+            eprintln!("Error: {reason}");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
 }
 
 fn get_tool_validation_help() -> String {
