@@ -105,12 +105,15 @@ pub fn prefetch(model_override: Option<&str>) -> Result<String> {
 /// CLI entry point for `cortex embed`.
 pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<EmbedStats> {
     log::info!(
-        "cortex::embed::run: vault_root={} batch_size={} kind={:?} model={:?} prefetch_model={}",
+        "cortex::embed::run: vault_root={} batch_size={} kind={:?} model={:?} prefetch_model={} rss_entry={}",
         vault_root.display(),
         opts.batch_size,
         opts.kind,
         opts.model,
         opts.prefetch_model,
+        vault::rss::read_self_rss()
+            .map(vault::rss::human_bytes)
+            .unwrap_or_else(|| "n/a".to_string()),
     );
 
     if opts.prefetch_model {
@@ -135,11 +138,24 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
         log::warn!("cortex::embed: using MockEmbedder (test-only)");
         Box::new(MockEmbedder::default_384())
     } else {
+        let rss_pre = vault::rss::read_self_rss();
         log::info!(
-            "cortex::embed: loading embedding model {model_version} workers={}",
-            config.embed.workers
+            "cortex::embed: loading embedding model {model_version} workers={} rss_pre_load={}",
+            config.embed.workers,
+            rss_pre
+                .map(vault::rss::human_bytes)
+                .unwrap_or_else(|| "n/a".to_string()),
         );
-        Box::new(load_active_model(config.embed.workers).wrap_err("failed to load embedding model")?)
+        let m = load_active_model(config.embed.workers).wrap_err("failed to load embedding model")?;
+        let rss_post = vault::rss::read_self_rss();
+        if let (Some(pre), Some(post)) = (rss_pre, rss_post) {
+            log::info!(
+                "cortex::embed: model loaded; rss_post_load={} delta={}",
+                vault::rss::human_bytes(post),
+                vault::rss::human_bytes(post.saturating_sub(pre)),
+            );
+        }
+        Box::new(m)
     };
 
     // Make sure embedding_config matches the model we're about to write
@@ -194,43 +210,125 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
     }
 
     drop(lock);
+    let rss_pre_drop = vault::rss::read_self_rss();
+    drop(model);
+    let rss_post_drop = vault::rss::read_self_rss();
     log::info!(
-        "embed complete: scanned={} embedded={} skipped_empty={} failed={}",
+        "embed complete: scanned={} embedded={} skipped_empty={} failed={} rss_pre_drop={} rss_post_drop={}",
         total.scanned,
         total.embedded,
         total.skipped_empty,
         total.failed,
+        rss_pre_drop
+            .map(vault::rss::human_bytes)
+            .unwrap_or_else(|| "n/a".to_string()),
+        rss_post_drop
+            .map(vault::rss::human_bytes)
+            .unwrap_or_else(|| "n/a".to_string()),
     );
     Ok(total)
 }
 
-/// Daemon tick: runs one bounded sweep of the same embed loop on the
-/// daemon's cadence interval. The lock makes ad-hoc `cortex embed`
-/// invocations safe to run concurrently with the daemon (the second
-/// instance exits cleanly).
-pub fn daemon_tick(vault_root: &Path, config: &Config) -> Result<EmbedStats> {
-    let default_opts = EmbedOpts {
-        backfill: false,
-        kind: None,
-        model: None,
-        batch_size: DEFAULT_BATCH_SIZE,
-        prefetch_model: false,
-        use_mock: false,
+/// Phase 7b: load the embedding model once at daemon startup. The daemon
+/// holds the returned handle and passes it (by reference) to every tick
+/// via `daemon_tick_with_model`, so the model's per-instance scratch
+/// state is reused across ticks instead of allocated + dropped per tick.
+/// The shakedown report's 1.2 -> 2.8 GB RSS climb over 50 minutes was
+/// almost entirely allocator churn from the prior per-tick load-and-drop
+/// pattern; this lifecycle change makes it bounded.
+pub fn load_daemon_model(config: &Config) -> Result<Box<dyn EmbeddingModel>> {
+    let rss_pre = vault::rss::read_self_rss();
+    log::info!(
+        "cortex::embed::load_daemon_model: workers={} rss_pre={}",
+        config.embed.workers,
+        rss_pre
+            .map(vault::rss::human_bytes)
+            .unwrap_or_else(|| "n/a".to_string()),
+    );
+    let model: Box<dyn EmbeddingModel> =
+        Box::new(load_active_model(config.embed.workers).wrap_err("failed to load embedding model for daemon")?);
+    let rss_post = vault::rss::read_self_rss();
+    if let (Some(pre), Some(post)) = (rss_pre, rss_post) {
+        log::info!(
+            "cortex::embed::load_daemon_model: loaded; rss_post={} delta={}",
+            vault::rss::human_bytes(post),
+            vault::rss::human_bytes(post.saturating_sub(pre)),
+        );
+    }
+    Ok(model)
+}
+
+/// Daemon tick that reuses a long-lived model loaded once at daemon
+/// startup. See `load_daemon_model`.
+pub fn daemon_tick_with_model(vault_root: &Path, config: &Config, model: &dyn EmbeddingModel) -> Result<EmbedStats> {
+    let rss_entry = vault::rss::read_self_rss();
+    log::debug!(
+        "cortex::embed::daemon_tick_with_model: vault_root={} rss={}",
+        vault_root.display(),
+        rss_entry
+            .map(vault::rss::human_bytes)
+            .unwrap_or_else(|| "n/a".to_string()),
+    );
+
+    let db_path = config.oracle_db_path();
+    let mut index = SearchIndex::open(&db_path)
+        .wrap_err_with(|| format!("failed to open search index at {}", db_path.display()))?;
+
+    // Make sure embedding_config matches the model we're using.
+    index.set_active_embedding(model.model_version(), model.dim())?;
+
+    let lock = match acquire_lock() {
+        Ok(l) => l,
+        Err(e) if e.to_string().contains("embed lock") => {
+            log::debug!("cortex::embed::daemon_tick_with_model: lock held; will retry next tick");
+            return Ok(EmbedStats::default());
+        }
+        Err(e) => return Err(e),
     };
-    match run(vault_root, config, &default_opts) {
-        Ok(stats) => Ok(stats),
-        Err(e) => {
-            // Lock contention with an ad-hoc `cortex embed` invocation
-            // is benign; downgrade to debug so the daemon log stays
-            // quiet.
-            if e.to_string().contains("embed lock") {
-                log::debug!("cortex::embed::daemon_tick: lock held by another invocation; will retry next tick");
-                Ok(EmbedStats::default())
-            } else {
-                Err(e)
+
+    let kinds = [EmbeddingKind::Summary, EmbeddingKind::TranscriptChunk];
+    let mut total = EmbedStats::default();
+    for kind in kinds {
+        loop {
+            let batch_stats = process_batch(
+                &mut index,
+                model,
+                kind,
+                model.model_version(),
+                vault_root,
+                DEFAULT_BATCH_SIZE,
+                config.embed.max_chunks_per_call,
+            )?;
+            total.merge(&batch_stats);
+            if batch_stats.scanned == 0 {
+                break;
+            }
+            if batch_stats.embedded == 0 && batch_stats.scanned == batch_stats.skipped_empty {
+                log::warn!(
+                    "cortex::embed::daemon_tick_with_model: kind={:?} batch scanned={} all skipped; halting to avoid an infinite loop.",
+                    kind,
+                    batch_stats.scanned,
+                );
+                break;
             }
         }
     }
+
+    drop(lock);
+    let rss_exit = vault::rss::read_self_rss();
+    if let (Some(entry), Some(exit)) = (rss_entry, rss_exit) {
+        log::debug!(
+            "cortex::embed::daemon_tick_with_model: scanned={} embedded={} skipped_empty={} failed={} rss_entry={} rss_exit={} delta={}",
+            total.scanned,
+            total.embedded,
+            total.skipped_empty,
+            total.failed,
+            vault::rss::human_bytes(entry),
+            vault::rss::human_bytes(exit),
+            vault::rss::human_bytes(exit.saturating_sub(entry)),
+        );
+    }
+    Ok(total)
 }
 
 /// Single batch of the read / inference / write loop. This is the

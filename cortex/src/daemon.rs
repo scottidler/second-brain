@@ -133,6 +133,13 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut embed_interval = tokio::time::interval(crate::embed::daemon_cadence(config));
     embed_interval.tick().await; // consume the immediate first tick
 
+    // Phase 7b: load the embedding model once at daemon startup and
+    // hand it to every tick by reference. The previous per-tick
+    // load-and-drop pattern leaked ~30 MB/tick of allocator scratch
+    // (shakedown: 1.2 -> 2.8 GB over 50 min); the long-lived model
+    // bounds it.
+    let embed_model = tokio::task::block_in_place(|| crate::embed::load_daemon_model(config))?;
+
     // Doc 3 cold-note sweep tick. Default cadence is one week; the
     // report is a checklist for review, not a polling watchdog. The
     // cold sweep is a pure consumer of the index oracle materializes;
@@ -232,7 +239,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 // (when there are stale rows); we don't want to starve
                 // the watcher or the scheduled-intel timers if the
                 // embedder is currently chewing on a batch.
-                match tokio::task::block_in_place(|| crate::embed::daemon_tick(vault_root, config)) {
+                match tokio::task::block_in_place(|| crate::embed::daemon_tick_with_model(vault_root, config, embed_model.as_ref())) {
                     Ok(stats) if stats.scanned > 0 => {
                         log::info!(
                             "daemon embed tick: scanned={} embedded={} skipped_empty={} failed={}",

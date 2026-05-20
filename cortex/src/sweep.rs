@@ -253,10 +253,9 @@ fn rewrite_note_tags(path: &Path, new_tags: &[String]) -> Result<()> {
 }
 
 /// Entry point invoked by the cortex daemon's `cold_interval` tick.
-/// Thin wrapper over `run_cold` that matches the
-/// `crate::embed::daemon_tick` shape, so the daemon's `select!` arm is
-/// a one-liner. Errors are propagated; the daemon translates them to
-/// log lines so the runtime keeps ticking.
+/// Thin wrapper over `cold` so the daemon's `select!` arm is a one-liner.
+/// Errors are propagated; the daemon translates them to log lines so
+/// the runtime keeps ticking.
 pub fn daemon_cold_tick(vault_root: &Path, config: &Config) -> Result<ColdStats> {
     cold(vault_root, config)
 }
