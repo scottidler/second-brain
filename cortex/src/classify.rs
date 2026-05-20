@@ -497,8 +497,7 @@ pub fn apply_classify(
         update_wikilinks_for_moves(vault_root, &all_notes, &moves)?;
     }
 
-    report.print_human(true);
-
+    // Caller (sb) formats the report; classify::run returns it directly.
     Ok(report)
 }
 

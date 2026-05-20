@@ -153,7 +153,7 @@ fn migrate_one_note(path: &Path, vault_root: &Path, apply: bool, config: &Config
     Ok(Some(MigrateOutcome { rel_path, ledger_entry }))
 }
 
-pub async fn run(config: &Config, apply: bool) -> Result<()> {
+pub async fn run(config: &Config, apply: bool) -> Result<Vec<String>> {
     let migration = &config.migration;
     let vault_root = expand_tilde(&config.vault.root_path);
 
@@ -162,16 +162,14 @@ pub async fn run(config: &Config, apply: bool) -> Result<()> {
     }
 
     let mode = if apply { "APPLY" } else { "DRY-RUN" };
-    println!("Migration mode: {mode}");
-    println!("Vault: {}", vault_root.display());
+    let mut lines = vec![
+        format!("Migration mode: {mode}"),
+        format!("Vault: {}", vault_root.display()),
+    ];
 
     let md_files = collect_md_files(&vault_root, &migration.skip_folders)?;
-    println!("Found {} markdown files to check", md_files.len());
+    lines.push(format!("Found {} markdown files to check", md_files.len()));
 
-    // Parallel phase: read + transform + (conditional) write + (conditional) build LedgerEntry.
-    // Per-file independent; std::fs::write is the only side-effect and targets distinct paths.
-    // collect::<Result<Vec<_>>>() preserves input-slice order so the sequential drain below
-    // produces console output and ledger_entries in the same order as the previous loop.
     let outcomes: Vec<Option<MigrateOutcome>> = md_files
         .par_iter()
         .map(|path| migrate_one_note(path, &vault_root, apply, config))
@@ -181,7 +179,7 @@ pub async fn run(config: &Config, apply: bool) -> Result<()> {
     let mut ledger_entries: Vec<LedgerEntry> = Vec::new();
     for outcome in outcomes.into_iter().flatten() {
         changed_count += 1;
-        println!("  {mode}: {}", outcome.rel_path);
+        lines.push(format!("  {mode}: {}", outcome.rel_path));
         if let Some(entry) = outcome.ledger_entry {
             ledger_entries.push(entry);
         }
@@ -190,22 +188,21 @@ pub async fn run(config: &Config, apply: bool) -> Result<()> {
     // Seed Borg Ledger
     if migration.seed_borg_log && apply && !ledger_entries.is_empty() {
         let log_path = ledger::ledger_path(config);
-        println!("Seeding Borg Ledger with {} entries...", ledger_entries.len());
+        lines.push(format!("Seeding Borg Ledger with {} entries...", ledger_entries.len()));
         for entry in &ledger_entries {
-            // Skip if already in log
             if ledger::check_duplicate(&log_path, &entry.source)?.is_none() {
                 ledger::append_entry(&log_path, entry)?;
             }
         }
-        println!("Borg Ledger seeded.");
+        lines.push("Borg Ledger seeded.".to_string());
     }
 
-    println!("\n{mode} complete: {changed_count} files would be changed");
+    lines.push(format!("\n{mode} complete: {changed_count} files would be changed"));
     if !apply && changed_count > 0 {
-        println!("Run with --apply to write changes.");
+        lines.push("Run with --apply to write changes.".to_string());
     }
 
-    Ok(())
+    Ok(lines)
 }
 
 fn collect_md_files(root: &Path, skip_folders: &[String]) -> Result<Vec<PathBuf>> {
@@ -319,11 +316,12 @@ fn render_yaml_field(lines: &mut Vec<String>, key: &str, val: &serde_yaml::Value
 /// whose body matches the failed-fetch signature (block-page paraphrase).
 /// This is the migration path for notes that predate the staged pipeline -
 /// the 28 XDA-style notes identified in the 2026-04-19 audit.
-pub async fn reingest_failed(config: &Config, dry_run: bool) -> Result<()> {
+pub async fn reingest_failed(config: &Config, dry_run: bool) -> Result<Vec<String>> {
     let vault_root = expand_tilde(&config.vault.root_path);
     if !vault_root.exists() {
         eyre::bail!("Vault root does not exist: {}", vault_root.display());
     }
+    let mut lines: Vec<String> = Vec::new();
     let md_files = collect_md_files(&vault_root, &config.migration.skip_folders)?;
 
     // Walk every markdown file in parallel; for each, read + split frontmatter + check the body
@@ -353,28 +351,28 @@ pub async fn reingest_failed(config: &Config, dry_run: bool) -> Result<()> {
         .collect();
 
     if matches.is_empty() {
-        println!("reingest-failed: no failed-fetch notes found");
-        return Ok(());
+        lines.push("reingest-failed: no failed-fetch notes found".to_string());
+        return Ok(lines);
     }
     let mode = if dry_run { "[dry-run] " } else { "" };
-    println!("{mode}reingest-failed: {} matching note(s)", matches.len());
+    lines.push(format!("{mode}reingest-failed: {} matching note(s)", matches.len()));
     for (path, source) in &matches {
         let rel = path.strip_prefix(&vault_root).unwrap_or(path.as_path());
-        println!("  {}  <- {}", rel.display(), source);
+        lines.push(format!("  {}  <- {}", rel.display(), source));
     }
     if dry_run {
-        return Ok(());
+        return Ok(lines);
     }
 
     // Reingest via the daemon's /ingest endpoint so the request flows through
-    // Stage-0 (Gate-0) → fetch chain (Jina → fabric-u → browser-UA) → Gate-1
-    // → Stage-2 → Gate-2 → publish, preserving cortex-owned frontmatter.
+    // Stage-0 (Gate-0) -> fetch chain (Jina -> fabric-u -> browser-UA) -> Gate-1
+    // -> Stage-2 -> Gate-2 -> publish, preserving cortex-owned frontmatter.
     let host = &config.hotkey.host;
     let port = config.hotkey.port;
     let endpoint = format!("http://{host}:{port}/ingest");
     let client = reqwest::Client::new();
     for (path, source) in &matches {
-        println!("  -> {}", source);
+        lines.push(format!("  -> {}", source));
         let body = serde_json::json!({
             "url": source,
             "tags": [],
@@ -385,31 +383,31 @@ pub async fn reingest_failed(config: &Config, dry_run: bool) -> Result<()> {
             Ok(response) => match response.json::<crate::types::IngestResult>().await {
                 Ok(result) => match &result.status {
                     crate::types::IngestStatus::Completed => {
-                        println!("     ok: {}", result.title.as_deref().unwrap_or("(no title)"));
+                        lines.push(format!("     ok: {}", result.title.as_deref().unwrap_or("(no title)")));
                     }
                     crate::types::IngestStatus::Duplicate { .. } => {
-                        println!("     duplicate (unchanged)");
+                        lines.push("     duplicate (unchanged)".to_string());
                     }
                     crate::types::IngestStatus::Failed { reason } => {
-                        println!("     failed: {reason}");
+                        lines.push(format!("     failed: {reason}"));
                     }
                     crate::types::IngestStatus::Queued => {
-                        println!("     queued");
+                        lines.push("     queued".to_string());
                     }
                 },
                 Err(e) => {
-                    eprintln!("     {}: response parse error: {e}", path.display());
+                    lines.push(format!("     {}: response parse error: {e}", path.display()));
                 }
             },
             Err(e) => {
                 if e.is_connect() {
                     eyre::bail!("cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?");
                 }
-                eprintln!("     {}: HTTP error: {e}", path.display());
+                lines.push(format!("     {}: HTTP error: {e}", path.display()));
             }
         }
     }
-    Ok(())
+    Ok(lines)
 }
 
 /// Detect the failed-fetch signature in a note body. Duplicates the

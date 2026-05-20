@@ -105,7 +105,7 @@ pub async fn backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 's
 
     if opts.dry_run {
         for note in &candidates {
-            println!(
+            log::info!(
                 "[would-distill] {} (kind={:?})",
                 note.path.display(),
                 infer_distill_kind(note).map(|k| k.as_str())

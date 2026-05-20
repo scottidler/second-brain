@@ -24,11 +24,7 @@ pub fn load_config<T: DeserializeOwned + Default>(config_path: Option<&PathBuf>)
             match load_from_file(&primary_config) {
                 Ok(config) => return Ok(config),
                 Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to load config from {}: {}",
-                        primary_config.display(),
-                        e
-                    );
+                    log::warn!("Failed to load config from {}: {}", primary_config.display(), e);
                 }
             }
         }
@@ -39,11 +35,7 @@ pub fn load_config<T: DeserializeOwned + Default>(config_path: Option<&PathBuf>)
         match load_from_file(&fallback_config) {
             Ok(config) => return Ok(config),
             Err(e) => {
-                eprintln!(
-                    "Warning: Failed to load config from {}: {}",
-                    fallback_config.display(),
-                    e
-                );
+                log::warn!("Failed to load config from {}: {}", fallback_config.display(), e);
             }
         }
     }

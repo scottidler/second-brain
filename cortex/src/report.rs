@@ -81,14 +81,15 @@ impl Report {
         self.violations.is_empty()
     }
 
-    /// Print report in human-readable format.
-    pub fn print_human(&self, applied: bool) {
+    /// Render the human-readable report into a vector of lines for sb to
+    /// print. Keeps the lib stdout-clean per the lib-returns-data invariant.
+    pub fn format_human(&self, applied: bool) -> Vec<String> {
         if self.is_empty() {
-            println!("{}", "No violations found.".green());
-            return;
+            return vec![format!("{}", "No violations found.".green())];
         }
 
         let fixable_count = self.violations.iter().filter(|v| v.fix.is_some()).count();
+        let mut lines: Vec<String> = Vec::new();
 
         for v in &self.violations {
             let severity_str = match v.severity {
@@ -96,7 +97,13 @@ impl Report {
                 Severity::Warning => format!("{}", v.severity).yellow(),
                 Severity::Info => format!("{}", v.severity).blue(),
             };
-            println!("{} [{}] {}: {}", severity_str, v.rule, v.path.display(), v.message);
+            lines.push(format!(
+                "{} [{}] {}: {}",
+                severity_str,
+                v.rule,
+                v.path.display(),
+                v.message
+            ));
             if let Some(ref fix) = v.fix {
                 let fix_desc = match fix {
                     Fix::RenameFile { from, to } => {
@@ -119,17 +126,17 @@ impl Report {
                     }
                 };
                 let prefix = if applied { "applied:" } else { "fix:" };
-                println!("  {} {}", prefix.dimmed(), fix_desc.dimmed());
+                lines.push(format!("  {} {}", prefix.dimmed(), fix_desc.dimmed()));
             }
         }
 
-        println!();
+        lines.push(String::new());
         let mode = if applied {
             format!(" (applied {} fix(es))", fixable_count)
         } else {
             String::new()
         };
-        println!(
+        lines.push(format!(
             "{}",
             format!(
                 "Total: {} error(s), {} warning(s), {} info(s){}",
@@ -139,13 +146,12 @@ impl Report {
                 mode,
             )
             .bold()
-        );
+        ));
+        lines
     }
 
-    /// Print report as JSON.
-    pub fn print_json(&self) -> eyre::Result<()> {
-        let json = serde_json::to_string_pretty(&self.violations)?;
-        println!("{json}");
-        Ok(())
+    /// Render the report as a JSON string for sb to print.
+    pub fn format_json(&self) -> eyre::Result<String> {
+        Ok(serde_json::to_string_pretty(&self.violations)?)
     }
 }

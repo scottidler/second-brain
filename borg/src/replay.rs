@@ -84,8 +84,9 @@ fn extract_frontmatter(text: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-/// Dispatch a replay based on the options provided.
-pub async fn run(config: Config, opts: ReplayOptions) -> Result<()> {
+/// Dispatch a replay based on the options provided. Returns the lines sb
+/// should print so the lib stays stdout-clean.
+pub async fn run(config: Config, opts: ReplayOptions) -> Result<Vec<String>> {
     // Highest priority: bootstrap-from-vault
     if opts.bootstrap_from_vault {
         let Some(note_path) = opts.note.as_ref() else {
@@ -107,35 +108,27 @@ pub async fn run(config: Config, opts: ReplayOptions) -> Result<()> {
     bail!("replay: must provide a trace_id, --since, --rejected, or --bootstrap-from-vault --note");
 }
 
-async fn bootstrap_note(config: &Config, note_path: &Path, dry_run: bool) -> Result<()> {
+async fn bootstrap_note(config: &Config, note_path: &Path, dry_run: bool) -> Result<Vec<String>> {
     let source =
         read_source_from_note(note_path).with_context(|| format!("extract source from {}", note_path.display()))?;
     let method = read_method_from_note(note_path)?.unwrap_or_else(|| "cli".to_string());
-    println!("bootstrap: {} -> {} (method: {method})", note_path.display(), source);
+    let mut lines = vec![format!(
+        "bootstrap: {} -> {} (method: {method})",
+        note_path.display(),
+        source
+    )];
     if dry_run {
-        println!("  [dry-run] would re-ingest {source}");
-        return Ok(());
+        lines.push(format!("  [dry-run] would re-ingest {source}"));
+        return Ok(lines);
     }
-    // Re-ingest via the running daemon's HTTP endpoint. This respects the
-    // daemon's reingest-domain-preservation logic (overwrites the note while
-    // preserving cortex-owned frontmatter fields) and exercises the full
-    // Stage-0-through-Stage-3 pipeline end to end.
     let result = reingest_via_daemon(config, &source, &method).await?;
-    match &result.status {
-        IngestStatus::Completed => {
-            println!("  -> {}", result.title.as_deref().unwrap_or("(no title)"));
-        }
-        IngestStatus::Duplicate { original_date } => {
-            println!("  -> duplicate (originally ingested {original_date})");
-        }
-        IngestStatus::Failed { reason } => {
-            println!("  -> failed: {reason}");
-        }
-        IngestStatus::Queued => {
-            println!("  -> queued");
-        }
-    }
-    Ok(())
+    lines.push(match &result.status {
+        IngestStatus::Completed => format!("  -> {}", result.title.as_deref().unwrap_or("(no title)")),
+        IngestStatus::Duplicate { original_date } => format!("  -> duplicate (originally ingested {original_date})"),
+        IngestStatus::Failed { reason } => format!("  -> failed: {reason}"),
+        IngestStatus::Queued => "  -> queued".to_string(),
+    });
+    Ok(lines)
 }
 
 async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result<IngestResult> {
@@ -159,7 +152,7 @@ async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result
     Ok(result)
 }
 
-async fn replay_trace(config: &Config, trace_id: &str, from_stage: u8, dry_run: bool) -> Result<()> {
+async fn replay_trace(config: &Config, trace_id: &str, from_stage: u8, dry_run: bool) -> Result<Vec<String>> {
     if !config.staging.enabled {
         bail!("replay: staging.enabled must be true");
     }
@@ -174,30 +167,24 @@ async fn replay_trace(config: &Config, trace_id: &str, from_stage: u8, dry_run: 
         bail!("replay: trace {trace_id} not found in staging");
     }
     let envelope = store.read_envelope(trace_id)?;
-    // For now, re-running a URL trace means: read the URL back out of the
-    // envelope body (Stage-0 writes the URL into body.txt for URL captures)
-    // and re-ingest via the daemon. More elaborate `--from-stage N` handling
-    // (re-distill only against a staged transcript, re-extract only, etc.)
-    // is a follow-on; the staged `distilled.yml` artifact written by Phase
-    // 6 / cutover gives us the data we'd need.
     let source = String::from_utf8(store.read_body(trace_id)?).context("read body as utf-8")?;
     let source = source.trim().to_string();
-    println!("replay trace {trace_id}: {source}");
+    let mut lines = vec![format!("replay trace {trace_id}: {source}")];
     if dry_run {
-        println!("  [dry-run] would re-ingest via daemon");
-        return Ok(());
+        lines.push("  [dry-run] would re-ingest via daemon".to_string());
+        return Ok(lines);
     }
     let method = envelope.method.to_string();
     let result = reingest_via_daemon(config, &source, &method).await?;
-    match &result.status {
-        IngestStatus::Completed => println!("  -> {}", result.title.as_deref().unwrap_or("(no title)")),
-        IngestStatus::Failed { reason } => println!("  -> failed: {reason}"),
-        other => println!("  -> {other:?}"),
-    }
-    Ok(())
+    lines.push(match &result.status {
+        IngestStatus::Completed => format!("  -> {}", result.title.as_deref().unwrap_or("(no title)")),
+        IngestStatus::Failed { reason } => format!("  -> failed: {reason}"),
+        other => format!("  -> {other:?}"),
+    });
+    Ok(lines)
 }
 
-async fn replay_matching(config: &Config, opts: &ReplayOptions) -> Result<()> {
+async fn replay_matching(config: &Config, opts: &ReplayOptions) -> Result<Vec<String>> {
     if !config.staging.enabled {
         bail!("replay: staging.enabled must be true");
     }
@@ -215,16 +202,16 @@ async fn replay_matching(config: &Config, opts: &ReplayOptions) -> Result<()> {
     };
     let matches = store.list_traces(&filter)?;
     if matches.is_empty() {
-        println!("replay: no traces matched");
-        return Ok(());
+        return Ok(vec!["replay: no traces matched".to_string()]);
     }
-    println!("replay: {} matching trace(s)", matches.len());
+    let mut lines = vec![format!("replay: {} matching trace(s)", matches.len())];
     for trace_id in matches {
-        if let Err(e) = replay_trace(config, &trace_id, opts.from_stage, opts.dry_run).await {
-            eprintln!("  trace {trace_id}: {e:#}");
+        match replay_trace(config, &trace_id, opts.from_stage, opts.dry_run).await {
+            Ok(trace_lines) => lines.extend(trace_lines),
+            Err(e) => lines.push(format!("  trace {trace_id}: {e:#}")),
         }
     }
-    Ok(())
+    Ok(lines)
 }
 
 #[cfg(test)]

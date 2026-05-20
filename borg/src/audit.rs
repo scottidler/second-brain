@@ -65,20 +65,37 @@ impl std::fmt::Display for AuditFinding {
     }
 }
 
-pub fn run(config: &Config, fix: bool) -> Result<()> {
+/// Outcome of `borg::audit::run`. Carries the structured findings plus the
+/// pre-rendered lines sb prints (header + summary + fix-attempt log).
+#[derive(Debug, Default)]
+pub struct AuditReport {
+    pub findings: Vec<AuditFinding>,
+    /// Number of fixes applied (only nonzero when `--fix` was passed).
+    pub fixed_count: usize,
+    /// Pre-rendered output lines: header, summary section, per-finding details,
+    /// fix-mode log entries. sb iterates and prints.
+    pub lines: Vec<String>,
+}
+
+pub fn run(config: &Config, fix: bool) -> Result<AuditReport> {
     let ledger_path = ledger::ledger_path(config);
     let vault_root = expand_tilde(&config.vault.root_path);
+    let mut lines: Vec<String> = Vec::new();
 
     if !ledger_path.exists() {
-        println!("No Borg Ledger found at {}", ledger_path.display());
-        return Ok(());
+        lines.push(format!("No Borg Ledger found at {}", ledger_path.display()));
+        return Ok(AuditReport {
+            findings: Vec::new(),
+            fixed_count: 0,
+            lines,
+        });
     }
 
-    println!("Auditing Borg Ledger: {}", ledger_path.display());
-    println!("Vault: {}", vault_root.display());
+    lines.push(format!("Auditing Borg Ledger: {}", ledger_path.display()));
+    lines.push(format!("Vault: {}", vault_root.display()));
 
     let entries = ledger::parse_completed_entries(&ledger_path)?;
-    println!("Found {} completed ledger entries to audit\n", entries.len());
+    lines.push(format!("Found {} completed ledger entries to audit\n", entries.len()));
 
     // Build a map of source URL -> note paths in vault
     let note_index = build_note_index(&vault_root, &config.migration.skip_folders)?;
@@ -179,8 +196,12 @@ pub fn run(config: &Config, fix: bool) -> Result<()> {
 
     // Report
     if findings.is_empty() {
-        println!("No issues found.");
-        return Ok(());
+        lines.push("No issues found.".to_string());
+        return Ok(AuditReport {
+            findings,
+            fixed_count: 0,
+            lines,
+        });
     }
 
     // Categorize
@@ -200,29 +221,32 @@ pub fn run(config: &Config, fix: bool) -> Result<()> {
         }
     }
 
-    println!("Audit Results:");
+    lines.push("Audit Results:".to_string());
     if mistype_count > 0 {
-        println!("  {mistype_count} misclassified types");
+        lines.push(format!("  {mistype_count} misclassified types"));
     }
     if blocked_count > 0 {
-        println!("  {blocked_count} blocked content saved as completed");
+        lines.push(format!("  {blocked_count} blocked content saved as completed"));
     }
     if raw_title_count > 0 {
-        println!("  {raw_title_count} raw URL titles");
+        lines.push(format!("  {raw_title_count} raw URL titles"));
     }
     if duplicate_count > 0 {
-        println!("  {duplicate_count} duplicate note pairs");
+        lines.push(format!("  {duplicate_count} duplicate note pairs"));
     }
     if orphan_count > 0 {
-        println!("  {orphan_count} orphaned replacements (replaced but no new ✅)");
+        lines.push(format!(
+            "  {orphan_count} orphaned replacements (replaced but no new ✅)"
+        ));
     }
 
-    println!("\nDetails:");
+    lines.push("\nDetails:".to_string());
     for finding in &findings {
-        println!("  {finding}");
+        lines.push(format!("  {finding}"));
     }
 
     // Fix mode: update mistyped notes
+    let mut fixed_count = 0;
     if fix {
         let fixable: Vec<&AuditFinding> = findings
             .iter()
@@ -230,9 +254,9 @@ pub fn run(config: &Config, fix: bool) -> Result<()> {
             .collect();
 
         if fixable.is_empty() {
-            println!("\nNo fixable issues (only type misclassifications can be auto-fixed).");
+            lines.push("\nNo fixable issues (only type misclassifications can be auto-fixed).".to_string());
         } else {
-            println!("\nFixing {} misclassified types...", fixable.len());
+            lines.push(format!("\nFixing {} misclassified types...", fixable.len()));
             for finding in &fixable {
                 if let AuditFinding::MistypedContent {
                     expected_type,
@@ -243,10 +267,11 @@ pub fn run(config: &Config, fix: bool) -> Result<()> {
                     match fix_note_type(path, expected_type) {
                         Ok(()) => {
                             let rel = path.strip_prefix(&vault_root).unwrap_or(path);
-                            println!("  Fixed: {} -> type: {expected_type}", rel.display());
+                            lines.push(format!("  Fixed: {} -> type: {expected_type}", rel.display()));
+                            fixed_count += 1;
                         }
                         Err(e) => {
-                            eprintln!("  Error fixing {}: {e:#}", path.display());
+                            lines.push(format!("  Error fixing {}: {e:#}", path.display()));
                         }
                     }
                 }
@@ -258,11 +283,17 @@ pub fn run(config: &Config, fix: bool) -> Result<()> {
             .filter(|f| matches!(f, AuditFinding::MistypedContent { .. }))
             .count();
         if fixable_count > 0 {
-            println!("\nRun with --fix to correct {fixable_count} misclassified types.");
+            lines.push(format!(
+                "\nRun with --fix to correct {fixable_count} misclassified types."
+            ));
         }
     }
 
-    Ok(())
+    Ok(AuditReport {
+        findings,
+        fixed_count,
+        lines,
+    })
 }
 
 /// Build an index mapping source URL -> list of note file paths in the vault.

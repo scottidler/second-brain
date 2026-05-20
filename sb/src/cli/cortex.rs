@@ -314,17 +314,24 @@ impl CortexCli {
                 let report = cortex::classify::run(&vault_root, &config, &a.into())?;
                 if apply {
                     println!("Classified {} note(s).", report.applied);
+                    for line in report.format_human(true) {
+                        println!("{line}");
+                    }
                 } else {
-                    report.print_human(false);
+                    for line in report.format_human(false) {
+                        println!("{line}");
+                    }
                 }
             }
             Command::Lint(a) => {
                 let opts: cortex::opts::LintOpts = a.into();
                 let report = cortex::lint(&vault_root, &config, &opts)?;
                 if opts.format == "json" {
-                    report.print_json()?;
+                    println!("{}", report.format_json()?);
                 } else {
-                    report.print_human(opts.apply);
+                    for line in report.format_human(opts.apply) {
+                        println!("{line}");
+                    }
                 }
             }
             Command::Link(a) => {
@@ -333,7 +340,9 @@ impl CortexCli {
                 if apply {
                     println!("Inserted wikilinks in {} file(s).", report.applied);
                 } else {
-                    report.print_human(false);
+                    for line in report.format_human(false) {
+                        println!("{line}");
+                    }
                 }
             }
             Command::Intel(a) => {
@@ -356,7 +365,9 @@ impl CortexCli {
                 if apply {
                     println!("Migrated {} file(s).", report.applied);
                 } else {
-                    report.print_human(false);
+                    for line in report.format_human(false) {
+                        println!("{line}");
+                    }
                 }
             }
             Command::Sweep(a) => {

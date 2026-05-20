@@ -370,39 +370,55 @@ impl BorgCli {
                 );
                 Ok(())
             }
-            Some(Command::Migrate { dry_run: _, apply }) => borg::migrate::run(&config, apply).await,
+            Some(Command::Migrate { dry_run: _, apply }) => {
+                let lines = borg::migrate::run(&config, apply).await?;
+                print_lines(&lines);
+                Ok(())
+            }
             Some(Command::Audit {
                 fix,
                 invariant,
                 bound_secs,
             }) => {
                 if invariant {
-                    borg::triage::orphan_audit(&config, bound_secs).await
+                    let lines = borg::triage::orphan_audit(&config, bound_secs).await?;
+                    print_lines(&lines);
+                    Ok(())
                 } else {
-                    borg::audit::run(&config, fix)
+                    let report = borg::audit::run(&config, fix)?;
+                    print_lines(&report.lines);
+                    Ok(())
                 }
             }
-            Some(Command::Intake(args)) => match args.action {
-                IntakeAction::List { method, since, limit } => {
-                    borg::triage::intake_rows(&config, method, since, limit).await
-                }
-                IntakeAction::Show { trace_id } => borg::triage::intake_row(&config, &trace_id).await,
-            },
-            Some(Command::Dlq(args)) => match args.action {
-                DlqAction::List {
-                    method,
-                    stage,
-                    status,
-                    limit,
-                } => borg::triage::dlq_rows(&config, method, stage, status, limit).await,
-                DlqAction::Show { trace_id } => borg::triage::dlq_row(&config, &trace_id).await,
-                DlqAction::Archive {
-                    trace_id,
-                    status,
-                    resolved,
-                } => borg::triage::dlq_archive(&config, trace_id, &status, resolved).await,
-                DlqAction::Replay { trace_id } => borg::triage::dlq_replay(&config, &trace_id).await,
-            },
+            Some(Command::Intake(args)) => {
+                let lines = match args.action {
+                    IntakeAction::List { method, since, limit } => {
+                        borg::triage::intake_rows(&config, method, since, limit).await?
+                    }
+                    IntakeAction::Show { trace_id } => borg::triage::intake_row(&config, &trace_id).await?,
+                };
+                print_lines(&lines);
+                Ok(())
+            }
+            Some(Command::Dlq(args)) => {
+                let lines = match args.action {
+                    DlqAction::List {
+                        method,
+                        stage,
+                        status,
+                        limit,
+                    } => borg::triage::dlq_rows(&config, method, stage, status, limit).await?,
+                    DlqAction::Show { trace_id } => borg::triage::dlq_row(&config, &trace_id).await?,
+                    DlqAction::Archive {
+                        trace_id,
+                        status,
+                        resolved,
+                    } => borg::triage::dlq_archive(&config, trace_id, &status, resolved).await?,
+                    DlqAction::Replay { trace_id } => borg::triage::dlq_replay(&config, &trace_id).await?,
+                };
+                print_lines(&lines);
+                Ok(())
+            }
             Some(Command::Reingest {
                 all,
                 r#type,
@@ -463,7 +479,9 @@ impl BorgCli {
                     note: args.note,
                     dry_run: args.dry_run,
                 };
-                borg::replay::run(config, opts).await
+                let lines = borg::replay::run(config, opts).await?;
+                print_lines(&lines);
+                Ok(())
             }
             Some(Command::Retention(args)) => match args.action {
                 RetentionAction::Sweep { dry_run } => {
@@ -491,8 +509,25 @@ impl BorgCli {
                     Ok(())
                 }
             },
-            Some(Command::ReingestFailed { dry_run }) => borg::migrate::reingest_failed(&config, dry_run).await,
-            Some(Command::BackfillIngested { dry_run }) => borg::backfill::ingested(&config, dry_run),
+            Some(Command::ReingestFailed { dry_run }) => {
+                let lines = borg::migrate::reingest_failed(&config, dry_run).await?;
+                print_lines(&lines);
+                Ok(())
+            }
+            Some(Command::BackfillIngested { dry_run }) => {
+                let report = borg::backfill::ingested(&config, dry_run)?;
+                println!(
+                    "backfill-ingested complete:\n  scanned: {}\n  backfilled: {}{}\n  skipped (already had ingested:): {}\n  skipped (origin != assisted): {}\n  skipped (recent mtime): {}\n  skipped (no date: field): {}",
+                    report.scanned,
+                    report.backfilled,
+                    if dry_run { " (dry-run)" } else { "" },
+                    report.skipped_already_present,
+                    report.skipped_authored,
+                    report.skipped_recently_modified,
+                    report.skipped_no_date,
+                );
+                Ok(())
+            }
             Some(Command::Dashboard(args)) => match args.action {
                 DashboardAction::Refresh => borg::dashboard::refresh(&borg::dashboard::dashboard_path(&config)),
             },
@@ -527,6 +562,14 @@ impl BorgCli {
                 }
             },
         }
+    }
+}
+
+/// Emit each pre-rendered line from the lib boundary. Used by every borg
+/// sub-verb that returns `Vec<String>` so sb owns stdout uniformly.
+fn print_lines(lines: &[String]) {
+    for line in lines {
+        println!("{line}");
     }
 }
 

@@ -103,7 +103,7 @@ pub fn audit_health_stats(config: &Config) -> Result<crate::routes::AuditHealth>
 /// Walk intake -> ledger / dlq and report orphans (intake rows older than
 /// `bound_secs` with no matching row in either store). Writes
 /// `system/views/borg-orphans.md`.
-pub async fn orphan_audit(config: &Config, bound_secs: u64) -> Result<()> {
+pub async fn orphan_audit(config: &Config, bound_secs: u64) -> Result<Vec<String>> {
     log::debug!("triage::orphan_audit: bound_secs={bound_secs}");
     let intake_md = intake_helper::intake_path(config);
     let dlq_md = intake_helper::dlq_path(config);
@@ -160,7 +160,7 @@ pub async fn orphan_audit(config: &Config, bound_secs: u64) -> Result<()> {
     let orphans_md_path = orphans_path(config);
     write_orphans_md(&orphans_md_path, &orphans)?;
 
-    println!(
+    Ok(vec![format!(
         "audit --invariant complete:\n  intake rows scanned: {}\n  ledger resolutions: {}\n  dlq resolutions: {}\n  orphans (>{}s no resolution): {}\n  intake rows still within deadline: {}\n  ledger rows with no intake row: {}\n  dlq rows with no intake row: {}\n  wrote: {}",
         intake_rows.len(),
         ledger_traces.len(),
@@ -171,9 +171,7 @@ pub async fn orphan_audit(config: &Config, bound_secs: u64) -> Result<()> {
         asymmetric_ledger,
         asymmetric_dlq,
         orphans_md_path.display(),
-    );
-
-    Ok(())
+    )])
 }
 
 fn write_orphans_md(path: &Path, orphans: &[&ParsedIntakeRow]) -> Result<()> {
@@ -203,7 +201,12 @@ fn write_orphans_md(path: &Path, orphans: &[&ParsedIntakeRow]) -> Result<()> {
     Ok(())
 }
 
-pub async fn intake_rows(config: &Config, method: Option<String>, since: Option<String>, limit: usize) -> Result<()> {
+pub async fn intake_rows(
+    config: &Config,
+    method: Option<String>,
+    since: Option<String>,
+    limit: usize,
+) -> Result<Vec<String>> {
     let intake_md = intake_helper::intake_path(config);
     let rows = intake::parse_entries(&intake_md).context("parse intake")?;
     let filtered: Vec<&ParsedIntakeRow> = rows
@@ -213,50 +216,55 @@ pub async fn intake_rows(config: &Config, method: Option<String>, since: Option<
         .take(limit)
         .collect();
     if filtered.is_empty() {
-        println!("(no intake rows match)");
-        return Ok(());
+        return Ok(vec!["(no intake rows match)".to_string()]);
     }
-    println!("Date        Time  Method    Origin        Kind      Trace      Preview");
+    let mut lines = vec!["Date        Time  Method    Origin        Kind      Trace      Preview".to_string()];
     for r in &filtered {
         let preview = if r.preview.len() > 60 {
             format!("{}...", &r.preview[..60])
         } else {
             r.preview.clone()
         };
-        println!(
+        lines.push(format!(
             "{:11} {:5} {:9} {:13} {:9} {:9} {}",
             r.date, r.time, r.method, r.origin_ctx, r.kind, r.trace_id, preview
-        );
+        ));
     }
-    Ok(())
+    Ok(lines)
 }
 
-pub async fn intake_row(config: &Config, trace_id: &str) -> Result<()> {
+pub async fn intake_row(config: &Config, trace_id: &str) -> Result<Vec<String>> {
     let intake_md = intake_helper::intake_path(config);
     let Some(row) = intake::find_by_trace(&intake_md, trace_id)? else {
         bail!("trace_id {trace_id} not found in intake log");
     };
-    println!("Intake row:");
-    println!("  date: {}", row.date);
-    println!("  time: {}", row.time);
-    println!("  method: {}", row.method);
-    println!("  origin: {}", row.origin_ctx);
-    println!("  kind: {}", row.kind);
-    println!("  preview: {}", row.preview);
-    println!("  trace: {}", row.trace_id);
+    let mut lines = vec![
+        "Intake row:".to_string(),
+        format!("  date: {}", row.date),
+        format!("  time: {}", row.time),
+        format!("  method: {}", row.method),
+        format!("  origin: {}", row.origin_ctx),
+        format!("  kind: {}", row.kind),
+        format!("  preview: {}", row.preview),
+        format!("  trace: {}", row.trace_id),
+    ];
 
     let sidecar = intake::raw_input_path(&vault_root(config), trace_id);
     if sidecar.exists() {
         let bytes = std::fs::read(&sidecar).context("read sidecar")?;
-        println!("\n--- sidecar {} ({} bytes) ---", sidecar.display(), bytes.len());
+        lines.push(format!(
+            "\n--- sidecar {} ({} bytes) ---",
+            sidecar.display(),
+            bytes.len()
+        ));
         match std::str::from_utf8(&bytes) {
-            Ok(s) => println!("{s}"),
-            Err(_) => println!("[binary - {} bytes]", bytes.len()),
+            Ok(s) => lines.push(s.to_string()),
+            Err(_) => lines.push(format!("[binary - {} bytes]", bytes.len())),
         }
     } else {
-        println!("\n(no sidecar at {})", sidecar.display());
+        lines.push(format!("\n(no sidecar at {})", sidecar.display()));
     }
-    Ok(())
+    Ok(lines)
 }
 
 pub async fn dlq_rows(
@@ -265,7 +273,7 @@ pub async fn dlq_rows(
     stage: Option<String>,
     status: Option<String>,
     limit: usize,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let dlq_md = intake_helper::dlq_path(config);
     let rows = dlq::parse_entries(&dlq_md).context("parse dlq")?;
     let filtered: Vec<_> = rows
@@ -276,58 +284,64 @@ pub async fn dlq_rows(
         .take(limit)
         .collect();
     if filtered.is_empty() {
-        println!("(no dlq rows match)");
-        return Ok(());
+        return Ok(vec!["(no dlq rows match)".to_string()]);
     }
-    println!("Date        Time  Method    Stage              Status     Trace      Reason");
+    let mut lines = vec!["Date        Time  Method    Stage              Status     Trace      Reason".to_string()];
     for r in &filtered {
         let reason = if r.reason.len() > 60 {
             format!("{}...", &r.reason[..60])
         } else {
             r.reason.clone()
         };
-        println!(
+        lines.push(format!(
             "{:11} {:5} {:9} {:18} {:10} {:9} {}",
             r.date, r.time, r.method, r.stage, r.status, r.trace_id, reason
-        );
+        ));
     }
-    Ok(())
+    Ok(lines)
 }
 
-pub async fn dlq_row(config: &Config, trace_id: &str) -> Result<()> {
+pub async fn dlq_row(config: &Config, trace_id: &str) -> Result<Vec<String>> {
     let dlq_md = intake_helper::dlq_path(config);
     let Some(dlq_row) = dlq::find_by_trace(&dlq_md, trace_id)? else {
         bail!("trace_id {trace_id} not found in DLQ");
     };
-    println!("DLQ row:");
-    println!("  date: {} {}", dlq_row.date, dlq_row.time);
-    println!("  method: {}", dlq_row.method);
-    println!("  stage: {}", dlq_row.stage);
-    println!("  status: {}", dlq_row.status);
-    println!("  retries: {}", dlq_row.retries);
-    println!("  trace: {}", dlq_row.trace_id);
+    let mut lines = vec![
+        "DLQ row:".to_string(),
+        format!("  date: {} {}", dlq_row.date, dlq_row.time),
+        format!("  method: {}", dlq_row.method),
+        format!("  stage: {}", dlq_row.stage),
+        format!("  status: {}", dlq_row.status),
+        format!("  retries: {}", dlq_row.retries),
+        format!("  trace: {}", dlq_row.trace_id),
+    ];
     if let Some(r) = &dlq_row.replay_of {
-        println!("  replay-of: {r}");
+        lines.push(format!("  replay-of: {r}"));
     }
-    println!("  reason: {}", dlq_row.reason);
-    println!("  preview: {}", dlq_row.preview);
+    lines.push(format!("  reason: {}", dlq_row.reason));
+    lines.push(format!("  preview: {}", dlq_row.preview));
 
     // Intake + sidecar
-    println!();
-    intake_row(config, trace_id).await?;
+    lines.push(String::new());
+    lines.extend(intake_row(config, trace_id).await?);
 
     // Ledger (likely empty - if there was a ledger row we wouldn't have a
     // pending DLQ entry - but the replay path can leave both)
     if let Ok(Some(ledger)) = vault_ledger::find_completed(&ledger::ledger_path(config), &dlq_row.preview)
         .map(|o| o.map(|_| dlq_row.preview.clone()))
     {
-        println!("\n(ledger has a completed row for this source: {ledger})");
+        lines.push(format!("\n(ledger has a completed row for this source: {ledger})"));
     }
 
-    Ok(())
+    Ok(lines)
 }
 
-pub async fn dlq_archive(config: &Config, trace_id: Option<String>, status: &str, resolved_mode: bool) -> Result<()> {
+pub async fn dlq_archive(
+    config: &Config,
+    trace_id: Option<String>,
+    status: &str,
+    resolved_mode: bool,
+) -> Result<Vec<String>> {
     let dlq_md = intake_helper::dlq_path(config);
     if resolved_mode {
         let archive_md = vault_root(config)
@@ -335,11 +349,10 @@ pub async fn dlq_archive(config: &Config, trace_id: Option<String>, status: &str
             .join("views")
             .join("borg-dlq-archive.md");
         let moved = dlq::archive_resolved(&dlq_md, &archive_md).context("archive resolved rows")?;
-        println!(
+        return Ok(vec![format!(
             "archive --resolved: moved {moved} resolved/abandoned row(s) to {}",
             archive_md.display()
-        );
-        return Ok(());
+        )]);
     }
     let Some(trace_id) = trace_id else {
         bail!("archive: provide a trace_id or use --resolved");
@@ -347,11 +360,10 @@ pub async fn dlq_archive(config: &Config, trace_id: Option<String>, status: &str
     let new_status = DlqStatus::from_str(status).map_err(|e| eyre::eyre!(e))?;
     let changed = dlq::update_status(&dlq_md, &trace_id, new_status)?;
     if changed {
-        println!("updated dlq trace={trace_id} status={new_status}");
+        Ok(vec![format!("updated dlq trace={trace_id} status={new_status}")])
     } else {
         bail!("trace_id {trace_id} not found in DLQ");
     }
-    Ok(())
 }
 
 /// Replay a DLQ entry. Reads the intake row + sidecar for the original
@@ -363,7 +375,7 @@ pub async fn dlq_archive(config: &Config, trace_id: Option<String>, status: &str
 /// text payloads; binary replay requires the sidecar to contain bytes,
 /// which today is a descriptor only - so binary inputs are rejected with
 /// a clear error rather than silently producing a wrong-bytes ingest.
-pub async fn dlq_replay(config: &Config, original_trace: &str) -> Result<()> {
+pub async fn dlq_replay(config: &Config, original_trace: &str) -> Result<Vec<String>> {
     log::debug!("triage::dlq_replay: original_trace={original_trace}");
     let intake_md = intake_helper::intake_path(config);
     let Some(orig) = intake::find_by_trace(&intake_md, original_trace)? else {
@@ -419,10 +431,10 @@ pub async fn dlq_replay(config: &Config, original_trace: &str) -> Result<()> {
                 Some(new_trace.clone()),
             )
             .await;
-            println!(
+            Ok(vec![format!(
                 "replay: trace={new_trace} replay_of={original_trace} result={:?}",
                 result.status
-            );
+            )])
         }
         "text" => {
             let text = if !sidecar_bytes.is_empty() {
@@ -440,10 +452,10 @@ pub async fn dlq_replay(config: &Config, original_trace: &str) -> Result<()> {
                 Some(new_trace.clone()),
             )
             .await;
-            println!(
+            Ok(vec![format!(
                 "replay: trace={new_trace} replay_of={original_trace} result={:?}",
                 result.status
-            );
+            )])
         }
         other => {
             let reason = format!("replay: binary kind `{other}` cannot be replayed from text sidecar");
@@ -459,8 +471,6 @@ pub async fn dlq_replay(config: &Config, original_trace: &str) -> Result<()> {
             bail!("{reason}");
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

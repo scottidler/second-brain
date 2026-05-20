@@ -233,22 +233,9 @@ pub(crate) fn backfill_on(vault_root: &Path, skip_folders: &[String], dry_run: b
     })
 }
 
-pub fn ingested(config: &Config, dry_run: bool) -> Result<()> {
+pub fn ingested(config: &Config, dry_run: bool) -> Result<BackfillReport> {
     let vault_root = expand_tilde(&config.vault.root_path);
-    let report = backfill_on(&vault_root, &config.migration.skip_folders, dry_run)?;
-
-    println!(
-        "backfill-ingested complete:\n  scanned: {}\n  backfilled: {}{}\n  skipped (already had ingested:): {}\n  skipped (origin != assisted): {}\n  skipped (recent mtime): {}\n  skipped (no date: field): {}",
-        report.scanned,
-        report.backfilled,
-        if dry_run { " (dry-run)" } else { "" },
-        report.skipped_already_present,
-        report.skipped_authored,
-        report.skipped_recently_modified,
-        report.skipped_no_date,
-    );
-
-    Ok(())
+    backfill_on(&vault_root, &config.migration.skip_folders, dry_run)
 }
 
 #[cfg(test)]
