@@ -67,7 +67,7 @@ fn intake_age_secs(row: &ParsedIntakeRow) -> Option<i64> {
 /// or DLQ resolution, and how old the oldest unresolved row is. Used by
 /// the `GET /health/audit` HTTP endpoint so operators can poll without
 /// re-reading the markdown tables.
-pub async fn audit_health_stats(config: &Config) -> Result<crate::routes::AuditHealth> {
+pub fn audit_health_stats(config: &Config) -> Result<crate::routes::AuditHealth> {
     let intake_md = intake_helper::intake_path(config);
     let dlq_md = intake_helper::dlq_path(config);
     let ledger_md = ledger::ledger_path(config);

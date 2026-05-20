@@ -82,8 +82,16 @@ pub fn all_sections() -> Vec<Section> {
             findings: pattern_findings(),
         },
         Section {
-            name: "embedding",
+            name: "embedding cache",
             findings: embedding_findings(),
+        },
+        Section {
+            name: "borg",
+            findings: borg_findings(),
+        },
+        Section {
+            name: "vault",
+            findings: vault_findings(),
         },
     ]
 }
@@ -311,4 +319,136 @@ fn human_bytes(bytes: u64) -> String {
         i += 1;
     }
     format!("{v:.1} {}", UNITS[i])
+}
+
+fn borg_findings() -> Vec<Finding> {
+    // Run borg's invariant audit and surface the counts. This is the same
+    // computation behind GET /health/audit, so the numbers match what the
+    // running daemon's HTTP endpoint reports.
+    let config = match borg::config::load_config(None) {
+        Ok(c) => c,
+        Err(e) => {
+            return vec![Finding::error(
+                format!("could not load borg config: {e}"),
+                "ensure ~/.config/borg/borg.yml exists (sb bootstrap)".to_string(),
+            )];
+        }
+    };
+
+    let health = match borg::triage::audit_health_stats(&config) {
+        Ok(h) => h,
+        Err(e) => {
+            return vec![Finding::error(
+                format!("borg audit health query failed: {e}"),
+                "sb borg audit --invariant (manual investigation)".to_string(),
+            )];
+        }
+    };
+
+    let mut findings = vec![Finding::ok(format!(
+        "intake: {} row(s), ledger: {} row(s), dlq: {} row(s)",
+        health.intake_rows, health.ledger_rows, health.dlq_rows
+    ))];
+    if health.dlq_pending > 0 {
+        findings.push(Finding::warn(
+            format!("dlq: {} pending row(s)", health.dlq_pending),
+            "sb borg dlq list --status pending (or sb borg dlq replay <trace>)".to_string(),
+        ));
+    } else {
+        findings.push(Finding::ok("dlq: 0 pending".to_string()));
+    }
+    if health.orphan_count > 0 {
+        let age = health
+            .oldest_orphan_secs
+            .map(|s| format!("{}s", s))
+            .unwrap_or_else(|| "unknown".to_string());
+        findings.push(Finding::warn(
+            format!(
+                "{} orphan(s) in intake without ledger or dlq resolution (oldest: {age})",
+                health.orphan_count
+            ),
+            "sb borg audit --invariant".to_string(),
+        ));
+    }
+    findings
+}
+
+fn vault_findings() -> Vec<Finding> {
+    // Open the oracle SQLite index and pull two readings: total note count
+    // (and schema gaps) and embedding coverage. Read-only.
+    let config = match oracle::Config::load(None) {
+        Ok(c) => c,
+        Err(e) => {
+            return vec![Finding::error(
+                format!("could not load oracle config: {e}"),
+                "ensure ~/.config/oracle/oracle.yml exists (sb bootstrap)".to_string(),
+            )];
+        }
+    };
+    let db = match vault::search::SearchIndex::open(&config.db_path()) {
+        Ok(db) => db,
+        Err(e) => {
+            return vec![Finding::warn(
+                format!("oracle SQLite index not openable: {e}"),
+                "sb oracle index".to_string(),
+            )];
+        }
+    };
+
+    let mut findings = Vec::new();
+
+    match db.stats() {
+        Ok(stats) => {
+            findings.push(Finding::ok(format!(
+                "{} note(s) indexed across {} domain(s)",
+                stats.total_notes,
+                stats.by_domain.len()
+            )));
+            let total_gaps: u64 = stats.schema_gaps.iter().map(|(_, n)| n).sum();
+            if total_gaps > 0 {
+                let detail = stats
+                    .schema_gaps
+                    .iter()
+                    .filter(|(_, n)| *n > 0)
+                    .map(|(field, n)| format!("{field}={n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                findings.push(Finding::info(format!("schema gaps: {detail}")));
+            }
+        }
+        Err(e) => findings.push(Finding::warn(
+            format!("vault stats query failed: {e}"),
+            "sb oracle stats".to_string(),
+        )),
+    }
+
+    match db.embedding_coverage() {
+        Ok(cov) => {
+            if cov.total_notes == 0 {
+                findings.push(Finding::info("no notes in index yet (sb oracle index)".to_string()));
+            } else if cov.embedded_notes == 0 {
+                findings.push(Finding::warn(
+                    format!("embedding coverage: 0 / {} notes (0%)", cov.total_notes),
+                    "sb cortex embed --backfill".to_string(),
+                ));
+            } else {
+                let pct = cov.percent();
+                let line = format!(
+                    "embedding coverage: {} / {} notes ({:.1}%)",
+                    cov.embedded_notes, cov.total_notes, pct
+                );
+                if pct < 50.0 {
+                    findings.push(Finding::warn(line, "sb cortex embed --backfill".to_string()));
+                } else {
+                    findings.push(Finding::ok(line));
+                }
+            }
+        }
+        Err(e) => findings.push(Finding::warn(
+            format!("embedding coverage query failed: {e}"),
+            "sb cortex embed --backfill".to_string(),
+        )),
+    }
+
+    findings
 }

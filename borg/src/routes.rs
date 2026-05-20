@@ -36,9 +36,7 @@ pub struct AuditHealth {
 /// this to detect a silent-drop regression without reading the markdown
 /// tables.
 pub async fn health_audit(State(state): State<AppState>) -> Json<AuditHealth> {
-    let stats = crate::triage::audit_health_stats(&state.config)
-        .await
-        .unwrap_or_default();
+    let stats = crate::triage::audit_health_stats(&state.config).unwrap_or_default();
     Json(stats)
 }
 

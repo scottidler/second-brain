@@ -1088,6 +1088,23 @@ impl SearchIndex {
         })
     }
 
+    /// Coverage of the `note_embeddings` table relative to `notes`. Used by
+    /// `sb status` / `sb doctor` to surface how many notes have been embedded.
+    pub fn embedding_coverage(&self) -> Result<EmbeddingCoverage> {
+        let total_notes: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
+        let embedded_notes: u64 =
+            self.conn
+                .query_row("SELECT COUNT(DISTINCT note_path) FROM note_embeddings", [], |row| {
+                    row.get(0)
+                })?;
+        Ok(EmbeddingCoverage {
+            total_notes,
+            embedded_notes,
+        })
+    }
+
     fn count_by_column(&self, column: &str) -> Result<Vec<(String, u64)>> {
         let sql = format!(
             "SELECT {column}, COUNT(*) as cnt FROM notes WHERE {column} != '' GROUP BY {column} ORDER BY cnt DESC"
@@ -1796,6 +1813,23 @@ impl NoteRow {
             body: row.get(10)?,
             summary: row.get(11)?,
         })
+    }
+}
+
+/// Embedding coverage snapshot: total notes in the index vs how many have at least one embedding row.
+#[derive(Debug, Serialize)]
+pub struct EmbeddingCoverage {
+    pub total_notes: u64,
+    pub embedded_notes: u64,
+}
+
+impl EmbeddingCoverage {
+    pub fn percent(&self) -> f64 {
+        if self.total_notes == 0 {
+            0.0
+        } else {
+            (self.embedded_notes as f64 / self.total_notes as f64) * 100.0
+        }
     }
 }
 
