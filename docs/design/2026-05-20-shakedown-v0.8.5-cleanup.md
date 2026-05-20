@@ -579,11 +579,45 @@ pub enum LintFormat { Human, Json }
 
 ## Open Questions
 
-- [ ] **Auto-migrate on first invocation, or require explicit `sb bootstrap --migrate`?** Auto-migrate is friendlier; explicit is safer. Leaning auto-migrate-with-marker, but worth confirming the failure mode (daemon caches old path post-migration until restart - see risks).
-- [ ] **Phase 2 deprecation timeline.** Remove `tags`/`sources`/`creators`/`recent_notes` aliases when? Probably "next minor that ships after we have proof nothing reads them via MCP." Document the removal in the relevant tool description so MCP consumers see the warning.
-- [ ] **Phase 7a log level.** RSS line at `info!` (visible in `journalctl -u cortex --since "1 hour ago"` without verbose) or `debug!`? Default to `info!` while the leak investigation is active; demote to `debug!` after 7b ships and is verified.
-- [ ] **Hand-rolled `eyre::set_hook` vs `color-eyre`.** Decided at implementation time based on which is the smaller diff; both produce the same user-visible output.
-- [ ] **Patterns directory location.** `~/.config/sb/patterns/` (with the other configs) vs `~/.local/share/sb/patterns/` (treated as data). Decision: `~/.config/sb/patterns/` because patterns are user-editable hand-curated Fabric prompts, not generated artifacts. Sealed.
+- [x] **Auto-migrate on first invocation, or require explicit `sb bootstrap --migrate`?** Decided: auto-migrate on first invocation; `sb bootstrap --migrate` forces a re-run. A `.migrated-to-sb` marker is dropped in each legacy directory so subsequent runs noop. The daemon-cache-old-path failure mode is documented and tolerated; the next `sb cortex daemon --install` regenerates the unit with the new path.
+- [x] **Phase 2 deprecation timeline.** Sealed by deviation: legacy `tags`/`sources`/`creators`/`recent` keys were removed in v0.8.6 itself; no transition window. See Implementation Notes.
+- [x] **Phase 7a log level.** Implemented at `info!` for the run-entry / load-entry / load-exit / run-exit boundaries, `debug!` for daemon-tick boundaries. Demoting all of them to `debug!` is a follow-up once the per-tick deltas have been observed steady-state for a few days.
+- [x] **Hand-rolled `eyre::set_hook` vs `color-eyre`.** Decided: hand-rolled (`sb/src/error.rs`). No new runtime dep, ~60 lines, produces the same user-visible output.
+- [x] **Patterns directory location.** `~/.config/sb/patterns/` (with the other configs). Sealed.
+
+## Implementation Notes
+
+These record deviations from the spec body above. The status of every other phase matches the design as written.
+
+### Phase 2: Oracle response key
+
+Spec said: every list-shaped tool's response adds `results` as a *transitional alias* alongside the existing `tags` / `sources` / `creators` / `recent_notes` key, with the legacy alias removed in a follow-up release.
+
+Shipped: **clean key rename, no bridge**. User direction during implementation was explicit ("no bridge features ... a clean break"). The legacy keys are gone in v0.8.6.
+
+Consequences: any external MCP consumer that read `.tags` / `.sources` / `.creators` / `.recent` will silently receive `null` on v0.8.6 until they update to `.results`. No in-tree consumer relied on the legacy keys, so the only blast radius is third-party scripts the user has not catalogued.
+
+### Phase 2: `domain_brief.unread_count`
+
+Spec said: fix `domain_brief.unread_count: null` by adding `unwrap_or(0)` in the response builder.
+
+Shipped: nothing. The Architect implementation audit retracted this finding after empirical re-review. `DomainBrief.unread` is `u64` (vault/src/search.rs:1851), populated by a `SELECT COUNT(*)` which always yields a non-null integer; the response builder serializes it as `"unread": brief.unread`, never `null`. The shakedown report's `null` symptom came from `jq .unread_count` against a response whose actual key is `unread` (no `_count` suffix) — a key-name mismatch on the consumer side, not a code defect at the location the design specified.
+
+The `oracle/src/server.rs::domain_brief_returns_results_key` test added in the post-audit cleanup commit asserts `unread` is always a number, locking in the (already correct) shape.
+
+### Phase 7: Lifecycle change shipped without the soak gate
+
+Spec said: 7b (long-lived model in daemon) ships only if `vault/tests/candle-bounded.rs` confirms candle's per-instance scratch state is bounded across 1000 varied batches.
+
+Shipped: 7a and 7b together, with the synthetic test added as a regression guard rather than a pre-flight gate (per `[[feedback-no-phase-gating]]` — "ship the whole roadmap back-to-back"). The test exists at `vault/tests/candle-bounded.rs`, is `#[ignore]`'d (costs ~1 minute of CPU + ~100 MB model download), and asserts the post-load RSS does not grow more than 200 MB over 1000 mixed-length batches. Run on demand with `cargo test --release -p vault --features vec-candle --test candle-bounded -- --ignored --nocapture`.
+
+If the test ever fails, the lifecycle change in `cortex::daemon` is the suspect: reverting to per-tick `load_active_model` is the rollback.
+
+### Phase 1b: bootstrap-time vault-root resolution
+
+Spec said: `vault::paths::resolve_vault_root` is strict — no vault, no run.
+
+Shipped: that's the runtime behavior, but `sb bootstrap`'s daemon-install path additionally falls back to CWD when the resolver errors. Rationale: `sb bootstrap` on a fresh machine needs to write the systemd unit before the user has set `root-path`; the daemon itself re-resolves via `--vault` (which the unit hardcodes) at start time, so the bootstrap-time CWD fallback never leaks into runtime behavior. The fallback is local to `sb/src/cli/bootstrap.rs::register_systemd_units` and noted in a comment.
 
 ## References
 
