@@ -1,19 +1,11 @@
 pub use vault::ledger::*;
 
 use crate::config::Config;
+use eyre::Result;
 use std::path::PathBuf;
 
 /// Resolve the Borg Ledger path from borg config.
-pub fn ledger_path(config: &Config) -> PathBuf {
-    let root = expand_tilde(&config.vault.root_path);
-    root.join("system").join("views").join("borg-ledger.md")
-}
-
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(stripped);
-    }
-    PathBuf::from(path)
+pub fn ledger_path(config: &Config) -> Result<PathBuf> {
+    let root = config.vault_root()?;
+    Ok(root.join("system").join("views").join("borg-ledger.md"))
 }

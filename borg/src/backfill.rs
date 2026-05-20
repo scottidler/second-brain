@@ -48,15 +48,6 @@ enum BackfillDecision {
     },
 }
 
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(stripped);
-    }
-    PathBuf::from(path)
-}
-
 fn collect_md_files(root: &Path, skip_folders: &[String]) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     walk(root, root, skip_folders, &mut out)?;
@@ -238,7 +229,7 @@ pub(crate) fn backfill_on(vault_root: &Path, skip_folders: &[String], dry_run: b
 }
 
 pub fn ingested(config: &Config, dry_run: bool) -> Result<BackfillReport> {
-    let vault_root = expand_tilde(&config.vault.root_path);
+    let vault_root = config.vault_root()?;
     backfill_on(&vault_root, &config.migration.skip_folders, dry_run)
 }
 

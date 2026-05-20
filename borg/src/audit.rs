@@ -112,8 +112,8 @@ pub fn run(config: &Config, fix: bool) -> Result<AuditReport> {
 /// `fixed_count = 0`; no disk writes occur. Run `apply_fixes` afterward
 /// (with the same report) to perform the --fix work.
 pub fn scan(config: &Config) -> Result<AuditReport> {
-    let ledger_path = ledger::ledger_path(config);
-    let vault_root = expand_tilde(&config.vault.root_path);
+    let ledger_path = ledger::ledger_path(config)?;
+    let vault_root = config.vault_root()?;
 
     if !ledger_path.exists() {
         return Ok(AuditReport {
@@ -411,15 +411,6 @@ fn collect_md_recursive(current: &Path, root: &Path, skip_folders: &[String], fi
         }
     }
     Ok(())
-}
-
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(stripped);
-    }
-    PathBuf::from(path)
 }
 
 #[cfg(test)]

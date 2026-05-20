@@ -305,7 +305,7 @@ impl From<SummarizeArgs> for opts::SummarizeOpts {
 impl CortexCli {
     pub async fn run(self) -> Result<()> {
         let config = cortex::config::Config::load(self.config.as_ref()).context("failed to load configuration")?;
-        let vault_root = config.vault_root(self.vault.as_ref());
+        let vault_root = config.vault_root(self.vault.as_ref())?;
         log::info!("cortex starting (version={})", env!("GIT_DESCRIBE"));
         log::info!("resolved vault root: {}", vault_root.display());
 

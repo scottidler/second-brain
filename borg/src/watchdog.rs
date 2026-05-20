@@ -66,9 +66,9 @@ fn intake_age_secs(row: &ParsedIntakeRow) -> Option<i64> {
 /// the global `ACTIVE_TRACES` is never touched.
 pub fn run_once(config: &Config, active_traces: &dyn Fn(&str) -> bool) -> Result<usize> {
     log::debug!("watchdog::run_once: starting scan");
-    let intake_md = intake_helper::intake_path(config);
-    let dlq_md = intake_helper::dlq_path(config);
-    let ledger_md = ledger::ledger_path(config);
+    let intake_md = intake_helper::intake_path(config)?;
+    let dlq_md = intake_helper::dlq_path(config)?;
+    let ledger_md = ledger::ledger_path(config)?;
 
     let intake_rows = intake::parse_entries(&intake_md).context("parse intake")?;
     let ledger_traces = ledger_trace_ids(&ledger_md).context("parse ledger")?;

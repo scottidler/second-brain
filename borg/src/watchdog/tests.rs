@@ -44,7 +44,7 @@ fn intake_age_secs_returns_none_for_bogus_timestamps() {
 /// DLQ files are created so the watchdog scan succeeds.
 fn config_for(vault_root: &std::path::Path) -> Config {
     let mut cfg = Config::default();
-    cfg.vault.root_path = vault_root.display().to_string();
+    cfg.vault.root_path = Some(vault_root.display().to_string());
     // Short hard_timeout so a row aged a few minutes is past deadline
     // without requiring the test to manipulate clocks back ~30 minutes.
     cfg.pipeline.hard_timeout_secs = 60;

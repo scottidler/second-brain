@@ -93,21 +93,12 @@ pub struct DlqReplayOutcome {
     pub result_status: crate::types::IngestStatus,
 }
 
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(stripped);
-    }
-    PathBuf::from(path)
+fn vault_root(config: &Config) -> Result<PathBuf> {
+    config.vault_root()
 }
 
-fn vault_root(config: &Config) -> PathBuf {
-    expand_tilde(&config.vault.root_path)
-}
-
-fn orphans_path(config: &Config) -> PathBuf {
-    vault_root(config).join("system").join("views").join("borg-orphans.md")
+fn orphans_path(config: &Config) -> Result<PathBuf> {
+    Ok(vault_root(config)?.join("system").join("views").join("borg-orphans.md"))
 }
 
 fn ledger_trace_ids(ledger_path: &Path) -> Result<HashSet<String>> {
@@ -141,9 +132,9 @@ fn intake_age_secs(row: &ParsedIntakeRow) -> Option<i64> {
 /// the `GET /health/audit` HTTP endpoint so operators can poll without
 /// re-reading the markdown tables.
 pub fn audit_health_stats(config: &Config) -> Result<crate::routes::AuditHealth> {
-    let intake_md = intake_helper::intake_path(config);
-    let dlq_md = intake_helper::dlq_path(config);
-    let ledger_md = ledger::ledger_path(config);
+    let intake_md = intake_helper::intake_path(config)?;
+    let dlq_md = intake_helper::dlq_path(config)?;
+    let ledger_md = ledger::ledger_path(config)?;
 
     let intake_rows = intake::parse_entries(&intake_md).context("parse intake")?;
     let ledger_traces = ledger_trace_ids(&ledger_md).context("parse ledger")?;
@@ -179,9 +170,9 @@ pub fn audit_health_stats(config: &Config) -> Result<crate::routes::AuditHealth>
 /// summary.
 pub async fn orphan_audit(config: &Config, bound_secs: u64) -> Result<OrphanAuditReport> {
     log::debug!("triage::orphan_audit: bound_secs={bound_secs}");
-    let intake_md = intake_helper::intake_path(config);
-    let dlq_md = intake_helper::dlq_path(config);
-    let ledger_md = ledger::ledger_path(config);
+    let intake_md = intake_helper::intake_path(config)?;
+    let dlq_md = intake_helper::dlq_path(config)?;
+    let ledger_md = ledger::ledger_path(config)?;
 
     let intake_rows = intake::parse_entries(&intake_md).context("parse intake")?;
     let ledger_traces = ledger_trace_ids(&ledger_md).context("parse ledger")?;
@@ -231,7 +222,7 @@ pub async fn orphan_audit(config: &Config, bound_secs: u64) -> Result<OrphanAudi
         }
     }
 
-    let orphans_md_path = orphans_path(config);
+    let orphans_md_path = orphans_path(config)?;
     write_orphans_md(&orphans_md_path, &orphans)?;
 
     Ok(OrphanAuditReport {
@@ -281,7 +272,7 @@ pub async fn intake_rows(
     since: Option<String>,
     limit: usize,
 ) -> Result<Vec<ParsedIntakeRow>> {
-    let intake_md = intake_helper::intake_path(config);
+    let intake_md = intake_helper::intake_path(config)?;
     let rows = intake::parse_entries(&intake_md).context("parse intake")?;
     Ok(rows
         .into_iter()
@@ -294,12 +285,12 @@ pub async fn intake_rows(
 /// Look up one intake row by trace id and pair it with the sidecar
 /// payload (or the expected path when absent).
 pub async fn intake_row(config: &Config, trace_id: &str) -> Result<IntakeRowDetail> {
-    let intake_md = intake_helper::intake_path(config);
+    let intake_md = intake_helper::intake_path(config)?;
     let Some(row) = intake::find_by_trace(&intake_md, trace_id)? else {
         bail!("trace_id {trace_id} not found in intake log");
     };
 
-    let sidecar_path = intake::raw_input_path(&vault_root(config), trace_id);
+    let sidecar_path = intake::raw_input_path(&vault_root(config)?, trace_id);
     let sidecar = if sidecar_path.exists() {
         let bytes = std::fs::read(&sidecar_path).context("read sidecar")?;
         let content = match std::str::from_utf8(&bytes) {
@@ -326,7 +317,7 @@ pub async fn dlq_rows(
     status: Option<String>,
     limit: usize,
 ) -> Result<Vec<ParsedDlqRow>> {
-    let dlq_md = intake_helper::dlq_path(config);
+    let dlq_md = intake_helper::dlq_path(config)?;
     let rows = dlq::parse_entries(&dlq_md).context("parse dlq")?;
     Ok(rows
         .into_iter()
@@ -341,7 +332,7 @@ pub async fn dlq_rows(
 /// any) and an optional ledger-completed flag so sb can render the
 /// composite view.
 pub async fn dlq_row(config: &Config, trace_id: &str) -> Result<DlqRowDetail> {
-    let dlq_md = intake_helper::dlq_path(config);
+    let dlq_md = intake_helper::dlq_path(config)?;
     let Some(row) = dlq::find_by_trace(&dlq_md, trace_id)? else {
         bail!("trace_id {trace_id} not found in DLQ");
     };
@@ -353,7 +344,7 @@ pub async fn dlq_row(config: &Config, trace_id: &str) -> Result<DlqRowDetail> {
     // Ledger lookup: only matters on the replay path (when both stores
     // carry the same source). We return the source string when there's
     // a completed row, so sb can mention it.
-    let ledger_has_completed_for = match vault_ledger::find_completed(&ledger::ledger_path(config), &row.preview) {
+    let ledger_has_completed_for = match vault_ledger::find_completed(&ledger::ledger_path(config)?, &row.preview) {
         Ok(Some(_)) => Some(row.preview.clone()),
         _ => None,
     };
@@ -373,9 +364,9 @@ pub async fn dlq_archive(
     status: &str,
     resolved_mode: bool,
 ) -> Result<DlqArchiveOutcome> {
-    let dlq_md = intake_helper::dlq_path(config);
+    let dlq_md = intake_helper::dlq_path(config)?;
     if resolved_mode {
-        let archive_path = vault_root(config)
+        let archive_path = vault_root(config)?
             .join("system")
             .join("views")
             .join("borg-dlq-archive.md");
@@ -405,7 +396,7 @@ pub async fn dlq_archive(
 /// a clear error rather than silently producing a wrong-bytes ingest.
 pub async fn dlq_replay(config: &Config, original_trace: &str) -> Result<DlqReplayOutcome> {
     log::debug!("triage::dlq_replay: original_trace={original_trace}");
-    let intake_md = intake_helper::intake_path(config);
+    let intake_md = intake_helper::intake_path(config)?;
     let Some(orig) = intake::find_by_trace(&intake_md, original_trace)? else {
         bail!("trace_id {original_trace} not found in intake log");
     };
@@ -421,7 +412,7 @@ pub async fn dlq_replay(config: &Config, original_trace: &str) -> Result<DlqRepl
     };
 
     let new_trace = crate::trace::generate(method);
-    let sidecar = intake::raw_input_path(&vault_root(config), original_trace);
+    let sidecar = intake::raw_input_path(&vault_root(config)?, original_trace);
     let sidecar_bytes = if sidecar.exists() {
         std::fs::read(&sidecar).context("read original sidecar")?
     } else {

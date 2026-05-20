@@ -171,7 +171,7 @@ pub struct MigrateReport {
 
 pub async fn run(config: &Config, apply: bool) -> Result<MigrateReport> {
     let migration = &config.migration;
-    let vault_root = expand_tilde(&config.vault.root_path);
+    let vault_root = config.vault_root()?;
 
     if !vault_root.exists() {
         eyre::bail!("Vault root does not exist: {}", vault_root.display());
@@ -197,7 +197,7 @@ pub async fn run(config: &Config, apply: bool) -> Result<MigrateReport> {
     // Seed Borg Ledger
     let mut seeded_ledger = 0usize;
     if migration.seed_borg_log && apply && !ledger_entries.is_empty() {
-        let log_path = ledger::ledger_path(config);
+        let log_path = ledger::ledger_path(config)?;
         for entry in &ledger_entries {
             if ledger::check_duplicate(&log_path, &entry.source)?.is_none() {
                 ledger::append_entry(&log_path, entry)?;
@@ -359,7 +359,7 @@ pub async fn reingest_failed(
     dry_run: bool,
     mut progress: impl FnMut(&ReingestFailedEvent) + Send,
 ) -> Result<ReingestFailedReport> {
-    let vault_root = expand_tilde(&config.vault.root_path);
+    let vault_root = config.vault_root()?;
     if !vault_root.exists() {
         eyre::bail!("Vault root does not exist: {}", vault_root.display());
     }
@@ -521,15 +521,6 @@ fn extract_title_from_body(body: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(stripped);
-    }
-    PathBuf::from(path)
 }
 
 #[cfg(test)]

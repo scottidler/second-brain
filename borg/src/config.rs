@@ -718,7 +718,10 @@ pub struct ServerConfig {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct VaultConfig {
-    pub root_path: String,
+    /// Vault root. None means the runtime requires either `--vault` on the CLI or
+    /// a `.obsidian/` directory in CWD. See `vault::paths::resolve_vault_root`.
+    #[serde(default)]
+    pub root_path: Option<String>,
     pub inbox_path: String,
     pub vault_name: String,
 }
@@ -795,10 +798,19 @@ impl Default for ServerConfig {
 impl Default for VaultConfig {
     fn default() -> Self {
         Self {
-            root_path: "~/obsidian-vault".to_string(),
+            root_path: None,
             inbox_path: "~/obsidian-vault/inbox".to_string(),
             vault_name: "obsidian".to_string(),
         }
+    }
+}
+
+impl Config {
+    /// Resolve the vault root via the unified resolver. Borg has no CLI override
+    /// for the vault path - the daemon takes its vault from config, or
+    /// (in marker-gated CWD mode) from a `.obsidian/` directory in CWD.
+    pub fn vault_root(&self) -> Result<PathBuf> {
+        vault::paths::resolve_vault_root(None, self.vault.root_path.as_deref())
     }
 }
 

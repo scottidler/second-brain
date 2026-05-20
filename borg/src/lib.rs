@@ -153,17 +153,22 @@ pub async fn serve_init(config: Config) -> Result<(ServerStartup, ServerHandle)>
     log::debug!("Groq model: {}", config.groq.model);
     log::debug!("LLM provider: {}, model: {}", config.llm.provider, config.llm.model);
 
-    // Ensure vault system files exist on startup
-    if let Err(e) = ledger::ensure_ledger_exists(&ledger::ledger_path(&config)) {
+    // Ensure vault system files exist on startup. vault_root must resolve here
+    // - the daemon cannot start without one.
+    let ledger_p = ledger::ledger_path(&config)?;
+    if let Err(e) = ledger::ensure_ledger_exists(&ledger_p) {
         log::warn!("Failed to ensure Borg Ledger exists: {e:#}");
     }
-    if let Err(e) = dashboard::ensure_dashboard_exists(&dashboard::dashboard_path(&config)) {
+    let dashboard_p = dashboard::dashboard_path(&config)?;
+    if let Err(e) = dashboard::ensure_dashboard_exists(&dashboard_p) {
         log::warn!("Failed to ensure Borg Dashboard exists: {e:#}");
     }
-    if let Err(e) = vault::intake::ensure_intake_exists(&intake::intake_path(&config)) {
+    let intake_p = intake::intake_path(&config)?;
+    if let Err(e) = vault::intake::ensure_intake_exists(&intake_p) {
         log::warn!("Failed to ensure Borg Intake exists: {e:#}");
     }
-    if let Err(e) = vault::dlq::ensure_dlq_exists(&intake::dlq_path(&config)) {
+    let dlq_p = intake::dlq_path(&config)?;
+    if let Err(e) = vault::dlq::ensure_dlq_exists(&dlq_p) {
         log::warn!("Failed to ensure Borg DLQ exists: {e:#}");
     }
 
@@ -524,7 +529,7 @@ pub async fn reingest(
         eyre::bail!("Specify --all, --source <URL>, --type <TYPE>, or --domain <DOMAIN> to select entries");
     }
 
-    let ledger_file = ledger::ledger_path(&config);
+    let ledger_file = ledger::ledger_path(&config)?;
 
     let filter = EntryFilter {
         source: source.clone(),
@@ -536,7 +541,7 @@ pub async fn reingest(
     let entries: Vec<QueriedEntry> = ledger::query_entries(&ledger_file, &filter)?;
 
     let entries: Vec<QueriedEntry> = if let Some(ref type_filter) = content_type {
-        let vault_root = pipeline::expand_vault_root(&config.vault.root_path);
+        let vault_root = config.vault_root()?;
         entries
             .into_iter()
             .filter(|e| {

@@ -620,16 +620,9 @@ impl Config {
         Ok(config)
     }
 
-    /// Resolve the vault root path from CLI flag, config, or CWD.
-    pub fn vault_root(&self, cli_vault: Option<&PathBuf>) -> PathBuf {
-        if let Some(vault) = cli_vault {
-            return vault.clone();
-        }
-        if let Some(ref root_path) = self.vault.root_path {
-            let expanded = shellexpand::tilde(root_path);
-            return PathBuf::from(expanded.as_ref());
-        }
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    /// Resolve the vault root via the unified resolver. Precedence: CLI > config > marker-gated CWD.
+    pub fn vault_root(&self, cli_vault: Option<&PathBuf>) -> Result<PathBuf> {
+        vault::paths::resolve_vault_root(cli_vault.map(|p| p.as_path()), self.vault.root_path.as_deref())
     }
 
     /// Path to oracle's search database. Cortex's embed loop reads from

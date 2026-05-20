@@ -26,8 +26,9 @@ pub async fn serve(config: Config) -> Result<()> {
     tracing::info!("Opening database at {}", config.db_path().display());
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
 
-    tracing::info!("Indexing vault at {}", config.vault_root().display());
-    let stats = db.index_vault(&config.vault_root()).context("Failed to index vault")?;
+    let vault_root = config.vault_root().context("Failed to resolve vault root")?;
+    tracing::info!("Indexing vault at {}", vault_root.display());
+    let stats = db.index_vault(&vault_root).context("Failed to index vault")?;
     tracing::info!(
         "Index complete: {} scanned, {} inserted, {} updated, {} unchanged, {} removed",
         stats.total_scanned,
@@ -45,11 +46,10 @@ pub async fn serve(config: Config) -> Result<()> {
             debounce_secs: config.watcher.debounce_secs,
             ignore_dirs: config.watcher.ignore.clone(),
         };
-        let vault_root = config.vault_root();
         match VaultWatcher::start(&vault_root, watcher_config, None) {
             Ok((watcher, mut rx)) => {
                 let db_handle = server.db_handle();
-                let vault_root = config.vault_root();
+                let vault_root = vault_root.clone();
                 tracing::info!("File watcher started (debounce: {}s)", config.watcher.debounce_secs);
                 tokio::spawn(async move {
                     let _keep = watcher;
@@ -116,13 +116,15 @@ pub async fn serve(config: Config) -> Result<()> {
 /// Reindex the vault and return the IndexStats. Caller formats the report.
 pub fn index(config: &Config) -> Result<vault::search::IndexStats> {
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
-    db.index_vault(&config.vault_root()).context("Failed to index vault")
+    let vault_root = config.vault_root().context("Failed to resolve vault root")?;
+    db.index_vault(&vault_root).context("Failed to index vault")
 }
 
 /// Dispatch a single MCP tool call (no transport). Caller formats `result.content`.
 pub async fn call(config: Config, tool: &str, args_json: Option<&str>) -> Result<rmcp::model::CallToolResult> {
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
-    db.index_vault(&config.vault_root()).context("Failed to index vault")?;
+    let vault_root = config.vault_root().context("Failed to resolve vault root")?;
+    db.index_vault(&vault_root).context("Failed to index vault")?;
 
     let server = server::OracleMcpServer::new(config, db);
 
@@ -145,6 +147,7 @@ pub fn tools() -> Vec<rmcp::model::Tool> {
 /// Open the SQLite index and return vault statistics. Caller formats them.
 pub fn stats(config: &Config) -> Result<vault::search::VaultStats> {
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
-    db.index_vault(&config.vault_root()).context("Failed to index vault")?;
+    let vault_root = config.vault_root().context("Failed to resolve vault root")?;
+    db.index_vault(&vault_root).context("Failed to index vault")?;
     db.stats().context("Failed to get stats")
 }

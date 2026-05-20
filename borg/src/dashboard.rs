@@ -88,9 +88,9 @@ The full DLQ table lives at [[borg-dlq]]; this panel surfaces still-pending fail
 "#;
 
 /// Resolve the dashboard path from config.
-pub fn dashboard_path(config: &Config) -> PathBuf {
-    let root = expand_tilde(&config.vault.root_path);
-    root.join("system").join("views").join("borg-dashboard.md")
+pub fn dashboard_path(config: &Config) -> Result<PathBuf> {
+    let root = config.vault_root()?;
+    Ok(root.join("system").join("views").join("borg-dashboard.md"))
 }
 
 /// Create the Borg Dashboard file if it doesn't exist.
@@ -121,15 +121,6 @@ pub fn refresh(dashboard_path: &Path) -> Result<()> {
     fs::write(dashboard_path, content).context("Failed to refresh Borg Dashboard")?;
     log::info!("Refreshed Borg Dashboard at {}", dashboard_path.display());
     Ok(())
-}
-
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(stripped);
-    }
-    PathBuf::from(path)
 }
 
 #[cfg(test)]

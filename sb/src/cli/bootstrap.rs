@@ -107,7 +107,11 @@ async fn register_systemd_units() -> Result<()> {
 
     let cortex_config = cortex::config::Config::load(None).context("load cortex config for daemon install")?;
     let cwd = std::env::current_dir().context("get CWD")?;
-    let cortex_vault = cortex_config.vault_root(Some(&cwd));
+    // The unified resolver is strict: a marker-less CWD returns Err. For
+    // bootstrap's install path we tolerate that and fall back to the CWD
+    // we already have - the install only writes the systemd unit; the
+    // daemon itself will re-resolve via `--vault` (set in the unit) at start time.
+    let cortex_vault = cortex_config.vault_root(Some(&cwd)).unwrap_or_else(|_| cwd.clone());
     let cortex_install = cortex::opts::DaemonOpts {
         install: true,
         uninstall: false,

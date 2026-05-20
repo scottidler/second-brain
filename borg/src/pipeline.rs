@@ -282,19 +282,21 @@ pub async fn process_url(
             .parse()
             .unwrap_or(chrono_tz::America::Los_Angeles);
         let now = chrono::Utc::now().with_timezone(&tz);
-        let _ = ledger::append_entry(
-            &ledger::ledger_path(config),
-            &LedgerEntry {
-                date: now.format("%Y-%m-%d").to_string(),
-                time: now.format("%H:%M").to_string(),
-                method: method.into(),
-                status: LedgerStatus::Failed,
-                filename: None,
-                source: canonical.clone(),
-                domain: None,
-                trace_id: Some(trace_id.to_string()),
-            },
-        );
+        if let Ok(ledger_p) = ledger::ledger_path(config) {
+            let _ = ledger::append_entry(
+                &ledger_p,
+                &LedgerEntry {
+                    date: now.format("%Y-%m-%d").to_string(),
+                    time: now.format("%H:%M").to_string(),
+                    method: method.into(),
+                    status: LedgerStatus::Failed,
+                    filename: None,
+                    source: canonical.clone(),
+                    domain: None,
+                    trace_id: Some(trace_id.to_string()),
+                },
+            );
+        }
         IngestResult {
             status: IngestStatus::Failed { reason },
             note_path: None,
@@ -370,7 +372,7 @@ async fn process_url_inner(
     // of the pipeline runs), capture its path here and remove only after
     // the atomic write of the new note succeeds.
     let mut old_path_to_delete: Option<PathBuf> = None;
-    let ledger_file = ledger::ledger_path(config);
+    let ledger_file = ledger::ledger_path(config)?;
 
     // Dedup guard: reject concurrent/duplicate ingestions (skip if --force).
     // Holding `inflight_guard` for the rest of this function keeps the URL
@@ -417,7 +419,7 @@ async fn process_url_inner(
             "[{trace_id}] Found existing entry for {canonical} (ingested {}), replacing",
             existing.date
         );
-        let vault_root = expand_tilde(&config.vault.root_path);
+        let vault_root = config.vault_root()?;
         let old_note_path = find_note_by_source(&vault_root, &canonical).or_else(|| {
             if existing.filename != "-" {
                 [vault_root.join("notes"), vault_root.join("inbox")]
@@ -597,8 +599,7 @@ async fn process_url_inner(
     // value of the slide pipeline. The Distilled-derived frontmatter
     // additions (cortex-video-*, distilled flag) still apply.
     let filename_stub = hygiene::sanitize_filename(&title);
-    let vault_root = std::path::Path::new(&config.vault.root_path);
-    let vault_root_resolved: PathBuf = shellexpand::tilde(&vault_root.to_string_lossy()).to_string().into();
+    let vault_root_resolved: PathBuf = config.vault_root()?;
     let rendered_distilled = distillers::render(&distilled);
     let (distilled_body, slide_paths) = if let Some(payload) = slide_payload.as_ref() {
         match crate::slides::publish::publish_slides(
@@ -1135,7 +1136,7 @@ async fn process_image_inner(
     let date_bucket = chrono::Utc::now().format("%Y-%m").to_string();
     let subdirectory = format!("images/{date_bucket}");
 
-    let vault_root = expand_tilde(&config.vault.root_path);
+    let vault_root = config.vault_root()?;
     let (_abs_path, rel_path) =
         assets::store_asset(&vault_root, data, filename, &subdirectory).context("Failed to store image asset")?;
 
@@ -1290,7 +1291,7 @@ async fn process_image_inner(
     let _ = std::fs::remove_file(&temp_path);
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config);
+    let ledger_file = ledger::ledger_path(config)?;
     let source_display = format!("[image: {filename}]");
     ledger::append_entry(
         &ledger_file,
@@ -1401,7 +1402,7 @@ async fn process_audio_inner(
     let date_bucket = chrono::Utc::now().format("%Y-%m").to_string();
     let subdirectory = format!("audio/{date_bucket}");
 
-    let vault_root = expand_tilde(&config.vault.root_path);
+    let vault_root = config.vault_root()?;
     let (_abs_path, rel_path) =
         assets::store_asset(&vault_root, data, filename, &subdirectory).context("Failed to store audio asset")?;
 
@@ -1526,7 +1527,7 @@ async fn process_audio_inner(
     log::info!("[{trace_id}] Wrote audio note: {}", note_path.display());
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config);
+    let ledger_file = ledger::ledger_path(config)?;
     let source_display = format!("[audio: {filename}]");
     ledger::append_entry(
         &ledger_file,
@@ -1658,7 +1659,7 @@ async fn process_document_file_inner(
     let log_time = now.format("%H:%M").to_string();
 
     // Store asset in vault
-    let vault_root = expand_tilde(&config.vault.root_path);
+    let vault_root = config.vault_root()?;
     let (_abs_path, rel_path) = assets::store_asset(&vault_root, data, filename, kind.subdirectory())
         .context(format!("Failed to store {} asset", kind.label()))?;
 
@@ -1783,7 +1784,7 @@ async fn process_document_file_inner(
     let _ = std::fs::remove_file(&temp_path);
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config);
+    let ledger_file = ledger::ledger_path(config)?;
     let source_display = format!("[{}: {filename}]", kind.label());
     ledger::append_entry(
         &ledger_file,
@@ -1986,7 +1987,7 @@ async fn process_text_inner(
     log::info!("[{trace_id}] Wrote text note: {}", note_path.display());
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config);
+    let ledger_file = ledger::ledger_path(config)?;
     let source_display = format!(
         "[text: {}]",
         if text.len() > 50 { format!("{}...", &text[..50]) } else { text.to_string() }
@@ -2162,7 +2163,7 @@ async fn process_vocab(
     log::info!("[{trace_id}] Wrote vocab note: {}", note_path.display());
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config);
+    let ledger_file = ledger::ledger_path(config)?;
     ledger::append_entry(
         &ledger_file,
         &LedgerEntry {
@@ -2563,7 +2564,7 @@ async fn process_code_snippet(
     );
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config);
+    let ledger_file = ledger::ledger_path(config)?;
     let source_display = format!("[code: {}]", if language.is_empty() { "unknown" } else { language });
     ledger::append_entry(
         &ledger_file,

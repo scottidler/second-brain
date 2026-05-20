@@ -557,7 +557,7 @@ impl BorgCli {
                 Ok(())
             }
             Some(Command::Dashboard(args)) => match args.action {
-                DashboardAction::Refresh => borg::dashboard::refresh(&borg::dashboard::dashboard_path(&config)),
+                DashboardAction::Refresh => borg::dashboard::refresh(&borg::dashboard::dashboard_path(&config)?),
             },
             Some(Command::Blocklist(args)) => match args.action {
                 BlocklistAction::List => {

@@ -142,11 +142,41 @@ fn config_findings() -> Vec<Finding> {
     let cortex_path = vault::paths::cortex_config();
     let oracle_path = vault::paths::oracle_config();
 
-    vec![
+    let mut findings = vec![
         parse_typed::<borg::config::Config>("borg", &borg_path),
         parse_typed::<cortex::config::Config>("cortex", &cortex_path),
         parse_typed::<oracle::Config>("oracle", &oracle_path),
-    ]
+    ];
+
+    // Surface unset vault.root-path values per Phase 1b. A missing root_path is
+    // valid but every subsequent operation must fall back to --vault or the
+    // marker-gated CWD - flag it so the user knows.
+    if let Ok(cfg) = borg::config::load_config::<borg::config::Config>(None)
+        && cfg.vault.root_path.is_none()
+    {
+        findings.push(Finding::warn(
+            format!("borg: vault.root-path not set in {}", borg_path.display()),
+            format!("set `vault.root-path` in {}", borg_path.display()),
+        ));
+    }
+    if let Ok(cfg) = cortex::config::Config::load(None)
+        && cfg.vault.root_path.is_none()
+    {
+        findings.push(Finding::warn(
+            format!("cortex: vault.root-path not set in {}", cortex_path.display()),
+            format!("set `vault.root-path` in {}", cortex_path.display()),
+        ));
+    }
+    if let Ok(cfg) = oracle::Config::load(None)
+        && cfg.vault.root_path.is_none()
+    {
+        findings.push(Finding::warn(
+            format!("oracle: vault.root-path not set in {}", oracle_path.display()),
+            format!("set `vault.root-path` in {}", oracle_path.display()),
+        ));
+    }
+
+    findings
 }
 
 fn parse_typed<T: serde::de::DeserializeOwned>(name: &str, path: &std::path::Path) -> Finding {

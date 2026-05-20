@@ -396,7 +396,7 @@ impl OracleMcpServer {
     )]
     async fn ingest_history(&self, params: Parameters<IngestHistoryRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
-        let vault_root = self.config.vault_root();
+        let vault_root = self.config.vault_root().map_err(Self::err)?;
         let ledger_path = ledger::ledger_path(&vault_root);
 
         let filter = vault::ledger::EntryFilter {
@@ -453,7 +453,7 @@ impl OracleMcpServer {
         description = "Trigger a reindex of the vault into the SQLite database. Only updates notes whose files have changed since the last index."
     )]
     async fn reindex(&self, _params: Parameters<ReindexRequest>) -> Result<CallToolResult, McpError> {
-        let vault_root = self.config.vault_root();
+        let vault_root = self.config.vault_root().map_err(Self::err)?;
         let db = self.db.lock().map_err(Self::err)?;
         let stats = db.index_vault(&vault_root).map_err(Self::err)?;
         Ok(CallToolResult::success(vec![Content::json(&stats)?]))

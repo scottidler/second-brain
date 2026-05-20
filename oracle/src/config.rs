@@ -4,14 +4,16 @@ use eyre::{Result, WrapErr};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
-    /// Path to the Obsidian vault root
-    #[serde(default = "default_vault_root")]
-    pub vault_root: String,
+    /// Vault configuration. `root-path` is optional; the unified resolver
+    /// (see `vault::paths::resolve_vault_root`) accepts a CLI override, this
+    /// config value, or a `.obsidian/`-marked CWD.
+    #[serde(default)]
+    pub vault: VaultConfig,
 
     /// Path to the SQLite database
-    #[serde(default = "default_db_path")]
+    #[serde(default = "default_db_path", rename = "db-path")]
     pub db_path: String,
 
     /// Logging configuration
@@ -33,6 +35,14 @@ pub struct Config {
         rename = "inbound-recompute-interval-secs"
     )]
     pub inbound_recompute_interval_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct VaultConfig {
+    /// Vault root. `None` means the runtime requires either a CLI override
+    /// or a `.obsidian/`-marked CWD.
+    pub root_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,10 +99,6 @@ fn default_ignore_dirs() -> Vec<String> {
     vec![".git".into(), ".obsidian".into(), "templates".into()]
 }
 
-fn default_vault_root() -> String {
-    "~/repos/scottidler/obsidian".to_string()
-}
-
 fn default_db_path() -> String {
     "~/.local/share/oracle/oracle.db".to_string()
 }
@@ -132,25 +138,14 @@ impl Config {
         Ok(primary)
     }
 
-    pub fn vault_root(&self) -> PathBuf {
-        let expanded = shellexpand::tilde(&self.vault_root);
-        PathBuf::from(expanded.as_ref())
+    /// Resolve the vault root via the unified resolver. Oracle has no CLI
+    /// override (it's an MCP server); precedence is config > marker-gated CWD.
+    pub fn vault_root(&self) -> Result<PathBuf> {
+        vault::paths::resolve_vault_root(None, self.vault.root_path.as_deref())
     }
 
     pub fn db_path(&self) -> PathBuf {
         let expanded = shellexpand::tilde(&self.db_path);
         PathBuf::from(expanded.as_ref())
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            vault_root: default_vault_root(),
-            db_path: default_db_path(),
-            logging: LogConfig::default(),
-            watcher: WatcherConfig::default(),
-            inbound_recompute_interval_secs: default_inbound_recompute_interval_secs(),
-        }
     }
 }

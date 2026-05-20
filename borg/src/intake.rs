@@ -18,26 +18,17 @@ use std::path::PathBuf;
 use vault::dlq::{self, DlqEntry, DlqStage, DlqStatus};
 use vault::intake::{self, IntakeEntry, IntakeKind};
 
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(stripped);
-    }
-    PathBuf::from(path)
+/// Resolve the vault root from borg config via the unified resolver.
+pub fn vault_root(config: &Config) -> Result<PathBuf> {
+    config.vault_root()
 }
 
-/// Resolve the vault root from borg config (with tilde expansion).
-pub fn vault_root(config: &Config) -> PathBuf {
-    expand_tilde(&config.vault.root_path)
+pub fn intake_path(config: &Config) -> Result<PathBuf> {
+    Ok(intake::intake_path(&vault_root(config)?))
 }
 
-pub fn intake_path(config: &Config) -> PathBuf {
-    intake::intake_path(&vault_root(config))
-}
-
-pub fn dlq_path(config: &Config) -> PathBuf {
-    dlq::dlq_path(&vault_root(config))
+pub fn dlq_path(config: &Config) -> Result<PathBuf> {
+    Ok(dlq::dlq_path(&vault_root(config)?))
 }
 
 fn now_date_time(config: &Config) -> (String, String) {
@@ -82,7 +73,7 @@ pub fn record_intake(
         "intake::record_intake: trace={trace_id} method={method} kind={kind} origin={origin_ctx} preview_len={}",
         preview.len()
     );
-    let root = vault_root(config);
+    let root = vault_root(config)?;
     let intake_md = intake::intake_path(&root);
     let (date, time) = now_date_time(config);
     let entry = IntakeEntry {
@@ -122,7 +113,7 @@ pub fn record_intake_with_sidecar(
         "intake::record_intake_with_sidecar: trace={trace_id} method={method} kind={kind} raw_bytes={}",
         raw_bytes.len()
     );
-    let root = vault_root(config);
+    let root = vault_root(config)?;
     let intake_md = intake::intake_path(&root);
     let (date, time) = now_date_time(config);
     let entry = IntakeEntry {
@@ -158,7 +149,13 @@ pub fn record_dlq(
     log::debug!(
         "intake::record_dlq: trace={trace_id} method={method} stage={stage} reason={reason} replay_of={replay_of:?}"
     );
-    let dlq_md = dlq_path(config);
+    let dlq_md = match dlq_path(config) {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("dlq: vault root not configured for trace={trace_id}: {e:#}");
+            return;
+        }
+    };
     let (date, time) = now_date_time(config);
     let entry = DlqEntry {
         date,

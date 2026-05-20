@@ -43,7 +43,8 @@ impl OracleCli {
         match self.command {
             Commands::Serve => oracle::serve(config).await,
             Commands::Index => {
-                println!("Indexing vault: {}", config.vault_root().display());
+                let vault_root = config.vault_root()?;
+                println!("Indexing vault: {}", vault_root.display());
                 println!("Database: {}", config.db_path().display());
                 let stats = oracle::index(&config)?;
                 println!();
@@ -74,7 +75,10 @@ impl OracleCli {
 }
 
 fn print_vault_stats(config: &oracle::Config, stats: &vault::search::VaultStats) {
-    println!("Vault: {}", config.vault_root().display());
+    match config.vault_root() {
+        Ok(root) => println!("Vault: {}", root.display()),
+        Err(e) => println!("Vault: (unresolved: {e})"),
+    }
     println!("Total notes: {}", stats.total_notes);
 
     if !stats.schema_gaps.is_empty() {
