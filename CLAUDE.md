@@ -14,10 +14,13 @@ Cargo workspace consolidating obsidian-borg (ingestion daemon), obsidian-cortex 
 second-brain/
   vault/       -- shared library crate (schema, frontmatter, note, ledger, hygiene, canonical, config, logging, fabric, trace, distilled, embedding)
   distillers/  -- per-kind Stage-2 distillers (article, repo, video, thread, idea, passthrough) + Fabric port + dispatcher + render
-  borg/        -- ingestion binary (Telegram, Discord, ntfy, HTTP, clipboard, CLI)
-  cortex/      -- governance binary (lint, link, intel, sweep, daemon, migrate, summarize --backfill, embed)
-  oracle/      -- knowledge retrieval MCP server (search [bm25/vector/hybrid], browse, domain briefs, ledger queries)
+  borg/        -- ingestion library (Telegram, Discord, ntfy, HTTP, clipboard, CLI) -- lib-only, consumed by sb
+  cortex/      -- governance library (lint, link, intel, sweep, daemon, migrate, summarize --backfill, embed) -- lib-only, consumed by sb
+  oracle/      -- knowledge retrieval library (search [bm25/vector/hybrid], browse, domain briefs, ledger queries) -- lib-only, consumed by sb
+  sb/          -- unified CLI binary: `sb borg ...`, `sb cortex ...`, `sb oracle ...`, plus `sb status/doctor/bootstrap`
+  systemd/     -- repo-shipped base unit files (borg.service, cortex.service); per-machine drop-ins live in ~/.config/systemd/user/*.service.d/
   config/      -- shared config source of truth (canonical-tags.yml, tag-mapping.yml, tag-proposals.yml)
+  config/templates/ -- starter configs that `sb bootstrap` drops into ~/.config/{borg,obsidian-cortex,oracle}/
 ```
 
 ## Key Conventions
@@ -32,7 +35,7 @@ second-brain/
 - **Patterns:** borg's Fabric patterns live at `~/.config/borg/patterns/` (source of truth in `borg/patterns/`). The L2 patterns are `distill-article.md`, `distill-repo.md`, `distill-thread.md`, `distill-video.md`, `distill-video-chunk.md`, `distill-video-reduce.md`.
 - **Tags:** 110 canonical tags, max 7 per note. Borg post-filters Fabric output through the canonical vocabulary. Cortex `sweep` command migrates and governs tags.
 - **One-way data flow:** Borg writes only to the vault filesystem (markdown files + staged artifacts). Oracle owns the SQLite FTS5 index and refreshes it via VaultWatcher when the vault changes. Borg's `Cargo.toml` does NOT depend on `rusqlite`.
-- **Binary names:** `borg`, `cortex`, and `oracle` (no obsidian- prefix)
+- **Binary name:** `sb` (one binary, subcommands `borg`/`cortex`/`oracle`/`status`/`doctor`/`bootstrap`). The borg/cortex/oracle crates are lib-only.
 
 ## Hybrid retrieval (Doc 2)
 
@@ -63,16 +66,17 @@ otto install     # build and install binaries
 
 ## Install (for /shipit)
 
+The workspace ships a single binary `sb` that subsumes the old `borg`, `cortex`, and `oracle` CLIs. Subcommands are namespaced: `sb borg ingest`, `sb cortex sweep`, `sb oracle serve`. See `sb --help` for the full surface.
+
 ```bash
-cargo install --path borg && systemctl --user restart borg
-cargo install --path cortex && systemctl --user restart cortex
-cargo install --path oracle
-cp borg/patterns/*.md ~/.config/borg/patterns/
-mkdir -p ~/.config/second-brain && cp config/canonical-tags.yml config/tag-mapping.yml config/tag-proposals.yml ~/.config/second-brain/
-# First run only: prefetch the fastembed model (~100 MB to the fastembed cache) so
-# the next oracle/cortex invocation does not need network.
-cortex embed --prefetch-model
+otto deploy
+# First run only: prefetch the fastembed model (~100 MB) so the
+# next oracle/cortex invocation does not need network.
+sb cortex embed --prefetch-model
 ```
 
-borg and cortex run as systemd user daemons and must be restarted after install.
-oracle is an MCP server launched on demand, no restart needed.
+`otto deploy` builds the single `sb` bin, installs it to `~/.cargo/bin/`, syncs the fabric patterns to `~/.config/borg/patterns/`, syncs canonical tags to `~/.config/second-brain/`, copies the repo-shipped systemd base units to `~/.config/systemd/user/`, runs `systemctl --user daemon-reload`, and restarts `borg.service` and `cortex.service`. Per-machine secrets / environment / config-path overrides live in `~/.config/systemd/user/{borg,cortex}.service.d/*.conf` drop-ins (untouched by the deploy).
+
+oracle is an MCP server launched on demand via `.mcp.json` -> `sb oracle serve`. No restart needed.
+
+For first-time setup on a new machine: `sb bootstrap` drops starter config files into `~/.config/{borg,obsidian-cortex,oracle}/` and prefetches the fastembed cache.
