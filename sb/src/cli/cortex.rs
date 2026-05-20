@@ -10,11 +10,7 @@ static AFTER_HELP: LazyLock<String> = LazyLock::new(after_help_text);
 
 fn after_help_text() -> String {
     let fabric_status = check_tool("fabric", &["--version"]);
-    let log_path = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
-        .join("cortex")
-        .join("logs")
-        .join("cortex.log");
+    let log_path = crate::logger::log_path("cortex");
 
     format!(
         "REQUIRED TOOLS:\n{fabric_status}\n\nLogs are written to: {log_path}",

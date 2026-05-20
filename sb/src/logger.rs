@@ -52,7 +52,11 @@ fn name_and_level(cli: &Cli) -> (String, String) {
     }
 }
 
-fn log_path(name: &str) -> PathBuf {
+/// Path of the log file for the given subsystem/command name.
+/// All logs land under `~/.local/share/sb/<name>.log`. Used by both
+/// the logger initializer and after_help text builders that want to
+/// show the path in `--help` output.
+pub fn log_path(name: &str) -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("sb")

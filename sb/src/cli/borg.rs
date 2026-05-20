@@ -449,12 +449,10 @@ fn get_tool_validation_help() -> String {
         ));
     }
 
-    let log_path = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
-        .join("borg")
-        .join("logs")
-        .join("borg.log");
-    help.push_str(&format!("\nLogs are written to: {}", log_path.display()));
+    help.push_str(&format!(
+        "\nLogs are written to: {}",
+        crate::logger::log_path("borg").display()
+    ));
     help
 }
 
