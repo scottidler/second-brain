@@ -547,6 +547,8 @@ The phases below are organizational; per [[feedback-no-phase-gating]] they ship 
 
 No new external dependencies. `clap`, `eyre`, `env_logger`, `tracing-subscriber` are already in the workspace (one or more of the three bins uses each today). The `sb` crate pulls all of them in once.
 
+**Update (2026-05-19, post-cutover):** `sb`'s `Cargo.toml` ended up depending on `rmcp = "1.3.0"` as well. This was added during Phase C of the cutover so `sb/src/cli/oracle.rs` can format the typed return of `oracle::call` (`rmcp::model::CallToolResult`) and the typed return of `oracle::tools` (`Vec<rmcp::model::Tool>`). `rmcp` was already an oracle dep; this just lifts it into `sb` so the CLI shell can pattern-match on its types. `serde_yaml` was added later (Phase 5 of `lib-api-cleanup`) so `sb/src/cli/checks.rs` can run a parse-status check on each subsystem's config file. See `docs/design/2026-05-19-lib-api-cleanup.md` for the full lib-API contract these deps support.
+
 ### Performance
 
 `sb borg ingest <url>` has the same runtime profile as today's `borg ingest <url>`: arg parsing, config load, pipeline invocation. The added dispatch layer is one `match` on a clap enum, microseconds.
