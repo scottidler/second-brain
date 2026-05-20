@@ -7,8 +7,12 @@ server:
   port: 8181
 
 vault:
-  root-path: ~/repos/scottidler/obsidian/
-  inbox-path: ~/repos/scottidler/obsidian/inbox
+  # Set root-path to your Obsidian vault, or leave it commented out and
+  # pass --vault on the CLI / run from a directory containing a .obsidian/
+  # subdirectory. With root-path unset, the resolver errors with a clear
+  # "vault root not set" message rather than guessing.
+  # root-path: ~/path/to/your/vault
+  inbox-path: inbox
   vault-name: obsidian
 
 # Local Whisper transcription service (for audio/video).

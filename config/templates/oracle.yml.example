@@ -2,10 +2,11 @@
 # Installed by `sb bootstrap` to ~/.config/sb/oracle.yml if absent.
 # Full schema: see oracle/src/config.rs in the second-brain workspace.
 
-# Vault root and DB path. db-path defaults to the vault's .obsidian-oracle.sqlite.
-# Leave commented out to require either --vault on the CLI or a .obsidian/ directory in CWD.
+# Vault root. Set root-path to your Obsidian vault, or leave it commented out and
+# launch oracle from a directory containing a .obsidian/ subdirectory. With root-path
+# unset, oracle errors with a clear "vault root not set" message at startup.
 vault:
-  root-path: ~/repos/scottidler/obsidian/
+  # root-path: ~/path/to/your/vault
 
 # Vault file watcher. When enabled, the running MCP server reindexes on file changes.
 watcher:

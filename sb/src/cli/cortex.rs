@@ -513,3 +513,6 @@ fn print_intel_report(r: &cortex::intel::IntelReport) {
     };
     println!("Generated {label}: {}", r.output_path.display());
 }
+
+#[cfg(test)]
+mod tests;

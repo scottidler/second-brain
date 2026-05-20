@@ -940,4 +940,93 @@ mod tests {
         assert_eq!(signals_after_read.0, 1, "note_read must bump search_hit_count");
         assert!(signals_after_read.1.is_some(), "note_read must stamp last_accessed_at",);
     }
+
+    /// Decode a CallToolResult's first content item as a JSON value. All the
+    /// list-tools we test below serialize their response via Content::json,
+    /// which the rmcp `Content::json` constructor stores as RawContent::Text
+    /// (per rmcp 1.x).
+    fn first_content_as_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+        let text = result
+            .content
+            .first()
+            .expect("response has at least one content item")
+            .as_text()
+            .expect("content[0] is text-shaped JSON")
+            .text
+            .clone();
+        serde_json::from_str(&text).expect("content text is valid JSON")
+    }
+
+    /// Phase 2 invariant: every list-shaped tool's response is keyed on
+    /// `results`. After the clean rename, the legacy keys (`tags`,
+    /// `creators`, `sources`, `recent`) must be absent.
+    #[tokio::test]
+    async fn tag_search_no_arg_returns_results_key() {
+        let db = SearchIndex::open_memory().expect("open db");
+        seed_one_article(&db, "notes/ai/transformer.md", "Transformer", "body");
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        let result = server.dispatch("tag_search", json!({})).await.expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert!(v.get("results").is_some(), "tag_search must expose `results`: {v}");
+        assert!(v.get("count").is_some(), "tag_search must expose `count`: {v}");
+        assert!(
+            v.get("tags").is_none(),
+            "legacy `tags` key must be gone (clean rename, no aliases): {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn creator_browse_no_arg_returns_results_key() {
+        let db = SearchIndex::open_memory().expect("open db");
+        seed_one_article(&db, "notes/ai/transformer.md", "Transformer", "body");
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        let result = server.dispatch("creator_browse", json!({})).await.expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert!(v.get("results").is_some(), "creator_browse must expose `results`: {v}");
+        assert!(v.get("count").is_some());
+        assert!(v.get("creators").is_none(), "legacy `creators` key must be gone: {v}");
+    }
+
+    #[tokio::test]
+    async fn source_browse_no_arg_returns_results_key() {
+        let db = SearchIndex::open_memory().expect("open db");
+        seed_one_article(&db, "notes/ai/transformer.md", "Transformer", "body");
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        let result = server.dispatch("source_browse", json!({})).await.expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert!(v.get("results").is_some(), "source_browse must expose `results`: {v}");
+        assert!(v.get("count").is_some());
+        assert!(v.get("sources").is_none(), "legacy `sources` key must be gone: {v}");
+    }
+
+    #[tokio::test]
+    async fn domain_brief_returns_results_key() {
+        let db = SearchIndex::open_memory().expect("open db");
+        seed_one_article(&db, "notes/ai/transformer.md", "Transformer", "body");
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        let result = server
+            .dispatch("domain_brief", json!({"domain": "ai"}))
+            .await
+            .expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert!(v.get("results").is_some(), "domain_brief must expose `results`: {v}");
+        assert!(v.get("recent").is_none(), "legacy `recent` key must be gone: {v}");
+        assert!(
+            v.get("recent_notes").is_none(),
+            "legacy `recent_notes` key (per design doc) must be gone: {v}"
+        );
+        // unread is u64, not Option<u64>, so it must serialize as a number, never null.
+        assert!(
+            v.get("unread").is_some_and(|u| u.is_number()),
+            "domain_brief.unread must be a number, never null: {v}"
+        );
+    }
 }

@@ -3,8 +3,11 @@
 # Full schema: see cortex/src/config.rs in the second-brain workspace.
 
 # Vault root. Required for cortex to know which Obsidian vault to operate on.
+# Set root-path to your Obsidian vault, or leave it commented out and pass --vault
+# on the CLI / run from a directory containing a .obsidian/ subdirectory. With
+# root-path unset, the resolver errors with a clear "vault root not set" message.
 vault:
-  root-path: ~/repos/scottidler/obsidian/
+  # root-path: ~/path/to/your/vault
 
 # Embedding pipeline (Phase A: summary embeddings; Phase B: transcript chunks).
 embedding:

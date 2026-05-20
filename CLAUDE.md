@@ -19,7 +19,7 @@ second-brain/
   oracle/      -- knowledge retrieval library (search [bm25/vector/hybrid], browse, domain briefs, ledger queries) -- lib-only, consumed by sb
   sb/          -- unified CLI binary: `sb borg ...`, `sb cortex ...`, `sb oracle ...`, plus `sb status/doctor/bootstrap`
   config/      -- shared config source of truth (canonical-tags.yml, tag-mapping.yml, tag-proposals.yml)
-  config/templates/ -- starter configs that `sb bootstrap` drops into ~/.config/{borg,obsidian-cortex,oracle}/
+  config/templates/ -- starter configs that `sb bootstrap` drops into ~/.config/sb/
 ```
 
 Systemd unit files are NOT in the repo. They are written into `~/.config/systemd/user/` by `sb borg daemon --install` and `sb cortex daemon --install`. Source of truth for unit content lives in `borg::install_systemd` (`borg/src/lib.rs`) and `cortex::install_systemd_service` (`cortex/src/daemon.rs`).
@@ -31,9 +31,10 @@ Systemd unit files are NOT in the repo. They are written into `~/.config/systemd
 - **Parallelism:** `vault::note::scan_vault` and the CPU-bound per-note loops in `cortex::autotag`, `cortex::quality`, `borg::backfill`, `borg::audit`, and `cortex::migrate` use `rayon::par_iter` for data-parallel work. Async/LLM-bound loops stay tokio-based. The cortex daemon wraps its sync sweep calls in `tokio::task::block_in_place` so rayon worker threads do not starve the tokio runtime.
 - **Schema:** vault::schema is THE single source of truth for Domain, NoteType, Origin, Status, Method. vault enums have feature-gated `schemars::JsonSchema` derives for MCP tool schemas.
 - **L2 Distilled contract:** vault::distilled defines the `Distilled { summary, claims, tags, links, kind_specific, meta }` type produced by Stage-2 distillers. Borg renders it into the note body (`## Summary` / `## Claims` / `## Links` headings) and frontmatter (`distilled: true`, `distilled-extractor`, per-kind `cortex-*` keys) at publish time; cortex's `summarize --backfill` does the same for legacy notes.
-- **Config:** borg reads ~/.config/borg/borg.yml; cortex reads ~/.config/obsidian-cortex/obsidian-cortex.yml; oracle reads ~/.config/oracle/oracle.yml
-- **Shared config:** ~/.config/second-brain/ has canonical-tags.yml, tag-mapping.yml, tag-proposals.yml (source of truth in `config/`). Both borg and cortex read from this shared directory.
-- **Patterns:** borg's Fabric patterns live at `~/.config/borg/patterns/` (source of truth in `borg/patterns/`). The L2 patterns are `distill-article.md`, `distill-repo.md`, `distill-thread.md`, `distill-video.md`, `distill-video-chunk.md`, `distill-video-reduce.md`.
+- **Config:** all three subsystems read from `~/.config/sb/`. Borg reads `~/.config/sb/borg.yml`; cortex reads `~/.config/sb/cortex.yml`; oracle reads `~/.config/sb/oracle.yml`. Shared paths are resolved through `vault::paths` (single source of truth). On legacy installs `sb bootstrap` auto-migrates from the old layout (`~/.config/{borg,cortex,obsidian-cortex,oracle,second-brain}`) into `~/.config/sb/`; the legacy directories are left in place (a future `sb bootstrap --prune-legacy-config` is the cleanup verb).
+- **Shared config:** `~/.config/sb/` also holds the cross-subsystem catalogue files: `canonical-tags.yml`, `tag-mapping.yml`, `tag-proposals.yml` (source of truth in `config/`). Both borg and cortex read these from the same shared location.
+- **Patterns:** borg's Fabric patterns live at `~/.config/sb/patterns/` (source of truth in `borg/patterns/`). The L2 patterns are `distill-article.md`, `distill-repo.md`, `distill-thread.md`, `distill-video.md`, `distill-video-chunk.md`, `distill-video-reduce.md`.
+- **Vault root:** resolved by `vault::paths::resolve_vault_root` with explicit precedence: CLI override (`--vault`) > config (`vault.root-path`) > marker-gated CWD (a `.obsidian/` directory must be present). No silent CWD fallback; commands error with a clear message if none of the three are set.
 - **Tags:** 110 canonical tags, max 7 per note. Borg post-filters Fabric output through the canonical vocabulary. Cortex `sweep` command migrates and governs tags.
 - **One-way data flow:** Borg writes only to the vault filesystem (markdown files + staged artifacts). Oracle owns the SQLite FTS5 index and refreshes it via VaultWatcher when the vault changes. Borg's `Cargo.toml` does NOT depend on `rusqlite`.
 - **Binary name:** `sb` (one binary, subcommands `borg`/`cortex`/`oracle`/`status`/`doctor`/`bootstrap`). The borg/cortex/oracle crates are lib-only.
@@ -76,8 +77,8 @@ otto deploy
 sb cortex embed --prefetch-model
 ```
 
-`otto deploy` builds the single `sb` bin, installs it to `~/.cargo/bin/`, syncs the fabric patterns to `~/.config/borg/patterns/`, syncs canonical tags to `~/.config/second-brain/`, and restarts any borg/cortex systemd units that already exist. Systemd unit content is owned by `sb borg daemon --install` and `sb cortex daemon --install` — run those on a fresh machine to write the units; the deploy task only restarts.
+`otto deploy` builds the single `sb` bin, installs it to `~/.cargo/bin/`, syncs the fabric patterns and canonical tags to `~/.config/sb/`, and restarts any borg/cortex systemd units that already exist. Systemd unit content is owned by `sb borg daemon --install` and `sb cortex daemon --install` - run those on a fresh machine to write the units; the deploy task only restarts.
 
 oracle is an MCP server launched on demand via `.mcp.json` -> `sb oracle serve`. No restart needed.
 
-For first-time setup on a new machine: `sb bootstrap` drops starter config files into `~/.config/{borg,obsidian-cortex,oracle}/` and prefetches the fastembed cache.
+For first-time setup on a new machine: `sb bootstrap` drops starter config files into `~/.config/sb/` and prefetches the fastembed cache. On machines with the legacy `~/.config/{borg,cortex,obsidian-cortex,oracle,second-brain}` layout, `sb bootstrap` auto-detects and migrates them.
