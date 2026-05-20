@@ -57,7 +57,7 @@ Refactor in three coupled moves:
 2. **Add a new `sb` bin crate** at the workspace root. It depends on `borg`, `cortex`, `oracle`, `vault`, `distillers` (all by `path =`). Its `main.rs` is a thin shell: parse args via clap, init the logger, dispatch to lib functions, map errors to exit codes. Every existing CLI verb gets a lib function in its owning subsystem crate that takes a typed `Config + Opts` and returns `Result<Output>`. The bin crate's job is to call those.
 3. **Ship root-level cross-cutting commands** as new code inside the `sb` crate. `sb status`, `sb doctor`, `sb bootstrap` are not subsystem-owned; they read across all three subsystems and live as `sb/src/cli/status.rs`, `sb/src/cli/doctor.rs`, `sb/src/cli/bootstrap.rs` alongside the per-subsystem CLI files.
 
-The two long-running daemons keep running as separate processes. The systemd unit files (now shipped in `systemd/` in the repo) call `/home/saidler/.cargo/bin/sb borg daemon --start` and `/home/saidler/.cargo/bin/sb cortex daemon --start` respectively. Two systemd units, two PIDs, two memory budgets, one binary on disk. Crash isolation is unchanged from today.
+The two long-running daemons keep running as separate processes. Systemd unit files (`borg.service`, `cortex.service`) are written by `sb borg daemon --install` and `sb cortex daemon --install` into `~/.config/systemd/user/`; their `ExecStart` lines invoke the unified bin (`{current_exe} borg daemon --start` / `{current_exe} cortex daemon --start`). Two systemd units, two PIDs, two memory budgets, one binary on disk. Crash isolation is unchanged from today.
 
 The MCP server is invoked by Claude Code via `.mcp.json` pointing at `/home/saidler/.cargo/bin/sb` with args `["oracle", "serve"]`. The `sb` binary's logger initializer notices the `oracle serve` subcommand and sets up tracing-to-stderr-only, preserving stdout for JSON-RPC.
 
@@ -103,11 +103,17 @@ second-brain/
   vault/                             unchanged - shared lib
   distillers/                        unchanged - shared lib
   config/                            unchanged - shared canonical YAMLs
-
-  systemd/                           NEW - shipped systemd user-unit files (base only)
-    borg.service                     ExecStart=%h/.cargo/bin/sb borg daemon --start
-    cortex.service                   ExecStart=%h/.cargo/bin/sb cortex daemon --start
+  config/templates/                  NEW - starter configs embedded into sb via include_str!,
+                                     dropped into ~/.config/{borg,obsidian-cortex,oracle}/ by `sb bootstrap`
 ```
+
+Systemd unit files are NOT shipped as static files in the repo. They are
+written by `sb borg daemon --install` and `sb cortex daemon --install` into
+`~/.config/systemd/user/{borg,cortex}.service` (and the cortex daily/weekly
+intel timer units). Source of truth for unit content lives in
+`borg::install_systemd` (`borg/src/lib.rs`) and `cortex::install_systemd_service`
+(`cortex/src/daemon.rs`); both consult `current_exe()` so the resulting
+`ExecStart` always points at the freshly-installed `sb` binary.
 
 The `sb/src/main.rs` is the only `main.rs` in the workspace and is structured per the project's `rust-cli-coder` Shell/Core rule: thin shell, no business logic. Sketch:
 
@@ -171,9 +177,9 @@ Every meaningful path in the workspace today and where it lands after the refact
 | `config/` | `config/` | Unchanged (canonical YAMLs). |
 | `config/` (no templates today) | `config/templates/{borg,cortex,oracle}.yml.example` | NEW: per-subsystem config exemplars used by `sb bootstrap`. |
 | `bin/gen-bge-reference.py` | `bin/gen-bge-reference.py` | Unchanged. |
-| `docs/`, `README.md`, `LICENSE`, `clippy.toml`, `.otto.yml`, `.mcp.json` | same | Unchanged on disk; `.mcp.json` content edits to point at `sb`; `.otto.yml` `deploy` task gains a systemd-sync step. |
+| `docs/`, `README.md`, `LICENSE`, `clippy.toml`, `.otto.yml`, `.mcp.json` | same | Unchanged on disk; `.mcp.json` content edits to point at `sb`; `.otto.yml` `deploy` task restarts borg/cortex daemons (unit files are owned by `daemon --install`, not the deploy task). |
 | *(no `sb/` today)* | `sb/` | NEW bin crate; sole `[[bin]]` in the workspace. |
-| *(no `systemd/` today)* | `systemd/{borg,cortex}.service` | NEW: base unit files shipped from the repo (per-machine secrets stay in `~/.config/systemd/user/*.service.d/`). |
+| systemd units (not in repo) | still not in repo; written by `sb borg/cortex daemon --install` | Source of truth for unit content lives in `borg::install_systemd` and `cortex::install_systemd_service`. |
 
 **The new `sb` crate**
 
@@ -240,10 +246,10 @@ Every meaningful path in the workspace today and where it lands after the refact
 | `~/.config/borg/borg.yml`, `~/.config/obsidian-cortex/obsidian-cortex.yml`, `~/.config/oracle/oracle.yml` | unchanged paths | Each subsystem lib still loads its own config from its own dir. `sb bootstrap` populates these from `config/templates/*.yml.example` if absent. |
 | `~/.config/borg/patterns/*.md` | unchanged | |
 | `~/.config/second-brain/{canonical-tags,tag-mapping,tag-proposals}.yml` | unchanged | |
-| `~/.config/systemd/user/borg.service`, `cortex.service` (hand-authored) | overwritten by `otto deploy` from `systemd/{borg,cortex}.service` (`ExecStart=%h/.cargo/bin/sb borg daemon --start`) | Same unit names; same PIDs/restart budgets. |
-| `~/.config/systemd/user/borg.service.d/secrets.conf` (per-machine, may or may not exist) | unchanged | Drop-in stays a per-machine concern; not checked into the repo. |
-| `.mcp.json` `command: borg|cortex|oracle` (currently `oracle`) | `command: sb`, `args: ["oracle", "serve"]` | One-line edit. |
-| `~/.local/share/{borg,cortex,oracle}/logs/*.log` | unchanged for workhorse verbs; `~/.local/share/sb/logs/sb.log` for cross-cutting `status`/`doctor`/`bootstrap` | See "Logger discipline". |
+| `~/.config/systemd/user/borg.service`, `cortex.service` | rewritten in place by `sb borg daemon --install` / `sb cortex daemon --install` (template lives in `borg::install_systemd` / `cortex::install_systemd_service`, ExecStart=`{current_exe} borg daemon --start`) | Same unit names; same PIDs/restart budgets. |
+| `~/.config/systemd/user/borg.service.d/*.conf` | n/a after this refactor | The new in-binary install writes the full unit content (secrets ExecStartPre, EnvironmentFile, PATH, hardening) so per-machine drop-ins are no longer needed on the borg side. If a drop-in exists from before, systemd still merges it on top — but the base unit alone is now sufficient. |
+| `.mcp.json` `command: oracle, args: ["serve"]` | `command: sb`, `args: ["oracle", "serve"]` | One-line edit (paired with sb install). |
+| `~/.local/share/{borg,cortex,oracle}/logs/*.log` | `~/.local/share/sb/{borg,cortex,oracle,status,doctor,bootstrap}.log` | One shared directory; one file per subsystem or root verb. See "Logger discipline". |
 
 #### Concrete extraction example: `borg ingest`
 
@@ -503,8 +509,9 @@ The phases below are organizational; per [[feedback-no-phase-gating]] they ship 
 #### Phase 4: Cutover
 **Model:** sonnet
 
-- Update `.mcp.json` to point at `sb` with `args: ["oracle", "serve"]`.
-- Run `otto deploy`: this `cp -f`s the new repo-shipped base units over the existing hand-authored ones in `~/.config/systemd/user/`. Scott's existing `borg.service.d/secrets.conf` drop-in (if it exists; if not, he can create one) is untouched because it's a separate file. `systemctl --user daemon-reload` followed by `systemctl --user restart borg cortex`. Unit names stay `borg.service` and `cortex.service` (same as today), so no enable/disable dance needed.
+- Update `.mcp.json` to point at `sb` with `args: ["oracle", "serve"]` (paired with `cargo install --path sb` so the bin is on PATH when Claude Code launches the MCP).
+- `cargo install --path sb` (or `otto deploy`, which also restarts any existing borg/cortex daemons).
+- Rewrite the systemd units: `sb borg daemon --install && sb cortex daemon --install`. These regenerate `~/.config/systemd/user/{borg,cortex}.service` (plus cortex's daily/weekly intel timers) with `ExecStart` pointing at the new `sb` binary, run `daemon-reload`, and `enable --now` the units.
 - `rkvr rmrf ~/.cargo/bin/borg ~/.cargo/bin/cortex ~/.cargo/bin/oracle` after the new `sb` install lands. (`rkvr` archives these for recovery; per the safety rule we don't `rm`.)
 - Update `CLAUDE.md`: replace the three-binary Install section with the single-binary version. Update the "Binary names" line in the architecture overview.
 - Update memories that name the three binaries.

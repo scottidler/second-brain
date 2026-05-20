@@ -6,13 +6,18 @@ pub struct BootstrapArgs {
     /// Skip the fastembed model prefetch (network-light bootstrap on install machines without GPU/disk budget).
     #[arg(long)]
     pub skip_prefetch_model: bool,
+
+    /// Skip registering systemd units. Useful on machines that already have
+    /// per-machine drop-ins in place that bootstrap shouldn't overwrite.
+    #[arg(long)]
+    pub skip_systemd: bool,
 }
 
 const BORG_TEMPLATE: &str = include_str!("../../../config/templates/borg.yml.example");
 const CORTEX_TEMPLATE: &str = include_str!("../../../config/templates/cortex.yml.example");
 const ORACLE_TEMPLATE: &str = include_str!("../../../config/templates/oracle.yml.example");
 
-pub fn run(args: BootstrapArgs) -> Result<()> {
+pub async fn run(args: BootstrapArgs) -> Result<()> {
     let config_root = dirs::config_dir().ok_or_else(|| eyre::eyre!("dirs::config_dir() returned None"))?;
 
     let targets = [
@@ -28,14 +33,15 @@ pub fn run(args: BootstrapArgs) -> Result<()> {
         write_if_missing(name, path, template)?;
     }
 
-    println!();
-    println!("Systemd units:");
-    println!("  Repo ships base units at systemd/{{borg,cortex}}.service");
-    println!("  Run `otto deploy` to install them into ~/.config/systemd/user/ and reload.");
+    if !args.skip_systemd {
+        println!();
+        println!("Installing systemd units...");
+        register_systemd_units().await?;
+    }
 
     if !args.skip_prefetch_model {
         println!();
-        println!("Prefetching fastembed model (this can take ~1-2 minutes on first run)...");
+        println!("Prefetching embedding model (this can take ~1-2 minutes on first run)...");
         prefetch_embedding_model()?;
     }
 
@@ -58,9 +64,41 @@ fn write_if_missing(name: &str, path: &Path, template: &str) -> Result<()> {
     Ok(())
 }
 
+async fn register_systemd_units() -> Result<()> {
+    let borg_config = borg::config::load_config(None).context("load borg config for daemon install")?;
+    let borg_install = borg::opts::DaemonOpts {
+        install: true,
+        uninstall: false,
+        reinstall: false,
+        start: false,
+        stop: false,
+        restart: false,
+        status: false,
+    };
+    borg::run_daemon(borg_config, false, borg_install)
+        .await
+        .context("borg daemon --install")?;
+
+    let cortex_config = cortex::config::Config::load(None).context("load cortex config for daemon install")?;
+    let cwd = std::env::current_dir().context("get CWD")?;
+    let cortex_vault = cortex_config.vault_root(Some(&cwd));
+    let cortex_install = cortex::opts::DaemonOpts {
+        install: true,
+        uninstall: false,
+        start: false,
+        stop: false,
+        status: false,
+    };
+    cortex::daemon::run_daemon(&cortex_vault, &cortex_config, &cortex_install)
+        .await
+        .context("cortex daemon --install")?;
+
+    Ok(())
+}
+
 fn prefetch_embedding_model() -> Result<()> {
-    // Reuse cortex's embed pipeline with prefetch_model = true to warm the
-    // fastembed cache. Vault root doesn't matter for prefetch; we pass CWD.
+    // Reuse cortex's embed pipeline with prefetch_model = true to warm the embedding
+    // cache. Vault root doesn't matter for prefetch; we pass CWD.
     let cwd = std::env::current_dir().context("get CWD")?;
     let config = cortex::config::Config::load(None).context("load cortex config (defaults are fine)")?;
     let vault_root = config.vault_root(Some(&cwd));

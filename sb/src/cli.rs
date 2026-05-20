@@ -53,7 +53,7 @@ impl Cmd {
             Cmd::Oracle(c) => c.run().await,
             Cmd::Status(a) => status::run(a),
             Cmd::Doctor(a) => doctor::run(a),
-            Cmd::Bootstrap(a) => bootstrap::run(a),
+            Cmd::Bootstrap(a) => bootstrap::run(a).await,
         }
     }
 }

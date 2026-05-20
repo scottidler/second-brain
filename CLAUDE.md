@@ -18,10 +18,11 @@ second-brain/
   cortex/      -- governance library (lint, link, intel, sweep, daemon, migrate, summarize --backfill, embed) -- lib-only, consumed by sb
   oracle/      -- knowledge retrieval library (search [bm25/vector/hybrid], browse, domain briefs, ledger queries) -- lib-only, consumed by sb
   sb/          -- unified CLI binary: `sb borg ...`, `sb cortex ...`, `sb oracle ...`, plus `sb status/doctor/bootstrap`
-  systemd/     -- repo-shipped base unit files (borg.service, cortex.service); per-machine drop-ins live in ~/.config/systemd/user/*.service.d/
   config/      -- shared config source of truth (canonical-tags.yml, tag-mapping.yml, tag-proposals.yml)
   config/templates/ -- starter configs that `sb bootstrap` drops into ~/.config/{borg,obsidian-cortex,oracle}/
 ```
+
+Systemd unit files are NOT in the repo. They are written into `~/.config/systemd/user/` by `sb borg daemon --install` and `sb cortex daemon --install`. Source of truth for unit content lives in `borg::install_systemd` (`borg/src/lib.rs`) and `cortex::install_systemd_service` (`cortex/src/daemon.rs`).
 
 ## Key Conventions
 
@@ -75,7 +76,7 @@ otto deploy
 sb cortex embed --prefetch-model
 ```
 
-`otto deploy` builds the single `sb` bin, installs it to `~/.cargo/bin/`, syncs the fabric patterns to `~/.config/borg/patterns/`, syncs canonical tags to `~/.config/second-brain/`, copies the repo-shipped systemd base units to `~/.config/systemd/user/`, runs `systemctl --user daemon-reload`, and restarts `borg.service` and `cortex.service`. Per-machine secrets / environment / config-path overrides live in `~/.config/systemd/user/{borg,cortex}.service.d/*.conf` drop-ins (untouched by the deploy).
+`otto deploy` builds the single `sb` bin, installs it to `~/.cargo/bin/`, syncs the fabric patterns to `~/.config/borg/patterns/`, syncs canonical tags to `~/.config/second-brain/`, and restarts any borg/cortex systemd units that already exist. Systemd unit content is owned by `sb borg daemon --install` and `sb cortex daemon --install` — run those on a fresh machine to write the units; the deploy task only restarts.
 
 oracle is an MCP server launched on demand via `.mcp.json` -> `sb oracle serve`. No restart needed.
 
