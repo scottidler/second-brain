@@ -232,3 +232,31 @@ The repo has no release automation. Tags are published; binaries are not. If you
 ## Verdict
 
 v0.8.6 ships its specified surface cleanly. The four observably-shipped phases (config unification, `results` rename, `--format`/`--scan` enum validation, daemon `--status` parity) all behave as designed against the real vault. The Phase 3 verbose-mode regression (D1), the missing-path exit code (D2), and the Phase 2 scope miss for `ingest_history`/`inbox_status` (D4) are real follow-ups; D3 is a contract clarification.
+
+## v0.8.7 verification (2026-05-20)
+
+All four defects from this report are addressed in v0.8.7. Design doc: `docs/design/2026-05-20-v0.8.6-shakedown-fixes.md`. The Architect was consulted twice via Gemini during the design pass (round 1 caught a fundamental D2 protocol-abuse issue; round 2 reached consensus on the revised design).
+
+Verification commands rerun against `sb v0.8.7`:
+
+| # | Command | Expected | Result |
+|---|---|---|---|
+| D1 | `sb -v borg replay` | `Location:` line present, exit 1 | `Location: borg/src/replay.rs:173:5` printed under the error chain; exit 1. ✅ |
+| D2.1 | `sb oracle call note_read --json '{"path":"notes/does-not-exist.md"}'` | JSON `{found: false, kind: "note", ...}`, exit 1 | Structured payload returned; exit 1 via wrapper-side `found: false` translation. ✅ |
+| D2.2 | `sb oracle call find_similar --json '{"path":"notes/does-not-exist.md"}'` | same shape, exit 1 | ✅ |
+| D2.3 | `sb oracle call find_similar --json '{}'` (missing args) | Protocol error via `is_error: true`, exit 1 | "Provide either 'content' or 'path' parameter" on stderr; exit 1. ✅ |
+| D2.4 | `sb oracle call find_links --json '{"path":"notes/does-not-exist.md"}'` | `{found: false, kind: "note", ...}`, exit 1 | ✅ |
+| D2.5 | `sb oracle call duplicate_groups --json '{"group_id":"no-such-group"}'` | `{found: false, kind: "duplicate_group", ...}`, exit 1 | ✅ |
+| D3 | `sb doctor; echo $?` | exit 1 only on Error-severity findings | Surfaced one real Error finding (`borg.service: failed`), exited 1. Confirms the contract works; this finding is Observation O1 above (daemon pointing at pre-unification binary), out of scope. ✅ |
+| D4.1 | `sb oracle call ingest_history --json '{"limit":3}'` | top-level `results` key, no `entries` key | `has("results") = true`, `has("entries") = false`. ✅ |
+| D4.2 | `sb oracle call inbox_status` | top-level `results` key, no `notes` key | `has("results") = true`, `has("notes") = false`. ✅ |
+
+**Architecturally:** D2 evolved significantly from the original draft. The Architect flagged that forcing `isError: true` on domain not-found would be MCP protocol abuse (LLM agents treat `isError` as a tool crash). The revised design splits the five sites into two categories: protocol-level errors (invalid args, 1 site) use `CallToolResult::error`; domain not-found (4 sites) returns structured `{"found": false, ...}` success payloads. The CLI wrapper learned a second exit-code translation (`found: false -> exit 1`) to satisfy shell consumers without breaking semantic correctness for agents. This is the corrected and shipped design.
+
+**Remaining out-of-scope items from the v0.8.6 shakedown that v0.8.7 does NOT address:**
+
+- O1: systemd daemons still point at pre-unification binaries. Manual fix: `sb borg daemon --install && sb cortex daemon --install && systemctl --user restart borg cortex`.
+- O2: ~88 MB of dead pre-unification binaries in `~/.cargo/bin/`.
+- O3: Boot-time log noise on short read-only commands.
+
+v0.8.7 ships only the design-doc-scoped fixes. The above are tracked separately.
