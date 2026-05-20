@@ -709,7 +709,8 @@ fn uninstall_systemd_service() -> Result<Vec<String>> {
     Ok(lines)
 }
 
-/// Show daemon status. Returns the lines sb should print.
+/// Show daemon status by shelling out to `systemctl --user status cortex --no-pager`,
+/// mirroring borg's `--status` pattern. Returns the lines sb should print.
 fn show_status() -> Result<Vec<String>> {
     let service_path = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("~/.config"))
@@ -717,14 +718,26 @@ fn show_status() -> Result<Vec<String>> {
         .join("user")
         .join("cortex.service");
 
-    Ok(if service_path.exists() {
-        vec![
-            format!("Service file: {}", service_path.display()),
-            "Check status: systemctl --user status cortex".to_string(),
-        ]
+    if !service_path.exists() {
+        return Ok(vec![
+            "Daemon not installed. Run: sb cortex daemon --install".to_string(),
+        ]);
+    }
+
+    let output = std::process::Command::new("systemctl")
+        .args(["--user", "status", "cortex", "--no-pager"])
+        .output()
+        .context("Failed to run systemctl")?;
+    // systemctl status returns non-zero when the unit is inactive/failed; the
+    // stdout text is still what the user wants to read.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<String> = stdout.lines().map(|s| s.to_string()).collect();
+    if lines.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Ok(stderr.lines().map(|s| s.to_string()).collect())
     } else {
-        vec!["Daemon not installed. Run: sb cortex daemon --install".to_string()]
-    })
+        Ok(lines)
+    }
 }
 
 /// Convert a human-friendly schedule string to a cron expression.

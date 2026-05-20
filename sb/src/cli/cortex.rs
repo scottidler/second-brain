@@ -305,7 +305,15 @@ impl From<SummarizeArgs> for opts::SummarizeOpts {
 impl CortexCli {
     pub async fn run(self) -> Result<()> {
         let config = cortex::config::Config::load(self.config.as_ref()).context("failed to load configuration")?;
-        let vault_root = config.vault_root(self.vault.as_ref())?;
+        // Resolve the vault root lazily-ish: status/install/uninstall verbs don't
+        // touch the vault, so a missing root_path shouldn't block them.
+        let vault_root = if matches!(&self.command, Command::Daemon(_)) {
+            config
+                .vault_root(self.vault.as_ref())
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            config.vault_root(self.vault.as_ref())?
+        };
         log::info!("cortex starting (version={})", env!("GIT_DESCRIBE"));
         log::info!("resolved vault root: {}", vault_root.display());
 
