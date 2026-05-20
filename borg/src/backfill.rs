@@ -13,14 +13,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
+/// Outcome of a backfill run. `dry_run = true` populates `would_backfill`;
+/// `dry_run = false` populates `backfilled`. Splitting the two disambiguates
+/// "what would happen" from "what did happen" without forcing sb to
+/// cross-reference the input opts.
 #[derive(Debug, Default)]
 pub struct BackfillReport {
     pub scanned: usize,
-    pub skipped_authored: usize,
-    pub skipped_already_present: usize,
-    pub skipped_recently_modified: usize,
-    pub skipped_no_date: usize,
+    pub would_backfill: usize,
     pub backfilled: usize,
+    pub skipped_origin: usize,
+    pub skipped_already_had: usize,
+    pub skipped_recent_mtime: usize,
+    pub skipped_no_date: usize,
 }
 
 /// Per-path classification produced by the parallel scan phase. The sequential phase that
@@ -165,9 +170,9 @@ pub(crate) fn backfill_on(vault_root: &Path, skip_folders: &[String], dry_run: b
     // Counters are aggregated lock-free via AtomicUsize; the only items that flow back to the
     // sequential write phase are the `Apply` decisions.
     let min_age = Duration::from_secs(60);
-    let skipped_authored = AtomicUsize::new(0);
-    let skipped_already_present = AtomicUsize::new(0);
-    let skipped_recently_modified = AtomicUsize::new(0);
+    let skipped_origin = AtomicUsize::new(0);
+    let skipped_already_had = AtomicUsize::new(0);
+    let skipped_recent_mtime = AtomicUsize::new(0);
     let skipped_no_date = AtomicUsize::new(0);
 
     let to_apply: Vec<BackfillDecision> = md_files
@@ -175,15 +180,15 @@ pub(crate) fn backfill_on(vault_root: &Path, skip_folders: &[String], dry_run: b
         .map(|path| classify_for_backfill(path, min_age))
         .filter_map(|decision| match decision {
             BackfillDecision::SkippedAuthored => {
-                skipped_authored.fetch_add(1, Ordering::Relaxed);
+                skipped_origin.fetch_add(1, Ordering::Relaxed);
                 None
             }
             BackfillDecision::SkippedAlreadyPresent => {
-                skipped_already_present.fetch_add(1, Ordering::Relaxed);
+                skipped_already_had.fetch_add(1, Ordering::Relaxed);
                 None
             }
             BackfillDecision::SkippedRecentlyModified => {
-                skipped_recently_modified.fetch_add(1, Ordering::Relaxed);
+                skipped_recent_mtime.fetch_add(1, Ordering::Relaxed);
                 None
             }
             BackfillDecision::SkippedNoDate => {
@@ -195,9 +200,7 @@ pub(crate) fn backfill_on(vault_root: &Path, skip_folders: &[String], dry_run: b
         })
         .collect();
 
-    // Sequential write phase: side-steps parent-directory fsync contention from write_atomic
-    // when many notes target the same inbox/<date>/ folder. If a future benchmark shows
-    // parallel writes outperform sequential ones here, swap this loop to a par_iter.
+    let mut would_backfill: usize = 0;
     let mut backfilled: usize = 0;
     for decision in to_apply {
         let BackfillDecision::Apply { path, content, date } = decision else {
@@ -206,7 +209,7 @@ pub(crate) fn backfill_on(vault_root: &Path, skip_folders: &[String], dry_run: b
 
         if dry_run {
             log::info!("backfill-ingested: WOULD set ingested={date} on {}", path.display());
-            backfilled += 1;
+            would_backfill += 1;
             continue;
         }
 
@@ -225,11 +228,12 @@ pub(crate) fn backfill_on(vault_root: &Path, skip_folders: &[String], dry_run: b
 
     Ok(BackfillReport {
         scanned: md_files.len(),
-        skipped_authored: skipped_authored.into_inner(),
-        skipped_already_present: skipped_already_present.into_inner(),
-        skipped_recently_modified: skipped_recently_modified.into_inner(),
-        skipped_no_date: skipped_no_date.into_inner(),
+        would_backfill,
         backfilled,
+        skipped_origin: skipped_origin.into_inner(),
+        skipped_already_had: skipped_already_had.into_inner(),
+        skipped_recent_mtime: skipped_recent_mtime.into_inner(),
+        skipped_no_date: skipped_no_date.into_inner(),
     })
 }
 

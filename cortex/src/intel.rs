@@ -6,17 +6,27 @@ use crate::config::{Config, IntelConfig, LlmConfig};
 use crate::opts::IntelOpts;
 use crate::vault::{Note, scan_vault};
 
-/// Outcome of a `sb cortex intel` invocation. Captures the paths the daily /
-/// weekly generators wrote; sb formats the output.
-#[derive(Debug, Default)]
+/// Which intel artifact a single `run`/`generate` invocation produces.
+/// Daily and weekly are exclusive at the report level; if a caller wants
+/// both, it calls `run` twice (rare; the daemon only schedules one at a
+/// time anyway).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntelMode {
+    Daily,
+    Weekly,
+}
+
+/// Outcome of a `sb cortex intel` invocation. Captures the mode the
+/// orchestrator ran in and the path it wrote; sb formats the output.
+#[derive(Debug)]
 pub struct IntelReport {
-    pub daily_path: Option<PathBuf>,
-    pub weekly_path: Option<PathBuf>,
+    pub mode: IntelMode,
+    pub output_path: PathBuf,
 }
 
 /// Top-level orchestrator for `sb cortex intel`. Scans the vault and runs
-/// either the daily-digest or weekly-review generator (or both) based on
-/// `opts`. The cortex daemon calls this directly on its daily/weekly tick.
+/// the daily-digest or weekly-review generator based on `opts.mode`. The
+/// cortex daemon calls this directly on its daily/weekly tick.
 pub fn run(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<IntelReport> {
     log::info!("starting intel command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
@@ -48,8 +58,8 @@ connective notes, not just the longest.
 tensions you noticed. These should make the reader want to go back and look at \
 specific notes. Reference notes by their wikilink when relevant.";
 
-/// Generate intelligence outputs (daily digest, weekly review). Returns the
-/// paths that were written so sb can announce them.
+/// Generate intelligence output for the requested mode. Returns the path
+/// that was written so sb can announce it.
 pub fn generate(
     vault_root: &Path,
     notes: &[Note],
@@ -57,17 +67,14 @@ pub fn generate(
     llm_config: &LlmConfig,
     opts: &IntelOpts,
 ) -> Result<IntelReport> {
-    let mut report = IntelReport::default();
-
-    if opts.daily || !opts.weekly {
-        report.daily_path = Some(generate_daily_digest(vault_root, notes, config, llm_config, opts)?);
-    }
-
-    if opts.weekly {
-        report.weekly_path = Some(generate_weekly_review(vault_root, notes, config, opts)?);
-    }
-
-    Ok(report)
+    let output_path = match opts.mode {
+        IntelMode::Daily => generate_daily_digest(vault_root, notes, config, llm_config, opts)?,
+        IntelMode::Weekly => generate_weekly_review(vault_root, notes, config, opts)?,
+    };
+    Ok(IntelReport {
+        mode: opts.mode,
+        output_path,
+    })
 }
 
 /// Process new/unread notes with Fabric pattern.
@@ -388,8 +395,7 @@ mod tests {
         let config = v.config().actions.intel;
         let llm_config = v.config().llm;
         let opts = IntelOpts {
-            daily: true,
-            weekly: false,
+            mode: IntelMode::Daily,
             output: None,
         };
 
@@ -414,8 +420,7 @@ mod tests {
         let config = v.config().actions.intel;
         let llm_config = v.config().llm;
         let opts = IntelOpts {
-            daily: false,
-            weekly: true,
+            mode: IntelMode::Weekly,
             output: None,
         };
 
@@ -435,8 +440,7 @@ mod tests {
     fn test_resolve_output_path_explicit() {
         let config = IntelConfig::default();
         let opts = IntelOpts {
-            daily: true,
-            weekly: false,
+            mode: IntelMode::Daily,
             output: Some(PathBuf::from("/custom/path.md")),
         };
 
@@ -448,8 +452,7 @@ mod tests {
     fn test_resolve_output_path_default() {
         let config = IntelConfig::default();
         let opts = IntelOpts {
-            daily: true,
-            weekly: false,
+            mode: IntelMode::Daily,
             output: None,
         };
 
@@ -517,8 +520,7 @@ mod tests {
             ..Default::default()
         };
         let opts = IntelOpts {
-            daily: true,
-            weekly: false,
+            mode: IntelMode::Daily,
             output: None,
         };
 

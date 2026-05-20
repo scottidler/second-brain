@@ -88,15 +88,16 @@ fn backfill_on_counter_values_match_known_fixture() {
     let report = backfill_on(root, &[], true).expect("backfill_on dry_run");
 
     assert_eq!(report.scanned, 5, "scanned should count every md file");
-    assert_eq!(report.backfilled, 1, "exactly one note is eligible to backfill");
-    assert_eq!(report.skipped_authored, 1, "origin=authored is skipped");
+    assert_eq!(report.would_backfill, 1, "exactly one note is eligible to backfill");
+    assert_eq!(report.backfilled, 0, "dry_run path leaves backfilled at zero");
+    assert_eq!(report.skipped_origin, 1, "origin=authored is skipped");
     assert_eq!(
-        report.skipped_already_present, 1,
+        report.skipped_already_had, 1,
         "note with existing ingested: is skipped"
     );
     assert_eq!(report.skipped_no_date, 1, "note without date: is skipped");
     assert_eq!(
-        report.skipped_recently_modified, 1,
+        report.skipped_recent_mtime, 1,
         "fresh-mtime note is skipped to avoid races"
     );
 }
@@ -110,9 +111,10 @@ fn backfill_ingested_dry_run_empty_vault_smoke() {
     let dir = tempdir().expect("tempdir");
     let report = backfill_on(dir.path(), &[], true).expect("dry-run on empty vault");
     assert_eq!(report.scanned, 0);
+    assert_eq!(report.would_backfill, 0);
     assert_eq!(report.backfilled, 0);
-    assert_eq!(report.skipped_authored, 0);
-    assert_eq!(report.skipped_already_present, 0);
+    assert_eq!(report.skipped_origin, 0);
+    assert_eq!(report.skipped_already_had, 0);
     assert_eq!(report.skipped_no_date, 0);
-    assert_eq!(report.skipped_recently_modified, 0);
+    assert_eq!(report.skipped_recent_mtime, 0);
 }

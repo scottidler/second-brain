@@ -10,32 +10,29 @@ use crate::opts::SweepOpts;
 use crate::tags::replace_tags_in_frontmatter;
 use crate::vault::{Note, scan_vault};
 
-/// Outcome of a `sb cortex sweep` invocation. Captures the data each branch
-/// produced; sb formats it for the terminal.
-#[derive(Debug, Default)]
+/// Outcome of a `sb cortex sweep` invocation. `mode` is the primary action
+/// the user requested; `proposals` is orthogonal and populated whenever a
+/// proposal scan ran (default mode, `--proposals`, or `--migrate --proposals`).
+#[derive(Debug)]
 pub struct SweepReport {
-    /// Populated when `--cold` was set: scan / surfaced / pinned-excluded counts.
-    pub cold: Option<ColdStats>,
-    /// Populated when `--migrate` was set: how many notes were (would be) rewritten,
-    /// and whether this was a dry run.
-    pub migration: Option<MigrationOutcome>,
-    /// Populated when proposals were scanned (default mode or `--proposals`):
-    /// the proposals found and, on apply, where they were written.
-    pub proposals: Option<ProposalsOutcome>,
+    pub mode: SweepMode,
+    pub proposals: Option<Vec<Proposal>>,
+    pub proposals_path: Option<String>,
 }
 
+/// Mirrors the Reingest/Backfill disambiguation rule: dry-run and apply
+/// produce distinct enum variants so sb never has to consult input opts
+/// to format output.
 #[derive(Debug)]
-pub struct MigrationOutcome {
-    pub count: usize,
-    pub dry_run: bool,
-}
-
-#[derive(Debug)]
-pub struct ProposalsOutcome {
-    pub proposals: Vec<Proposal>,
-    /// `Some(path)` when proposals were written to disk; `None` when `--dry-run`
-    /// (or no proposals were produced).
-    pub written_to: Option<String>,
+pub enum SweepMode {
+    WouldMigrate { count: usize },
+    Migrated { count: usize },
+    Proposals,
+    Cold {
+        scanned: u64,
+        surfaced: u64,
+        pinned_excluded: u64,
+    },
 }
 
 /// Top-level orchestrator for `sb cortex sweep`. Validates flag combinations,
@@ -51,34 +48,53 @@ pub fn run(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<Sweep
     if opts.cold {
         let stats = cold(vault_root, config)?;
         return Ok(SweepReport {
-            cold: Some(stats),
-            ..SweepReport::default()
+            mode: SweepMode::Cold {
+                scanned: stats.scanned,
+                surfaced: stats.surfaced,
+                pinned_excluded: stats.pinned_excluded,
+            },
+            proposals: None,
+            proposals_path: None,
         });
     }
 
     let notes = scan_vault(vault_root, &config.vault)?;
-    let mut report = SweepReport::default();
 
-    if opts.migrate {
-        let count = migrate(vault_root, &notes, &config.sweep, opts.dry_run)?;
-        report.migration = Some(MigrationOutcome {
-            count,
-            dry_run: opts.dry_run,
-        });
-    }
+    let migrate_count = if opts.migrate {
+        Some(migrate(vault_root, &notes, &config.sweep, opts.dry_run)?)
+    } else {
+        None
+    };
 
-    if opts.proposals || !opts.migrate {
+    let proposals_data = if opts.proposals || !opts.migrate {
         let proposals = scan_proposals(&notes, &config.sweep)?;
-        let written_to = if !proposals.is_empty() && !opts.dry_run {
+        let path = if !proposals.is_empty() && !opts.dry_run {
             write_proposals(&config.sweep, proposals.clone())?;
             Some(config.sweep.proposals_path.clone())
         } else {
             None
         };
-        report.proposals = Some(ProposalsOutcome { proposals, written_to });
-    }
+        Some((proposals, path))
+    } else {
+        None
+    };
 
-    Ok(report)
+    let mode = match migrate_count {
+        Some(count) if opts.dry_run => SweepMode::WouldMigrate { count },
+        Some(count) => SweepMode::Migrated { count },
+        None => SweepMode::Proposals,
+    };
+
+    let (proposals, proposals_path) = match proposals_data {
+        Some((p, path)) => (Some(p), path),
+        None => (None, None),
+    };
+
+    Ok(SweepReport {
+        mode,
+        proposals,
+        proposals_path,
+    })
 }
 
 /// Stats from a single cold-sweep run. Surfaced in the cortex log and

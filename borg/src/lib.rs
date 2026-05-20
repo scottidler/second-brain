@@ -886,13 +886,31 @@ pub async fn hotkey(opts: opts::HotkeyOpts, config: &Config) -> Result<HotkeyOut
     }
 }
 
-/// Outcome of `borg::daemon`. Carries pre-rendered lines for sb to print.
-/// The long-running `--start` mode boots via `serve` and either runs forever
-/// or returns Err on a startup failure - it never produces a DaemonOutcome
-/// to format.
-#[derive(Debug, Default)]
-pub struct DaemonOutcome {
-    pub lines: Vec<String>,
+/// Outcome of a `sb borg daemon <flag>` invocation (everything except
+/// `--start`, which sb routes to `serve_init`). Variants carry the typed
+/// data sb needs to format the user-facing message; no pre-rendered text
+/// crosses the lib boundary. `Status` carries the raw systemctl-status
+/// blob because systemd's output is not contract-stable across versions;
+/// parsing structured fields out of it would be brittle scope-creep
+/// (per 2026-05-20 architect consensus).
+#[derive(Debug)]
+pub enum DaemonOutcome {
+    Installed { unit_path: PathBuf },
+    Uninstalled { unit_path: PathBuf },
+    NotInstalled { unit_path: PathBuf },
+    Reinstalled { unit_path: PathBuf },
+    Stopped,
+    Restarted,
+    Status { raw_output: String },
+    NoAction,
+}
+
+/// Internal: outcome of an uninstall attempt. `was_present = false` means
+/// the unit file was already absent (no-op); `true` means a file was
+/// removed.
+struct UninstallOutcome {
+    unit_path: PathBuf,
+    was_present: bool,
 }
 
 /// Dispatch the non-start daemon flags (install/uninstall/reinstall/stop/restart/status).
@@ -902,36 +920,46 @@ pub async fn daemon(_config: Config, _verbose: bool, opts: opts::DaemonOpts) -> 
     use crate::opts::DaemonOpts;
 
     match opts {
-        DaemonOpts { install: true, .. } => Ok(DaemonOutcome {
-            lines: install_service().await?,
+        DaemonOpts { install: true, .. } => Ok(DaemonOutcome::Installed {
+            unit_path: install_service().await?,
         }),
-        DaemonOpts { uninstall: true, .. } => Ok(DaemonOutcome {
-            lines: uninstall_service().await?,
-        }),
-        DaemonOpts { reinstall: true, .. } => {
-            let mut lines = uninstall_service().await.unwrap_or_default();
-            lines.extend(install_service().await?);
-            Ok(DaemonOutcome { lines })
+        DaemonOpts { uninstall: true, .. } => {
+            let outcome = uninstall_service().await?;
+            if outcome.was_present {
+                Ok(DaemonOutcome::Uninstalled {
+                    unit_path: outcome.unit_path,
+                })
+            } else {
+                Ok(DaemonOutcome::NotInstalled {
+                    unit_path: outcome.unit_path,
+                })
+            }
         }
-        DaemonOpts { stop: true, .. } => Ok(DaemonOutcome {
-            lines: stop_service().await?,
-        }),
-        DaemonOpts { restart: true, .. } => Ok(DaemonOutcome {
-            lines: restart_service().await?,
-        }),
-        DaemonOpts { status: true, .. } => Ok(DaemonOutcome {
-            lines: show_status().await?,
+        DaemonOpts { reinstall: true, .. } => {
+            let _ = uninstall_service().await;
+            Ok(DaemonOutcome::Reinstalled {
+                unit_path: install_service().await?,
+            })
+        }
+        DaemonOpts { stop: true, .. } => {
+            stop_service().await?;
+            Ok(DaemonOutcome::Stopped)
+        }
+        DaemonOpts { restart: true, .. } => {
+            restart_service().await?;
+            Ok(DaemonOutcome::Restarted)
+        }
+        DaemonOpts { status: true, .. } => Ok(DaemonOutcome::Status {
+            raw_output: show_status().await?,
         }),
         DaemonOpts { start: true, .. } => Err(eyre::eyre!(
             "borg::daemon: --start should be dispatched by sb via serve_init"
         )),
-        _ => Ok(DaemonOutcome {
-            lines: vec!["No daemon action specified. See: sb borg daemon --help".to_string()],
-        }),
+        _ => Ok(DaemonOutcome::NoAction),
     }
 }
 
-async fn install_service() -> Result<Vec<String>> {
+async fn install_service() -> Result<PathBuf> {
     let exe_path = std::env::current_exe().context("Failed to detect binary path")?;
     let exe = exe_path.display().to_string();
 
@@ -944,7 +972,7 @@ async fn install_service() -> Result<Vec<String>> {
     }
 }
 
-async fn uninstall_service() -> Result<Vec<String>> {
+async fn uninstall_service() -> Result<UninstallOutcome> {
     if cfg!(target_os = "linux") {
         uninstall_systemd().await
     } else if cfg!(target_os = "macos") {
@@ -954,7 +982,7 @@ async fn uninstall_service() -> Result<Vec<String>> {
     }
 }
 
-async fn stop_service() -> Result<Vec<String>> {
+async fn stop_service() -> Result<()> {
     if cfg!(target_os = "linux") {
         systemctl(&["stop", "borg"]).await?;
     } else if cfg!(target_os = "macos") {
@@ -962,10 +990,10 @@ async fn stop_service() -> Result<Vec<String>> {
     } else {
         eyre::bail!("Unsupported platform for service stop")
     }
-    Ok(vec!["Stopped obsidian-borg service".to_string()])
+    Ok(())
 }
 
-async fn restart_service() -> Result<Vec<String>> {
+async fn restart_service() -> Result<()> {
     if cfg!(target_os = "linux") {
         systemctl(&["restart", "borg"]).await?;
     } else if cfg!(target_os = "macos") {
@@ -974,24 +1002,24 @@ async fn restart_service() -> Result<Vec<String>> {
     } else {
         eyre::bail!("Unsupported platform for service restart")
     }
-    Ok(vec!["Restarted obsidian-borg service".to_string()])
+    Ok(())
 }
 
-async fn show_status() -> Result<Vec<String>> {
+async fn show_status() -> Result<String> {
     if cfg!(target_os = "linux") {
         let output = tokio::process::Command::new("systemctl")
             .args(["--user", "status", "borg"])
             .output()
             .await
             .context("Failed to run systemctl")?;
-        Ok(vec![String::from_utf8_lossy(&output.stdout).to_string()])
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else if cfg!(target_os = "macos") {
         let output = tokio::process::Command::new("launchctl")
             .args(["list", "com.borg"])
             .output()
             .await
             .context("Failed to run launchctl")?;
-        Ok(vec![String::from_utf8_lossy(&output.stdout).to_string()])
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         eyre::bail!("Unsupported platform for service status")
     }
@@ -1027,7 +1055,7 @@ async fn launchctl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-async fn install_systemd(exe_path: &str) -> Result<Vec<String>> {
+async fn install_systemd(exe_path: &str) -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let unit_dir = home.join(".config/systemd/user");
     let unit_path = unit_dir.join("borg.service");
@@ -1082,20 +1110,15 @@ WantedBy=default.target
     // Write (or overwrite) the unit file
     std::fs::create_dir_all(&unit_dir).context("Failed to create systemd user unit directory")?;
     std::fs::write(&unit_path, &unit_content).context("Failed to write systemd unit file")?;
-    let mut lines = vec![format!("Wrote {}", unit_path.display())];
 
     // Reload so systemd picks up changes, then enable + start
     systemctl(&["daemon-reload"]).await?;
     systemctl(&["enable", "--now", "borg"]).await?;
 
-    lines.push("Service installed and started.".to_string());
-    if let Ok(status_lines) = show_status().await {
-        lines.extend(status_lines);
-    }
-    Ok(lines)
+    Ok(unit_path)
 }
 
-async fn install_launchd(exe_path: &str) -> Result<Vec<String>> {
+async fn install_launchd(exe_path: &str) -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let plist_dir = home.join("Library/LaunchAgents");
     let plist_path = plist_dir.join("com.obsidian-borg.plist");
@@ -1131,19 +1154,20 @@ async fn install_launchd(exe_path: &str) -> Result<Vec<String>> {
 
     std::fs::create_dir_all(&plist_dir).context("Failed to create LaunchAgents directory")?;
     std::fs::write(&plist_path, &plist_content).context("Failed to write plist file")?;
-    let mut lines = vec![format!("Wrote {}", plist_path.display())];
 
     launchctl(&["load", &plist_path.to_string_lossy()]).await?;
-    lines.push("Service installed and started.".to_string());
-    Ok(lines)
+    Ok(plist_path)
 }
 
-async fn uninstall_systemd() -> Result<Vec<String>> {
+async fn uninstall_systemd() -> Result<UninstallOutcome> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let unit_path = home.join(".config/systemd/user/borg.service");
 
     if !unit_path.exists() {
-        return Ok(vec![format!("No service file found at {}", unit_path.display())]);
+        return Ok(UninstallOutcome {
+            unit_path,
+            was_present: false,
+        });
     }
 
     let _ = std::process::Command::new("systemctl")
@@ -1151,22 +1175,26 @@ async fn uninstall_systemd() -> Result<Vec<String>> {
         .status();
 
     std::fs::remove_file(&unit_path).context("Failed to remove unit file")?;
-    let mut lines = vec![format!("Removed {}", unit_path.display())];
 
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status();
 
-    lines.push("Service uninstalled.".to_string());
-    Ok(lines)
+    Ok(UninstallOutcome {
+        unit_path,
+        was_present: true,
+    })
 }
 
-async fn uninstall_launchd() -> Result<Vec<String>> {
+async fn uninstall_launchd() -> Result<UninstallOutcome> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let plist_path = home.join("Library/LaunchAgents/com.obsidian-borg.plist");
 
     if !plist_path.exists() {
-        return Ok(vec![format!("No plist found at {}", plist_path.display())]);
+        return Ok(UninstallOutcome {
+            unit_path: plist_path,
+            was_present: false,
+        });
     }
 
     let _ = std::process::Command::new("launchctl")
@@ -1174,10 +1202,10 @@ async fn uninstall_launchd() -> Result<Vec<String>> {
         .status();
 
     std::fs::remove_file(&plist_path).context("Failed to remove plist file")?;
-    Ok(vec![
-        format!("Removed {}", plist_path.display()),
-        "Service uninstalled.".to_string(),
-    ])
+    Ok(UninstallOutcome {
+        unit_path: plist_path,
+        was_present: true,
+    })
 }
 
 const GNOME_KEYBINDINGS_SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";

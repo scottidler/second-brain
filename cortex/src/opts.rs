@@ -45,13 +45,10 @@ pub struct LinkOpts {
 
 #[derive(Debug, Clone)]
 pub struct IntelOpts {
-    /// Generate today's daily digest
-    pub daily: bool,
+    /// Which artifact to generate.
+    pub mode: crate::intel::IntelMode,
 
-    /// Generate weekly review
-    pub weekly: bool,
-
-    /// Write to specific path (default: vault daily note)
+    /// Write to specific path (default: vault daily note).
     pub output: Option<PathBuf>,
 }
 

@@ -301,9 +301,7 @@ impl BorgCli {
                     handle.wait().await
                 } else {
                     let outcome = borg::daemon(config, verbose, opts).await?;
-                    for line in &outcome.lines {
-                        println!("{line}");
-                    }
+                    print_daemon_outcome(&outcome);
                     Ok(())
                 }
             }
@@ -516,14 +514,19 @@ impl BorgCli {
             }
             Some(Command::BackfillIngested { dry_run }) => {
                 let report = borg::backfill::ingested(&config, dry_run)?;
+                let (count_label, count) = if dry_run {
+                    ("would backfill", report.would_backfill)
+                } else {
+                    ("backfilled", report.backfilled)
+                };
                 println!(
-                    "backfill-ingested complete:\n  scanned: {}\n  backfilled: {}{}\n  skipped (already had ingested:): {}\n  skipped (origin != assisted): {}\n  skipped (recent mtime): {}\n  skipped (no date: field): {}",
+                    "backfill-ingested complete:\n  scanned: {}\n  {}: {}\n  skipped (already had ingested:): {}\n  skipped (origin != assisted): {}\n  skipped (recent mtime): {}\n  skipped (no date: field): {}",
                     report.scanned,
-                    report.backfilled,
-                    if dry_run { " (dry-run)" } else { "" },
-                    report.skipped_already_present,
-                    report.skipped_authored,
-                    report.skipped_recently_modified,
+                    count_label,
+                    count,
+                    report.skipped_already_had,
+                    report.skipped_origin,
+                    report.skipped_recent_mtime,
                     report.skipped_no_date,
                 );
                 Ok(())
@@ -570,6 +573,33 @@ impl BorgCli {
 fn print_lines(lines: &[String]) {
     for line in lines {
         println!("{line}");
+    }
+}
+
+fn print_daemon_outcome(outcome: &borg::DaemonOutcome) {
+    use borg::DaemonOutcome;
+    match outcome {
+        DaemonOutcome::Installed { unit_path } => {
+            println!("Wrote {}", unit_path.display());
+            println!("Service installed and started.");
+        }
+        DaemonOutcome::Uninstalled { unit_path } => {
+            println!("Removed {}", unit_path.display());
+            println!("Service uninstalled.");
+        }
+        DaemonOutcome::NotInstalled { unit_path } => {
+            println!("No service file found at {}", unit_path.display());
+        }
+        DaemonOutcome::Reinstalled { unit_path } => {
+            println!("Wrote {}", unit_path.display());
+            println!("Service reinstalled and started.");
+        }
+        DaemonOutcome::Stopped => println!("Stopped obsidian-borg service"),
+        DaemonOutcome::Restarted => println!("Restarted obsidian-borg service"),
+        DaemonOutcome::Status { raw_output } => print!("{raw_output}"),
+        DaemonOutcome::NoAction => {
+            println!("No daemon action specified. See: sb borg daemon --help");
+        }
     }
 }
 

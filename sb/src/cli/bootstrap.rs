@@ -78,8 +78,12 @@ async fn register_systemd_units() -> Result<()> {
     let borg_outcome = borg::daemon(borg_config, false, borg_install)
         .await
         .context("borg daemon --install")?;
-    for line in &borg_outcome.lines {
-        println!("{line}");
+    match &borg_outcome {
+        borg::DaemonOutcome::Installed { unit_path } | borg::DaemonOutcome::Reinstalled { unit_path } => {
+            println!("Wrote {}", unit_path.display());
+            println!("Service installed and started.");
+        }
+        _ => println!("borg daemon: unexpected outcome from --install ({borg_outcome:?})"),
     }
 
     let cortex_config = cortex::config::Config::load(None).context("load cortex config for daemon install")?;

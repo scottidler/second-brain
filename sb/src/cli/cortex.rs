@@ -151,9 +151,13 @@ pub struct IntelArgs {
 }
 impl From<IntelArgs> for opts::IntelOpts {
     fn from(a: IntelArgs) -> Self {
+        let mode = if a.weekly {
+            cortex::intel::IntelMode::Weekly
+        } else {
+            cortex::intel::IntelMode::Daily
+        };
         Self {
-            daily: a.daily,
-            weekly: a.weekly,
+            mode,
             output: a.output,
         }
     }
@@ -464,29 +468,33 @@ fn print_state_report(r: &cortex::state::StateReport) {
 }
 
 fn print_sweep_report(r: &cortex::sweep::SweepReport) {
-    if let Some(stats) = &r.cold {
-        println!(
-            "Cold sweep: scanned={} surfaced={} pinned_excluded={}",
-            stats.scanned, stats.surfaced, stats.pinned_excluded
-        );
-        return;
-    }
-    if let Some(m) = &r.migration {
-        if m.dry_run {
-            println!("Dry run: would modify {} note(s).", m.count);
-        } else {
-            println!("Migrated tags in {} note(s).", m.count);
+    use cortex::sweep::SweepMode;
+    match &r.mode {
+        SweepMode::Cold {
+            scanned,
+            surfaced,
+            pinned_excluded,
+        } => {
+            println!("Cold sweep: scanned={scanned} surfaced={surfaced} pinned_excluded={pinned_excluded}");
+            return;
         }
+        SweepMode::WouldMigrate { count } => {
+            println!("Dry run: would modify {count} note(s).");
+        }
+        SweepMode::Migrated { count } => {
+            println!("Migrated tags in {count} note(s).");
+        }
+        SweepMode::Proposals => {}
     }
-    if let Some(p) = &r.proposals {
-        if p.proposals.is_empty() {
+    if let Some(proposals) = &r.proposals {
+        if proposals.is_empty() {
             println!("No new tag proposals.");
         } else {
-            println!("Found {} tag(s) needing review:", p.proposals.len());
-            for proposal in &p.proposals {
+            println!("Found {} tag(s) needing review:", proposals.len());
+            for proposal in proposals {
                 println!("  {} (on {} notes)", proposal.tag, proposal.frequency);
             }
-            if let Some(path) = &p.written_to {
+            if let Some(path) = &r.proposals_path {
                 println!("Proposals written to {path}");
             }
         }
@@ -494,10 +502,9 @@ fn print_sweep_report(r: &cortex::sweep::SweepReport) {
 }
 
 fn print_intel_report(r: &cortex::intel::IntelReport) {
-    if let Some(path) = &r.daily_path {
-        println!("Generated daily digest: {}", path.display());
-    }
-    if let Some(path) = &r.weekly_path {
-        println!("Generated weekly review: {}", path.display());
-    }
+    let label = match r.mode {
+        cortex::intel::IntelMode::Daily => "daily digest",
+        cortex::intel::IntelMode::Weekly => "weekly review",
+    };
+    println!("Generated {label}: {}", r.output_path.display());
 }
