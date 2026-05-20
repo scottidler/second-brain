@@ -19,13 +19,21 @@ pub struct ClassifyOpts {
     pub reclassify_domain: Option<String>,
 }
 
+/// Output shape for `cortex lint`. Clap rejects unknown values at parse
+/// time (e.g. `--format yaml` errors with "possible values: human, json").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum LintFormat {
+    Human,
+    Json,
+}
+
 #[derive(Debug, Clone)]
 pub struct LintOpts {
     /// Auto-fix what's fixable (default: report only)
     pub apply: bool,
 
     /// Output format: human (default), json
-    pub format: String,
+    pub format: LintFormat,
 
     /// Run only specific rule(s): naming, frontmatter, tags, scope, broken-links, duplicates, quality, auto-tag
     pub rule: Vec<String>,

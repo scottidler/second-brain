@@ -106,8 +106,8 @@ impl From<ClassifyArgs> for opts::ClassifyOpts {
 pub struct LintArgs {
     #[arg(long)]
     pub apply: bool,
-    #[arg(long, default_value = "human")]
-    pub format: String,
+    #[arg(long, value_enum, default_value_t = opts::LintFormat::Human)]
+    pub format: opts::LintFormat,
     #[arg(long)]
     pub rule: Vec<String>,
     #[arg(long)]
@@ -327,7 +327,7 @@ impl CortexCli {
             Command::Lint(a) => {
                 let opts: cortex::opts::LintOpts = a.into();
                 let report = cortex::lint(&vault_root, &config, &opts)?;
-                if opts.format == "json" {
+                if opts.format == cortex::opts::LintFormat::Json {
                     println!("{}", report.format_json()?);
                 } else {
                     for line in report.format_human(opts.apply) {

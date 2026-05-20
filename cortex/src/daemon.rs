@@ -344,7 +344,7 @@ fn configured_actions(
                 let auto = daemon_config.is_enabled("lint");
                 let opts = crate::opts::LintOpts {
                     apply: auto,
-                    format: "human".to_string(),
+                    format: crate::opts::LintFormat::Human,
                     rule: Vec::new(),
                     path: None,
                 };
