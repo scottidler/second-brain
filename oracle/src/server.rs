@@ -426,7 +426,7 @@ impl OracleMcpServer {
 
         Ok(CallToolResult::success(vec![Content::json(json!({
             "count": results.len(),
-            "entries": results,
+            "results": results,
         }))?]))
     }
 
@@ -754,7 +754,7 @@ impl OracleMcpServer {
             "inbox_count": inbox_results.len(),
             "needs_review": review_results.len(),
             "classified": classified,
-            "notes": inbox_results,
+            "results": inbox_results,
             "review_candidates": review_results,
         }))?]))
     }
@@ -866,6 +866,7 @@ impl ServerHandler for OracleMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::VaultConfig;
     use serde_json::json;
     use std::path::PathBuf;
     use vault::frontmatter::Frontmatter;
@@ -1112,6 +1113,56 @@ mod tests {
         let v = first_content_as_json(&result);
         assert_eq!(v.get("found").and_then(|f| f.as_bool()), Some(false), "{v}");
         assert_eq!(v.get("kind").and_then(|k| k.as_str()), Some("note"), "{v}");
+    }
+
+    /// D4: ingest_history should return its rows under the canonical
+    /// `results` key, not the legacy `entries` key. The Phase 2 design
+    /// classified ingest_history as "per-tool object - unchanged," but the
+    /// shakedown showed it's really a list-of-things tool that should
+    /// follow the same convention as tag_search/source_browse/etc.
+    #[tokio::test]
+    async fn ingest_history_returns_results_key() {
+        // ingest_history needs a vault root to locate the ledger; query_entries
+        // returns an empty Vec when the ledger file doesn't exist, so a bare
+        // tempdir with a `.obsidian/` marker is sufficient.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir(tmp.path().join(".obsidian")).expect("mkdir .obsidian");
+        let config = Config {
+            vault: VaultConfig {
+                root_path: Some(tmp.path().to_string_lossy().into_owned()),
+            },
+            ..Config::default()
+        };
+        let db = SearchIndex::open_memory().expect("open db");
+        let server = OracleMcpServer::new(config, db);
+
+        let result = server.dispatch("ingest_history", json!({})).await.expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert!(v.get("results").is_some(), "ingest_history must expose `results`: {v}");
+        assert!(v.get("count").is_some(), "ingest_history must expose `count`: {v}");
+        assert!(v.get("entries").is_none(), "legacy `entries` key must be gone: {v}");
+    }
+
+    /// D4: inbox_status should rename `notes` -> `results`. The other keys
+    /// (inbox_count, needs_review, classified, review_candidates) stay -
+    /// they're semantic counters and a secondary list, not "the list" the
+    /// tool is named for.
+    #[tokio::test]
+    async fn inbox_status_returns_results_key() {
+        let db = SearchIndex::open_memory().expect("open db");
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        let result = server.dispatch("inbox_status", json!({})).await.expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert!(v.get("results").is_some(), "inbox_status must expose `results`: {v}");
+        assert!(v.get("notes").is_none(), "legacy `notes` key must be gone: {v}");
+        // Secondary keys must remain.
+        assert!(v.get("inbox_count").is_some(), "{v}");
+        assert!(v.get("needs_review").is_some(), "{v}");
+        assert!(v.get("classified").is_some(), "{v}");
+        assert!(v.get("review_candidates").is_some(), "{v}");
     }
 
     #[tokio::test]
