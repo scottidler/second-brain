@@ -23,14 +23,12 @@ pub mod tags;
 pub mod testutil;
 pub mod vault;
 
-use colored::Colorize;
 use eyre::Result;
 use std::path::Path;
 
 use config::Config;
-use opts::{LinkOpts, LintOpts, StateOpts};
+use opts::{LinkOpts, LintOpts};
 use report::Report;
-use state::VaultManifest;
 use vault::{Note, scan_vault};
 
 /// Check if a note's path matches any glob pattern in the list.
@@ -178,81 +176,6 @@ pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Repor
 
     // Output formatting is the caller's responsibility (see sb/src/cli/cortex.rs).
     Ok(report)
-}
-
-pub fn state(vault_root: &Path, config: &Config, opts: &StateOpts) -> Result<()> {
-    log::info!("starting state command (vault_root={})", vault_root.display());
-    let cache_dir = &config.state.cache_dir;
-    let manifest_path = VaultManifest::manifest_path(vault_root, cache_dir);
-
-    if opts.refresh || opts.diff {
-        let current = VaultManifest::scan(vault_root, &config.vault.ignore)?;
-
-        if opts.diff {
-            if manifest_path.exists() {
-                let previous = VaultManifest::load(&manifest_path)?;
-                let diff = previous.diff(&current);
-
-                if diff.has_changes() {
-                    if !diff.added.is_empty() {
-                        println!("{}", "Added:".green().bold());
-                        for p in &diff.added {
-                            println!("  + {}", p.display());
-                        }
-                    }
-                    if !diff.removed.is_empty() {
-                        println!("{}", "Removed:".red().bold());
-                        for p in &diff.removed {
-                            println!("  - {}", p.display());
-                        }
-                    }
-                    if !diff.modified.is_empty() {
-                        println!("{}", "Modified:".yellow().bold());
-                        for p in &diff.modified {
-                            println!("  ~ {}", p.display());
-                        }
-                    }
-                    println!(
-                        "\n{}: {} added, {} removed, {} modified",
-                        "Summary".bold(),
-                        diff.added.len(),
-                        diff.removed.len(),
-                        diff.modified.len()
-                    );
-                } else {
-                    println!("{}", "No changes since last scan.".green());
-                }
-            } else {
-                println!("{}", "No previous manifest found. Run with --refresh first.".yellow());
-            }
-        }
-
-        if opts.refresh {
-            current.save(&manifest_path)?;
-            println!(
-                "{} manifest saved ({} files)",
-                "Refreshed:".green().bold(),
-                current.files.len()
-            );
-        }
-    } else {
-        // Default: show current manifest info
-        if manifest_path.exists() {
-            let manifest = VaultManifest::load(&manifest_path)?;
-            println!(
-                "Last scan: {} ({} files)",
-                manifest.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
-                manifest.files.len()
-            );
-        } else {
-            println!(
-                "{}",
-                "No manifest found. Run `cortex state --refresh` to create one.".yellow()
-            );
-        }
-    }
-
-    Ok(())
 }
 
 pub fn link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Report> {

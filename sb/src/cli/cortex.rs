@@ -1,4 +1,5 @@
 use clap::{Args, Subcommand};
+use colored::Colorize;
 use eyre::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
@@ -336,13 +337,18 @@ impl CortexCli {
                 }
             }
             Command::Intel(a) => {
-                cortex::intel::run(&vault_root, &config, &a.into())?;
+                let report = cortex::intel::run(&vault_root, &config, &a.into())?;
+                print_intel_report(&report);
             }
             Command::State(a) => {
-                cortex::state(&vault_root, &config, &a.into())?;
+                let report = cortex::state::run(&vault_root, &config, &a.into())?;
+                print_state_report(&report);
             }
             Command::Daemon(a) => {
-                cortex::daemon::run(&vault_root, &config, &a.into()).await?;
+                let outcome = cortex::daemon::run(&vault_root, &config, &a.into()).await?;
+                for line in &outcome.lines {
+                    println!("{line}");
+                }
             }
             Command::Migrate(a) => {
                 let apply = a.apply;
@@ -354,7 +360,8 @@ impl CortexCli {
                 }
             }
             Command::Sweep(a) => {
-                cortex::sweep::run(&vault_root, &config, &a.into())?;
+                let report = cortex::sweep::run(&vault_root, &config, &a.into())?;
+                print_sweep_report(&report);
             }
             Command::Summarize(a) => {
                 let summary = cortex::summarize::run(&vault_root, &config, &a.into()).await?;
@@ -367,16 +374,117 @@ impl CortexCli {
                 );
             }
             Command::Embed(a) => {
-                let stats = cortex::embed::run(&vault_root, &config, &a.into())?;
-                log::info!(
-                    "embed complete: scanned={} embedded={} skipped_empty={} failed={}",
-                    stats.scanned,
-                    stats.embedded,
-                    stats.skipped_empty,
-                    stats.failed,
-                );
+                let opts_struct: cortex::opts::EmbedOpts = a.into();
+                let prefetch = opts_struct.prefetch_model;
+                let model_label = opts_struct.model.clone().unwrap_or_else(|| "active".to_string());
+                let stats = cortex::embed::run(&vault_root, &config, &opts_struct)?;
+                if prefetch {
+                    println!("Prefetched embedding model {model_label}.");
+                } else {
+                    println!(
+                        "embed complete: scanned={} embedded={} skipped_empty={} failed={}",
+                        stats.scanned, stats.embedded, stats.skipped_empty, stats.failed,
+                    );
+                }
             }
         }
         Ok(())
+    }
+}
+
+fn print_state_report(r: &cortex::state::StateReport) {
+    if let Some(diff) = &r.diff {
+        if diff.has_changes() {
+            if !diff.added.is_empty() {
+                println!("{}", "Added:".green().bold());
+                for p in &diff.added {
+                    println!("  + {}", p.display());
+                }
+            }
+            if !diff.removed.is_empty() {
+                println!("{}", "Removed:".red().bold());
+                for p in &diff.removed {
+                    println!("  - {}", p.display());
+                }
+            }
+            if !diff.modified.is_empty() {
+                println!("{}", "Modified:".yellow().bold());
+                for p in &diff.modified {
+                    println!("  ~ {}", p.display());
+                }
+            }
+            println!(
+                "\n{}: {} added, {} removed, {} modified",
+                "Summary".bold(),
+                diff.added.len(),
+                diff.removed.len(),
+                diff.modified.len()
+            );
+        } else {
+            println!("{}", "No changes since last scan.".green());
+        }
+    } else if r.diff_requested {
+        println!("{}", "No previous manifest found. Run with --refresh first.".yellow());
+    }
+
+    if let Some(count) = r.refreshed_count {
+        println!("{} manifest saved ({} files)", "Refreshed:".green().bold(), count);
+    }
+
+    if r.diff.is_none() && r.refreshed_count.is_none() && !r.diff_requested {
+        match &r.current {
+            Some(snap) => {
+                println!(
+                    "Last scan: {} ({} files)",
+                    snap.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
+                    snap.file_count
+                );
+            }
+            None => {
+                println!(
+                    "{}",
+                    "No manifest found. Run `sb cortex state --refresh` to create one.".yellow()
+                );
+            }
+        }
+    }
+}
+
+fn print_sweep_report(r: &cortex::sweep::SweepReport) {
+    if let Some(stats) = &r.cold {
+        println!(
+            "Cold sweep: scanned={} surfaced={} pinned_excluded={}",
+            stats.scanned, stats.surfaced, stats.pinned_excluded
+        );
+        return;
+    }
+    if let Some(m) = &r.migration {
+        if m.dry_run {
+            println!("Dry run: would modify {} note(s).", m.count);
+        } else {
+            println!("Migrated tags in {} note(s).", m.count);
+        }
+    }
+    if let Some(p) = &r.proposals {
+        if p.proposals.is_empty() {
+            println!("No new tag proposals.");
+        } else {
+            println!("Found {} tag(s) needing review:", p.proposals.len());
+            for proposal in &p.proposals {
+                println!("  {} (on {} notes)", proposal.tag, proposal.frequency);
+            }
+            if let Some(path) = &p.written_to {
+                println!("Proposals written to {path}");
+            }
+        }
+    }
+}
+
+fn print_intel_report(r: &cortex::intel::IntelReport) {
+    if let Some(path) = &r.daily_path {
+        println!("Generated daily digest: {}", path.display());
+    }
+    if let Some(path) = &r.weekly_path {
+        println!("Generated weekly review: {}", path.display());
     }
 }

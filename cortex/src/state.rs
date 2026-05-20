@@ -6,6 +6,75 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use crate::config::Config;
+use crate::opts::StateOpts;
+
+/// Snapshot of an on-disk manifest. `None` when no manifest exists yet.
+#[derive(Debug)]
+pub struct ManifestSnapshot {
+    pub timestamp: DateTime<Utc>,
+    pub file_count: usize,
+}
+
+/// Outcome of a `sb cortex state` invocation. Captures everything the four
+/// flag combinations (default / --diff / --refresh / --diff --refresh) might
+/// need to print; sb formats it.
+#[derive(Debug, Default)]
+pub struct StateReport {
+    pub manifest_path: PathBuf,
+    /// The pre-existing manifest at the start of the run (None if none existed).
+    /// Shown in default mode; meaningful in --diff mode for "no previous manifest".
+    pub current: Option<ManifestSnapshot>,
+    /// `true` when the user passed `--diff`.
+    pub diff_requested: bool,
+    /// Populated when `--diff` was set AND a previous manifest existed.
+    pub diff: Option<ManifestDiff>,
+    /// Populated when `--refresh` was set: file count saved into the new manifest.
+    pub refreshed_count: Option<usize>,
+}
+
+/// Top-level orchestrator for `sb cortex state`. Returns a typed report; sb
+/// owns formatting.
+pub fn run(vault_root: &Path, config: &Config, opts: &StateOpts) -> Result<StateReport> {
+    log::info!("starting state command (vault_root={})", vault_root.display());
+    let cache_dir = &config.state.cache_dir;
+    let manifest_path = VaultManifest::manifest_path(vault_root, cache_dir);
+
+    let current = if manifest_path.exists() {
+        let m = VaultManifest::load(&manifest_path)?;
+        Some(ManifestSnapshot {
+            timestamp: m.timestamp,
+            file_count: m.files.len(),
+        })
+    } else {
+        None
+    };
+
+    let mut report = StateReport {
+        manifest_path: manifest_path.clone(),
+        current,
+        diff_requested: opts.diff,
+        diff: None,
+        refreshed_count: None,
+    };
+
+    if opts.refresh || opts.diff {
+        let fresh = VaultManifest::scan(vault_root, &config.vault.ignore)?;
+
+        if opts.diff && manifest_path.exists() {
+            let previous = VaultManifest::load(&manifest_path)?;
+            report.diff = Some(previous.diff(&fresh));
+        }
+
+        if opts.refresh {
+            fresh.save(&manifest_path)?;
+            report.refreshed_count = Some(fresh.files.len());
+        }
+    }
+
+    Ok(report)
+}
+
 /// Per-file metadata for change detection (no content read needed).
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FileEntry {

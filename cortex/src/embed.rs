@@ -107,7 +107,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
     if opts.prefetch_model {
         log::info!("cortex::embed: prefetching model {model_version}");
         vault::embedding::prefetch_active_model().wrap_err("failed to prefetch embedding model")?;
-        println!("Prefetched embedding model {model_version}.");
+        log::info!("prefetched embedding model {model_version}");
         return Ok(EmbedStats::default());
     }
 
@@ -177,9 +177,12 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
     }
 
     drop(lock);
-    println!(
+    log::info!(
         "embed complete: scanned={} embedded={} skipped_empty={} failed={}",
-        total.scanned, total.embedded, total.skipped_empty, total.failed,
+        total.scanned,
+        total.embedded,
+        total.skipped_empty,
+        total.failed,
     );
     Ok(total)
 }

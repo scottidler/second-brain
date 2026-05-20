@@ -6,10 +6,18 @@ use crate::config::{Config, IntelConfig, LlmConfig};
 use crate::opts::IntelOpts;
 use crate::vault::{Note, scan_vault};
 
+/// Outcome of a `sb cortex intel` invocation. Captures the paths the daily /
+/// weekly generators wrote; sb formats the output.
+#[derive(Debug, Default)]
+pub struct IntelReport {
+    pub daily_path: Option<PathBuf>,
+    pub weekly_path: Option<PathBuf>,
+}
+
 /// Top-level orchestrator for `sb cortex intel`. Scans the vault and runs
 /// either the daily-digest or weekly-review generator (or both) based on
 /// `opts`. The cortex daemon calls this directly on its daily/weekly tick.
-pub fn run(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<()> {
+pub fn run(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<IntelReport> {
     log::info!("starting intel command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
     generate(vault_root, &notes, &config.actions.intel, &config.llm, opts)
@@ -40,23 +48,26 @@ connective notes, not just the longest.
 tensions you noticed. These should make the reader want to go back and look at \
 specific notes. Reference notes by their wikilink when relevant.";
 
-/// Generate intelligence outputs (daily digest, weekly review).
+/// Generate intelligence outputs (daily digest, weekly review). Returns the
+/// paths that were written so sb can announce them.
 pub fn generate(
     vault_root: &Path,
     notes: &[Note],
     config: &IntelConfig,
     llm_config: &LlmConfig,
     opts: &IntelOpts,
-) -> Result<()> {
+) -> Result<IntelReport> {
+    let mut report = IntelReport::default();
+
     if opts.daily || !opts.weekly {
-        generate_daily_digest(vault_root, notes, config, llm_config, opts)?;
+        report.daily_path = Some(generate_daily_digest(vault_root, notes, config, llm_config, opts)?);
     }
 
     if opts.weekly {
-        generate_weekly_review(vault_root, notes, config, opts)?;
+        report.weekly_path = Some(generate_weekly_review(vault_root, notes, config, opts)?);
     }
 
-    Ok(())
+    Ok(report)
 }
 
 /// Process new/unread notes with Fabric pattern.
@@ -161,7 +172,7 @@ fn generate_daily_digest(
     config: &IntelConfig,
     llm_config: &LlmConfig,
     opts: &IntelOpts,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let yesterday = Local::now().date_naive() - chrono::Duration::days(1);
     let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
     let today = Local::now().format("%Y-%m-%d").to_string();
@@ -222,12 +233,17 @@ fn generate_daily_digest(
     let output_path = resolve_output_path(vault_root, config, opts, &format!("daily-{today}.md"));
     write_intel_output(&output_path, &digest)?;
 
-    println!("Generated daily digest: {}", output_path.display());
-    Ok(())
+    log::info!("generated daily digest: {}", output_path.display());
+    Ok(output_path)
 }
 
 /// Generate a weekly review note.
-fn generate_weekly_review(vault_root: &Path, notes: &[Note], config: &IntelConfig, opts: &IntelOpts) -> Result<()> {
+fn generate_weekly_review(
+    vault_root: &Path,
+    notes: &[Note],
+    config: &IntelConfig,
+    opts: &IntelOpts,
+) -> Result<PathBuf> {
     let today = Local::now().date_naive();
     let week_start = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
     let week_str = week_start.format("%Y-%m-%d").to_string();
@@ -338,8 +354,8 @@ fn generate_weekly_review(vault_root: &Path, notes: &[Note], config: &IntelConfi
     let output_path = resolve_output_path(vault_root, config, opts, &format!("weekly-{week_str}.md"));
     write_intel_output(&output_path, &review)?;
 
-    println!("Generated weekly review: {}", output_path.display());
-    Ok(())
+    log::info!("generated weekly review: {}", output_path.display());
+    Ok(output_path)
 }
 
 /// Resolve the output path for an intel file.

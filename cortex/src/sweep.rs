@@ -10,9 +10,38 @@ use crate::opts::SweepOpts;
 use crate::tags::replace_tags_in_frontmatter;
 use crate::vault::{Note, scan_vault};
 
+/// Outcome of a `sb cortex sweep` invocation. Captures the data each branch
+/// produced; sb formats it for the terminal.
+#[derive(Debug, Default)]
+pub struct SweepReport {
+    /// Populated when `--cold` was set: scan / surfaced / pinned-excluded counts.
+    pub cold: Option<ColdStats>,
+    /// Populated when `--migrate` was set: how many notes were (would be) rewritten,
+    /// and whether this was a dry run.
+    pub migration: Option<MigrationOutcome>,
+    /// Populated when proposals were scanned (default mode or `--proposals`):
+    /// the proposals found and, on apply, where they were written.
+    pub proposals: Option<ProposalsOutcome>,
+}
+
+#[derive(Debug)]
+pub struct MigrationOutcome {
+    pub count: usize,
+    pub dry_run: bool,
+}
+
+#[derive(Debug)]
+pub struct ProposalsOutcome {
+    pub proposals: Vec<Proposal>,
+    /// `Some(path)` when proposals were written to disk; `None` when `--dry-run`
+    /// (or no proposals were produced).
+    pub written_to: Option<String>,
+}
+
 /// Top-level orchestrator for `sb cortex sweep`. Validates flag combinations,
-/// branches between cold-sweep, tag migration, and proposal-scan modes.
-pub fn run(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<()> {
+/// branches between cold-sweep, tag migration, and proposal-scan modes, and
+/// returns a typed report; sb formats the output.
+pub fn run(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<SweepReport> {
     log::info!("starting sweep command (vault_root={})", vault_root.display());
 
     if opts.cold && (opts.migrate || opts.proposals) {
@@ -21,41 +50,35 @@ pub fn run(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<()> {
 
     if opts.cold {
         let stats = cold(vault_root, config)?;
-        println!(
-            "Cold sweep: scanned={} surfaced={} pinned_excluded={}",
-            stats.scanned, stats.surfaced, stats.pinned_excluded
-        );
-        return Ok(());
+        return Ok(SweepReport {
+            cold: Some(stats),
+            ..SweepReport::default()
+        });
     }
 
     let notes = scan_vault(vault_root, &config.vault)?;
+    let mut report = SweepReport::default();
 
     if opts.migrate {
         let count = migrate(vault_root, &notes, &config.sweep, opts.dry_run)?;
-        if opts.dry_run {
-            println!("Dry run: would modify {count} note(s).");
-        } else {
-            println!("Migrated tags in {count} note(s).");
-        }
+        report.migration = Some(MigrationOutcome {
+            count,
+            dry_run: opts.dry_run,
+        });
     }
 
     if opts.proposals || !opts.migrate {
         let proposals = scan_proposals(&notes, &config.sweep)?;
-        if proposals.is_empty() {
-            println!("No new tag proposals.");
+        let written_to = if !proposals.is_empty() && !opts.dry_run {
+            write_proposals(&config.sweep, proposals.clone())?;
+            Some(config.sweep.proposals_path.clone())
         } else {
-            println!("Found {} tag(s) needing review:", proposals.len());
-            for p in &proposals {
-                println!("  {} (on {} notes)", p.tag, p.frequency);
-            }
-            if !opts.dry_run {
-                write_proposals(&config.sweep, proposals)?;
-                println!("Proposals written to {}", config.sweep.proposals_path);
-            }
-        }
+            None
+        };
+        report.proposals = Some(ProposalsOutcome { proposals, written_to });
     }
 
-    Ok(())
+    Ok(report)
 }
 
 /// Stats from a single cold-sweep run. Surfaced in the cortex log and

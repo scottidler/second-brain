@@ -32,21 +32,35 @@ impl SweepFingerprint {
     }
 }
 
+/// Outcome of a `sb cortex daemon` invocation. `Installed`/`Uninstalled`/`Status`
+/// carry pre-rendered lines for sb to print. `LoopExited` indicates the
+/// long-running watcher loop exited cleanly (ctrl-C or SIGTERM); sb stays quiet.
+#[derive(Debug, Default)]
+pub struct DaemonOutcome {
+    pub lines: Vec<String>,
+}
+
 /// Run the daemon based on subcommand options.
-pub async fn run(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Result<()> {
+pub async fn run(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Result<DaemonOutcome> {
     if opts.install {
-        install_systemd_service(vault_root, config)?;
+        Ok(DaemonOutcome {
+            lines: install_systemd_service(vault_root, config)?,
+        })
     } else if opts.uninstall {
-        uninstall_systemd_service()?;
+        Ok(DaemonOutcome {
+            lines: uninstall_systemd_service()?,
+        })
     } else if opts.status {
-        show_status()?;
+        Ok(DaemonOutcome { lines: show_status()? })
     } else if opts.stop {
-        println!("Send SIGTERM to the running daemon process to stop it.");
+        log::info!("daemon --stop: send SIGTERM to the running daemon process to stop it");
+        Ok(DaemonOutcome::default())
     } else {
-        // Default: start watching (--start or no flags)
+        // Default: start watching (--start or no flags). Long-running; logs
+        // every transition; returns an empty outcome on clean shutdown.
         start_watching(vault_root, config).await?;
+        Ok(DaemonOutcome::default())
     }
-    Ok(())
 }
 
 /// Start filesystem watcher and run actions on changes using async tokio::select! loop.
@@ -57,9 +71,9 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let action_names: Vec<&str> = daemon_config.enabled_actions();
     let any_enabled = daemon_config.actions.values().any(|a| a.enable);
 
-    println!("Starting daemon, watching: {}", vault_root.display());
-    println!(
-        "Debounce: {}s, actions: {}{}",
+    log::info!("starting daemon, watching: {}", vault_root.display());
+    log::info!(
+        "debounce: {}s, actions: {}{}",
         daemon_config.debounce_secs,
         action_names.join(", "),
         if any_enabled { " (auto-apply enabled)" } else { "" },
@@ -86,8 +100,8 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let daily_dur = match (&daemon_config.daily_at, intel_enabled) {
         (Some(time_str), true) => {
             let dur = duration_until_next(time_str);
-            println!(
-                "Daily intel scheduled at {time_str} (in {:.0}m)",
+            log::info!(
+                "daily intel scheduled at {time_str} (in {:.0}m)",
                 dur.as_secs_f64() / 60.0
             );
             dur
@@ -100,8 +114,8 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let weekly_dur = match (&daemon_config.weekly_at, intel_enabled) {
         (Some(schedule_str), true) => {
             let dur = duration_until_next(schedule_str);
-            println!(
-                "Weekly intel scheduled for {schedule_str} (in {:.1}h)",
+            log::info!(
+                "weekly intel scheduled for {schedule_str} (in {:.1}h)",
                 dur.as_secs_f64() / 3600.0
             );
             dur
@@ -146,7 +160,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     .collect();
                 log::info!("processing changes: {} file(s)", pending.len());
                 for path in &pending {
-                    println!("  changed: {}", path.display());
+                    log::info!("  changed: {}", path.display());
                 }
                 applying.store(true, Ordering::Relaxed);
                 let fingerprint = tokio::task::block_in_place(|| {
@@ -181,7 +195,6 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
             () = &mut daily => {
                 // Scheduled daily intel
                 log::info!("running scheduled daily intel");
-                println!("[daemon] running scheduled daily intel");
                 let opts = crate::opts::IntelOpts {
                     daily: true,
                     weekly: false,
@@ -200,7 +213,6 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
             () = &mut weekly => {
                 // Scheduled weekly intel
                 log::info!("running scheduled weekly intel");
-                println!("[daemon] running scheduled weekly intel");
                 let opts = crate::opts::IntelOpts {
                     daily: false,
                     weekly: true,
@@ -251,8 +263,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                log::info!("received shutdown signal");
-                println!("\nShutting down daemon...");
+                log::info!("received shutdown signal; shutting down daemon");
                 break;
             }
         }
@@ -284,7 +295,7 @@ fn classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonConfi
                 .count();
             if promoted > 0 {
                 log::info!("classify (cycle-exempt): promoted {promoted} note(s)");
-                println!("[daemon] classify: promoted {promoted} note(s) from inbox/");
+                log::info!("[daemon] classify: promoted {promoted} note(s) from inbox/");
             }
         }
         Err(e) => log::error!("classify action failed: {e}"),
@@ -325,7 +336,7 @@ fn configured_actions(
                         if promoted > 0 {
                             fingerprint.add("classify", vec!["__applied__".to_string()]);
                             log::info!("classify: promoted {promoted} note(s)");
-                            println!("[daemon] classify: promoted {promoted} note(s) from inbox/");
+                            log::info!("[daemon] classify: promoted {promoted} note(s) from inbox/");
                         }
                     }
                     Err(e) => log::error!("classify action failed: {e}"),
@@ -350,7 +361,7 @@ fn configured_actions(
                                 log::info!("lint: applied fixes ({remaining} unfixable violation(s) remain)");
                             }
                         } else if !report.is_empty() {
-                            println!("[daemon] lint: {} violation(s)", report.violations.len());
+                            log::info!("[daemon] lint: {} violation(s)", report.violations.len());
                         }
                     }
                     Err(e) => log::error!("lint action failed: {e}"),
@@ -366,7 +377,7 @@ fn configured_actions(
                 };
                 let report = crate::links::lint_broken_links(&notes, &notes, &config.actions.broken_links);
                 if !report.is_empty() {
-                    println!("[daemon] broken-links: {} violation(s)", report.violations.len());
+                    log::info!("[daemon] broken-links: {} violation(s)", report.violations.len());
                 }
             }
             "link" => {
@@ -388,7 +399,7 @@ fn configured_actions(
                                 Ok(_) => {
                                     fingerprint.add("link", vec!["__applied__".to_string()]);
                                     log::info!("link: applied wikilink fixes");
-                                    println!("[daemon] link: applied wikilink fixes");
+                                    log::info!("[daemon] link: applied wikilink fixes");
                                 }
                                 Err(e) => log::error!("link apply failed: {e}"),
                             }
@@ -403,7 +414,7 @@ fn configured_actions(
                     };
                     match crate::link(vault_root, config, &opts) {
                         Ok(report) if !report.is_empty() => {
-                            println!("[daemon] link: {} suggestion(s)", report.violations.len());
+                            log::info!("[daemon] link: {} suggestion(s)", report.violations.len());
                         }
                         Ok(_) => {}
                         Err(e) => log::error!("link action failed: {e}"),
@@ -419,7 +430,7 @@ fn configured_actions(
                                 Ok(count) if count > 0 => {
                                     fingerprint.add("duplicates", vec!["__applied__".to_string()]);
                                     log::info!("auto-applied duplicates: {count} fix(es)");
-                                    println!("[daemon] auto-applied duplicates: {count} fix(es)");
+                                    log::info!("[daemon] auto-applied duplicates: {count} fix(es)");
                                 }
                                 Ok(_) => {}
                                 Err(e) => log::error!("duplicates apply failed: {e}"),
@@ -427,7 +438,7 @@ fn configured_actions(
                         } else {
                             let report = crate::duplicates::lint_duplicates(&notes, &config.actions.duplicates);
                             if !report.is_empty() {
-                                println!("[daemon] duplicates: {} violation(s)", report.violations.len());
+                                log::info!("[daemon] duplicates: {} violation(s)", report.violations.len());
                             }
                         }
                     }
@@ -443,7 +454,7 @@ fn configured_actions(
                                 Ok(count) if count > 0 => {
                                     fingerprint.add("auto-tag", vec!["__applied__".to_string()]);
                                     log::info!("auto-applied auto-tag: {count} fix(es)");
-                                    println!("[daemon] auto-applied auto-tag: {count} fix(es)");
+                                    log::info!("[daemon] auto-applied auto-tag: {count} fix(es)");
                                 }
                                 Ok(_) => {}
                                 Err(e) => log::error!("auto-tag apply failed: {e}"),
@@ -451,7 +462,7 @@ fn configured_actions(
                         } else {
                             let report = crate::autotag::lint_autotag(&notes, &notes, &config.actions.auto_tag);
                             if !report.is_empty() {
-                                println!("[daemon] auto-tag: {} suggestion(s)", report.violations.len());
+                                log::info!("[daemon] auto-tag: {} suggestion(s)", report.violations.len());
                             }
                         }
                     }
@@ -467,7 +478,7 @@ fn configured_actions(
                                 Ok(count) if count > 0 => {
                                     fingerprint.add("quality", vec!["__applied__".to_string()]);
                                     log::info!("auto-applied quality: {count} fix(es)");
-                                    println!("[daemon] auto-applied quality: {count} fix(es)");
+                                    log::info!("[daemon] auto-applied quality: {count} fix(es)");
                                 }
                                 Ok(_) => {}
                                 Err(e) => log::error!("quality apply failed: {e}"),
@@ -475,7 +486,7 @@ fn configured_actions(
                         } else {
                             let report = crate::quality::lint_quality(&notes, &config.actions.quality);
                             if !report.is_empty() {
-                                println!("[daemon] quality: {} violation(s)", report.violations.len());
+                                log::info!("[daemon] quality: {} violation(s)", report.violations.len());
                             }
                         }
                     }
@@ -497,7 +508,7 @@ fn configured_actions(
                     refresh: true,
                     diff: false,
                 };
-                if let Err(e) = crate::state(vault_root, config, &opts) {
+                if let Err(e) = crate::state::run(vault_root, config, &opts) {
                     log::error!("state action failed: {e}");
                 }
             }
@@ -511,7 +522,7 @@ fn configured_actions(
                                 Ok(count) if count > 0 => {
                                     fingerprint.add("sweep", vec!["__applied__".to_string()]);
                                     log::info!("sweep: migrated tags in {count} note(s)");
-                                    println!("[daemon] sweep: migrated tags in {count} note(s)");
+                                    log::info!("[daemon] sweep: migrated tags in {count} note(s)");
                                 }
                                 Ok(_) => {}
                                 Err(e) => log::error!("sweep migrate failed: {e}"),
@@ -542,8 +553,10 @@ fn configured_actions(
     fingerprint
 }
 
-/// Install a systemd user service for the daemon.
-fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
+/// Install a systemd user service for the daemon. Returns the lines sb
+/// should print (paths written, follow-up systemctl commands).
+fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
     let service_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("~/.config"))
         .join("systemd")
@@ -593,7 +606,7 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
 
     let service_path = service_dir.join("cortex.service");
     std::fs::write(&service_path, &service)?;
-    println!("Installed: {}", service_path.display());
+    lines.push(format!("Installed: {}", service_path.display()));
 
     // Daily intel timer - runs at 23:00 every day
     let daily_service = format!(
@@ -622,8 +635,8 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
     let daily_timer_path = service_dir.join("cortex-daily.timer");
     std::fs::write(&daily_svc_path, daily_service)?;
     std::fs::write(&daily_timer_path, daily_timer)?;
-    println!("Installed: {}", daily_svc_path.display());
-    println!("Installed: {}", daily_timer_path.display());
+    lines.push(format!("Installed: {}", daily_svc_path.display()));
+    lines.push(format!("Installed: {}", daily_timer_path.display()));
 
     // Weekly intel timer - runs Sunday at 22:00
     let weekly_service = format!(
@@ -652,20 +665,22 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
     let weekly_timer_path = service_dir.join("cortex-weekly.timer");
     std::fs::write(&weekly_svc_path, weekly_service)?;
     std::fs::write(&weekly_timer_path, weekly_timer)?;
-    println!("Installed: {}", weekly_svc_path.display());
-    println!("Installed: {}", weekly_timer_path.display());
+    lines.push(format!("Installed: {}", weekly_svc_path.display()));
+    lines.push(format!("Installed: {}", weekly_timer_path.display()));
 
-    println!("\nRun:");
-    println!("  systemctl --user daemon-reload");
-    println!("  systemctl --user enable --now cortex");
-    println!("  systemctl --user enable --now cortex-daily.timer");
-    println!("  systemctl --user enable --now cortex-weekly.timer");
+    lines.push(String::new());
+    lines.push("Run:".to_string());
+    lines.push("  systemctl --user daemon-reload".to_string());
+    lines.push("  systemctl --user enable --now cortex".to_string());
+    lines.push("  systemctl --user enable --now cortex-daily.timer".to_string());
+    lines.push("  systemctl --user enable --now cortex-weekly.timer".to_string());
 
-    Ok(())
+    Ok(lines)
 }
 
-/// Uninstall the systemd user service and timer units.
-fn uninstall_systemd_service() -> Result<()> {
+/// Uninstall the systemd user service and timer units. Returns the lines sb
+/// should print.
+fn uninstall_systemd_service() -> Result<Vec<String>> {
     let service_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("~/.config"))
         .join("systemd")
@@ -679,41 +694,42 @@ fn uninstall_systemd_service() -> Result<()> {
         "cortex-weekly.timer",
     ];
 
+    let mut lines = Vec::new();
     let mut removed = false;
     for unit in &units {
         let path = service_dir.join(unit);
         if path.exists() {
             std::fs::remove_file(&path)?;
-            println!("Removed: {}", path.display());
+            lines.push(format!("Removed: {}", path.display()));
             removed = true;
         }
     }
 
     if removed {
-        println!("Run: systemctl --user daemon-reload");
+        lines.push("Run: systemctl --user daemon-reload".to_string());
     } else {
-        println!("No service files found");
+        lines.push("No service files found".to_string());
     }
 
-    Ok(())
+    Ok(lines)
 }
 
-/// Show daemon status.
-fn show_status() -> Result<()> {
+/// Show daemon status. Returns the lines sb should print.
+fn show_status() -> Result<Vec<String>> {
     let service_path = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("~/.config"))
         .join("systemd")
         .join("user")
         .join("cortex.service");
 
-    if service_path.exists() {
-        println!("Service file: {}", service_path.display());
-        println!("Check status: systemctl --user status cortex");
+    Ok(if service_path.exists() {
+        vec![
+            format!("Service file: {}", service_path.display()),
+            "Check status: systemctl --user status cortex".to_string(),
+        ]
     } else {
-        println!("Daemon not installed. Run: sb cortex daemon --install");
-    }
-
-    Ok(())
+        vec!["Daemon not installed. Run: sb cortex daemon --install".to_string()]
+    })
 }
 
 /// Convert a human-friendly schedule string to a cron expression.

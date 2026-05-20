@@ -89,9 +89,12 @@ async fn register_systemd_units() -> Result<()> {
         stop: false,
         status: false,
     };
-    cortex::daemon::run(&cortex_vault, &cortex_config, &cortex_install)
+    let outcome = cortex::daemon::run(&cortex_vault, &cortex_config, &cortex_install)
         .await
         .context("cortex daemon --install")?;
+    for line in &outcome.lines {
+        println!("{line}");
+    }
 
     Ok(())
 }
