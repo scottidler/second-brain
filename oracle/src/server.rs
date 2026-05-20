@@ -317,10 +317,12 @@ impl OracleMcpServer {
                 let result = Self::format_note(&note, &detail_level);
                 Ok(CallToolResult::success(vec![Content::json(&result)?]))
             }
-            None => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Note not found: {}",
-                req.path
-            ))])),
+            None => Ok(CallToolResult::success(vec![Content::json(json!({
+                "found": false,
+                "kind": "note",
+                "path": req.path,
+                "message": "Note not found",
+            }))?])),
         }
     }
 
@@ -522,13 +524,16 @@ impl OracleMcpServer {
             (None, Some(p)) => match db.get_note(p).map_err(Self::err)? {
                 Some(note) => note.body,
                 None => {
-                    return Ok(CallToolResult::success(vec![Content::text(format!(
-                        "Note not found: {p}"
-                    ))]));
+                    return Ok(CallToolResult::success(vec![Content::json(json!({
+                        "found": false,
+                        "kind": "note",
+                        "path": p,
+                        "message": "Note not found",
+                    }))?]));
                 }
             },
             (None, None) => {
-                return Ok(CallToolResult::success(vec![Content::text(
+                return Ok(CallToolResult::error(vec![Content::text(
                     "Provide either 'content' or 'path' parameter",
                 )]));
             }
@@ -598,10 +603,12 @@ impl OracleMcpServer {
         let (title, path) = match note {
             Some(n) => (n.title.clone(), n.path.clone()),
             None => {
-                return Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Note not found: {}",
-                    req.path
-                ))]));
+                return Ok(CallToolResult::success(vec![Content::json(json!({
+                    "found": false,
+                    "kind": "note",
+                    "path": req.path,
+                    "message": "Note not found",
+                }))?]));
             }
         };
 
@@ -790,9 +797,12 @@ impl OracleMcpServer {
                 let group = groups.into_iter().find(|g| g.group_id == gid);
                 match group {
                     Some(g) => Ok(CallToolResult::success(vec![Content::json(&g)?])),
-                    None => Ok(CallToolResult::success(vec![Content::text(format!(
-                        "Duplicate group not found: {gid}"
-                    ))])),
+                    None => Ok(CallToolResult::success(vec![Content::json(json!({
+                        "found": false,
+                        "kind": "duplicate_group",
+                        "group_id": gid,
+                        "message": "Duplicate group not found",
+                    }))?])),
                 }
             }
             None => {
@@ -1028,5 +1038,94 @@ mod tests {
             v.get("unread").is_some_and(|u| u.is_number()),
             "domain_brief.unread must be a number, never null: {v}"
         );
+    }
+
+    /// D2: missing-note paths should return a structured `{found: false, ...}`
+    /// payload, not a free-text string. The CallToolResult must NOT set
+    /// `is_error: true` (MCP `isError` is reserved for protocol-level
+    /// failures, not domain-level "no row matched").
+    #[tokio::test]
+    async fn note_read_missing_path_returns_found_false() {
+        let db = SearchIndex::open_memory().expect("open db");
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        let result = server
+            .dispatch("note_read", json!({"path": "notes/does-not-exist.md"}))
+            .await
+            .expect("dispatch");
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "domain not-found must not set is_error: true",
+        );
+        let v = first_content_as_json(&result);
+        assert_eq!(v.get("found").and_then(|f| f.as_bool()), Some(false), "{v}");
+        assert_eq!(v.get("kind").and_then(|k| k.as_str()), Some("note"), "{v}");
+        assert_eq!(
+            v.get("path").and_then(|p| p.as_str()),
+            Some("notes/does-not-exist.md"),
+            "{v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_similar_missing_path_returns_found_false() {
+        let db = SearchIndex::open_memory().expect("open db");
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        let result = server
+            .dispatch("find_similar", json!({"path": "notes/does-not-exist.md"}))
+            .await
+            .expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert_eq!(v.get("found").and_then(|f| f.as_bool()), Some(false), "{v}");
+        assert_eq!(v.get("kind").and_then(|k| k.as_str()), Some("note"), "{v}");
+    }
+
+    /// D2: invalid arguments (neither `content` nor `path`) IS a protocol-level
+    /// failure - the tool can't execute. This branch should set
+    /// `is_error: true` so MCP agents know the call itself failed.
+    #[tokio::test]
+    async fn find_similar_missing_args_returns_is_error() {
+        let db = SearchIndex::open_memory().expect("open db");
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        let result = server.dispatch("find_similar", json!({})).await.expect("dispatch");
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "invalid args must be a protocol-level error",
+        );
+    }
+
+    #[tokio::test]
+    async fn find_links_missing_path_returns_found_false() {
+        let db = SearchIndex::open_memory().expect("open db");
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        let result = server
+            .dispatch("find_links", json!({"path": "notes/does-not-exist.md"}))
+            .await
+            .expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert_eq!(v.get("found").and_then(|f| f.as_bool()), Some(false), "{v}");
+        assert_eq!(v.get("kind").and_then(|k| k.as_str()), Some("note"), "{v}");
+    }
+
+    #[tokio::test]
+    async fn duplicate_groups_missing_group_id_returns_found_false() {
+        let db = SearchIndex::open_memory().expect("open db");
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        let result = server
+            .dispatch("duplicate_groups", json!({"group_id": "no-such-group"}))
+            .await
+            .expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert_eq!(v.get("found").and_then(|f| f.as_bool()), Some(false), "{v}");
+        assert_eq!(v.get("kind").and_then(|k| k.as_str()), Some("duplicate_group"), "{v}");
     }
 }

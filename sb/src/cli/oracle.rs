@@ -110,24 +110,49 @@ fn print_tool_list(tools: &[rmcp::model::Tool]) {
     }
 }
 
-fn print_call_result(result: &rmcp::model::CallToolResult) -> Result<()> {
+/// Pure inspection of a tool result. Returns true if the wrapper should
+/// translate this outcome into a non-zero CLI exit code.
+///
+/// Two failure shapes are recognized:
+/// - `is_error == Some(true)`: MCP-level protocol error (invalid args, panic).
+/// - Top-level JSON `"found": false`: domain-level "not found" — the tool ran
+///   successfully but the requested item doesn't exist.
+fn outcome_is_failure(result: &rmcp::model::CallToolResult) -> bool {
     if result.is_error == Some(true) {
-        for content in &result.content {
-            if let Some(text) = content.as_text() {
-                eprintln!("{}", text.text);
-            }
-        }
-        std::process::exit(1);
+        return true;
     }
+    for content in &result.content {
+        if let Some(text) = content.as_text()
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text.text)
+            && parsed.get("found").and_then(|v| v.as_bool()) == Some(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn print_call_result(result: &rmcp::model::CallToolResult) -> Result<()> {
+    let failure = outcome_is_failure(result);
+    let is_protocol_error = result.is_error == Some(true);
 
     for content in &result.content {
         if let Some(text) = content.as_text() {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text.text) {
+            if is_protocol_error {
+                eprintln!("{}", text.text);
+            } else if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text.text) {
                 println!("{}", serde_json::to_string_pretty(&parsed)?);
             } else {
                 println!("{}", text.text);
             }
         }
     }
+
+    if failure {
+        std::process::exit(1);
+    }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
