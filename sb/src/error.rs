@@ -10,6 +10,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::panic::Location;
 
 use eyre::EyreHandler;
 
@@ -21,11 +22,17 @@ use eyre::EyreHandler;
 pub fn install(verbose: bool) {
     // `set_hook` returns Err if a hook is already installed (e.g. running tests
     // that also set up eyre). That's fine - the existing hook is good enough.
-    let _ = eyre::set_hook(Box::new(move |_| Box::new(Handler { verbose })));
+    let _ = eyre::set_hook(Box::new(move |_| {
+        Box::new(Handler {
+            verbose,
+            location: None,
+        })
+    }));
 }
 
 struct Handler {
     verbose: bool,
+    location: Option<&'static Location<'static>>,
 }
 
 impl Handler {
@@ -39,12 +46,11 @@ impl Handler {
 }
 
 impl EyreHandler for Handler {
+    fn track_caller(&mut self, location: &'static Location<'static>) {
+        self.location = Some(location);
+    }
+
     fn debug(&self, error: &(dyn Error + 'static), f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.show_verbose() {
-            // Fall back to the default verbose chain (Display + Debug + sources).
-            return fmt::Debug::fmt(error, f);
-        }
-        // Compact mode: top error + indented chain. No Location, no backtrace.
         write!(f, "{error}")?;
         let mut source = error.source();
         let mut depth = 0;
@@ -55,6 +61,11 @@ impl EyreHandler for Handler {
             }
             write!(f, "\n    {depth}: {cause}")?;
             source = cause.source();
+        }
+        if self.show_verbose()
+            && let Some(location) = self.location
+        {
+            write!(f, "\n\nLocation:\n    {location}")?;
         }
         Ok(())
     }
