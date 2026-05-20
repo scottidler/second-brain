@@ -3,6 +3,7 @@ use eyre::Result;
 
 pub mod bootstrap;
 pub mod borg;
+pub mod checks;
 pub mod cortex;
 pub mod doctor;
 pub mod oracle;

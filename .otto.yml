@@ -217,18 +217,14 @@ tasks:
       echo "✅ Installed to ~/.cargo/bin: $(echo $BINS | tr '\n' ' ')"
 
   deploy:
-    help: "Build, install assets + bins, and restart any workspace bins that have systemd user units"
+    help: "Build sb, install bin + assets + systemd units, and restart workspace daemons"
     bash: |
       cargo build --release --locked --workspace --bins
       BINS=$(cargo metadata --format-version 1 --no-deps \
         | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name' \
         | sort -u)
-      DAEMONS=""
       for bin in $BINS; do
         install -m 0755 "target/release/$bin" "$HOME/.cargo/bin/$bin"
-        if systemctl --user cat "$bin.service" >/dev/null 2>&1; then
-          DAEMONS="$DAEMONS $bin"
-        fi
       done
 
       # Sync borg fabric patterns to where vault::fabric::resolve_pattern looks.
@@ -243,6 +239,24 @@ tasks:
       mkdir -p "$HOME/.config/second-brain"
       cp -f config/*.yml "$HOME/.config/second-brain/"
 
+      # Sync repo-shipped systemd base units. Per-machine drop-ins under
+      # ~/.config/systemd/user/*.service.d/ are untouched (they live in
+      # sibling directories systemd merges on top of the base unit). The
+      # workspace now ships one `sb` bin but two systemd units (borg + cortex),
+      # so derive the daemon list from the unit filenames, not from cargo bins.
+      SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+      mkdir -p "$SYSTEMD_USER_DIR"
+      DAEMONS=""
+      if ls systemd/*.service >/dev/null 2>&1; then
+        for unit in systemd/*.service; do
+          name=$(basename "$unit" .service)
+          install -m 0644 "$unit" "$SYSTEMD_USER_DIR/$name.service"
+          DAEMONS="$DAEMONS $name"
+        done
+        systemctl --user daemon-reload
+      fi
+
       [ -n "$DAEMONS" ] && systemctl --user restart $DAEMONS
-      echo "✅ Deployed$(echo $BINS | tr '\n' ' ' | sed 's/^/ /'); restarted:${DAEMONS:- (none)}"
-      echo "✅ Synced patterns -> ~/.config/borg/patterns/ and shared config -> ~/.config/second-brain/"
+      echo "✅ Installed bins:$(echo $BINS | tr '\n' ' ' | sed 's/^/ /')"
+      echo "✅ Synced patterns -> ~/.config/borg/patterns/, shared config -> ~/.config/second-brain/, systemd units -> $SYSTEMD_USER_DIR"
+      echo "✅ Restarted daemons:${DAEMONS:- (none)}"

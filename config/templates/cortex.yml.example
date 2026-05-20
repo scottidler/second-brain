@@ -1,0 +1,28 @@
+# cortex config — Obsidian vault governance daemon
+# Installed by `sb bootstrap` to ~/.config/obsidian-cortex/obsidian-cortex.yml if absent.
+# Full schema: see cortex/src/config.rs in the second-brain workspace.
+
+# Vault root. Required for cortex to know which Obsidian vault to operate on.
+vault:
+  root-path: ~/repos/scottidler/obsidian/
+
+# Embedding pipeline (Phase A: summary embeddings; Phase B: transcript chunks).
+embedding:
+  enabled: true
+  # active-model is pinned in the DB via embedding_config; this is the bootstrap default.
+  active-model: bge-small-en-v1.5
+  batch-size: 64
+
+# Daemon cadence (sweep loop interval).
+daemon:
+  embed-interval-secs: 600
+  sweep-interval-secs: 3600
+
+# LLM used by intel / classify. Provider: claude | openai.
+llm:
+  provider: claude
+  model: claude-sonnet-4-6
+  api-key: ANTHROPIC_API_KEY
+
+# Log level: trace | debug | info | warn | error
+log-level: info

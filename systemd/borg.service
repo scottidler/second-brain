@@ -1,0 +1,28 @@
+[Unit]
+Description=borg - Obsidian ingestion daemon (second-brain)
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/sb borg daemon --start
+Restart=always
+RestartSec=5
+WorkingDirectory=%h
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/repos/scottidler/obsidian
+PrivateTmp=true
+
+# Per-machine secrets / environment file paths belong in a drop-in:
+#   ~/.config/systemd/user/borg.service.d/secrets.conf
+# Drop-ins are merged by systemd and survive an `otto deploy` overwrite
+# of this base unit.
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,44 @@
+# borg config — Obsidian ingestion daemon
+# Installed by `sb bootstrap` to ~/.config/borg/borg.yml if absent.
+# Fields use kebab-case; the Rust struct (borg::config::Config) translates to snake_case via serde.
+
+server:
+  host: "0.0.0.0"
+  port: 8181
+
+vault:
+  root-path: ~/repos/scottidler/obsidian/
+  inbox-path: ~/repos/scottidler/obsidian/inbox
+  vault-name: obsidian
+
+# Local Whisper transcription service (for audio/video).
+transcriber:
+  url: http://localhost:8090
+  timeout-secs: 120
+
+# Groq fallback transcription (Whisper-large-v3 via API).
+# API key is read from the named environment variable.
+groq:
+  api-key: GROQ_API_KEY
+  model: whisper-large-v3
+
+# LLM used by the distillation pipeline. Provider: claude | openai.
+llm:
+  provider: claude
+  model: claude-sonnet-4-6
+  api-key: ANTHROPIC_API_KEY
+
+# Telegram bot — primary ingestion input.
+# allowed-chat-ids gates which chats borg listens to.
+telegram:
+  bot-token: TELEGRAM_BOT_TOKEN
+  allowed-chat-ids: []
+  host: desk
+
+# Discord bot — optional secondary input.
+# discord:
+#   bot-token: DISCORD_BOT_TOKEN
+#   channel-id: 0
+
+# Log level: trace | debug | info | warn | error
+log-level: info
