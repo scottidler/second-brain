@@ -374,7 +374,7 @@ impl OracleMcpServer {
         let db = self.db.lock().map_err(Self::err)?;
         let brief = db.domain_brief(req.domain.as_str(), req.limit).map_err(Self::err)?;
 
-        let recent: Vec<serde_json::Value> = brief
+        let results: Vec<serde_json::Value> = brief
             .recent
             .iter()
             .map(|n| Self::format_note(n, &detail_level))
@@ -386,7 +386,7 @@ impl OracleMcpServer {
             "unread": brief.unread,
             "starred": brief.starred,
             "by_type": brief.by_type,
-            "recent": recent,
+            "results": results,
         }))?]))
     }
 
@@ -500,7 +500,7 @@ impl OracleMcpServer {
 
                 Ok(CallToolResult::success(vec![Content::json(json!({
                     "count": tags.len(),
-                    "tags": tags,
+                    "results": tags,
                 }))?]))
             }
         }
@@ -674,7 +674,7 @@ impl OracleMcpServer {
 
                 Ok(CallToolResult::success(vec![Content::json(json!({
                     "count": creators.len(),
-                    "creators": creators,
+                    "results": creators,
                 }))?]))
             }
         }
@@ -719,7 +719,7 @@ impl OracleMcpServer {
 
                 Ok(CallToolResult::success(vec![Content::json(json!({
                     "count": sources.len(),
-                    "sources": sources,
+                    "results": sources,
                 }))?]))
             }
         }
