@@ -43,6 +43,14 @@ pub struct Violation {
 #[derive(Debug, Default, Serialize)]
 pub struct Report {
     pub violations: Vec<Violation>,
+    /// Set by `apply` paths to indicate how many files were modified.
+    /// Zero when the run was lint-only.
+    #[serde(default, skip_serializing_if = "usize_is_zero")]
+    pub applied: usize,
+}
+
+fn usize_is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl Report {

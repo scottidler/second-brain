@@ -107,25 +107,14 @@ pub async fn run_serve(config: Config) -> Result<()> {
     Ok(())
 }
 
-pub fn run_index(config: &Config) -> Result<()> {
+/// Reindex the vault and return the IndexStats. Caller formats the report.
+pub fn run_index(config: &Config) -> Result<vault::search::IndexStats> {
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
-
-    println!("Indexing vault: {}", config.vault_root().display());
-    println!("Database: {}", config.db_path().display());
-
-    let stats = db.index_vault(&config.vault_root()).context("Failed to index vault")?;
-
-    println!();
-    println!("Scanned:   {}", stats.total_scanned);
-    println!("Inserted:  {}", stats.inserted);
-    println!("Updated:   {}", stats.updated);
-    println!("Unchanged: {}", stats.unchanged);
-    println!("Removed:   {}", stats.removed);
-
-    Ok(())
+    db.index_vault(&config.vault_root()).context("Failed to index vault")
 }
 
-pub async fn run_call(config: Config, tool: &str, args_json: Option<&str>) -> Result<()> {
+/// Dispatch a single MCP tool call (no transport). Caller formats `result.content`.
+pub async fn run_call(config: Config, tool: &str, args_json: Option<&str>) -> Result<rmcp::model::CallToolResult> {
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
     db.index_vault(&config.vault_root()).context("Failed to index vault")?;
 
@@ -136,70 +125,20 @@ pub async fn run_call(config: Config, tool: &str, args_json: Option<&str>) -> Re
         None => serde_json::json!({}),
     };
 
-    let result = server
+    server
         .dispatch(tool, args)
         .await
-        .map_err(|e| eyre::eyre!("{}", e.message))?;
-
-    if result.is_error == Some(true) {
-        for content in &result.content {
-            if let Some(text) = content.as_text() {
-                eprintln!("{}", text.text);
-            }
-        }
-        std::process::exit(1);
-    }
-
-    for content in &result.content {
-        if let Some(text) = content.as_text() {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text.text) {
-                println!("{}", serde_json::to_string_pretty(&parsed)?);
-            } else {
-                println!("{}", text.text);
-            }
-        }
-    }
-
-    Ok(())
+        .map_err(|e| eyre::eyre!("{}", e.message))
 }
 
-pub fn run_list() {
-    for tool in server::OracleMcpServer::list_tools() {
-        println!("{:<20} {}", tool.name, tool.description.as_deref().unwrap_or(""));
-    }
+/// Available MCP tools (no I/O). Caller formats the table.
+pub fn run_list() -> Vec<rmcp::model::Tool> {
+    server::OracleMcpServer::list_tools()
 }
 
-pub fn run_stats(config: &Config) -> Result<()> {
+/// Open the SQLite index and return vault statistics. Caller formats them.
+pub fn run_stats(config: &Config) -> Result<vault::search::VaultStats> {
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
-
     db.index_vault(&config.vault_root()).context("Failed to index vault")?;
-
-    let stats = db.stats().context("Failed to get stats")?;
-
-    println!("Vault: {}", config.vault_root().display());
-    println!("Total notes: {}", stats.total_notes);
-
-    if !stats.schema_gaps.is_empty() {
-        println!("\nSchema gaps:");
-        for (field, count) in &stats.schema_gaps {
-            println!("  missing {field:<10} {count}");
-        }
-    }
-
-    println!("\nBy domain:");
-    for (domain, count) in &stats.by_domain {
-        println!("  {domain:<15} {count}");
-    }
-
-    println!("\nBy type:");
-    for (note_type, count) in &stats.by_type {
-        println!("  {note_type:<15} {count}");
-    }
-
-    println!("\nBy status:");
-    for (status, count) in &stats.by_status {
-        println!("  {status:<15} {count}");
-    }
-
-    Ok(())
+    db.stats().context("Failed to get stats")
 }

@@ -42,21 +42,88 @@ impl OracleCli {
         let config = oracle::Config::load(self.config.as_deref()).context("Failed to load configuration")?;
         match self.command {
             Commands::Serve => oracle::run_serve(config).await,
-            Commands::Index => oracle::run_index(&config),
-            Commands::Stats => oracle::run_stats(&config),
+            Commands::Index => {
+                println!("Indexing vault: {}", config.vault_root().display());
+                println!("Database: {}", config.db_path().display());
+                let stats = oracle::run_index(&config)?;
+                println!();
+                println!("Scanned:   {}", stats.total_scanned);
+                println!("Inserted:  {}", stats.inserted);
+                println!("Updated:   {}", stats.updated);
+                println!("Unchanged: {}", stats.unchanged);
+                println!("Removed:   {}", stats.removed);
+                Ok(())
+            }
+            Commands::Stats => {
+                let stats = oracle::run_stats(&config)?;
+                print_vault_stats(&config, &stats);
+                Ok(())
+            }
             Commands::Call { tool, json, list } => {
                 if list {
-                    oracle::run_list();
+                    print_tool_list(&oracle::run_list());
                     Ok(())
                 } else {
-                    oracle::run_call(
-                        config,
-                        tool.as_deref().expect("clap enforces tool or --list"),
-                        json.as_deref(),
-                    )
-                    .await
+                    let tool_name = tool.as_deref().expect("clap enforces tool or --list");
+                    let result = oracle::run_call(config, tool_name, json.as_deref()).await?;
+                    print_call_result(&result)
                 }
             }
         }
     }
+}
+
+fn print_vault_stats(config: &oracle::Config, stats: &vault::search::VaultStats) {
+    println!("Vault: {}", config.vault_root().display());
+    println!("Total notes: {}", stats.total_notes);
+
+    if !stats.schema_gaps.is_empty() {
+        println!("\nSchema gaps:");
+        for (field, count) in &stats.schema_gaps {
+            println!("  missing {field:<10} {count}");
+        }
+    }
+
+    println!("\nBy domain:");
+    for (domain, count) in &stats.by_domain {
+        println!("  {domain:<15} {count}");
+    }
+
+    println!("\nBy type:");
+    for (note_type, count) in &stats.by_type {
+        println!("  {note_type:<15} {count}");
+    }
+
+    println!("\nBy status:");
+    for (status, count) in &stats.by_status {
+        println!("  {status:<15} {count}");
+    }
+}
+
+fn print_tool_list(tools: &[rmcp::model::Tool]) {
+    for tool in tools {
+        println!("{:<20} {}", tool.name, tool.description.as_deref().unwrap_or(""));
+    }
+}
+
+fn print_call_result(result: &rmcp::model::CallToolResult) -> Result<()> {
+    if result.is_error == Some(true) {
+        for content in &result.content {
+            if let Some(text) = content.as_text() {
+                eprintln!("{}", text.text);
+            }
+        }
+        std::process::exit(1);
+    }
+
+    for content in &result.content {
+        if let Some(text) = content.as_text() {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text.text) {
+                println!("{}", serde_json::to_string_pretty(&parsed)?);
+            } else {
+                println!("{}", text.text);
+            }
+        }
+    }
+    Ok(())
 }

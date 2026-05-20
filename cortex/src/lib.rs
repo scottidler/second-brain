@@ -177,12 +177,7 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
         }
     }
 
-    if opts.format == "json" {
-        report.print_json()?;
-    } else {
-        report.print_human(opts.apply);
-    }
-
+    // Output formatting is the caller's responsibility (see sb/src/cli/cortex.rs).
     Ok(report)
 }
 
@@ -267,12 +262,12 @@ pub fn run_migrate(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Re
 
     if opts.apply {
         let count = migrate::apply_migrate(vault_root, &notes, &config.migrations)?;
-        println!("Migrated {count} file(s).");
-        Ok(Report::default())
+        Ok(Report {
+            applied: count,
+            ..Default::default()
+        })
     } else {
-        let report = migrate::lint_migrate(&notes, &config.migrations);
-        report.print_human(false);
-        Ok(report)
+        Ok(migrate::lint_migrate(&notes, &config.migrations))
     }
 }
 
@@ -289,12 +284,12 @@ pub fn run_link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<R
 
     if opts.apply {
         let count = linking::apply_linking(vault_root, &notes, &config.actions.linking)?;
-        println!("Inserted wikilinks in {count} file(s).");
-        Ok(Report::default())
+        Ok(Report {
+            applied: count,
+            ..Default::default()
+        })
     } else {
-        let report = linking::lint_linking(&notes, &config.actions.linking);
-        report.print_human(false);
-        Ok(report)
+        Ok(linking::lint_linking(&notes, &config.actions.linking))
     }
 }
 
@@ -327,9 +322,7 @@ pub fn run_classify(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> 
             search_ref,
         )
     } else {
-        let report = classify::lint_classify(&notes, &config.actions.classify, search_ref);
-        report.print_human(false);
-        Ok(report)
+        Ok(classify::lint_classify(&notes, &config.actions.classify, search_ref))
     }
 }
 

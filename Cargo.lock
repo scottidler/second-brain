@@ -4584,6 +4584,7 @@ dependencies = [
  "eyre",
  "log",
  "oracle",
+ "rmcp",
  "serde_json",
  "shellexpand",
  "tokio",

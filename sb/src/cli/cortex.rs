@@ -309,13 +309,31 @@ impl CortexCli {
 
         match self.command {
             Command::Classify(a) => {
-                cortex::run_classify(&vault_root, &config, &a.into())?;
+                let apply = a.apply;
+                let report = cortex::run_classify(&vault_root, &config, &a.into())?;
+                if apply {
+                    println!("Classified {} note(s).", report.applied);
+                } else {
+                    report.print_human(false);
+                }
             }
             Command::Lint(a) => {
-                cortex::run_lint(&vault_root, &config, &a.into())?;
+                let opts: cortex::opts::LintOpts = a.into();
+                let report = cortex::run_lint(&vault_root, &config, &opts)?;
+                if opts.format == "json" {
+                    report.print_json()?;
+                } else {
+                    report.print_human(opts.apply);
+                }
             }
             Command::Link(a) => {
-                cortex::run_link(&vault_root, &config, &a.into())?;
+                let apply = a.apply;
+                let report = cortex::run_link(&vault_root, &config, &a.into())?;
+                if apply {
+                    println!("Inserted wikilinks in {} file(s).", report.applied);
+                } else {
+                    report.print_human(false);
+                }
             }
             Command::Intel(a) => {
                 cortex::run_intel(&vault_root, &config, &a.into())?;
@@ -327,7 +345,13 @@ impl CortexCli {
                 cortex::daemon::run_daemon(&vault_root, &config, &a.into()).await?;
             }
             Command::Migrate(a) => {
-                cortex::run_migrate(&vault_root, &config, &a.into())?;
+                let apply = a.apply;
+                let report = cortex::run_migrate(&vault_root, &config, &a.into())?;
+                if apply {
+                    println!("Migrated {} file(s).", report.applied);
+                } else {
+                    report.print_human(false);
+                }
             }
             Command::Sweep(a) => {
                 cortex::run_sweep(&vault_root, &config, &a.into())?;

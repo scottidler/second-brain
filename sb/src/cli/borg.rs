@@ -384,9 +384,34 @@ impl BorgCli {
                 }
             },
             Some(Command::Blocklist(args)) => match args.action {
-                BlocklistAction::List => borg::blocklist::run_list(),
-                BlocklistAction::Remove { domain } => borg::blocklist::run_remove(&domain),
-                BlocklistAction::Clear => borg::blocklist::run_clear(),
+                BlocklistAction::List => {
+                    let rows = borg::blocklist::run_list()?;
+                    if rows.is_empty() {
+                        println!("(blocklist empty)");
+                    } else {
+                        for (domain, entry) in &rows {
+                            println!(
+                                "{domain:30} retriable-after={} hits={} reason={}",
+                                entry.retriable_after, entry.hits, entry.reason
+                            );
+                        }
+                    }
+                    Ok(())
+                }
+                BlocklistAction::Remove { domain } => {
+                    let removed = borg::blocklist::run_remove(&domain)?;
+                    if removed {
+                        println!("removed: {domain}");
+                    } else {
+                        println!("not blocklisted: {domain}");
+                    }
+                    Ok(())
+                }
+                BlocklistAction::Clear => {
+                    borg::blocklist::run_clear()?;
+                    println!("blocklist cleared");
+                    Ok(())
+                }
             },
         }
     }
