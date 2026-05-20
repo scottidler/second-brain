@@ -317,6 +317,29 @@ pub struct LinkingConfig {
     pub min_word_length: usize,
 }
 
+impl Clone for LinkingConfig {
+    fn clone(&self) -> Self {
+        Self {
+            scan_for: self.scan_for.clone(),
+            entities: LinkingEntities {
+                people: self.entities.people.clone(),
+                projects: self.entities.projects.clone(),
+            },
+            targets: LinkingTargets {
+                types: LinkingFilter {
+                    exclude: self.targets.types.exclude.clone(),
+                    include: self.targets.types.include.clone(),
+                },
+                paths: LinkingFilter {
+                    exclude: self.targets.paths.exclude.clone(),
+                    include: self.targets.paths.include.clone(),
+                },
+            },
+            min_word_length: self.min_word_length,
+        }
+    }
+}
+
 impl Default for LinkingConfig {
     fn default() -> Self {
         Self {

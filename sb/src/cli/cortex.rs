@@ -128,8 +128,8 @@ impl From<LintArgs> for opts::LintOpts {
 pub struct LinkArgs {
     #[arg(long)]
     pub apply: bool,
-    #[arg(long, default_value = "all")]
-    pub scan: String,
+    #[arg(long, value_enum, default_value_t = opts::ScanScope::All)]
+    pub scan: opts::ScanScope,
 }
 impl From<LinkArgs> for opts::LinkOpts {
     fn from(a: LinkArgs) -> Self {

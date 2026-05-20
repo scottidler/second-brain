@@ -34,13 +34,39 @@ pub struct LintOpts {
     pub path: Option<String>,
 }
 
+/// What `cortex link` should scan for. `All` means "use whatever the config's
+/// `actions.linking.scan-for` says"; the other variants override the config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ScanScope {
+    People,
+    Projects,
+    Concepts,
+    All,
+}
+
+impl ScanScope {
+    /// Translate the enum into the strings the linker reads out of
+    /// `config.actions.linking.scan_for` (matches the legacy contract:
+    /// the linker checks `contains("people")` / `contains("projects")` /
+    /// `contains("concepts")` / `contains("all")`).
+    pub fn as_config_scan_for(self) -> Vec<String> {
+        match self {
+            ScanScope::People => vec!["people".to_string()],
+            ScanScope::Projects => vec!["projects".to_string()],
+            ScanScope::Concepts => vec!["concepts".to_string()],
+            ScanScope::All => vec!["all".to_string()],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LinkOpts {
     /// Insert wikilinks into notes (default: report only)
     pub apply: bool,
 
-    /// What to scan for: people, projects, concepts, all (default)
-    pub scan: String,
+    /// What to scan for: people, projects, concepts, all (default).
+    /// `All` means "fall through to the config value".
+    pub scan: ScanScope,
 }
 
 #[derive(Debug, Clone)]

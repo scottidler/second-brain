@@ -185,7 +185,11 @@ pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Repor
 }
 
 pub fn link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Report> {
-    log::info!("starting link command (vault_root={})", vault_root.display());
+    log::info!(
+        "starting link command (vault_root={} scan={:?})",
+        vault_root.display(),
+        opts.scan
+    );
     let all_notes = scan_vault(vault_root, &config.vault)?;
     let exclude_patterns = parse_patterns(&config.vault.exclude);
     let include_patterns = parse_patterns(&config.vault.include);
@@ -195,14 +199,28 @@ pub fn link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Repor
         .cloned()
         .collect();
 
+    // `ScanScope::All` falls through to whatever the config holds; any other
+    // variant overrides the config's `actions.linking.scan-for`. This is the
+    // wiring the CLI flag was missing until v0.8.5.
+    let overridden;
+    let linking_config = if opts.scan == crate::opts::ScanScope::All {
+        &config.actions.linking
+    } else {
+        overridden = crate::config::LinkingConfig {
+            scan_for: opts.scan.as_config_scan_for(),
+            ..config.actions.linking.clone()
+        };
+        &overridden
+    };
+
     if opts.apply {
-        let count = linking::apply_linking(vault_root, &notes, &config.actions.linking)?;
+        let count = linking::apply_linking(vault_root, &notes, linking_config)?;
         Ok(Report {
             applied: count,
             ..Default::default()
         })
     } else {
-        Ok(linking::lint_linking(&notes, &config.actions.linking))
+        Ok(linking::lint_linking(&notes, linking_config))
     }
 }
 
@@ -250,5 +268,14 @@ mod tests {
         let exclude = parse_patterns(&["system/**".to_string()]);
         let include = parse_patterns(&["system/design-*.md".to_string()]);
         assert!(is_excluded(&n, &exclude, &include));
+    }
+
+    #[test]
+    fn scan_scope_as_config_scan_for_maps_each_variant() {
+        use crate::opts::ScanScope;
+        assert_eq!(ScanScope::People.as_config_scan_for(), vec!["people".to_string()]);
+        assert_eq!(ScanScope::Projects.as_config_scan_for(), vec!["projects".to_string()]);
+        assert_eq!(ScanScope::Concepts.as_config_scan_for(), vec!["concepts".to_string()]);
+        assert_eq!(ScanScope::All.as_config_scan_for(), vec!["all".to_string()]);
     }
 }

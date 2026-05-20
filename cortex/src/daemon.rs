@@ -385,13 +385,13 @@ fn configured_actions(
                     // Previously fingerprinted unconditionally, permanently triggering cycle detection.
                     let lint_opts = crate::opts::LinkOpts {
                         apply: false,
-                        scan: "all".to_string(),
+                        scan: crate::opts::ScanScope::All,
                     };
                     match crate::link(vault_root, config, &lint_opts) {
                         Ok(report) if !report.is_empty() => {
                             let apply_opts = crate::opts::LinkOpts {
                                 apply: true,
-                                scan: "all".to_string(),
+                                scan: crate::opts::ScanScope::All,
                             };
                             match crate::link(vault_root, config, &apply_opts) {
                                 Ok(_) => {
@@ -408,7 +408,7 @@ fn configured_actions(
                 } else {
                     let opts = crate::opts::LinkOpts {
                         apply: false,
-                        scan: "all".to_string(),
+                        scan: crate::opts::ScanScope::All,
                     };
                     match crate::link(vault_root, config, &opts) {
                         Ok(report) if !report.is_empty() => {
