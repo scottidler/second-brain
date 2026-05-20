@@ -75,9 +75,12 @@ async fn register_systemd_units() -> Result<()> {
         restart: false,
         status: false,
     };
-    borg::daemon(borg_config, false, borg_install)
+    let borg_outcome = borg::daemon(borg_config, false, borg_install)
         .await
         .context("borg daemon --install")?;
+    for line in &borg_outcome.lines {
+        println!("{line}");
+    }
 
     let cortex_config = cortex::config::Config::load(None).context("load cortex config for daemon install")?;
     let cwd = std::env::current_dir().context("get CWD")?;

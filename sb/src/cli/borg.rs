@@ -1,4 +1,5 @@
 use clap::{Args, Subcommand};
+use colored::Colorize;
 use eyre::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
@@ -292,7 +293,20 @@ impl BorgCli {
                 println!();
                 Ok(())
             }
-            Some(Command::Daemon(a)) => borg::daemon(config, verbose, a.into()).await,
+            Some(Command::Daemon(a)) => {
+                let opts: borg::opts::DaemonOpts = a.into();
+                if opts.start {
+                    let (startup, handle) = borg::serve_init(config).await?;
+                    print_server_banner(&startup);
+                    handle.wait().await
+                } else {
+                    let outcome = borg::daemon(config, verbose, opts).await?;
+                    for line in &outcome.lines {
+                        println!("{line}");
+                    }
+                    Ok(())
+                }
+            }
             Some(Command::Ingest {
                 url,
                 clipboard,
@@ -397,7 +411,48 @@ impl BorgCli {
                 before,
                 after,
                 dry_run,
-            }) => borg::reingest(config, all, r#type, domain, source, before, after, dry_run).await,
+            }) => {
+                borg::reingest(
+                    config,
+                    all,
+                    r#type,
+                    domain,
+                    source,
+                    before,
+                    after,
+                    dry_run,
+                    |event| match event {
+                        borg::ReingestEvent::NoMatches => println!("No matching entries found."),
+                        borg::ReingestEvent::Matched { count, dry_run } => println!(
+                            "{} {} entries{}",
+                            if *dry_run { "Would reingest" } else { "Reingesting" },
+                            count,
+                            if *dry_run { " (dry run)" } else { "" }
+                        ),
+                        borg::ReingestEvent::ItemStart {
+                            index,
+                            total,
+                            date,
+                            slug,
+                            source,
+                        } => println!("  [{}/{}] {} - {} ({})", index + 1, total, date, slug, source),
+                        borg::ReingestEvent::ItemReplaced { title } => {
+                            println!("    -> Replaced: \"{title}\"")
+                        }
+                        borg::ReingestEvent::ItemFailed { reason } => {
+                            eprintln!("    -> Failed: {reason}")
+                        }
+                        borg::ReingestEvent::ItemOther(s) => println!("    -> {s}"),
+                        borg::ReingestEvent::ItemError(e) => eprintln!("    -> Error: {e}"),
+                        borg::ReingestEvent::Complete { dry_run } => {
+                            if !*dry_run {
+                                println!("Reingest complete.");
+                            }
+                        }
+                    },
+                )
+                .await
+            }
             Some(Command::Replay(args)) => {
                 let opts = borg::replay::ReplayOptions {
                     trace_id: args.trace_id,
@@ -472,6 +527,61 @@ impl BorgCli {
                 }
             },
         }
+    }
+}
+
+/// Render the daemon startup banner from the typed snapshot. Lines that
+/// previously went to stdout/stderr go through here so the lib stays
+/// stdout-clean.
+fn print_server_banner(s: &borg::ServerStartup) {
+    use borg::SubsystemStatus;
+
+    let arrow = "-->".to_string();
+    match &s.telegram_notifier {
+        SubsystemStatus::Active => println!("{} telegram notifier active", arrow.green()),
+        SubsystemStatus::SkippedNoToken => {
+            eprintln!("{} telegram notifier skipped (token not available)", arrow.yellow())
+        }
+        _ => {}
+    }
+
+    println!("{} http server on {}", arrow.green(), s.addr.to_string().cyan());
+
+    match &s.telegram_bot {
+        SubsystemStatus::Active => println!("{} telegram bot active", arrow.green()),
+        SubsystemStatus::SkippedHostMismatch => {
+            eprintln!("{} telegram bot skipped (host mismatch)", arrow.yellow())
+        }
+        SubsystemStatus::SkippedNoToken => {
+            eprintln!("{} telegram bot skipped (token not available)", arrow.yellow())
+        }
+        _ => {}
+    }
+
+    match &s.discord {
+        SubsystemStatus::Active => println!("{} discord bot active", arrow.green()),
+        SubsystemStatus::SkippedHostMismatch => {
+            eprintln!("{} discord bot skipped (host mismatch)", arrow.yellow())
+        }
+        SubsystemStatus::SkippedNoToken => {
+            eprintln!("{} discord bot skipped (token not available)", arrow.yellow())
+        }
+        _ => {}
+    }
+
+    match &s.ntfy {
+        SubsystemStatus::ActiveWithDetail(detail) => {
+            println!("{} ntfy subscriber active ({})", arrow.green(), detail)
+        }
+        SubsystemStatus::Active => println!("{} ntfy subscriber active", arrow.green()),
+        SubsystemStatus::SkippedHostMismatch => {
+            eprintln!("{} ntfy subscriber skipped (host mismatch)", arrow.yellow())
+        }
+        _ => {}
+    }
+
+    if matches!(s.watchdog, SubsystemStatus::Active) {
+        println!("{} watchdog active", arrow.green());
     }
 }
 

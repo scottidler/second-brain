@@ -47,7 +47,6 @@ pub mod youtube;
 
 use axum::Router;
 use axum::routing::{get, post};
-use colored::*;
 use eyre::{Context, Result};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -81,7 +80,61 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub async fn serve(config: Config, _verbose: bool) -> Result<()> {
+/// Status of one of borg's startup subsystems (telegram / discord / ntfy /
+/// watchdog). Populated by `serve_init` so sb can render the startup banner
+/// without the lib touching stdout.
+#[derive(Debug, Clone)]
+pub enum SubsystemStatus {
+    Active,
+    ActiveWithDetail(String),
+    SkippedNoToken,
+    SkippedHostMismatch,
+    Disabled,
+}
+
+/// Snapshot returned by `serve_init` capturing the per-subsystem startup
+/// outcome. sb prints the banner from these fields.
+#[derive(Debug, Clone)]
+pub struct ServerStartup {
+    pub addr: SocketAddr,
+    pub telegram_notifier: SubsystemStatus,
+    pub telegram_bot: SubsystemStatus,
+    pub discord: SubsystemStatus,
+    pub ntfy: SubsystemStatus,
+    pub watchdog: SubsystemStatus,
+}
+
+/// Opaque wrapper around the internal tokio::task::JoinSet. Keeping the
+/// concurrency primitive private means sb has no compile-time dependency on
+/// tokio's JoinSet type. The only operation sb performs is `wait().await`.
+pub struct ServerHandle {
+    tasks: tokio::task::JoinSet<Result<()>>,
+}
+
+impl ServerHandle {
+    /// Await any of the spawned tasks to exit. Under normal operation this
+    /// blocks until ctrl-C / SIGTERM kills the daemon.
+    pub async fn wait(mut self) -> Result<()> {
+        while let Some(result) = self.tasks.join_next().await {
+            match result {
+                Ok(Ok(())) => log::info!("a daemon task exited cleanly"),
+                Ok(Err(e)) => log::error!("a daemon task failed: {e:#}"),
+                Err(e) => {
+                    if e.is_panic() {
+                        log::error!("a daemon task panicked: {e}");
+                    } else {
+                        log::error!("a daemon task was cancelled: {e}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Boot every borg subsystem (HTTP server, telegram, discord, ntfy, watchdog)
+/// and return a startup snapshot plus an opaque handle the caller awaits.
+pub async fn serve_init(config: Config) -> Result<(ServerStartup, ServerHandle)> {
     log::info!("Starting obsidian-borg daemon");
 
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
@@ -114,19 +167,22 @@ pub async fn serve(config: Config, _verbose: bool) -> Result<()> {
     // Build the shared Telegram notifier (if configured)
     let mut notifier: Option<Notifier> = None;
     let mut resolved_tg_token: Option<String> = None;
+    let mut telegram_notifier_status = SubsystemStatus::Disabled;
 
     if let Some(tg_config) = &config.telegram {
         match config::resolve_secret(&tg_config.bot_token) {
             Ok(token) => {
                 notifier = Notifier::new(&token, tg_config);
                 resolved_tg_token = Some(token);
-                if notifier.is_some() {
-                    println!("{} telegram notifier active", "-->".green());
-                }
+                telegram_notifier_status = if notifier.is_some() {
+                    SubsystemStatus::Active
+                } else {
+                    SubsystemStatus::Disabled
+                };
             }
             Err(e) => {
                 log::warn!("Telegram configured but token not available: {e:#}");
-                eprintln!("{} telegram notifier skipped (token not available)", "-->".yellow());
+                telegram_notifier_status = SubsystemStatus::SkippedNoToken;
             }
         }
     }
@@ -140,16 +196,16 @@ pub async fn serve(config: Config, _verbose: bool) -> Result<()> {
     let listener = TcpListener::bind(addr).await.context("Failed to bind to address")?;
     tasks.spawn(async move { axum::serve(listener, app).await.map_err(|e| eyre::eyre!(e)) });
     log::info!("HTTP server listening on {addr}");
-    println!("{} http server on {}", "-->".green(), addr.to_string().cyan());
 
     // Telegram bot (config-driven, host-gated)
+    let mut telegram_bot_status = SubsystemStatus::Disabled;
     if let Some(tg_config) = &config.telegram {
         if !config::is_local_host(&tg_config.host) {
             log::info!(
                 "Telegram configured but host {:?} does not match this machine, skipping",
                 tg_config.host
             );
-            eprintln!("{} telegram bot skipped (host mismatch)", "-->".yellow());
+            telegram_bot_status = SubsystemStatus::SkippedHostMismatch;
         } else if let Some(token) = resolved_tg_token.clone() {
             log::info!(
                 "Telegram bot enabled (allowed_chat_ids: {:?})",
@@ -159,20 +215,21 @@ pub async fn serve(config: Config, _verbose: bool) -> Result<()> {
             let cfg = config.clone();
             let tg_notifier = notifier.clone();
             tasks.spawn(async move { telegram::run(token, tg, cfg, tg_notifier).await });
-            println!("{} telegram bot active", "-->".green());
+            telegram_bot_status = SubsystemStatus::Active;
         } else {
-            eprintln!("{} telegram bot skipped (token not available)", "-->".yellow());
+            telegram_bot_status = SubsystemStatus::SkippedNoToken;
         }
     }
 
     // Discord bot (config-driven, host-gated)
+    let mut discord_status = SubsystemStatus::Disabled;
     if let Some(dc_config) = &config.discord {
         if !config::is_local_host(&dc_config.host) {
             log::info!(
                 "Discord configured but host {:?} does not match this machine, skipping",
                 dc_config.host
             );
-            eprintln!("{} discord bot skipped (host mismatch)", "-->".yellow());
+            discord_status = SubsystemStatus::SkippedHostMismatch;
         } else {
             match config::resolve_secret(&dc_config.bot_token) {
                 Ok(token) => {
@@ -180,72 +237,65 @@ pub async fn serve(config: Config, _verbose: bool) -> Result<()> {
                     let dc = dc_config.clone();
                     let cfg = config.clone();
                     tasks.spawn(async move { discord::run(token, dc, cfg).await });
-                    println!("{} discord bot active", "-->".green());
+                    discord_status = SubsystemStatus::Active;
                 }
                 Err(e) => {
                     log::warn!("Discord configured but token not available: {e:#}");
-                    eprintln!("{} discord bot skipped (token not available)", "-->".yellow());
+                    discord_status = SubsystemStatus::SkippedNoToken;
                 }
             }
         }
     }
 
     // ntfy subscriber (config-driven, host-gated)
+    let mut ntfy_status = SubsystemStatus::Disabled;
     if let Some(ntfy_config) = &config.ntfy {
         if !config::is_local_host(&ntfy_config.host) {
             log::info!(
                 "ntfy configured but host {:?} does not match this machine, skipping",
                 ntfy_config.host
             );
-            eprintln!("{} ntfy subscriber skipped (host mismatch)", "-->".yellow());
+            ntfy_status = SubsystemStatus::SkippedHostMismatch;
         } else {
             let server = ntfy_config.server.clone();
             let topic = ntfy_config.topic.clone();
             let token = ntfy_config.token.as_ref().and_then(|t| config::resolve_secret(t).ok());
             let cfg = config.clone();
             let ntfy_notifier = notifier.clone();
+            let topic_for_status = ntfy_config.topic.clone();
             tasks.spawn(async move { ntfy::run(server, topic, token, cfg, ntfy_notifier).await });
-            println!(
-                "{} ntfy subscriber active (topic: {})",
-                "-->".green(),
-                ntfy_config.topic
-            );
+            ntfy_status = SubsystemStatus::ActiveWithDetail(format!("topic: {topic_for_status}"));
         }
     }
 
-    // Watchdog: every minute, scan intake -> ledger/dlq and record
-    // watchdog-orphan DLQ rows for any trace_id that has not produced a
-    // resolution within `pipeline.hard_timeout_secs + buffer`.
+    // Watchdog
     {
         let cfg = config.clone();
         tasks.spawn(async move {
             watchdog::run(cfg).await;
-            // run() loops forever; if it returns, that's a bug.
             Err::<(), eyre::Report>(eyre::eyre!("watchdog exited unexpectedly"))
         });
-        println!("{} watchdog active", "-->".green());
     }
 
-    // Monitor tasks: log failures but keep the daemon alive as long as HTTP is running
-    while let Some(result) = tasks.join_next().await {
-        match result {
-            Ok(Ok(())) => {
-                log::info!("A daemon task exited cleanly");
-            }
-            Ok(Err(e)) => {
-                log::error!("A daemon task failed: {e:#}");
-            }
-            Err(e) => {
-                if e.is_panic() {
-                    log::error!("A daemon task panicked: {e}");
-                } else {
-                    log::error!("A daemon task was cancelled: {e}");
-                }
-            }
-        }
-    }
+    Ok((
+        ServerStartup {
+            addr,
+            telegram_notifier: telegram_notifier_status,
+            telegram_bot: telegram_bot_status,
+            discord: discord_status,
+            ntfy: ntfy_status,
+            watchdog: SubsystemStatus::Active,
+        },
+        ServerHandle { tasks },
+    ))
+}
 
-    Ok(())
+/// Thin wrapper preserved for internal callers (daemon::run with --start).
+/// New sb code paths should use `serve_init` + `ServerHandle::wait` to get
+/// the typed startup banner instead.
+pub async fn serve(config: Config, _verbose: bool) -> Result<()> {
+    let (_startup, handle) = serve_init(config).await?;
+    handle.wait().await
 }
 
 pub fn resolve_note_text(text: Option<String>, clipboard: bool) -> Result<String> {
@@ -416,6 +466,41 @@ pub fn resolve_ingest_url(url: Option<String>, clipboard: bool) -> Result<String
     eyre::bail!("No URL provided. Use a URL argument or --clipboard")
 }
 
+/// Streamed progress event from `borg::reingest`. Emitted via the caller-
+/// supplied callback so sb can print as each ledger entry is visited - the
+/// architect-flagged case (sequential HTTP per entry; buffering would silence
+/// the CLI for 10+ minutes).
+#[derive(Debug)]
+pub enum ReingestEvent {
+    Matched {
+        count: usize,
+        dry_run: bool,
+    },
+    ItemStart {
+        index: usize,
+        total: usize,
+        date: String,
+        slug: String,
+        source: String,
+    },
+    ItemReplaced {
+        title: String,
+    },
+    ItemFailed {
+        reason: String,
+    },
+    ItemOther(String),
+    ItemError(String),
+    Complete {
+        dry_run: bool,
+    },
+    NoMatches,
+}
+
+/// Reingest existing ledger entries via the daemon's ingest endpoint.
+/// Emits a streaming `ReingestEvent` per matched entry through the caller-
+/// supplied progress callback; sb prints as they arrive so the user sees
+/// progress on 800-row ledgers (~10+ minutes of sequential HTTP work).
 pub async fn reingest(
     config: Config,
     all: bool,
@@ -425,6 +510,7 @@ pub async fn reingest(
     before: Option<String>,
     after: Option<String>,
     dry_run: bool,
+    mut progress: impl FnMut(&ReingestEvent) + Send,
 ) -> Result<()> {
     use ledger::{EntryFilter, QueriedEntry};
 
@@ -434,8 +520,6 @@ pub async fn reingest(
 
     let ledger_file = ledger::ledger_path(&config);
 
-    // Content type filtering requires reading the vault note to check the type: field.
-    // For --type, we read each note's frontmatter after the ledger query.
     let filter = EntryFilter {
         source: source.clone(),
         domain: domain.clone(),
@@ -445,7 +529,6 @@ pub async fn reingest(
 
     let entries: Vec<QueriedEntry> = ledger::query_entries(&ledger_file, &filter)?;
 
-    // If --type filter is specified, filter by reading each note's frontmatter
     let entries: Vec<QueriedEntry> = if let Some(ref type_filter) = content_type {
         let vault_root = pipeline::expand_vault_root(&config.vault.root_path);
         entries
@@ -464,12 +547,9 @@ pub async fn reingest(
                     return false;
                 };
                 match std::fs::read_to_string(&note_path) {
-                    Ok(content) => {
-                        // Quick frontmatter type: field check
-                        content
-                            .lines()
-                            .any(|l| l.trim().starts_with("type:") && l.contains(type_filter))
-                    }
+                    Ok(content) => content
+                        .lines()
+                        .any(|l| l.trim().starts_with("type:") && l.contains(type_filter)),
                     Err(_) => false,
                 }
             })
@@ -479,32 +559,28 @@ pub async fn reingest(
     };
 
     if entries.is_empty() {
-        println!("No matching entries found.");
+        progress(&ReingestEvent::NoMatches);
         return Ok(());
     }
 
-    println!(
-        "{} {} entries{}",
-        if dry_run { "Would reingest" } else { "Reingesting" },
-        entries.len(),
-        if dry_run { " (dry run)" } else { "" }
-    );
+    progress(&ReingestEvent::Matched {
+        count: entries.len(),
+        dry_run,
+    });
 
     for (i, entry) in entries.iter().enumerate() {
-        println!(
-            "  [{}/{}] {} - {} ({})",
-            i + 1,
-            entries.len(),
-            entry.date,
-            entry.slug,
-            entry.source
-        );
+        progress(&ReingestEvent::ItemStart {
+            index: i,
+            total: entries.len(),
+            date: entry.date.clone(),
+            slug: entry.slug.clone(),
+            source: entry.source.clone(),
+        });
 
         if dry_run {
             continue;
         }
 
-        // Reingest by calling the daemon's ingest endpoint (same as CLI ingest)
         let host = &config.hotkey.host;
         let port = config.hotkey.port;
         let endpoint = format!("http://{host}:{port}/ingest");
@@ -521,16 +597,17 @@ pub async fn reingest(
             Ok(response) => {
                 let result: types::IngestResult =
                     response.json().await.context("Failed to parse response from daemon")?;
-                match &result.status {
+                match result.status {
                     types::IngestStatus::Completed => {
-                        let title = result.title.as_deref().unwrap_or("Untitled");
-                        println!("    -> Replaced: \"{title}\"");
+                        progress(&ReingestEvent::ItemReplaced {
+                            title: result.title.unwrap_or_else(|| "Untitled".to_string()),
+                        });
                     }
                     types::IngestStatus::Failed { reason } => {
-                        eprintln!("    -> Failed: {reason}");
+                        progress(&ReingestEvent::ItemFailed { reason });
                     }
                     other => {
-                        println!("    -> {:?}", other);
+                        progress(&ReingestEvent::ItemOther(format!("{other:?}")));
                     }
                 }
             }
@@ -538,14 +615,12 @@ pub async fn reingest(
                 if e.is_connect() {
                     eyre::bail!("Cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?");
                 }
-                eprintln!("    -> Error: {e}");
+                progress(&ReingestEvent::ItemError(e.to_string()));
             }
         }
     }
 
-    if !dry_run {
-        println!("Reingest complete.");
-    }
+    progress(&ReingestEvent::Complete { dry_run });
 
     Ok(())
 }
@@ -805,28 +880,52 @@ pub async fn hotkey(opts: opts::HotkeyOpts, config: &Config) -> Result<HotkeyOut
     }
 }
 
-pub async fn daemon(config: Config, verbose: bool, opts: opts::DaemonOpts) -> Result<()> {
+/// Outcome of `borg::daemon`. Carries pre-rendered lines for sb to print.
+/// The long-running `--start` mode boots via `serve` and either runs forever
+/// or returns Err on a startup failure - it never produces a DaemonOutcome
+/// to format.
+#[derive(Debug, Default)]
+pub struct DaemonOutcome {
+    pub lines: Vec<String>,
+}
+
+/// Dispatch the non-start daemon flags (install/uninstall/reinstall/stop/restart/status).
+/// `--start` is handled separately by sb via `serve_init` + `ServerHandle::wait` so the
+/// startup banner can be formatted from typed data.
+pub async fn daemon(_config: Config, _verbose: bool, opts: opts::DaemonOpts) -> Result<DaemonOutcome> {
     use crate::opts::DaemonOpts;
 
     match opts {
-        DaemonOpts { install: true, .. } => install_service().await,
-        DaemonOpts { uninstall: true, .. } => uninstall_service().await,
+        DaemonOpts { install: true, .. } => Ok(DaemonOutcome {
+            lines: install_service().await?,
+        }),
+        DaemonOpts { uninstall: true, .. } => Ok(DaemonOutcome {
+            lines: uninstall_service().await?,
+        }),
         DaemonOpts { reinstall: true, .. } => {
-            uninstall_service().await.ok();
-            install_service().await
+            let mut lines = uninstall_service().await.unwrap_or_default();
+            lines.extend(install_service().await?);
+            Ok(DaemonOutcome { lines })
         }
-        DaemonOpts { start: true, .. } => serve(config, verbose).await,
-        DaemonOpts { stop: true, .. } => stop_service().await,
-        DaemonOpts { restart: true, .. } => restart_service().await,
-        DaemonOpts { status: true, .. } => show_status().await,
-        _ => {
-            eprintln!("No daemon action specified. See: obsidian-borg daemon --help");
-            Ok(())
-        }
+        DaemonOpts { stop: true, .. } => Ok(DaemonOutcome {
+            lines: stop_service().await?,
+        }),
+        DaemonOpts { restart: true, .. } => Ok(DaemonOutcome {
+            lines: restart_service().await?,
+        }),
+        DaemonOpts { status: true, .. } => Ok(DaemonOutcome {
+            lines: show_status().await?,
+        }),
+        DaemonOpts { start: true, .. } => Err(eyre::eyre!(
+            "borg::daemon: --start should be dispatched by sb via serve_init"
+        )),
+        _ => Ok(DaemonOutcome {
+            lines: vec!["No daemon action specified. See: sb borg daemon --help".to_string()],
+        }),
     }
 }
 
-async fn install_service() -> Result<()> {
+async fn install_service() -> Result<Vec<String>> {
     let exe_path = std::env::current_exe().context("Failed to detect binary path")?;
     let exe = exe_path.display().to_string();
 
@@ -839,7 +938,7 @@ async fn install_service() -> Result<()> {
     }
 }
 
-async fn uninstall_service() -> Result<()> {
+async fn uninstall_service() -> Result<Vec<String>> {
     if cfg!(target_os = "linux") {
         uninstall_systemd().await
     } else if cfg!(target_os = "macos") {
@@ -849,54 +948,47 @@ async fn uninstall_service() -> Result<()> {
     }
 }
 
-async fn stop_service() -> Result<()> {
+async fn stop_service() -> Result<Vec<String>> {
     if cfg!(target_os = "linux") {
         systemctl(&["stop", "borg"]).await?;
-        println!("Stopped obsidian-borg service");
     } else if cfg!(target_os = "macos") {
         launchctl(&["stop", "com.borg"]).await?;
-        println!("Stopped obsidian-borg service");
     } else {
         eyre::bail!("Unsupported platform for service stop")
     }
-    Ok(())
+    Ok(vec!["Stopped obsidian-borg service".to_string()])
 }
 
-async fn restart_service() -> Result<()> {
+async fn restart_service() -> Result<Vec<String>> {
     if cfg!(target_os = "linux") {
         systemctl(&["restart", "borg"]).await?;
-        println!("Restarted obsidian-borg service");
     } else if cfg!(target_os = "macos") {
         launchctl(&["stop", "com.borg"]).await.ok();
         launchctl(&["start", "com.borg"]).await?;
-        println!("Restarted obsidian-borg service");
     } else {
         eyre::bail!("Unsupported platform for service restart")
     }
-    Ok(())
+    Ok(vec!["Restarted obsidian-borg service".to_string()])
 }
 
-async fn show_status() -> Result<()> {
+async fn show_status() -> Result<Vec<String>> {
     if cfg!(target_os = "linux") {
         let output = tokio::process::Command::new("systemctl")
             .args(["--user", "status", "borg"])
             .output()
             .await
             .context("Failed to run systemctl")?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        println!("{stdout}");
+        Ok(vec![String::from_utf8_lossy(&output.stdout).to_string()])
     } else if cfg!(target_os = "macos") {
         let output = tokio::process::Command::new("launchctl")
             .args(["list", "com.borg"])
             .output()
             .await
             .context("Failed to run launchctl")?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        println!("{stdout}");
+        Ok(vec![String::from_utf8_lossy(&output.stdout).to_string()])
     } else {
         eyre::bail!("Unsupported platform for service status")
     }
-    Ok(())
 }
 
 /// Run `systemctl --user <args>` and return Ok if it succeeds.
@@ -929,7 +1021,7 @@ async fn launchctl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-async fn install_systemd(exe_path: &str) -> Result<()> {
+async fn install_systemd(exe_path: &str) -> Result<Vec<String>> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let unit_dir = home.join(".config/systemd/user");
     let unit_path = unit_dir.join("borg.service");
@@ -984,18 +1076,20 @@ WantedBy=default.target
     // Write (or overwrite) the unit file
     std::fs::create_dir_all(&unit_dir).context("Failed to create systemd user unit directory")?;
     std::fs::write(&unit_path, &unit_content).context("Failed to write systemd unit file")?;
-    println!("Wrote {}", unit_path.display());
+    let mut lines = vec![format!("Wrote {}", unit_path.display())];
 
     // Reload so systemd picks up changes, then enable + start
     systemctl(&["daemon-reload"]).await?;
     systemctl(&["enable", "--now", "borg"]).await?;
 
-    println!("Service installed and started.");
-    show_status().await.ok();
-    Ok(())
+    lines.push("Service installed and started.".to_string());
+    if let Ok(status_lines) = show_status().await {
+        lines.extend(status_lines);
+    }
+    Ok(lines)
 }
 
-async fn install_launchd(exe_path: &str) -> Result<()> {
+async fn install_launchd(exe_path: &str) -> Result<Vec<String>> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let plist_dir = home.join("Library/LaunchAgents");
     let plist_path = plist_dir.join("com.obsidian-borg.plist");
@@ -1031,21 +1125,19 @@ async fn install_launchd(exe_path: &str) -> Result<()> {
 
     std::fs::create_dir_all(&plist_dir).context("Failed to create LaunchAgents directory")?;
     std::fs::write(&plist_path, &plist_content).context("Failed to write plist file")?;
-    println!("Wrote {}", plist_path.display());
+    let mut lines = vec![format!("Wrote {}", plist_path.display())];
 
     launchctl(&["load", &plist_path.to_string_lossy()]).await?;
-
-    println!("Service installed and started.");
-    Ok(())
+    lines.push("Service installed and started.".to_string());
+    Ok(lines)
 }
 
-async fn uninstall_systemd() -> Result<()> {
+async fn uninstall_systemd() -> Result<Vec<String>> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let unit_path = home.join(".config/systemd/user/borg.service");
 
     if !unit_path.exists() {
-        println!("No service file found at {}", unit_path.display());
-        return Ok(());
+        return Ok(vec![format!("No service file found at {}", unit_path.display())]);
     }
 
     let _ = std::process::Command::new("systemctl")
@@ -1053,23 +1145,22 @@ async fn uninstall_systemd() -> Result<()> {
         .status();
 
     std::fs::remove_file(&unit_path).context("Failed to remove unit file")?;
-    println!("Removed {}", unit_path.display());
+    let mut lines = vec![format!("Removed {}", unit_path.display())];
 
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status();
 
-    println!("Service uninstalled.");
-    Ok(())
+    lines.push("Service uninstalled.".to_string());
+    Ok(lines)
 }
 
-async fn uninstall_launchd() -> Result<()> {
+async fn uninstall_launchd() -> Result<Vec<String>> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let plist_path = home.join("Library/LaunchAgents/com.obsidian-borg.plist");
 
     if !plist_path.exists() {
-        println!("No plist found at {}", plist_path.display());
-        return Ok(());
+        return Ok(vec![format!("No plist found at {}", plist_path.display())]);
     }
 
     let _ = std::process::Command::new("launchctl")
@@ -1077,9 +1168,10 @@ async fn uninstall_launchd() -> Result<()> {
         .status();
 
     std::fs::remove_file(&plist_path).context("Failed to remove plist file")?;
-    println!("Removed {}", plist_path.display());
-    println!("Service uninstalled.");
-    Ok(())
+    Ok(vec![
+        format!("Removed {}", plist_path.display()),
+        "Service uninstalled.".to_string(),
+    ])
 }
 
 const GNOME_KEYBINDINGS_SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";
