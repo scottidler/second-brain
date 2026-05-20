@@ -1,6 +1,12 @@
 #![deny(clippy::unwrap_used)]
 #![deny(dead_code)]
 #![deny(unused_variables)]
+// Lib invariant: borg pub fns return typed data; sb owns stdout/stderr.
+// Production code emits nothing via println!/eprintln! - log::* / tracing::*
+// route through the logger initializer instead. Test modules that print
+// captured stdout opt in via #[cfg_attr(test, allow(...))] on the test
+// declaration.
+#![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 
 pub use vault;
 

@@ -104,18 +104,22 @@ pub async fn backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 's
     }
 
     if opts.dry_run {
-        for note in &candidates {
-            log::info!(
-                "[would-distill] {} (kind={:?})",
-                note.path.display(),
-                infer_distill_kind(note).map(|k| k.as_str())
-            );
-        }
+        let would_distill: Vec<String> = candidates
+            .iter()
+            .map(|note| {
+                format!(
+                    "[would-distill] {} (kind={:?})",
+                    note.path.display(),
+                    infer_distill_kind(note).map(|k| k.as_str())
+                )
+            })
+            .collect();
         return Ok(BackfillSummary {
             attempted: candidates.len() as u64,
             distilled: 0,
             skipped: 0,
             failed: 0,
+            would_distill,
         });
     }
 
@@ -187,6 +191,7 @@ pub async fn backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 's
         distilled: distilled_count.load(Ordering::Relaxed),
         skipped: skipped.load(Ordering::Relaxed),
         failed: failed.load(Ordering::Relaxed),
+        would_distill: Vec::new(),
     };
     log::info!(
         "summarize::backfill: complete attempted={} distilled={} skipped={} failed={}",
@@ -198,12 +203,16 @@ pub async fn backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 's
     Ok(summary)
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BackfillSummary {
     pub attempted: u64,
     pub distilled: u64,
     pub skipped: u64,
     pub failed: u64,
+    /// Populated when `--dry-run` was set: one line per candidate note
+    /// describing what would be distilled. sb prints these so the user sees
+    /// the preview the flag exists to provide.
+    pub would_distill: Vec<String>,
 }
 
 enum ProcessOutcome {

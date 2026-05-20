@@ -103,18 +103,10 @@ async fn register_systemd_units() -> Result<()> {
 }
 
 fn prefetch_embedding_model() -> Result<()> {
-    // Reuse cortex's embed pipeline with prefetch_model = true to warm the embedding
-    // cache. Vault root doesn't matter for prefetch; we pass CWD.
-    let cwd = std::env::current_dir().context("get CWD")?;
-    let config = cortex::config::Config::load(None).context("load cortex config (defaults are fine)")?;
-    let vault_root = config.vault_root(Some(&cwd));
-    let opts = cortex::opts::EmbedOpts {
-        backfill: false,
-        kind: None,
-        model: None,
-        batch_size: cortex::embed::DEFAULT_BATCH_SIZE,
-        prefetch_model: true,
-        use_mock: false,
-    };
-    cortex::embed::run(&vault_root, &config, &opts).map(|_| ())
+    // Warm the embedding cache via cortex's dedicated prefetch entry. Returns
+    // the resolved model name; bootstrap prints it so the operator sees
+    // exactly which model was fetched.
+    let resolved = cortex::embed::prefetch(None).context("prefetch embedding model")?;
+    println!("Prefetched embedding model {resolved}.");
+    Ok(())
 }

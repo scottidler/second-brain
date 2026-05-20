@@ -1,3 +1,9 @@
+// Lib invariant: cortex pub fns return typed data; sb owns stdout/stderr.
+// Production code emits nothing via println!/eprintln! - log::* routes
+// through the logger initializer instead. Test modules that print captured
+// stdout are exempted via the not(test) guard below.
+#![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
+
 pub mod autotag;
 pub mod classify;
 pub mod config;

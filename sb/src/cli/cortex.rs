@@ -376,6 +376,9 @@ impl CortexCli {
             }
             Command::Summarize(a) => {
                 let summary = cortex::summarize::run(&vault_root, &config, &a.into()).await?;
+                for line in &summary.would_distill {
+                    println!("{line}");
+                }
                 log::info!(
                     "summarize complete: attempted={} distilled={} skipped={} failed={}",
                     summary.attempted,
@@ -386,12 +389,11 @@ impl CortexCli {
             }
             Command::Embed(a) => {
                 let opts_struct: cortex::opts::EmbedOpts = a.into();
-                let prefetch = opts_struct.prefetch_model;
-                let model_label = opts_struct.model.clone().unwrap_or_else(|| "active".to_string());
-                let stats = cortex::embed::run(&vault_root, &config, &opts_struct)?;
-                if prefetch {
-                    println!("Prefetched embedding model {model_label}.");
+                if opts_struct.prefetch_model {
+                    let resolved = cortex::embed::prefetch(opts_struct.model.as_deref())?;
+                    println!("Prefetched embedding model {resolved}.");
                 } else {
+                    let stats = cortex::embed::run(&vault_root, &config, &opts_struct)?;
                     println!(
                         "embed complete: scanned={} embedded={} skipped_empty={} failed={}",
                         stats.scanned, stats.embedded, stats.skipped_empty, stats.failed,
