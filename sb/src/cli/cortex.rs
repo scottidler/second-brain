@@ -156,10 +156,7 @@ impl From<IntelArgs> for opts::IntelOpts {
         } else {
             cortex::intel::IntelMode::Daily
         };
-        Self {
-            mode,
-            output: a.output,
-        }
+        Self { mode, output: a.output }
     }
 }
 

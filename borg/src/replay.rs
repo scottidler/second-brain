@@ -84,51 +84,155 @@ fn extract_frontmatter(text: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-/// Dispatch a replay based on the options provided. Returns the lines sb
-/// should print so the lib stays stdout-clean.
-pub async fn run(config: Config, opts: ReplayOptions) -> Result<Vec<String>> {
+/// Outcome of a `borg replay` run. The actual per-trace results stream
+/// through the `ReplayEvent` callback (sequential HTTP per trace, per
+/// architect Alternative 3); the report holds only the mode summary
+/// and aggregate counts sb prints at the end if it wants.
+#[derive(Debug)]
+pub struct ReplayReport {
+    pub mode: ReplayMode,
+    pub dry_run: bool,
+    pub attempted: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug)]
+pub enum ReplayMode {
+    Bootstrap,
+    Trace,
+    Matching { count: usize },
+}
+
+/// Live-progress event emitted by `replay::run`. Variants are typed so
+/// no pre-formatted text crosses the lib boundary.
+#[derive(Debug)]
+pub enum ReplayEvent {
+    BootstrapHeader {
+        note_path: PathBuf,
+        source: String,
+        method: String,
+    },
+    TraceHeader {
+        trace_id: String,
+        source: String,
+    },
+    MatchingHeader {
+        count: usize,
+    },
+    NoMatches,
+    DryRunBootstrap {
+        source: String,
+    },
+    DryRunTrace,
+    ResultOk {
+        title: Option<String>,
+    },
+    ResultDuplicate {
+        original_date: String,
+    },
+    ResultFailed {
+        reason: String,
+    },
+    ResultQueued,
+    ResultOther {
+        description: String,
+    },
+    MatchingItemError {
+        trace_id: String,
+        error: String,
+    },
+}
+
+/// Dispatch a replay based on the options provided. Streams progress
+/// events through `progress`; returns the typed `ReplayReport` once the
+/// dispatch finishes (or pass `|_| {}` to ignore events).
+pub async fn run(
+    config: Config,
+    opts: ReplayOptions,
+    mut progress: impl FnMut(&ReplayEvent) + Send,
+) -> Result<ReplayReport> {
     // Highest priority: bootstrap-from-vault
     if opts.bootstrap_from_vault {
         let Some(note_path) = opts.note.as_ref() else {
             bail!("--bootstrap-from-vault requires --note <path>");
         };
-        return bootstrap_note(&config, note_path, opts.dry_run).await;
+        return bootstrap_note(&config, note_path, opts.dry_run, &mut progress).await;
     }
 
     // Next: specific trace
     if let Some(trace_id) = &opts.trace_id {
-        return replay_trace(&config, trace_id, opts.from_stage, opts.dry_run).await;
+        return replay_trace_top(&config, trace_id, opts.from_stage, opts.dry_run, &mut progress).await;
     }
 
     // Next: filter over traces in the store
     if opts.rejected || opts.since.is_some() {
-        return replay_matching(&config, &opts).await;
+        return replay_matching(&config, &opts, &mut progress).await;
     }
 
     bail!("replay: must provide a trace_id, --since, --rejected, or --bootstrap-from-vault --note");
 }
 
-async fn bootstrap_note(config: &Config, note_path: &Path, dry_run: bool) -> Result<Vec<String>> {
+async fn bootstrap_note(
+    config: &Config,
+    note_path: &Path,
+    dry_run: bool,
+    progress: &mut (impl FnMut(&ReplayEvent) + ?Sized),
+) -> Result<ReplayReport> {
     let source =
         read_source_from_note(note_path).with_context(|| format!("extract source from {}", note_path.display()))?;
     let method = read_method_from_note(note_path)?.unwrap_or_else(|| "cli".to_string());
-    let mut lines = vec![format!(
-        "bootstrap: {} -> {} (method: {method})",
-        note_path.display(),
-        source
-    )];
+    progress(&ReplayEvent::BootstrapHeader {
+        note_path: note_path.to_path_buf(),
+        source: source.clone(),
+        method: method.clone(),
+    });
     if dry_run {
-        lines.push(format!("  [dry-run] would re-ingest {source}"));
-        return Ok(lines);
+        progress(&ReplayEvent::DryRunBootstrap { source });
+        return Ok(ReplayReport {
+            mode: ReplayMode::Bootstrap,
+            dry_run: true,
+            attempted: 1,
+            succeeded: 0,
+            failed: 0,
+        });
     }
     let result = reingest_via_daemon(config, &source, &method).await?;
-    lines.push(match &result.status {
-        IngestStatus::Completed => format!("  -> {}", result.title.as_deref().unwrap_or("(no title)")),
-        IngestStatus::Duplicate { original_date } => format!("  -> duplicate (originally ingested {original_date})"),
-        IngestStatus::Failed { reason } => format!("  -> failed: {reason}"),
-        IngestStatus::Queued => "  -> queued".to_string(),
-    });
-    Ok(lines)
+    let (succeeded, failed) = emit_result_event(progress, &result.status, &result.title);
+    Ok(ReplayReport {
+        mode: ReplayMode::Bootstrap,
+        dry_run: false,
+        attempted: 1,
+        succeeded,
+        failed,
+    })
+}
+
+fn emit_result_event(
+    progress: &mut (impl FnMut(&ReplayEvent) + ?Sized),
+    status: &IngestStatus,
+    title: &Option<String>,
+) -> (usize, usize) {
+    match status {
+        IngestStatus::Completed => {
+            progress(&ReplayEvent::ResultOk { title: title.clone() });
+            (1, 0)
+        }
+        IngestStatus::Duplicate { original_date } => {
+            progress(&ReplayEvent::ResultDuplicate {
+                original_date: original_date.clone(),
+            });
+            (1, 0)
+        }
+        IngestStatus::Failed { reason } => {
+            progress(&ReplayEvent::ResultFailed { reason: reason.clone() });
+            (0, 1)
+        }
+        IngestStatus::Queued => {
+            progress(&ReplayEvent::ResultQueued);
+            (0, 0)
+        }
+    }
 }
 
 async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result<IngestResult> {
@@ -152,7 +256,32 @@ async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result
     Ok(result)
 }
 
-async fn replay_trace(config: &Config, trace_id: &str, from_stage: u8, dry_run: bool) -> Result<Vec<String>> {
+async fn replay_trace_top(
+    config: &Config,
+    trace_id: &str,
+    from_stage: u8,
+    dry_run: bool,
+    progress: &mut (impl FnMut(&ReplayEvent) + ?Sized),
+) -> Result<ReplayReport> {
+    let (succeeded, failed) = replay_one(config, trace_id, from_stage, dry_run, progress).await?;
+    Ok(ReplayReport {
+        mode: ReplayMode::Trace,
+        dry_run,
+        attempted: 1,
+        succeeded,
+        failed,
+    })
+}
+
+/// Replay a single trace and stream events. Returns (succeeded, failed)
+/// counts (1/0, 0/1, or 0/0 for dry-run/queued).
+async fn replay_one(
+    config: &Config,
+    trace_id: &str,
+    from_stage: u8,
+    dry_run: bool,
+    progress: &mut (impl FnMut(&ReplayEvent) + ?Sized),
+) -> Result<(usize, usize)> {
     if !config.staging.enabled {
         bail!("replay: staging.enabled must be true");
     }
@@ -169,22 +298,24 @@ async fn replay_trace(config: &Config, trace_id: &str, from_stage: u8, dry_run: 
     let envelope = store.read_envelope(trace_id)?;
     let source = String::from_utf8(store.read_body(trace_id)?).context("read body as utf-8")?;
     let source = source.trim().to_string();
-    let mut lines = vec![format!("replay trace {trace_id}: {source}")];
+    progress(&ReplayEvent::TraceHeader {
+        trace_id: trace_id.to_string(),
+        source: source.clone(),
+    });
     if dry_run {
-        lines.push("  [dry-run] would re-ingest via daemon".to_string());
-        return Ok(lines);
+        progress(&ReplayEvent::DryRunTrace);
+        return Ok((0, 0));
     }
     let method = envelope.method.to_string();
     let result = reingest_via_daemon(config, &source, &method).await?;
-    lines.push(match &result.status {
-        IngestStatus::Completed => format!("  -> {}", result.title.as_deref().unwrap_or("(no title)")),
-        IngestStatus::Failed { reason } => format!("  -> failed: {reason}"),
-        other => format!("  -> {other:?}"),
-    });
-    Ok(lines)
+    Ok(emit_result_event(progress, &result.status, &result.title))
 }
 
-async fn replay_matching(config: &Config, opts: &ReplayOptions) -> Result<Vec<String>> {
+async fn replay_matching(
+    config: &Config,
+    opts: &ReplayOptions,
+    progress: &mut (impl FnMut(&ReplayEvent) + ?Sized),
+) -> Result<ReplayReport> {
     if !config.staging.enabled {
         bail!("replay: staging.enabled must be true");
     }
@@ -202,16 +333,42 @@ async fn replay_matching(config: &Config, opts: &ReplayOptions) -> Result<Vec<St
     };
     let matches = store.list_traces(&filter)?;
     if matches.is_empty() {
-        return Ok(vec!["replay: no traces matched".to_string()]);
+        progress(&ReplayEvent::NoMatches);
+        return Ok(ReplayReport {
+            mode: ReplayMode::Matching { count: 0 },
+            dry_run: opts.dry_run,
+            attempted: 0,
+            succeeded: 0,
+            failed: 0,
+        });
     }
-    let mut lines = vec![format!("replay: {} matching trace(s)", matches.len())];
-    for trace_id in matches {
-        match replay_trace(config, &trace_id, opts.from_stage, opts.dry_run).await {
-            Ok(trace_lines) => lines.extend(trace_lines),
-            Err(e) => lines.push(format!("  trace {trace_id}: {e:#}")),
+    progress(&ReplayEvent::MatchingHeader { count: matches.len() });
+    let mut attempted = 0usize;
+    let mut succeeded_total = 0usize;
+    let mut failed_total = 0usize;
+    for trace_id in &matches {
+        attempted += 1;
+        match replay_one(config, trace_id, opts.from_stage, opts.dry_run, progress).await {
+            Ok((s, f)) => {
+                succeeded_total += s;
+                failed_total += f;
+            }
+            Err(e) => {
+                progress(&ReplayEvent::MatchingItemError {
+                    trace_id: trace_id.clone(),
+                    error: format!("{e:#}"),
+                });
+                failed_total += 1;
+            }
         }
     }
-    Ok(lines)
+    Ok(ReplayReport {
+        mode: ReplayMode::Matching { count: matches.len() },
+        dry_run: opts.dry_run,
+        attempted,
+        succeeded: succeeded_total,
+        failed: failed_total,
+    })
 }
 
 #[cfg(test)]

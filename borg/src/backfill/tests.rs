@@ -91,10 +91,7 @@ fn backfill_on_counter_values_match_known_fixture() {
     assert_eq!(report.would_backfill, 1, "exactly one note is eligible to backfill");
     assert_eq!(report.backfilled, 0, "dry_run path leaves backfilled at zero");
     assert_eq!(report.skipped_origin, 1, "origin=authored is skipped");
-    assert_eq!(
-        report.skipped_already_had, 1,
-        "note with existing ingested: is skipped"
-    );
+    assert_eq!(report.skipped_already_had, 1, "note with existing ingested: is skipped");
     assert_eq!(report.skipped_no_date, 1, "note without date: is skipped");
     assert_eq!(
         report.skipped_recent_mtime, 1,

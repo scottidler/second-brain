@@ -25,8 +25,12 @@ pub struct SweepReport {
 /// to format output.
 #[derive(Debug)]
 pub enum SweepMode {
-    WouldMigrate { count: usize },
-    Migrated { count: usize },
+    WouldMigrate {
+        count: usize,
+    },
+    Migrated {
+        count: usize,
+    },
     Proposals,
     Cold {
         scanned: u64,

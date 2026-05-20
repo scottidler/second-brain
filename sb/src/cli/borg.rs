@@ -369,8 +369,8 @@ impl BorgCli {
                 Ok(())
             }
             Some(Command::Migrate { dry_run: _, apply }) => {
-                let lines = borg::migrate::run(&config, apply).await?;
-                print_lines(&lines);
+                let report = borg::migrate::run(&config, apply).await?;
+                print_migrate_report(&report);
                 Ok(())
             }
             Some(Command::Audit {
@@ -379,42 +379,59 @@ impl BorgCli {
                 bound_secs,
             }) => {
                 if invariant {
-                    let lines = borg::triage::orphan_audit(&config, bound_secs).await?;
-                    print_lines(&lines);
+                    let report = borg::triage::orphan_audit(&config, bound_secs).await?;
+                    print_orphan_audit_report(&report);
                     Ok(())
                 } else {
-                    let report = borg::audit::run(&config, fix)?;
-                    print_lines(&report.lines);
+                    print_audit_header_from_disk(&config);
+                    let report = borg::audit::audit_with_progress(&config, fix, |event| {
+                        print_audit_event(event);
+                    })?;
+                    print_audit_summary(&report, fix);
                     Ok(())
                 }
             }
             Some(Command::Intake(args)) => {
-                let lines = match args.action {
+                match args.action {
                     IntakeAction::List { method, since, limit } => {
-                        borg::triage::intake_rows(&config, method, since, limit).await?
+                        let rows = borg::triage::intake_rows(&config, method, since, limit).await?;
+                        print_intake_rows(&rows);
                     }
-                    IntakeAction::Show { trace_id } => borg::triage::intake_row(&config, &trace_id).await?,
-                };
-                print_lines(&lines);
+                    IntakeAction::Show { trace_id } => {
+                        let detail = borg::triage::intake_row(&config, &trace_id).await?;
+                        print_intake_row_detail(&detail);
+                    }
+                }
                 Ok(())
             }
             Some(Command::Dlq(args)) => {
-                let lines = match args.action {
+                match args.action {
                     DlqAction::List {
                         method,
                         stage,
                         status,
                         limit,
-                    } => borg::triage::dlq_rows(&config, method, stage, status, limit).await?,
-                    DlqAction::Show { trace_id } => borg::triage::dlq_row(&config, &trace_id).await?,
+                    } => {
+                        let rows = borg::triage::dlq_rows(&config, method, stage, status, limit).await?;
+                        print_dlq_rows(&rows);
+                    }
+                    DlqAction::Show { trace_id } => {
+                        let detail = borg::triage::dlq_row(&config, &trace_id).await?;
+                        print_dlq_row_detail(&detail);
+                    }
                     DlqAction::Archive {
                         trace_id,
                         status,
                         resolved,
-                    } => borg::triage::dlq_archive(&config, trace_id, &status, resolved).await?,
-                    DlqAction::Replay { trace_id } => borg::triage::dlq_replay(&config, &trace_id).await?,
-                };
-                print_lines(&lines);
+                    } => {
+                        let outcome = borg::triage::dlq_archive(&config, trace_id, &status, resolved).await?;
+                        print_dlq_archive_outcome(&outcome);
+                    }
+                    DlqAction::Replay { trace_id } => {
+                        let outcome = borg::triage::dlq_replay(&config, &trace_id).await?;
+                        print_dlq_replay_outcome(&outcome);
+                    }
+                }
                 Ok(())
             }
             Some(Command::Reingest {
@@ -477,8 +494,11 @@ impl BorgCli {
                     note: args.note,
                     dry_run: args.dry_run,
                 };
-                let lines = borg::replay::run(config, opts).await?;
-                print_lines(&lines);
+                let report = borg::replay::run(config, opts, |event| {
+                    print_replay_event(event);
+                })
+                .await?;
+                let _ = report;
                 Ok(())
             }
             Some(Command::Retention(args)) => match args.action {
@@ -508,8 +528,11 @@ impl BorgCli {
                 }
             },
             Some(Command::ReingestFailed { dry_run }) => {
-                let lines = borg::migrate::reingest_failed(&config, dry_run).await?;
-                print_lines(&lines);
+                let report = borg::migrate::reingest_failed(&config, dry_run, |event| {
+                    print_reingest_failed_event(event);
+                })
+                .await?;
+                print_reingest_failed_report(&report);
                 Ok(())
             }
             Some(Command::BackfillIngested { dry_run }) => {
@@ -570,12 +593,6 @@ impl BorgCli {
 
 /// Emit each pre-rendered line from the lib boundary. Used by every borg
 /// sub-verb that returns `Vec<String>` so sb owns stdout uniformly.
-fn print_lines(lines: &[String]) {
-    for line in lines {
-        println!("{line}");
-    }
-}
-
 fn print_daemon_outcome(outcome: &borg::DaemonOutcome) {
     use borg::DaemonOutcome;
     match outcome {
@@ -599,6 +616,327 @@ fn print_daemon_outcome(outcome: &borg::DaemonOutcome) {
         DaemonOutcome::Status { raw_output } => print!("{raw_output}"),
         DaemonOutcome::NoAction => {
             println!("No daemon action specified. See: sb borg daemon --help");
+        }
+    }
+}
+
+fn print_orphan_audit_report(r: &borg::triage::OrphanAuditReport) {
+    println!("audit --invariant complete:");
+    println!("  intake rows scanned: {}", r.intake_scanned);
+    println!("  ledger resolutions: {}", r.ledger_resolutions);
+    println!("  dlq resolutions: {}", r.dlq_resolutions);
+    println!("  orphans (>{}s no resolution): {}", r.bound_secs, r.orphans_found);
+    println!("  intake rows still within deadline: {}", r.intake_recent);
+    println!("  ledger rows with no intake row: {}", r.asymmetric_ledger);
+    println!("  dlq rows with no intake row: {}", r.asymmetric_dlq);
+    println!("  wrote: {}", r.orphans_path.display());
+}
+
+fn print_intake_rows(rows: &[vault::intake::ParsedIntakeRow]) {
+    if rows.is_empty() {
+        println!("(no intake rows match)");
+        return;
+    }
+    println!("Date        Time  Method    Origin        Kind      Trace      Preview");
+    for r in rows {
+        let preview = if r.preview.len() > 60 {
+            format!("{}...", &r.preview[..60])
+        } else {
+            r.preview.clone()
+        };
+        println!(
+            "{:11} {:5} {:9} {:13} {:9} {:9} {}",
+            r.date, r.time, r.method, r.origin_ctx, r.kind, r.trace_id, preview
+        );
+    }
+}
+
+fn print_intake_row_detail(d: &borg::triage::IntakeRowDetail) {
+    use borg::triage::{IntakeSidecar, SidecarContent};
+    let r = &d.row;
+    println!("Intake row:");
+    println!("  date: {}", r.date);
+    println!("  time: {}", r.time);
+    println!("  method: {}", r.method);
+    println!("  origin: {}", r.origin_ctx);
+    println!("  kind: {}", r.kind);
+    println!("  preview: {}", r.preview);
+    println!("  trace: {}", r.trace_id);
+    match &d.sidecar {
+        Ok(IntakeSidecar {
+            path,
+            size_bytes,
+            content,
+        }) => {
+            println!();
+            println!("--- sidecar {} ({} bytes) ---", path.display(), size_bytes);
+            match content {
+                SidecarContent::Utf8(s) => println!("{s}"),
+                SidecarContent::Binary => println!("[binary - {size_bytes} bytes]"),
+            }
+        }
+        Err(expected) => {
+            println!();
+            println!("(no sidecar at {})", expected.display());
+        }
+    }
+}
+
+fn print_dlq_rows(rows: &[vault::dlq::ParsedDlqRow]) {
+    if rows.is_empty() {
+        println!("(no dlq rows match)");
+        return;
+    }
+    println!("Date        Time  Method    Stage              Status     Trace      Reason");
+    for r in rows {
+        let reason = if r.reason.len() > 60 {
+            format!("{}...", &r.reason[..60])
+        } else {
+            r.reason.clone()
+        };
+        println!(
+            "{:11} {:5} {:9} {:18} {:10} {:9} {}",
+            r.date, r.time, r.method, r.stage, r.status, r.trace_id, reason
+        );
+    }
+}
+
+fn print_dlq_row_detail(d: &borg::triage::DlqRowDetail) {
+    let r = &d.row;
+    println!("DLQ row:");
+    println!("  date: {} {}", r.date, r.time);
+    println!("  method: {}", r.method);
+    println!("  stage: {}", r.stage);
+    println!("  status: {}", r.status);
+    println!("  retries: {}", r.retries);
+    println!("  trace: {}", r.trace_id);
+    if let Some(replay) = &r.replay_of {
+        println!("  replay-of: {replay}");
+    }
+    println!("  reason: {}", r.reason);
+    println!("  preview: {}", r.preview);
+
+    if let Some(intake) = &d.intake {
+        println!();
+        print_intake_row_detail(intake);
+    }
+    if let Some(source) = &d.ledger_has_completed_for {
+        println!();
+        println!("(ledger has a completed row for this source: {source})");
+    }
+}
+
+fn print_dlq_archive_outcome(o: &borg::triage::DlqArchiveOutcome) {
+    use borg::triage::DlqArchiveOutcome;
+    match o {
+        DlqArchiveOutcome::ResolvedBatch { moved, archive_path } => {
+            println!(
+                "archive --resolved: moved {moved} resolved/abandoned row(s) to {}",
+                archive_path.display()
+            );
+        }
+        DlqArchiveOutcome::StatusUpdated { trace_id, new_status } => {
+            println!("updated dlq trace={trace_id} status={new_status}");
+        }
+    }
+}
+
+fn print_dlq_replay_outcome(o: &borg::triage::DlqReplayOutcome) {
+    println!(
+        "replay: trace={} replay_of={} result={:?}",
+        o.new_trace, o.original_trace, o.result_status
+    );
+    let _ = o.method;
+}
+
+fn print_replay_event(event: &borg::replay::ReplayEvent) {
+    use borg::replay::ReplayEvent;
+    match event {
+        ReplayEvent::BootstrapHeader {
+            note_path,
+            source,
+            method,
+        } => {
+            println!("bootstrap: {} -> {source} (method: {method})", note_path.display());
+        }
+        ReplayEvent::TraceHeader { trace_id, source } => {
+            println!("replay trace {trace_id}: {source}");
+        }
+        ReplayEvent::MatchingHeader { count } => {
+            println!("replay: {count} matching trace(s)");
+        }
+        ReplayEvent::NoMatches => {
+            println!("replay: no traces matched");
+        }
+        ReplayEvent::DryRunBootstrap { source } => {
+            println!("  [dry-run] would re-ingest {source}");
+        }
+        ReplayEvent::DryRunTrace => {
+            println!("  [dry-run] would re-ingest via daemon");
+        }
+        ReplayEvent::ResultOk { title } => {
+            println!("  -> {}", title.as_deref().unwrap_or("(no title)"));
+        }
+        ReplayEvent::ResultDuplicate { original_date } => {
+            println!("  -> duplicate (originally ingested {original_date})");
+        }
+        ReplayEvent::ResultFailed { reason } => {
+            println!("  -> failed: {reason}");
+        }
+        ReplayEvent::ResultQueued => {
+            println!("  -> queued");
+        }
+        ReplayEvent::ResultOther { description } => {
+            println!("  -> {description}");
+        }
+        ReplayEvent::MatchingItemError { trace_id, error } => {
+            println!("  trace {trace_id}: {error}");
+        }
+    }
+}
+
+fn print_audit_header_from_disk(_config: &borg::config::Config) {
+    // The header used to be emitted by the lib; now sb prints it from
+    // the report. The lib has not started yet at this point, so we
+    // delay header rendering until after audit_with_progress returns
+    // and we have a populated report.
+}
+
+fn print_audit_event(event: &borg::audit::AuditEvent) {
+    use borg::audit::AuditEvent;
+    match event {
+        AuditEvent::FixStart { count } => {
+            println!();
+            println!("Fixing {count} misclassified types...");
+        }
+        AuditEvent::Fixed {
+            rel_path,
+            expected_type,
+        } => {
+            println!("  Fixed: {} -> type: {expected_type}", rel_path.display());
+        }
+        AuditEvent::FixError { path, error } => {
+            println!("  Error fixing {}: {error}", path.display());
+        }
+        AuditEvent::NothingFixable => {
+            println!();
+            println!("No fixable issues (only type misclassifications can be auto-fixed).");
+        }
+    }
+}
+
+fn print_audit_summary(report: &borg::audit::AuditReport, fix: bool) {
+    if report.no_ledger {
+        println!("No Borg Ledger found at {}", report.ledger_path.display());
+        return;
+    }
+    println!("Auditing Borg Ledger: {}", report.ledger_path.display());
+    println!("Vault: {}", report.vault_root.display());
+    println!("Found {} completed ledger entries to audit", report.entries_scanned);
+    println!();
+
+    if report.findings.is_empty() {
+        println!("No issues found.");
+        return;
+    }
+
+    let mut mistype_count = 0;
+    let mut blocked_count = 0;
+    let mut raw_title_count = 0;
+    let mut duplicate_count = 0;
+    let mut orphan_count = 0;
+    for finding in &report.findings {
+        match finding {
+            borg::audit::AuditFinding::MistypedContent { .. } => mistype_count += 1,
+            borg::audit::AuditFinding::BlockedContent { .. } => blocked_count += 1,
+            borg::audit::AuditFinding::RawUrlTitle { .. } => raw_title_count += 1,
+            borg::audit::AuditFinding::DuplicateNotes { .. } => duplicate_count += 1,
+            borg::audit::AuditFinding::OrphanedReplacement { .. } => orphan_count += 1,
+        }
+    }
+
+    println!("Audit Results:");
+    if mistype_count > 0 {
+        println!("  {mistype_count} misclassified types");
+    }
+    if blocked_count > 0 {
+        println!("  {blocked_count} blocked content saved as completed");
+    }
+    if raw_title_count > 0 {
+        println!("  {raw_title_count} raw URL titles");
+    }
+    if duplicate_count > 0 {
+        println!("  {duplicate_count} duplicate note pairs");
+    }
+    if orphan_count > 0 {
+        println!("  {orphan_count} orphaned replacements (replaced but no new ✅)");
+    }
+
+    println!();
+    println!("Details:");
+    for finding in &report.findings {
+        println!("  {finding}");
+    }
+
+    if !fix && mistype_count > 0 {
+        println!();
+        println!("Run with --fix to correct {mistype_count} misclassified types.");
+    }
+}
+
+fn print_migrate_report(r: &borg::migrate::MigrateReport) {
+    let mode = if r.apply { "APPLY" } else { "DRY-RUN" };
+    println!("Migration mode: {mode}");
+    println!("Vault: {}", r.vault_root.display());
+    println!("Found {} markdown files to check", r.files_scanned);
+    for rel in &r.changed {
+        println!("  {mode}: {rel}");
+    }
+    if r.seeded_ledger > 0 {
+        println!("Seeded Borg Ledger with {} entries.", r.seeded_ledger);
+    }
+    println!();
+    println!("{mode} complete: {} files would be changed", r.changed.len());
+    if !r.apply && !r.changed.is_empty() {
+        println!("Run with --apply to write changes.");
+    }
+}
+
+fn print_reingest_failed_event(event: &borg::migrate::ReingestFailedEvent) {
+    use borg::migrate::ReingestFailedEvent;
+    match event {
+        ReingestFailedEvent::NoMatches => {
+            println!("reingest-failed: no failed-fetch notes found");
+        }
+        ReingestFailedEvent::Dispatching { source } => println!("  -> {source}"),
+        ReingestFailedEvent::Ok { title } => {
+            println!("     ok: {}", title.as_deref().unwrap_or("(no title)"));
+        }
+        ReingestFailedEvent::Duplicate => println!("     duplicate (unchanged)"),
+        ReingestFailedEvent::Failed { reason } => println!("     failed: {reason}"),
+        ReingestFailedEvent::Queued => println!("     queued"),
+        ReingestFailedEvent::ParseError { path, error } => {
+            println!("     {}: response parse error: {error}", path.display());
+        }
+        ReingestFailedEvent::HttpError { path, error } => {
+            println!("     {}: HTTP error: {error}", path.display());
+        }
+    }
+}
+
+fn print_reingest_failed_report(r: &borg::migrate::ReingestFailedReport) {
+    if r.matched.is_empty() {
+        return; // NoMatches event already printed
+    }
+    let mode = if r.dry_run { "[dry-run] " } else { "" };
+    // For apply mode the dispatching events already streamed; we only
+    // print the summary header + path list at the end (matches the
+    // pre-refactor output where the list preceded the per-item lines).
+    if r.dry_run {
+        println!("{mode}reingest-failed: {} matching note(s)", r.matched.len());
+        for (path, source) in &r.matched {
+            let rel = path.strip_prefix(&r.vault_root).unwrap_or(path);
+            println!("  {}  <- {}", rel.display(), source);
         }
     }
 }

@@ -65,37 +65,62 @@ impl std::fmt::Display for AuditFinding {
     }
 }
 
-/// Outcome of `borg::audit::run`. Carries the structured findings plus the
-/// pre-rendered lines sb prints (header + summary + fix-attempt log).
+/// Outcome of `borg::audit::run`. Carries the structured findings plus
+/// the count of fixes that were applied (only nonzero when `--fix` was
+/// passed). The pre-fix display lines and per-fix progress lines are no
+/// longer buffered in the report; the `--fix` path emits each fix-event
+/// through the `progress` callback so sb prints live as disk I/O
+/// happens (per architect Alternative 3 table, audit --fix is one of
+/// the genuinely sequential I/O cases that needs callback UX).
 #[derive(Debug, Default)]
 pub struct AuditReport {
+    pub ledger_path: PathBuf,
+    pub vault_root: PathBuf,
+    /// Total entries scanned; 0 when no ledger existed at start.
+    pub entries_scanned: usize,
+    /// `true` when the ledger file did not exist; `findings` and
+    /// `entries_scanned` are empty in this case.
+    pub no_ledger: bool,
     pub findings: Vec<AuditFinding>,
     /// Number of fixes applied (only nonzero when `--fix` was passed).
     pub fixed_count: usize,
-    /// Pre-rendered output lines: header, summary section, per-finding details,
-    /// fix-mode log entries. sb iterates and prints.
-    pub lines: Vec<String>,
+}
+
+/// Live-progress event emitted by `audit::run` during the `--fix` phase.
+/// sb's caller renders each variant to the human-readable line the lib
+/// used to print directly.
+#[derive(Debug)]
+pub enum AuditEvent {
+    FixStart { count: usize },
+    Fixed { rel_path: PathBuf, expected_type: String },
+    FixError { path: PathBuf, error: String },
+    NothingFixable,
 }
 
 pub fn run(config: &Config, fix: bool) -> Result<AuditReport> {
+    audit_with_progress(config, fix, |_| {})
+}
+
+/// Same as `run` but allows callers to stream fix-mode progress. `sb`
+/// uses this entry point; pass `|_| {}` if you do not care about
+/// streaming.
+pub fn audit_with_progress(config: &Config, fix: bool, mut progress: impl FnMut(&AuditEvent)) -> Result<AuditReport> {
     let ledger_path = ledger::ledger_path(config);
     let vault_root = expand_tilde(&config.vault.root_path);
-    let mut lines: Vec<String> = Vec::new();
 
     if !ledger_path.exists() {
-        lines.push(format!("No Borg Ledger found at {}", ledger_path.display()));
         return Ok(AuditReport {
+            ledger_path,
+            vault_root,
+            entries_scanned: 0,
+            no_ledger: true,
             findings: Vec::new(),
             fixed_count: 0,
-            lines,
         });
     }
 
-    lines.push(format!("Auditing Borg Ledger: {}", ledger_path.display()));
-    lines.push(format!("Vault: {}", vault_root.display()));
-
     let entries = ledger::parse_completed_entries(&ledger_path)?;
-    lines.push(format!("Found {} completed ledger entries to audit\n", entries.len()));
+    let entries_scanned = entries.len();
 
     // Build a map of source URL -> note paths in vault
     let note_index = build_note_index(&vault_root, &config.migration.skip_folders)?;
@@ -194,58 +219,9 @@ pub fn run(config: &Config, fix: bool) -> Result<AuditReport> {
         }
     }
 
-    // Report
-    if findings.is_empty() {
-        lines.push("No issues found.".to_string());
-        return Ok(AuditReport {
-            findings,
-            fixed_count: 0,
-            lines,
-        });
-    }
-
-    // Categorize
-    let mut mistype_count = 0;
-    let mut blocked_count = 0;
-    let mut raw_title_count = 0;
-    let mut duplicate_count = 0;
-    let mut orphan_count = 0;
-
-    for finding in &findings {
-        match finding {
-            AuditFinding::MistypedContent { .. } => mistype_count += 1,
-            AuditFinding::BlockedContent { .. } => blocked_count += 1,
-            AuditFinding::RawUrlTitle { .. } => raw_title_count += 1,
-            AuditFinding::DuplicateNotes { .. } => duplicate_count += 1,
-            AuditFinding::OrphanedReplacement { .. } => orphan_count += 1,
-        }
-    }
-
-    lines.push("Audit Results:".to_string());
-    if mistype_count > 0 {
-        lines.push(format!("  {mistype_count} misclassified types"));
-    }
-    if blocked_count > 0 {
-        lines.push(format!("  {blocked_count} blocked content saved as completed"));
-    }
-    if raw_title_count > 0 {
-        lines.push(format!("  {raw_title_count} raw URL titles"));
-    }
-    if duplicate_count > 0 {
-        lines.push(format!("  {duplicate_count} duplicate note pairs"));
-    }
-    if orphan_count > 0 {
-        lines.push(format!(
-            "  {orphan_count} orphaned replacements (replaced but no new ✅)"
-        ));
-    }
-
-    lines.push("\nDetails:".to_string());
-    for finding in &findings {
-        lines.push(format!("  {finding}"));
-    }
-
-    // Fix mode: update mistyped notes
+    // Fix mode: update mistyped notes. Each fix is a real disk I/O
+    // event; emit progress via callback so sb can stream live (per
+    // Alternative 3 in the design).
     let mut fixed_count = 0;
     if fix {
         let fixable: Vec<&AuditFinding> = findings
@@ -254,9 +230,9 @@ pub fn run(config: &Config, fix: bool) -> Result<AuditReport> {
             .collect();
 
         if fixable.is_empty() {
-            lines.push("\nNo fixable issues (only type misclassifications can be auto-fixed).".to_string());
+            progress(&AuditEvent::NothingFixable);
         } else {
-            lines.push(format!("\nFixing {} misclassified types...", fixable.len()));
+            progress(&AuditEvent::FixStart { count: fixable.len() });
             for finding in &fixable {
                 if let AuditFinding::MistypedContent {
                     expected_type,
@@ -266,33 +242,32 @@ pub fn run(config: &Config, fix: bool) -> Result<AuditReport> {
                 {
                     match fix_note_type(path, expected_type) {
                         Ok(()) => {
-                            let rel = path.strip_prefix(&vault_root).unwrap_or(path);
-                            lines.push(format!("  Fixed: {} -> type: {expected_type}", rel.display()));
+                            let rel = path.strip_prefix(&vault_root).unwrap_or(path).to_path_buf();
+                            progress(&AuditEvent::Fixed {
+                                rel_path: rel,
+                                expected_type: expected_type.clone(),
+                            });
                             fixed_count += 1;
                         }
                         Err(e) => {
-                            lines.push(format!("  Error fixing {}: {e:#}", path.display()));
+                            progress(&AuditEvent::FixError {
+                                path: path.clone(),
+                                error: format!("{e:#}"),
+                            });
                         }
                     }
                 }
             }
         }
-    } else {
-        let fixable_count = findings
-            .iter()
-            .filter(|f| matches!(f, AuditFinding::MistypedContent { .. }))
-            .count();
-        if fixable_count > 0 {
-            lines.push(format!(
-                "\nRun with --fix to correct {fixable_count} misclassified types."
-            ));
-        }
     }
 
     Ok(AuditReport {
+        ledger_path,
+        vault_root,
+        entries_scanned,
+        no_ledger: false,
         findings,
         fixed_count,
-        lines,
     })
 }
 
