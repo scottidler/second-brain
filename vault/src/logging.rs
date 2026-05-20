@@ -1,7 +1,7 @@
 use eyre::{Context, Result};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::Path;
 
 /// Resolve log level from: CLI flag > LOG_LEVEL env > config file > "info"
 pub fn resolve_log_level(cli_level: Option<&str>, config_level: Option<&str>) -> String {
@@ -17,20 +17,17 @@ pub fn resolve_log_level(cli_level: Option<&str>, config_level: Option<&str>) ->
     "info".to_string()
 }
 
-pub fn setup_logging(app_name: &str, log_level: &str) -> Result<()> {
-    let log_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(app_name)
-        .join("logs");
-
-    fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
-
-    let log_file_path = log_dir.join(format!("{app_name}.log"));
+/// Init env_logger writing to both the given file (append + create) and stderr.
+/// Caller owns path construction so the on-disk layout is not baked in here.
+pub fn setup_logging(log_file_path: &Path, log_level: &str) -> Result<()> {
+    if let Some(parent) = log_file_path.parent() {
+        fs::create_dir_all(parent).context("Failed to create log directory")?;
+    }
 
     let log_file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&log_file_path)
+        .open(log_file_path)
         .context("Failed to open log file")?;
 
     env_logger::Builder::new()

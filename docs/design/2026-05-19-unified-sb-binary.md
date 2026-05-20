@@ -445,10 +445,21 @@ Oracle does NOT need this split (no lib-internal coupling to `oracle/src/cli.rs`
 
 #### Logger discipline
 
-`sb/src/logger.rs` examines the parsed `Cli` and picks one of two initialization paths:
+`sb/src/logger.rs` examines the parsed `Cli` and picks one of two initialization paths. **All logs land under `~/.local/share/sb/<name>.log`** (one directory, one file per subsystem or root verb):
 
-- **`Cmd::Oracle(OracleCmd::Serve)`**: init `tracing-subscriber` with a stderr-only writer. Never touch stdout. This preserves MCP JSON-RPC stdio.
-- **All other subcommands**: init `env_logger` with a file target. The log file path follows existing conventions: `~/.local/share/<subsystem>/logs/<subsystem>.log` for the workhorse subcommands (so `sb borg ingest` writes to `~/.local/share/borg/logs/borg.log`, matching today). Cross-cutting commands log to `~/.local/share/sb/logs/sb.log`.
+| Invocation | Path | Writer |
+|---|---|---|
+| `sb borg <verb>` | `~/.local/share/sb/borg.log` | env_logger |
+| `sb cortex <verb>` | `~/.local/share/sb/cortex.log` | env_logger |
+| `sb oracle serve` | `~/.local/share/sb/oracle.log` | tracing-subscriber (preserves stdout for MCP JSON-RPC) |
+| `sb oracle index/stats/call` | `~/.local/share/sb/oracle.log` | env_logger |
+| `sb status` | `~/.local/share/sb/status.log` | env_logger |
+| `sb doctor` | `~/.local/share/sb/doctor.log` | env_logger |
+| `sb bootstrap` | `~/.local/share/sb/bootstrap.log` | env_logger |
+
+Single parent directory (`sb/`) so `ls ~/.local/share/sb/` is the whole story; per-subsystem leaf files so long-running daemon output doesn't interleave. The two oracle rows share a file path on disk — only the writer library differs.
+
+`vault::logging::setup_logging` was refactored from `(app_name, level)` to `(log_file_path, level)` so the layout lives in `sb/src/logger.rs` and is not baked into the shared lib.
 
 The lib crates keep their `log::debug!` / `log::info!` / `log::warn!` macros unchanged. The bin chooses the implementation that picks those up.
 

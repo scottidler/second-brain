@@ -5,30 +5,58 @@ use tracing_subscriber::EnvFilter;
 use crate::cli::{Cli, Cmd};
 
 /// Init the right logger for the parsed subcommand.
-/// - `oracle serve`: tracing-subscriber to file (preserves stdio for MCP JSON-RPC).
-/// - Everything else: env_logger (via vault::logging) to a per-subsystem log file.
+///
+/// All logs land under `~/.local/share/sb/<name>.log`:
+/// - Borg verbs   -> sb/borg.log
+/// - Cortex verbs -> sb/cortex.log
+/// - Oracle verbs -> sb/oracle.log (tracing-subscriber for `oracle serve` so MCP stdio stays clean; env_logger for the rest)
+/// - status / doctor / bootstrap -> sb/{status,doctor,bootstrap}.log
 pub fn init_for(cli: &Cli) -> Result<()> {
-    match &cli.cmd {
-        Cmd::Oracle(c) if matches!(c.command, crate::cli::oracle::Commands::Serve) => {
-            init_tracing_to_file(cli.verbose, "oracle")
-        }
-        Cmd::Borg(c) => {
-            let level = resolve_level(cli.log_level.as_deref(), c.log_level.as_deref(), cli.verbose);
-            vault::logging::setup_logging("borg", &level)
-        }
-        Cmd::Cortex(c) => {
-            let level = resolve_level(cli.log_level.as_deref(), c.log_level.as_deref(), cli.verbose);
-            vault::logging::setup_logging("cortex", &level)
-        }
-        Cmd::Oracle(_) => {
-            let level = resolve_level(cli.log_level.as_deref(), None, cli.verbose);
-            vault::logging::setup_logging("oracle", &level)
-        }
-        Cmd::Status(_) | Cmd::Doctor(_) | Cmd::Bootstrap(_) => {
-            let level = resolve_level(cli.log_level.as_deref(), None, cli.verbose);
-            vault::logging::setup_logging("sb", &level)
-        }
+    let (name, level) = name_and_level(cli);
+    let path = log_path(&name);
+
+    // The `oracle serve` MCP server uses tracing, not log; route it to the
+    // tracing-subscriber file writer. Everything else goes through env_logger.
+    if matches!(&cli.cmd, Cmd::Oracle(c) if matches!(c.command, crate::cli::oracle::Commands::Serve)) {
+        return init_tracing_to_file(&path, &level);
     }
+    vault::logging::setup_logging(&path, &level)
+}
+
+fn name_and_level(cli: &Cli) -> (String, String) {
+    match &cli.cmd {
+        Cmd::Borg(c) => (
+            "borg".into(),
+            resolve_level(cli.log_level.as_deref(), c.log_level.as_deref(), cli.verbose),
+        ),
+        Cmd::Cortex(c) => (
+            "cortex".into(),
+            resolve_level(cli.log_level.as_deref(), c.log_level.as_deref(), cli.verbose),
+        ),
+        Cmd::Oracle(_) => (
+            "oracle".into(),
+            resolve_level(cli.log_level.as_deref(), None, cli.verbose),
+        ),
+        Cmd::Status(_) => (
+            "status".into(),
+            resolve_level(cli.log_level.as_deref(), None, cli.verbose),
+        ),
+        Cmd::Doctor(_) => (
+            "doctor".into(),
+            resolve_level(cli.log_level.as_deref(), None, cli.verbose),
+        ),
+        Cmd::Bootstrap(_) => (
+            "bootstrap".into(),
+            resolve_level(cli.log_level.as_deref(), None, cli.verbose),
+        ),
+    }
+}
+
+fn log_path(name: &str) -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("sb")
+        .join(format!("{name}.log"))
 }
 
 fn resolve_level(root: Option<&str>, sub: Option<&str>, verbose: bool) -> String {
@@ -38,15 +66,8 @@ fn resolve_level(root: Option<&str>, sub: Option<&str>, verbose: bool) -> String
     if verbose { "debug".into() } else { "info".into() }
 }
 
-fn init_tracing_to_file(verbose: bool, app_name: &str) -> Result<()> {
-    let level = if verbose { "debug" } else { "info" };
+fn init_tracing_to_file(log_path: &std::path::Path, level: &str) -> Result<()> {
     let filter = EnvFilter::new(level);
-
-    let log_path = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(app_name)
-        .join("logs")
-        .join(format!("{app_name}.log"));
 
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent).context("Failed to create log directory")?;
@@ -55,7 +76,7 @@ fn init_tracing_to_file(verbose: bool, app_name: &str) -> Result<()> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&log_path)
+        .open(log_path)
         .context("Failed to open log file")?;
 
     tracing_subscriber::fmt()
