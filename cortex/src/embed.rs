@@ -83,6 +83,25 @@ impl EmbedStats {
     }
 }
 
+/// Prefetch the active embedding model and return the resolved model name
+/// so sb can print "Prefetched embedding model {name}". Split from
+/// `embed::run` to keep `EmbedStats` Copy and avoid stuffing prefetch-only
+/// state into the per-batch stats type.
+pub fn prefetch(model_override: Option<&str>) -> Result<String> {
+    // Resolve the model name from the active SearchIndex if possible (matches
+    // the prior behavior); otherwise fall back to the compiled-in
+    // ACTIVE_MODEL_VERSION. We accept an Option<&str> --model override so the
+    // user can ask to prefetch a specific name even before the index exists.
+    let resolved = match model_override {
+        Some(m) => m.to_string(),
+        None => ACTIVE_MODEL_VERSION.to_string(),
+    };
+    log::info!("cortex::embed: prefetching model {resolved}");
+    vault::embedding::prefetch_active_model().wrap_err("failed to prefetch embedding model")?;
+    log::info!("prefetched embedding model {resolved}");
+    Ok(resolved)
+}
+
 /// CLI entry point for `cortex embed`.
 pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<EmbedStats> {
     log::info!(
@@ -94,6 +113,11 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
         opts.prefetch_model,
     );
 
+    if opts.prefetch_model {
+        prefetch(opts.model.as_deref())?;
+        return Ok(EmbedStats::default());
+    }
+
     let db_path = config.oracle_db_path();
     let mut index = SearchIndex::open(&db_path)
         .wrap_err_with(|| format!("failed to open search index at {}", db_path.display()))?;
@@ -103,13 +127,6 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
             .active_embedding_model()
             .unwrap_or_else(|_| ACTIVE_MODEL_VERSION.to_string())
     });
-
-    if opts.prefetch_model {
-        log::info!("cortex::embed: prefetching model {model_version}");
-        vault::embedding::prefetch_active_model().wrap_err("failed to prefetch embedding model")?;
-        log::info!("prefetched embedding model {model_version}");
-        return Ok(EmbedStats::default());
-    }
 
     let lock = acquire_lock()?;
     log::debug!("cortex::embed: acquired file lock");

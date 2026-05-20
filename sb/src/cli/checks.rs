@@ -134,41 +134,48 @@ fn systemd_findings() -> Vec<Finding> {
 }
 
 fn config_findings() -> Vec<Finding> {
-    let candidates = [
-        ("borg", config_path("borg", "borg.yml")),
-        ("cortex", config_path("obsidian-cortex", "obsidian-cortex.yml")),
-        ("oracle", config_path("oracle", "oracle.yml")),
-    ];
-    let mut findings = Vec::new();
-    for (name, path) in &candidates {
-        if !path.exists() {
-            findings.push(Finding::warn(
-                format!("{name}: missing ({})", path.display()),
-                "sb bootstrap".to_string(),
-            ));
-            continue;
-        }
-        // Parse-status check: try to deserialize each present config file. A
-        // YAML syntax error is the most common silent-misconfig mode this
-        // catches before the daemon fails opaquely at startup.
-        match std::fs::read_to_string(path) {
-            Ok(content) => match serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                Ok(_) => findings.push(Finding::ok(format!("{name}: {} (parses)", path.display()))),
-                Err(e) => findings.push(Finding::error(
-                    format!("{name}: {} parse failed: {e}", path.display()),
-                    format!(
-                        "open {} and fix the YAML syntax (or sb bootstrap to restore the template)",
-                        path.display()
-                    ),
-                )),
-            },
-            Err(e) => findings.push(Finding::error(
+    // Parse-status check: try to deserialize each config file as the typed
+    // subsystem Config struct so YAML syntax errors AND schema errors (wrong
+    // field type, unknown required field, etc.) both surface before the
+    // daemon hits them at startup. Using `serde_yaml::Value` here would
+    // only catch syntax, missing the design's intent.
+    let borg_path = config_path("borg", "borg.yml");
+    let cortex_path = config_path("obsidian-cortex", "obsidian-cortex.yml");
+    let oracle_path = config_path("oracle", "oracle.yml");
+
+    vec![
+        parse_typed::<borg::config::Config>("borg", &borg_path),
+        parse_typed::<cortex::config::Config>("cortex", &cortex_path),
+        parse_typed::<oracle::Config>("oracle", &oracle_path),
+    ]
+}
+
+fn parse_typed<T: serde::de::DeserializeOwned>(name: &str, path: &std::path::Path) -> Finding {
+    if !path.exists() {
+        return Finding::warn(
+            format!("{name}: missing ({})", path.display()),
+            "sb bootstrap".to_string(),
+        );
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            return Finding::error(
                 format!("{name}: {} unreadable: {e}", path.display()),
                 "check permissions on the file".to_string(),
-            )),
+            );
         }
+    };
+    match serde_yaml::from_str::<T>(&content) {
+        Ok(_) => Finding::ok(format!("{name}: {} (parses as typed Config)", path.display())),
+        Err(e) => Finding::error(
+            format!("{name}: {} parse failed: {e}", path.display()),
+            format!(
+                "open {} and fix the YAML (or sb bootstrap to restore the template)",
+                path.display()
+            ),
+        ),
     }
-    findings
 }
 
 /// Compare the shared-config files in the repo (`config/*.yml`) against the

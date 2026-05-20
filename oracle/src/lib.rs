@@ -5,6 +5,12 @@
 //!
 //! The search index and detail extraction are provided by the shared vault crate.
 
+// Lib invariant: oracle pub fns return typed data; sb owns stdout/stderr.
+// Production code emits nothing via println!/eprintln! - tracing::* routes
+// through the logger initializer instead. Test modules that print captured
+// stdout are exempted via the not(test) guard below.
+#![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
+
 pub mod config;
 pub mod server;
 pub mod tools;
