@@ -15,6 +15,7 @@ pub mod intake;
 pub mod ledger;
 pub mod logging;
 pub mod note;
+pub mod paths;
 pub mod schema;
 #[cfg(feature = "search")]
 pub mod search;

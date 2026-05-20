@@ -119,11 +119,9 @@ impl Config {
     }
 
     fn find_config_file() -> Result<PathBuf> {
-        if let Some(config_dir) = dirs::config_dir() {
-            let path = config_dir.join("oracle").join("oracle.yml");
-            if path.exists() {
-                return Ok(path);
-            }
+        let primary = vault::paths::oracle_config();
+        if primary.exists() {
+            return Ok(primary);
         }
 
         let local = PathBuf::from("oracle.yml");
@@ -131,10 +129,7 @@ impl Config {
             return Ok(local);
         }
 
-        Ok(dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("oracle")
-            .join("oracle.yml"))
+        Ok(primary)
     }
 
     pub fn vault_root(&self) -> PathBuf {

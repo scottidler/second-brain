@@ -1,5 +1,5 @@
-# cortex config — Obsidian vault governance daemon
-# Installed by `sb bootstrap` to ~/.config/obsidian-cortex/obsidian-cortex.yml if absent.
+# cortex config - Obsidian vault governance daemon
+# Installed by `sb bootstrap` to ~/.config/sb/cortex.yml if absent.
 # Full schema: see cortex/src/config.rs in the second-brain workspace.
 
 # Vault root. Required for cortex to know which Obsidian vault to operate on.

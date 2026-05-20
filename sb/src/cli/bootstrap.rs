@@ -1,6 +1,8 @@
 use eyre::{Context, Result};
 use std::path::Path;
 
+mod migrate;
+
 #[derive(clap::Args)]
 pub struct BootstrapArgs {
     /// Skip the fastembed model prefetch (network-light bootstrap on install machines without GPU/disk budget).
@@ -11,6 +13,12 @@ pub struct BootstrapArgs {
     /// per-machine drop-ins in place that bootstrap shouldn't overwrite.
     #[arg(long)]
     pub skip_systemd: bool,
+
+    /// Migrate legacy config layout (~/.config/{borg,cortex,obsidian-cortex,oracle,second-brain})
+    /// into the unified ~/.config/sb/ layout. Safe to run repeatedly; copies legacy files only when
+    /// the new location is empty, refuses on byte differences, never deletes the legacy directory.
+    #[arg(long)]
+    pub migrate: bool,
 }
 
 const BORG_TEMPLATE: &str = include_str!("../../../config/templates/borg.yml.example");
@@ -18,16 +26,27 @@ const CORTEX_TEMPLATE: &str = include_str!("../../../config/templates/cortex.yml
 const ORACLE_TEMPLATE: &str = include_str!("../../../config/templates/oracle.yml.example");
 
 pub async fn run(args: BootstrapArgs) -> Result<()> {
-    let config_root = dirs::config_dir().ok_or_else(|| eyre::eyre!("dirs::config_dir() returned None"))?;
+    // Auto-migrate on first invocation that detects a legacy directory, unless
+    // --migrate was passed explicitly (which forces it regardless of detection).
+    if args.migrate || migrate::legacy_detected() {
+        println!("Detected legacy config layout - migrating into ~/.config/sb/...");
+        let report = migrate::migrate_legacy_layout().context("migrate legacy config layout")?;
+        for line in &report.lines {
+            println!("{line}");
+        }
+        if report.had_conflicts {
+            eyre::bail!(
+                "migration refused due to byte differences with existing ~/.config/sb/ files - \
+                 resolve manually then rerun"
+            );
+        }
+        println!();
+    }
 
     let targets = [
-        ("borg", config_root.join("borg").join("borg.yml"), BORG_TEMPLATE),
-        (
-            "cortex",
-            config_root.join("obsidian-cortex").join("obsidian-cortex.yml"),
-            CORTEX_TEMPLATE,
-        ),
-        ("oracle", config_root.join("oracle").join("oracle.yml"), ORACLE_TEMPLATE),
+        ("borg", vault::paths::borg_config(), BORG_TEMPLATE),
+        ("cortex", vault::paths::cortex_config(), CORTEX_TEMPLATE),
+        ("oracle", vault::paths::oracle_config(), ORACLE_TEMPLATE),
     ];
     for (name, path, template) in &targets {
         write_if_missing(name, path, template)?;

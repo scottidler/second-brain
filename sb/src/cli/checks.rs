@@ -1,7 +1,6 @@
 //! Shared health checks consumed by `sb status` (informational rendering)
 //! and `sb doctor` (severity-tagged findings).
 
-use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -139,9 +138,9 @@ fn config_findings() -> Vec<Finding> {
     // field type, unknown required field, etc.) both surface before the
     // daemon hits them at startup. Using `serde_yaml::Value` here would
     // only catch syntax, missing the design's intent.
-    let borg_path = config_path("borg", "borg.yml");
-    let cortex_path = config_path("obsidian-cortex", "obsidian-cortex.yml");
-    let oracle_path = config_path("oracle", "oracle.yml");
+    let borg_path = vault::paths::borg_config();
+    let cortex_path = vault::paths::cortex_config();
+    let oracle_path = vault::paths::oracle_config();
 
     vec![
         parse_typed::<borg::config::Config>("borg", &borg_path),
@@ -179,13 +178,13 @@ fn parse_typed<T: serde::de::DeserializeOwned>(name: &str, path: &std::path::Pat
 }
 
 /// Compare the shared-config files in the repo (`config/*.yml`) against the
-/// installed copies in `~/.config/second-brain/`. Drift here means borg and
+/// installed copies in `~/.config/sb/`. Drift here means borg and
 /// cortex disagree on the canonical tag vocabulary - a class of silent bugs
 /// only caught by hash-comparing the source-of-truth against the runtime
 /// copy. Mirror of `pattern_findings`.
 fn shared_config_findings() -> Vec<Finding> {
     let repo_shared = std::path::Path::new("config");
-    let installed = dirs::config_dir().map(|d| d.join("second-brain"));
+    let installed = Some(vault::paths::config_root());
     let mut findings = Vec::new();
     let Some(installed) = installed else {
         findings.push(Finding::error(
@@ -245,10 +244,10 @@ fn shared_config_findings() -> Vec<Finding> {
 }
 
 fn pattern_findings() -> Vec<Finding> {
-    // Compare borg/patterns/*.md in the repo (working tree) against ~/.config/borg/patterns/*.md.
+    // Compare borg/patterns/*.md in the repo (working tree) against ~/.config/sb/patterns/*.md.
     // We can only detect drift on machines where the repo is checked out at the expected path.
     let repo_patterns = std::path::Path::new("borg/patterns");
-    let installed = dirs::config_dir().map(|d| d.join("borg/patterns"));
+    let installed = Some(vault::paths::patterns_dir());
     let mut findings = Vec::new();
     let Some(installed) = installed else {
         findings.push(Finding::error(
@@ -397,13 +396,6 @@ fn systemctl_show(unit: &str) -> Result<SystemdState, String> {
     Ok(state)
 }
 
-fn config_path(dir: &str, filename: &str) -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
-        .join(dir)
-        .join(filename)
-}
-
 fn human_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     let mut v = bytes as f64;
@@ -424,7 +416,7 @@ fn borg_findings() -> Vec<Finding> {
         Err(e) => {
             return vec![Finding::error(
                 format!("could not load borg config: {e}"),
-                "ensure ~/.config/borg/borg.yml exists (sb bootstrap)".to_string(),
+                format!("ensure {} exists (sb bootstrap)", vault::paths::borg_config().display()),
             )];
         }
     };
@@ -475,7 +467,10 @@ fn vault_findings() -> Vec<Finding> {
         Err(e) => {
             return vec![Finding::error(
                 format!("could not load oracle config: {e}"),
-                "ensure ~/.config/oracle/oracle.yml exists (sb bootstrap)".to_string(),
+                format!(
+                    "ensure {} exists (sb bootstrap)",
+                    vault::paths::oracle_config().display()
+                ),
             )];
         }
     };

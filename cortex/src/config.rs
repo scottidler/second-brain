@@ -254,9 +254,9 @@ pub struct SweepConfig {
 impl Default for SweepConfig {
     fn default() -> Self {
         Self {
-            canonical_path: "~/.config/second-brain/canonical-tags.yml".to_string(),
-            mapping_path: "~/.config/second-brain/tag-mapping.yml".to_string(),
-            proposals_path: "~/.config/second-brain/tag-proposals.yml".to_string(),
+            canonical_path: vault::paths::canonical_tags().display().to_string(),
+            mapping_path: vault::paths::tag_mapping().display().to_string(),
+            proposals_path: vault::paths::tag_proposals().display().to_string(),
             sweep_interval: "1h".to_string(),
             proposal_threshold: 3,
             cold: ColdConfig::default(),
@@ -589,24 +589,22 @@ impl Default for LlmConfig {
 impl Config {
     /// Load configuration with fallback chain:
     /// 1. Explicit --config flag
-    /// 2. ~/.config/obsidian-cortex/obsidian-cortex.yml
+    /// 2. ~/.config/sb/cortex.yml
     /// 3. Defaults
     pub fn load(config_path: Option<&PathBuf>) -> Result<Self> {
         if let Some(path) = config_path {
             return Self::load_from_file(path).context(format!("Failed to load config from {}", path.display()));
         }
 
-        if let Some(config_dir) = dirs::config_dir() {
-            let primary = config_dir.join("cortex").join("cortex.yml");
-            if primary.exists() {
-                match Self::load_from_file(&primary) {
-                    Ok(config) => return Ok(config),
-                    Err(e) => {
-                        log::warn!(
-                            "failed to load config, falling back to defaults: {}: {e}",
-                            primary.display()
-                        );
-                    }
+        let primary = vault::paths::cortex_config();
+        if primary.exists() {
+            match Self::load_from_file(&primary) {
+                Ok(config) => return Ok(config),
+                Err(e) => {
+                    log::warn!(
+                        "failed to load config, falling back to defaults: {}: {e}",
+                        primary.display()
+                    );
                 }
             }
         }

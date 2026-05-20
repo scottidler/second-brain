@@ -4589,6 +4589,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "shellexpand",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

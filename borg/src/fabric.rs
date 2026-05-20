@@ -31,18 +31,16 @@ fn wait_with_timeout(child: &mut Child, timeout_secs: u64, label: &str) -> Resul
 /// Resolve a pattern name to a file path.
 ///
 /// If the pattern is already a path (starts with `~`, `/`, or `.`), return it as-is.
-/// Otherwise, treat it as a filename and resolve to `~/.config/borg/patterns/<name>`.
+/// Otherwise, treat it as a filename and resolve to `~/.config/sb/patterns/<name>`.
 /// If that file exists, return the resolved path. Otherwise, return the original name
 /// so fabric can try its own pattern resolution as a fallback.
 fn resolve_pattern(name: &str) -> String {
     if name.starts_with('~') || name.starts_with('/') || name.starts_with('.') {
         return name.to_string();
     }
-    if let Some(home) = dirs::home_dir() {
-        let path: PathBuf = home.join(".config/borg/patterns").join(name);
-        if path.exists() {
-            return path.to_string_lossy().to_string();
-        }
+    let path: PathBuf = vault::paths::patterns_dir().join(name);
+    if path.exists() {
+        return path.to_string_lossy().to_string();
     }
     name.to_string()
 }

@@ -10,7 +10,7 @@ const APP_NAME: &str = "borg";
 
 /// Load configuration with fallback chain:
 /// 1. Explicit path (if provided)
-/// 2. ~/.config/borg/borg.yml
+/// 2. ~/.config/sb/borg.yml
 /// 3. ./borg.yml
 /// 4. Default
 pub fn load_config<T: DeserializeOwned + Default>(config_path: Option<&PathBuf>) -> Result<T> {
@@ -18,14 +18,12 @@ pub fn load_config<T: DeserializeOwned + Default>(config_path: Option<&PathBuf>)
         return load_from_file(path).context(format!("Failed to load config from {}", path.display()));
     }
 
-    if let Some(config_dir) = dirs::config_dir() {
-        let primary_config = config_dir.join(APP_NAME).join(format!("{APP_NAME}.yml"));
-        if primary_config.exists() {
-            match load_from_file(&primary_config) {
-                Ok(config) => return Ok(config),
-                Err(e) => {
-                    log::warn!("Failed to load config from {}: {}", primary_config.display(), e);
-                }
+    let primary_config = vault::paths::borg_config();
+    if primary_config.exists() {
+        match load_from_file(&primary_config) {
+            Ok(config) => return Ok(config),
+            Err(e) => {
+                log::warn!("Failed to load config from {}: {}", primary_config.display(), e);
             }
         }
     }
@@ -778,8 +776,8 @@ pub struct TagsConfig {
 impl Default for TagsConfig {
     fn default() -> Self {
         Self {
-            canonical_path: "~/.config/second-brain/canonical-tags.yml".to_string(),
-            mapping_path: "~/.config/second-brain/tag-mapping.yml".to_string(),
+            canonical_path: vault::paths::canonical_tags().display().to_string(),
+            mapping_path: vault::paths::tag_mapping().display().to_string(),
             reject_concatenated: true,
         }
     }

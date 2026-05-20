@@ -1,5 +1,5 @@
-# borg config — Obsidian ingestion daemon
-# Installed by `sb bootstrap` to ~/.config/borg/borg.yml if absent.
+# borg config - Obsidian ingestion daemon
+# Installed by `sb bootstrap` to ~/.config/sb/borg.yml if absent.
 # Fields use kebab-case; the Rust struct (borg::config::Config) translates to snake_case via serde.
 
 server:

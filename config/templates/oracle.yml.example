@@ -1,8 +1,9 @@
-# oracle config — knowledge retrieval MCP server
-# Installed by `sb bootstrap` to ~/.config/oracle/oracle.yml if absent.
+# oracle config - knowledge retrieval MCP server
+# Installed by `sb bootstrap` to ~/.config/sb/oracle.yml if absent.
 # Full schema: see oracle/src/config.rs in the second-brain workspace.
 
 # Vault root and DB path. db-path defaults to the vault's .obsidian-oracle.sqlite.
+# Leave commented out to require either --vault on the CLI or a .obsidian/ directory in CWD.
 vault:
   root-path: ~/repos/scottidler/obsidian/
 

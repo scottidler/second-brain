@@ -566,11 +566,9 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<Str
     let vault = vault_root.display();
 
     let mut config_flag = String::new();
-    if let Some(config_dir) = dirs::config_dir() {
-        let config_path = config_dir.join("obsidian-cortex").join("obsidian-cortex.yml");
-        if config_path.exists() {
-            config_flag = format!(" --config {}", config_path.display());
-        }
+    let config_path = vault::paths::cortex_config();
+    if config_path.exists() {
+        config_flag = format!(" --config {}", config_path.display());
     }
 
     let log_level = &config.log_level;
