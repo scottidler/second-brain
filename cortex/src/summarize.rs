@@ -24,8 +24,8 @@ use distillers::{
     ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, demote_headings, render,
 };
 
-use crate::opts::SummarizeOpts;
 use crate::config::Config;
+use crate::opts::SummarizeOpts;
 use crate::vault::{Frontmatter, Note, scan_vault};
 
 /// Match the design doc's "log every 100 notes" cadence.

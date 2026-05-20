@@ -2,8 +2,8 @@ use chrono::{Datelike, Local, NaiveDate};
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::opts::IntelOpts;
 use crate::config::{IntelConfig, LlmConfig};
+use crate::opts::IntelOpts;
 use crate::vault::Note;
 
 const DAILY_SYSTEM_PROMPT: &str = "\

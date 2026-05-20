@@ -1,6 +1,6 @@
 use super::*;
-use crate::opts::SummarizeOpts;
 use crate::config::{BackfillConfig, Config, StateConfig, VaultConfig};
+use crate::opts::SummarizeOpts;
 use distillers::{Dispatcher, FakeFabric};
 use std::sync::Arc;
 use tempfile::TempDir;

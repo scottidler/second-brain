@@ -1,0 +1,26 @@
+[package]
+name = "sb"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "second-brain unified CLI: borg ingestion + cortex governance + oracle MCP"
+build = "build.rs"
+
+[dependencies]
+borg = { path = "../borg" }
+cortex = { path = "../cortex" }
+oracle = { path = "../oracle" }
+vault = { path = "../vault", features = ["search", "watcher", "vec"] }
+distillers = { path = "../distillers" }
+
+clap = { workspace = true }
+eyre = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1"
+dirs = { workspace = true }
+shellexpand = { workspace = true }
+colored = { workspace = true }
+serde_json = { workspace = true }

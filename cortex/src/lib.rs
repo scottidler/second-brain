@@ -10,7 +10,6 @@ pub mod intel;
 pub mod linking;
 pub mod links;
 pub mod llm;
-pub mod logging;
 pub mod migrate;
 pub mod naming;
 pub mod opts;
@@ -28,8 +27,8 @@ use colored::Colorize;
 use eyre::Result;
 use std::path::Path;
 
-use opts::{ClassifyOpts, IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts, SummarizeOpts, SweepOpts};
 use config::Config;
+use opts::{ClassifyOpts, IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts, SummarizeOpts, SweepOpts};
 use report::Report;
 use state::VaultManifest;
 use summarize::BackfillSummary;

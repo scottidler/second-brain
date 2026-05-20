@@ -7,8 +7,8 @@ use std::time::Duration;
 use tokio::time::Instant;
 use vault::watcher::{VaultWatcher, WatcherConfig};
 
-use crate::opts::DaemonOpts;
 use crate::config::{Config, DaemonConfig};
+use crate::opts::DaemonOpts;
 
 /// Fingerprint of a single sweep's apply results.
 /// Used to detect oscillation between consecutive sweeps.

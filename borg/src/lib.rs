@@ -22,7 +22,6 @@ pub mod hygiene;
 pub mod intake;
 pub mod jina;
 pub mod ledger;
-pub mod logging;
 pub mod markdown;
 pub mod migrate;
 pub mod notify;

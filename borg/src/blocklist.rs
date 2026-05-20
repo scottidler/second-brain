@@ -206,5 +206,42 @@ fn try_parse_date(s: &str) -> Result<DateTime<Utc>> {
     bail!("no recognized date format in {s}");
 }
 
+pub fn run_list() -> Result<()> {
+    let path = default_path();
+    let bl = Blocklist::from_file(&path)?;
+    if bl.domains.is_empty() {
+        println!("(blocklist empty)");
+    } else {
+        for (domain, entry) in bl.list() {
+            println!(
+                "{domain:30} retriable-after={} hits={} reason={}",
+                entry.retriable_after, entry.hits, entry.reason
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn run_remove(domain: &str) -> Result<()> {
+    let path = default_path();
+    let mut bl = Blocklist::from_file(&path)?;
+    let removed = bl.remove(domain).is_some();
+    bl.save_to(&path)?;
+    if removed {
+        println!("removed: {domain}");
+    } else {
+        println!("not blocklisted: {domain}");
+    }
+    Ok(())
+}
+
+pub fn run_clear() -> Result<()> {
+    let path = default_path();
+    let bl = Blocklist::default();
+    bl.save_to(&path)?;
+    println!("blocklist cleared");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

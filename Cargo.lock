@@ -4571,6 +4571,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "sb"
+version = "0.8.2"
+dependencies = [
+ "borg",
+ "clap",
+ "colored",
+ "cortex",
+ "dirs",
+ "distillers",
+ "env_logger",
+ "eyre",
+ "log",
+ "oracle",
+ "serde_json",
+ "shellexpand",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "vault",
+]
+
+[[package]]
 name = "scc"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -41,8 +41,8 @@ use fs2::FileExt;
 use vault::embedding::{ACTIVE_MODEL_VERSION, EmbeddingModel, MockEmbedder, load_active_model};
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
-use crate::opts::EmbedOpts;
 use crate::config::Config;
+use crate::opts::EmbedOpts;
 
 /// Default batch size for the embed loop. Phase A5's transaction
 /// discipline test asserts the write transaction wall-clock stays under
