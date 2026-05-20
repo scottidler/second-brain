@@ -78,6 +78,10 @@ pub fn all_sections() -> Vec<Section> {
             findings: config_findings(),
         },
         Section {
+            name: "shared config",
+            findings: shared_config_findings(),
+        },
+        Section {
             name: "patterns",
             findings: pattern_findings(),
         },
@@ -135,19 +139,102 @@ fn config_findings() -> Vec<Finding> {
         ("cortex", config_path("obsidian-cortex", "obsidian-cortex.yml")),
         ("oracle", config_path("oracle", "oracle.yml")),
     ];
-    candidates
-        .iter()
-        .map(|(name, path)| {
-            if path.exists() {
-                Finding::ok(format!("{name}: {}", path.display()))
-            } else {
-                Finding::warn(
-                    format!("{name}: missing ({})", path.display()),
-                    "sb bootstrap".to_string(),
-                )
-            }
-        })
-        .collect()
+    let mut findings = Vec::new();
+    for (name, path) in &candidates {
+        if !path.exists() {
+            findings.push(Finding::warn(
+                format!("{name}: missing ({})", path.display()),
+                "sb bootstrap".to_string(),
+            ));
+            continue;
+        }
+        // Parse-status check: try to deserialize each present config file. A
+        // YAML syntax error is the most common silent-misconfig mode this
+        // catches before the daemon fails opaquely at startup.
+        match std::fs::read_to_string(path) {
+            Ok(content) => match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                Ok(_) => findings.push(Finding::ok(format!("{name}: {} (parses)", path.display()))),
+                Err(e) => findings.push(Finding::error(
+                    format!("{name}: {} parse failed: {e}", path.display()),
+                    format!(
+                        "open {} and fix the YAML syntax (or sb bootstrap to restore the template)",
+                        path.display()
+                    ),
+                )),
+            },
+            Err(e) => findings.push(Finding::error(
+                format!("{name}: {} unreadable: {e}", path.display()),
+                "check permissions on the file".to_string(),
+            )),
+        }
+    }
+    findings
+}
+
+/// Compare the shared-config files in the repo (`config/*.yml`) against the
+/// installed copies in `~/.config/second-brain/`. Drift here means borg and
+/// cortex disagree on the canonical tag vocabulary - a class of silent bugs
+/// only caught by hash-comparing the source-of-truth against the runtime
+/// copy. Mirror of `pattern_findings`.
+fn shared_config_findings() -> Vec<Finding> {
+    let repo_shared = std::path::Path::new("config");
+    let installed = dirs::config_dir().map(|d| d.join("second-brain"));
+    let mut findings = Vec::new();
+    let Some(installed) = installed else {
+        findings.push(Finding::error(
+            "dirs::config_dir() returned None",
+            "check XDG_CONFIG_HOME",
+        ));
+        return findings;
+    };
+    if !repo_shared.exists() {
+        findings.push(Finding::info(
+            "config/ not present in CWD (run from repo root for drift detection)",
+        ));
+        return findings;
+    }
+    if !installed.exists() {
+        findings.push(Finding::warn(
+            format!("{} missing", installed.display()),
+            "otto deploy".to_string(),
+        ));
+        return findings;
+    }
+    let repo_files: Vec<_> = std::fs::read_dir(repo_shared)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("yml"))
+        .collect();
+    if repo_files.is_empty() {
+        findings.push(Finding::info("no .yml files under config/ (nothing to compare)"));
+        return findings;
+    }
+    let mut drift = 0usize;
+    for entry in &repo_files {
+        let name = entry.file_name();
+        let installed_path = installed.join(&name);
+        if !installed_path.exists() {
+            drift += 1;
+            continue;
+        }
+        if std::fs::read(entry.path()).ok() != std::fs::read(&installed_path).ok() {
+            drift += 1;
+        }
+    }
+    if drift == 0 {
+        findings.push(Finding::ok(format!(
+            "{} shared-config file(s) in sync",
+            repo_files.len()
+        )));
+    } else {
+        findings.push(Finding::warn(
+            format!("{drift} of {} shared-config file(s) drifted vs repo", repo_files.len()),
+            "otto deploy".to_string(),
+        ));
+    }
+    findings
 }
 
 fn pattern_findings() -> Vec<Finding> {

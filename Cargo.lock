@@ -4586,6 +4586,7 @@ dependencies = [
  "oracle",
  "rmcp",
  "serde_json",
+ "serde_yaml",
  "shellexpand",
  "tokio",
  "tracing",
