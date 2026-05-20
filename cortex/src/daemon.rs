@@ -551,6 +551,7 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
 
     std::fs::create_dir_all(&service_dir).context("failed to create systemd user dir")?;
 
+    let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let binary = std::env::current_exe().context("failed to get current executable path")?;
     let vault = vault_root.display();
 
@@ -566,37 +567,49 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
 
     let service = format!(
         "[Unit]\n\
-         Description=Obsidian Cortex Vault Daemon\n\
+         Description=cortex - Obsidian vault governance daemon (second-brain)\n\
          After=default.target\n\
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={binary}{config_flag} --vault {vault} --log-level {log_level} daemon --start\n\
+         Environment=\"PATH={home}/.local/bin:{home}/.cargo/bin:{home}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n\
+         ExecStart={binary} cortex{config_flag} --vault {vault} --log-level {log_level} daemon --start\n\
          Restart=on-failure\n\
          RestartSec=5\n\
+         WorkingDirectory={home}\n\
+         \n\
+         # Hardening\n\
+         NoNewPrivileges=true\n\
+         ProtectSystem=strict\n\
+         ProtectHome=read-only\n\
+         ReadWritePaths={vault}\n\
+         PrivateTmp=true\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
+        home = home.display(),
         binary = binary.display(),
     );
 
-    let service_path = service_dir.join("obsidian-cortex.service");
+    let service_path = service_dir.join("cortex.service");
     std::fs::write(&service_path, &service)?;
     println!("Installed: {}", service_path.display());
 
     // Daily intel timer - runs at 23:00 every day
     let daily_service = format!(
         "[Unit]\n\
-         Description=Obsidian Cortex Daily Intel\n\
+         Description=cortex daily intel\n\
          \n\
          [Service]\n\
          Type=oneshot\n\
-         ExecStart={binary}{config_flag} --vault {vault} intel --daily\n",
+         Environment=\"PATH={home}/.local/bin:{home}/.cargo/bin:{home}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n\
+         ExecStart={binary} cortex{config_flag} --vault {vault} intel --daily\n",
+        home = home.display(),
         binary = binary.display(),
     );
 
     let daily_timer = "[Unit]\n\
-         Description=Obsidian Cortex Daily Intel Timer\n\
+         Description=cortex daily intel timer\n\
          \n\
          [Timer]\n\
          OnCalendar=*-*-* 23:00:00\n\
@@ -605,8 +618,8 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
          [Install]\n\
          WantedBy=timers.target\n";
 
-    let daily_svc_path = service_dir.join("obsidian-cortex-daily.service");
-    let daily_timer_path = service_dir.join("obsidian-cortex-daily.timer");
+    let daily_svc_path = service_dir.join("cortex-daily.service");
+    let daily_timer_path = service_dir.join("cortex-daily.timer");
     std::fs::write(&daily_svc_path, daily_service)?;
     std::fs::write(&daily_timer_path, daily_timer)?;
     println!("Installed: {}", daily_svc_path.display());
@@ -615,16 +628,18 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
     // Weekly intel timer - runs Sunday at 22:00
     let weekly_service = format!(
         "[Unit]\n\
-         Description=Obsidian Cortex Weekly Intel\n\
+         Description=cortex weekly intel\n\
          \n\
          [Service]\n\
          Type=oneshot\n\
-         ExecStart={binary}{config_flag} --vault {vault} intel --weekly\n",
+         Environment=\"PATH={home}/.local/bin:{home}/.cargo/bin:{home}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n\
+         ExecStart={binary} cortex{config_flag} --vault {vault} intel --weekly\n",
+        home = home.display(),
         binary = binary.display(),
     );
 
     let weekly_timer = "[Unit]\n\
-         Description=Obsidian Cortex Weekly Intel Timer\n\
+         Description=cortex weekly intel timer\n\
          \n\
          [Timer]\n\
          OnCalendar=Sun *-*-* 22:00:00\n\
@@ -633,8 +648,8 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
          [Install]\n\
          WantedBy=timers.target\n";
 
-    let weekly_svc_path = service_dir.join("obsidian-cortex-weekly.service");
-    let weekly_timer_path = service_dir.join("obsidian-cortex-weekly.timer");
+    let weekly_svc_path = service_dir.join("cortex-weekly.service");
+    let weekly_timer_path = service_dir.join("cortex-weekly.timer");
     std::fs::write(&weekly_svc_path, weekly_service)?;
     std::fs::write(&weekly_timer_path, weekly_timer)?;
     println!("Installed: {}", weekly_svc_path.display());
@@ -642,9 +657,9 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
 
     println!("\nRun:");
     println!("  systemctl --user daemon-reload");
-    println!("  systemctl --user enable --now obsidian-cortex");
-    println!("  systemctl --user enable --now obsidian-cortex-daily.timer");
-    println!("  systemctl --user enable --now obsidian-cortex-weekly.timer");
+    println!("  systemctl --user enable --now cortex");
+    println!("  systemctl --user enable --now cortex-daily.timer");
+    println!("  systemctl --user enable --now cortex-weekly.timer");
 
     Ok(())
 }
@@ -657,11 +672,11 @@ fn uninstall_systemd_service() -> Result<()> {
         .join("user");
 
     let units = [
-        "obsidian-cortex.service",
-        "obsidian-cortex-daily.service",
-        "obsidian-cortex-daily.timer",
-        "obsidian-cortex-weekly.service",
-        "obsidian-cortex-weekly.timer",
+        "cortex.service",
+        "cortex-daily.service",
+        "cortex-daily.timer",
+        "cortex-weekly.service",
+        "cortex-weekly.timer",
     ];
 
     let mut removed = false;
@@ -689,13 +704,13 @@ fn show_status() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("~/.config"))
         .join("systemd")
         .join("user")
-        .join("obsidian-cortex.service");
+        .join("cortex.service");
 
     if service_path.exists() {
         println!("Service file: {}", service_path.display());
-        println!("Check status: systemctl --user status obsidian-cortex");
+        println!("Check status: systemctl --user status cortex");
     } else {
-        println!("Daemon not installed. Run: cortex daemon --install");
+        println!("Daemon not installed. Run: sb cortex daemon --install");
     }
 
     Ok(())

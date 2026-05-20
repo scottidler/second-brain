@@ -623,7 +623,7 @@ pub async fn run_ingest(
 
 fn send_notification(summary: &str, body: &str) {
     let _ = notify_rust::Notification::new()
-        .appname("obsidian-borg")
+        .appname("borg")
         .summary(&format!("obsidian-borg: {summary}"))
         .body(body)
         .timeout(notify_rust::Timeout::Milliseconds(5000))
@@ -826,10 +826,10 @@ async fn uninstall_service() -> Result<()> {
 
 async fn stop_service() -> Result<()> {
     if cfg!(target_os = "linux") {
-        systemctl(&["stop", "obsidian-borg"]).await?;
+        systemctl(&["stop", "borg"]).await?;
         println!("Stopped obsidian-borg service");
     } else if cfg!(target_os = "macos") {
-        launchctl(&["stop", "com.obsidian-borg"]).await?;
+        launchctl(&["stop", "com.borg"]).await?;
         println!("Stopped obsidian-borg service");
     } else {
         eyre::bail!("Unsupported platform for service stop")
@@ -839,11 +839,11 @@ async fn stop_service() -> Result<()> {
 
 async fn restart_service() -> Result<()> {
     if cfg!(target_os = "linux") {
-        systemctl(&["restart", "obsidian-borg"]).await?;
+        systemctl(&["restart", "borg"]).await?;
         println!("Restarted obsidian-borg service");
     } else if cfg!(target_os = "macos") {
-        launchctl(&["stop", "com.obsidian-borg"]).await.ok();
-        launchctl(&["start", "com.obsidian-borg"]).await?;
+        launchctl(&["stop", "com.borg"]).await.ok();
+        launchctl(&["start", "com.borg"]).await?;
         println!("Restarted obsidian-borg service");
     } else {
         eyre::bail!("Unsupported platform for service restart")
@@ -854,7 +854,7 @@ async fn restart_service() -> Result<()> {
 async fn show_status() -> Result<()> {
     if cfg!(target_os = "linux") {
         let output = tokio::process::Command::new("systemctl")
-            .args(["--user", "status", "obsidian-borg"])
+            .args(["--user", "status", "borg"])
             .output()
             .await
             .context("Failed to run systemctl")?;
@@ -862,7 +862,7 @@ async fn show_status() -> Result<()> {
         println!("{stdout}");
     } else if cfg!(target_os = "macos") {
         let output = tokio::process::Command::new("launchctl")
-            .args(["list", "com.obsidian-borg"])
+            .args(["list", "com.borg"])
             .output()
             .await
             .context("Failed to run launchctl")?;
@@ -907,20 +907,20 @@ async fn launchctl(args: &[&str]) -> Result<()> {
 async fn install_systemd(exe_path: &str) -> Result<()> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let unit_dir = home.join(".config/systemd/user");
-    let unit_path = unit_dir.join("obsidian-borg.service");
+    let unit_path = unit_dir.join("borg.service");
 
     let vault_path = home.join("repos/scottidler/obsidian");
-    let secrets_path = home.join(".../.secrets");
+    let secrets_path = home.join("repos/scottidler/secrets/.secrets");
     let manifest_bin = home.join(".cargo/bin/manifest");
     let uid = std::process::Command::new("id")
         .arg("-u")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| "1000".to_string());
-    let env_file = format!("/run/user/{}/obsidian-borg.env", uid);
+    let env_file = format!("/run/user/{}/borg.env", uid);
     let unit_content = format!(
         r#"[Unit]
-Description=obsidian-borg - Obsidian ingestion daemon
+Description=borg - Obsidian ingestion daemon (second-brain)
 After=network-online.target
 Wants=network-online.target
 StartLimitBurst=5
@@ -931,7 +931,7 @@ Type=simple
 ExecStartPre=/bin/sh -c '{manifest} age decrypt {secrets} -f env > {env_file}'
 EnvironmentFile=-{env_file}
 Environment="PATH={home}/.local/bin:{home}/.cargo/bin:{home}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart={exe_path} daemon --start
+ExecStart={exe_path} borg daemon --start
 Restart=always
 RestartSec=5
 WorkingDirectory={home}
@@ -954,7 +954,7 @@ WantedBy=default.target
     );
 
     // Stop the running service if active (ignore errors - may not be running)
-    systemctl(&["stop", "obsidian-borg"]).await.ok();
+    systemctl(&["stop", "borg"]).await.ok();
 
     // Write (or overwrite) the unit file
     std::fs::create_dir_all(&unit_dir).context("Failed to create systemd user unit directory")?;
@@ -963,7 +963,7 @@ WantedBy=default.target
 
     // Reload so systemd picks up changes, then enable + start
     systemctl(&["daemon-reload"]).await?;
-    systemctl(&["enable", "--now", "obsidian-borg"]).await?;
+    systemctl(&["enable", "--now", "borg"]).await?;
 
     println!("Service installed and started.");
     show_status().await.ok();
@@ -1016,7 +1016,7 @@ async fn install_launchd(exe_path: &str) -> Result<()> {
 
 async fn uninstall_systemd() -> Result<()> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
-    let unit_path = home.join(".config/systemd/user/obsidian-borg.service");
+    let unit_path = home.join(".config/systemd/user/borg.service");
 
     if !unit_path.exists() {
         println!("No service file found at {}", unit_path.display());
@@ -1024,7 +1024,7 @@ async fn uninstall_systemd() -> Result<()> {
     }
 
     let _ = std::process::Command::new("systemctl")
-        .args(["--user", "disable", "--now", "obsidian-borg"])
+        .args(["--user", "disable", "--now", "borg"])
         .status();
 
     std::fs::remove_file(&unit_path).context("Failed to remove unit file")?;
@@ -1108,7 +1108,7 @@ fn install_gnome_keybinding(command: &str, key: &str) -> Result<()> {
         GNOME_KEYBINDING_PATH
     );
 
-    for (prop, val) in [("name", "obsidian-borg"), ("command", command), ("binding", key)] {
+    for (prop, val) in [("name", "borg"), ("command", command), ("binding", key)] {
         let status = std::process::Command::new("gsettings")
             .args(["set", &schema, prop, val])
             .status()
