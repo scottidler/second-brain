@@ -97,14 +97,21 @@ pub enum AuditEvent {
     NothingFixable,
 }
 
+/// Convenience: scan + optionally apply fixes in one call. sb does NOT
+/// use this entry point (it needs to print the summary BEFORE the fix
+/// loop streams events); use `scan` + `apply_fixes` for that.
 pub fn run(config: &Config, fix: bool) -> Result<AuditReport> {
-    audit_with_progress(config, fix, |_| {})
+    let mut report = scan(config)?;
+    if fix && !report.no_ledger {
+        report.fixed_count = apply_fixes(&report, |_| {});
+    }
+    Ok(report)
 }
 
-/// Same as `run` but allows callers to stream fix-mode progress. `sb`
-/// uses this entry point; pass `|_| {}` if you do not care about
-/// streaming.
-pub fn audit_with_progress(config: &Config, fix: bool, mut progress: impl FnMut(&AuditEvent)) -> Result<AuditReport> {
+/// Scan the vault for audit findings. Returns the typed report with
+/// `fixed_count = 0`; no disk writes occur. Run `apply_fixes` afterward
+/// (with the same report) to perform the --fix work.
+pub fn scan(config: &Config) -> Result<AuditReport> {
     let ledger_path = ledger::ledger_path(config);
     let vault_root = expand_tilde(&config.vault.root_path);
 
@@ -219,56 +226,61 @@ pub fn audit_with_progress(config: &Config, fix: bool, mut progress: impl FnMut(
         }
     }
 
-    // Fix mode: update mistyped notes. Each fix is a real disk I/O
-    // event; emit progress via callback so sb can stream live (per
-    // Alternative 3 in the design).
-    let mut fixed_count = 0;
-    if fix {
-        let fixable: Vec<&AuditFinding> = findings
-            .iter()
-            .filter(|f| matches!(f, AuditFinding::MistypedContent { .. }))
-            .collect();
-
-        if fixable.is_empty() {
-            progress(&AuditEvent::NothingFixable);
-        } else {
-            progress(&AuditEvent::FixStart { count: fixable.len() });
-            for finding in &fixable {
-                if let AuditFinding::MistypedContent {
-                    expected_type,
-                    note_path: Some(path),
-                    ..
-                } = finding
-                {
-                    match fix_note_type(path, expected_type) {
-                        Ok(()) => {
-                            let rel = path.strip_prefix(&vault_root).unwrap_or(path).to_path_buf();
-                            progress(&AuditEvent::Fixed {
-                                rel_path: rel,
-                                expected_type: expected_type.clone(),
-                            });
-                            fixed_count += 1;
-                        }
-                        Err(e) => {
-                            progress(&AuditEvent::FixError {
-                                path: path.clone(),
-                                error: format!("{e:#}"),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     Ok(AuditReport {
         ledger_path,
         vault_root,
         entries_scanned,
         no_ledger: false,
         findings,
-        fixed_count,
+        fixed_count: 0,
     })
+}
+
+/// Apply fixes for the mistyped-content findings in `report`. Each fix
+/// is a real disk I/O event, so this streams `AuditEvent`s through the
+/// callback (per architect Alternative 3, audit --fix is sequential I/O
+/// where live UX matters). Returns the number of fixes successfully
+/// applied; sb writes that back into `report.fixed_count`.
+pub fn apply_fixes(report: &AuditReport, mut progress: impl FnMut(&AuditEvent)) -> usize {
+    let fixable: Vec<&AuditFinding> = report
+        .findings
+        .iter()
+        .filter(|f| matches!(f, AuditFinding::MistypedContent { .. }))
+        .collect();
+
+    if fixable.is_empty() {
+        progress(&AuditEvent::NothingFixable);
+        return 0;
+    }
+
+    progress(&AuditEvent::FixStart { count: fixable.len() });
+    let mut fixed = 0usize;
+    for finding in &fixable {
+        if let AuditFinding::MistypedContent {
+            expected_type,
+            note_path: Some(path),
+            ..
+        } = finding
+        {
+            match fix_note_type(path, expected_type) {
+                Ok(()) => {
+                    let rel = path.strip_prefix(&report.vault_root).unwrap_or(path).to_path_buf();
+                    progress(&AuditEvent::Fixed {
+                        rel_path: rel,
+                        expected_type: expected_type.clone(),
+                    });
+                    fixed += 1;
+                }
+                Err(e) => {
+                    progress(&AuditEvent::FixError {
+                        path: path.clone(),
+                        error: format!("{e:#}"),
+                    });
+                }
+            }
+        }
+    }
+    fixed
 }
 
 /// Build an index mapping source URL -> list of note file paths in the vault.

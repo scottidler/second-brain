@@ -383,11 +383,13 @@ impl BorgCli {
                     print_orphan_audit_report(&report);
                     Ok(())
                 } else {
-                    print_audit_header_from_disk(&config);
-                    let report = borg::audit::audit_with_progress(&config, fix, |event| {
-                        print_audit_event(event);
-                    })?;
+                    let mut report = borg::audit::scan(&config)?;
                     print_audit_summary(&report, fix);
+                    if fix && !report.no_ledger {
+                        report.fixed_count = borg::audit::apply_fixes(&report, |event| {
+                            print_audit_event(event);
+                        });
+                    }
                     Ok(())
                 }
             }
@@ -793,13 +795,6 @@ fn print_replay_event(event: &borg::replay::ReplayEvent) {
             println!("  trace {trace_id}: {error}");
         }
     }
-}
-
-fn print_audit_header_from_disk(_config: &borg::config::Config) {
-    // The header used to be emitted by the lib; now sb prints it from
-    // the report. The lib has not started yet at this point, so we
-    // delay header rendering until after audit_with_progress returns
-    // and we have a populated report.
 }
 
 fn print_audit_event(event: &borg::audit::AuditEvent) {
