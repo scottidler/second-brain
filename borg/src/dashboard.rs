@@ -112,7 +112,7 @@ pub fn ensure_dashboard_exists(dashboard_path: &Path) -> Result<()> {
 /// `borg dashboard refresh` to upgrade dashboards that were generated
 /// before a schema change (e.g. the source != null -> origin = "assisted"
 /// + date -> ingested swap from the 2026-05-11 intake-log + DLQ design).
-pub fn refresh_dashboard(dashboard_path: &Path) -> Result<()> {
+pub fn refresh(dashboard_path: &Path) -> Result<()> {
     if let Some(parent) = dashboard_path.parent() {
         fs::create_dir_all(parent).context("Failed to create dashboard directory")?;
     }
@@ -223,7 +223,7 @@ mod tests {
         let path = temp_dashboard_path("test-refresh-dashboard.md");
         cleanup(&path);
         fs::write(&path, "STALE CONTENT").expect("seed");
-        refresh_dashboard(&path).expect("refresh");
+        refresh(&path).expect("refresh");
         let content = fs::read_to_string(&path).expect("read");
         assert!(!content.contains("STALE CONTENT"));
         assert!(content.contains("# Borg Dashboard"));

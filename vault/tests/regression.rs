@@ -8,9 +8,9 @@
 
 #![cfg(feature = "vec")]
 
-#[path = "regression/hybrid_retrieval.rs"]
-mod hybrid_retrieval;
+#[path = "regression/hybrid/retrieval.rs"]
+mod retrieval;
 
 #[cfg(feature = "vec-candle")]
-#[path = "regression/candle_parity.rs"]
-mod candle_parity;
+#[path = "regression/candle/parity.rs"]
+mod parity;

@@ -153,7 +153,7 @@ fn classify_for_backfill(path: &Path, min_age: Duration) -> BackfillDecision {
 ///
 /// Pure helper, no global Config dependency. Used both by the public `run_backfill_ingested`
 /// entry point (which then prints the report) and by the counter-correctness test.
-pub(crate) fn run_backfill_on(vault_root: &Path, skip_folders: &[String], dry_run: bool) -> Result<BackfillReport> {
+pub(crate) fn backfill_on(vault_root: &Path, skip_folders: &[String], dry_run: bool) -> Result<BackfillReport> {
     log::debug!(
         "backfill::run_backfill_on: vault={} dry_run={dry_run}",
         vault_root.display()
@@ -233,9 +233,9 @@ pub(crate) fn run_backfill_on(vault_root: &Path, skip_folders: &[String], dry_ru
     })
 }
 
-pub fn run_backfill_ingested(config: &Config, dry_run: bool) -> Result<()> {
+pub fn ingested(config: &Config, dry_run: bool) -> Result<()> {
     let vault_root = expand_tilde(&config.vault.root_path);
-    let report = run_backfill_on(&vault_root, &config.migration.skip_folders, dry_run)?;
+    let report = backfill_on(&vault_root, &config.migration.skip_folders, dry_run)?;
 
     println!(
         "backfill-ingested complete:\n  scanned: {}\n  backfilled: {}{}\n  skipped (already had ingested:): {}\n  skipped (origin != assisted): {}\n  skipped (recent mtime): {}\n  skipped (no date: field): {}",

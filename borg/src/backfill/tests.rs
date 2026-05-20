@@ -45,7 +45,7 @@ fn collect_md_files_skips_listed_folders() {
 /// Each counter is verified independently so any par_iter/AtomicUsize aggregation bug
 /// surfaces with a specific failed assertion, not just a total-count mismatch.
 #[test]
-fn run_backfill_on_counter_values_match_known_fixture() {
+fn backfill_on_counter_values_match_known_fixture() {
     use filetime::{FileTime, set_file_mtime};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -85,7 +85,7 @@ fn run_backfill_on_counter_values_match_known_fixture() {
     let recent_path = root.join("e-recent.md");
     std::fs::write(&recent_path, "---\norigin: assisted\ndate: 2026-04-05\n---\nbody\n").expect("write recent");
 
-    let report = run_backfill_on(root, &[], true).expect("run_backfill_on dry_run");
+    let report = backfill_on(root, &[], true).expect("backfill_on dry_run");
 
     assert_eq!(report.scanned, 5, "scanned should count every md file");
     assert_eq!(report.backfilled, 1, "exactly one note is eligible to backfill");
@@ -102,13 +102,13 @@ fn run_backfill_on_counter_values_match_known_fixture() {
 }
 
 /// Phase 0 deliverable the audit flagged as missing: `borg backfill-ingested --dry-run` runs
-/// to completion. Exercises the sync conversion end-to-end via the same `run_backfill_on`
+/// to completion. Exercises the sync conversion end-to-end via the same `backfill_on`
 /// helper that the CLI entry point now calls; assertion is that an empty tempdir returns
 /// a zeroed report rather than panicking or propagating an error.
 #[test]
 fn backfill_ingested_dry_run_empty_vault_smoke() {
     let dir = tempdir().expect("tempdir");
-    let report = run_backfill_on(dir.path(), &[], true).expect("dry-run on empty vault");
+    let report = backfill_on(dir.path(), &[], true).expect("dry-run on empty vault");
     assert_eq!(report.scanned, 0);
     assert_eq!(report.backfilled, 0);
     assert_eq!(report.skipped_authored, 0);

@@ -75,7 +75,7 @@ async fn register_systemd_units() -> Result<()> {
         restart: false,
         status: false,
     };
-    borg::run_daemon(borg_config, false, borg_install)
+    borg::daemon(borg_config, false, borg_install)
         .await
         .context("borg daemon --install")?;
 
@@ -89,7 +89,7 @@ async fn register_systemd_units() -> Result<()> {
         stop: false,
         status: false,
     };
-    cortex::daemon::run_daemon(&cortex_vault, &cortex_config, &cortex_install)
+    cortex::daemon::run(&cortex_vault, &cortex_config, &cortex_install)
         .await
         .context("cortex daemon --install")?;
 
@@ -110,5 +110,5 @@ fn prefetch_embedding_model() -> Result<()> {
         prefetch_model: true,
         use_mock: false,
     };
-    cortex::embed::run_embed(&vault_root, &config, &opts).map(|_| ())
+    cortex::embed::run(&vault_root, &config, &opts).map(|_| ())
 }

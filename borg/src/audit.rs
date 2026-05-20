@@ -65,7 +65,7 @@ impl std::fmt::Display for AuditFinding {
     }
 }
 
-pub fn run_audit(config: &Config, fix: bool) -> Result<()> {
+pub fn run(config: &Config, fix: bool) -> Result<()> {
     let ledger_path = ledger::ledger_path(config);
     let vault_root = expand_tilde(&config.vault.root_path);
 

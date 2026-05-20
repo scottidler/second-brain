@@ -81,7 +81,7 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub async fn run_server(config: Config, _verbose: bool) -> Result<()> {
+pub async fn serve(config: Config, _verbose: bool) -> Result<()> {
     log::info!("Starting obsidian-borg daemon");
 
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
@@ -264,7 +264,7 @@ pub fn resolve_note_text(text: Option<String>, clipboard: bool) -> Result<String
     eyre::bail!("No text provided. Use a text argument or --clipboard")
 }
 
-pub async fn run_note(config: Config, text: String, tags: Option<Vec<String>>) -> Result<()> {
+pub async fn note(config: Config, text: String, tags: Option<Vec<String>>) -> Result<()> {
     let trace_id = trace::generate(types::IngestMethod::Cli);
     intake::record_intake_with_sidecar(
         &config,
@@ -304,7 +304,7 @@ pub async fn run_note(config: Config, text: String, tags: Option<Vec<String>>) -
     Ok(())
 }
 
-pub async fn run_file_ingest(
+pub async fn ingest_file(
     config: Config,
     file_path: std::path::PathBuf,
     tags: Option<Vec<String>>,
@@ -416,7 +416,7 @@ pub fn resolve_ingest_url(url: Option<String>, clipboard: bool) -> Result<String
     eyre::bail!("No URL provided. Use a URL argument or --clipboard")
 }
 
-pub async fn run_reingest(
+pub async fn reingest(
     config: Config,
     all: bool,
     content_type: Option<String>,
@@ -550,7 +550,7 @@ pub async fn run_reingest(
     Ok(())
 }
 
-pub async fn run_ingest(
+pub async fn ingest(
     config: Config,
     url: String,
     tags: Option<Vec<String>>,
@@ -709,7 +709,7 @@ fn generate_manifest(config: &config::Config) -> serde_json::Value {
     })
 }
 
-pub async fn run_sign(config: &config::Config) -> Result<()> {
+pub async fn sign(config: &config::Config) -> Result<()> {
     let repo_root = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .output()
@@ -764,7 +764,7 @@ pub async fn run_sign(config: &config::Config) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_hotkey(opts: opts::HotkeyOpts, config: &Config) -> Result<()> {
+pub async fn hotkey(opts: opts::HotkeyOpts, config: &Config) -> Result<()> {
     // CLI args override config; if CLI has default values, fall back to config
     let host = if opts.host == "localhost" { config.hotkey.host.clone() } else { opts.host };
     let port = if opts.port == 8181 { config.hotkey.port } else { opts.port };
@@ -780,7 +780,7 @@ pub async fn run_hotkey(opts: opts::HotkeyOpts, config: &Config) -> Result<()> {
     }
 }
 
-pub async fn run_daemon(config: Config, verbose: bool, opts: opts::DaemonOpts) -> Result<()> {
+pub async fn daemon(config: Config, verbose: bool, opts: opts::DaemonOpts) -> Result<()> {
     use crate::opts::DaemonOpts;
 
     match opts {
@@ -790,7 +790,7 @@ pub async fn run_daemon(config: Config, verbose: bool, opts: opts::DaemonOpts) -
             uninstall_service().await.ok();
             install_service().await
         }
-        DaemonOpts { start: true, .. } => run_server(config, verbose).await,
+        DaemonOpts { start: true, .. } => serve(config, verbose).await,
         DaemonOpts { stop: true, .. } => stop_service().await,
         DaemonOpts { restart: true, .. } => restart_service().await,
         DaemonOpts { status: true, .. } => show_status().await,
@@ -1249,7 +1249,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_ingest_connection_refused() {
+    async fn test_ingest_connection_refused() {
         // Use a port that's almost certainly not listening
         let config = Config {
             hotkey: config::HotkeyConfig {
@@ -1259,7 +1259,7 @@ mod tests {
             },
             ..Config::default()
         };
-        let result = run_ingest(
+        let result = ingest(
             config,
             "https://example.com".to_string(),
             None,

@@ -10,11 +10,47 @@ use std::path::{Path, PathBuf};
 use eyre::Result;
 use serde::Deserialize;
 
+use crate::config::Config;
+use crate::opts::ClassifyOpts;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::scope::insert_frontmatter_fields;
-use crate::vault::Note;
+use crate::vault::{Note, scan_vault};
 use ::vault::schema::Domain;
 use ::vault::search::SearchIndex;
+
+/// Top-level orchestrator for `sb cortex classify`. Scans the vault, opens the
+/// oracle search index (best-effort, Tier-2 LLM context), and dispatches to
+/// `apply_classify` or `lint_classify` based on `opts.apply`.
+pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Report> {
+    log::info!("starting classify command (vault_root={})", vault_root.display());
+    let notes = scan_vault(vault_root, &config.vault)?;
+
+    let db_path = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
+        .join("oracle")
+        .join("oracle.db");
+    let search_index = SearchIndex::open(&db_path).ok();
+    if let Some(ref idx) = search_index
+        && let Err(e) = idx.index_vault(vault_root)
+    {
+        log::warn!("failed to refresh search index: {e}");
+    }
+    let search_ref = search_index.as_ref();
+
+    if opts.apply {
+        apply_classify(
+            vault_root,
+            &notes,
+            &config.actions.classify,
+            opts.force,
+            opts.review_only,
+            opts.reclassify_domain.as_deref(),
+            search_ref,
+        )
+    } else {
+        Ok(lint_classify(&notes, &config.actions.classify, search_ref))
+    }
+}
 
 /// Classification configuration from cortex.yml
 #[derive(Debug, Clone, Deserialize)]

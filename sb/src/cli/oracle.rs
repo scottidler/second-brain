@@ -41,11 +41,11 @@ impl OracleCli {
     pub async fn run(self) -> Result<()> {
         let config = oracle::Config::load(self.config.as_deref()).context("Failed to load configuration")?;
         match self.command {
-            Commands::Serve => oracle::run_serve(config).await,
+            Commands::Serve => oracle::serve(config).await,
             Commands::Index => {
                 println!("Indexing vault: {}", config.vault_root().display());
                 println!("Database: {}", config.db_path().display());
-                let stats = oracle::run_index(&config)?;
+                let stats = oracle::index(&config)?;
                 println!();
                 println!("Scanned:   {}", stats.total_scanned);
                 println!("Inserted:  {}", stats.inserted);
@@ -55,17 +55,17 @@ impl OracleCli {
                 Ok(())
             }
             Commands::Stats => {
-                let stats = oracle::run_stats(&config)?;
+                let stats = oracle::stats(&config)?;
                 print_vault_stats(&config, &stats);
                 Ok(())
             }
             Commands::Call { tool, json, list } => {
                 if list {
-                    print_tool_list(&oracle::run_list());
+                    print_tool_list(&oracle::tools());
                     Ok(())
                 } else {
                     let tool_name = tool.as_deref().expect("clap enforces tool or --list");
-                    let result = oracle::run_call(config, tool_name, json.as_deref()).await?;
+                    let result = oracle::call(config, tool_name, json.as_deref()).await?;
                     print_call_result(&result)
                 }
             }

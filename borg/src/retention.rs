@@ -140,33 +140,5 @@ fn dir_size(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
-/// Run retention sweep as a CLI command. Prints a human-readable summary.
-pub fn run_sweep(config: &Config, dry_run: bool) -> Result<()> {
-    let result = sweep(config, dry_run)?;
-    let action = if dry_run { "Would delete" } else { "Deleted" };
-    println!(
-        "Scanned {} traces, kept {}, {} {} (freed {} bytes)",
-        result.scanned,
-        result.kept,
-        action.to_ascii_lowercase(),
-        result.deleted.len(),
-        result.bytes_freed
-    );
-    for name in &result.deleted {
-        println!("  {action}: {name}");
-    }
-    Ok(())
-}
-
-/// Run retention status as a CLI command. Prints a human-readable summary.
-pub fn run_status(config: &Config) -> Result<()> {
-    let report = status(config)?;
-    println!("Staging root: {}", report.root.display());
-    println!("Traces:       {}", report.traces);
-    println!("Rejected:     {}", report.rejected);
-    println!("Disk usage:   {} bytes", report.total_bytes);
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests;

@@ -103,8 +103,8 @@ pub fn audit_health_stats(config: &Config) -> Result<crate::routes::AuditHealth>
 /// Walk intake -> ledger / dlq and report orphans (intake rows older than
 /// `bound_secs` with no matching row in either store). Writes
 /// `system/views/borg-orphans.md`.
-pub async fn run_orphan_audit(config: &Config, bound_secs: u64) -> Result<()> {
-    log::debug!("dlq_cli::run_orphan_audit: bound_secs={bound_secs}");
+pub async fn orphan_audit(config: &Config, bound_secs: u64) -> Result<()> {
+    log::debug!("triage::orphan_audit: bound_secs={bound_secs}");
     let intake_md = intake_helper::intake_path(config);
     let dlq_md = intake_helper::dlq_path(config);
     let ledger_md = ledger::ledger_path(config);
@@ -203,12 +203,7 @@ fn write_orphans_md(path: &Path, orphans: &[&ParsedIntakeRow]) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_intake_list(
-    config: &Config,
-    method: Option<String>,
-    since: Option<String>,
-    limit: usize,
-) -> Result<()> {
+pub async fn intake_rows(config: &Config, method: Option<String>, since: Option<String>, limit: usize) -> Result<()> {
     let intake_md = intake_helper::intake_path(config);
     let rows = intake::parse_entries(&intake_md).context("parse intake")?;
     let filtered: Vec<&ParsedIntakeRow> = rows
@@ -236,7 +231,7 @@ pub async fn run_intake_list(
     Ok(())
 }
 
-pub async fn run_intake_show(config: &Config, trace_id: &str) -> Result<()> {
+pub async fn intake_row(config: &Config, trace_id: &str) -> Result<()> {
     let intake_md = intake_helper::intake_path(config);
     let Some(row) = intake::find_by_trace(&intake_md, trace_id)? else {
         bail!("trace_id {trace_id} not found in intake log");
@@ -264,7 +259,7 @@ pub async fn run_intake_show(config: &Config, trace_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_dlq_list(
+pub async fn dlq_rows(
     config: &Config,
     method: Option<String>,
     stage: Option<String>,
@@ -299,7 +294,7 @@ pub async fn run_dlq_list(
     Ok(())
 }
 
-pub async fn run_dlq_show(config: &Config, trace_id: &str) -> Result<()> {
+pub async fn dlq_row(config: &Config, trace_id: &str) -> Result<()> {
     let dlq_md = intake_helper::dlq_path(config);
     let Some(dlq_row) = dlq::find_by_trace(&dlq_md, trace_id)? else {
         bail!("trace_id {trace_id} not found in DLQ");
@@ -319,7 +314,7 @@ pub async fn run_dlq_show(config: &Config, trace_id: &str) -> Result<()> {
 
     // Intake + sidecar
     println!();
-    run_intake_show(config, trace_id).await?;
+    intake_row(config, trace_id).await?;
 
     // Ledger (likely empty - if there was a ledger row we wouldn't have a
     // pending DLQ entry - but the replay path can leave both)
@@ -332,12 +327,7 @@ pub async fn run_dlq_show(config: &Config, trace_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_dlq_archive(
-    config: &Config,
-    trace_id: Option<String>,
-    status: &str,
-    resolved_mode: bool,
-) -> Result<()> {
+pub async fn dlq_archive(config: &Config, trace_id: Option<String>, status: &str, resolved_mode: bool) -> Result<()> {
     let dlq_md = intake_helper::dlq_path(config);
     if resolved_mode {
         let archive_md = vault_root(config)
@@ -373,8 +363,8 @@ pub async fn run_dlq_archive(
 /// text payloads; binary replay requires the sidecar to contain bytes,
 /// which today is a descriptor only - so binary inputs are rejected with
 /// a clear error rather than silently producing a wrong-bytes ingest.
-pub async fn run_dlq_replay(config: &Config, original_trace: &str) -> Result<()> {
-    log::debug!("triage::run_dlq_replay: original_trace={original_trace}");
+pub async fn dlq_replay(config: &Config, original_trace: &str) -> Result<()> {
+    log::debug!("triage::dlq_replay: original_trace={original_trace}");
     let intake_md = intake_helper::intake_path(config);
     let Some(orig) = intake::find_by_trace(&intake_md, original_trace)? else {
         bail!("trace_id {original_trace} not found in intake log");

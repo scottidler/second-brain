@@ -6,8 +6,57 @@ use vault::canonical::{self, CanonicalTagsFile};
 use vault::search::{ColdNote, ColdQuery, SearchIndex};
 
 use crate::config::{Config, SweepConfig};
+use crate::opts::SweepOpts;
 use crate::tags::replace_tags_in_frontmatter;
-use crate::vault::Note;
+use crate::vault::{Note, scan_vault};
+
+/// Top-level orchestrator for `sb cortex sweep`. Validates flag combinations,
+/// branches between cold-sweep, tag migration, and proposal-scan modes.
+pub fn run(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<()> {
+    log::info!("starting sweep command (vault_root={})", vault_root.display());
+
+    if opts.cold && (opts.migrate || opts.proposals) {
+        eyre::bail!("--cold cannot be combined with --migrate or --proposals");
+    }
+
+    if opts.cold {
+        let stats = cold(vault_root, config)?;
+        println!(
+            "Cold sweep: scanned={} surfaced={} pinned_excluded={}",
+            stats.scanned, stats.surfaced, stats.pinned_excluded
+        );
+        return Ok(());
+    }
+
+    let notes = scan_vault(vault_root, &config.vault)?;
+
+    if opts.migrate {
+        let count = migrate(vault_root, &notes, &config.sweep, opts.dry_run)?;
+        if opts.dry_run {
+            println!("Dry run: would modify {count} note(s).");
+        } else {
+            println!("Migrated tags in {count} note(s).");
+        }
+    }
+
+    if opts.proposals || !opts.migrate {
+        let proposals = scan_proposals(&notes, &config.sweep)?;
+        if proposals.is_empty() {
+            println!("No new tag proposals.");
+        } else {
+            println!("Found {} tag(s) needing review:", proposals.len());
+            for p in &proposals {
+                println!("  {} (on {} notes)", p.tag, p.frequency);
+            }
+            if !opts.dry_run {
+                write_proposals(&config.sweep, proposals)?;
+                println!("Proposals written to {}", config.sweep.proposals_path);
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// Stats from a single cold-sweep run. Surfaced in the cortex log and
 /// embedded in the report's frontmatter so a reviewer can tell at a
@@ -38,7 +87,7 @@ pub struct ProposalsFile {
 ///
 /// Rewrites each note's tags using the canonical mapping.
 /// Returns the number of notes modified.
-pub fn run_migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run: bool) -> Result<usize> {
+pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run: bool) -> Result<usize> {
     let canonical_file =
         CanonicalTagsFile::load(Path::new(&config.canonical_path)).wrap_err("failed to load canonical tags")?;
     let mapping =
@@ -166,7 +215,7 @@ fn rewrite_note_tags(path: &Path, new_tags: &[String]) -> Result<()> {
 /// a one-liner. Errors are propagated; the daemon translates them to
 /// log lines so the runtime keeps ticking.
 pub fn daemon_cold_tick(vault_root: &Path, config: &Config) -> Result<ColdStats> {
-    run_cold(vault_root, config)
+    cold(vault_root, config)
 }
 
 /// Generate the cold-note review report.
@@ -176,7 +225,7 @@ pub fn daemon_cold_tick(vault_root: &Path, config: &Config) -> Result<ColdStats>
 /// `<vault_root>/system/views/cold-notes.md`. Cortex writes nothing to
 /// the `notes` table; the inbound counts it reads are whatever oracle's
 /// periodic recompute most recently materialized.
-pub fn run_cold(vault_root: &Path, config: &Config) -> Result<ColdStats> {
+pub fn cold(vault_root: &Path, config: &Config) -> Result<ColdStats> {
     log::debug!(
         "run_cold: vault_root={} older_than_days={} limit={}",
         vault_root.display(),
@@ -192,7 +241,7 @@ pub fn run_cold(vault_root: &Path, config: &Config) -> Result<ColdStats> {
         )
     })?;
 
-    run_cold_with_index(vault_root, &index, &config.sweep.cold)
+    cold_with_index(vault_root, &index, &config.sweep.cold)
 }
 
 /// Inner cold-sweep entrypoint that takes an already-open `SearchIndex`.
@@ -200,11 +249,7 @@ pub fn run_cold(vault_root: &Path, config: &Config) -> Result<ColdStats> {
 /// write path without going through `config.oracle_db_path()`. The
 /// daemon tick uses the outer `run_cold` so it stays a one-line `select!`
 /// arm matching the embed-tick shape.
-pub fn run_cold_with_index(
-    vault_root: &Path,
-    index: &SearchIndex,
-    cold: &crate::config::ColdConfig,
-) -> Result<ColdStats> {
+pub fn cold_with_index(vault_root: &Path, index: &SearchIndex, cold: &crate::config::ColdConfig) -> Result<ColdStats> {
     let now = chrono::Utc::now().timestamp();
     let older_than = now - (cold.older_than_days as i64) * 86_400;
     let query = ColdQuery {
@@ -573,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn run_cold_with_index_counts_pinned_excluded() {
+    fn cold_with_index_counts_pinned_excluded() {
         use std::path::PathBuf;
         use vault::frontmatter::Frontmatter;
         use vault::note::Note;
@@ -619,7 +664,7 @@ mod tests {
             older_than_days: 30,
             limit: 100,
         };
-        let stats = run_cold_with_index(vault_root.path(), &index, &cold_config).expect("run_cold");
+        let stats = cold_with_index(vault_root.path(), &index, &cold_config).expect("run_cold");
 
         assert_eq!(stats.scanned, 2, "two indexed notes");
         assert_eq!(stats.surfaced, 1, "only the unpinned one surfaces");
@@ -633,10 +678,10 @@ mod tests {
     }
 
     #[test]
-    fn run_cold_with_index_writes_report_atomically() {
+    fn cold_with_index_writes_report_atomically() {
         // The same fixture pattern the daemon test would otherwise need
         // (driving the daemon for a few seconds and asserting the file
-        // appears). Going through `run_cold_with_index` directly skips
+        // appears). Going through `cold_with_index` directly skips
         // the tokio interval but exercises every other step the daemon
         // tick runs, so a regression in the SQL, render, or atomic
         // write will surface here.
@@ -666,7 +711,7 @@ mod tests {
             older_than_days: 30,
             limit: 100,
         };
-        let stats = run_cold_with_index(vault_root.path(), &index, &cold_config).expect("run_cold");
+        let stats = cold_with_index(vault_root.path(), &index, &cold_config).expect("run_cold");
 
         assert_eq!(stats.scanned, 1);
         assert_eq!(stats.surfaced, 1);

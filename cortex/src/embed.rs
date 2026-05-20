@@ -84,9 +84,9 @@ impl EmbedStats {
 }
 
 /// CLI entry point for `cortex embed`.
-pub fn run_embed(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<EmbedStats> {
+pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<EmbedStats> {
     log::info!(
-        "cortex::embed::run_embed: vault_root={} batch_size={} kind={:?} model={:?} prefetch_model={}",
+        "cortex::embed::run: vault_root={} batch_size={} kind={:?} model={:?} prefetch_model={}",
         vault_root.display(),
         opts.batch_size,
         opts.kind,
@@ -197,7 +197,7 @@ pub fn daemon_tick(vault_root: &Path, config: &Config) -> Result<EmbedStats> {
         prefetch_model: false,
         use_mock: false,
     };
-    match run_embed(vault_root, config, &default_opts) {
+    match run(vault_root, config, &default_opts) {
         Ok(stats) => Ok(stats),
         Err(e) => {
             // Lock contention with an ad-hoc `cortex embed` invocation

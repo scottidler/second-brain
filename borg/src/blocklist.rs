@@ -207,14 +207,14 @@ fn try_parse_date(s: &str) -> Result<DateTime<Utc>> {
 }
 
 /// Load the blocklist and return its rows. Caller formats output.
-pub fn run_list() -> Result<Vec<(String, BlockedDomain)>> {
+pub fn entries() -> Result<Vec<(String, BlockedDomain)>> {
     let path = default_path();
     let bl = Blocklist::from_file(&path)?;
     Ok(bl.list().into_iter().map(|(d, e)| (d, e.clone())).collect())
 }
 
 /// Remove one domain. Returns true iff the domain was present.
-pub fn run_remove(domain: &str) -> Result<bool> {
+pub fn remove(domain: &str) -> Result<bool> {
     let path = default_path();
     let mut bl = Blocklist::from_file(&path)?;
     let removed = bl.remove(domain).is_some();
@@ -223,7 +223,7 @@ pub fn run_remove(domain: &str) -> Result<bool> {
 }
 
 /// Clear every entry. Always succeeds (writes an empty blocklist).
-pub fn run_clear() -> Result<()> {
+pub fn clear() -> Result<()> {
     let path = default_path();
     let bl = Blocklist::default();
     bl.save_to(&path)

@@ -310,7 +310,7 @@ impl CortexCli {
         match self.command {
             Command::Classify(a) => {
                 let apply = a.apply;
-                let report = cortex::run_classify(&vault_root, &config, &a.into())?;
+                let report = cortex::classify::run(&vault_root, &config, &a.into())?;
                 if apply {
                     println!("Classified {} note(s).", report.applied);
                 } else {
@@ -319,7 +319,7 @@ impl CortexCli {
             }
             Command::Lint(a) => {
                 let opts: cortex::opts::LintOpts = a.into();
-                let report = cortex::run_lint(&vault_root, &config, &opts)?;
+                let report = cortex::lint(&vault_root, &config, &opts)?;
                 if opts.format == "json" {
                     report.print_json()?;
                 } else {
@@ -328,7 +328,7 @@ impl CortexCli {
             }
             Command::Link(a) => {
                 let apply = a.apply;
-                let report = cortex::run_link(&vault_root, &config, &a.into())?;
+                let report = cortex::link(&vault_root, &config, &a.into())?;
                 if apply {
                     println!("Inserted wikilinks in {} file(s).", report.applied);
                 } else {
@@ -336,17 +336,17 @@ impl CortexCli {
                 }
             }
             Command::Intel(a) => {
-                cortex::run_intel(&vault_root, &config, &a.into())?;
+                cortex::intel::run(&vault_root, &config, &a.into())?;
             }
             Command::State(a) => {
-                cortex::run_state(&vault_root, &config, &a.into())?;
+                cortex::state(&vault_root, &config, &a.into())?;
             }
             Command::Daemon(a) => {
-                cortex::daemon::run_daemon(&vault_root, &config, &a.into()).await?;
+                cortex::daemon::run(&vault_root, &config, &a.into()).await?;
             }
             Command::Migrate(a) => {
                 let apply = a.apply;
-                let report = cortex::run_migrate(&vault_root, &config, &a.into())?;
+                let report = cortex::migrate::run(&vault_root, &config, &a.into())?;
                 if apply {
                     println!("Migrated {} file(s).", report.applied);
                 } else {
@@ -354,10 +354,10 @@ impl CortexCli {
                 }
             }
             Command::Sweep(a) => {
-                cortex::run_sweep(&vault_root, &config, &a.into())?;
+                cortex::sweep::run(&vault_root, &config, &a.into())?;
             }
             Command::Summarize(a) => {
-                let summary = cortex::run_summarize(&vault_root, &config, &a.into()).await?;
+                let summary = cortex::summarize::run(&vault_root, &config, &a.into()).await?;
                 log::info!(
                     "summarize complete: attempted={} distilled={} skipped={} failed={}",
                     summary.attempted,
@@ -367,7 +367,7 @@ impl CortexCli {
                 );
             }
             Command::Embed(a) => {
-                let stats = cortex::embed::run_embed(&vault_root, &config, &a.into())?;
+                let stats = cortex::embed::run(&vault_root, &config, &a.into())?;
                 log::info!(
                     "embed complete: scanned={} embedded={} skipped_empty={} failed={}",
                     stats.scanned,

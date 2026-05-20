@@ -33,7 +33,7 @@ impl SweepFingerprint {
 }
 
 /// Run the daemon based on subcommand options.
-pub async fn run_daemon(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Result<()> {
+pub async fn run(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Result<()> {
     if opts.install {
         install_systemd_service(vault_root, config)?;
     } else if opts.uninstall {
@@ -134,7 +134,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     log::info!("running initial full sweep");
     applying.store(true, Ordering::Relaxed);
     let mut last_fingerprint =
-        tokio::task::block_in_place(|| run_configured_actions(vault_root, config, daemon_config, &[]));
+        tokio::task::block_in_place(|| configured_actions(vault_root, config, daemon_config, &[]));
     applying.store(false, Ordering::Relaxed);
 
     loop {
@@ -150,7 +150,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 }
                 applying.store(true, Ordering::Relaxed);
                 let fingerprint = tokio::task::block_in_place(|| {
-                    run_configured_actions(vault_root, config, daemon_config, &pending)
+                    configured_actions(vault_root, config, daemon_config, &pending)
                 });
                 applying.store(false, Ordering::Relaxed);
                 // Real user edit - reset cycle detection so periodic sweeps re-enable
@@ -166,13 +166,13 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     // Don't run most actions - last sweep applied fixes, so running again risks repeating them.
                     // Exception: classify is inherently idempotent (marks notes cortex-classified: true),
                     // so it can never cause a cycle and must always run to promote new inbox notes.
-                    tokio::task::block_in_place(|| run_classify_only(vault_root, config, daemon_config));
+                    tokio::task::block_in_place(|| classify_only(vault_root, config, daemon_config));
                     // A real user edit will reset last_fingerprint and re-enable sweeps.
                 } else {
                     log::info!("running periodic sweep");
                     applying.store(true, Ordering::Relaxed);
                     let fingerprint = tokio::task::block_in_place(|| {
-                        run_configured_actions(vault_root, config, daemon_config, &[])
+                        configured_actions(vault_root, config, daemon_config, &[])
                     });
                     applying.store(false, Ordering::Relaxed);
                     last_fingerprint = fingerprint;
@@ -187,7 +187,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     weekly: false,
                     output: None,
                 };
-                if let Err(e) = tokio::task::block_in_place(|| crate::run_intel(vault_root, config, &opts)) {
+                if let Err(e) = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts)) {
                     log::error!("scheduled daily intel failed: {e}");
                 }
                 // Reschedule for next day
@@ -206,7 +206,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     weekly: true,
                     output: None,
                 };
-                if let Err(e) = tokio::task::block_in_place(|| crate::run_intel(vault_root, config, &opts)) {
+                if let Err(e) = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts)) {
                     log::error!("scheduled weekly intel failed: {e}");
                 }
                 // Reschedule for next week
@@ -264,7 +264,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
 
 /// Run classify only - used during cycle detection since classify is inherently idempotent
 /// (notes are marked cortex-classified: true and never reprocessed).
-fn run_classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonConfig) {
+fn classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonConfig) {
     if !daemon_config.enabled_actions().contains(&"classify") {
         return;
     }
@@ -275,7 +275,7 @@ fn run_classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonC
         review_only: false,
         reclassify_domain: None,
     };
-    match crate::run_classify(vault_root, config, &opts) {
+    match crate::classify::run(vault_root, config, &opts) {
         Ok(report) => {
             let promoted = report
                 .violations
@@ -292,7 +292,7 @@ fn run_classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonC
 }
 
 /// Run the configured on-change actions, returning a fingerprint of what was applied.
-fn run_configured_actions(
+fn configured_actions(
     vault_root: &Path,
     config: &Config,
     daemon_config: &DaemonConfig,
@@ -315,7 +315,7 @@ fn run_configured_actions(
                     review_only: false,
                     reclassify_domain: None,
                 };
-                match crate::run_classify(vault_root, config, &opts) {
+                match crate::classify::run(vault_root, config, &opts) {
                     Ok(report) => {
                         let promoted = report
                             .violations
@@ -339,7 +339,7 @@ fn run_configured_actions(
                     rule: Vec::new(),
                     path: None,
                 };
-                match crate::run_lint(vault_root, config, &opts) {
+                match crate::lint(vault_root, config, &opts) {
                     Ok(report) => {
                         if auto {
                             // Only mark as applied when violations were found (some may have been fixed).
@@ -378,13 +378,13 @@ fn run_configured_actions(
                         apply: false,
                         scan: "all".to_string(),
                     };
-                    match crate::run_link(vault_root, config, &lint_opts) {
+                    match crate::link(vault_root, config, &lint_opts) {
                         Ok(report) if !report.is_empty() => {
                             let apply_opts = crate::opts::LinkOpts {
                                 apply: true,
                                 scan: "all".to_string(),
                             };
-                            match crate::run_link(vault_root, config, &apply_opts) {
+                            match crate::link(vault_root, config, &apply_opts) {
                                 Ok(_) => {
                                     fingerprint.add("link", vec!["__applied__".to_string()]);
                                     log::info!("link: applied wikilink fixes");
@@ -401,7 +401,7 @@ fn run_configured_actions(
                         apply: false,
                         scan: "all".to_string(),
                     };
-                    match crate::run_link(vault_root, config, &opts) {
+                    match crate::link(vault_root, config, &opts) {
                         Ok(report) if !report.is_empty() => {
                             println!("[daemon] link: {} suggestion(s)", report.violations.len());
                         }
@@ -488,7 +488,7 @@ fn run_configured_actions(
                     weekly: false,
                     output: None,
                 };
-                if let Err(e) = crate::run_intel(vault_root, config, &opts) {
+                if let Err(e) = crate::intel::run(vault_root, config, &opts) {
                     log::error!("intel action failed: {e}");
                 }
             }
@@ -497,7 +497,7 @@ fn run_configured_actions(
                     refresh: true,
                     diff: false,
                 };
-                if let Err(e) = crate::run_state(vault_root, config, &opts) {
+                if let Err(e) = crate::state(vault_root, config, &opts) {
                     log::error!("state action failed: {e}");
                 }
             }
@@ -507,7 +507,7 @@ fn run_configured_actions(
                     Ok(notes) => {
                         if auto {
                             // Run migration (rewrite non-canonical tags)
-                            match crate::sweep::run_migrate(vault_root, &notes, &config.sweep, false) {
+                            match crate::sweep::migrate(vault_root, &notes, &config.sweep, false) {
                                 Ok(count) if count > 0 => {
                                     fingerprint.add("sweep", vec!["__applied__".to_string()]);
                                     log::info!("sweep: migrated tags in {count} note(s)");

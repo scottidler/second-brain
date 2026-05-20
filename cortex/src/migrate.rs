@@ -4,9 +4,26 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::config::MigrationConfig;
+use crate::config::{Config, MigrationConfig};
+use crate::opts::MigrateOpts;
 use crate::report::{Fix, Report, Severity, Violation};
-use crate::vault::Note;
+use crate::vault::{Note, scan_vault};
+
+/// Top-level orchestrator for `sb cortex migrate`. Scans the vault, then runs
+/// `apply_migrate` (when `opts.apply`) or `lint_migrate` (dry-run).
+pub fn run(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Result<Report> {
+    log::info!("starting migrate command (vault_root={})", vault_root.display());
+    let notes = scan_vault(vault_root, &config.vault)?;
+    if opts.apply {
+        let count = apply_migrate(vault_root, &notes, &config.migrations)?;
+        Ok(Report {
+            applied: count,
+            ..Default::default()
+        })
+    } else {
+        Ok(lint_migrate(&notes, &config.migrations))
+    }
+}
 
 /// Planned file move with optional frontmatter updates.
 #[derive(Debug)]

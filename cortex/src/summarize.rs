@@ -31,12 +31,18 @@ use crate::vault::{Frontmatter, Note, scan_vault};
 /// Match the design doc's "log every 100 notes" cadence.
 const PROGRESS_LOG_EVERY: u64 = 100;
 
-/// Top-level entry. Called from `main.rs` when `cortex summarize --backfill`
-/// is invoked. Builds a `FabricShell`-backed dispatcher and delegates to the
-/// generic core so tests can inject a fake.
-pub async fn run_backfill(vault_root: &Path, config: &Config, opts: &SummarizeOpts) -> Result<BackfillSummary> {
+/// Top-level orchestrator for `sb cortex summarize`. Logs the command start
+/// before delegating to the backfill core.
+pub async fn run(vault_root: &Path, config: &Config, opts: &SummarizeOpts) -> Result<BackfillSummary> {
+    log::info!("starting summarize command (vault_root={})", vault_root.display());
+    backfill(vault_root, config, opts).await
+}
+
+/// Build a `FabricShell`-backed dispatcher and delegate to the generic core so
+/// tests can inject a fake.
+pub async fn backfill(vault_root: &Path, config: &Config, opts: &SummarizeOpts) -> Result<BackfillSummary> {
     log::debug!(
-        "summarize::run_backfill: vault_root={} since={:?} domain={:?} extractor={:?} dry_run={} resume={}",
+        "summarize::backfill: vault_root={} since={:?} domain={:?} extractor={:?} dry_run={} resume={}",
         vault_root.display(),
         opts.since,
         opts.domain,
@@ -58,34 +64,34 @@ pub async fn run_backfill(vault_root: &Path, config: &Config, opts: &SummarizeOp
         timeout_secs: config.fabric.timeout_secs,
     };
     let dispatcher = Dispatcher::new(fabric, article_config);
-    run_backfill_with_dispatcher(vault_root, config, opts, dispatcher).await
+    backfill_with_dispatcher(vault_root, config, opts, dispatcher).await
 }
 
 /// Test-injectable core. Production builds a `FabricShell` dispatcher;
 /// tests build a `Dispatcher<Arc<FakeFabric>>` and reuse the same logic.
-pub async fn run_backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 'static>(
+pub async fn backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 'static>(
     vault_root: &Path,
     config: &Config,
     opts: &SummarizeOpts,
     dispatcher: Dispatcher<F>,
 ) -> Result<BackfillSummary> {
     let notes = scan_vault(vault_root, &config.vault).context("scan vault")?;
-    log::info!("summarize::run_backfill: scanned {} notes", notes.len());
+    log::info!("summarize::backfill: scanned {} notes", notes.len());
 
     let checkpoint_path = checkpoint_path(vault_root, config);
     let resume_after = if opts.resume { load_checkpoint(&checkpoint_path) } else { None };
     if let Some(ref last) = resume_after {
         log::info!(
-            "summarize::run_backfill: resume from checkpoint last_path={}",
+            "summarize::backfill: resume from checkpoint last_path={}",
             last.display()
         );
     } else {
-        log::info!("summarize::run_backfill: starting fresh (no checkpoint or --no-resume)");
+        log::info!("summarize::backfill: starting fresh (no checkpoint or --no-resume)");
     }
 
     let candidates: Vec<Note> = filter_notes(&notes, opts, resume_after.as_deref());
     log::info!(
-        "summarize::run_backfill: {} note(s) qualify after filters (since={:?} domain={:?} extractor={:?})",
+        "summarize::backfill: {} note(s) qualify after filters (since={:?} domain={:?} extractor={:?})",
         candidates.len(),
         opts.since,
         opts.domain,
@@ -93,7 +99,7 @@ pub async fn run_backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync 
     );
 
     if candidates.is_empty() {
-        log::info!("summarize::run_backfill: nothing to do");
+        log::info!("summarize::backfill: nothing to do");
         return Ok(BackfillSummary::default());
     }
 
@@ -141,7 +147,7 @@ pub async fn run_backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync 
             let _permit = match permit_owner.acquire_owned().await {
                 Ok(p) => p,
                 Err(e) => {
-                    log::warn!("summarize::run_backfill: semaphore closed mid-flight: {e}");
+                    log::warn!("summarize::backfill: semaphore closed mid-flight: {e}");
                     return;
                 }
             };
@@ -153,7 +159,7 @@ pub async fn run_backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync 
                     let done = distilled_count.fetch_add(1, Ordering::Relaxed) + 1;
                     if done.is_multiple_of(PROGRESS_LOG_EVERY) {
                         log::info!(
-                            "summarize::run_backfill: progress {}/{} distilled (failed={})",
+                            "summarize::backfill: progress {}/{} distilled (failed={})",
                             done,
                             total,
                             failed.load(Ordering::Relaxed),
@@ -162,11 +168,11 @@ pub async fn run_backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync 
                 }
                 Ok(ProcessOutcome::Skipped(reason)) => {
                     skipped.fetch_add(1, Ordering::Relaxed);
-                    log::debug!("summarize::run_backfill: skip {}: {reason}", path.display());
+                    log::debug!("summarize::backfill: skip {}: {reason}", path.display());
                 }
                 Err(e) => {
                     failed.fetch_add(1, Ordering::Relaxed);
-                    log::warn!("summarize::run_backfill: failed {}: {e:#}", path.display());
+                    log::warn!("summarize::backfill: failed {}: {e:#}", path.display());
                 }
             }
         });
@@ -183,7 +189,7 @@ pub async fn run_backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync 
         failed: failed.load(Ordering::Relaxed),
     };
     log::info!(
-        "summarize::run_backfill: complete attempted={} distilled={} skipped={} failed={}",
+        "summarize::backfill: complete attempted={} distilled={} skipped={} failed={}",
         summary.attempted,
         summary.distilled,
         summary.skipped,

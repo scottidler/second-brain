@@ -292,7 +292,7 @@ impl BorgCli {
                 println!();
                 Ok(())
             }
-            Some(Command::Daemon(a)) => borg::run_daemon(config, verbose, a.into()).await,
+            Some(Command::Daemon(a)) => borg::daemon(config, verbose, a.into()).await,
             Some(Command::Ingest {
                 url,
                 clipboard,
@@ -301,7 +301,7 @@ impl BorgCli {
                 force,
             }) => {
                 if let Some(file_path) = file {
-                    borg::run_file_ingest(config, file_path, tags, force).await
+                    borg::ingest_file(config, file_path, tags, force).await
                 } else {
                     let resolved_url = borg::resolve_ingest_url(url, clipboard)?;
                     let method = if clipboard {
@@ -309,32 +309,32 @@ impl BorgCli {
                     } else {
                         borg::types::IngestMethod::Cli
                     };
-                    borg::run_ingest(config, resolved_url, tags, force, clipboard, method).await
+                    borg::ingest(config, resolved_url, tags, force, clipboard, method).await
                 }
             }
             Some(Command::Note { text, clipboard, tags }) => {
                 let resolved_text = borg::resolve_note_text(text, clipboard)?;
-                borg::run_note(config, resolved_text, tags).await
+                borg::note(config, resolved_text, tags).await
             }
-            Some(Command::Hotkey(a)) => borg::run_hotkey(a.into(), &config).await,
-            Some(Command::Sign) => borg::run_sign(&config).await,
-            Some(Command::Migrate { dry_run: _, apply }) => borg::migrate::run_migrate(&config, apply).await,
+            Some(Command::Hotkey(a)) => borg::hotkey(a.into(), &config).await,
+            Some(Command::Sign) => borg::sign(&config).await,
+            Some(Command::Migrate { dry_run: _, apply }) => borg::migrate::run(&config, apply).await,
             Some(Command::Audit {
                 fix,
                 invariant,
                 bound_secs,
             }) => {
                 if invariant {
-                    borg::triage::run_orphan_audit(&config, bound_secs).await
+                    borg::triage::orphan_audit(&config, bound_secs).await
                 } else {
-                    borg::audit::run_audit(&config, fix)
+                    borg::audit::run(&config, fix)
                 }
             }
             Some(Command::Intake(args)) => match args.action {
                 IntakeAction::List { method, since, limit } => {
-                    borg::triage::run_intake_list(&config, method, since, limit).await
+                    borg::triage::intake_rows(&config, method, since, limit).await
                 }
-                IntakeAction::Show { trace_id } => borg::triage::run_intake_show(&config, &trace_id).await,
+                IntakeAction::Show { trace_id } => borg::triage::intake_row(&config, &trace_id).await,
             },
             Some(Command::Dlq(args)) => match args.action {
                 DlqAction::List {
@@ -342,14 +342,14 @@ impl BorgCli {
                     stage,
                     status,
                     limit,
-                } => borg::triage::run_dlq_list(&config, method, stage, status, limit).await,
-                DlqAction::Show { trace_id } => borg::triage::run_dlq_show(&config, &trace_id).await,
+                } => borg::triage::dlq_rows(&config, method, stage, status, limit).await,
+                DlqAction::Show { trace_id } => borg::triage::dlq_row(&config, &trace_id).await,
                 DlqAction::Archive {
                     trace_id,
                     status,
                     resolved,
-                } => borg::triage::run_dlq_archive(&config, trace_id, &status, resolved).await,
-                DlqAction::Replay { trace_id } => borg::triage::run_dlq_replay(&config, &trace_id).await,
+                } => borg::triage::dlq_archive(&config, trace_id, &status, resolved).await,
+                DlqAction::Replay { trace_id } => borg::triage::dlq_replay(&config, &trace_id).await,
             },
             Some(Command::Reingest {
                 all,
@@ -359,7 +359,7 @@ impl BorgCli {
                 before,
                 after,
                 dry_run,
-            }) => borg::run_reingest(config, all, r#type, domain, source, before, after, dry_run).await,
+            }) => borg::reingest(config, all, r#type, domain, source, before, after, dry_run).await,
             Some(Command::Replay(args)) => {
                 let opts = borg::replay::ReplayOptions {
                     trace_id: args.trace_id,
@@ -373,19 +373,39 @@ impl BorgCli {
                 borg::replay::run(config, opts).await
             }
             Some(Command::Retention(args)) => match args.action {
-                RetentionAction::Sweep { dry_run } => borg::retention::run_sweep(&config, dry_run),
-                RetentionAction::Status => borg::retention::run_status(&config),
-            },
-            Some(Command::ReingestFailed { dry_run }) => borg::migrate::run_reingest_failed(&config, dry_run).await,
-            Some(Command::BackfillIngested { dry_run }) => borg::backfill::run_backfill_ingested(&config, dry_run),
-            Some(Command::Dashboard(args)) => match args.action {
-                DashboardAction::Refresh => {
-                    borg::dashboard::refresh_dashboard(&borg::dashboard::dashboard_path(&config))
+                RetentionAction::Sweep { dry_run } => {
+                    let result = borg::retention::sweep(&config, dry_run)?;
+                    let action = if dry_run { "Would delete" } else { "Deleted" };
+                    println!(
+                        "Scanned {} traces, kept {}, {} {} (freed {} bytes)",
+                        result.scanned,
+                        result.kept,
+                        action.to_ascii_lowercase(),
+                        result.deleted.len(),
+                        result.bytes_freed
+                    );
+                    for name in &result.deleted {
+                        println!("  {action}: {name}");
+                    }
+                    Ok(())
                 }
+                RetentionAction::Status => {
+                    let report = borg::retention::status(&config)?;
+                    println!("Staging root: {}", report.root.display());
+                    println!("Traces:       {}", report.traces);
+                    println!("Rejected:     {}", report.rejected);
+                    println!("Disk usage:   {} bytes", report.total_bytes);
+                    Ok(())
+                }
+            },
+            Some(Command::ReingestFailed { dry_run }) => borg::migrate::reingest_failed(&config, dry_run).await,
+            Some(Command::BackfillIngested { dry_run }) => borg::backfill::ingested(&config, dry_run),
+            Some(Command::Dashboard(args)) => match args.action {
+                DashboardAction::Refresh => borg::dashboard::refresh(&borg::dashboard::dashboard_path(&config)),
             },
             Some(Command::Blocklist(args)) => match args.action {
                 BlocklistAction::List => {
-                    let rows = borg::blocklist::run_list()?;
+                    let rows = borg::blocklist::entries()?;
                     if rows.is_empty() {
                         println!("(blocklist empty)");
                     } else {
@@ -399,7 +419,7 @@ impl BorgCli {
                     Ok(())
                 }
                 BlocklistAction::Remove { domain } => {
-                    let removed = borg::blocklist::run_remove(&domain)?;
+                    let removed = borg::blocklist::remove(&domain)?;
                     if removed {
                         println!("removed: {domain}");
                     } else {
@@ -408,7 +428,7 @@ impl BorgCli {
                     Ok(())
                 }
                 BlocklistAction::Clear => {
-                    borg::blocklist::run_clear()?;
+                    borg::blocklist::clear()?;
                     println!("blocklist cleared");
                     Ok(())
                 }

@@ -16,7 +16,7 @@ use rmcp::ServiceExt;
 use vault::search::SearchIndex;
 use vault::watcher::{VaultWatcher, WatcherConfig};
 
-pub async fn run_serve(config: Config) -> Result<()> {
+pub async fn serve(config: Config) -> Result<()> {
     tracing::info!("Opening database at {}", config.db_path().display());
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
 
@@ -108,13 +108,13 @@ pub async fn run_serve(config: Config) -> Result<()> {
 }
 
 /// Reindex the vault and return the IndexStats. Caller formats the report.
-pub fn run_index(config: &Config) -> Result<vault::search::IndexStats> {
+pub fn index(config: &Config) -> Result<vault::search::IndexStats> {
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
     db.index_vault(&config.vault_root()).context("Failed to index vault")
 }
 
 /// Dispatch a single MCP tool call (no transport). Caller formats `result.content`.
-pub async fn run_call(config: Config, tool: &str, args_json: Option<&str>) -> Result<rmcp::model::CallToolResult> {
+pub async fn call(config: Config, tool: &str, args_json: Option<&str>) -> Result<rmcp::model::CallToolResult> {
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
     db.index_vault(&config.vault_root()).context("Failed to index vault")?;
 
@@ -132,12 +132,12 @@ pub async fn run_call(config: Config, tool: &str, args_json: Option<&str>) -> Re
 }
 
 /// Available MCP tools (no I/O). Caller formats the table.
-pub fn run_list() -> Vec<rmcp::model::Tool> {
+pub fn tools() -> Vec<rmcp::model::Tool> {
     server::OracleMcpServer::list_tools()
 }
 
 /// Open the SQLite index and return vault statistics. Caller formats them.
-pub fn run_stats(config: &Config) -> Result<vault::search::VaultStats> {
+pub fn stats(config: &Config) -> Result<vault::search::VaultStats> {
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
     db.index_vault(&config.vault_root()).context("Failed to index vault")?;
     db.stats().context("Failed to get stats")

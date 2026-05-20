@@ -153,7 +153,7 @@ fn migrate_one_note(path: &Path, vault_root: &Path, apply: bool, config: &Config
     Ok(Some(MigrateOutcome { rel_path, ledger_entry }))
 }
 
-pub async fn run_migrate(config: &Config, apply: bool) -> Result<()> {
+pub async fn run(config: &Config, apply: bool) -> Result<()> {
     let migration = &config.migration;
     let vault_root = expand_tilde(&config.vault.root_path);
 
@@ -319,7 +319,7 @@ fn render_yaml_field(lines: &mut Vec<String>, key: &str, val: &serde_yaml::Value
 /// whose body matches the failed-fetch signature (block-page paraphrase).
 /// This is the migration path for notes that predate the staged pipeline -
 /// the 28 XDA-style notes identified in the 2026-04-19 audit.
-pub async fn run_reingest_failed(config: &Config, dry_run: bool) -> Result<()> {
+pub async fn reingest_failed(config: &Config, dry_run: bool) -> Result<()> {
     let vault_root = expand_tilde(&config.vault.root_path);
     if !vault_root.exists() {
         eyre::bail!("Vault root does not exist: {}", vault_root.display());

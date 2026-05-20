@@ -2,9 +2,18 @@ use chrono::{Datelike, Local, NaiveDate};
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::config::{IntelConfig, LlmConfig};
+use crate::config::{Config, IntelConfig, LlmConfig};
 use crate::opts::IntelOpts;
-use crate::vault::Note;
+use crate::vault::{Note, scan_vault};
+
+/// Top-level orchestrator for `sb cortex intel`. Scans the vault and runs
+/// either the daily-digest or weekly-review generator (or both) based on
+/// `opts`. The cortex daemon calls this directly on its daily/weekly tick.
+pub fn run(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<()> {
+    log::info!("starting intel command (vault_root={})", vault_root.display());
+    let notes = scan_vault(vault_root, &config.vault)?;
+    generate(vault_root, &notes, &config.actions.intel, &config.llm, opts)
+}
 
 const DAILY_SYSTEM_PROMPT: &str = "\
 You are a sharp, well-read colleague reviewing someone's daily reading and notes. \
@@ -32,7 +41,7 @@ tensions you noticed. These should make the reader want to go back and look at \
 specific notes. Reference notes by their wikilink when relevant.";
 
 /// Generate intelligence outputs (daily digest, weekly review).
-pub fn run_intel(
+pub fn generate(
     vault_root: &Path,
     notes: &[Note],
     config: &IntelConfig,
@@ -368,7 +377,7 @@ mod tests {
             output: None,
         };
 
-        run_intel(v.root(), &notes, &config, &llm_config, &opts).expect("run_intel");
+        generate(v.root(), &notes, &config, &llm_config, &opts).expect("generate");
 
         let today = Local::now().format("%Y-%m-%d").to_string();
         let digest_path = v.root().join("notes/ai").join(format!("daily-{today}.md"));
@@ -394,7 +403,7 @@ mod tests {
             output: None,
         };
 
-        run_intel(v.root(), &notes, &config, &llm_config, &opts).expect("run_intel");
+        generate(v.root(), &notes, &config, &llm_config, &opts).expect("generate");
 
         let output_dir = v.root().join("notes/ai");
         assert!(output_dir.exists());
@@ -497,7 +506,7 @@ mod tests {
             output: None,
         };
 
-        run_intel(v.root(), &notes, &config, &llm_config, &opts).expect("run_intel");
+        generate(v.root(), &notes, &config, &llm_config, &opts).expect("generate");
 
         let today = Local::now().format("%Y-%m-%d").to_string();
         let digest_path = v.root().join("notes/ai").join(format!("daily-{today}.md"));

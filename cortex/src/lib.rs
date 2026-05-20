@@ -28,10 +28,9 @@ use eyre::Result;
 use std::path::Path;
 
 use config::Config;
-use opts::{ClassifyOpts, IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts, SummarizeOpts, SweepOpts};
+use opts::{LinkOpts, LintOpts, StateOpts};
 use report::Report;
 use state::VaultManifest;
-use summarize::BackfillSummary;
 use vault::{Note, scan_vault};
 
 /// Check if a note's path matches any glob pattern in the list.
@@ -75,7 +74,7 @@ fn parse_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
         .collect()
 }
 
-pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Report> {
+pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Report> {
     log::info!("starting lint run (vault_root={})", vault_root.display());
     let all_notes = scan_vault(vault_root, &config.vault)?;
 
@@ -181,7 +180,7 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
     Ok(report)
 }
 
-pub fn run_state(vault_root: &Path, config: &Config, opts: &StateOpts) -> Result<()> {
+pub fn state(vault_root: &Path, config: &Config, opts: &StateOpts) -> Result<()> {
     log::info!("starting state command (vault_root={})", vault_root.display());
     let cache_dir = &config.state.cache_dir;
     let manifest_path = VaultManifest::manifest_path(vault_root, cache_dir);
@@ -256,22 +255,7 @@ pub fn run_state(vault_root: &Path, config: &Config, opts: &StateOpts) -> Result
     Ok(())
 }
 
-pub fn run_migrate(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Result<Report> {
-    log::info!("starting migrate command (vault_root={})", vault_root.display());
-    let notes = scan_vault(vault_root, &config.vault)?;
-
-    if opts.apply {
-        let count = migrate::apply_migrate(vault_root, &notes, &config.migrations)?;
-        Ok(Report {
-            applied: count,
-            ..Default::default()
-        })
-    } else {
-        Ok(migrate::lint_migrate(&notes, &config.migrations))
-    }
-}
-
-pub fn run_link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Report> {
+pub fn link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Report> {
     log::info!("starting link command (vault_root={})", vault_root.display());
     let all_notes = scan_vault(vault_root, &config.vault)?;
     let exclude_patterns = parse_patterns(&config.vault.exclude);
@@ -291,97 +275,6 @@ pub fn run_link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<R
     } else {
         Ok(linking::lint_linking(&notes, &config.actions.linking))
     }
-}
-
-pub fn run_classify(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Report> {
-    log::info!("starting classify command (vault_root={})", vault_root.display());
-    let notes = scan_vault(vault_root, &config.vault)?;
-
-    // Open search index for Tier 2 (LLM with vault context)
-    let db_path = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share"))
-        .join("oracle")
-        .join("oracle.db");
-    let search_index = ::vault::search::SearchIndex::open(&db_path).ok();
-    if let Some(ref idx) = search_index {
-        // Ensure index is fresh
-        if let Err(e) = idx.index_vault(vault_root) {
-            log::warn!("failed to refresh search index: {e}");
-        }
-    }
-    let search_ref = search_index.as_ref();
-
-    if opts.apply {
-        classify::apply_classify(
-            vault_root,
-            &notes,
-            &config.actions.classify,
-            opts.force,
-            opts.review_only,
-            opts.reclassify_domain.as_deref(),
-            search_ref,
-        )
-    } else {
-        Ok(classify::lint_classify(&notes, &config.actions.classify, search_ref))
-    }
-}
-
-pub fn run_sweep(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<()> {
-    log::info!("starting sweep command (vault_root={})", vault_root.display());
-
-    if opts.cold && (opts.migrate || opts.proposals) {
-        eyre::bail!("--cold cannot be combined with --migrate or --proposals");
-    }
-
-    if opts.cold {
-        let stats = sweep::run_cold(vault_root, config)?;
-        println!(
-            "Cold sweep: scanned={} surfaced={} pinned_excluded={}",
-            stats.scanned, stats.surfaced, stats.pinned_excluded
-        );
-        return Ok(());
-    }
-
-    let notes = scan_vault(vault_root, &config.vault)?;
-
-    if opts.migrate {
-        let count = sweep::run_migrate(vault_root, &notes, &config.sweep, opts.dry_run)?;
-        if opts.dry_run {
-            println!("Dry run: would modify {count} note(s).");
-        } else {
-            println!("Migrated tags in {count} note(s).");
-        }
-    }
-
-    if opts.proposals || !opts.migrate {
-        // Default action: scan for proposals
-        let proposals = sweep::scan_proposals(&notes, &config.sweep)?;
-        if proposals.is_empty() {
-            println!("No new tag proposals.");
-        } else {
-            println!("Found {} tag(s) needing review:", proposals.len());
-            for p in &proposals {
-                println!("  {} (on {} notes)", p.tag, p.frequency);
-            }
-            if !opts.dry_run {
-                sweep::write_proposals(&config.sweep, proposals)?;
-                println!("Proposals written to {}", config.sweep.proposals_path);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-pub fn run_intel(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<()> {
-    log::info!("starting intel command (vault_root={})", vault_root.display());
-    let notes = scan_vault(vault_root, &config.vault)?;
-    intel::run_intel(vault_root, &notes, &config.actions.intel, &config.llm, opts)
-}
-
-pub async fn run_summarize(vault_root: &Path, config: &Config, opts: &SummarizeOpts) -> Result<BackfillSummary> {
-    log::info!("starting summarize command (vault_root={})", vault_root.display());
-    summarize::run_backfill(vault_root, config, opts).await
 }
 
 #[cfg(test)]

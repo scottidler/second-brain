@@ -244,7 +244,7 @@ async fn backfill_filters_to_ingested_notes_only() {
     ));
     let cfg = v.config();
     let opts = opts_default();
-    let summary = run_backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
+    let summary = backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
         .await
         .expect("run");
 
@@ -277,7 +277,7 @@ async fn backfill_dry_run_writes_no_files() {
     let mut opts = opts_default();
     opts.dry_run = true;
 
-    let summary = run_backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
+    let summary = backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
         .await
         .expect("run");
     assert_eq!(summary.attempted, 1);
@@ -302,7 +302,7 @@ async fn backfill_rewrites_article_note_with_structured_sections() {
     ));
     let cfg = v.config();
 
-    let summary = run_backfill_with_dispatcher(v.root(), &cfg, &opts_default(), dispatcher)
+    let summary = backfill_with_dispatcher(v.root(), &cfg, &opts_default(), dispatcher)
         .await
         .expect("run");
     assert_eq!(summary.attempted, 1);
@@ -333,7 +333,7 @@ async fn backfill_skips_notes_already_distilled() {
         "summary: \"S\"\nclaims: []\ntags: []\nlinks: []\n",
     ));
     let cfg = v.config();
-    let summary = run_backfill_with_dispatcher(v.root(), &cfg, &opts_default(), dispatcher)
+    let summary = backfill_with_dispatcher(v.root(), &cfg, &opts_default(), dispatcher)
         .await
         .expect("run");
     assert_eq!(summary.attempted, 1);
@@ -360,7 +360,7 @@ async fn backfill_extractor_override_forces_redistill() {
     let mut opts = opts_default();
     opts.extractor = Some("distill-article-v2".to_string());
 
-    let summary = run_backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
+    let summary = backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
         .await
         .expect("run");
     assert_eq!(summary.distilled, 1);
@@ -395,7 +395,7 @@ async fn backfill_filters_by_domain_frontmatter() {
     let mut opts = opts_default();
     opts.domain = Some("technical".to_string());
 
-    let summary = run_backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
+    let summary = backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
         .await
         .expect("run");
     assert_eq!(summary.distilled, 1);
@@ -431,7 +431,7 @@ async fn backfill_filters_by_since_date() {
     let mut opts = opts_default();
     opts.since = Some("30d".to_string());
 
-    let summary = run_backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
+    let summary = backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
         .await
         .expect("run");
     assert_eq!(summary.distilled, 1);
@@ -455,7 +455,7 @@ async fn backfill_writes_checkpoint_after_each_completed_note() {
     ));
     let cfg = v.config();
 
-    let summary = run_backfill_with_dispatcher(v.root(), &cfg, &opts_default(), dispatcher)
+    let summary = backfill_with_dispatcher(v.root(), &cfg, &opts_default(), dispatcher)
         .await
         .expect("run");
     assert_eq!(summary.distilled, 1);
@@ -486,7 +486,7 @@ async fn backfill_resume_skips_through_checkpoint() {
         "distill-article",
         "summary: \"S\"\nclaims: []\ntags: []\nlinks: []\n",
     ));
-    let summary = run_backfill_with_dispatcher(v.root(), &cfg, &opts_default(), dispatcher)
+    let summary = backfill_with_dispatcher(v.root(), &cfg, &opts_default(), dispatcher)
         .await
         .expect("run");
     assert_eq!(summary.attempted, 1);
@@ -511,7 +511,7 @@ async fn backfill_resume_false_ignores_checkpoint() {
     ));
     let mut opts = opts_default();
     opts.resume = false;
-    let summary = run_backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
+    let summary = backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
         .await
         .expect("run");
     assert_eq!(summary.distilled, 1);
@@ -533,7 +533,7 @@ async fn backfill_continues_past_per_note_skips() {
         "distill-article",
         "summary: \"S\"\nclaims: []\ntags: []\nlinks: []\n",
     ));
-    let summary = run_backfill_with_dispatcher(v.root(), &v.config(), &opts_default(), dispatcher)
+    let summary = backfill_with_dispatcher(v.root(), &v.config(), &opts_default(), dispatcher)
         .await
         .expect("run");
     assert_eq!(summary.distilled, 1);
@@ -547,7 +547,7 @@ async fn backfill_requires_backfill_flag() {
     let cfg = v.config();
     let mut opts = opts_default();
     opts.backfill = false;
-    let err = run_backfill(v.root(), &cfg, &opts)
+    let err = backfill(v.root(), &cfg, &opts)
         .await
         .expect_err("must require --backfill");
     let msg = format!("{err}");
