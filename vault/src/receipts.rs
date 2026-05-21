@@ -172,6 +172,26 @@ impl FromStr for ReceiptStatus {
 /// Subdirectory under `dirs::data_local_dir()` that owns borg's data files.
 pub const SB_BORG_DATA_DIR: &str = "sb/borg";
 
+/// Map a legacy `DlqStage` value to its `FailureStage` counterpart. The two
+/// enums have the same set of variants except `DlqStage::WatchdogOrphan`
+/// became `FailureStage::Crashed`; this helper is the only place that
+/// rename is reconciled.
+///
+/// Lives here (in vault) rather than in vault::dlq so receipts code doesn't
+/// have to import the legacy module to do the conversion. Both modules
+/// remain side-by-side during the dual-write window.
+pub fn failure_stage_from_dlq(stage: crate::dlq::DlqStage) -> FailureStage {
+    match stage {
+        crate::dlq::DlqStage::IntakeReject => FailureStage::IntakeRejected,
+        crate::dlq::DlqStage::ClassifyFailed => FailureStage::ClassifyFailed,
+        crate::dlq::DlqStage::FetchFailed => FailureStage::FetchFailed,
+        crate::dlq::DlqStage::QualityBlocked => FailureStage::QualityBlocked,
+        crate::dlq::DlqStage::PipelineTimedOut => FailureStage::PipelineTimedOut,
+        crate::dlq::DlqStage::PublishFailed => FailureStage::PublishFailed,
+        crate::dlq::DlqStage::WatchdogOrphan => FailureStage::Crashed,
+    }
+}
+
 /// Resolve the platform-native path to `~/.local/share/sb/borg/receipts.db`
 /// (or macOS equivalent). The directory may not exist yet; the caller is
 /// responsible for `create_dir_all` before opening the DB.

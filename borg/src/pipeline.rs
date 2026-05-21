@@ -8,6 +8,7 @@ use crate::jina;
 use crate::ledger::{self, LedgerEntry, LedgerStatus};
 use crate::markdown::{self, ContentType, NoteContent};
 use crate::ocr;
+use crate::receipts;
 use crate::router;
 use crate::trace;
 use crate::transcription::TranscriptionClient;
@@ -18,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
 use vault::canonical::{self, CanonicalTagsFile, TagMapping};
+use vault::receipts::FailureStage;
 use vault::schema::CORTEX_PRESERVE_KEYS;
 
 pub mod atomic;
@@ -254,8 +256,68 @@ pub async fn process_content(
             .await
         }
     };
-    result.trace_id = Some(trace_id);
+    result.trace_id = Some(trace_id.clone());
+    // Dual-write: mirror the terminal outcome into the receipts DB. The
+    // markdown ledger still receives its own row in the inner stage; this
+    // is the single chokepoint where the receipts row is closed out so
+    // every successful path lands a `succeeded` row and every failure path
+    // lands a `failed` row with at least a coarse stage classification.
+    // Inner stages will refine stage classification in a follow-up; the
+    // dual-write window keeps the markdown DLQ as the rich-reason source
+    // of truth until that lands.
+    record_terminal_to_receipts(&trace_id, &result);
     result
+}
+
+/// Convert an `IngestResult` into the matching receipts UPDATE. Best-effort:
+/// errors are logged but do NOT propagate; the markdown ledger / DLQ still
+/// holds authoritative state during the Phase-2 dual-write window.
+fn record_terminal_to_receipts(trace_id: &str, result: &IngestResult) {
+    let conn = match receipts::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("receipts: failed to open DB for terminal write trace={trace_id}: {e:#}");
+            return;
+        }
+    };
+    match &result.status {
+        IngestStatus::Completed | IngestStatus::Duplicate { .. } => {
+            let note_path = result.note_path.as_deref().unwrap_or("");
+            if let Err(e) = receipts::mark_succeeded(&conn, trace_id, note_path) {
+                log::error!("receipts: mark_succeeded trace={trace_id} failed: {e:#}");
+            }
+        }
+        IngestStatus::Failed { reason } => {
+            let stage = classify_terminal_failure(reason);
+            if let Err(e) = receipts::mark_failed(&conn, trace_id, stage, reason) {
+                log::error!("receipts: mark_failed trace={trace_id} failed: {e:#}");
+            }
+        }
+        IngestStatus::Queued => {
+            // Should not happen on a terminal result; log and leave the
+            // receipts row in `received` so the watchdog can pick it up.
+            log::warn!("receipts: trace={trace_id} returned status=Queued from process_content");
+        }
+    }
+}
+
+/// Pick a coarse `FailureStage` from a free-form reason. Refined per-site
+/// classification is the typed-PipelineError refactor planned as the
+/// follow-up to Phase 2; until then this catch-all keeps the receipts row's
+/// `failure_stage` column non-null.
+fn classify_terminal_failure(reason: &str) -> FailureStage {
+    let lower = reason.to_lowercase();
+    if lower == "timeout" || lower.contains("timed out") {
+        FailureStage::PipelineTimedOut
+    } else if lower.contains("quality") || lower.contains("blocked") {
+        FailureStage::QualityBlocked
+    } else if lower.contains("write_atomic") || lower.contains("publish") {
+        FailureStage::PublishFailed
+    } else if lower.contains("classify") {
+        FailureStage::ClassifyFailed
+    } else {
+        FailureStage::FetchFailed
+    }
 }
 
 pub async fn process_url(

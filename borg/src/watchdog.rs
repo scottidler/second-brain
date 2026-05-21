@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::intake as intake_helper;
 use crate::ledger;
 use crate::pipeline::permits;
+use crate::receipts;
 use chrono::{Local, NaiveDateTime, TimeZone};
 use eyre::{Context, Result};
 use std::collections::HashSet;
@@ -138,7 +139,52 @@ pub fn run_once(config: &Config, active_traces: &dyn Fn(&str) -> bool) -> Result
     } else {
         log::debug!("watchdog: scan clean, no orphans this pass");
     }
+    // Dual-write: also scan the receipts DB. SELECT stale candidates,
+    // filter through the same `active_traces` predicate, then promote each
+    // survivor to `failed/crashed` with a status-guarded targeted UPDATE.
+    let receipts_promoted = receipts_run_once(deadline as u64, active_traces).unwrap_or_else(|e| {
+        log::warn!("watchdog: receipts scan failed: {e:#}");
+        0
+    });
+    if receipts_promoted > 0 {
+        log::info!("watchdog: promoted {receipts_promoted} receipts row(s) to crashed this pass");
+    }
     Ok(new_orphans)
+}
+
+/// Receipts-DB half of the watchdog tick. Mirrors the markdown orphan loop
+/// but reads from `~/.local/share/sb/borg/receipts.db`:
+///
+/// 1. `SELECT trace_id, received_at FROM receipts WHERE status='received' AND received_at < cutoff`
+/// 2. Filter survivors through `active_traces` (a permit-queued trace is
+///    legitimately mid-flight and must not be promoted).
+/// 3. For each survivor, issue a targeted UPDATE that the status-guarded
+///    `promote_single_to_crashed` enforces.
+fn receipts_run_once(deadline_secs: u64, active_traces: &dyn Fn(&str) -> bool) -> Result<usize> {
+    let conn = receipts::open_default().context("receipts: open_default")?;
+    let stale = receipts::list_stale(&conn, deadline_secs).context("receipts: list_stale")?;
+    let mut promoted = 0usize;
+    for (trace_id, received_at) in stale {
+        if active_traces(&trace_id) {
+            log::debug!(
+                "watchdog: receipts trace {trace_id} aged past deadline (received_at={received_at}) but still active; skipping"
+            );
+            continue;
+        }
+        match receipts::promote_single_to_crashed(&conn, &trace_id, deadline_secs) {
+            Ok(true) => {
+                log::warn!("watchdog: promoted receipts trace={trace_id} to crashed (received_at={received_at})");
+                promoted += 1;
+            }
+            Ok(false) => {
+                log::debug!("watchdog: receipts trace={trace_id} no longer in received state (race lost); skipping");
+            }
+            Err(e) => {
+                log::error!("watchdog: receipts promote_single failed for trace={trace_id}: {e:#}");
+            }
+        }
+    }
+    Ok(promoted)
 }
 
 /// Background task entry point. Runs forever, scanning every

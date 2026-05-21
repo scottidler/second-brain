@@ -12,11 +12,53 @@
 //! call sites uniform.
 
 use crate::config::Config;
+use crate::receipts;
 use crate::types::IngestMethod;
 use eyre::{Context, Result};
 use std::path::PathBuf;
 use vault::dlq::{self, DlqEntry, DlqStage, DlqStatus};
 use vault::intake::{self, IntakeEntry, IntakeKind};
+use vault::receipts::{ReceiptKind, failure_stage_from_dlq};
+
+/// Map the intake-side kind (rich classification, includes media subtypes) to
+/// the receipts-side kind (flat `url`/`text`/`binary`).
+fn receipt_kind(kind: IntakeKind) -> ReceiptKind {
+    match kind {
+        IntakeKind::Url => ReceiptKind::Url,
+        IntakeKind::Text | IntakeKind::Empty | IntakeKind::Unknown => ReceiptKind::Text,
+        IntakeKind::Photo
+        | IntakeKind::Voice
+        | IntakeKind::Audio
+        | IntakeKind::Document
+        | IntakeKind::Sticker
+        | IntakeKind::Video
+        | IntakeKind::Animation
+        | IntakeKind::Poll
+        | IntakeKind::Location
+        | IntakeKind::Contact => ReceiptKind::Binary,
+    }
+}
+
+/// Best-effort receipts-DB write at the door. Errors are logged but do NOT
+/// propagate: the markdown intake log already captured the input and is the
+/// dual-write source of truth during the rollout window; a receipts DB
+/// write failure must not block a legitimate intake.
+fn receipts_record_received(method: IngestMethod, kind: IntakeKind, raw_input: &str, trace_id: &str) {
+    log::debug!(
+        "intake::receipts_record_received: trace={trace_id} method={method} kind={kind} raw_len={}",
+        raw_input.len()
+    );
+    let conn = match receipts::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("receipts: failed to open DB for trace={trace_id}: {e:#}");
+            return;
+        }
+    };
+    if let Err(e) = receipts::record_received(&conn, trace_id, method.into(), receipt_kind(kind), raw_input) {
+        log::error!("receipts: failed to record_received trace={trace_id}: {e:#}");
+    }
+}
 
 /// Resolve the vault root from borg config via the unified resolver.
 pub fn vault_root(config: &Config) -> Result<PathBuf> {
@@ -90,6 +132,8 @@ pub fn record_intake(
     // structured descriptor. Callers that want the verbatim text body can
     // override via `record_intake_with_sidecar`.
     intake::write_raw_input(&root, trace_id, preview.as_bytes()).context("Failed to write intake sidecar")?;
+    // Dual-write: also record the receipts-DB row. Best-effort.
+    receipts_record_received(method, kind, preview, trace_id);
     log::info!(
         "intake: recorded trace={trace_id} method={method} kind={kind} preview={}",
         preview_text(preview)
@@ -127,6 +171,9 @@ pub fn record_intake_with_sidecar(
     };
     intake::append_entry(&intake_md, &entry).context("Failed to append intake row")?;
     intake::write_raw_input(&root, trace_id, raw_bytes).context("Failed to write intake sidecar")?;
+    // Dual-write: receipts-DB row. The receipts row stores the preview as
+    // `raw_input` (small UTF-8); the full bytes still live in the sidecar.
+    receipts_record_received(method, kind, preview, trace_id);
     log::info!(
         "intake: recorded trace={trace_id} method={method} kind={kind} preview={}",
         preview_text(preview)
@@ -173,6 +220,19 @@ pub fn record_dlq(
         log::error!("dlq: failed to append row for trace={trace_id}: {e:#}");
     } else {
         log::info!("dlq: recorded trace={trace_id} method={method} stage={stage} reason={reason}");
+    }
+    // Dual-write: also mark the receipts row failed with the mapped stage.
+    // This is the only path that emits the IntakeRejected receipts stage
+    // today; other stages (FetchFailed, QualityBlocked, ...) are still
+    // produced via the legacy DLQ path during the Phase-2 rollout window.
+    let receipt_stage = failure_stage_from_dlq(stage);
+    match receipts::open_default() {
+        Ok(conn) => {
+            if let Err(e) = receipts::mark_failed(&conn, trace_id, receipt_stage, reason) {
+                log::error!("receipts: failed to mark_failed trace={trace_id} stage={receipt_stage}: {e:#}");
+            }
+        }
+        Err(e) => log::error!("receipts: failed to open DB for trace={trace_id}: {e:#}"),
     }
 }
 
