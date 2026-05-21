@@ -21,6 +21,7 @@ use vault::canonical::{self, CanonicalTagsFile, TagMapping};
 use vault::schema::CORTEX_PRESERVE_KEYS;
 
 pub mod atomic;
+pub mod error;
 mod inflight;
 pub mod permits;
 use atomic::{apply_cortex_fields, apply_ingested_date, apply_original_date, write_atomic};

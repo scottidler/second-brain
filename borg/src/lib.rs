@@ -36,6 +36,7 @@ pub mod ocr;
 pub mod opts;
 pub mod pipeline;
 pub mod quality;
+pub mod receipts;
 pub mod replay;
 pub mod retention;
 pub mod router;
