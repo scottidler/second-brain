@@ -78,13 +78,9 @@ WHERE origin = "assisted"
 GROUP BY type
 ```
 
-## ⚠️ Recently failed (DLQ)
+## ⚠️ Recently failed
 
-The full DLQ table lives at [[borg-dlq]]; this panel surfaces still-pending failures from the last week so they show up here without a manual click.
-
-## 🕳️ Intake without resolution (orphans)
-
-`borg audit` writes [[borg-orphans]] when an intake row has neither a ledger nor DLQ row within the deadline window. If that page is empty, the intake-log invariant is currently clean.
+Failures are recorded in the receipts SQLite DB at `~/.local/share/sb/borg/receipts.db`, not in the vault. Query the last day of failures with `sb borg log --status failed --since "$(date -I -d 'yesterday')"`, or group by stage with `sb borg log --status failed --stage fetch-failed`. The MCP equivalent is the `failure_history` oracle tool.
 "#;
 
 /// Resolve the dashboard path from config.

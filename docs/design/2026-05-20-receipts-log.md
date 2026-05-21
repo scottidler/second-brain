@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-05-20
-**Status:** Approved (post-Architect, consensus reached)
+**Status:** Implemented (Phase 5 migration shipped as `bin/migrate-receipts` bash script rather than the Rust verb originally specified)
 **Review Passes Completed:** 6/5 + Architect rounds 1, 2, 3 (all findings absorbed)
 
 ## Summary
