@@ -29,7 +29,7 @@ pub fn init_permits(cfg: &Config) -> Result<()> {
     permits::GENERAL_PERMITS.init(general);
     permits::HEAVY_PERMITS.init(heavy);
 
-    log::info!("pipeline permits initialized: general={general} heavy={heavy}");
+    log::debug!("pipeline permits initialized: general={general} heavy={heavy}");
     Ok(())
 }
 
@@ -40,16 +40,18 @@ fn validate_cap(name: &str, cap: usize) -> Result<()> {
     Ok(())
 }
 
-/// Emit one INFO line summarizing the configured-vs-resolved ffmpeg thread
-/// caps, so an operator can confirm from the journal alone how `nproc/N`
-/// expressions resolved against this host's `nproc`.
+/// Emit one DEBUG line summarizing the configured-vs-resolved ffmpeg thread
+/// caps, so an operator running with `--log-level debug` can confirm from
+/// the journal how `nproc/N` expressions resolved against this host's `nproc`.
+/// At default (INFO) level this stays silent, so one-shot inspection
+/// commands don't pay the noise cost.
 pub fn log_ffmpeg_thread_caps(cfg: &Config) {
     let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let threads_resolved = cfg.youtube.ffmpeg_threads.resolve();
     let filter_resolved = cfg.youtube.ffmpeg_filter_threads.resolve();
     let threads_sym = cfg.youtube.ffmpeg_threads.symbolic();
     let filter_sym = cfg.youtube.ffmpeg_filter_threads.symbolic();
-    log::info!(
+    log::debug!(
         "ffmpeg thread caps: threads={threads_resolved} filter_threads={filter_resolved} \
          (nproc={nproc}, ffmpeg-threads={threads_sym}, ffmpeg-filter-threads={filter_sym})"
     );

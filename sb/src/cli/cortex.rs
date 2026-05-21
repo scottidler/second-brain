@@ -314,8 +314,8 @@ impl CortexCli {
         } else {
             config.vault_root(self.vault.as_ref())?
         };
-        log::info!("cortex starting (version={})", env!("GIT_DESCRIBE"));
-        log::info!("resolved vault root: {}", vault_root.display());
+        log::debug!("cortex starting (version={})", env!("GIT_DESCRIBE"));
+        log::debug!("resolved vault root: {}", vault_root.display());
 
         match self.command {
             Command::Classify(a) => {
