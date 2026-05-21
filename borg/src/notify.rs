@@ -1,8 +1,33 @@
-use crate::config::TelegramConfig;
+//! Notification sinks. Two structurally identical channels:
+//!
+//! - [`Notifier`] talks to Telegram via teloxide. Cross-host (the bot delivers
+//!   to whichever device is logged in).
+//! - [`DesktopNotifier`] talks to the local user-session D-Bus via
+//!   `notify-rust`. Host-gated; only runs on the machine with the desktop.
+//!
+//! Both sinks expose `processing(...)` and `result(...)` so call sites stay
+//! parallel. Future channels go side-by-side rather than behind a trait -
+//! two sinks does not yet justify the abstraction.
+
+use std::time::Duration;
+
+use crate::config::{DesktopNotifierConfig, TelegramConfig};
 use crate::router::format_reply;
 use crate::types::IngestResult;
+use notify_rust::{Notification, NotificationHandle, Timeout};
 use teloxide::prelude::*;
 use teloxide::types::ChatId;
+
+#[cfg(test)]
+mod tests;
+
+/// Per the Design Invariant in docs/design/2026-05-21-desktop-notifications.md,
+/// every notification call is bounded so a wedged service cannot delay the
+/// pipeline. D-Bus default timeout is ~25s; Telegram round trip can be slow on
+/// flaky links. 500 ms is comfortably above the warm-bus / warm-HTTPS latency
+/// while still being negligible on the 15+ minute YouTube-transcription
+/// pipeline timeline.
+const NOTIFICATION_CALL_TIMEOUT_MS: u64 = 500;
 
 /// Shared notification service that sends feedback via Telegram.
 /// Clone-cheap: `Bot` is an HTTP client wrapper.
@@ -104,119 +129,114 @@ pub fn format_telegram_reply(result: &IngestResult, display_source: &str) -> Str
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{IngestResult, IngestStatus};
+/// Format an `IngestResult` as a plain-text desktop notification body.
+///
+/// Identical to [`format_reply`] modulo the appended Obsidian deep link
+/// (which the notification daemon renders as plain text - no HTML escape).
+/// Kept as a thin wrapper so the desktop body is testably byte-equal to the
+/// Telegram body before HTML escaping; any divergence in either channel is
+/// caught by `test_format_desktop_body_matches_format_reply` in `notify/tests.rs`.
+pub fn format_desktop_body(result: &IngestResult, display_source: &str) -> String {
+    let base = format_reply(result, display_source);
+    match &result.obsidian_url {
+        Some(url) => format!("{base}\n{url}"),
+        None => base,
+    }
+}
 
-    #[test]
-    fn test_html_escape_special_chars() {
-        assert_eq!(
-            html_escape("<script>alert('xss')</script>"),
-            "&lt;script&gt;alert('xss')&lt;/script&gt;"
+/// Desktop notification sink, peer to the Telegram [`Notifier`]. Renders the
+/// same intake / terminal messages onto the local user-session D-Bus via
+/// `notify-rust`. The `processing` toast is replaced in place by the terminal
+/// toast (the [`NotificationHandle`] from `processing` is threaded through to
+/// `result`), so one ingest produces one persistent popup that updates rather
+/// than two stacking popups.
+#[derive(Clone)]
+pub struct DesktopNotifier {
+    appname: String,
+    timeout: Timeout,
+}
+
+impl DesktopNotifier {
+    /// Build from config. Returns `None` when `enabled: false` so call sites
+    /// can mirror the [`Notifier::new`] `Option<Self>` pattern.
+    pub fn new(cfg: &DesktopNotifierConfig) -> Option<Self> {
+        if !cfg.enabled {
+            log::info!("notify: desktop notifications disabled");
+            return None;
+        }
+        log::info!(
+            "notify: desktop notifications enabled (appname={}, timeout_ms={})",
+            cfg.appname,
+            cfg.timeout_ms
         );
-        assert_eq!(html_escape("AT&T"), "AT&amp;T");
-        assert_eq!(html_escape("no special chars"), "no special chars");
+        Some(Self {
+            appname: cfg.appname.clone(),
+            timeout: Timeout::Milliseconds(cfg.timeout_ms),
+        })
     }
 
-    #[test]
-    fn test_html_escape_mixed() {
-        assert_eq!(html_escape("a < b & c > d"), "a &lt; b &amp; c &gt; d");
-    }
-
-    #[test]
-    fn test_format_telegram_reply_with_obsidian_url() {
-        let result = IngestResult {
-            status: IngestStatus::Completed,
-            title: Some("Test Article".to_string()),
-            tags: vec!["ai".to_string()],
-            elapsed_secs: Some(3.5),
-            obsidian_url: Some("obsidian://search?vault=obsidian&query=test-article".to_string()),
-            ..Default::default()
+    /// Fire the `[trace_id] description` intake popup and return its handle.
+    /// The handle is later passed to [`Self::result`] so the terminal popup
+    /// REPLACES this one in place (notify-rust's id-based replace pattern).
+    /// Returns `None` on D-Bus error or 500 ms timeout; `result(...)` then
+    /// falls back to a fresh popup.
+    pub async fn processing(&self, trace_id: &str, description: &str) -> Option<NotificationHandle> {
+        let body = format!("[{trace_id}] {description}");
+        let appname = self.appname.clone();
+        let timeout = self.timeout;
+        let future = async move {
+            Notification::new()
+                .appname(&appname)
+                .summary("obsidian-borg")
+                .body(&body)
+                .timeout(timeout)
+                .show_async()
+                .await
         };
-        let reply = format_telegram_reply(&result, "https://example.com");
-        assert!(reply.contains("Saved: Test Article"));
-        assert!(reply.contains("obsidian://search?vault=obsidian&amp;query=test-article"));
+        match tokio::time::timeout(Duration::from_millis(NOTIFICATION_CALL_TIMEOUT_MS), future).await {
+            Ok(Ok(handle)) => Some(handle),
+            Ok(Err(e)) => {
+                log::warn!("notify: failed to send desktop processing popup: {e}");
+                None
+            }
+            Err(_) => {
+                log::warn!("notify: desktop processing popup timed out after {NOTIFICATION_CALL_TIMEOUT_MS}ms");
+                None
+            }
+        }
     }
 
-    #[test]
-    fn test_format_telegram_reply_without_obsidian_url() {
-        let result = IngestResult {
-            status: IngestStatus::Failed {
-                reason: "network error".to_string(),
-            },
-            ..Default::default()
+    /// Fire the terminal popup from an `IngestResult`. When `prior` is
+    /// `Some(handle)`, the new popup is published with the same id and
+    /// replaces the prior popup in place. When `None`, a fresh popup is
+    /// created. Wraps the D-Bus call in 500 ms timeout per the Design
+    /// Invariant.
+    ///
+    /// Note: uses `.id(prior.id()) + show_async()` rather than
+    /// `prior.update()` because `NotificationHandle::update` is synchronous
+    /// in notify-rust v4, which would defeat the timeout wrapper - a sync
+    /// call inside `timeout(async { ... })` has no await points and blocks
+    /// the worker until D-Bus replies.
+    pub async fn result(&self, result: &IngestResult, display_source: &str, prior: Option<NotificationHandle>) {
+        let body = format_desktop_body(result, display_source);
+        let appname = self.appname.clone();
+        let timeout = self.timeout;
+        let prior_id = prior.as_ref().map(|h| h.id());
+        let future = async move {
+            let mut n = Notification::new();
+            n.appname(&appname)
+                .summary("obsidian-borg")
+                .body(&body)
+                .timeout(timeout);
+            if let Some(id) = prior_id {
+                n.id(id);
+            }
+            n.show_async().await
         };
-        let reply = format_telegram_reply(&result, "https://example.com");
-        assert!(reply.contains("Failed"));
-        assert!(!reply.contains("Open in Obsidian"));
-    }
-
-    #[test]
-    fn test_format_telegram_reply_escapes_html_in_title() {
-        let result = IngestResult {
-            status: IngestStatus::Completed,
-            title: Some("Title with <html> & stuff".to_string()),
-            tags: vec![],
-            obsidian_url: Some("obsidian://search?vault=obsidian&query=test".to_string()),
-            ..Default::default()
-        };
-        let reply = format_telegram_reply(&result, "https://example.com");
-        assert!(reply.contains("&lt;html&gt;"));
-        assert!(reply.contains("&amp;"));
-        assert!(reply.contains("obsidian://search?vault=obsidian&amp;query=test"));
-    }
-
-    #[test]
-    fn test_notifier_new_with_notification_chat_id() {
-        let config = TelegramConfig {
-            bot_token: "fake-token".to_string(),
-            allowed_chat_ids: vec![111],
-            notification_chat_id: Some(222),
-            host: None,
-        };
-        let notifier = Notifier::new("fake-token", &config);
-        assert!(notifier.is_some());
-        let n = notifier.expect("should be Some");
-        assert_eq!(n.default_chat_id, ChatId(222));
-    }
-
-    #[test]
-    fn test_notifier_new_falls_back_to_allowed_chat_ids() {
-        let config = TelegramConfig {
-            bot_token: "fake-token".to_string(),
-            allowed_chat_ids: vec![333],
-            notification_chat_id: None,
-            host: None,
-        };
-        let notifier = Notifier::new("fake-token", &config);
-        assert!(notifier.is_some());
-        let n = notifier.expect("should be Some");
-        assert_eq!(n.default_chat_id, ChatId(333));
-    }
-
-    #[test]
-    fn test_notifier_new_returns_none_when_no_chat_id() {
-        let config = TelegramConfig {
-            bot_token: "fake-token".to_string(),
-            allowed_chat_ids: vec![],
-            notification_chat_id: None,
-            host: None,
-        };
-        let notifier = Notifier::new("fake-token", &config);
-        assert!(notifier.is_none());
-    }
-
-    #[test]
-    fn test_resolve_chat_id_override() {
-        let config = TelegramConfig {
-            bot_token: "fake-token".to_string(),
-            allowed_chat_ids: vec![111],
-            notification_chat_id: None,
-            host: None,
-        };
-        let notifier = Notifier::new("fake-token", &config).expect("should be Some");
-        assert_eq!(notifier.resolve_chat_id(Some(999)), ChatId(999));
-        assert_eq!(notifier.resolve_chat_id(None), ChatId(111));
+        match tokio::time::timeout(Duration::from_millis(NOTIFICATION_CALL_TIMEOUT_MS), future).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => log::warn!("notify: failed to send desktop result popup: {e}"),
+            Err(_) => log::warn!("notify: desktop result popup timed out after {NOTIFICATION_CALL_TIMEOUT_MS}ms"),
+        }
     }
 }
