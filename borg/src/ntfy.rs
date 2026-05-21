@@ -1,7 +1,7 @@
 use crate::backoff::ExponentialBackoff;
 use crate::config::Config;
 use crate::intake::{self as intake_log, Kind as IntakeKind, Stage as DlqStage};
-use crate::notify::Notifier;
+use crate::notify::{Desktop, Telegram};
 use crate::pipeline;
 use crate::router::extract_url_from_text;
 use crate::trace;
@@ -73,7 +73,8 @@ pub async fn run(
     topic: String,
     token: Option<String>,
     config: Arc<Config>,
-    notifier: Option<Notifier>,
+    telegram: Option<Telegram>,
+    desktop: Option<Desktop>,
 ) -> Result<()> {
     let mut last_event_id: Option<String> = None;
     let mut backoff = ExponentialBackoff::new();
@@ -175,12 +176,18 @@ pub async fn run(
                 ParsedMessage::Url { url, tags, force } => {
                     log::info!("ntfy: processing URL {url} (trace={trace_id})");
                     let cfg = config.clone();
-                    let n = notifier.clone();
-                    if let Some(ref n) = notifier {
-                        let _ = n.processing(&trace_id, "Processing...", None).await;
-                    }
+                    let tg = telegram.clone();
+                    let desk = desktop.clone();
                     let trace_for_spawn = trace_id.clone();
                     tokio::spawn(async move {
+                        let prior = if let Some(d) = &desk {
+                            d.processing(&trace_for_spawn, "Processing...").await
+                        } else {
+                            None
+                        };
+                        if let Some(t) = &tg {
+                            let _ = t.processing(&trace_for_spawn, "Processing...", None).await;
+                        }
                         let display_source = url.clone();
                         let content = ContentKind::Url(url.clone());
                         let result = pipeline::process_content(
@@ -193,21 +200,30 @@ pub async fn run(
                         )
                         .await;
                         log::info!("ntfy: pipeline result for {url}: {:?}", result.status);
-                        if let Some(n) = n {
-                            n.result(&result, &display_source, None).await;
+                        if let Some(t) = tg {
+                            t.result(&result, &display_source, None).await;
+                        }
+                        if let Some(d) = desk {
+                            d.result(&result, &display_source, prior).await;
                         }
                     });
                 }
                 ParsedMessage::Text(text) => {
                     log::info!("ntfy: processing text capture ({} chars, trace={trace_id})", text.len());
                     let cfg = config.clone();
-                    let n = notifier.clone();
+                    let tg = telegram.clone();
+                    let desk = desktop.clone();
                     let display = if text.len() > 50 { format!("{}...", &text[..50]) } else { text.clone() };
-                    if let Some(ref n) = notifier {
-                        let _ = n.processing(&trace_id, "Processing text...", None).await;
-                    }
                     let trace_for_spawn = trace_id.clone();
                     tokio::spawn(async move {
+                        let prior = if let Some(d) = &desk {
+                            d.processing(&trace_for_spawn, "Processing text...").await
+                        } else {
+                            None
+                        };
+                        if let Some(t) = &tg {
+                            let _ = t.processing(&trace_for_spawn, "Processing text...", None).await;
+                        }
                         let content = ContentKind::Text(text);
                         let result = pipeline::process_content(
                             content,
@@ -219,8 +235,11 @@ pub async fn run(
                         )
                         .await;
                         log::info!("ntfy: text capture result: {:?}", result.status);
-                        if let Some(n) = n {
-                            n.result(&result, &display, None).await;
+                        if let Some(t) = tg {
+                            t.result(&result, &display, None).await;
+                        }
+                        if let Some(d) = desk {
+                            d.result(&result, &display, prior).await;
                         }
                     });
                 }

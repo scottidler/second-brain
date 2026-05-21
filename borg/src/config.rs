@@ -150,7 +150,7 @@ pub struct Config {
     pub telegram: Option<TelegramConfig>,
     pub discord: Option<DiscordConfig>,
     pub ntfy: Option<NtfyConfig>,
-    pub notifier: Option<DesktopNotifierConfig>,
+    pub desktop: Option<DesktopConfig>,
     #[serde(default = "default_links")]
     pub links: Vec<LinkConfig>,
     pub fabric: FabricConfig,
@@ -694,13 +694,13 @@ fn default_ntfy_server() -> String {
     "https://ntfy.sh".to_string()
 }
 
-/// Config for the desktop notifier sink (a sibling of the Telegram `Notifier`).
+/// Config for the desktop notification sink (a sibling of the Telegram sink).
 /// The sink shells out to the user session D-Bus via `notify-rust`. Default
 /// `enabled: false` keeps headless borg hosts silent; new machines pick up
 /// `enabled: true` via the `sb bootstrap` template.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
-pub struct DesktopNotifierConfig {
+pub struct DesktopConfig {
     /// If false, no DesktopNotifier is constructed and the daemon stays silent
     /// on the desktop. Telegram is unaffected.
     pub enabled: bool,
@@ -714,7 +714,7 @@ pub struct DesktopNotifierConfig {
     pub appname: String,
 }
 
-impl Default for DesktopNotifierConfig {
+impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
             enabled: false,

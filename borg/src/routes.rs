@@ -61,10 +61,6 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
         });
     }
 
-    if let Some(ref n) = state.notifier {
-        let _ = n.processing(&trace_id, "Processing...", None).await;
-    }
-
     // Spawn the pipeline on a detached task. The HTTP response returns
     // within milliseconds so the client's connection slot frees up. This
     // also protects the pipeline from being cancelled if the client gives
@@ -72,17 +68,33 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
     // future the moment Firefox recycled its service worker, leaving an
     // intake row with no ledger / DLQ resolution until the watchdog
     // caught it 31 minutes later.
+    //
+    // Per Design Invariant 1 the processing notifications also run inside
+    // the spawn so notification-channel latency cannot couple to the HTTP
+    // response time.
     let url = request.url.clone();
     let config = state.config.clone();
-    let notifier = state.notifier.clone();
+    let telegram = state.telegram.clone();
+    let desktop = state.desktop.clone();
     let force = request.force;
     let task_trace = trace_id.clone();
     let task_url = url.clone();
     tokio::spawn(async move {
+        let prior = if let Some(d) = &desktop {
+            d.processing(&task_trace, "Processing...").await
+        } else {
+            None
+        };
+        if let Some(t) = &telegram {
+            let _ = t.processing(&task_trace, "Processing...", None).await;
+        }
         let content = ContentKind::Url(task_url.clone());
         let result = pipeline::process_content(content, tags, method, force, &config, Some(task_trace.clone())).await;
-        if let Some(n) = notifier {
-            n.result(&result, &task_url, None).await;
+        if let Some(t) = telegram {
+            t.result(&result, &task_url, None).await;
+        }
+        if let Some(d) = desktop {
+            d.result(&result, &task_url, prior).await;
         }
         match &result.status {
             IngestStatus::Failed { reason } => {
@@ -135,18 +147,24 @@ pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest
         });
     }
 
-    if let Some(ref n) = state.notifier {
-        let _ = n.processing(&trace_id, "Processing note...", None).await;
-    }
-
     // Detach the pipeline from the HTTP handler - same reason as /ingest.
+    // Per Design Invariant 1, notification calls run inside the spawn too.
     let tags = request.tags.unwrap_or_default();
     let config = state.config.clone();
-    let notifier = state.notifier.clone();
+    let telegram = state.telegram.clone();
+    let desktop = state.desktop.clone();
     let task_trace = trace_id.clone();
     let task_display = display.clone();
     let task_text = request.text;
     tokio::spawn(async move {
+        let prior = if let Some(d) = &desktop {
+            d.processing(&task_trace, "Processing note...").await
+        } else {
+            None
+        };
+        if let Some(t) = &telegram {
+            let _ = t.processing(&task_trace, "Processing note...", None).await;
+        }
         let content = ContentKind::Text(task_text);
         let result = pipeline::process_content(
             content,
@@ -157,8 +175,11 @@ pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest
             Some(task_trace.clone()),
         )
         .await;
-        if let Some(n) = notifier {
-            n.result(&result, &task_display, None).await;
+        if let Some(t) = telegram {
+            t.result(&result, &task_display, None).await;
+        }
+        if let Some(d) = desktop {
+            d.result(&result, &task_display, prior).await;
         }
         match &result.status {
             IngestStatus::Failed { reason } => log::warn!("Note capture failed: {reason}"),
@@ -356,18 +377,24 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
         _ => "file".to_string(),
     };
 
-    if let Some(ref n) = state.notifier {
-        let _ = n
-            .processing(&trace_id, &format!("Processing file: {display_filename}..."), None)
-            .await;
-    }
-
     // Detach the pipeline from the HTTP handler - same reason as /ingest.
+    // Per Design Invariant 1, notification calls run inside the spawn too.
     let config = state.config.clone();
-    let notifier = state.notifier.clone();
+    let telegram = state.telegram.clone();
+    let desktop = state.desktop.clone();
     let task_trace = trace_id.clone();
     let task_display = display_filename.clone();
+    let processing_text = format!("Processing file: {task_display}...");
+    let display_source = format!("[file: {task_display}]");
     tokio::spawn(async move {
+        let prior = if let Some(d) = &desktop {
+            d.processing(&task_trace, &processing_text).await
+        } else {
+            None
+        };
+        if let Some(t) = &telegram {
+            let _ = t.processing(&task_trace, &processing_text, None).await;
+        }
         let result = pipeline::process_content(
             content,
             tags,
@@ -377,8 +404,11 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
             Some(task_trace.clone()),
         )
         .await;
-        if let Some(n) = notifier {
-            n.result(&result, &format!("[file: {task_display}]"), None).await;
+        if let Some(t) = telegram {
+            t.result(&result, &display_source, None).await;
+        }
+        if let Some(d) = desktop {
+            d.result(&result, &display_source, prior).await;
         }
         match &result.status {
             IngestStatus::Failed { reason } => {

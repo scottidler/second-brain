@@ -1044,10 +1044,18 @@ fn print_server_banner(s: &borg::ServerStartup) {
     use borg::SubsystemStatus;
 
     let arrow = "-->".to_string();
-    match &s.telegram_notifier {
+    match &s.telegram {
         SubsystemStatus::Active => println!("{} telegram notifier active", arrow.green()),
         SubsystemStatus::SkippedNoToken => {
             eprintln!("{} telegram notifier skipped (token not available)", arrow.yellow())
+        }
+        _ => {}
+    }
+
+    match &s.desktop {
+        SubsystemStatus::Active => println!("{} desktop notifier active", arrow.green()),
+        SubsystemStatus::SkippedHostMismatch => {
+            eprintln!("{} desktop notifier skipped (host mismatch)", arrow.yellow())
         }
         _ => {}
     }

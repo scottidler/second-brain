@@ -1,9 +1,9 @@
 //! Notification sinks. Two structurally identical channels:
 //!
-//! - [`Notifier`] talks to Telegram via teloxide. Cross-host (the bot delivers
+//! - [`Telegram`] talks to Telegram via teloxide. Cross-host (the bot delivers
 //!   to whichever device is logged in).
-//! - [`DesktopNotifier`] talks to the local user-session D-Bus via
-//!   `notify-rust`. Host-gated; only runs on the machine with the desktop.
+//! - [`Desktop`] talks to the local user-session D-Bus via `notify-rust`.
+//!   Host-gated; only runs on the machine with the desktop.
 //!
 //! Both sinks expose `processing(...)` and `result(...)` so call sites stay
 //! parallel. Future channels go side-by-side rather than behind a trait -
@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use crate::config::{DesktopNotifierConfig, TelegramConfig};
+use crate::config::{DesktopConfig, TelegramConfig};
 use crate::router::format_reply;
 use crate::types::IngestResult;
 use notify_rust::{Notification, NotificationHandle, Timeout};
@@ -29,15 +29,14 @@ mod tests;
 /// pipeline timeline.
 const NOTIFICATION_CALL_TIMEOUT_MS: u64 = 500;
 
-/// Shared notification service that sends feedback via Telegram.
-/// Clone-cheap: `Bot` is an HTTP client wrapper.
+/// Telegram notification sink. Clone-cheap: `Bot` is an HTTP client wrapper.
 #[derive(Clone)]
-pub struct Notifier {
+pub struct Telegram {
     bot: Bot,
     default_chat_id: ChatId,
 }
 
-impl Notifier {
+impl Telegram {
     /// Build from a resolved bot token and Telegram config.
     ///
     /// Chat ID resolution order:
@@ -144,22 +143,22 @@ pub fn format_desktop_body(result: &IngestResult, display_source: &str) -> Strin
     }
 }
 
-/// Desktop notification sink, peer to the Telegram [`Notifier`]. Renders the
-/// same intake / terminal messages onto the local user-session D-Bus via
-/// `notify-rust`. The `processing` toast is replaced in place by the terminal
-/// toast (the [`NotificationHandle`] from `processing` is threaded through to
-/// `result`), so one ingest produces one persistent popup that updates rather
-/// than two stacking popups.
+/// Desktop notification sink, peer to [`Telegram`]. Renders the same intake /
+/// terminal messages onto the local user-session D-Bus via `notify-rust`.
+/// The `processing` toast is replaced in place by the terminal toast (the
+/// [`NotificationHandle`] from `processing` is threaded through to `result`),
+/// so one ingest produces one persistent popup that updates rather than two
+/// stacking popups.
 #[derive(Clone)]
-pub struct DesktopNotifier {
+pub struct Desktop {
     appname: String,
     timeout: Timeout,
 }
 
-impl DesktopNotifier {
+impl Desktop {
     /// Build from config. Returns `None` when `enabled: false` so call sites
-    /// can mirror the [`Notifier::new`] `Option<Self>` pattern.
-    pub fn new(cfg: &DesktopNotifierConfig) -> Option<Self> {
+    /// can mirror the [`Telegram::new`] `Option<Self>` pattern.
+    pub fn new(cfg: &DesktopConfig) -> Option<Self> {
         if !cfg.enabled {
             log::info!("notify: desktop notifications disabled");
             return None;

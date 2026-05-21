@@ -2,6 +2,7 @@ use crate::assets;
 use crate::backoff::ExponentialBackoff;
 use crate::config::{Config, DiscordConfig};
 use crate::intake::{self as intake_log, Kind as IntakeKind, Stage as DlqStage};
+use crate::notify::Desktop;
 use crate::pipeline;
 use crate::router::{extract_url_from_text, format_reply};
 use crate::trace;
@@ -64,6 +65,7 @@ fn format_discord_reply(result: &IngestResult, display_source: &str) -> String {
 struct Handler {
     config: Arc<Config>,
     channel_id: u64,
+    desktop: Option<Desktop>,
 }
 
 #[async_trait]
@@ -203,10 +205,16 @@ impl EventHandler for Handler {
                         _ => "file",
                     };
                     let display_source = format!("[{}: {}]", kind_label, att_filename);
+                    let processing_text = format!("Processing {kind_label}...");
 
+                    let prior = if let Some(d) = &self.desktop {
+                        d.processing(&trace_id, &processing_text).await
+                    } else {
+                        None
+                    };
                     let _ = msg
                         .channel_id
-                        .say(&ctx.http, format!("[{trace_id}] Processing {kind_label}..."))
+                        .say(&ctx.http, format!("[{trace_id}] {processing_text}"))
                         .await;
 
                     let result = pipeline::process_content(
@@ -222,6 +230,9 @@ impl EventHandler for Handler {
                         .channel_id
                         .say(&ctx.http, format_discord_reply(&result, &display_source))
                         .await;
+                    if let Some(d) = &self.desktop {
+                        d.result(&result, &display_source, prior).await;
+                    }
                 }
                 None => {
                     log::warn!(
@@ -259,6 +270,11 @@ impl EventHandler for Handler {
             (ContentKind::Text(msg.content.clone()), display)
         };
 
+        let prior = if let Some(d) = &self.desktop {
+            d.processing(&trace_id, "Processing...").await
+        } else {
+            None
+        };
         let _ = msg
             .channel_id
             .say(&ctx.http, format!("[{trace_id}] Processing..."))
@@ -276,10 +292,13 @@ impl EventHandler for Handler {
             .channel_id
             .say(&ctx.http, format_discord_reply(&result, &display_source))
             .await;
+        if let Some(d) = &self.desktop {
+            d.result(&result, &display_source, prior).await;
+        }
     }
 }
 
-pub async fn run(token: String, dc_config: DiscordConfig, config: Arc<Config>) -> Result<()> {
+pub async fn run(token: String, dc_config: DiscordConfig, config: Arc<Config>, desktop: Option<Desktop>) -> Result<()> {
     let mut backoff = ExponentialBackoff::new();
 
     loop {
@@ -287,6 +306,7 @@ pub async fn run(token: String, dc_config: DiscordConfig, config: Arc<Config>) -
         let handler = Handler {
             config: config.clone(),
             channel_id: dc_config.channel_id,
+            desktop: desktop.clone(),
         };
         let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
 

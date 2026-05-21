@@ -163,7 +163,8 @@ pub async fn run(
     token: String,
     tg_config: TelegramConfig,
     config: Arc<Config>,
-    notifier: Option<notify::Notifier>,
+    telegram: Option<notify::Telegram>,
+    desktop: Option<notify::Desktop>,
 ) -> Result<()> {
     let mut backoff = ExponentialBackoff::new();
 
@@ -189,14 +190,16 @@ pub async fn run(
         // races with a lingering long-poll and triggers TerminatedByOtherGetUpdates.
         claim_polling_session(&bot).await;
 
-        let tg = tg_config.clone();
+        let tg_cfg = tg_config.clone();
         let cfg = config.clone();
-        let nfy = notifier.clone();
+        let tg_outer = telegram.clone();
+        let desk_outer = desktop.clone();
 
         let handler = Update::filter_message().endpoint(move |message: Message, bot: Bot| {
             let config = cfg.clone();
-            let allowed = tg.allowed_chat_ids.clone();
-            let notifier = nfy.clone();
+            let allowed = tg_cfg.allowed_chat_ids.clone();
+            let telegram = tg_outer.clone();
+            let desktop = desk_outer.clone();
             async move {
                 let chat_id = message.chat.id;
                 let chat_id_override = Some(chat_id.0);
@@ -286,16 +289,22 @@ pub async fn run(
 
                     let filename = format!("telegram-photo-{}.jpg", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
                     let display_source = format!("[image: {}]", filename);
-                    if let Some(ref n) = notifier {
-                        let _ = n.processing(&trace_id, "Processing image...", chat_id_override).await;
-                    }
 
                     let content = ContentKind::Image { data, filename };
                     let extra_tags: Vec<String> =
                         if caption.is_empty() { vec![] } else { vec![format!("caption:{caption}")] };
 
-                    let n = notifier.clone();
+                    let tg = telegram.clone();
+                    let desk = desktop.clone();
                     tokio::spawn(async move {
+                        let prior = if let Some(d) = &desk {
+                            d.processing(&trace_id, "Processing image...").await
+                        } else {
+                            None
+                        };
+                        if let Some(t) = &tg {
+                            let _ = t.processing(&trace_id, "Processing image...", chat_id_override).await;
+                        }
                         let result = pipeline::process_content(
                             content,
                             extra_tags,
@@ -306,8 +315,11 @@ pub async fn run(
                         )
                         .await;
                         log::debug!("Pipeline result: {:?}", result.status);
-                        if let Some(n) = n {
-                            n.result(&result, &display_source, chat_id_override).await;
+                        if let Some(t) = tg {
+                            t.result(&result, &display_source, chat_id_override).await;
+                        }
+                        if let Some(d) = desk {
+                            d.result(&result, &display_source, prior).await;
                         }
                     });
 
@@ -334,16 +346,22 @@ pub async fn run(
 
                     let filename = format!("voice-{}.ogg", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
                     let display_source = format!("[voice: {}]", filename);
-                    if let Some(ref n) = notifier {
-                        let _ = n
-                            .processing(&trace_id, "Processing voice note...", chat_id_override)
-                            .await;
-                    }
 
                     let content = ContentKind::Audio { data, filename };
 
-                    let n = notifier.clone();
+                    let tg = telegram.clone();
+                    let desk = desktop.clone();
                     tokio::spawn(async move {
+                        let prior = if let Some(d) = &desk {
+                            d.processing(&trace_id, "Processing voice note...").await
+                        } else {
+                            None
+                        };
+                        if let Some(t) = &tg {
+                            let _ = t
+                                .processing(&trace_id, "Processing voice note...", chat_id_override)
+                                .await;
+                        }
                         let result = pipeline::process_content(
                             content,
                             vec![],
@@ -354,8 +372,11 @@ pub async fn run(
                         )
                         .await;
                         log::debug!("Pipeline result: {:?}", result.status);
-                        if let Some(n) = n {
-                            n.result(&result, &display_source, chat_id_override).await;
+                        if let Some(t) = tg {
+                            t.result(&result, &display_source, chat_id_override).await;
+                        }
+                        if let Some(d) = desk {
+                            d.result(&result, &display_source, prior).await;
                         }
                     });
 
@@ -382,17 +403,23 @@ pub async fn run(
                     };
 
                     let display_source = format!("[audio: {}]", original_name);
-                    if let Some(ref n) = notifier {
-                        let _ = n.processing(&trace_id, "Processing audio...", chat_id_override).await;
-                    }
 
                     let content = ContentKind::Audio {
                         data,
                         filename: original_name,
                     };
 
-                    let n = notifier.clone();
+                    let tg = telegram.clone();
+                    let desk = desktop.clone();
                     tokio::spawn(async move {
+                        let prior = if let Some(d) = &desk {
+                            d.processing(&trace_id, "Processing audio...").await
+                        } else {
+                            None
+                        };
+                        if let Some(t) = &tg {
+                            let _ = t.processing(&trace_id, "Processing audio...", chat_id_override).await;
+                        }
                         let result = pipeline::process_content(
                             content,
                             vec![],
@@ -403,8 +430,11 @@ pub async fn run(
                         )
                         .await;
                         log::debug!("Pipeline result: {:?}", result.status);
-                        if let Some(n) = n {
-                            n.result(&result, &display_source, chat_id_override).await;
+                        if let Some(t) = tg {
+                            t.result(&result, &display_source, chat_id_override).await;
+                        }
+                        if let Some(d) = desk {
+                            d.result(&result, &display_source, prior).await;
                         }
                     });
 
@@ -447,14 +477,19 @@ pub async fn run(
                             let caption = message.caption().unwrap_or("").to_string();
                             let extra_tags: Vec<String> =
                                 if caption.is_empty() { vec![] } else { vec![format!("caption:{caption}")] };
-                            if let Some(ref n) = notifier {
-                                let _ = n
-                                    .processing(&trace_id, &format!("Processing {kind_label}..."), chat_id_override)
-                                    .await;
-                            }
+                            let processing_text = format!("Processing {kind_label}...");
 
-                            let n = notifier.clone();
+                            let tg = telegram.clone();
+                            let desk = desktop.clone();
                             tokio::spawn(async move {
+                                let prior = if let Some(d) = &desk {
+                                    d.processing(&trace_id, &processing_text).await
+                                } else {
+                                    None
+                                };
+                                if let Some(t) = &tg {
+                                    let _ = t.processing(&trace_id, &processing_text, chat_id_override).await;
+                                }
                                 let result = pipeline::process_content(
                                     kind,
                                     extra_tags,
@@ -465,8 +500,11 @@ pub async fn run(
                                 )
                                 .await;
                                 log::debug!("Pipeline result: {:?}", result.status);
-                                if let Some(n) = n {
-                                    n.result(&result, &display_source, chat_id_override).await;
+                                if let Some(t) = tg {
+                                    t.result(&result, &display_source, chat_id_override).await;
+                                }
+                                if let Some(d) = desk {
+                                    d.result(&result, &display_source, prior).await;
                                 }
                             });
                         }
@@ -509,12 +547,17 @@ pub async fn run(
                     (ContentKind::Text(text.to_string()), display)
                 };
 
-                if let Some(ref n) = notifier {
-                    let _ = n.processing(&trace_id, "Processing...", chat_id_override).await;
-                }
-
-                let n = notifier.clone();
+                let tg = telegram.clone();
+                let desk = desktop.clone();
                 tokio::spawn(async move {
+                    let prior = if let Some(d) = &desk {
+                        d.processing(&trace_id, "Processing...").await
+                    } else {
+                        None
+                    };
+                    if let Some(t) = &tg {
+                        let _ = t.processing(&trace_id, "Processing...", chat_id_override).await;
+                    }
                     let result = pipeline::process_content(
                         content,
                         vec![],
@@ -525,8 +568,11 @@ pub async fn run(
                     )
                     .await;
                     log::debug!("Pipeline result: {:?}", result.status);
-                    if let Some(n) = n {
-                        n.result(&result, &display_source, chat_id_override).await;
+                    if let Some(t) = tg {
+                        t.result(&result, &display_source, chat_id_override).await;
+                    }
+                    if let Some(d) = desk {
+                        d.result(&result, &display_source, prior).await;
                     }
                 });
 

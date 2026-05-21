@@ -62,13 +62,14 @@ use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
 use config::Config;
-use notify::Notifier;
+use notify::{Desktop, Telegram};
 
 /// Shared application state for the HTTP server and daemon tasks.
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
-    pub notifier: Option<Notifier>,
+    pub telegram: Option<Telegram>,
+    pub desktop: Option<Desktop>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -104,10 +105,11 @@ pub enum SubsystemStatus {
 #[derive(Debug, Clone)]
 pub struct ServerStartup {
     pub addr: SocketAddr,
-    pub telegram_notifier: SubsystemStatus,
+    pub telegram: SubsystemStatus,
     pub telegram_bot: SubsystemStatus,
     pub discord: SubsystemStatus,
     pub ntfy: SubsystemStatus,
+    pub desktop: SubsystemStatus,
     pub watchdog: SubsystemStatus,
 }
 
@@ -177,16 +179,16 @@ pub async fn serve_init(config: Config) -> Result<(ServerStartup, ServerHandle)>
     let mut tasks = tokio::task::JoinSet::new();
 
     // Build the shared Telegram notifier (if configured)
-    let mut notifier: Option<Notifier> = None;
+    let mut telegram: Option<Telegram> = None;
     let mut resolved_tg_token: Option<String> = None;
-    let mut telegram_notifier_status = SubsystemStatus::Disabled;
+    let mut telegram_status = SubsystemStatus::Disabled;
 
     if let Some(tg_config) = &config.telegram {
         match config::resolve_secret(&tg_config.bot_token) {
             Ok(token) => {
-                notifier = Notifier::new(&token, tg_config);
+                telegram = Telegram::new(&token, tg_config);
                 resolved_tg_token = Some(token);
-                telegram_notifier_status = if notifier.is_some() {
+                telegram_status = if telegram.is_some() {
                     SubsystemStatus::Active
                 } else {
                     SubsystemStatus::Disabled
@@ -194,15 +196,36 @@ pub async fn serve_init(config: Config) -> Result<(ServerStartup, ServerHandle)>
             }
             Err(e) => {
                 log::warn!("Telegram configured but token not available: {e:#}");
-                telegram_notifier_status = SubsystemStatus::SkippedNoToken;
+                telegram_status = SubsystemStatus::SkippedNoToken;
             }
+        }
+    }
+
+    // Build the desktop notifier (host-gated; mirrors telegram/discord/ntfy)
+    let mut desktop: Option<Desktop> = None;
+    let mut desktop_status = SubsystemStatus::Disabled;
+    if let Some(dn_config) = &config.desktop {
+        if !config::is_local_host(&dn_config.host) {
+            log::info!(
+                "Desktop notifier configured but host {:?} does not match this machine, skipping",
+                dn_config.host
+            );
+            desktop_status = SubsystemStatus::SkippedHostMismatch;
+        } else {
+            desktop = Desktop::new(dn_config);
+            desktop_status = if desktop.is_some() {
+                SubsystemStatus::Active
+            } else {
+                SubsystemStatus::Disabled
+            };
         }
     }
 
     // HTTP server (always runs)
     let state = AppState {
         config: config.clone(),
-        notifier: notifier.clone(),
+        telegram: telegram.clone(),
+        desktop: desktop.clone(),
     };
     let app = build_router(state);
     let listener = TcpListener::bind(addr).await.context("Failed to bind to address")?;
@@ -223,10 +246,11 @@ pub async fn serve_init(config: Config) -> Result<(ServerStartup, ServerHandle)>
                 "Telegram bot enabled (allowed_chat_ids: {:?})",
                 tg_config.allowed_chat_ids
             );
-            let tg = tg_config.clone();
+            let tg_cfg = tg_config.clone();
             let cfg = config.clone();
-            let tg_notifier = notifier.clone();
-            tasks.spawn(async move { telegram::run(token, tg, cfg, tg_notifier).await });
+            let tg = telegram.clone();
+            let desk = desktop.clone();
+            tasks.spawn(async move { telegram::run(token, tg_cfg, cfg, tg, desk).await });
             telegram_bot_status = SubsystemStatus::Active;
         } else {
             telegram_bot_status = SubsystemStatus::SkippedNoToken;
@@ -248,7 +272,8 @@ pub async fn serve_init(config: Config) -> Result<(ServerStartup, ServerHandle)>
                     log::info!("Discord bot enabled (channel_id: {})", dc_config.channel_id);
                     let dc = dc_config.clone();
                     let cfg = config.clone();
-                    tasks.spawn(async move { discord::run(token, dc, cfg).await });
+                    let desk = desktop.clone();
+                    tasks.spawn(async move { discord::run(token, dc, cfg, desk).await });
                     discord_status = SubsystemStatus::Active;
                 }
                 Err(e) => {
@@ -273,9 +298,10 @@ pub async fn serve_init(config: Config) -> Result<(ServerStartup, ServerHandle)>
             let topic = ntfy_config.topic.clone();
             let token = ntfy_config.token.as_ref().and_then(|t| config::resolve_secret(t).ok());
             let cfg = config.clone();
-            let ntfy_notifier = notifier.clone();
+            let tg = telegram.clone();
+            let desk = desktop.clone();
             let topic_for_status = ntfy_config.topic.clone();
-            tasks.spawn(async move { ntfy::run(server, topic, token, cfg, ntfy_notifier).await });
+            tasks.spawn(async move { ntfy::run(server, topic, token, cfg, tg, desk).await });
             ntfy_status = SubsystemStatus::ActiveWithDetail(format!("topic: {topic_for_status}"));
         }
     }
@@ -292,10 +318,11 @@ pub async fn serve_init(config: Config) -> Result<(ServerStartup, ServerHandle)>
     Ok((
         ServerStartup {
             addr,
-            telegram_notifier: telegram_notifier_status,
+            telegram: telegram_status,
             telegram_bot: telegram_bot_status,
             discord: discord_status,
             ntfy: ntfy_status,
+            desktop: desktop_status,
             watchdog: SubsystemStatus::Active,
         },
         ServerHandle { tasks },
@@ -1407,7 +1434,8 @@ mod tests {
     fn test_router() -> Router {
         build_router(AppState {
             config: Arc::new(Config::default()),
-            notifier: None,
+            telegram: None,
+            desktop: None,
         })
     }
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::DesktopNotifierConfig;
+use crate::config::DesktopConfig;
 use crate::router::format_reply;
 use crate::types::{IngestResult, IngestStatus};
 
@@ -62,42 +62,42 @@ fn test_format_telegram_reply_escapes_html_in_title() {
 }
 
 #[test]
-fn test_notifier_new_with_notification_chat_id() {
+fn test_telegram_new_with_notification_chat_id() {
     let config = TelegramConfig {
         bot_token: "fake-token".to_string(),
         allowed_chat_ids: vec![111],
         notification_chat_id: Some(222),
         host: None,
     };
-    let notifier = Notifier::new("fake-token", &config);
+    let notifier = Telegram::new("fake-token", &config);
     assert!(notifier.is_some());
     let n = notifier.expect("should be Some");
     assert_eq!(n.default_chat_id, ChatId(222));
 }
 
 #[test]
-fn test_notifier_new_falls_back_to_allowed_chat_ids() {
+fn test_telegram_new_falls_back_to_allowed_chat_ids() {
     let config = TelegramConfig {
         bot_token: "fake-token".to_string(),
         allowed_chat_ids: vec![333],
         notification_chat_id: None,
         host: None,
     };
-    let notifier = Notifier::new("fake-token", &config);
+    let notifier = Telegram::new("fake-token", &config);
     assert!(notifier.is_some());
     let n = notifier.expect("should be Some");
     assert_eq!(n.default_chat_id, ChatId(333));
 }
 
 #[test]
-fn test_notifier_new_returns_none_when_no_chat_id() {
+fn test_telegram_new_returns_none_when_no_chat_id() {
     let config = TelegramConfig {
         bot_token: "fake-token".to_string(),
         allowed_chat_ids: vec![],
         notification_chat_id: None,
         host: None,
     };
-    let notifier = Notifier::new("fake-token", &config);
+    let notifier = Telegram::new("fake-token", &config);
     assert!(notifier.is_none());
 }
 
@@ -109,29 +109,29 @@ fn test_resolve_chat_id_override() {
         notification_chat_id: None,
         host: None,
     };
-    let notifier = Notifier::new("fake-token", &config).expect("should be Some");
+    let notifier = Telegram::new("fake-token", &config).expect("should be Some");
     assert_eq!(notifier.resolve_chat_id(Some(999)), ChatId(999));
     assert_eq!(notifier.resolve_chat_id(None), ChatId(111));
 }
 
 #[test]
-fn test_desktop_notifier_new_disabled_returns_none() {
-    let cfg = DesktopNotifierConfig {
+fn test_desktop_new_disabled_returns_none() {
+    let cfg = DesktopConfig {
         enabled: false,
         ..Default::default()
     };
-    assert!(DesktopNotifier::new(&cfg).is_none());
+    assert!(Desktop::new(&cfg).is_none());
 }
 
 #[test]
-fn test_desktop_notifier_new_enabled_returns_some() {
-    let cfg = DesktopNotifierConfig {
+fn test_desktop_new_enabled_returns_some() {
+    let cfg = DesktopConfig {
         enabled: true,
         host: None,
         timeout_ms: 5000,
         appname: "borg".to_string(),
     };
-    let n = DesktopNotifier::new(&cfg).expect("enabled config builds notifier");
+    let n = Desktop::new(&cfg).expect("enabled config builds notifier");
     assert_eq!(n.appname, "borg");
     assert_eq!(n.timeout, Timeout::Milliseconds(5000));
 }
