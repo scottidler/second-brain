@@ -5,7 +5,7 @@ use crate::extraction;
 use crate::fabric;
 use crate::hygiene;
 use crate::jina;
-use crate::ledger::{self, LedgerEntry, LedgerStatus};
+use crate::ledger::{self, LedgerEntry};
 use crate::markdown::{self, ContentType, NoteContent};
 use crate::ocr;
 use crate::receipts;
@@ -337,29 +337,10 @@ pub async fn process_url(
     .await;
 
     let make_failure = |reason: String, elapsed: std::time::Duration| -> IngestResult {
-        // Best-effort log failure to Borg Ledger
+        // Failures live in the receipts log only; the markdown ledger is
+        // success-only as of Phase 4. The receipts row is closed out in
+        // process_content's terminal write at the chokepoint.
         let canonical = hygiene::normalize_url(url, &config.canonicalization.rules).unwrap_or_else(|_| url.to_string());
-        let tz: chrono_tz::Tz = config
-            .frontmatter
-            .timezone
-            .parse()
-            .unwrap_or(chrono_tz::America::Los_Angeles);
-        let now = chrono::Utc::now().with_timezone(&tz);
-        if let Ok(ledger_p) = ledger::ledger_path(config) {
-            let _ = ledger::append_entry(
-                &ledger_p,
-                &LedgerEntry {
-                    date: now.format("%Y-%m-%d").to_string(),
-                    time: now.format("%H:%M").to_string(),
-                    method: method.into(),
-                    status: LedgerStatus::Failed,
-                    filename: None,
-                    source: canonical.clone(),
-                    domain: None,
-                    trace_id: Some(trace_id.to_string()),
-                },
-            );
-        }
         IngestResult {
             status: IngestStatus::Failed { reason },
             note_path: None,
@@ -446,19 +427,12 @@ async fn process_url_inner(
             Some(g) => Some(g),
             None => {
                 log::info!("[{trace_id}] Duplicate URL (inflight): {canonical}");
-                ledger::append_entry(
-                    &ledger_file,
-                    &LedgerEntry {
-                        date: log_date,
-                        time: log_time,
-                        method: method.into(),
-                        status: LedgerStatus::Skipped,
-                        filename: None,
-                        source: canonical.clone(),
-                        domain: None,
-                        trace_id: Some(trace_id.to_string()),
-                    },
-                )?;
+                // Inflight duplicates do NOT get a ledger row (the ledger is
+                // success-only as of Phase 4 and an inflight collision is
+                // not a successful ingestion). The outer process_content
+                // chokepoint closes out the receipts row to `succeeded`
+                // because the IngestStatus is Duplicate, which is the
+                // intentional "no-op success" mapping.
                 return Ok(IngestResult {
                     status: IngestStatus::Duplicate {
                         original_date: "inflight".to_string(),
@@ -513,8 +487,13 @@ async fn process_url_inner(
             // for that final cleanup.
             old_path_to_delete = Some(old_path.clone());
         }
-        ledger::mark_replaced(&ledger_file, existing.line_number)?;
-        log::info!("[{trace_id}] Marked ledger row {} as replaced", existing.line_number);
+        // Phase 4: the ledger is append-only and success-only. A reingest
+        // produces a new ledger row alongside the original; the original
+        // row stays as the historical record. mark_replaced is gone.
+        log::info!(
+            "[{trace_id}] Reingest will append a new ledger row; original row {} stays as history",
+            existing.line_number
+        );
     }
 
     let url_match = router::classify_url(&canonical, &config.links)?;
@@ -783,7 +762,6 @@ async fn process_url_inner(
             date: log_date,
             time: log_time,
             method: method.into(),
-            status: LedgerStatus::Completed,
             filename: extract_filename(&note_path),
             source: canonical.clone(),
             domain: None,
@@ -1362,7 +1340,6 @@ async fn process_image_inner(
             date: log_date,
             time: log_time,
             method: method.into(),
-            status: LedgerStatus::Completed,
             filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
@@ -1598,7 +1575,6 @@ async fn process_audio_inner(
             date: log_date,
             time: log_time,
             method: method.into(),
-            status: LedgerStatus::Completed,
             filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
@@ -1855,7 +1831,6 @@ async fn process_document_file_inner(
             date: log_date,
             time: log_time,
             method: method.into(),
-            status: LedgerStatus::Completed,
             filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
@@ -2061,7 +2036,6 @@ async fn process_text_inner(
             date: log_date,
             time: log_time,
             method: method.into(),
-            status: LedgerStatus::Completed,
             filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
@@ -2233,7 +2207,6 @@ async fn process_vocab(
             date: log_date,
             time: log_time,
             method: method.into(),
-            status: LedgerStatus::Completed,
             filename: extract_filename(&note_path),
             source: format!("[{}]", text.trim()),
             domain: None,
@@ -2635,7 +2608,6 @@ async fn process_code_snippet(
             date: log_date,
             time: log_time,
             method: method.into(),
-            status: LedgerStatus::Completed,
             filename: extract_filename(&note_path),
             source: source_display,
             domain: None,

@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::hygiene;
-use crate::ledger::{self, LedgerEntry, LedgerStatus};
+use crate::ledger::{self, LedgerEntry};
 use crate::types::IngestMethod;
 use eyre::{Context, Result};
 use rayon::prelude::*;
@@ -137,7 +137,6 @@ fn migrate_one_note(path: &Path, vault_root: &Path, apply: bool, config: &Config
             date,
             time: "00:00".to_string(),
             method: IngestMethod::Cli.into(),
-            status: LedgerStatus::Completed,
             filename: rel_note_path.and_then(|p| p.rsplit('/').next().map(|s| s.to_string())),
             source: source.to_string(),
             domain: path

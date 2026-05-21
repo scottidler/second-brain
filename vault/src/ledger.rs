@@ -4,30 +4,15 @@ use fs2::FileExt;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LedgerStatus {
-    Completed,
-    Failed,
-    Skipped,
-    Replaced,
-}
-
-impl std::fmt::Display for LedgerStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Completed => write!(f, "\u{2705}"),
-            Self::Failed => write!(f, "\u{274c}"),
-            Self::Skipped => write!(f, "\u{23ed}\u{fe0f}"),
-            Self::Replaced => write!(f, "\u{01f504}"),
-        }
-    }
-}
+/// On-disk marker for a successful ledger row. The receipts log carries
+/// every failure now; the ledger only records successes. Kept as a const
+/// so the writer and any drift-repair logic agree on the literal.
+const SUCCESS_GLYPH: &str = "\u{2705}";
 
 pub struct LedgerEntry {
     pub date: String,
     pub time: String,
     pub method: Method,
-    pub status: LedgerStatus,
     pub filename: Option<String>,
     pub source: String,
     pub domain: Option<String>,
@@ -265,32 +250,6 @@ pub fn find_completed(ledger_path: &Path, content_key: &str) -> Result<Option<Co
     Ok(last_match)
 }
 
-/// Mark an existing ledger row as replaced.
-pub fn mark_replaced(ledger_path: &Path, line_number: usize) -> Result<()> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(ledger_path)
-        .context("Failed to open Borg Ledger for update")?;
-    file.lock_exclusive()
-        .context("Failed to acquire exclusive lock on Borg Ledger")?;
-
-    let content = fs::read_to_string(ledger_path).context("Failed to read Borg Ledger")?;
-    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-
-    if line_number < lines.len() {
-        lines[line_number] = lines[line_number].replacen("\u{2705}", "\u{01f504}", 1);
-    }
-
-    let new_content = lines.join("\n");
-    let final_content = if content.ends_with('\n') { format!("{new_content}\n") } else { new_content };
-
-    fs::write(ledger_path, final_content).context("Failed to write updated Borg Ledger")?;
-    file.unlock().ok();
-
-    Ok(())
-}
-
 /// Filter criteria for querying ledger entries.
 #[derive(Debug, Default)]
 pub struct EntryFilter {
@@ -468,7 +427,7 @@ pub fn append_entry(ledger_path: &Path, entry: &LedgerEntry) -> Result<()> {
 
     let row = format!(
         "| {} | {} | {} | {} | {} | {} | {} | {} |",
-        entry.date, entry.time, entry.method, entry.status, note_display, entry.source, domain_display, trace_display,
+        entry.date, entry.time, entry.method, SUCCESS_GLYPH, note_display, entry.source, domain_display, trace_display,
     );
 
     let content = fs::read_to_string(ledger_path).context("Failed to read Borg Ledger")?;
@@ -551,7 +510,6 @@ mod tests {
             date: "2026-03-07".to_string(),
             time: "14:30".to_string(),
             method: Method::Cli,
-            status: LedgerStatus::Completed,
             source: "https://example.com/article".to_string(),
             domain: Some("ai".to_string()),
             filename: Some("test-article.md".to_string()),
@@ -569,36 +527,6 @@ mod tests {
     }
 
     #[test]
-    fn test_failed_entry_not_duplicate() {
-        let path = temp_ledger_path().with_file_name("test-vault-failed-not-dup.md");
-        cleanup(&path);
-
-        let entry = LedgerEntry {
-            date: "2026-03-07".to_string(),
-            time: "14:30".to_string(),
-            method: Method::Telegram,
-            status: LedgerStatus::Failed,
-            filename: None,
-            source: "https://example.com/broken".to_string(),
-            domain: None,
-            trace_id: None,
-        };
-        append_entry(&path, &entry).expect("append");
-
-        let result = check_duplicate(&path, "https://example.com/broken").expect("check");
-        assert!(result.is_none());
-
-        cleanup(&path);
-    }
-
-    #[test]
-    fn test_ledger_status_display() {
-        assert_eq!(format!("{}", LedgerStatus::Completed), "\u{2705}");
-        assert_eq!(format!("{}", LedgerStatus::Failed), "\u{274c}");
-        assert_eq!(format!("{}", LedgerStatus::Replaced), "\u{01f504}");
-    }
-
-    #[test]
     fn test_find_completed_returns_path() {
         let path = temp_ledger_path().with_file_name("test-vault-find-completed.md");
         cleanup(&path);
@@ -607,7 +535,6 @@ mod tests {
             date: "2026-03-18".to_string(),
             time: "10:00".to_string(),
             method: Method::Cli,
-            status: LedgerStatus::Completed,
             filename: Some("test-note.md".to_string()),
             source: "https://example.com/article".to_string(),
             domain: Some("ai".to_string()),
@@ -620,34 +547,6 @@ mod tests {
         let found = result.expect("should have entry");
         assert_eq!(found.date, "2026-03-18");
         assert_eq!(found.filename, "test-note.md");
-
-        cleanup(&path);
-    }
-
-    #[test]
-    fn test_mark_replaced_changes_status() {
-        let path = temp_ledger_path().with_file_name("test-vault-mark-replaced.md");
-        cleanup(&path);
-
-        let entry = LedgerEntry {
-            date: "2026-03-18".to_string(),
-            time: "10:00".to_string(),
-            method: Method::Cli,
-            status: LedgerStatus::Completed,
-            filename: Some("test-note.md".to_string()),
-            source: "https://example.com/article".to_string(),
-            domain: Some("ai".to_string()),
-            trace_id: None,
-        };
-        append_entry(&path, &entry).expect("append");
-
-        let existing = find_completed(&path, "https://example.com/article")
-            .expect("find")
-            .expect("should exist");
-        mark_replaced(&path, existing.line_number).expect("mark");
-
-        let result = check_duplicate(&path, "https://example.com/article").expect("check");
-        assert!(result.is_none(), "replaced entry should not count as duplicate");
 
         cleanup(&path);
     }
@@ -674,7 +573,6 @@ mod tests {
             date: "2026-03-23".to_string(),
             time: "14:00".to_string(),
             method: Method::Http,
-            status: LedgerStatus::Completed,
             filename: Some("new-note.md".to_string()),
             source: "https://example.com/new".to_string(),
             domain: Some("ai".to_string()),
@@ -723,7 +621,6 @@ mod tests {
             date: "2026-03-23".to_string(),
             time: "14:00".to_string(),
             method: Method::Http,
-            status: LedgerStatus::Completed,
             filename: Some("test.md".to_string()),
             source: "https://example.com".to_string(),
             domain: Some("ai".to_string()),
@@ -756,7 +653,6 @@ mod tests {
             date: "2026-03-23".to_string(),
             time: "14:00".to_string(),
             method: Method::Http,
-            status: LedgerStatus::Completed,
             filename: Some("inbox/should-strip-this.md".to_string()),
             source: "https://example.com/strip".to_string(),
             domain: Some("ai".to_string()),
@@ -807,7 +703,6 @@ mod tests {
                     date: date.to_string(),
                     time: time.to_string(),
                     method: Method::Http,
-                    status: LedgerStatus::Completed,
                     filename: Some(format!("{}.md", title.to_lowercase())),
                     source: format!("https://example.com/{}", title.to_lowercase()),
                     domain: Some("ai".to_string()),
