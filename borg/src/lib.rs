@@ -508,10 +508,50 @@ pub enum ReingestEvent {
     NoMatches,
 }
 
+/// Aggregate summary of a reingest run. The streaming `ReingestEvent` callback
+/// drives live UX (so a 10-minute 800-entry run never goes silent); this struct
+/// is the final typed contract the design doc specified: callers that don't
+/// want to handle events still get a structural summary.
+///
+/// Mirrors the dry-run/apply disambiguation rule used elsewhere in the workspace:
+/// `would_process` is populated only in dry-run mode; `processed` only in apply mode.
+#[derive(Debug, Default, Clone)]
+pub struct ReingestReport {
+    pub matched: usize,
+    pub would_process: Vec<ReingestCandidate>,
+    pub processed: Vec<ReingestEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReingestCandidate {
+    pub date: String,
+    pub slug: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReingestEntry {
+    pub source: String,
+    pub status: ReingestEntryStatus,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReingestEntryStatus {
+    Replaced { title: String },
+    Failed { reason: String },
+    Other(String),
+    Error(String),
+}
+
 /// Reingest existing ledger entries via the daemon's ingest endpoint.
+///
 /// Emits a streaming `ReingestEvent` per matched entry through the caller-
 /// supplied progress callback; sb prints as they arrive so the user sees
-/// progress on 800-row ledgers (~10+ minutes of sequential HTTP work).
+/// progress on 800-row ledgers (~10+ minutes of sequential HTTP work). The
+/// returned `ReingestReport` is the design-spec'd aggregate summary; the
+/// callback gives live UX, the report gives a structural contract for
+/// programmatic callers. `ReingestEvent::Complete` exists as the streaming
+/// signal of run completion; the typed return is the post-hoc summary.
 pub async fn reingest(
     config: Config,
     all: bool,
@@ -522,7 +562,7 @@ pub async fn reingest(
     after: Option<String>,
     dry_run: bool,
     mut progress: impl FnMut(&ReingestEvent) + Send,
-) -> Result<()> {
+) -> Result<ReingestReport> {
     use ledger::{EntryFilter, QueriedEntry};
 
     if !all && source.is_none() && content_type.is_none() && domain.is_none() {
@@ -569,11 +609,14 @@ pub async fn reingest(
         entries
     };
 
+    let mut report = ReingestReport::default();
+
     if entries.is_empty() {
         progress(&ReingestEvent::NoMatches);
-        return Ok(());
+        return Ok(report);
     }
 
+    report.matched = entries.len();
     progress(&ReingestEvent::Matched {
         count: entries.len(),
         dry_run,
@@ -589,6 +632,11 @@ pub async fn reingest(
         });
 
         if dry_run {
+            report.would_process.push(ReingestCandidate {
+                date: entry.date.clone(),
+                slug: entry.slug.clone(),
+                source: entry.source.clone(),
+            });
             continue;
         }
 
@@ -604,21 +652,24 @@ pub async fn reingest(
         });
 
         let client = reqwest::Client::new();
-        match client.post(&endpoint).json(&body).send().await {
+        let status = match client.post(&endpoint).json(&body).send().await {
             Ok(response) => {
                 let result: types::IngestResult =
                     response.json().await.context("Failed to parse response from daemon")?;
                 match result.status {
                     types::IngestStatus::Completed => {
-                        progress(&ReingestEvent::ItemReplaced {
-                            title: result.title.unwrap_or_else(|| "Untitled".to_string()),
-                        });
+                        let title = result.title.unwrap_or_else(|| "Untitled".to_string());
+                        progress(&ReingestEvent::ItemReplaced { title: title.clone() });
+                        ReingestEntryStatus::Replaced { title }
                     }
                     types::IngestStatus::Failed { reason } => {
-                        progress(&ReingestEvent::ItemFailed { reason });
+                        progress(&ReingestEvent::ItemFailed { reason: reason.clone() });
+                        ReingestEntryStatus::Failed { reason }
                     }
                     other => {
-                        progress(&ReingestEvent::ItemOther(format!("{other:?}")));
+                        let s = format!("{other:?}");
+                        progress(&ReingestEvent::ItemOther(s.clone()));
+                        ReingestEntryStatus::Other(s)
                     }
                 }
             }
@@ -626,14 +677,20 @@ pub async fn reingest(
                 if e.is_connect() {
                     eyre::bail!("Cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?");
                 }
-                progress(&ReingestEvent::ItemError(e.to_string()));
+                let s = e.to_string();
+                progress(&ReingestEvent::ItemError(s.clone()));
+                ReingestEntryStatus::Error(s)
             }
-        }
+        };
+        report.processed.push(ReingestEntry {
+            source: entry.source.clone(),
+            status,
+        });
     }
 
     progress(&ReingestEvent::Complete { dry_run });
 
-    Ok(())
+    Ok(report)
 }
 
 pub async fn ingest(

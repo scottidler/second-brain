@@ -215,6 +215,11 @@ pub struct ReingestReport {
 pub struct ReingestCandidate { pub date: String, pub slug: String, pub source: String }
 pub struct ReingestEntry { pub source: String, pub status: ReingestEntryStatus }
 pub enum ReingestEntryStatus { Replaced { title: String }, Failed { reason: String }, Other(String), Error(String) }
+```
+
+**Coexistence note (added 2026-05-20 after Mode-2 audit):** the design ships *both* `ReingestReport` (typed aggregate return) and a `ReingestEvent::Complete { dry_run: bool }` streaming event. The callback drives live UX so a 10-minute 800-entry run never goes silent; the report is the post-hoc contract for any programmatic consumer that wants a structural summary. Initial implementation (v0.8.5) dropped the report and put completion into the event enum only; v0.8.8+ restored the typed return alongside the event so both consumers are served.
+
+```rust
 
 pub struct ServerStartup {
     pub addr: SocketAddr,

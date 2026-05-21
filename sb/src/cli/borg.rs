@@ -445,46 +445,48 @@ impl BorgCli {
                 after,
                 dry_run,
             }) => {
-                borg::reingest(
-                    config,
-                    all,
-                    r#type,
-                    domain,
-                    source,
-                    before,
-                    after,
-                    dry_run,
-                    |event| match event {
-                        borg::ReingestEvent::NoMatches => println!("No matching entries found."),
-                        borg::ReingestEvent::Matched { count, dry_run } => println!(
-                            "{} {} entries{}",
-                            if *dry_run { "Would reingest" } else { "Reingesting" },
-                            count,
-                            if *dry_run { " (dry run)" } else { "" }
-                        ),
-                        borg::ReingestEvent::ItemStart {
-                            index,
-                            total,
-                            date,
-                            slug,
-                            source,
-                        } => println!("  [{}/{}] {} - {} ({})", index + 1, total, date, slug, source),
-                        borg::ReingestEvent::ItemReplaced { title } => {
-                            println!("    -> Replaced: \"{title}\"")
-                        }
-                        borg::ReingestEvent::ItemFailed { reason } => {
-                            eprintln!("    -> Failed: {reason}")
-                        }
-                        borg::ReingestEvent::ItemOther(s) => println!("    -> {s}"),
-                        borg::ReingestEvent::ItemError(e) => eprintln!("    -> Error: {e}"),
-                        borg::ReingestEvent::Complete { dry_run } => {
-                            if !*dry_run {
-                                println!("Reingest complete.");
+                let _report =
+                    borg::reingest(
+                        config,
+                        all,
+                        r#type,
+                        domain,
+                        source,
+                        before,
+                        after,
+                        dry_run,
+                        |event| match event {
+                            borg::ReingestEvent::NoMatches => println!("No matching entries found."),
+                            borg::ReingestEvent::Matched { count, dry_run } => println!(
+                                "{} {} entries{}",
+                                if *dry_run { "Would reingest" } else { "Reingesting" },
+                                count,
+                                if *dry_run { " (dry run)" } else { "" }
+                            ),
+                            borg::ReingestEvent::ItemStart {
+                                index,
+                                total,
+                                date,
+                                slug,
+                                source,
+                            } => println!("  [{}/{}] {} - {} ({})", index + 1, total, date, slug, source),
+                            borg::ReingestEvent::ItemReplaced { title } => {
+                                println!("    -> Replaced: \"{title}\"")
                             }
-                        }
-                    },
-                )
-                .await
+                            borg::ReingestEvent::ItemFailed { reason } => {
+                                eprintln!("    -> Failed: {reason}")
+                            }
+                            borg::ReingestEvent::ItemOther(s) => println!("    -> {s}"),
+                            borg::ReingestEvent::ItemError(e) => eprintln!("    -> Error: {e}"),
+                            borg::ReingestEvent::Complete { dry_run } => {
+                                if !*dry_run {
+                                    println!("Reingest complete.");
+                                }
+                            }
+                        },
+                    )
+                    .await?;
+                Ok(())
             }
             Some(Command::Replay(args)) => {
                 let opts = borg::replay::ReplayOptions {
