@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+# Migrate borg's legacy markdown bookkeeping (borg-intake.md, borg-ledger.md,
+# borg-dlq.md, borg-dlq-archive.md) into the receipts SQLite database
+# introduced by the receipts-log refactor.
+#
+# Idempotent. Safe to re-run. Refuses to run if borg.service is active.
+#
+# Usage:
+#   bin/migrate-receipts                # do the migration
+#   bin/migrate-receipts --dry-run      # parse and report; do not write
+#   bin/migrate-receipts --prune-legacy # after verifying, archive the
+#                                       # legacy markdown files via rkvr.
+#
+# After migration:
+#   sb borg log --status failed | head    # sanity check failures
+#   sb borg log --status succeeded | head # sanity check successes
+#   bin/migrate-receipts --prune-legacy   # delete legacy files when satisfied
+
+set -euo pipefail
+
+VAULT_ROOT="${VAULT_ROOT:-$HOME/repos/scottidler/obsidian}"
+RECEIPTS_DB="$HOME/.local/share/sb/borg/receipts.db"
+DRY_RUN=0
+PRUNE_LEGACY=0
+FORCE=0
+
+usage() {
+    grep -E '^# ' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run)      DRY_RUN=1 ;;
+        --prune-legacy) PRUNE_LEGACY=1 ;;
+        --force)        FORCE=1 ;;
+        -h|--help)      usage ;;
+        *)              echo "unknown arg: $arg" >&2; usage ;;
+    esac
+done
+
+# Refuse to run if the borg daemon is active - racy reads/writes against the
+# legacy markdown files during migration would corrupt the receipts DB.
+if systemctl --user is-active --quiet borg.service 2>/dev/null; then
+    echo "ERROR: borg.service is active. Stop it first:" >&2
+    echo "  sb borg daemon --stop" >&2
+    echo "  bin/migrate-receipts" >&2
+    echo "  sb borg daemon --start" >&2
+    exit 1
+fi
+
+INTAKE_MD="$VAULT_ROOT/system/views/borg-intake.md"
+LEDGER_MD="$VAULT_ROOT/system/views/borg-ledger.md"
+DLQ_MD="$VAULT_ROOT/system/views/borg-dlq.md"
+DLQ_ARCHIVE_MD="$VAULT_ROOT/system/views/borg-dlq-archive.md"
+ORPHANS_MD="$VAULT_ROOT/system/views/borg-orphans.md"
+
+# === --prune-legacy branch ===========================================================
+if [[ $PRUNE_LEGACY -eq 1 ]]; then
+    echo "Scanning vault for [[borg-intake]] / [[borg-dlq]] / [[borg-dlq-archive]] / [[borg-orphans]] backlinks..."
+    backlink_hits=$(grep -RIn --include='*.md' \
+        --exclude-dir="$VAULT_ROOT/system/views" \
+        -E '\[\[borg-(intake|dlq|dlq-archive|orphans)' \
+        "$VAULT_ROOT" 2>/dev/null || true)
+    if [[ -n "$backlink_hits" ]]; then
+        echo "Found vault backlinks to deleted pages:"
+        printf '%s\n' "$backlink_hits"
+        if [[ $FORCE -ne 1 ]]; then
+            echo "Refusing to prune. Resolve the backlinks or rerun with --force." >&2
+            exit 1
+        fi
+        echo "--force passed; pruning anyway."
+    fi
+    for f in "$INTAKE_MD" "$DLQ_MD" "$DLQ_ARCHIVE_MD" "$ORPHANS_MD" "$LEDGER_MD.pre-receipts"; do
+        if [[ -e "$f" ]]; then
+            rkvr rmrf "$f"
+        fi
+    done
+    echo "Pruned legacy markdown files (archived via rkvr; recoverable from /var/tmp/rmrf/)."
+    exit 0
+fi
+
+# === migration branch ================================================================
+mkdir -p "$(dirname "$RECEIPTS_DB")"
+
+# Ensure the schema exists (open via `sb` if available, else inline the schema).
+if [[ ! -f "$RECEIPTS_DB" ]]; then
+    if command -v sb >/dev/null 2>&1; then
+        # `sb borg log` opens the DB and runs the schema migration if absent.
+        sb borg log --limit 1 >/dev/null 2>&1 || true
+    fi
+fi
+if [[ ! -f "$RECEIPTS_DB" ]]; then
+    echo "ERROR: $RECEIPTS_DB does not exist and `sb borg log` could not create it." >&2
+    echo "Run \`sb borg log\` once (any args) to create the schema, then re-run this script." >&2
+    exit 1
+fi
+
+run_sql() {
+    if [[ $DRY_RUN -eq 1 ]]; then
+        # Wrap mutating SQL in BEGIN/ROLLBACK so reads return rows but no
+        # writes commit. SELECT-only statements still return data.
+        sqlite3 "$RECEIPTS_DB" "BEGIN; $1; ROLLBACK;"
+    else
+        sqlite3 "$RECEIPTS_DB" "$1"
+    fi
+}
+
+# Awk helper that converts a markdown table file into TSV-ish lines (`|` is
+# the column delimiter; field 0 is empty because rows start with `|`).
+# Skips header / separator / non-table lines.
+table_to_tsv() {
+    local path="$1"
+    awk -F'|' '
+        /^\| Date / { next }
+        /^\|-+/    { next }
+        /^\|/      {
+            for (i = 1; i <= NF; i++) {
+                gsub(/^ +| +$/, "", $i)
+            }
+            print
+        }
+    ' "$path"
+}
+
+prefix() { [[ $DRY_RUN -eq 1 ]] && echo "[dry-run] " || echo ""; }
+
+# --- Step 1: intake.md -> INSERT OR IGNORE as `received` -----------------------------
+echo "$(prefix)Step 1: intake.md -> receipts"
+INTAKE_INSERTED=0
+if [[ -f "$INTAKE_MD" ]]; then
+    while IFS='|' read -r _ date time method origin kind preview trace _rest; do
+        date=$(echo "$date" | xargs)
+        time=$(echo "$time" | xargs)
+        method=$(echo "$method" | xargs)
+        kind=$(echo "$kind" | xargs)
+        preview=$(echo "$preview" | xargs)
+        trace=$(echo "$trace" | xargs)
+        [[ -z "$trace" || "$trace" == "-" ]] && continue
+        # Map IntakeKind -> ReceiptKind { url, text, binary }.
+        case "$kind" in
+            url)                  rkind="url" ;;
+            text|empty|unknown)   rkind="text" ;;
+            *)                    rkind="binary" ;;
+        esac
+        # Escape single quotes (sqlite uses doubled '' for embedded quotes).
+        method=${method//\'/\'\'}
+        preview=${preview//\'/\'\'}
+        trace=${trace//\'/\'\'}
+        sql="INSERT OR IGNORE INTO receipts (trace_id, received_at, method, kind, raw_input, status) VALUES ('$trace', '${date}T${time}:00Z', '$method', '$rkind', '$preview', 'received');"
+        run_sql "$sql"
+        INTAKE_INSERTED=$((INTAKE_INSERTED + 1))
+    done < <(table_to_tsv "$INTAKE_MD")
+fi
+echo "  parsed $INTAKE_INSERTED intake row(s)"
+
+# --- Step 2: ledger.md ✅/🔄 -> succeeded, ❌ -> failed/crashed ----------------------
+echo "$(prefix)Step 2: ledger.md -> receipts terminal updates"
+LEDGER_SUCC=0
+LEDGER_FAIL=0
+if [[ -f "$LEDGER_MD" ]]; then
+    while IFS='|' read -r _ date time method status note source domain trace _rest; do
+        date=$(echo "$date" | xargs)
+        time=$(echo "$time" | xargs)
+        status=$(echo "$status" | xargs)
+        note=$(echo "$note" | xargs)
+        trace=$(echo "$trace" | xargs)
+        [[ -z "$trace" || "$trace" == "-" ]] && continue
+        # Derive note_path from the [[slug]] wikilink target.
+        note_path=""
+        if [[ "$note" =~ ^\[\[(.+)\]\]$ ]]; then
+            slug="${BASH_REMATCH[1]}"
+            slug="${slug%%|*}"
+            [[ -n "$slug" && "$slug" != "-" ]] && note_path="${slug}.md"
+        fi
+        note_path=${note_path//\'/\'\'}
+        trace=${trace//\'/\'\'}
+        case "$status" in
+            *✅*|✅|*ǵ04*|🔄)
+                sql="UPDATE receipts SET status='succeeded', terminal_at='${date}T${time}:00Z', note_path='$note_path' WHERE trace_id='$trace' AND status='received';"
+                run_sql "$sql"
+                LEDGER_SUCC=$((LEDGER_SUCC + 1))
+                ;;
+            *❌*|❌)
+                sql="UPDATE receipts SET status='failed', failure_stage='crashed', failure_reason='migrated from pre-receipts ledger ❌ row', terminal_at='${date}T${time}:00Z' WHERE trace_id='$trace' AND status='received';"
+                run_sql "$sql"
+                LEDGER_FAIL=$((LEDGER_FAIL + 1))
+                ;;
+        esac
+    done < <(table_to_tsv "$LEDGER_MD")
+fi
+echo "  ledger rows applied: $LEDGER_SUCC succeeded, $LEDGER_FAIL failed-crashed"
+
+# --- Step 3+4: dlq.md + dlq-archive.md -> refine or transition -----------------------
+echo "$(prefix)Step 3+4: dlq.md + dlq-archive.md -> receipts failure_stage refinement"
+DLQ_REFINED=0
+DLQ_ONLY=0
+for src in "$DLQ_MD" "$DLQ_ARCHIVE_MD"; do
+    [[ -f "$src" ]] || continue
+    while IFS='|' read -r _ date time method stage reason _preview _retries _dlqstatus trace _replay _rest; do
+        date=$(echo "$date" | xargs)
+        time=$(echo "$time" | xargs)
+        stage=$(echo "$stage" | xargs)
+        reason=$(echo "$reason" | xargs)
+        trace=$(echo "$trace" | xargs)
+        [[ -z "$trace" || "$trace" == "-" ]] && continue
+        # Map DlqStage -> FailureStage.
+        case "$stage" in
+            intake-reject)      fstage="intake-rejected" ;;
+            classify-failed)    fstage="classify-failed" ;;
+            fetch-failed)       fstage="fetch-failed" ;;
+            quality-blocked)    fstage="quality-blocked" ;;
+            pipeline-timed-out) fstage="pipeline-timed-out" ;;
+            publish-failed)     fstage="publish-failed" ;;
+            watchdog-orphan)    fstage="crashed" ;;
+            *)                  fstage="crashed" ;;
+        esac
+        reason=${reason//\'/\'\'}
+        trace=${trace//\'/\'\'}
+        # Case A: still-received rows (no matching ledger entry) - this is
+        # mostly IntakeReject / WatchdogOrphan. Transition to failed with the
+        # mapped stage.
+        sql_a="UPDATE receipts SET status='failed', failure_stage='$fstage', failure_reason='$reason', terminal_at='${date}T${time}:00Z' WHERE trace_id='$trace' AND status='received';"
+        rows_a=$(sqlite3 "$RECEIPTS_DB" "$sql_a; SELECT changes();" 2>/dev/null | tail -1)
+        if [[ "${rows_a:-0}" -gt 0 ]]; then
+            DLQ_ONLY=$((DLQ_ONLY + 1))
+            continue
+        fi
+        # Case B: ledger had ❌ for this trace (Step 2 set failure_stage='crashed').
+        # Refine to the DLQ row's specific stage.
+        sql_b="UPDATE receipts SET failure_stage='$fstage', failure_reason='$reason' WHERE trace_id='$trace' AND status='failed' AND failure_stage='crashed';"
+        rows_b=$(sqlite3 "$RECEIPTS_DB" "$sql_b; SELECT changes();" 2>/dev/null | tail -1)
+        if [[ "${rows_b:-0}" -gt 0 ]]; then
+            DLQ_REFINED=$((DLQ_REFINED + 1))
+        fi
+    done < <(table_to_tsv "$src")
+done
+echo "  dlq transitions: $DLQ_ONLY new-failed, $DLQ_REFINED stage-refined"
+
+# --- Step 5: rewrite borg-ledger.md (drop ❌ rows; keep ✅ + 🔄) ---------------------
+if [[ $DRY_RUN -eq 0 && -f "$LEDGER_MD" ]]; then
+    echo "Step 5: rewriting borg-ledger.md (dropping ❌ rows)"
+    cp "$LEDGER_MD" "$LEDGER_MD.pre-receipts"
+    awk '
+        /^\| Date / { print; next }
+        /^\|-+/     { print; next }
+        /^\|/ && /❌/ { next }
+        { print }
+    ' "$LEDGER_MD.pre-receipts" > "$LEDGER_MD.tmp"
+    mv "$LEDGER_MD.tmp" "$LEDGER_MD"
+    echo "  saved original at $LEDGER_MD.pre-receipts"
+fi
+
+# --- summary ------------------------------------------------------------------------
+echo ""
+echo "$(prefix)Summary:"
+sqlite3 "$RECEIPTS_DB" "SELECT status, COUNT(*) FROM receipts GROUP BY status ORDER BY status;" | column -t -s'|'
+echo ""
+echo "Failed by stage:"
+sqlite3 "$RECEIPTS_DB" "SELECT failure_stage, COUNT(*) FROM receipts WHERE status='failed' AND failure_stage IS NOT NULL GROUP BY failure_stage ORDER BY 2 DESC;" | column -t -s'|'
+
+if [[ $DRY_RUN -eq 0 ]]; then
+    echo ""
+    echo "Next: verify with"
+    echo "  sb borg log --status failed | head"
+    echo "  sb borg log --status succeeded | head"
+    echo "Then prune the legacy markdown files when satisfied:"
+    echo "  bin/migrate-receipts --prune-legacy"
+fi
