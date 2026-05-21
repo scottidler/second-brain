@@ -148,6 +148,36 @@ pub struct IngestHistoryRequest {
     pub before: Option<String>,
 }
 
+/// Query the borg receipts log for failure history.
+///
+/// Counterpart to `ingest_history`: `ingest_history` returns the success
+/// subset (from `borg-ledger.md`), `failure_history` returns failures from
+/// the receipts SQLite DB at `~/.local/share/sb/borg/receipts.db`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FailureHistoryRequest {
+    /// Optional `failure_stage` filter. One of `intake-rejected`,
+    /// `classify-failed`, `fetch-failed`, `quality-blocked`,
+    /// `pipeline-timed-out`, `publish-failed`, `crashed`.
+    #[schemars(description = "Filter by failure_stage (e.g. fetch-failed, quality-blocked, crashed)")]
+    pub stage: Option<String>,
+
+    /// Optional method filter (`http`, `telegram`, `discord`, `ntfy`, `cli`, `clipboard`).
+    #[schemars(description = "Filter by method")]
+    pub method: Option<String>,
+
+    /// SQL LIKE pattern matched against `raw_input` (e.g. `%youtube.com%`).
+    #[schemars(description = "Filter by raw_input substring (SQL LIKE pattern, e.g. %youtube.com%)")]
+    pub source: Option<String>,
+
+    /// ISO-8601 lower bound on `received_at` (inclusive).
+    #[schemars(description = "Only receipts received at or after this ISO-8601 timestamp")]
+    pub since: Option<String>,
+
+    /// Maximum number of rows to return (default: 50).
+    #[schemars(description = "Maximum number of rows to return (default: 50)")]
+    pub limit: Option<u32>,
+}
+
 /// Search notes by tag, or list all tags with counts when no tag is specified.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TagSearchRequest {

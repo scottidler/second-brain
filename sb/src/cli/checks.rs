@@ -486,7 +486,34 @@ fn borg_findings() -> Vec<Finding> {
             "sb borg audit --invariant".to_string(),
         ));
     }
+    // Receipts DB summary: open read-only, group by status, group failures
+    // by stage. Reported as info (the file may not exist yet on a fresh
+    // install, which is fine).
+    match receipts_summary() {
+        Ok(line) => findings.push(Finding::ok(line)),
+        Err(e) => findings.push(Finding::info(format!("receipts: {e}"))),
+    }
     findings
+}
+
+/// One-line summary of the receipts DB for `sb status`.
+fn receipts_summary() -> Result<String, String> {
+    let path = vault::receipts::receipts_db_path().map_err(|e| e.to_string())?;
+    if !path.exists() {
+        return Err(format!("DB not yet created at {}", path.display()));
+    }
+    let conn = borg::receipts::open_at(&path).map_err(|e| e.to_string())?;
+    let (received, succeeded, failed) = borg::receipts::count_by_status(&conn).map_err(|e| e.to_string())?;
+    let by_stage = borg::receipts::count_failed_by_stage(&conn).map_err(|e| e.to_string())?;
+    let stage_summary = if by_stage.is_empty() {
+        String::new()
+    } else {
+        let parts: Vec<String> = by_stage.iter().map(|(s, n)| format!("{s}={n}")).collect();
+        format!(" [{}]", parts.join(", "))
+    };
+    Ok(format!(
+        "receipts: {received} received, {succeeded} succeeded, {failed} failed{stage_summary}"
+    ))
 }
 
 fn vault_findings() -> Vec<Finding> {

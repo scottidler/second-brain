@@ -73,6 +73,10 @@ impl OracleMcpServer {
                 let req: IngestHistoryRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
                 self.ingest_history(Parameters(req)).await
             }
+            "failure_history" => {
+                let req: FailureHistoryRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.failure_history(Parameters(req)).await
+            }
             "schema_info" => {
                 let req: SchemaInfoRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
                 self.schema_info(Parameters(req)).await
@@ -428,6 +432,96 @@ impl OracleMcpServer {
             "count": results.len(),
             "results": results,
         }))?]))
+    }
+
+    /// Query the borg receipts log for failure history.
+    ///
+    /// Counterpart to `ingest_history`: that tool reads `borg-ledger.md`
+    /// (success-only after Phase 4 of the receipts-log refactor); this tool
+    /// reads the SQLite receipts DB and surfaces failures with their
+    /// `failure_stage` taxonomy. Opens the DB read-only.
+    #[tool(
+        description = "Query the borg receipts log for failed ingests. Filter by failure_stage, method, source pattern, since timestamp."
+    )]
+    async fn failure_history(&self, params: Parameters<FailureHistoryRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let path = vault::receipts::receipts_db_path().map_err(Self::err)?;
+        if !path.exists() {
+            return Ok(CallToolResult::success(vec![
+                Content::json(json!({
+                    "count": 0,
+                    "results": [],
+                    "note": "receipts DB does not exist yet",
+                }))
+                .map_err(Self::err)?,
+            ]));
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|e| Self::err(eyre::eyre!("open receipts DB: {e}")))?;
+
+        let mut sql = String::from(
+            "SELECT trace_id, received_at, method, kind, raw_input, status, \
+                    terminal_at, note_path, failure_stage, failure_reason, replay_of \
+             FROM receipts WHERE status='failed'",
+        );
+        let mut bound: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(stage) = &req.stage {
+            sql.push_str(" AND failure_stage=?");
+            bound.push(stage.clone().into());
+        }
+        if let Some(method) = &req.method {
+            sql.push_str(" AND method=?");
+            bound.push(method.clone().into());
+        }
+        if let Some(pat) = &req.source {
+            sql.push_str(" AND raw_input LIKE ?");
+            bound.push(pat.clone().into());
+        }
+        if let Some(since) = &req.since {
+            sql.push_str(" AND received_at >= ?");
+            bound.push(since.clone().into());
+        }
+        sql.push_str(" ORDER BY received_at DESC LIMIT ?");
+        let limit = req.limit.unwrap_or(50) as i64;
+        bound.push(limit.into());
+
+        let mut stmt = conn.prepare(&sql).map_err(|e| Self::err(eyre::eyre!("prepare: {e}")))?;
+        let rows_iter = stmt
+            .query_map(
+                rusqlite::params_from_iter(bound.iter()),
+                |row| -> rusqlite::Result<serde_json::Value> {
+                    Ok(json!({
+                        "trace_id":       row.get::<_, String>(0)?,
+                        "received_at":    row.get::<_, String>(1)?,
+                        "method":         row.get::<_, String>(2)?,
+                        "kind":           row.get::<_, String>(3)?,
+                        "raw_input":      row.get::<_, String>(4)?,
+                        "status":         row.get::<_, String>(5)?,
+                        "terminal_at":    row.get::<_, Option<String>>(6)?,
+                        "note_path":      row.get::<_, Option<String>>(7)?,
+                        "failure_stage":  row.get::<_, Option<String>>(8)?,
+                        "failure_reason": row.get::<_, Option<String>>(9)?,
+                        "replay_of":      row.get::<_, Option<String>>(10)?,
+                    }))
+                },
+            )
+            .map_err(|e| Self::err(eyre::eyre!("query_map: {e}")))?;
+
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        for r in rows_iter {
+            results.push(r.map_err(|e| Self::err(eyre::eyre!("row: {e}")))?);
+        }
+
+        Ok(CallToolResult::success(vec![
+            Content::json(json!({
+                "count": results.len(),
+                "results": results,
+            }))
+            .map_err(Self::err)?,
+        ]))
     }
 
     /// List all valid schema values

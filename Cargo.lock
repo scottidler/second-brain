@@ -3494,6 +3494,7 @@ dependencies = [
  "dirs",
  "eyre",
  "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

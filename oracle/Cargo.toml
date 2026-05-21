@@ -26,6 +26,7 @@ chrono = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0"
+rusqlite = { version = "0.34", features = ["bundled"] }
 
 [build-dependencies]
 

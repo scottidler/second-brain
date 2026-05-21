@@ -72,6 +72,8 @@ pub enum Command {
     Intake(IntakeCliArgs),
     /// Inspect and replay the dead letter queue
     Dlq(DlqCliArgs),
+    /// Query the receipts log (durable record of every input borg ever saw)
+    Log(LogCliArgs),
     /// Reingest existing entries through the current pipeline
     Reingest {
         #[arg(long)]
@@ -194,6 +196,31 @@ pub enum IntakeAction {
     },
     /// Show the intake row + raw-input sidecar for a single trace
     Show { trace_id: String },
+}
+
+#[derive(Args)]
+pub struct LogCliArgs {
+    /// Filter by receipt status (received | succeeded | failed).
+    #[arg(long)]
+    pub status: Option<String>,
+    /// Filter by method (http | telegram | discord | ntfy | cli | clipboard).
+    #[arg(long)]
+    pub method: Option<String>,
+    /// Filter failed rows by failure_stage.
+    #[arg(long)]
+    pub stage: Option<String>,
+    /// ISO-8601 lower bound on received_at (inclusive).
+    #[arg(long)]
+    pub since: Option<String>,
+    /// SQL LIKE pattern matched against raw_input (e.g. `%youtube.com%`).
+    #[arg(long)]
+    pub source: Option<String>,
+    /// Cap the number of rows returned.
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+    /// Show a single trace's full detail instead of the list view.
+    #[arg(long)]
+    pub trace: Option<String>,
 }
 
 #[derive(Args)]
@@ -433,6 +460,24 @@ impl BorgCli {
                         let outcome = borg::triage::dlq_replay(&config, &trace_id).await?;
                         print_dlq_replay_outcome(&outcome);
                     }
+                }
+                Ok(())
+            }
+            Some(Command::Log(args)) => {
+                if let Some(trace_id) = args.trace {
+                    let row = borg::triage::receipts_show(&trace_id)?;
+                    print_receipt_detail(&row);
+                } else {
+                    let filter = borg::triage::ReceiptLogFilter {
+                        status: args.status,
+                        method: args.method,
+                        stage: args.stage,
+                        since: args.since,
+                        source: args.source,
+                        limit: args.limit,
+                    };
+                    let rows = borg::triage::receipts_log(filter)?;
+                    print_receipt_rows(&rows);
                 }
                 Ok(())
             }
@@ -751,6 +796,60 @@ fn print_dlq_replay_outcome(o: &borg::triage::DlqReplayOutcome) {
         o.new_trace, o.original_trace, o.result_status
     );
     let _ = o.method;
+}
+
+fn print_receipt_rows(rows: &[borg::receipts::Receipt]) {
+    if rows.is_empty() {
+        println!("(no receipts rows match)");
+        return;
+    }
+    println!(
+        "{:>3}  {:<24}  {:<10}  {:<9}  {:<10}  {:<19}  trace_id",
+        "#", "received_at", "method", "status", "kind", "stage"
+    );
+    println!("{}", "-".repeat(110));
+    for (i, r) in rows.iter().enumerate() {
+        let stage = r.failure_stage.as_deref().unwrap_or("-");
+        println!(
+            "{:>3}  {:<24}  {:<10}  {:<9}  {:<10}  {:<19}  {}",
+            i + 1,
+            r.received_at,
+            r.method,
+            r.status,
+            r.kind,
+            stage,
+            r.trace_id
+        );
+    }
+}
+
+fn print_receipt_detail(r: &borg::receipts::Receipt) {
+    println!("trace_id:       {}", r.trace_id);
+    println!("status:         {}", r.status);
+    println!("received_at:    {}", r.received_at);
+    println!("method:         {}", r.method);
+    println!("kind:           {}", r.kind);
+    if let Some(t) = &r.terminal_at {
+        println!("terminal_at:    {t}");
+    }
+    if let Some(n) = &r.note_path {
+        println!("note_path:      {n}");
+    }
+    if let Some(s) = &r.failure_stage {
+        println!("failure_stage:  {s}");
+    }
+    if let Some(reason) = &r.failure_reason {
+        println!("failure_reason: {reason}");
+    }
+    if let Some(rep) = &r.replay_of {
+        println!("replay_of:      {rep}");
+    }
+    let preview = if r.raw_input.len() > 200 {
+        format!("{}...", &r.raw_input[..200])
+    } else {
+        r.raw_input.clone()
+    };
+    println!("raw_input:      {preview}");
 }
 
 fn print_replay_event(event: &borg::replay::ReplayEvent) {

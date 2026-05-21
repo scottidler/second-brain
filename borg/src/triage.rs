@@ -10,6 +10,7 @@
 use crate::config::Config;
 use crate::intake as intake_helper;
 use crate::ledger;
+use crate::receipts;
 use chrono::{Local, NaiveDateTime, TimeZone};
 use eyre::{Context, Result, bail};
 use std::collections::HashSet;
@@ -18,6 +19,8 @@ use std::str::FromStr;
 use vault::dlq::{self, DlqStatus, ParsedDlqRow};
 use vault::intake::{self, ParsedIntakeRow};
 use vault::ledger as vault_ledger;
+use vault::receipts::{FailureStage, ReceiptStatus};
+use vault::schema::Method;
 use vault::table;
 
 /// One intake-sidecar payload, either UTF-8 decoded or flagged binary.
@@ -489,6 +492,57 @@ pub async fn dlq_replay(config: &Config, original_trace: &str) -> Result<DlqRepl
         method,
         result_status: result.status,
     })
+}
+
+/// Filter args for `sb borg log`. All fields are optional except `limit`.
+pub struct ReceiptLogFilter {
+    pub status: Option<String>,
+    pub method: Option<String>,
+    pub stage: Option<String>,
+    pub since: Option<String>,
+    pub source: Option<String>,
+    pub limit: usize,
+}
+
+/// Query the receipts DB for `sb borg log`. Returns rows newest-first.
+pub fn receipts_log(filter: ReceiptLogFilter) -> Result<Vec<crate::receipts::Receipt>> {
+    let conn = receipts::open_default().context("open receipts DB")?;
+    let status = filter
+        .status
+        .as_deref()
+        .map(|s| s.parse::<ReceiptStatus>().map_err(|e| eyre::eyre!(e)))
+        .transpose()
+        .context("parse --status")?;
+    let method = filter
+        .method
+        .as_deref()
+        .map(|m| m.parse::<Method>().map_err(|e| eyre::eyre!(e)))
+        .transpose()
+        .context("parse --method")?;
+    let stage = filter
+        .stage
+        .as_deref()
+        .map(|s| s.parse::<FailureStage>().map_err(|e| eyre::eyre!(e)))
+        .transpose()
+        .context("parse --stage")?;
+    let receipts_filter = receipts::Filter {
+        status,
+        method,
+        stage,
+        since: filter.since,
+        source_like: filter.source,
+        limit: Some(filter.limit),
+    };
+    receipts::query(&conn, &receipts_filter)
+}
+
+/// Read one receipts row by trace_id (for `sb borg log --trace ...`).
+pub fn receipts_show(trace_id: &str) -> Result<crate::receipts::Receipt> {
+    let conn = receipts::open_default().context("open receipts DB")?;
+    let row = receipts::get(&conn, trace_id)
+        .context("lookup receipt")?
+        .ok_or_else(|| eyre::eyre!("trace_id {trace_id} not found in receipts DB"))?;
+    Ok(row)
 }
 
 #[cfg(test)]
