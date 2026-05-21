@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Sign the obsidian-borg Firefox extension via the AMO API and optionally
+# hand the signed .xpi to Firefox for install.
+#
+# Reads MOZILLA_JWT_ISSUER and MOZILLA_JWT_SECRET from the environment
+# (`web-ext sign` needs AMO API credentials). Produces a signed .xpi in
+# borg/clients/extension/web-ext-artifacts/ named after manifest.json's
+# `version` field.
+#
+# Usage:
+#   bin/extension-sign            # sign only; prints path to the new .xpi
+#   bin/extension-sign --install  # sign + xdg-open the .xpi so Firefox
+#                                 # prompts to install it
+#   bin/extension-sign --help
+#
+# Companion: docs/extension-signing.md walks through credential setup,
+# manifest version bumps, and the install flow in detail.
+
+set -euo pipefail
+
+usage() {
+    grep -E '^# ' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+}
+
+INSTALL=0
+for arg in "$@"; do
+    case "$arg" in
+        --install)        INSTALL=1 ;;
+        -h|--help)        usage ;;
+        *) echo "unknown arg: $arg" >&2; usage ;;
+    esac
+done
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+EXT_DIR="$REPO_ROOT/borg/clients/extension"
+cd "$EXT_DIR"
+
+# sign.sh does its own credential check + cd; we just invoke it.
+./sign.sh
+
+XPI=$(ls -t web-ext-artifacts/*.xpi 2>/dev/null | head -1)
+if [[ -z "$XPI" ]]; then
+    echo "error: sign.sh succeeded but no .xpi found in web-ext-artifacts/" >&2
+    exit 1
+fi
+
+echo "signed: $XPI"
+
+if [[ "$INSTALL" -eq 1 ]]; then
+    # xdg-open the .xpi - Firefox registers as the handler for application/x-xpinstall
+    # and pops the install confirmation dialog. The user still has to click through;
+    # Firefox does not allow silent installation of unlisted extensions.
+    xdg-open "$XPI"
+    echo "opened in Firefox - approve the install prompt to upgrade the cached extension"
+fi

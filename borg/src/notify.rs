@@ -21,13 +21,16 @@ use teloxide::types::ChatId;
 #[cfg(test)]
 mod tests;
 
-/// Per the Design Invariant in docs/design/2026-05-21-desktop-notifications.md,
-/// every notification call is bounded so a wedged service cannot delay the
-/// pipeline. D-Bus default timeout is ~25s; Telegram round trip can be slow on
-/// flaky links. 500 ms is comfortably above the warm-bus / warm-HTTPS latency
-/// while still being negligible on the 15+ minute YouTube-transcription
-/// pipeline timeline.
-const NOTIFICATION_CALL_TIMEOUT_MS: u64 = 500;
+// Per-channel notification timeouts. The Design Invariant in
+// docs/design/2026-05-21-desktop-notifications.md ships ONE shared 500 ms
+// timeout. Empirically (2026-05-21 on desk) Telegram bot HTTPS round trips
+// from a residential ISP consistently exceeded 500 ms even on the warm path,
+// which dropped every Telegram message. D-Bus on the same box stays under
+// 500 ms comfortably, so the desktop timeout keeps its sharper wedge-
+// detection bound and Telegram gets a wider one that still cannot meaningfully
+// delay the 15+ minute video-transcription pipeline.
+const DESKTOP_TIMEOUT_MS: u64 = 500;
+const TELEGRAM_TIMEOUT_MS: u64 = 3000;
 
 /// Telegram notification sink. Clone-cheap: `Bot` is an HTTP client wrapper.
 #[derive(Clone)]
@@ -83,14 +86,14 @@ impl Telegram {
         let bot = self.bot.clone();
         let future = async move { bot.send_message(chat_id, text).await };
 
-        match tokio::time::timeout(Duration::from_millis(NOTIFICATION_CALL_TIMEOUT_MS), future).await {
+        match tokio::time::timeout(Duration::from_millis(TELEGRAM_TIMEOUT_MS), future).await {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(e)) => {
                 log::warn!("notify: failed to send processing message: {e}");
                 Err(())
             }
             Err(_) => {
-                log::warn!("notify: telegram processing message timed out after {NOTIFICATION_CALL_TIMEOUT_MS}ms");
+                log::warn!("notify: telegram processing message timed out after {TELEGRAM_TIMEOUT_MS}ms");
                 Err(())
             }
         }
@@ -112,10 +115,10 @@ impl Telegram {
                 .await
         };
 
-        match tokio::time::timeout(Duration::from_millis(NOTIFICATION_CALL_TIMEOUT_MS), future).await {
+        match tokio::time::timeout(Duration::from_millis(TELEGRAM_TIMEOUT_MS), future).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => log::warn!("notify: failed to send result message: {e}"),
-            Err(_) => log::warn!("notify: telegram result message timed out after {NOTIFICATION_CALL_TIMEOUT_MS}ms"),
+            Err(_) => log::warn!("notify: telegram result message timed out after {TELEGRAM_TIMEOUT_MS}ms"),
         }
     }
 }
@@ -203,14 +206,14 @@ impl Desktop {
                 .show_async()
                 .await
         };
-        match tokio::time::timeout(Duration::from_millis(NOTIFICATION_CALL_TIMEOUT_MS), future).await {
+        match tokio::time::timeout(Duration::from_millis(DESKTOP_TIMEOUT_MS), future).await {
             Ok(Ok(handle)) => Some(handle),
             Ok(Err(e)) => {
                 log::warn!("notify: failed to send desktop processing popup: {e}");
                 None
             }
             Err(_) => {
-                log::warn!("notify: desktop processing popup timed out after {NOTIFICATION_CALL_TIMEOUT_MS}ms");
+                log::warn!("notify: desktop processing popup timed out after {DESKTOP_TIMEOUT_MS}ms");
                 None
             }
         }
@@ -227,11 +230,42 @@ impl Desktop {
     /// in notify-rust v4, which would defeat the timeout wrapper - a sync
     /// call inside `timeout(async { ... })` has no await points and blocks
     /// the worker until D-Bus replies.
+    ///
+    /// Fallback: if the id-based replace fails (notification daemon expired
+    /// the prior popup once the pipeline ran longer than its display
+    /// timeout - typical for 80s+ video transcription), retry once with a
+    /// fresh notification. The user sees a separate terminal popup rather
+    /// than nothing.
     pub async fn result(&self, result: &IngestResult, display_source: &str, prior: Option<NotificationHandle>) {
         let body = format_desktop_body(result, display_source);
+        let prior_id = prior.as_ref().map(|h| h.id());
+
+        if prior_id.is_some()
+            && self
+                .show(&body, prior_id, "desktop result popup (replace)")
+                .await
+                .is_err()
+        {
+            // Prior popup expired (daemon GC'd the id). Fall back to a fresh popup
+            // so the user still gets a terminal notification.
+            log::info!("notify: desktop result popup falling back to fresh notification");
+            let _ = self.show(&body, None, "desktop result popup (fresh)").await;
+            return;
+        }
+
+        if prior_id.is_none() {
+            let _ = self.show(&body, None, "desktop result popup").await;
+        }
+    }
+
+    /// Show a notification, optionally with a prior id for replace-in-place.
+    /// Wraps the D-Bus call in the 500ms desktop timeout. Returns `Ok(())`
+    /// on success, `Err(())` on any failure path (D-Bus error or timeout)
+    /// with a `warn!` already logged - `label` distinguishes log lines.
+    async fn show(&self, body: &str, prior_id: Option<u32>, label: &'static str) -> Result<(), ()> {
         let appname = self.appname.clone();
         let timeout = self.timeout;
-        let prior_id = prior.as_ref().map(|h| h.id());
+        let body = body.to_string();
         let future = async move {
             let mut n = Notification::new();
             n.appname(&appname)
@@ -243,10 +277,16 @@ impl Desktop {
             }
             n.show_async().await
         };
-        match tokio::time::timeout(Duration::from_millis(NOTIFICATION_CALL_TIMEOUT_MS), future).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => log::warn!("notify: failed to send desktop result popup: {e}"),
-            Err(_) => log::warn!("notify: desktop result popup timed out after {NOTIFICATION_CALL_TIMEOUT_MS}ms"),
+        match tokio::time::timeout(Duration::from_millis(DESKTOP_TIMEOUT_MS), future).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => {
+                log::warn!("notify: failed to send {label}: {e}");
+                Err(())
+            }
+            Err(_) => {
+                log::warn!("notify: {label} timed out after {DESKTOP_TIMEOUT_MS}ms");
+                Err(())
+            }
         }
     }
 }
