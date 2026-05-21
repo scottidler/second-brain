@@ -75,15 +75,22 @@ impl Telegram {
     ///
     /// Returns `Ok(())` on success so callers can await delivery before
     /// starting the pipeline (preserves message ordering).
-    /// On failure, logs a warning and returns `Err(())`.
+    /// On failure or 500ms timeout (per Design Invariant 2), logs a warning
+    /// and returns `Err(())`.
     pub async fn processing(&self, trace_id: &str, description: &str, override_chat_id: Option<i64>) -> Result<(), ()> {
         let chat_id = self.resolve_chat_id(override_chat_id);
         let text = format!("[{trace_id}] {description}");
+        let bot = self.bot.clone();
+        let future = async move { bot.send_message(chat_id, text).await };
 
-        match self.bot.send_message(chat_id, text).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
+        match tokio::time::timeout(Duration::from_millis(NOTIFICATION_CALL_TIMEOUT_MS), future).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => {
                 log::warn!("notify: failed to send processing message: {e}");
+                Err(())
+            }
+            Err(_) => {
+                log::warn!("notify: telegram processing message timed out after {NOTIFICATION_CALL_TIMEOUT_MS}ms");
                 Err(())
             }
         }
@@ -93,18 +100,22 @@ impl Telegram {
     ///
     /// Appends the Obsidian deep link as plain text. Telegram strips custom
     /// URI schemes from both HTML `<a>` tags and inline keyboard buttons,
-    /// so the link is included as a copyable `obsidian://` URL.
+    /// so the link is included as a copyable `obsidian://` URL. Wraps the
+    /// HTTPS call in 500ms `tokio::time::timeout` per Design Invariant 2.
     pub async fn result(&self, result: &IngestResult, display_source: &str, override_chat_id: Option<i64>) {
         let chat_id = self.resolve_chat_id(override_chat_id);
         let reply = format_telegram_reply(result, display_source);
+        let bot = self.bot.clone();
+        let future = async move {
+            bot.send_message(chat_id, reply)
+                .parse_mode(teloxide::types::ParseMode::Html)
+                .await
+        };
 
-        if let Err(e) = self
-            .bot
-            .send_message(chat_id, reply)
-            .parse_mode(teloxide::types::ParseMode::Html)
-            .await
-        {
-            log::warn!("notify: failed to send result message: {e}");
+        match tokio::time::timeout(Duration::from_millis(NOTIFICATION_CALL_TIMEOUT_MS), future).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => log::warn!("notify: failed to send result message: {e}"),
+            Err(_) => log::warn!("notify: telegram result message timed out after {NOTIFICATION_CALL_TIMEOUT_MS}ms"),
         }
     }
 }
