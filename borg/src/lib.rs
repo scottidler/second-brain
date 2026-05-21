@@ -726,16 +726,11 @@ pub async fn ingest(
     url: String,
     tags: Option<Vec<String>>,
     force: bool,
-    notify: bool,
     method: types::IngestMethod,
 ) -> Result<IngestOutcome> {
     let host = &config.hotkey.host;
     let port = config.hotkey.port;
     let endpoint = format!("http://{host}:{port}/ingest");
-
-    if notify {
-        send_notification("Ingesting...", &url);
-    }
 
     let body = serde_json::json!({
         "url": url,
@@ -745,15 +740,18 @@ pub async fn ingest(
     });
 
     let client = reqwest::Client::new();
+    // The Error toast here is unconditional and load-bearing: when the HTTP
+    // POST itself fails (daemon not running), the daemon by definition
+    // cannot deliver the failure notification. The CLI may be wired to a
+    // desktop hotkey where stderr is not visible. This is the symmetric
+    // counterpart to the `catch (err)` branch in background.js.
     let response = client.post(&endpoint).json(&body).send().await.map_err(|e| {
         let msg = if e.is_connect() {
             format!("cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?")
         } else {
             format!("{e}")
         };
-        if notify {
-            send_notification("Error", &msg);
-        }
+        send_notification("Error", &msg);
         eyre::eyre!("{msg}")
     })?;
 
@@ -763,29 +761,11 @@ pub async fn ingest(
         types::IngestStatus::Completed => {
             let title = result.title.unwrap_or_else(|| "Untitled".to_string());
             let path = result.note_path.unwrap_or_else(|| "unknown".to_string());
-            if notify {
-                send_notification("Saved", &title);
-            }
             IngestOutcome::Captured { title, path }
         }
-        types::IngestStatus::Duplicate { original_date } => {
-            if notify {
-                send_notification("Duplicate", &format!("Already ingested on {original_date}"));
-            }
-            IngestOutcome::Duplicate { original_date }
-        }
-        types::IngestStatus::Failed { reason } => {
-            if notify {
-                send_notification("Failed", &reason);
-            }
-            IngestOutcome::Failed { reason }
-        }
-        types::IngestStatus::Queued => {
-            if notify {
-                send_notification("Queued", &url);
-            }
-            IngestOutcome::Queued
-        }
+        types::IngestStatus::Duplicate { original_date } => IngestOutcome::Duplicate { original_date },
+        types::IngestStatus::Failed { reason } => IngestOutcome::Failed { reason },
+        types::IngestStatus::Queued => IngestOutcome::Queued,
     })
 }
 
@@ -1506,7 +1486,6 @@ mod tests {
             config,
             "https://example.com".to_string(),
             None,
-            false,
             false,
             types::IngestMethod::Cli,
         )

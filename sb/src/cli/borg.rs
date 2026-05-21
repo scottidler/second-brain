@@ -348,7 +348,7 @@ impl BorgCli {
                     } else {
                         borg::types::IngestMethod::Cli
                     };
-                    borg::ingest(config, resolved_url, tags, force, clipboard, method).await?
+                    borg::ingest(config, resolved_url, tags, force, method).await?
                 };
                 print_ingest_outcome(&outcome)
             }
