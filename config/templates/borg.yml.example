@@ -44,5 +44,15 @@ telegram:
 #   bot-token: DISCORD_BOT_TOKEN
 #   channel-id: 0
 
+# Desktop notifications - peer to the Telegram notifier. Renders the same
+# Processing... -> Saved/Duplicate/Failed messages via libnotify (user
+# session D-Bus). host-gated like telegram/discord/ntfy so headless borg
+# hosts stay silent.
+desktop:
+  enabled: true
+  host: desk
+  timeout-ms: 5000
+  appname: borg
+
 # Log level: trace | debug | info | warn | error
 log-level: info

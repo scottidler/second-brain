@@ -1123,10 +1123,15 @@ fn print_ingest_outcome(outcome: &borg::IngestOutcome) -> Result<()> {
 
 fn get_tool_validation_help() -> String {
     #[allow(clippy::type_complexity)]
+    // `notify-send` is a runtime-dependency proxy: borg does not shell out to
+    // it (we use the in-process notify-rust crate), but its presence indicates
+    // a working libnotify stack and gives the operator a diagnostic one-liner
+    // (`notify-send foo`) when desktop toasts go missing.
     let tools: &[(&str, &str, &str, &[(&str, &str, &str)])] = &[
         ("yt-dlp", "--version", "2023.0.0", &[("ffmpeg", "-version", "")]),
         ("fabric", "--version", "1.0.0", &[]),
         ("markitdown", "--version", "", &[]),
+        ("notify-send", "--version", "", &[]),
     ];
 
     struct ToolEntry {
