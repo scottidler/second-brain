@@ -2,8 +2,9 @@
 
 **Author:** Scott Idler
 **Date:** 2026-05-21
-**Status:** Draft
+**Status:** Implemented
 **Review Passes Completed:** 5/5 + Architect Rounds 1-2 (approved for implementation)
+**Implemented at:** workspace v0.8.12 (all 7 phases landed 2026-05-21)
 
 ## Summary
 
