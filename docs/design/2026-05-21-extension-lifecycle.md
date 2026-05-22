@@ -2,9 +2,20 @@
 
 **Author:** Scott Idler
 **Date:** 2026-05-21
-**Status:** Implemented
+**Status:** Implemented (then partially superseded; see amendment below)
 **Review Passes Completed:** 5/5 + Architect Rounds 1-2 (approved for implementation)
 **Implemented at:** workspace v0.8.12 (all 7 phases landed 2026-05-21)
+
+> **Amendment (2026-05-22):** The `validate`, `generate`, `extension-validate`,
+> and `strip_volatile_fields` machinery described here is superseded by
+> [`2026-05-22-extension-manifest-binary-versioned.md`](2026-05-22-extension-manifest-binary-versioned.md).
+> The sign/install/uninstall user-facing behaviour is preserved; internals
+> move to `tempfile::TempDir` staging and binary-versioned manifest threading
+> (sb passes its own `env!("CARGO_PKG_VERSION")` into `extension::stage` /
+> `extension::sign::run` / `extension::install::run`). Committed
+> `manifest.json` and `ingest-schema.json` are deleted; `borg/build.rs`
+> (along with `cortex/build.rs` and `oracle/build.rs`) is deleted in the
+> same change. Read the newer doc for the current architecture.
 
 ## Summary
 

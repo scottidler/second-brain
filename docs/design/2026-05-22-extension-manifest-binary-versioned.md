@@ -2,8 +2,9 @@
 
 **Author:** Scott Idler
 **Date:** 2026-05-22
-**Status:** Draft (post-Architect review)
-**Review Passes Completed:** 5/5 + 1 Architect round
+**Status:** Implemented
+**Review Passes Completed:** 5/5 + Architect Rounds 1-2 (approved for implementation)
+**Implemented at:** workspace v0.8.14 -> v0.8.15 (all 7 phases landed 2026-05-22)
 **Supersedes (in part):** [`2026-05-21-extension-lifecycle.md`](2026-05-21-extension-lifecycle.md). The `validate` verb, `extension-validate` CI gate, and `strip_volatile_fields` shim introduced there are obsoleted.
 
 ## Summary
