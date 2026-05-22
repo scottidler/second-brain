@@ -17,14 +17,32 @@ pub fn run(repo_root: &Path, config: &Config, version: &str) -> Result<SignResul
         eyre::bail!("Extension directory not found at {}", source_dir.display());
     }
 
+    let artifacts_dir = source_dir.join("web-ext-artifacts");
+    std::fs::create_dir_all(&artifacts_dir)
+        .with_context(|| format!("create artifacts dir {}", artifacts_dir.display()))?;
+
+    // Idempotency: AMO is a one-publish-per-version service. If an .xpi for
+    // this version already exists in the artifacts dir (signed earlier on
+    // this machine, or transported from another), reuse it. A second sign
+    // attempt always returns `Version X.Y.Z already exists` from AMO and
+    // exits non-zero, which breaks multi-machine deploys and any retry of a
+    // single-machine deploy.
+    if let Ok(existing) = locate_versioned_xpi(&artifacts_dir, version) {
+        log::info!(
+            "extension::sign::run: reusing existing signed .xpi for v{version} ({}); skipping AMO upload",
+            existing.display()
+        );
+        return Ok(SignResult {
+            extension_dir: source_dir,
+            xpi_path: existing,
+            version: version.to_string(),
+        });
+    }
+
     let jwt_issuer =
         std::env::var("MOZILLA_JWT_ISSUER").context("MOZILLA_JWT_ISSUER env var must be set (AMO API key)")?;
     let jwt_secret =
         std::env::var("MOZILLA_JWT_SECRET").context("MOZILLA_JWT_SECRET env var must be set (AMO API secret)")?;
-
-    let artifacts_dir = source_dir.join("web-ext-artifacts");
-    std::fs::create_dir_all(&artifacts_dir)
-        .with_context(|| format!("create artifacts dir {}", artifacts_dir.display()))?;
 
     let tempdir = tempfile::TempDir::new().context("create staging tempdir")?;
     let staging_dir = tempdir.path();
