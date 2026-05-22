@@ -53,6 +53,14 @@ pub enum FirefoxInstall {
 
 pub fn detect_firefox() -> Result<FirefoxInstall> {
     log::debug!("extension::install::detect_firefox");
+    // Ask the snap daemon directly. Snap-installed Firefox surfaces
+    // /usr/bin/firefox as a shell-script wrapper (not a symlink), so
+    // path-based canonicalize cannot follow it into /snap/. `snap list
+    // firefox` is the only reliable signal.
+    if is_snap_firefox() {
+        log::debug!("extension::install::detect_firefox: snap detected via `snap list firefox`");
+        return Ok(FirefoxInstall::Snap);
+    }
     let Some(resolved) = which_firefox()? else {
         return Ok(FirefoxInstall::Unknown);
     };
@@ -71,6 +79,13 @@ pub fn detect_firefox() -> Result<FirefoxInstall> {
         return Ok(FirefoxInstall::AptOrDeb);
     }
     Ok(FirefoxInstall::Unknown)
+}
+
+fn is_snap_firefox() -> bool {
+    let Ok(output) = Command::new("snap").arg("list").arg("firefox").output() else {
+        return false;
+    };
+    output.status.success() && !output.stdout.is_empty()
 }
 
 fn which_firefox() -> Result<Option<PathBuf>> {
@@ -94,18 +109,127 @@ pub fn policy_path(install: &FirefoxInstall) -> Result<PathBuf> {
         FirefoxInstall::Tarball(root) => Ok(root.join("distribution").join("policies.json")),
         FirefoxInstall::AptOrDeb => Ok(PathBuf::from("/etc/firefox/policies/policies.json")),
         FirefoxInstall::Snap => eyre::bail!(
-            "snap-installed Firefox cannot load `file://` install_url - use the Mozilla tarball or apt Firefox, \
-             or pass --policy-file to override"
+            "snap-installed Firefox cannot load a system policies.json (it runs inside snap confinement). \
+             Use `install_strategy()` instead, which targets the snap profile's extensions/ directory."
         ),
         FirefoxInstall::Flatpak => {
             let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("cannot resolve $HOME"))?;
             Ok(home.join(".var/app/org.mozilla.firefox/.mozilla/firefox/policies/policies.json"))
         }
         FirefoxInstall::Unknown => eyre::bail!(
-            "could not detect Firefox install type; supported: tarball, apt/deb, flatpak. \
+            "could not detect Firefox install type; supported: tarball, apt/deb, snap, flatpak. \
              Pass --policy-file to override."
         ),
     }
+}
+
+/// How to deliver the signed .xpi to a given Firefox install. System Firefox
+/// (apt/deb, tarball, flatpak) reads enterprise policies; snap Firefox is
+/// sandboxed and cannot, so we copy the .xpi straight into the user's snap
+/// profile extensions directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallStrategy {
+    /// Write a `policies.json` with a `force_installed` entry pointing at the
+    /// .xpi. Firefox picks the extension up from the `file://` URL on next
+    /// launch. Used for apt/deb, tarball, and flatpak Firefox.
+    PolicyFile { path: PathBuf },
+    /// Copy the .xpi directly into the snap profile's extensions/ directory
+    /// at `<profile>/extensions/<EXTENSION_ID>.xpi`. Snap Firefox reads
+    /// extensions from its confined profile; the system /etc/firefox/policies
+    /// file is invisible inside the sandbox.
+    ProfileExtension { xpi_path: PathBuf },
+}
+
+pub fn install_strategy(install: &FirefoxInstall) -> Result<InstallStrategy> {
+    match install {
+        FirefoxInstall::Tarball(_) | FirefoxInstall::AptOrDeb | FirefoxInstall::Flatpak => {
+            Ok(InstallStrategy::PolicyFile {
+                path: policy_path(install)?,
+            })
+        }
+        FirefoxInstall::Snap => {
+            let profile = snap_active_profile_dir()?;
+            Ok(InstallStrategy::ProfileExtension {
+                xpi_path: profile.join("extensions").join(format!("{EXTENSION_ID}.xpi")),
+            })
+        }
+        FirefoxInstall::Unknown => eyre::bail!(
+            "could not detect Firefox install type; supported: tarball, apt/deb, snap, flatpak. \
+             Pass --policy-file to override."
+        ),
+    }
+}
+
+/// Locate the active snap-Firefox profile directory by parsing
+/// `~/snap/firefox/common/.mozilla/firefox/profiles.ini`. Snap Firefox
+/// confines its profile under `~/snap/firefox/common/.mozilla/firefox/`,
+/// distinct from the unconfined `~/.mozilla/firefox/` used by apt/deb
+/// Firefox.
+fn snap_active_profile_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("cannot resolve $HOME"))?;
+    let snap_firefox = home.join("snap/firefox/common/.mozilla/firefox");
+    let profiles_ini = snap_firefox.join("profiles.ini");
+    if !profiles_ini.exists() {
+        eyre::bail!(
+            "snap Firefox profiles.ini not found at {} - launch Firefox at least once before installing the extension",
+            profiles_ini.display()
+        );
+    }
+    let contents =
+        std::fs::read_to_string(&profiles_ini).with_context(|| format!("read {}", profiles_ini.display()))?;
+    let profile_path = parse_default_profile_path(&contents)
+        .ok_or_else(|| eyre::eyre!("no profile found in {}", profiles_ini.display()))?;
+    Ok(snap_firefox.join(profile_path))
+}
+
+/// Parse a Firefox `profiles.ini` and return the active profile's path.
+/// Prefers a `Profile` section with `Default=1`; falls back to the first
+/// `Profile` section if none is marked default.
+pub fn parse_default_profile_path(contents: &str) -> Option<String> {
+    let mut current_section: Option<String> = None;
+    let mut current_is_default = false;
+    let mut current_path: Option<String> = None;
+    let mut first_path: Option<String> = None;
+    let mut default_path: Option<String> = None;
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(name) = rest.strip_suffix(']')
+        {
+            // Flush previous section before opening a new one.
+            if current_is_default && default_path.is_none() {
+                default_path = current_path.clone();
+            }
+            current_section = Some(name.to_string());
+            current_is_default = false;
+            current_path = None;
+            continue;
+        }
+        if current_section.as_deref().is_some_and(|s| s.starts_with("Profile"))
+            && let Some((key, value)) = line.split_once('=')
+        {
+            match key.trim() {
+                "Default" => {
+                    if value.trim() == "1" {
+                        current_is_default = true;
+                    }
+                }
+                "Path" => {
+                    let v = value.trim().to_string();
+                    if first_path.is_none() {
+                        first_path = Some(v.clone());
+                    }
+                    current_path = Some(v);
+                }
+                _ => {}
+            }
+        }
+    }
+    // Flush the final section.
+    if current_is_default && default_path.is_none() {
+        default_path = current_path;
+    }
+    default_path.or(first_path)
 }
 
 #[cfg(target_os = "linux")]
@@ -280,12 +404,14 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
         opts.policy_file
     );
 
-    // Resolve the policy file path. --if-installed needs it to check whether
-    // our entry is present, EVEN WHEN --no-policy is also set (the otto deploy
+    // Resolve the install strategy. --policy-file overrides detection and
+    // always uses the PolicyFile strategy (caller knows what they're doing).
+    // --if-installed needs the strategy to check whether our extension is
+    // already present, EVEN WHEN --no-policy is also set (the otto deploy
     // hook case): --no-policy means "don't WRITE the policy", not "skip the
-    // installed-check." So always try to determine the path.
-    let policy_target: Option<PathBuf> = if let Some(override_path) = opts.policy_file.clone() {
-        Some(override_path)
+    // installed-check."
+    let strategy: Option<InstallStrategy> = if let Some(override_path) = opts.policy_file.clone() {
+        Some(InstallStrategy::PolicyFile { path: override_path })
     } else {
         match detect_firefox()? {
             FirefoxInstall::Unknown => {
@@ -300,27 +426,27 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
                     None
                 } else {
                     eyre::bail!(
-                        "could not detect Firefox install type; supported: tarball, apt/deb, flatpak. \
+                        "could not detect Firefox install type; supported: tarball, apt/deb, snap, flatpak. \
                          Pass --policy-file to override."
                     );
                 }
             }
-            ff => Some(policy_path(&ff)?),
+            ff => Some(install_strategy(&ff)?),
         }
     };
 
     if opts.if_installed {
-        let Some(target) = policy_target.as_ref() else {
-            log::debug!("extension::install: --if-installed but no policy path resolvable -> skip");
+        let Some(strategy_ref) = strategy.as_ref() else {
+            log::debug!("extension::install: --if-installed but no install strategy resolvable -> skip");
             return Ok(InstallResult {
                 skipped_not_installed: true,
                 ..InstallResult::default()
             });
         };
-        if !policy_contains_ours(target) {
+        if !is_already_installed(strategy_ref) {
             log::debug!(
-                "extension::install: --if-installed and {} has no obsidian-borg entry -> skip",
-                target.display()
+                "extension::install: --if-installed and strategy {:?} has no obsidian-borg entry -> skip",
+                strategy_ref
             );
             return Ok(InstallResult {
                 skipped_not_installed: true,
@@ -346,28 +472,64 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
 
     if !latest_link.exists() {
         eyre::bail!(
-            "symlink target missing after sign: {}; refusing to write a policy that points at nothing",
+            "symlink target missing after sign: {}; refusing to install something that points at nothing",
             latest_link.display()
         );
     }
 
-    let target = policy_target.expect("policy_target must be set when no_policy=false");
-    let install_url = install_url_for(repo_root);
-    let existing = read_policy_file(&target).unwrap_or_else(|_| json!({}));
-    let merged = merge_policy(existing.clone(), &install_url);
-    let merged_text = serde_json::to_string_pretty(&merged).context("serialize merged policy")? + "\n";
-    let existing_text = serde_json::to_string_pretty(&existing).unwrap_or_default() + "\n";
-    let policy_changed = merged_text != existing_text;
-    if policy_changed {
-        write_policy_file(&target, &merged_text)?;
+    let strategy = strategy.expect("strategy must be set when no_policy=false");
+    match strategy {
+        InstallStrategy::PolicyFile { path: target } => {
+            let install_url = install_url_for(repo_root);
+            let existing = read_policy_file(&target).unwrap_or_else(|_| json!({}));
+            let merged = merge_policy(existing.clone(), &install_url);
+            let merged_text = serde_json::to_string_pretty(&merged).context("serialize merged policy")? + "\n";
+            let existing_text = serde_json::to_string_pretty(&existing).unwrap_or_default() + "\n";
+            let policy_changed = merged_text != existing_text;
+            if policy_changed {
+                write_policy_file(&target, &merged_text)?;
+            }
+            Ok(InstallResult {
+                xpi_path: Some(sign_result.xpi_path),
+                policy_path: Some(target),
+                policy_changed,
+                skipped_not_installed: false,
+            })
+        }
+        InstallStrategy::ProfileExtension { xpi_path } => {
+            let parent = xpi_path
+                .parent()
+                .ok_or_else(|| eyre::eyre!("profile extension path has no parent: {}", xpi_path.display()))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create profile extensions dir {}", parent.display()))?;
+            // Copy fresh; std::fs::copy overwrites atomically on the same
+            // filesystem. The signed .xpi from sign::run is the source.
+            std::fs::copy(&sign_result.xpi_path, &xpi_path)
+                .with_context(|| format!("copy {} -> {}", sign_result.xpi_path.display(), xpi_path.display()))?;
+            log::info!(
+                "extension::install: copied signed .xpi into snap profile at {}",
+                xpi_path.display()
+            );
+            Ok(InstallResult {
+                xpi_path: Some(sign_result.xpi_path),
+                policy_path: Some(xpi_path),
+                policy_changed: true,
+                skipped_not_installed: false,
+            })
+        }
     }
+}
 
-    Ok(InstallResult {
-        xpi_path: Some(sign_result.xpi_path),
-        policy_path: Some(target),
-        policy_changed,
-        skipped_not_installed: false,
-    })
+/// Returns true if our extension is already installed according to the given
+/// strategy. For PolicyFile, "installed" means the policies.json contains an
+/// `ExtensionSettings.<EXTENSION_ID>` entry. For ProfileExtension, "installed"
+/// means the .xpi exists in the profile.
+#[cfg(target_os = "linux")]
+fn is_already_installed(strategy: &InstallStrategy) -> bool {
+    match strategy {
+        InstallStrategy::PolicyFile { path } => policy_contains_ours(path),
+        InstallStrategy::ProfileExtension { xpi_path } => xpi_path.exists(),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -378,19 +540,29 @@ pub fn run(_repo_root: &Path, _config: &Config, _opts: InstallOpts, _version: &s
 #[cfg(target_os = "linux")]
 pub fn uninstall(opts: UninstallOpts) -> Result<UninstallResult> {
     log::debug!("extension::install::uninstall: purge={}", opts.purge);
-    let detected = detect_firefox().ok();
-    let policy_target = detected.as_ref().and_then(|i| policy_path(i).ok());
+    let strategy = detect_firefox().ok().and_then(|i| install_strategy(&i).ok());
 
     let mut policy_path_out = None;
-    if let Some(target) = policy_target.as_ref()
-        && target.exists()
-        && policy_contains_ours(target)
-    {
-        let existing = read_policy_file(target)?;
-        let stripped = strip_policy(existing);
-        let stripped_text = serde_json::to_string_pretty(&stripped).context("serialize stripped policy")? + "\n";
-        write_policy_file(target, &stripped_text)?;
-        policy_path_out = Some(target.clone());
+    if let Some(strategy) = strategy {
+        match strategy {
+            InstallStrategy::PolicyFile { path: target } => {
+                if target.exists() && policy_contains_ours(&target) {
+                    let existing = read_policy_file(&target)?;
+                    let stripped = strip_policy(existing);
+                    let stripped_text =
+                        serde_json::to_string_pretty(&stripped).context("serialize stripped policy")? + "\n";
+                    write_policy_file(&target, &stripped_text)?;
+                    policy_path_out = Some(target);
+                }
+            }
+            InstallStrategy::ProfileExtension { xpi_path } => {
+                if xpi_path.exists() {
+                    std::fs::remove_file(&xpi_path)
+                        .with_context(|| format!("remove profile extension {}", xpi_path.display()))?;
+                    policy_path_out = Some(xpi_path);
+                }
+            }
+        }
     }
 
     let mut artifacts_removed = false;

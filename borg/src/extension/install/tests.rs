@@ -114,6 +114,93 @@ fn policy_path_routes_per_install_type() {
 }
 
 #[test]
+fn install_strategy_picks_policy_for_system_firefox() {
+    assert!(matches!(
+        install_strategy(&FirefoxInstall::Tarball(PathBuf::from("/opt/firefox"))).expect("tarball strategy"),
+        InstallStrategy::PolicyFile { .. }
+    ));
+    assert!(matches!(
+        install_strategy(&FirefoxInstall::AptOrDeb).expect("apt strategy"),
+        InstallStrategy::PolicyFile { .. }
+    ));
+    assert!(matches!(
+        install_strategy(&FirefoxInstall::Flatpak).expect("flatpak strategy"),
+        InstallStrategy::PolicyFile { .. }
+    ));
+}
+
+#[test]
+fn install_strategy_errors_on_unknown_firefox() {
+    assert!(install_strategy(&FirefoxInstall::Unknown).is_err());
+}
+
+#[test]
+fn parse_default_profile_path_picks_default_flagged_profile() {
+    // The realistic snap-Firefox profiles.ini from this machine.
+    let ini = "[Profile0]\n\
+               Name=default\n\
+               IsRelative=1\n\
+               Path=qokp77y8.default-1764019811616\n\
+               Default=1\n\
+               \n\
+               [General]\n\
+               StartWithLastProfile=1\n\
+               Version=2\n";
+    assert_eq!(
+        parse_default_profile_path(ini).as_deref(),
+        Some("qokp77y8.default-1764019811616")
+    );
+}
+
+#[test]
+fn parse_default_profile_path_prefers_default_over_first() {
+    // Profile1 has Default=1 even though Profile0 comes first.
+    let ini = "[Profile0]\n\
+               Name=older\n\
+               IsRelative=1\n\
+               Path=aaaaaaaa.older\n\
+               \n\
+               [Profile1]\n\
+               Name=current\n\
+               IsRelative=1\n\
+               Path=bbbbbbbb.current\n\
+               Default=1\n";
+    assert_eq!(parse_default_profile_path(ini).as_deref(), Some("bbbbbbbb.current"));
+}
+
+#[test]
+fn parse_default_profile_path_falls_back_to_first_when_none_marked_default() {
+    let ini = "[Profile0]\n\
+               Name=only\n\
+               IsRelative=1\n\
+               Path=cccccccc.only\n";
+    assert_eq!(parse_default_profile_path(ini).as_deref(), Some("cccccccc.only"));
+}
+
+#[test]
+fn parse_default_profile_path_returns_none_when_no_profile_sections() {
+    let ini = "[General]\nStartWithLastProfile=1\nVersion=2\n";
+    assert_eq!(parse_default_profile_path(ini), None);
+}
+
+#[test]
+fn parse_default_profile_path_ignores_install_section_keys() {
+    // [Install<hash>] sections also contain Default= but should not be confused
+    // for profile sections. Our parser only reads keys when the current section
+    // name starts with "Profile".
+    let ini = "[Install4F96D1932A9F858E]\n\
+               Default=Profiles/aaaaaaaa.fake\n\
+               Locked=1\n\
+               \n\
+               [Profile0]\n\
+               Name=real\n\
+               IsRelative=1\n\
+               Path=bbbbbbbb.real\n\
+               Default=1\n";
+    assert_eq!(parse_default_profile_path(ini).as_deref(), Some("bbbbbbbb.real"));
+}
+
+#[test]
 fn requires_sudo_for_system_paths_only() {
     assert!(requires_sudo(Path::new("/etc/firefox/policies/policies.json")));
     assert!(requires_sudo(Path::new("/opt/firefox/distribution/policies.json")));
