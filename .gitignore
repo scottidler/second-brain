@@ -24,6 +24,14 @@ target
 # continues to target the same listing across machines / clones.
 borg/clients/extension/web-ext-artifacts/*.xpi
 
+# Generated extension manifest + schema. Produced fresh at sign/stage
+# time from sb's CARGO_PKG_VERSION and the loaded config; the runtime
+# materialises them into a tempfile::TempDir for web-ext sign. Inspect
+# the current shape via `sb borg extension show`. These lines guard
+# against accidental re-commit if a future regen verb writes here.
+borg/clients/extension/manifest.json
+borg/clients/extension/ingest-schema.json
+
 # Claude Code runtime files
 **/.claude/scheduled_tasks.lock
 

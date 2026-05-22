@@ -3,7 +3,6 @@ name = "oracle"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-build = "build.rs"
 description = "MCP server for querying an Obsidian vault's ingested knowledge"
 license = "MIT"
 

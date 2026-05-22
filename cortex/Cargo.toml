@@ -3,7 +3,6 @@ name = "cortex"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-build = "build.rs"
 description = "Vault governance and intelligence companion for Obsidian"
 
 [dependencies]
