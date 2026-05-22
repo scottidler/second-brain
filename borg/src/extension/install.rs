@@ -257,7 +257,7 @@ fn atomic_symlink_swap(versioned_xpi: &Path, latest_link: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts) -> Result<InstallResult> {
+pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) -> Result<InstallResult> {
     log::debug!(
         "extension::install::run: no_policy={} if_installed={} policy_file={:?}",
         opts.no_policy,
@@ -314,7 +314,7 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts) -> Result<Insta
         }
     }
 
-    let sign_result = sign::run(repo_root, config).context("sign extension")?;
+    let sign_result = sign::run(repo_root, config, version).context("sign extension")?;
     let dir = extension::extension_dir(repo_root);
     let artifacts_dir = dir.join("web-ext-artifacts");
     let latest_link = artifacts_dir.join(LATEST_XPI_NAME);
@@ -356,7 +356,7 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts) -> Result<Insta
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn run(_repo_root: &Path, _config: &Config, _opts: InstallOpts) -> Result<InstallResult> {
+pub fn run(_repo_root: &Path, _config: &Config, _opts: InstallOpts, _version: &str) -> Result<InstallResult> {
     eyre::bail!("install verb is Linux-only; macOS/Windows users use `sb borg extension sign` + manual .xpi install")
 }
 

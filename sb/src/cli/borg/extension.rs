@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use eyre::Result;
+use eyre::{Context, Result};
 
 use borg::config::Config;
 use borg::extension::{self, install};
@@ -14,11 +14,7 @@ pub struct ExtensionCli {
 
 #[derive(Subcommand)]
 pub enum ExtensionCommand {
-    /// Regenerate manifest.json (and ingest-schema.json, when wired) from code.
-    Generate,
-    /// Regenerate and fail if committed files differ. Drift gate for otto ci.
-    Validate,
-    /// Generate + sign via AMO. Produces a versioned .xpi.
+    /// Sign via AMO. Stages the full extension into a tempdir and runs web-ext sign.
     Sign,
     /// Sign + atomic symlink swap + drop policies.json (sudo first run).
     Install {
@@ -40,44 +36,31 @@ pub enum ExtensionCommand {
         #[arg(long)]
         purge: bool,
     },
-    /// Print the extension version (= workspace version).
+    /// Materialise the full extension (manifest + schema + static assets +
+    /// AMO sidecar) into <DIR> for dev loading via about:debugging.
+    Stage {
+        /// Target directory. Created if absent; overwrites existing files.
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+    },
+    /// Print the resolved extension manifest (or schema with --schema) as
+    /// pretty JSON to stdout. Reflects the running binary's version and the
+    /// loaded config; no filesystem writes.
+    Show {
+        /// Print ingest-schema.json instead of manifest.json.
+        #[arg(long)]
+        schema: bool,
+    },
+    /// Print the extension version (= sb's CARGO_PKG_VERSION).
     Version,
 }
 
 pub fn run(cli: ExtensionCli, config: Config) -> Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
     let repo_root = extension::repo_root()?;
     match cli.command {
-        ExtensionCommand::Generate => {
-            let result = extension::generate(&repo_root, &config)?;
-            for (changed, path) in [
-                (result.manifest_changed, &result.manifest_path),
-                (result.schema_changed, &result.schema_path),
-            ] {
-                let verb = if changed { "regenerated" } else { "unchanged" };
-                println!("{}: {}", verb, path.display());
-            }
-            Ok(())
-        }
-        ExtensionCommand::Validate => {
-            let result = extension::validate(&repo_root, &config)?;
-            let mut drifted = false;
-            if let Some(drift) = result.manifest_drift {
-                eprintln!("{drift}");
-                drifted = true;
-            }
-            if let Some(drift) = result.schema_drift {
-                eprintln!("{drift}");
-                drifted = true;
-            }
-            if drifted {
-                eprintln!("Run `sb borg extension generate` and commit the result, then re-run `otto ci`.");
-                std::process::exit(2);
-            }
-            println!("manifest + schema current: no drift");
-            Ok(())
-        }
         ExtensionCommand::Sign => {
-            let result = extension::sign::run(&repo_root, &config)?;
+            let result = extension::sign::run(&repo_root, &config, version)?;
             println!(
                 "Signing extension v{} in {}",
                 result.version,
@@ -96,7 +79,7 @@ pub fn run(cli: ExtensionCli, config: Config) -> Result<()> {
                 policy_file,
                 if_installed,
             };
-            let result = install::run(&repo_root, &config, opts)?;
+            let result = install::run(&repo_root, &config, opts, version)?;
             if result.skipped_not_installed {
                 println!(
                     "extension not installed on this machine; skipping (use without --if-installed to bootstrap)."
@@ -126,8 +109,26 @@ pub fn run(cli: ExtensionCli, config: Config) -> Result<()> {
             println!("uninstall complete; restart Firefox to drop the extension from the running profile.");
             Ok(())
         }
+        ExtensionCommand::Stage { to } => {
+            std::fs::create_dir_all(&to).with_context(|| format!("create stage target {}", to.display()))?;
+            let result = extension::stage(&to, version, &config)?;
+            println!("staged extension v{version} into {}", result.target_dir.display());
+            println!("Load in Firefox via about:debugging -> 'Load Temporary Add-on...' and pick manifest.json");
+            Ok(())
+        }
+        ExtensionCommand::Show { schema } => {
+            let body = if schema {
+                serde_json::to_string_pretty(&extension::schema::build_schema()?)
+                    .context("serialize schema for stdout")?
+            } else {
+                serde_json::to_string_pretty(&extension::manifest::build_manifest(version, &config))
+                    .context("serialize manifest for stdout")?
+            };
+            println!("{body}");
+            Ok(())
+        }
         ExtensionCommand::Version => {
-            println!("{}", extension::current_version());
+            println!("{version}");
             Ok(())
         }
     }

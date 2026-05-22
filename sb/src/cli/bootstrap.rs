@@ -82,10 +82,11 @@ pub async fn run(args: BootstrapArgs) -> Result<()> {
 }
 
 fn install_extension() -> Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
     let repo_root = borg::extension::repo_root().context("locate repo root for extension install")?;
     let config = borg::config::load_config(None).context("load borg config for extension install")?;
     let opts = borg::extension::install::InstallOpts::default();
-    let result = borg::extension::install::run(&repo_root, &config, opts).context("extension install")?;
+    let result = borg::extension::install::run(&repo_root, &config, opts, version).context("extension install")?;
     if let Some(xpi) = &result.xpi_path {
         println!("signed: {}", xpi.display());
     }
