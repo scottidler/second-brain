@@ -163,9 +163,22 @@ pub struct Config {
     pub tags: TagsConfig,
     pub staging: StagingConfig,
     pub youtube: YoutubeConfig,
+    pub extension: ExtensionConfig,
     #[serde(default)]
     pub pipeline: PipelineConfig,
     pub log_level: Option<String>,
+}
+
+/// Browser-extension lifecycle settings. The only field today is
+/// `origin-patterns`, an optional explicit list of match-pattern hosts the
+/// extension is permitted to talk to. When `None` (default), the extension
+/// manifest generator merges `DEFAULT_ORIGIN_PATTERNS` (localhost, *.lan,
+/// *.local) with `server.host`. Users running borg on Tailscale, ZeroTier, a
+/// VPS, or any host not covered by the defaults set this list explicitly.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ExtensionConfig {
+    pub origin_patterns: Option<Vec<String>>,
 }
 
 /// Bounded-wait configuration for the ingestion pipeline. All timeouts are

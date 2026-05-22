@@ -383,16 +383,14 @@ impl BorgCli {
                 Ok(())
             }
             Some(Command::Sign) => {
-                let result = borg::sign(&config).await?;
+                let repo_root = borg::extension::repo_root()?;
+                let result = borg::extension::sign::run(&repo_root, &config)?;
                 println!(
                     "Signing extension v{} in {}",
                     result.version,
                     result.extension_dir.display()
                 );
-                println!(
-                    "Extension signed successfully. Check {}/web-ext-artifacts/",
-                    result.extension_dir.display()
-                );
+                println!("Extension signed successfully: {}", result.xpi_path.display());
                 Ok(())
             }
             Some(Command::Migrate { dry_run: _, apply }) => {
