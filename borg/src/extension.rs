@@ -37,11 +37,16 @@ pub fn validate(repo_root: &Path, config: &Config) -> Result<ValidateResult> {
     }
 
     let manifest_path = dir.join("manifest.json");
-    let manifest_expected =
-        serde_json::to_string_pretty(&manifest::build_manifest(config)).context("serialize manifest")? + "\n";
-    let manifest_actual = std::fs::read_to_string(&manifest_path).unwrap_or_default();
-    let manifest_drift = (manifest_expected != manifest_actual)
-        .then(|| describe_drift(&manifest_path, &manifest_actual, &manifest_expected));
+    let manifest_expected_json = strip_volatile_fields(manifest::build_manifest(config));
+    let manifest_actual_raw = std::fs::read_to_string(&manifest_path).unwrap_or_default();
+    let manifest_actual_json: serde_json::Value =
+        serde_json::from_str(&manifest_actual_raw).unwrap_or(serde_json::Value::Null);
+    let manifest_actual_normalized = strip_volatile_fields(manifest_actual_json);
+    let manifest_drift = (manifest_expected_json != manifest_actual_normalized).then(|| {
+        let expected_text = serde_json::to_string_pretty(&manifest_expected_json).unwrap_or_default() + "\n";
+        let actual_text = serde_json::to_string_pretty(&manifest_actual_normalized).unwrap_or_default() + "\n";
+        describe_drift(&manifest_path, &actual_text, &expected_text)
+    });
 
     let schema_path = dir.join("ingest-schema.json");
     let schema_expected = serde_json::to_string_pretty(&schema::build_schema()?).context("serialize schema")? + "\n";
@@ -53,6 +58,22 @@ pub fn validate(repo_root: &Path, config: &Config) -> Result<ValidateResult> {
         manifest_drift,
         schema_drift,
     })
+}
+
+/// Remove fields that change between regen calls without reflecting a real
+/// structural change. Currently: the `version` field, which derives from
+/// `env!("CARGO_PKG_VERSION")` and gets baked into the .xpi at sign time
+/// regardless of what's committed. The committed value is informational
+/// only - the live .xpi always reflects current Cargo.toml because
+/// `sign::run` regenerates the manifest immediately before invoking
+/// web-ext. Stripping it from validate means `bump` (which amends
+/// Cargo.toml without regenerating manifest.json) does not produce false
+/// drift on the tagged commit.
+fn strip_volatile_fields(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("version");
+    }
+    value
 }
 
 fn describe_drift(path: &Path, actual: &str, expected: &str) -> String {

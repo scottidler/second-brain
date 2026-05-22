@@ -128,3 +128,62 @@ fn csp_starts_with_default_src_self() {
         "unexpected CSP format: {csp:?}"
     );
 }
+
+#[test]
+fn validate_ignores_version_drift() {
+    use crate::extension::validate;
+    use std::fs;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo_root = tmp.path();
+    let ext_dir = repo_root.join("borg/clients/extension");
+    fs::create_dir_all(&ext_dir).expect("mkdir extension dir");
+
+    let config = Config::default();
+    let mut current = build_manifest(&config);
+    current["version"] = serde_json::Value::String("0.0.0-stale".to_string());
+    let stale_text = serde_json::to_string_pretty(&current).expect("serialize") + "\n";
+    fs::write(ext_dir.join("manifest.json"), stale_text).expect("write stale manifest");
+
+    let schema_text = serde_json::to_string_pretty(&crate::extension::schema::build_schema().expect("schema"))
+        .expect("serialize schema")
+        + "\n";
+    fs::write(ext_dir.join("ingest-schema.json"), schema_text).expect("write schema");
+
+    let result = validate(repo_root, &config).expect("validate");
+    assert!(
+        result.is_ok(),
+        "validate must ignore version drift; got manifest_drift={:?}",
+        result.manifest_drift
+    );
+}
+
+#[test]
+fn validate_still_flags_structural_drift() {
+    use crate::extension::validate;
+    use std::fs;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo_root = tmp.path();
+    let ext_dir = repo_root.join("borg/clients/extension");
+    fs::create_dir_all(&ext_dir).expect("mkdir extension dir");
+
+    let config = Config::default();
+    // Write a manifest with a wrong host_permissions (the original NetworkError condition).
+    let mut wrong = build_manifest(&config);
+    wrong["host_permissions"] = serde_json::json!(["http://localhost/*"]);
+    let wrong_text = serde_json::to_string_pretty(&wrong).expect("serialize") + "\n";
+    fs::write(ext_dir.join("manifest.json"), wrong_text).expect("write wrong manifest");
+
+    let schema_text = serde_json::to_string_pretty(&crate::extension::schema::build_schema().expect("schema"))
+        .expect("serialize schema")
+        + "\n";
+    fs::write(ext_dir.join("ingest-schema.json"), schema_text).expect("write schema");
+
+    let result = validate(repo_root, &config).expect("validate");
+    assert!(
+        result.manifest_drift.is_some(),
+        "validate must catch host_permissions drift; got is_ok={}",
+        result.is_ok()
+    );
+}
