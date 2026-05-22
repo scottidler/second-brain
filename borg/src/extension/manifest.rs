@@ -46,9 +46,8 @@ pub fn csp_extension_pages(patterns: &[String]) -> String {
     format!("default-src 'self'; connect-src {connect}")
 }
 
-pub fn build_manifest(config: &Config) -> Value {
-    log::debug!("extension::manifest::build_manifest");
-    let version = env!("CARGO_PKG_VERSION");
+pub fn build_manifest(version: &str, config: &Config) -> Value {
+    log::debug!("extension::manifest::build_manifest: version={version}");
     let patterns = origin_patterns(config);
     let host_perms = host_permissions(&patterns);
     let csp = csp_extension_pages(&patterns);

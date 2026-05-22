@@ -37,7 +37,7 @@ pub fn validate(repo_root: &Path, config: &Config) -> Result<ValidateResult> {
     }
 
     let manifest_path = dir.join("manifest.json");
-    let manifest_expected_json = strip_volatile_fields(manifest::build_manifest(config));
+    let manifest_expected_json = strip_volatile_fields(manifest::build_manifest(env!("CARGO_PKG_VERSION"), config));
     let manifest_actual_raw = std::fs::read_to_string(&manifest_path).unwrap_or_default();
     let manifest_actual_json: serde_json::Value =
         serde_json::from_str(&manifest_actual_raw).unwrap_or(serde_json::Value::Null);
@@ -125,8 +125,9 @@ pub fn generate(repo_root: &Path, config: &Config) -> Result<GenerateResult> {
     }
 
     let manifest_path = dir.join("manifest.json");
-    let manifest_content =
-        serde_json::to_string_pretty(&manifest::build_manifest(config)).context("serialize manifest")? + "\n";
+    let manifest_content = serde_json::to_string_pretty(&manifest::build_manifest(env!("CARGO_PKG_VERSION"), config))
+        .context("serialize manifest")?
+        + "\n";
     let manifest_changed = write_if_different(&manifest_path, &manifest_content)?;
 
     let schema_path = dir.join("ingest-schema.json");

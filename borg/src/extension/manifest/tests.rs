@@ -2,14 +2,14 @@ use super::*;
 use crate::config::Config;
 
 #[test]
-fn version_matches_crate_version() {
-    let manifest = build_manifest(&Config::default());
-    assert_eq!(manifest["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
+fn version_threads_through_from_parameter() {
+    let manifest = build_manifest("0.0.0-test", &Config::default());
+    assert_eq!(manifest["version"].as_str(), Some("0.0.0-test"));
 }
 
 #[test]
 fn manifest_version_is_3() {
-    let manifest = build_manifest(&Config::default());
+    let manifest = build_manifest("0.0.0-test", &Config::default());
     assert_eq!(manifest["manifest_version"].as_u64(), Some(3));
 }
 
@@ -101,7 +101,7 @@ fn empty_explicit_falls_back_to_defaults() {
 
 #[test]
 fn manifest_contains_required_top_level_keys() {
-    let manifest = build_manifest(&Config::default());
+    let manifest = build_manifest("0.0.0-test", &Config::default());
     for key in [
         "manifest_version",
         "name",
@@ -140,7 +140,7 @@ fn validate_ignores_version_drift() {
     fs::create_dir_all(&ext_dir).expect("mkdir extension dir");
 
     let config = Config::default();
-    let mut current = build_manifest(&config);
+    let mut current = build_manifest(env!("CARGO_PKG_VERSION"), &config);
     current["version"] = serde_json::Value::String("0.0.0-stale".to_string());
     let stale_text = serde_json::to_string_pretty(&current).expect("serialize") + "\n";
     fs::write(ext_dir.join("manifest.json"), stale_text).expect("write stale manifest");
@@ -170,7 +170,7 @@ fn validate_still_flags_structural_drift() {
 
     let config = Config::default();
     // Write a manifest with a wrong host_permissions (the original NetworkError condition).
-    let mut wrong = build_manifest(&config);
+    let mut wrong = build_manifest(env!("CARGO_PKG_VERSION"), &config);
     wrong["host_permissions"] = serde_json::json!(["http://localhost/*"]);
     let wrong_text = serde_json::to_string_pretty(&wrong).expect("serialize") + "\n";
     fs::write(ext_dir.join("manifest.json"), wrong_text).expect("write wrong manifest");
