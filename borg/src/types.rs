@@ -200,7 +200,7 @@ pub struct RejectionRecord {
     pub retriable_after: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum IngestMethod {
     Telegram,
@@ -258,7 +258,7 @@ pub struct TranscriptionResponse {
     pub duration_secs: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IngestRequest {
     pub url: String,
     pub tags: Option<Vec<String>>,
@@ -269,7 +269,7 @@ pub struct IngestRequest {
     pub method: Option<IngestMethod>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum Priority {
     Normal,
     High,

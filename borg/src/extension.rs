@@ -6,22 +6,26 @@ use crate::config::Config;
 
 pub mod install;
 pub mod manifest;
+pub mod schema;
 pub mod sign;
 
 #[derive(Debug)]
 pub struct GenerateResult {
     pub manifest_path: PathBuf,
     pub manifest_changed: bool,
+    pub schema_path: PathBuf,
+    pub schema_changed: bool,
 }
 
 #[derive(Debug)]
 pub struct ValidateResult {
     pub manifest_drift: Option<String>,
+    pub schema_drift: Option<String>,
 }
 
 impl ValidateResult {
     pub fn is_ok(&self) -> bool {
-        self.manifest_drift.is_none()
+        self.manifest_drift.is_none() && self.schema_drift.is_none()
     }
 }
 
@@ -33,11 +37,22 @@ pub fn validate(repo_root: &Path, config: &Config) -> Result<ValidateResult> {
     }
 
     let manifest_path = dir.join("manifest.json");
-    let expected =
+    let manifest_expected =
         serde_json::to_string_pretty(&manifest::build_manifest(config)).context("serialize manifest")? + "\n";
-    let actual = std::fs::read_to_string(&manifest_path).unwrap_or_default();
-    let manifest_drift = (expected != actual).then(|| describe_drift(&manifest_path, &actual, &expected));
-    Ok(ValidateResult { manifest_drift })
+    let manifest_actual = std::fs::read_to_string(&manifest_path).unwrap_or_default();
+    let manifest_drift = (manifest_expected != manifest_actual)
+        .then(|| describe_drift(&manifest_path, &manifest_actual, &manifest_expected));
+
+    let schema_path = dir.join("ingest-schema.json");
+    let schema_expected = serde_json::to_string_pretty(&schema::build_schema()?).context("serialize schema")? + "\n";
+    let schema_actual = std::fs::read_to_string(&schema_path).unwrap_or_default();
+    let schema_drift =
+        (schema_expected != schema_actual).then(|| describe_drift(&schema_path, &schema_actual, &schema_expected));
+
+    Ok(ValidateResult {
+        manifest_drift,
+        schema_drift,
+    })
 }
 
 fn describe_drift(path: &Path, actual: &str, expected: &str) -> String {
@@ -88,20 +103,32 @@ pub fn generate(repo_root: &Path, config: &Config) -> Result<GenerateResult> {
         eyre::bail!("extension directory not found: {}", dir.display());
     }
 
-    let new_content =
-        serde_json::to_string_pretty(&manifest::build_manifest(config)).context("serialize manifest")? + "\n";
     let manifest_path = dir.join("manifest.json");
-    let manifest_changed = match std::fs::read_to_string(&manifest_path) {
-        Ok(existing) => existing != new_content,
-        Err(_) => true,
-    };
-    if manifest_changed {
-        std::fs::write(&manifest_path, &new_content).with_context(|| format!("write {}", manifest_path.display()))?;
-    }
+    let manifest_content =
+        serde_json::to_string_pretty(&manifest::build_manifest(config)).context("serialize manifest")? + "\n";
+    let manifest_changed = write_if_different(&manifest_path, &manifest_content)?;
+
+    let schema_path = dir.join("ingest-schema.json");
+    let schema_content = serde_json::to_string_pretty(&schema::build_schema()?).context("serialize schema")? + "\n";
+    let schema_changed = write_if_different(&schema_path, &schema_content)?;
+
     Ok(GenerateResult {
         manifest_path,
         manifest_changed,
+        schema_path,
+        schema_changed,
     })
+}
+
+fn write_if_different(path: &Path, new_content: &str) -> Result<bool> {
+    let changed = match std::fs::read_to_string(path) {
+        Ok(existing) => existing != new_content,
+        Err(_) => true,
+    };
+    if changed {
+        std::fs::write(path, new_content).with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(changed)
 }
 
 pub fn repo_root() -> Result<PathBuf> {

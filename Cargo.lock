@@ -618,6 +618,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.2",
  "rusqlite",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "serde_yaml",

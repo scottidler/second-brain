@@ -49,18 +49,31 @@ pub fn run(cli: ExtensionCli, config: Config) -> Result<()> {
     match cli.command {
         ExtensionCommand::Generate => {
             let result = extension::generate(&repo_root, &config)?;
-            let verb = if result.manifest_changed { "regenerated" } else { "unchanged" };
-            println!("manifest {}: {}", verb, result.manifest_path.display());
+            for (changed, path) in [
+                (result.manifest_changed, &result.manifest_path),
+                (result.schema_changed, &result.schema_path),
+            ] {
+                let verb = if changed { "regenerated" } else { "unchanged" };
+                println!("{}: {}", verb, path.display());
+            }
             Ok(())
         }
         ExtensionCommand::Validate => {
             let result = extension::validate(&repo_root, &config)?;
+            let mut drifted = false;
             if let Some(drift) = result.manifest_drift {
                 eprintln!("{drift}");
+                drifted = true;
+            }
+            if let Some(drift) = result.schema_drift {
+                eprintln!("{drift}");
+                drifted = true;
+            }
+            if drifted {
                 eprintln!("Run `sb borg extension generate` and commit the result, then re-run `otto ci`.");
                 std::process::exit(2);
             }
-            println!("manifest current: no drift");
+            println!("manifest + schema current: no drift");
             Ok(())
         }
         ExtensionCommand::Sign => {
