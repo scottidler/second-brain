@@ -7,6 +7,8 @@ use std::sync::LazyLock;
 
 use borg::opts;
 
+pub mod extension;
+
 static HELP_TEXT: LazyLock<String> = LazyLock::new(get_tool_validation_help);
 
 #[derive(Args)]
@@ -50,8 +52,8 @@ pub enum Command {
     },
     /// Install/uninstall a keyboard shortcut to ingest URLs from clipboard
     Hotkey(HotkeyArgs),
-    /// Sign the browser extension for Firefox (AMO)
-    Sign,
+    /// Manage the Firefox browser extension (generate, validate, sign, install)
+    Extension(extension::ExtensionCli),
     /// Migrate vault frontmatter to current schema
     Migrate {
         #[arg(long)]
@@ -382,17 +384,7 @@ impl BorgCli {
                 }
                 Ok(())
             }
-            Some(Command::Sign) => {
-                let repo_root = borg::extension::repo_root()?;
-                let result = borg::extension::sign::run(&repo_root, &config)?;
-                println!(
-                    "Signing extension v{} in {}",
-                    result.version,
-                    result.extension_dir.display()
-                );
-                println!("Extension signed successfully: {}", result.xpi_path.display());
-                Ok(())
-            }
+            Some(Command::Extension(cli)) => extension::run(cli, config),
             Some(Command::Migrate { dry_run: _, apply }) => {
                 let report = borg::migrate::run(&config, apply).await?;
                 print_migrate_report(&report);

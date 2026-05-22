@@ -193,9 +193,9 @@ tasks:
       echo "✅ Release build complete"
 
   extension:
-    help: "Sign the Firefox extension; pass --install to xdg-open the .xpi for browser install"
+    help: "Sign + install the Firefox extension via `sb borg extension install`"
     bash: |
-      bin/extension-sign "$@"
+      sb borg extension install "$@"
 
   clean:
     help: "Clean build artifacts"
