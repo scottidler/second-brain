@@ -1,0 +1,67 @@
+{
+  "$defs": {
+    "IngestMethod": {
+      "enum": [
+        "telegram",
+        "discord",
+        "http",
+        "clipboard",
+        "cli",
+        "ntfy"
+      ],
+      "type": "string"
+    },
+    "Priority": {
+      "enum": [
+        "Normal",
+        "High"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "force": {
+      "default": false,
+      "type": "boolean"
+    },
+    "method": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IngestMethod"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "priority": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Priority"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "url": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "url"
+  ],
+  "title": "IngestRequest",
+  "type": "object"
+}

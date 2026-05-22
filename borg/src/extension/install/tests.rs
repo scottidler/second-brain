@@ -27,8 +27,7 @@ fn merge_policy_preserves_unrelated_top_level_policies() {
     let merged = merge_policy(existing, "file:///x.xpi");
     assert_eq!(merged["policies"]["Certificates"]["ImportEnterpriseRoots"], true);
     assert_eq!(
-        merged["policies"]["ExtensionSettings"]["ublock0@raymondhill.net"]["installation_mode"],
-        "force_installed",
+        merged["policies"]["ExtensionSettings"]["ublock0@raymondhill.net"]["installation_mode"], "force_installed",
         "unrelated extension entry must be preserved"
     );
     assert_eq!(
@@ -41,7 +40,10 @@ fn merge_policy_preserves_unrelated_top_level_policies() {
 fn merge_policy_handles_corrupt_or_missing_extension_settings() {
     let existing = json!({ "policies": { "ExtensionSettings": "garbage" } });
     let merged = merge_policy(existing, "file:///x.xpi");
-    assert_eq!(merged["policies"]["ExtensionSettings"][EXTENSION_ID]["install_url"], "file:///x.xpi");
+    assert_eq!(
+        merged["policies"]["ExtensionSettings"][EXTENSION_ID]["install_url"],
+        "file:///x.xpi"
+    );
 }
 
 #[test]
@@ -74,7 +76,10 @@ fn strip_policy_removes_our_entry_and_keeps_others() {
     });
     let stripped = strip_policy(existing);
     assert!(stripped["policies"]["ExtensionSettings"].get(EXTENSION_ID).is_none());
-    assert_eq!(stripped["policies"]["ExtensionSettings"]["other@ext"]["installation_mode"], "blocked");
+    assert_eq!(
+        stripped["policies"]["ExtensionSettings"]["other@ext"]["installation_mode"],
+        "blocked"
+    );
     assert_eq!(stripped["policies"]["Certificates"]["ImportEnterpriseRoots"], true);
 }
 

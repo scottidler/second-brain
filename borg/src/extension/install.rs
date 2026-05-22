@@ -94,8 +94,7 @@ pub fn policy_path(install: &FirefoxInstall) -> Result<PathBuf> {
         ),
         FirefoxInstall::Flatpak => {
             let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("cannot resolve $HOME"))?;
-            Ok(home
-                .join(".var/app/org.mozilla.firefox/.mozilla/firefox/policies/policies.json"))
+            Ok(home.join(".var/app/org.mozilla.firefox/.mozilla/firefox/policies/policies.json"))
         }
         FirefoxInstall::Unknown => eyre::bail!(
             "could not detect Firefox install type; supported: tarball, apt/deb, flatpak. \
@@ -131,9 +130,7 @@ pub fn merge_policy(existing: Value, install_url: &str) -> Value {
         _ => json!({}),
     };
     let root_obj = root.as_object_mut().expect("root is object");
-    let policies = root_obj
-        .entry("policies".to_string())
-        .or_insert_with(|| json!({}));
+    let policies = root_obj.entry("policies".to_string()).or_insert_with(|| json!({}));
     if !policies.is_object() {
         *policies = json!({});
     }
@@ -154,9 +151,7 @@ pub fn strip_policy(existing: Value) -> Value {
         return existing;
     };
     if let Some(policies) = root_obj.get_mut("policies").and_then(|v| v.as_object_mut())
-        && let Some(ext_settings) = policies
-            .get_mut("ExtensionSettings")
-            .and_then(|v| v.as_object_mut())
+        && let Some(ext_settings) = policies.get_mut("ExtensionSettings").and_then(|v| v.as_object_mut())
     {
         ext_settings.remove(EXTENSION_ID);
         if ext_settings.is_empty() {
@@ -193,10 +188,7 @@ fn write_policy_file(path: &Path, content: &str) -> Result<()> {
     if requires_sudo(path) {
         log::info!("writing {} via sudo tee (atomic rename)", path.display());
         // Stage to a sibling tmp file then atomic-rename, both via sudo.
-        let tmp = parent.join(format!(
-            ".policies.json.{}.tmp",
-            std::process::id()
-        ));
+        let tmp = parent.join(format!(".policies.json.{}.tmp", std::process::id()));
         let mut child = Command::new("sudo")
             .arg("tee")
             .arg(&tmp)
@@ -228,8 +220,7 @@ fn write_policy_file(path: &Path, content: &str) -> Result<()> {
         }
         let tmp = parent.join(format!(".policies.json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, content).with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     }
     Ok(())
 }
@@ -251,13 +242,8 @@ fn atomic_symlink_swap(versioned_xpi: &Path, latest_link: &Path) -> Result<()> {
         std::fs::remove_file(&tmp).ok();
     }
     symlink(target_basename, &tmp).with_context(|| format!("symlink {}", tmp.display()))?;
-    std::fs::rename(&tmp, latest_link).with_context(|| {
-        format!(
-            "atomic-rename {} -> {}",
-            tmp.display(),
-            latest_link.display()
-        )
-    })?;
+    std::fs::rename(&tmp, latest_link)
+        .with_context(|| format!("atomic-rename {} -> {}", tmp.display(), latest_link.display()))?;
     Ok(())
 }
 
@@ -370,8 +356,7 @@ pub fn uninstall(opts: UninstallOpts) -> Result<UninstallResult> {
         let repo_root = extension::repo_root()?;
         let artifacts_dir = extension::extension_dir(&repo_root).join("web-ext-artifacts");
         if artifacts_dir.exists() {
-            std::fs::remove_dir_all(&artifacts_dir)
-                .with_context(|| format!("remove {}", artifacts_dir.display()))?;
+            std::fs::remove_dir_all(&artifacts_dir).with_context(|| format!("remove {}", artifacts_dir.display()))?;
             artifacts_removed = true;
         }
     }

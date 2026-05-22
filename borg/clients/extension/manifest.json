@@ -32,9 +32,14 @@
       }
     }
   },
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; connect-src http://localhost:* http://*.lan:* http://*.local:*"
+  },
   "description": "Send the current tab URL to obsidian-borg for ingestion",
   "host_permissions": [
-    "http://localhost/*"
+    "http://localhost/*",
+    "http://*.lan/*",
+    "http://*.local/*"
   ],
   "icons": {
     "128": "icons/locutus-128.png",
@@ -52,5 +57,5 @@
     "storage",
     "notifications"
   ],
-  "version": "0.4.0"
+  "version": "0.8.12"
 }

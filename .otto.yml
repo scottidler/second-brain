@@ -180,9 +180,14 @@ tasks:
 
       [ "$TEST_FAILED" = "1" ] || [ "$THRESHOLD_FAILED" = "1" ] && exit 1 || true
 
+  extension-validate:
+    help: "Regenerate manifest.json + ingest-schema.json and fail if committed files drift"
+    bash: |
+      cargo run --quiet --bin sb -- borg extension validate
+
   ci:
-    help: "Full CI pipeline (lint + bloat + check + test in parallel)"
-    before: [lint, bloat, check, test]
+    help: "Full CI pipeline (lint + bloat + check + test + extension-validate in parallel)"
+    before: [lint, bloat, check, test, extension-validate]
     bash: |
       echo "✅ All CI checks passed!"
 
