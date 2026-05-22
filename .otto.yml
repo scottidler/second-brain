@@ -264,3 +264,17 @@ tasks:
       echo "✅ Installed bins:$(echo $BINS | tr '\n' ' ' | sed 's/^/ /')"
       echo "✅ Synced patterns -> ~/.config/borg/patterns/, shared config -> ~/.config/second-brain/"
       echo "✅ Restarted daemons:${DAEMONS:- (none — run \`sb borg daemon --install\` / \`sb cortex daemon --install\` first)}"
+
+      # Refresh the Firefox extension iff this machine has it installed.
+      # --if-installed short-circuits (no sign, no sudo, no Firefox dep) on
+      # daemon-only servers; on the laptop it re-signs the .xpi and atomically
+      # swaps the obsidian-borg-latest.xpi symlink. Firefox watches the file
+      # at install_url and auto-reinstalls without restart per Mozilla docs.
+      # First-machine bootstrap is `sudo sb borg extension install` (or
+      # `sudo sb bootstrap --extension`); from then on `bump && otto deploy`
+      # is the entire day-to-day workflow.
+      if sb borg extension install --no-policy --if-installed; then
+        echo "✅ Extension refresh: handled"
+      else
+        echo "⚠️  Extension refresh failed (non-fatal; daemon redeploy succeeded)"
+      fi

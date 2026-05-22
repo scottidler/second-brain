@@ -19,6 +19,11 @@ target
 # fastembed-downloaded ONNX model cache (legacy backend artifacts)
 .fastembed_cache/
 
+# Signed Firefox extension artifacts: build outputs, reproducible from
+# source + AMO. The .amo-upload-uuid sidecar stays tracked so signing
+# continues to target the same listing across machines / clones.
+borg/clients/extension/web-ext-artifacts/*.xpi
+
 # Claude Code runtime files
 **/.claude/scheduled_tasks.lock
 

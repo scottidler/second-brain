@@ -1,24 +1,26 @@
 # Firefox Extension: Signing & Install
 
 How to ship a new version of the `obsidian-borg Capture` Firefox extension
-(the toolbar button that POSTs the current tab URL to the local borg daemon).
+(the toolbar button + Alt+Shift+B hotkey that POSTs the current tab URL to
+the local borg daemon).
 
-The extension source lives at `borg/clients/extension/`. The repo ships
-build/sign/install automation via `bin/extension-sign`, surfaced as the
-`otto extension` task.
+The extension source lives at `borg/clients/extension/`. Build / sign /
+install / uninstall are owned by `sb borg extension <verb>`. There is no
+shell-script entry point; both `bin/extension-sign` and the in-source
+`sign.sh` were retired alongside the design at
+`docs/design/2026-05-21-extension-lifecycle.md`.
 
 ## Prerequisites: AMO API credentials
 
-Mozilla requires signed `.xpi`s for permanent install in stable Firefox. The
-signing endpoint is the AMO (addons.mozilla.org) API and authenticates with a
-per-user JWT issuer + secret pair.
+Mozilla requires signed `.xpi`s for permanent install in stable Firefox.
+The signing endpoint is the AMO (addons.mozilla.org) API and authenticates
+with a per-user JWT issuer + secret pair.
 
-1. Sign in to https://addons.mozilla.org/en-US/developers/addon/api/key/
-2. Generate (or copy) your API credentials. The page shows two values:
+1. Sign in to <https://addons.mozilla.org/en-US/developers/addon/api/key/>.
+2. Generate (or copy) the API credentials. The page shows two values:
    - **JWT issuer** (looks like `user:NNNNNNNN:NNN`)
    - **JWT secret** (long hex string)
-3. Export them in your shell init with the `MOZILLA_` prefix the repo's
-   `sign.sh` reads:
+3. Export them with the `MOZILLA_` prefix the sign path reads:
 
    ```bash
    # ~/.zshenv or equivalent (or a secrets file you source)
@@ -26,101 +28,140 @@ per-user JWT issuer + secret pair.
    export MOZILLA_JWT_SECRET="..."
    ```
 
-The secret grants the ability to sign `.xpi`s under your AMO account ONLY.
-It does not access browser data or installed extensions. If it leaks (e.g.
-into a shell transcript), rotate it on the same AMO page - the old key
-becomes invalid the moment a replacement is generated.
+The secret grants the ability to sign `.xpi`s under your AMO account
+ONLY. It does not access browser data or installed extensions. If it leaks
+(e.g. into a shell transcript), rotate it on the same AMO page - the old
+key becomes invalid the moment a replacement is generated.
 
-## Bumping the extension version
+## Version: extension follows the workspace, automatically
 
-The extension has its own version line in `borg/clients/extension/manifest.json`
-that is DISTINCT from the workspace's `CARGO_PKG_VERSION` / git tag. You bump it
-when you ship a meaningful change to the extension itself - new permissions,
-behavioral changes to `background.js`, new options pages, etc. It does NOT
-need to track every daemon release.
+The extension's `manifest.json` is **generated** from
+`borg/src/extension/manifest.rs` with `version = env!("CARGO_PKG_VERSION")`.
+Bumping the workspace via `bump` also bumps the extension. There is no
+separate extension-version concept anymore. Drift between
+`Cargo.toml`, `manifest.json`, and the signed `.xpi` is structurally
+impossible: regenerate the manifest after `bump` (or rely on CI to catch
+the omission via the `extension-validate` task in `otto ci`).
 
-```json
-{
-  ...
-  "version": "0.4.0"   // bump this when you change the extension
-}
-```
+## First-machine setup (one time, requires sudo)
 
-After bumping, sign and install. AMO refuses to re-sign an unchanged version;
-each sign requires a fresh version number.
-
-## Sign + install workflow
-
-The fast path - sign and immediately install via `xdg-open`:
+On a fresh machine that has never had the extension installed:
 
 ```bash
-otto extension --install
+sudo sb borg extension install
 # - or equivalently -
-bin/extension-sign --install
+sudo sb bootstrap --extension
 ```
 
 This:
 
-1. Validates `MOZILLA_JWT_ISSUER` + `MOZILLA_JWT_SECRET` are set.
-2. Runs `web-ext sign` against the AMO API. Validation takes 10-30s.
-3. Downloads the signed `.xpi` to
-   `borg/clients/extension/web-ext-artifacts/c8b5da7dc30043ceb5b1-<version>.xpi`.
-4. `xdg-open`s the `.xpi`. Firefox registers as the handler for
-   `application/x-xpinstall` and pops the install-confirmation dialog.
-5. Click **Continue Installation** in Firefox. Done.
+1. Regenerates `manifest.json` + `ingest-schema.json`.
+2. Calls `web-ext sign` against the AMO API (10-30s).
+3. Symlinks `web-ext-artifacts/obsidian-borg-latest.xpi` at the freshly
+   signed versioned `.xpi`.
+4. Writes (or deep-merges into) the Firefox Enterprise Policy at the
+   detected path:
+   - Mozilla tarball (`/opt/firefox/`): `/opt/firefox/distribution/policies.json`
+   - Ubuntu / Debian / Fedora apt-Firefox: `/etc/firefox/policies/policies.json`
+   - Flatpak: `~/.var/app/org.mozilla.firefox/.mozilla/firefox/policies/policies.json`
+   - Snap: explicitly rejected (snap confinement blocks `file://` install_url).
+5. Firefox's file-watch on the `install_url` triggers an immediate install
+   on next Firefox launch (no click-through prompt; `force_installed` mode).
 
-Sign without auto-install (useful for CI or building a release artifact you'll
-distribute):
+Sudo is required ONLY for the policy file write on system paths
+(`/etc/firefox/`, `/opt/firefox/`). The signing step runs as your user.
+
+## Day-to-day: just `bump && otto deploy`
+
+After the first-machine setup, the full development loop is:
 
 ```bash
-otto extension
-# Prints the path to the new .xpi.
+bump            # bumps the workspace version (and therefore the extension)
+otto deploy     # builds + installs sb + restarts daemons + refreshes the extension
 ```
+
+The `otto deploy` task runs `sb borg extension install --no-policy
+--if-installed` at the end of its sequence. This:
+
+- Re-signs the extension (no sudo; the policy file already exists from
+  the first-machine setup).
+- Atomically swaps the `obsidian-borg-latest.xpi` symlink to the new
+  versioned `.xpi`.
+- Mozilla docs guarantee Firefox watches the file at `install_url` and
+  auto-reinstalls when it changes. No Firefox restart needed.
+
+The `--if-installed` flag makes the hook a no-op on daemon-only servers
+(no Firefox, no sudo, no failure). The same `otto deploy` works
+everywhere.
 
 ## Verifying what's installed
 
 The cached `.xpi` lives in the active Firefox profile's `extensions/` dir.
-On Linux with snap Firefox:
+For tarball Firefox:
 
 ```bash
-unzip -p ~/snap/firefox/common/.mozilla/firefox/*.default*/extensions/obsidian-borg@scottidler.xpi manifest.json | grep version
+unzip -p ~/.mozilla/firefox/*.default*/extensions/obsidian-borg@scottidler.xpi manifest.json | grep version
 ```
 
-Or check `about:addons` -> obsidian-borg Capture -> version line at the top.
+Or just open `about:addons` -> obsidian-borg Capture and read the version
+line. That version is what's actually running, regardless of what the
+on-disk `.xpi` symlink target says.
 
-The version printed there is what's actually running, regardless of what
-`borg/clients/extension/manifest.json` says in the repo.
+## Managed environments (Ansible / Puppet / Chef)
 
-## When extension and daemon drift
+If `/etc/firefox/policies/policies.json` is owned by a config-management
+agent, point our writer at a drop-in your management tool merges in:
 
-The extension talks to the borg daemon over HTTP at `/ingest`. The contract
-is small (URL POST in, queued response back), but it has historically drifted:
+```bash
+sb borg extension install --policy-file /etc/firefox/policies.d/obsidian-borg.json
+```
 
-- Before fa79724 (2026-05-12), `/ingest` blocked until the pipeline finished
-  and returned `{title, status, ...}`. The extension rendered toasts from the
-  response.
-- After fa79724, `/ingest` returns `{status: "Queued", ...}` within ms; the
-  daemon's `notify::Desktop` sink delivers terminal toasts. The extension's
-  `if (result.title)` and `else if (result.status.Failed)` branches went dead
-  silently - extension 0.3.4 had them, extension 0.4.0 removes them.
+The deep-merge logic still runs against the override path; the management
+agent's own policy entries are unaffected because we only own the
+`policies.ExtensionSettings["obsidian-borg@scottidler"]` subtree of the
+file we write.
 
-How to tell you've drifted:
+## Uninstall
 
-- Daemon log shows ingest succeeded but no terminal toast appeared:
-  upgrade the extension (the dead-branch fall-through swallowed the response).
-- Browser shows a "Captured: <stale-title>" toast: the daemon got upgraded
-  past fa79724 but the extension is still pre-0.4.0.
+```bash
+sb borg extension uninstall            # removes the policy entry
+sb borg extension uninstall --purge    # also deletes web-ext-artifacts/
+```
 
-If in doubt, run `otto extension --install` to ship the latest source as a
-fresh signed `.xpi`.
+Firefox loads the new (or absent) policy on next launch; restart Firefox
+to drop the running extension from the active profile.
+
+## Drift detection
+
+`otto ci` runs `sb borg extension validate` as a final gate. If
+`manifest.json` or `ingest-schema.json` drifts from what
+`borg/src/extension/manifest.rs` + `borg::types::IngestRequest` would
+produce, the build fails with a short unified-diff snippet pointing at
+the first divergence. Fix: `sb borg extension generate && git add
+borg/clients/extension/manifest.json borg/clients/extension/ingest-schema.json`.
+
+## Daemon-protocol evolution rule
+
+`borg::types::IngestRequest` evolves additively-only. An `Option<>` field
+is non-breaking; a required field is breaking. The integration test
+`borg/tests/extension_body_matches_ingest_request.rs` deserializes the
+canonical extension body (`{"url": "..."}`) into `IngestRequest` at CI
+time; a required-field addition without an extension update fails CI
+with an actionable message.
 
 ## Files involved
 
 | File | Purpose |
 |---|---|
-| `borg/clients/extension/manifest.json` | extension metadata; bump `version` here before signing |
-| `borg/clients/extension/background.js` | service worker - handles toolbar click, POSTs to `/ingest` |
-| `borg/clients/extension/sign.sh` | thin wrapper around `web-ext sign` |
-| `bin/extension-sign` | repo-level entry point (called by `otto extension`); adds the `--install` shortcut |
-| `borg/clients/extension/web-ext-artifacts/` | signed `.xpi` output dir; signed builds are committed for historical reference |
-| `.otto.yml` -> `extension` task | `otto extension [--install]` |
+| `borg/src/extension/manifest.rs` | Manifest generator (source of truth for `manifest.json`) |
+| `borg/src/extension/schema.rs` | `IngestRequest` JSON Schema generator |
+| `borg/src/extension/sign.rs` | `web-ext sign` wrapper |
+| `borg/src/extension/install.rs` | Firefox detection + atomic symlink + policies.json deep-merge |
+| `borg/clients/extension/manifest.json` | Generated; committed; CI-validated |
+| `borg/clients/extension/ingest-schema.json` | Generated; committed; CI-validated |
+| `borg/clients/extension/background.js` | Service worker - POSTs `{url}` to `/ingest` |
+| `borg/clients/extension/options.js` | Save-time `chrome.permissions.contains` check against host_permissions |
+| `borg/clients/extension/web-ext-artifacts/` | Signed `.xpi` output dir (gitignored) |
+| `borg/tests/extension_body_matches_ingest_request.rs` | Build-time contract gate |
+| `.otto.yml` -> `extension-validate` | CI drift gate |
+| `.otto.yml` -> `deploy` -> last step | `--if-installed --no-policy` auto-refresh |

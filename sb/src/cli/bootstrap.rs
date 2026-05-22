@@ -19,6 +19,12 @@ pub struct BootstrapArgs {
     /// the new location is empty, refuses on byte differences, never deletes the legacy directory.
     #[arg(long)]
     pub migrate: bool,
+
+    /// Sign + install the Firefox capture extension after standard bootstrap.
+    /// First run on a machine: requires sudo for the policy-file write.
+    /// Subsequent runs are unattended; pair with `otto deploy` for auto-refresh.
+    #[arg(long)]
+    pub extension: bool,
 }
 
 const BORG_TEMPLATE: &str = include_str!("../../../config/templates/borg.yml.example");
@@ -64,8 +70,33 @@ pub async fn run(args: BootstrapArgs) -> Result<()> {
         prefetch_embedding_model()?;
     }
 
+    if args.extension {
+        println!();
+        println!("Installing Firefox capture extension (sudo required for first policy write)...");
+        install_extension()?;
+    }
+
     println!();
     println!("\u{2705} Bootstrap complete. Run `sb status` to see live state.");
+    Ok(())
+}
+
+fn install_extension() -> Result<()> {
+    let repo_root = borg::extension::repo_root().context("locate repo root for extension install")?;
+    let config = borg::config::load_config(None).context("load borg config for extension install")?;
+    let opts = borg::extension::install::InstallOpts::default();
+    let result = borg::extension::install::run(&repo_root, &config, opts).context("extension install")?;
+    if let Some(xpi) = &result.xpi_path {
+        println!("signed: {}", xpi.display());
+    }
+    if let Some(policy) = &result.policy_path {
+        let verb = if result.policy_changed { "updated" } else { "current" };
+        println!("policy {}: {}", verb, policy.display());
+    }
+    println!(
+        "Firefox capture extension installed; the daily-use loop is now `bump && otto deploy` \
+         (auto-refresh via the otto deploy hook)."
+    );
     Ok(())
 }
 
