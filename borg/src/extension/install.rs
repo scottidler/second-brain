@@ -195,6 +195,21 @@ fn write_policy_file(path: &Path, content: &str) -> Result<()> {
         .ok_or_else(|| eyre::eyre!("policy path has no parent: {}", path.display()))?;
     if requires_sudo(path) {
         log::info!("writing {} via sudo tee (atomic rename)", path.display());
+        // Ensure the parent directory exists. On a fresh apt/deb Firefox
+        // install, /etc/firefox/policies/ may not exist yet; the non-sudo
+        // branch below already handles this via std::fs::create_dir_all,
+        // and the sudo branch needs the same affordance via `sudo mkdir -p`.
+        if !parent.exists() {
+            let mkdir_status = Command::new("sudo")
+                .arg("mkdir")
+                .arg("-p")
+                .arg(parent)
+                .status()
+                .context("spawn `sudo mkdir -p` for policy dir")?;
+            if !mkdir_status.success() {
+                eyre::bail!("sudo mkdir -p {} failed with exit {mkdir_status}", parent.display());
+            }
+        }
         // Stage to a sibling tmp file then atomic-rename, both via sudo.
         let tmp = parent.join(format!(".policies.json.{}.tmp", std::process::id()));
         let mut child = Command::new("sudo")
