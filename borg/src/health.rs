@@ -8,7 +8,7 @@ pub struct HealthResponse {
     pub version: String,
 }
 
-pub async fn health_handler(service: &'static str, version: &'static str) -> Json<HealthResponse> {
+pub async fn health_handler(service: &'static str, version: &str) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
         service: service.to_string(),

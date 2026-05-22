@@ -17,8 +17,8 @@ pub struct NoteRequest {
     pub tags: Option<Vec<String>>,
 }
 
-pub async fn health() -> Json<HealthResponse> {
-    crate::health::health_handler("obsidian-borg", env!("GIT_DESCRIBE")).await
+pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    crate::health::health_handler("obsidian-borg", &state.version).await
 }
 
 #[derive(serde::Serialize, Default)]

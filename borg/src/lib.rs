@@ -71,6 +71,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub telegram: Option<Telegram>,
     pub desktop: Option<Desktop>,
+    pub version: String,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -144,7 +145,7 @@ impl ServerHandle {
 
 /// Boot every borg subsystem (HTTP server, telegram, discord, ntfy, watchdog)
 /// and return a startup snapshot plus an opaque handle the caller awaits.
-pub async fn serve_init(config: Config) -> Result<(ServerStartup, ServerHandle)> {
+pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartup, ServerHandle)> {
     log::info!("Starting obsidian-borg daemon");
 
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
@@ -227,6 +228,7 @@ pub async fn serve_init(config: Config) -> Result<(ServerStartup, ServerHandle)>
         config: config.clone(),
         telegram: telegram.clone(),
         desktop: desktop.clone(),
+        version: version.clone(),
     };
     let app = build_router(state);
     let listener = TcpListener::bind(addr).await.context("Failed to bind to address")?;
@@ -333,8 +335,8 @@ pub async fn serve_init(config: Config) -> Result<(ServerStartup, ServerHandle)>
 /// Thin wrapper preserved for internal callers (daemon::run with --start).
 /// New sb code paths should use `serve_init` + `ServerHandle::wait` to get
 /// the typed startup banner instead.
-pub async fn serve(config: Config, _verbose: bool) -> Result<()> {
-    let (_startup, handle) = serve_init(config).await?;
+pub async fn serve(config: Config, version: String, _verbose: bool) -> Result<()> {
+    let (_startup, handle) = serve_init(config, version).await?;
     handle.wait().await
 }
 
@@ -1275,6 +1277,7 @@ mod tests {
             config: Arc::new(Config::default()),
             telegram: None,
             desktop: None,
+            version: "0.0.0-test".to_string(),
         })
     }
 
