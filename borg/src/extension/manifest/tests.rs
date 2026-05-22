@@ -128,3 +128,54 @@ fn csp_starts_with_default_src_self() {
         "unexpected CSP format: {csp:?}"
     );
 }
+
+#[test]
+fn permissions_are_exactly_activetab_storage_notifications() {
+    let manifest = build_manifest("0.0.0-test", &Config::default());
+    let perms: Vec<&str> = manifest["permissions"]
+        .as_array()
+        .expect("permissions array")
+        .iter()
+        .map(|v| v.as_str().expect("string"))
+        .collect();
+    assert_eq!(perms, vec!["activeTab", "storage", "notifications"]);
+}
+
+#[test]
+fn default_host_permissions_match_default_origins() {
+    let manifest = build_manifest("0.0.0-test", &Config::default());
+    let hosts: Vec<&str> = manifest["host_permissions"]
+        .as_array()
+        .expect("host_permissions array")
+        .iter()
+        .map(|v| v.as_str().expect("string"))
+        .collect();
+    assert_eq!(hosts, vec!["http://localhost/*", "http://*.lan/*", "http://*.local/*"]);
+}
+
+#[test]
+fn gecko_id_is_obsidian_borg_scottidler() {
+    let manifest = build_manifest("0.0.0-test", &Config::default());
+    assert_eq!(
+        manifest["browser_specific_settings"]["gecko"]["id"].as_str(),
+        Some("obsidian-borg@scottidler")
+    );
+}
+
+#[test]
+fn gecko_strict_min_version_is_140() {
+    let manifest = build_manifest("0.0.0-test", &Config::default());
+    assert_eq!(
+        manifest["browser_specific_settings"]["gecko"]["strict_min_version"].as_str(),
+        Some("140.0")
+    );
+}
+
+#[test]
+fn capture_url_suggested_key_is_alt_shift_b() {
+    let manifest = build_manifest("0.0.0-test", &Config::default());
+    assert_eq!(
+        manifest["commands"]["capture-url"]["suggested_key"]["default"].as_str(),
+        Some("Alt+Shift+B")
+    );
+}
