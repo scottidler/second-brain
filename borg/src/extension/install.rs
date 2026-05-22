@@ -1,11 +1,16 @@
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::symlink;
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 
 use eyre::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::config::Config;
+#[cfg(target_os = "linux")]
 use crate::extension::{self, sign};
 
 const EXTENSION_ID: &str = "obsidian-borg@scottidler";
@@ -103,11 +108,13 @@ pub fn policy_path(install: &FirefoxInstall) -> Result<PathBuf> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn requires_sudo(path: &Path) -> bool {
     let s = path.to_string_lossy();
     s.starts_with("/etc/") || s.starts_with("/opt/")
 }
 
+#[cfg(target_os = "linux")]
 fn install_url_for(repo_root: &Path) -> String {
     let xpi = extension::extension_dir(repo_root)
         .join("web-ext-artifacts")
@@ -181,6 +188,7 @@ fn policy_contains_ours(path: &Path) -> bool {
         .is_some()
 }
 
+#[cfg(target_os = "linux")]
 fn write_policy_file(path: &Path, content: &str) -> Result<()> {
     let parent = path
         .parent()
@@ -225,6 +233,7 @@ fn write_policy_file(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn atomic_symlink_swap(versioned_xpi: &Path, latest_link: &Path) -> Result<()> {
     log::debug!(
         "extension::install: symlink {} -> {}",
@@ -247,6 +256,7 @@ fn atomic_symlink_swap(versioned_xpi: &Path, latest_link: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts) -> Result<InstallResult> {
     log::debug!(
         "extension::install::run: no_policy={} if_installed={} policy_file={:?}",
@@ -255,20 +265,30 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts) -> Result<Insta
         opts.policy_file
     );
 
-    let policy_target = if let Some(override_path) = opts.policy_file.clone() {
+    // Resolve the policy file path. --if-installed needs it to check whether
+    // our entry is present, EVEN WHEN --no-policy is also set (the otto deploy
+    // hook case): --no-policy means "don't WRITE the policy", not "skip the
+    // installed-check." So always try to determine the path.
+    let policy_target: Option<PathBuf> = if let Some(override_path) = opts.policy_file.clone() {
         Some(override_path)
-    } else if opts.no_policy && opts.if_installed {
-        None
     } else {
-        // We need the path either to write to it OR to check it (if_installed).
         match detect_firefox()? {
-            ff @ FirefoxInstall::Unknown if opts.if_installed => {
-                log::debug!("extension::install: --if-installed and no Firefox detected -> skip");
-                let _ = ff;
-                return Ok(InstallResult {
-                    skipped_not_installed: true,
-                    ..InstallResult::default()
-                });
+            FirefoxInstall::Unknown => {
+                if opts.if_installed {
+                    log::debug!("extension::install: --if-installed and no Firefox detected -> skip");
+                    return Ok(InstallResult {
+                        skipped_not_installed: true,
+                        ..InstallResult::default()
+                    });
+                }
+                if opts.no_policy {
+                    None
+                } else {
+                    eyre::bail!(
+                        "could not detect Firefox install type; supported: tarball, apt/deb, flatpak. \
+                         Pass --policy-file to override."
+                    );
+                }
             }
             ff => Some(policy_path(&ff)?),
         }
@@ -276,6 +296,7 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts) -> Result<Insta
 
     if opts.if_installed {
         let Some(target) = policy_target.as_ref() else {
+            log::debug!("extension::install: --if-installed but no policy path resolvable -> skip");
             return Ok(InstallResult {
                 skipped_not_installed: true,
                 ..InstallResult::default()
@@ -334,6 +355,12 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts) -> Result<Insta
     })
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn run(_repo_root: &Path, _config: &Config, _opts: InstallOpts) -> Result<InstallResult> {
+    eyre::bail!("install verb is Linux-only; macOS/Windows users use `sb borg extension sign` + manual .xpi install")
+}
+
+#[cfg(target_os = "linux")]
 pub fn uninstall(opts: UninstallOpts) -> Result<UninstallResult> {
     log::debug!("extension::install::uninstall: purge={}", opts.purge);
     let detected = detect_firefox().ok();
@@ -365,6 +392,11 @@ pub fn uninstall(opts: UninstallOpts) -> Result<UninstallResult> {
         policy_path: policy_path_out,
         artifacts_removed,
     })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn uninstall(_opts: UninstallOpts) -> Result<UninstallResult> {
+    eyre::bail!("uninstall verb is Linux-only; macOS/Windows users remove web-ext-artifacts/ manually")
 }
 
 #[cfg(test)]
