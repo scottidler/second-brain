@@ -19,10 +19,14 @@ target
 # fastembed-downloaded ONNX model cache (legacy backend artifacts)
 .fastembed_cache/
 
-# Signed Firefox extension artifacts: build outputs, reproducible from
-# source + AMO. The .amo-upload-uuid sidecar stays tracked so signing
-# continues to target the same listing across machines / clones.
-borg/clients/extension/web-ext-artifacts/*.xpi
+# Signed Firefox extension artifacts. Committed so multi-machine deploys
+# (laptop + desk + servers) can install without each one needing to re-sign
+# against AMO - AMO publishes one .xpi per version and rejects re-uploads
+# at the same version with `Version X.Y.Z already exists`. The publishing
+# machine signs once, commits the .xpi, and every other machine that
+# `git pull`s reuses it via sign::run's idempotency check. The
+# .amo-upload-uuid sidecar stays tracked alongside so signing continues
+# to target the same AMO listing.
 
 # Generated extension manifest + schema. Produced fresh at sign/stage
 # time from sb's CARGO_PKG_VERSION and the loaded config; the runtime

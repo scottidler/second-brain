@@ -461,15 +461,6 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
     let latest_link = artifacts_dir.join(LATEST_XPI_NAME);
     atomic_symlink_swap(&sign_result.xpi_path, &latest_link)?;
 
-    if opts.no_policy {
-        return Ok(InstallResult {
-            xpi_path: Some(sign_result.xpi_path),
-            policy_path: None,
-            policy_changed: false,
-            skipped_not_installed: false,
-        });
-    }
-
     if !latest_link.exists() {
         eyre::bail!(
             "symlink target missing after sign: {}; refusing to install something that points at nothing",
@@ -477,9 +468,27 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
         );
     }
 
-    let strategy = strategy.expect("strategy must be set when no_policy=false");
+    // Dispatch on strategy. `--no-policy` only applies to the PolicyFile
+    // path (system policies.json) - for ProfileExtension the .xpi copy IS
+    // the install, and skipping it would leave the snap profile stale.
+    // `None` strategy means no Firefox detected AND --no-policy passed: a
+    // daemon-only host where we sign for archival and stop there.
     match strategy {
-        InstallStrategy::PolicyFile { path: target } => {
+        None => Ok(InstallResult {
+            xpi_path: Some(sign_result.xpi_path),
+            policy_path: None,
+            policy_changed: false,
+            skipped_not_installed: false,
+        }),
+        Some(InstallStrategy::PolicyFile { path: target }) => {
+            if opts.no_policy {
+                return Ok(InstallResult {
+                    xpi_path: Some(sign_result.xpi_path),
+                    policy_path: None,
+                    policy_changed: false,
+                    skipped_not_installed: false,
+                });
+            }
             let install_url = install_url_for(repo_root);
             let existing = read_policy_file(&target).unwrap_or_else(|_| json!({}));
             let merged = merge_policy(existing.clone(), &install_url);
@@ -496,14 +505,15 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
                 skipped_not_installed: false,
             })
         }
-        InstallStrategy::ProfileExtension { xpi_path } => {
+        Some(InstallStrategy::ProfileExtension { xpi_path }) => {
+            // Snap-style install: copy the .xpi straight into the profile.
+            // `--no-policy` does not gate this - there is no system policy
+            // file to skip writing; the profile copy is the install action.
             let parent = xpi_path
                 .parent()
                 .ok_or_else(|| eyre::eyre!("profile extension path has no parent: {}", xpi_path.display()))?;
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create profile extensions dir {}", parent.display()))?;
-            // Copy fresh; std::fs::copy overwrites atomically on the same
-            // filesystem. The signed .xpi from sign::run is the source.
             std::fs::copy(&sign_result.xpi_path, &xpi_path)
                 .with_context(|| format!("copy {} -> {}", sign_result.xpi_path.display(), xpi_path.display()))?;
             log::info!(
