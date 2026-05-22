@@ -88,13 +88,21 @@ pub fn run(cli: ExtensionCli, config: Config) -> Result<()> {
                 if let Some(xpi) = &result.xpi_path {
                     println!("signed: {}", xpi.display());
                 }
-                if let Some(policy) = &result.policy_path {
+                if let Some(target) = &result.policy_path {
+                    let is_profile_copy = target.extension().and_then(|s| s.to_str()) == Some("xpi");
+                    let label = if is_profile_copy { "profile xpi" } else { "policy" };
                     let verb = if result.policy_changed { "updated" } else { "current" };
-                    println!("policy {}: {}", verb, policy.display());
+                    println!("{label} {verb}: {}", target.display());
+                    if is_profile_copy {
+                        println!(
+                            "extension installed; restart Firefox to load the new .xpi (snap Firefox does not hot-reload extensions)."
+                        );
+                    } else {
+                        println!(
+                            "extension installed; Firefox will pick up the change on next launch via `file://` install_url semantics."
+                        );
+                    }
                 }
-                println!(
-                    "extension installed; Firefox will pick up the change automatically per `file://` install_url semantics."
-                );
             }
             Ok(())
         }
