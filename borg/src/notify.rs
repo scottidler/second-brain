@@ -1,20 +1,24 @@
-//! Notification sinks. Two structurally identical channels:
+//! Notification sinks. Three structurally identical channels:
 //!
 //! - [`Telegram`] talks to Telegram via teloxide. Cross-host (the bot delivers
 //!   to whichever device is logged in).
+//! - [`Signal`] talks to Signal via signal-rs's in-process `Client`.
+//!   Host-pinned to the same machine that runs the Signal receive loop.
 //! - [`Desktop`] talks to the local user-session D-Bus via `notify-rust`.
 //!   Host-gated; only runs on the machine with the desktop.
 //!
-//! Both sinks expose `processing(...)` and `result(...)` so call sites stay
-//! parallel. Future channels go side-by-side rather than behind a trait -
-//! two sinks does not yet justify the abstraction.
+//! All three sinks expose `processing(...)` and `result(...)` so call sites
+//! stay parallel. Future channels go side-by-side rather than behind a trait
+//! - three sinks does not yet justify the abstraction.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::{DesktopConfig, TelegramConfig};
+use crate::config::{DesktopConfig, SignalConfig, TelegramConfig};
 use crate::router::format_reply;
 use crate::types::IngestResult;
 use notify_rust::{Notification, NotificationHandle, Timeout};
+use signal_rs::{Client as SignalClient, Recipient};
 use teloxide::prelude::*;
 use teloxide::types::ChatId;
 
@@ -31,6 +35,7 @@ mod tests;
 // delay the 15+ minute video-transcription pipeline.
 const DESKTOP_TIMEOUT_MS: u64 = 500;
 const TELEGRAM_TIMEOUT_MS: u64 = 3000;
+const SIGNAL_TIMEOUT_MS: u64 = 3000;
 
 /// Telegram notification sink. Clone-cheap: `Bot` is an HTTP client wrapper.
 #[derive(Clone)]
@@ -287,6 +292,125 @@ impl Desktop {
                 log::warn!("notify: {label} timed out after {DESKTOP_TIMEOUT_MS}ms");
                 Err(())
             }
+        }
+    }
+}
+
+/// Signal notification sink, peer to [`Telegram`] and [`Desktop`]. Sends
+/// Processing / Saved / Duplicate / Failed acks back to the inbound source
+/// (Note-to-Self for the privileged Note-to-Self path, peer ACI for an
+/// allowed-sender DM). Cross-method notifications (e.g. an ntfy ingest
+/// acknowledged via Signal) route to `default_recipient`, populated from
+/// `SignalConfig::notification_recipient`.
+///
+/// Clones cheap because the underlying `Client` is held by `Arc` and the
+/// recipient is a small enum.
+#[derive(Clone)]
+pub struct Signal {
+    client: Arc<SignalClient>,
+    default_recipient: Recipient,
+}
+
+impl Signal {
+    /// Build from a shared client and config. Returns `Option<Self>` to match
+    /// the [`Telegram::new`] shape - the constructor always succeeds today
+    /// (SelfSync is always a valid default) but the Option lets future
+    /// config-validation failures land without a signature change.
+    pub fn new(client: Arc<SignalClient>, signal_config: &SignalConfig) -> Option<Self> {
+        let default_recipient = match &signal_config.notification_recipient {
+            None => Recipient::SelfSync,
+            Some(aci) => Recipient::Aci(aci.clone()),
+        };
+        log::info!("notify: Signal notifications enabled (default={:?})", default_recipient);
+        Some(Self {
+            client,
+            default_recipient,
+        })
+    }
+
+    fn resolve_recipient(&self, override_recipient: Option<&Recipient>) -> Recipient {
+        override_recipient
+            .cloned()
+            .unwrap_or_else(|| self.default_recipient.clone())
+    }
+
+    /// Send `[trace_id] description` ack to the resolved recipient. Returns
+    /// `Ok(())` on success so callers can await delivery before starting the
+    /// pipeline (preserves ordering with the pipeline's first downstream
+    /// step). Logs a warn and returns `Err(())` on failure or timeout.
+    pub async fn processing(
+        &self,
+        trace_id: &str,
+        description: &str,
+        override_recipient: Option<&Recipient>,
+    ) -> Result<(), ()> {
+        let recipient = self.resolve_recipient(override_recipient);
+        let body = format!("[{trace_id}] {description}");
+        let client = Arc::clone(&self.client);
+        let future = async move { client.send(recipient, &body).await };
+        match tokio::time::timeout(Duration::from_millis(SIGNAL_TIMEOUT_MS), future).await {
+            Ok(Ok(_ts)) => Ok(()),
+            Ok(Err(e)) => {
+                log::warn!("notify: failed to send Signal processing message: {e}");
+                Err(())
+            }
+            Err(_) => {
+                log::warn!("notify: Signal processing message timed out after {SIGNAL_TIMEOUT_MS}ms");
+                Err(())
+            }
+        }
+    }
+
+    /// Send the full result message (Saved / Duplicate / Failed) to the
+    /// resolved recipient. Body is the same plain-text rendering [`Desktop`]
+    /// uses (no HTML, since Signal renders plain text in the thread). Wraps
+    /// the send in `SIGNAL_TIMEOUT_MS`.
+    pub async fn result(&self, result: &IngestResult, display_source: &str, override_recipient: Option<&Recipient>) {
+        let body = format_signal_body(result, display_source, None);
+        self.send_body(body, override_recipient, "result").await;
+    }
+
+    /// Partial-attachment ack. Used when the inbound envelope carried more
+    /// than one attachment - the pipeline processes the first, this method
+    /// renders a body that names the partial outcome so the operator does
+    /// not think the rest of the attachments were silently consumed.
+    pub async fn result_partial(
+        &self,
+        result: &IngestResult,
+        display_source: &str,
+        dropped_count: usize,
+        override_recipient: Option<&Recipient>,
+    ) {
+        let body = format_signal_body(result, display_source, Some(dropped_count));
+        self.send_body(body, override_recipient, "result (partial)").await;
+    }
+
+    async fn send_body(&self, body: String, override_recipient: Option<&Recipient>, label: &'static str) {
+        let recipient = self.resolve_recipient(override_recipient);
+        let client = Arc::clone(&self.client);
+        let future = async move { client.send(recipient, &body).await };
+        match tokio::time::timeout(Duration::from_millis(SIGNAL_TIMEOUT_MS), future).await {
+            Ok(Ok(_ts)) => {}
+            Ok(Err(e)) => log::warn!("notify: failed to send Signal {label} message: {e}"),
+            Err(_) => log::warn!("notify: Signal {label} message timed out after {SIGNAL_TIMEOUT_MS}ms"),
+        }
+    }
+}
+
+/// Render a Signal-bound ack body. Same plain-text shape as the desktop sink
+/// for consistency, plus an optional partial-attachment line when the
+/// dispatch path was `ClassifyOutcome::PartialMultiAttachment`.
+fn format_signal_body(result: &IngestResult, display_source: &str, dropped_count: Option<usize>) -> String {
+    let base = format_reply(result, display_source);
+    let with_link = match &result.obsidian_url {
+        Some(url) => format!("{base}\n{url}"),
+        None => base,
+    };
+    match dropped_count {
+        None => with_link,
+        Some(dropped) => {
+            let total = dropped + 1;
+            format!("{with_link}\nSaved 1 of {total} attachments; multi-attachment support is v2")
         }
     }
 }

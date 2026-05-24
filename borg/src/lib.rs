@@ -42,6 +42,7 @@ pub mod replay;
 pub mod retention;
 pub mod router;
 pub mod routes;
+pub mod signal;
 pub mod slides;
 pub mod stages;
 pub mod startup;
@@ -111,6 +112,7 @@ pub struct ServerStartup {
     pub telegram_bot: SubsystemStatus,
     pub discord: SubsystemStatus,
     pub ntfy: SubsystemStatus,
+    pub signal: SubsystemStatus,
     pub desktop: SubsystemStatus,
     pub watchdog: SubsystemStatus,
 }
@@ -309,6 +311,56 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
         }
     }
 
+    // Signal transport (config-driven, host-gated, single-machine pin).
+    // libsignal-protocol's storage futures are !Send, so signal cannot run
+    // on tokio's multi-thread runtime. We spawn a dedicated OS thread that
+    // owns a current-thread tokio runtime and a LocalSet; signal::run drives
+    // its receive loop and per-envelope `spawn_local` dispatches there. The
+    // bridge back into the JoinSet is a `oneshot::channel<Result<()>>` so
+    // an Err (NotLinked / Deauthorized) still propagates to
+    // `ServerHandle::wait` exactly like every other transport.
+    let mut signal_status = SubsystemStatus::Disabled;
+    if let Some(signal_config) = config.signal.clone() {
+        if !config::is_local_host(&Some(signal_config.host.clone())) {
+            log::info!(
+                "Signal configured but host {:?} does not match this machine, skipping",
+                signal_config.host
+            );
+            signal_status = SubsystemStatus::SkippedHostMismatch;
+        } else {
+            log::info!(
+                "Signal transport enabled (state_dir: {}, allowed_senders: {})",
+                signal_config.state_dir.display(),
+                signal_config.allowed_senders.len()
+            );
+            let cfg = config.clone();
+            let desk = desktop.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel::<Result<()>>();
+            std::thread::Builder::new()
+                .name("signal-runtime".to_string())
+                .spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let _ = tx.send(Err(eyre::eyre!("signal: failed to build runtime: {e}")));
+                            return;
+                        }
+                    };
+                    let local = tokio::task::LocalSet::new();
+                    let result = rt.block_on(local.run_until(signal::run(signal_config, cfg, desk)));
+                    let _ = tx.send(result);
+                })
+                .context("failed to spawn signal-runtime thread")?;
+            tasks.spawn(async move {
+                match rx.await {
+                    Ok(res) => res,
+                    Err(_) => Err(eyre::eyre!("signal: runtime thread dropped without reporting")),
+                }
+            });
+            signal_status = SubsystemStatus::Active;
+        }
+    }
+
     // Watchdog
     {
         let cfg = config.clone();
@@ -325,6 +377,7 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
             telegram_bot: telegram_bot_status,
             discord: discord_status,
             ntfy: ntfy_status,
+            signal: signal_status,
             desktop: desktop_status,
             watchdog: SubsystemStatus::Active,
         },
