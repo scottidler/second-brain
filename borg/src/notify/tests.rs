@@ -215,6 +215,33 @@ fn test_format_desktop_body_appends_obsidian_url_unescaped() {
     assert!(!body.contains("&amp;"));
 }
 
+// ---------------- Signal constructor (recipient resolution) ----------------
+
+fn mk_signal_config(notification_recipient: Option<&str>) -> SignalConfig {
+    SignalConfig {
+        state_dir: std::path::PathBuf::from("/tmp/borg-test-signal-state"),
+        allowed_senders: vec![],
+        notification_recipient: notification_recipient.map(str::to_string),
+        host: "test-host".to_string(),
+        notetoself_rate_threshold_per_hour: 100,
+    }
+}
+
+#[test]
+fn signal_default_recipient_is_selfsync_when_unset() {
+    let cfg = mk_signal_config(None);
+    assert_eq!(default_recipient_for(&cfg), Recipient::SelfSync);
+}
+
+#[test]
+fn signal_default_recipient_is_aci_when_set() {
+    let cfg = mk_signal_config(Some("11111111-1111-1111-1111-111111111111"));
+    assert_eq!(
+        default_recipient_for(&cfg),
+        Recipient::Aci("11111111-1111-1111-1111-111111111111".to_string())
+    );
+}
+
 #[test]
 fn real_notifications_disabled_under_cargo_test() {
     // Regression for 2026-05-24: `test_ingest_connection_refused` fired a

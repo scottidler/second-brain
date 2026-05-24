@@ -347,16 +347,23 @@ pub struct Signal {
     default_recipient: Recipient,
 }
 
+/// Resolve the default reply target for cross-method notifications. Extracted
+/// so it can be exercised in tests without constructing a live `SignalClient`
+/// (which requires a fully linked state directory).
+pub(crate) fn default_recipient_for(signal_config: &SignalConfig) -> Recipient {
+    match &signal_config.notification_recipient {
+        None => Recipient::SelfSync,
+        Some(aci) => Recipient::Aci(aci.clone()),
+    }
+}
+
 impl Signal {
     /// Build from a shared client and config. Returns `Option<Self>` to match
     /// the [`Telegram::new`] shape - the constructor always succeeds today
     /// (SelfSync is always a valid default) but the Option lets future
     /// config-validation failures land without a signature change.
     pub fn new(client: Arc<SignalClient>, signal_config: &SignalConfig) -> Option<Self> {
-        let default_recipient = match &signal_config.notification_recipient {
-            None => Recipient::SelfSync,
-            Some(aci) => Recipient::Aci(aci.clone()),
-        };
+        let default_recipient = default_recipient_for(signal_config);
         log::info!("notify: Signal notifications enabled (default={:?})", default_recipient);
         Some(Self {
             client,
