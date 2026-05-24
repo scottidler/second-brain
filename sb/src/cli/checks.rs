@@ -681,18 +681,27 @@ fn telegram_findings_for(tg: &TelegramConfig) -> Vec<Finding> {
 }
 
 fn telegram_probe_get_me(token: &str) -> Result<String, String> {
-    use teloxide::prelude::Requester;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("build current-thread runtime: {e}"))?;
-    rt.block_on(async move {
-        let bot = teloxide::Bot::new(token);
-        match bot.get_me().await {
-            Ok(me) => Ok(me.user.username.clone().unwrap_or_else(|| "<no-username>".to_string())),
-            Err(e) => Err(e.to_string()),
-        }
+    // `sb doctor` runs inside `#[tokio::main]`'s multi-thread runtime, so we
+    // cannot build a fresh runtime on the calling thread (panics with
+    // "Cannot start a runtime from within a runtime"). Spawn an isolated OS
+    // thread so the new runtime owns its own thread context, then join.
+    let token = token.to_string();
+    std::thread::spawn(move || -> Result<String, String> {
+        use teloxide::prelude::Requester;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build current-thread runtime: {e}"))?;
+        rt.block_on(async move {
+            let bot = teloxide::Bot::new(&token);
+            match bot.get_me().await {
+                Ok(me) => Ok(me.user.username.clone().unwrap_or_else(|| "<no-username>".to_string())),
+                Err(e) => Err(e.to_string()),
+            }
+        })
     })
+    .join()
+    .map_err(|_| "telegram probe thread panicked".to_string())?
 }
 
 /// Signal doctor section. Host-gated like the supervisor (`is_local_host`):
@@ -827,29 +836,36 @@ enum SignalProbe {
 }
 
 fn signal_probe_status(state_dir: &Path) -> Result<SignalProbe, String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("build current-thread runtime: {e}"))?;
-    let local = tokio::task::LocalSet::new();
+    // See `telegram_probe_get_me` for the runtime-isolation rationale.
+    // signal-rs's futures are !Send, so we need a current-thread runtime plus
+    // a LocalSet; both live on the spawned OS thread.
     let dir = state_dir.to_path_buf();
-    Ok(rt.block_on(local.run_until(async move {
-        use signal_rs::{Client, OpenError};
-        match Client::open(&dir).await {
-            Ok(client) => match client.status().await {
-                Ok(status) => SignalProbe::Linked {
-                    account: status.account_number,
-                    device_id: status.device_id,
-                    linked_devices: status.linked_devices.len(),
+    std::thread::spawn(move || -> Result<SignalProbe, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build current-thread runtime: {e}"))?;
+        let local = tokio::task::LocalSet::new();
+        Ok(rt.block_on(local.run_until(async move {
+            use signal_rs::{Client, OpenError};
+            match Client::open(&dir).await {
+                Ok(client) => match client.status().await {
+                    Ok(status) => SignalProbe::Linked {
+                        account: status.account_number,
+                        device_id: status.device_id,
+                        linked_devices: status.linked_devices.len(),
+                    },
+                    Err(e) => SignalProbe::StatusFailed(e.to_string()),
                 },
-                Err(e) => SignalProbe::StatusFailed(e.to_string()),
-            },
-            Err(OpenError::NotLinked) => SignalProbe::NotLinked,
-            Err(OpenError::PartiallyLinked) => SignalProbe::PartiallyLinked,
-            Err(OpenError::Deauthorized) => SignalProbe::Deauthorized,
-            Err(e) => SignalProbe::OpenFailed(e.to_string()),
-        }
-    })))
+                Err(OpenError::NotLinked) => SignalProbe::NotLinked,
+                Err(OpenError::PartiallyLinked) => SignalProbe::PartiallyLinked,
+                Err(OpenError::Deauthorized) => SignalProbe::Deauthorized,
+                Err(e) => SignalProbe::OpenFailed(e.to_string()),
+            }
+        })))
+    })
+    .join()
+    .map_err(|_| "signal probe thread panicked".to_string())?
 }
 
 fn current_hostname() -> String {
