@@ -150,6 +150,7 @@ pub struct Config {
     pub telegram: Option<TelegramConfig>,
     pub discord: Option<DiscordConfig>,
     pub ntfy: Option<NtfyConfig>,
+    pub signal: Option<SignalConfig>,
     pub desktop: Option<DesktopConfig>,
     #[serde(default = "default_links")]
     pub links: Vec<LinkConfig>,
@@ -691,6 +692,46 @@ pub struct DiscordConfig {
     pub host: Option<String>,
 }
 
+/// Signal transport configuration. The presence of this section enables Signal
+/// ingest (mirrors `telegram`, `discord`, `ntfy`). `host` is mandatory because
+/// Signal-Server fans out Note-to-Self envelopes to every linked device and has
+/// no polling-lock equivalent to Telegram's `TerminatedByOtherGetUpdates` -
+/// leaving `host` unset on a multi-machine install would silently double-ingest.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct SignalConfig {
+    /// Directory holding the linked state from
+    /// `signal-rs link --state-dir <here>`. The bootstrap template
+    /// defaults to `~/.local/share/sb/borg/signal-state/`.
+    pub state_dir: PathBuf,
+
+    /// ACI UUIDs (string form) allowed to send borg peer DMs.
+    /// Note-to-Self is structural and never gated by this list.
+    #[serde(default)]
+    pub allowed_senders: Vec<String>,
+
+    /// Default reply target for cross-method notifications (e.g. an ntfy
+    /// ingest acknowledged via Signal). `None` = `SelfSync`; `Some(<ACI UUID>)`
+    /// = peer.
+    #[serde(default)]
+    pub notification_recipient: Option<String>,
+
+    /// Pin Signal ingest to a specific hostname. Mandatory when the `signal:`
+    /// block is present; config-load fails if missing or empty.
+    pub host: String,
+
+    /// Maximum accepted Note-to-Self envelopes per hour before the rate gate
+    /// trips and pauses ingest until the daemon is restarted. Backstops an
+    /// upstream `signal-rs` regression in the wire-ACI to `Recipient::SelfSync`
+    /// mapping. Peer DMs are not counted.
+    #[serde(default = "default_signal_rate_threshold")]
+    pub notetoself_rate_threshold_per_hour: u32,
+}
+
+fn default_signal_rate_threshold() -> u32 {
+    100
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct NtfyConfig {
@@ -856,6 +897,23 @@ impl Config {
     /// (in marker-gated CWD mode) from a `.obsidian/` directory in CWD.
     pub fn vault_root(&self) -> Result<PathBuf> {
         vault::paths::resolve_vault_root(None, self.vault.root_path.as_deref())
+    }
+
+    /// Validate cross-cutting invariants on a freshly-loaded Config. Today
+    /// this checks Signal's mandatory `host` field; future invariants land
+    /// here. Call once at load time from the daemon entry; the doctor
+    /// command intentionally skips validation so it can report findings on
+    /// misconfigured sections instead of refusing to run.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(signal) = &self.signal
+            && signal.host.trim().is_empty()
+        {
+            eyre::bail!(
+                "signal.host is required when the `signal:` config section is present; \
+                 set it to the exact hostname (output of `hostname`) of the machine that should run Signal ingest"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1169,6 +1227,90 @@ discord:
         let dc = config.discord.expect("discord should be Some");
         assert_eq!(dc.bot_token, "DISCORD_BOT_TOKEN");
         assert_eq!(dc.channel_id, 1234567890);
+    }
+
+    #[test]
+    fn test_config_with_signal_section() {
+        let yaml = r#"
+signal:
+  state-dir: /tmp/signal-state
+  allowed-senders:
+    - "00000000-0000-0000-0000-000000000001"
+  host: home-server
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+        config
+            .validate()
+            .expect("validate should accept a populated signal section");
+        let sg = config.signal.as_ref().expect("signal should be Some");
+        assert_eq!(sg.state_dir, PathBuf::from("/tmp/signal-state"));
+        assert_eq!(
+            sg.allowed_senders,
+            vec!["00000000-0000-0000-0000-000000000001".to_string()]
+        );
+        assert_eq!(sg.host, "home-server");
+        assert_eq!(sg.notetoself_rate_threshold_per_hour, 100);
+        assert!(sg.notification_recipient.is_none());
+    }
+
+    #[test]
+    fn test_config_with_signal_overrides_rate_threshold() {
+        let yaml = r#"
+signal:
+  state-dir: /tmp/signal-state
+  host: home-server
+  notetoself-rate-threshold-per-hour: 250
+  notification-recipient: "00000000-0000-0000-0000-000000000002"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+        let sg = config.signal.expect("signal should be Some");
+        assert_eq!(sg.notetoself_rate_threshold_per_hour, 250);
+        assert_eq!(
+            sg.notification_recipient.as_deref(),
+            Some("00000000-0000-0000-0000-000000000002"),
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_signal_with_empty_host() {
+        let yaml = r#"
+signal:
+  state-dir: /tmp/signal-state
+  host: ""
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+        let err = config.validate().expect_err("validate must reject empty signal.host");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("signal.host"),
+            "expected error to mention signal.host, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_signal_with_whitespace_host() {
+        let yaml = r#"
+signal:
+  state-dir: /tmp/signal-state
+  host: "   "
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+        let err = config
+            .validate()
+            .expect_err("validate must reject whitespace-only signal.host");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("signal.host"),
+            "expected error to mention signal.host, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_no_signal_block() {
+        let config = Config::default();
+        config
+            .validate()
+            .expect("validate should accept a config with no signal block");
     }
 
     #[test]

@@ -25,3 +25,14 @@ serde_yaml = "0.9"
 shellexpand = "3.1"
 tokio = { version = "1", features = ["full"] }
 walkdir = "2.5"
+
+# libsignal's workspace patches curve25519-dalek to Signal's fork; consuming
+# libsignal-protocol/net/net-chat as git deps (via signal-rs) does not carry
+# that patch over, so we replicate it here. Without this block we get two
+# versions of curve25519-dalek (upstream pulled by ed25519-dalek, Signal's
+# fork pulled by zkgroup), which fails to compile. `boring` is patched for
+# the same reason - libsignal-net pulls it in for TLS.
+[patch.crates-io]
+boring     = { git = "https://github.com/signalapp/boring", tag = "signal-v5.0.2" }
+boring-sys = { git = "https://github.com/signalapp/boring", tag = "signal-v5.0.2" }
+curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }

@@ -209,6 +209,7 @@ pub enum IngestMethod {
     Clipboard,
     Cli,
     Ntfy,
+    Signal,
 }
 
 impl fmt::Display for IngestMethod {
@@ -220,6 +221,7 @@ impl fmt::Display for IngestMethod {
             Self::Clipboard => write!(f, "clipboard"),
             Self::Cli => write!(f, "cli"),
             Self::Ntfy => write!(f, "ntfy"),
+            Self::Signal => write!(f, "signal"),
         }
     }
 }
@@ -233,6 +235,7 @@ impl From<IngestMethod> for vault::schema::Method {
             IngestMethod::Clipboard => Self::Clipboard,
             IngestMethod::Cli => Self::Cli,
             IngestMethod::Ntfy => Self::Ntfy,
+            IngestMethod::Signal => Self::Signal,
         }
     }
 }

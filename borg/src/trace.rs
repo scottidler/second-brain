@@ -9,6 +9,7 @@ pub fn generate(method: IngestMethod) -> String {
         IngestMethod::Clipboard => Method::Clipboard,
         IngestMethod::Cli => Method::Cli,
         IngestMethod::Ntfy => Method::Ntfy,
+        IngestMethod::Signal => Method::Signal,
     };
     vault::trace::generate(vault_method)
 }

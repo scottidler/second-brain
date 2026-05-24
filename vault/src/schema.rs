@@ -335,6 +335,7 @@ pub enum Method {
     Clipboard,
     Cli,
     Ntfy,
+    Signal,
     Manual,
 }
 
@@ -347,6 +348,7 @@ impl Method {
             Self::Clipboard => "clipboard",
             Self::Cli => "cli",
             Self::Ntfy => "ntfy",
+            Self::Signal => "signal",
             Self::Manual => "manual",
         }
     }
@@ -359,6 +361,7 @@ impl Method {
             Self::Clipboard,
             Self::Cli,
             Self::Ntfy,
+            Self::Signal,
             Self::Manual,
         ]
     }
@@ -380,6 +383,7 @@ impl FromStr for Method {
             "clipboard" => Ok(Self::Clipboard),
             "cli" => Ok(Self::Cli),
             "ntfy" => Ok(Self::Ntfy),
+            "signal" => Ok(Self::Signal),
             "manual" => Ok(Self::Manual),
             _ => Err(format!("unknown method: {s}")),
         }

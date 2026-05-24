@@ -307,7 +307,9 @@ pub enum RetentionAction {
 
 impl BorgCli {
     pub async fn run(self) -> Result<()> {
-        let config = borg::config::load_config(self.config.as_ref()).context("Failed to load configuration")?;
+        let config: borg::config::Config =
+            borg::config::load_config(self.config.as_ref()).context("Failed to load configuration")?;
+        config.validate().context("borg config validation failed")?;
 
         borg::startup::init_permits(&config).context("Failed to initialize pipeline permits")?;
         borg::startup::log_ffmpeg_thread_caps(&config);

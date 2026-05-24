@@ -38,6 +38,7 @@ fn method_prefix(method: Method) -> &'static str {
         Method::Clipboard => "cb",
         Method::Cli => "cl",
         Method::Ntfy => "nf",
+        Method::Signal => "sg",
         Method::Manual => "mn",
     }
 }
@@ -61,6 +62,7 @@ mod tests {
         assert_eq!(method_prefix(Method::Clipboard), "cb");
         assert_eq!(method_prefix(Method::Cli), "cl");
         assert_eq!(method_prefix(Method::Ntfy), "nf");
+        assert_eq!(method_prefix(Method::Signal), "sg");
         assert_eq!(method_prefix(Method::Manual), "mn");
     }
 

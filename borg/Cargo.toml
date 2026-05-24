@@ -18,14 +18,14 @@ eyre = { workspace = true }
 fs2 = { workspace = true }
 log = { workspace = true }
 regex = { workspace = true }
-reqwest = { version = "0.13.2", features = ["json", "multipart", "stream"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "multipart", "stream", "charset", "http2", "rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = "0.10"
 shellexpand = { workspace = true }
 thiserror = "2.0.18"
-teloxide = { version = "0.17", features = ["macros"] }
+teloxide = { version = "0.17", default-features = false, features = ["macros", "ctrlc_handler", "rustls", "rustls-native-roots"] }
 tokio = { workspace = true }
 tower = "0.5.3"
 tower-http = { version = "0.6.8", features = ["cors"] }
@@ -46,6 +46,7 @@ rusqlite = { version = "0.34", features = ["bundled"] }
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.27.0"
 schemars = "1.2.1"
+signal-rs = { git = "https://github.com/scottidler/signal-rs", tag = "v0.2.1", version = "0.2.1" }
 
 [dependencies.serenity]
 version = "0.12"
