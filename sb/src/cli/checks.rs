@@ -1,7 +1,10 @@
 //! Shared health checks consumed by `sb status` (informational rendering)
 //! and `sb doctor` (severity-tagged findings).
 
+use std::path::Path;
 use std::process::Command;
+
+use borg::config::{SignalConfig, TelegramConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -91,6 +94,14 @@ pub fn all_sections() -> Vec<Section> {
         Section {
             name: "borg",
             findings: borg_findings(),
+        },
+        Section {
+            name: "telegram",
+            findings: telegram_findings(),
+        },
+        Section {
+            name: "signal",
+            findings: signal_findings(),
         },
         Section {
             name: "vault",
@@ -597,4 +608,342 @@ fn vault_findings() -> Vec<Finding> {
     }
 
     findings
+}
+
+/// Telegram doctor section. Was missing pre-Phase 5 despite Telegram being
+/// borg's daily driver; shipped alongside the Signal section so both
+/// transports report config + auth + host parity.
+fn telegram_findings() -> Vec<Finding> {
+    let config = match borg::config::load_config::<borg::config::Config>(None) {
+        Ok(c) => c,
+        Err(e) => {
+            return vec![Finding::error(
+                format!("could not load borg config: {e}"),
+                "ensure ~/.config/sb/borg.yml exists (sb bootstrap)",
+            )];
+        }
+    };
+    let Some(tg) = config.telegram.as_ref() else {
+        return vec![Finding::info(
+            "telegram not configured (no `telegram:` block in borg.yml)",
+        )];
+    };
+    telegram_findings_for(tg)
+}
+
+fn telegram_findings_for(tg: &TelegramConfig) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if let Some(host) = tg.host.as_deref()
+        && !host.is_empty()
+    {
+        let current = current_hostname();
+        if !current.eq_ignore_ascii_case(host) {
+            findings.push(Finding::info(format!(
+                "telegram.host={host:?}, hostname={current:?} (this machine does not run Telegram ingest)"
+            )));
+            return findings;
+        }
+    }
+    if tg.bot_token.trim().is_empty() {
+        findings.push(Finding::error(
+            "telegram.bot-token is empty",
+            "set telegram.bot-token in borg.yml (env var name or path containing the token)",
+        ));
+        return findings;
+    }
+    match borg::config::resolve_secret(&tg.bot_token) {
+        Ok(token) if !token.is_empty() => {
+            findings.push(Finding::ok(format!(
+                "telegram.bot-token resolves ({} chars)",
+                token.len()
+            )));
+            // Live get_me() probe is multi-thread tokio safe; run it in a
+            // throwaway runtime so we don't depend on the caller's runtime
+            // shape.
+            match telegram_probe_get_me(&token) {
+                Ok(username) => findings.push(Finding::ok(format!("telegram.get_me() succeeded: @{username}"))),
+                Err(e) => findings.push(Finding::error(
+                    format!("telegram.get_me() failed: {e}"),
+                    "verify the bot token, network egress to api.telegram.org, and that the bot is not deauthorized",
+                )),
+            }
+        }
+        Ok(_) => findings.push(Finding::error(
+            format!("telegram.bot-token {:?} resolved to an empty string", tg.bot_token),
+            "set the env var (or file) referenced by telegram.bot-token to a non-empty value",
+        )),
+        Err(e) => findings.push(Finding::error(
+            format!("telegram.bot-token {:?} not resolvable: {e}", tg.bot_token),
+            "set the env var (or file path) referenced by telegram.bot-token",
+        )),
+    }
+    findings
+}
+
+fn telegram_probe_get_me(token: &str) -> Result<String, String> {
+    use teloxide::prelude::Requester;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("build current-thread runtime: {e}"))?;
+    rt.block_on(async move {
+        let bot = teloxide::Bot::new(token);
+        match bot.get_me().await {
+            Ok(me) => Ok(me.user.username.clone().unwrap_or_else(|| "<no-username>".to_string())),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+}
+
+/// Signal doctor section. Host-gated like the supervisor (`is_local_host`):
+/// when the configured host differs from this machine the section
+/// short-circuits at the host comparison and skips the state_dir / link
+/// checks - the laptop is not expected to have a linked state on disk.
+fn signal_findings() -> Vec<Finding> {
+    let config = match borg::config::load_config::<borg::config::Config>(None) {
+        Ok(c) => c,
+        Err(e) => {
+            return vec![Finding::error(
+                format!("could not load borg config: {e}"),
+                "ensure ~/.config/sb/borg.yml exists (sb bootstrap)",
+            )];
+        }
+    };
+    let Some(sg) = config.signal.as_ref() else {
+        return vec![Finding::info("signal not configured (no `signal:` block in borg.yml)")];
+    };
+    signal_findings_for(sg)
+}
+
+fn signal_findings_for(sg: &SignalConfig) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if sg.host.trim().is_empty() {
+        findings.push(Finding::error(
+            "signal.host is empty",
+            "set signal.host to the exact hostname of the machine that should run Signal ingest",
+        ));
+        return findings;
+    }
+    let current = current_hostname();
+    if !current.eq_ignore_ascii_case(&sg.host) {
+        findings.push(Finding::info(format!(
+            "signal.host={:?}, hostname={current:?} (this machine does not run Signal ingest)",
+            sg.host
+        )));
+        return findings;
+    }
+
+    findings.extend(state_dir_findings(&sg.state_dir));
+
+    // Live open + status probe. signal-rs futures are !Send so run on a
+    // current-thread runtime + LocalSet.
+    match signal_probe_status(&sg.state_dir) {
+        Ok(SignalProbe::Linked {
+            account,
+            device_id,
+            linked_devices,
+        }) => findings.push(Finding::ok(format!(
+            "linked as account={account} device_id={device_id} linked_devices={linked_devices}"
+        ))),
+        Ok(SignalProbe::NotLinked) => findings.push(Finding::error(
+            format!("state_dir {} is not linked", sg.state_dir.display()),
+            format!("signal-rs link --name borg --state-dir {}", sg.state_dir.display()),
+        )),
+        Ok(SignalProbe::PartiallyLinked) => findings.push(Finding::error(
+            format!("state_dir {} is partially linked", sg.state_dir.display()),
+            format!(
+                "re-run signal-rs link --name borg --state-dir {} to resume",
+                sg.state_dir.display()
+            ),
+        )),
+        Ok(SignalProbe::Deauthorized) => findings.push(Finding::error(
+            format!("state_dir {} is deauthorized", sg.state_dir.display()),
+            format!(
+                "re-run signal-rs link --name borg --state-dir {} after re-authorizing on the primary phone",
+                sg.state_dir.display()
+            ),
+        )),
+        Ok(SignalProbe::OpenFailed(msg)) => findings.push(Finding::error(
+            format!("Client::open failed: {msg}"),
+            "inspect the signal-rs state directory; corruption usually requires re-linking",
+        )),
+        Ok(SignalProbe::StatusFailed(msg)) => findings.push(Finding::warn(
+            format!("status() failed (open succeeded): {msg}"),
+            "transient; re-run `sb doctor signal` after the network stabilises",
+        )),
+        Err(e) => findings.push(Finding::error(
+            format!("signal probe runtime failed: {e}"),
+            "rebuild sb (this is a build-time runtime error, not a config issue)",
+        )),
+    }
+    findings
+}
+
+fn state_dir_findings(state_dir: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if !state_dir.exists() {
+        findings.push(Finding::error(
+            format!("state_dir {} does not exist", state_dir.display()),
+            format!(
+                "create it or run `signal-rs link --name borg --state-dir {}` to provision it",
+                state_dir.display()
+            ),
+        ));
+        return findings;
+    }
+    findings.push(Finding::ok(format!("state_dir exists at {}", state_dir.display())));
+
+    // Resolve symlinks before comparing so a state_dir that symlinks into
+    // signal-rs's CLI default is still caught.
+    let configured = std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
+    let default = dirs::data_local_dir().map(|d| d.join("signal-rs"));
+    if let Some(default) = default {
+        let default = std::fs::canonicalize(&default).unwrap_or(default);
+        if configured == default {
+            findings.push(Finding::warn(
+                format!(
+                    "state_dir {} collides with signal-rs's CLI default ({})",
+                    configured.display(),
+                    default.display()
+                ),
+                "use a borg-owned path like ~/.local/share/sb/borg/signal-state/ to avoid Double-Ratchet contention with ad-hoc signal-rs CLI use",
+            ));
+        }
+    }
+    findings
+}
+
+enum SignalProbe {
+    Linked {
+        account: String,
+        device_id: u32,
+        linked_devices: usize,
+    },
+    NotLinked,
+    PartiallyLinked,
+    Deauthorized,
+    OpenFailed(String),
+    StatusFailed(String),
+}
+
+fn signal_probe_status(state_dir: &Path) -> Result<SignalProbe, String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("build current-thread runtime: {e}"))?;
+    let local = tokio::task::LocalSet::new();
+    let dir = state_dir.to_path_buf();
+    Ok(rt.block_on(local.run_until(async move {
+        use signal_rs::{Client, OpenError};
+        match Client::open(&dir).await {
+            Ok(client) => match client.status().await {
+                Ok(status) => SignalProbe::Linked {
+                    account: status.account_number,
+                    device_id: status.device_id,
+                    linked_devices: status.linked_devices.len(),
+                },
+                Err(e) => SignalProbe::StatusFailed(e.to_string()),
+            },
+            Err(OpenError::NotLinked) => SignalProbe::NotLinked,
+            Err(OpenError::PartiallyLinked) => SignalProbe::PartiallyLinked,
+            Err(OpenError::Deauthorized) => SignalProbe::Deauthorized,
+            Err(e) => SignalProbe::OpenFailed(e.to_string()),
+        }
+    })))
+}
+
+fn current_hostname() -> String {
+    hostname::get()
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn make_signal(host: &str, state_dir: PathBuf) -> SignalConfig {
+        SignalConfig {
+            state_dir,
+            allowed_senders: vec![],
+            notification_recipient: None,
+            host: host.to_string(),
+            notetoself_rate_threshold_per_hour: 100,
+        }
+    }
+
+    fn make_telegram(token: &str, host: Option<&str>) -> TelegramConfig {
+        TelegramConfig {
+            bot_token: token.to_string(),
+            allowed_chat_ids: vec![],
+            notification_chat_id: None,
+            host: host.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn signal_findings_host_mismatch_short_circuits() {
+        let sg = make_signal("definitely-not-this-host-abc-xyz", PathBuf::from("/nonexistent"));
+        let findings = signal_findings_for(&sg);
+        assert_eq!(findings.len(), 1, "host mismatch must short-circuit");
+        assert_eq!(findings[0].severity, Severity::Info);
+        assert!(findings[0].message.contains("does not run Signal ingest"));
+    }
+
+    #[test]
+    fn signal_findings_empty_host_is_error() {
+        let sg = make_signal("", PathBuf::from("/nonexistent"));
+        let findings = signal_findings_for(&sg);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn signal_state_dir_missing_is_error() {
+        let findings = state_dir_findings(Path::new("/nonexistent-signal-state-dir-xyz"));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(findings[0].message.contains("does not exist"));
+    }
+
+    #[test]
+    fn signal_state_dir_collision_with_default_is_warn() {
+        let Some(default) = dirs::data_local_dir() else {
+            return;
+        };
+        let default = default.join("signal-rs");
+        if !default.exists() {
+            std::fs::create_dir_all(&default).expect("create signal-rs default");
+        }
+        let findings = state_dir_findings(&default);
+        let has_collision = findings
+            .iter()
+            .any(|f| f.severity == Severity::Warn && f.message.contains("collides"));
+        assert!(
+            has_collision,
+            "state_dir == signal-rs CLI default must emit a collision Warn"
+        );
+    }
+
+    #[test]
+    fn telegram_findings_host_mismatch_short_circuits() {
+        let tg = make_telegram("DUMMY_TOKEN_ENV_VAR", Some("definitely-not-this-host-abc-xyz"));
+        let findings = telegram_findings_for(&tg);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
+        assert!(findings[0].message.contains("does not run Telegram ingest"));
+    }
+
+    #[test]
+    fn telegram_findings_empty_token_is_error() {
+        let tg = make_telegram("", None);
+        let findings = telegram_findings_for(&tg);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::Error && f.message.contains("bot-token")),
+            "empty bot-token must emit Error finding"
+        );
+    }
 }

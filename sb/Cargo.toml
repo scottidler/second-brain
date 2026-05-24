@@ -27,6 +27,9 @@ serde_json = { workspace = true }
 rmcp = { version = "1.3.0", features = ["server", "macros"] }
 serde_yaml.workspace = true
 serde.workspace = true
+teloxide = { version = "0.17.0", default-features = false, features = ["macros", "ctrlc_handler", "rustls", "rustls-native-roots"] }
+hostname = "0.4.2"
+signal-rs = { git = "https://github.com/scottidler/signal-rs", tag = "v0.2.1", version = "0.2.1" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

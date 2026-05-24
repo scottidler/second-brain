@@ -272,6 +272,27 @@ fn query_filters_by_method_and_stage() {
 }
 
 #[test]
+fn query_filters_by_signal_method() {
+    // Phase 4: confirm Method::Signal round-trips through the receipts schema
+    // and the --method query filter. Without this, `sb borg log --method signal`
+    // would silently return zero rows even with Signal traffic in the DB.
+    let conn = fresh();
+    record_received(&conn, "sg1", Method::Signal, ReceiptKind::Url, "https://example.com").expect("ins signal");
+    record_received(&conn, "tg2", Method::Telegram, ReceiptKind::Url, "https://example.org").expect("ins tg");
+    let by_method = query(
+        &conn,
+        &Filter {
+            method: Some(Method::Signal),
+            ..Default::default()
+        },
+    )
+    .expect("q");
+    assert_eq!(by_method.len(), 1, "Signal filter must return exactly the Signal row");
+    assert_eq!(by_method[0].trace_id, "sg1");
+    assert_eq!(by_method[0].method, "signal");
+}
+
+#[test]
 fn query_filters_by_source_like() {
     let conn = fresh();
     record_received(
