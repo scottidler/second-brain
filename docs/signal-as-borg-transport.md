@@ -6,6 +6,11 @@ and not a roadmap. The design-memo counterpart for the `signal-cli`-as-linked-de
 path lives at
 `tatari-tv/thoughts/directors/scott.idler/2026-05-21-signal-ingest-via-linked-device.md`.
 
+See also: `docs/design/2026-05-24-signal-as-borg-transport.md` — the implemented
+design memo for the Shape-B (in-process `signal-rs`) integration. The reference
+doc below stays as the option-space snapshot; the design memo records the path
+that was actually built.
+
 This doc exists so future conversations (in second-brain or elsewhere) can pick up
 cold and understand:
 

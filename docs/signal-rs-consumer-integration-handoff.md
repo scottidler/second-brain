@@ -1,5 +1,13 @@
 # signal-rs -> borg integration handoff
 
+**Status: superseded-in-part.** The borg-side integration shipped per
+`docs/design/2026-05-24-signal-as-borg-transport.md`. The
+`signal-rs`-side contract (API surface, version pin, starter stub
+shape) below remains authoritative. Anywhere this doc and the
+implemented design memo disagree about borg internals (config layout,
+state_dir default, doctor surface, supervisor hostname-gating
+location, rate-gate semantics), trust the design memo.
+
 This is the handoff doc from the agent that built `scottidler/signal-rs`
 to the agent that integrates it as a borg transport inside
 `scottidler/second-brain/borg`. It documents the state of `signal-rs`

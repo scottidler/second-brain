@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-05-24
-**Status:** Draft
+**Status:** Implemented
 **Review Passes Completed:** 5/5 + Architect Rounds 1-2 (verified against borg/src/lib.rs and signal-rs/src/envelope.rs; six Round 1 findings applied, two Round 2 corrections applied: result_partial sink method for accurate partial-attachment ack, intake-rate anomaly gate promoted to mandatory v1)
 
 ## Summary
