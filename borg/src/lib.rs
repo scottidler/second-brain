@@ -826,6 +826,10 @@ pub async fn ingest(
 }
 
 fn send_notification(summary: &str, body: &str) {
+    if notify::real_notifications_disabled() {
+        log::debug!("send_notification: suppressed under test (summary={summary:?})");
+        return;
+    }
     let _ = notify_rust::Notification::new()
         .appname("borg")
         .summary(&format!("obsidian-borg: {summary}"))

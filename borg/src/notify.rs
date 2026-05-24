@@ -37,6 +37,26 @@ const DESKTOP_TIMEOUT_MS: u64 = 500;
 const TELEGRAM_TIMEOUT_MS: u64 = 3000;
 const SIGNAL_TIMEOUT_MS: u64 = 3000;
 
+/// Hard gate against test-suite leakage into the user's real notification
+/// systems (desktop libnotify, Telegram, Signal). On 2026-05-24 the
+/// `test_ingest_connection_refused` unit test shipped a real "cannot reach
+/// obsidian-borg" toast to the operator's desktop because `send_notification`
+/// called libnotify unconditionally. Every D-Bus / Bot / Client send in
+/// production code paths must consult this gate first; tests that need to
+/// assert the rendered text use the pure `format_*` helpers, not the live
+/// sinks.
+pub(crate) fn real_notifications_disabled() -> bool {
+    // `cfg!(test)` catches borg's own `cargo test`/`cargo test -p borg`.
+    // `CARGO_TARGET_TMPDIR` is set by cargo when running integration tests
+    // for any crate. `NEXTEST_RUN_ID` is set by `cargo nextest`. The
+    // explicit env override is for shell debugging when an operator wants
+    // to exercise the binary without producing real toasts.
+    cfg!(test)
+        || std::env::var_os("CARGO_TARGET_TMPDIR").is_some()
+        || std::env::var_os("NEXTEST_RUN_ID").is_some()
+        || std::env::var_os("BORG_DISABLE_DESKTOP_NOTIFY").is_some()
+}
+
 /// Telegram notification sink. Clone-cheap: `Bot` is an HTTP client wrapper.
 #[derive(Clone)]
 pub struct Telegram {
@@ -86,6 +106,10 @@ impl Telegram {
     /// On failure or 500ms timeout (per Design Invariant 2), logs a warning
     /// and returns `Err(())`.
     pub async fn processing(&self, trace_id: &str, description: &str, override_chat_id: Option<i64>) -> Result<(), ()> {
+        if real_notifications_disabled() {
+            log::debug!("notify::Telegram::processing: suppressed under test (trace={trace_id})");
+            return Ok(());
+        }
         let chat_id = self.resolve_chat_id(override_chat_id);
         let text = format!("[{trace_id}] {description}");
         let bot = self.bot.clone();
@@ -111,6 +135,10 @@ impl Telegram {
     /// so the link is included as a copyable `obsidian://` URL. Wraps the
     /// HTTPS call in 500ms `tokio::time::timeout` per Design Invariant 2.
     pub async fn result(&self, result: &IngestResult, display_source: &str, override_chat_id: Option<i64>) {
+        if real_notifications_disabled() {
+            log::debug!("notify::Telegram::result: suppressed under test (display={display_source})");
+            return;
+        }
         let chat_id = self.resolve_chat_id(override_chat_id);
         let reply = format_telegram_reply(result, display_source);
         let bot = self.bot.clone();
@@ -199,6 +227,10 @@ impl Desktop {
     /// Returns `None` on D-Bus error or 500 ms timeout; `result(...)` then
     /// falls back to a fresh popup.
     pub async fn processing(&self, trace_id: &str, description: &str) -> Option<NotificationHandle> {
+        if real_notifications_disabled() {
+            log::debug!("notify::Desktop::processing: suppressed under test (trace={trace_id})");
+            return None;
+        }
         let body = format!("[{trace_id}] {description}");
         let appname = self.appname.clone();
         let timeout = self.timeout;
@@ -268,6 +300,10 @@ impl Desktop {
     /// on success, `Err(())` on any failure path (D-Bus error or timeout)
     /// with a `warn!` already logged - `label` distinguishes log lines.
     async fn show(&self, body: &str, prior_id: Option<u32>, label: &'static str) -> Result<(), ()> {
+        if real_notifications_disabled() {
+            log::debug!("notify::Desktop::show: suppressed under test ({label})");
+            return Ok(());
+        }
         let appname = self.appname.clone();
         let timeout = self.timeout;
         let body = body.to_string();
@@ -344,6 +380,10 @@ impl Signal {
         description: &str,
         override_recipient: Option<&Recipient>,
     ) -> Result<(), ()> {
+        if real_notifications_disabled() {
+            log::debug!("notify::Signal::processing: suppressed under test (trace={trace_id})");
+            return Ok(());
+        }
         let recipient = self.resolve_recipient(override_recipient);
         let body = format!("[{trace_id}] {description}");
         let client = Arc::clone(&self.client);
@@ -386,6 +426,10 @@ impl Signal {
     }
 
     async fn send_body(&self, body: String, override_recipient: Option<&Recipient>, label: &'static str) {
+        if real_notifications_disabled() {
+            log::debug!("notify::Signal::{label}: suppressed under test");
+            return;
+        }
         let recipient = self.resolve_recipient(override_recipient);
         let client = Arc::clone(&self.client);
         let future = async move { client.send(recipient, &body).await };

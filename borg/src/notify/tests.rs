@@ -214,3 +214,16 @@ fn test_format_desktop_body_appends_obsidian_url_unescaped() {
     assert!(body.ends_with("obsidian://search?vault=obsidian&query=test"));
     assert!(!body.contains("&amp;"));
 }
+
+#[test]
+fn real_notifications_disabled_under_cargo_test() {
+    // Regression for 2026-05-24: `test_ingest_connection_refused` fired a
+    // real "cannot reach obsidian-borg" libnotify toast at the operator's
+    // desktop because send_notification was unconditional. The gate must
+    // return true any time cargo test is the harness so no future test
+    // can leak a real notification to D-Bus / Telegram / Signal.
+    assert!(
+        real_notifications_disabled(),
+        "real_notifications_disabled() must return true under cfg!(test)"
+    );
+}
