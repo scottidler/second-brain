@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use eyre::Result;
 use serde::Deserialize;
 
-use crate::config::Config;
+use crate::config::{Config, FabricConfig};
 use crate::opts::ClassifyOpts;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::scope::insert_frontmatter_fields;
@@ -22,6 +22,7 @@ use ::vault::search::SearchIndex;
 /// oracle search index (best-effort, Tier-2 LLM context), and dispatches to
 /// `apply_classify` or `lint_classify` based on `opts.apply`.
 pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Report> {
+    crate::startup::validate_canonical_assets()?;
     log::info!("starting classify command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
 
@@ -42,13 +43,19 @@ pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Re
             vault_root,
             &notes,
             &config.actions.classify,
+            &config.fabric,
             opts.force,
             opts.review_only,
             opts.reclassify_domain.as_deref(),
             search_ref,
         )
     } else {
-        Ok(lint_classify(&notes, &config.actions.classify, search_ref))
+        Ok(lint_classify(
+            &notes,
+            &config.actions.classify,
+            &config.fabric,
+            search_ref,
+        ))
     }
 }
 
@@ -252,7 +259,12 @@ impl ClassifyMethod {
 }
 
 /// Dry-run: returns planned classifications as violations in a Report
-pub fn lint_classify(notes: &[Note], config: &ClassifyConfig, search_index: Option<&SearchIndex>) -> Report {
+pub fn lint_classify(
+    notes: &[Note],
+    config: &ClassifyConfig,
+    fabric: &FabricConfig,
+    search_index: Option<&SearchIndex>,
+) -> Report {
     let mut report = Report::default();
     let inbox_notes = filter_inbox_notes(notes, false, false);
     let unclassified_notes = filter_unclassified_notes(notes);
@@ -265,7 +277,7 @@ pub fn lint_classify(notes: &[Note], config: &ClassifyConfig, search_index: Opti
     for note in &all_targets {
         let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
 
-        match classify_note(note, config, search_index) {
+        match classify_note(note, config, fabric, search_index) {
             Some(result) if result.confidence != ClassifyConfidence::Low => {
                 if already_in_notes {
                     report.add(Violation {
@@ -337,6 +349,7 @@ pub fn apply_classify(
     vault_root: &Path,
     notes: &[Note],
     config: &ClassifyConfig,
+    fabric: &FabricConfig,
     force: bool,
     review_only: bool,
     reclassify_domain: Option<&str>,
@@ -356,7 +369,7 @@ pub fn apply_classify(
     for note in &target_notes {
         let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
 
-        let result = match classify_note(note, config, search_index) {
+        let result = match classify_note(note, config, fabric, search_index) {
             Some(r) => r,
             None => {
                 if !is_reclassify && !already_in_notes {
@@ -502,7 +515,12 @@ pub fn apply_classify(
 }
 
 /// Classify a single note using the tiered pipeline
-fn classify_note(note: &Note, config: &ClassifyConfig, search_index: Option<&SearchIndex>) -> Option<ClassifyResult> {
+fn classify_note(
+    note: &Note,
+    config: &ClassifyConfig,
+    fabric: &FabricConfig,
+    search_index: Option<&SearchIndex>,
+) -> Option<ClassifyResult> {
     // Tier 1: Deterministic classification
     if let Some(result) = classify_by_tags(note, config) {
         return Some(result);
@@ -514,7 +532,7 @@ fn classify_note(note: &Note, config: &ClassifyConfig, search_index: Option<&Sea
 
     // Tier 2: LLM classification with vault context
     if let Some(index) = search_index
-        && let Some(result) = classify_by_llm(note, config, index)
+        && let Some(result) = classify_by_llm(note, config, fabric, index)
     {
         return Some(result);
     }
@@ -524,8 +542,13 @@ fn classify_note(note: &Note, config: &ClassifyConfig, search_index: Option<&Sea
 }
 
 /// Tier 2: LLM classification using Fabric with vault context from SearchIndex
-fn classify_by_llm(note: &Note, config: &ClassifyConfig, index: &SearchIndex) -> Option<ClassifyResult> {
-    if !crate::fabric::is_available() {
+fn classify_by_llm(
+    note: &Note,
+    config: &ClassifyConfig,
+    fabric: &FabricConfig,
+    index: &SearchIndex,
+) -> Option<ClassifyResult> {
+    if !crate::fabric::is_available(&fabric.binary) {
         log::debug!("fabric not available, skipping LLM classification");
         return None;
     }
@@ -535,7 +558,7 @@ fn classify_by_llm(note: &Note, config: &ClassifyConfig, index: &SearchIndex) ->
     let input = crate::fabric::truncate_input(&context, config.max_input_tokens);
 
     // Call Fabric pattern
-    match crate::fabric::run_pattern(&config.fabric_pattern, input, config.fabric_timeout_secs) {
+    match crate::fabric::run_pattern(fabric, &config.fabric_pattern, input, config.fabric_timeout_secs) {
         Ok(output) => parse_llm_result(&output, config.confidence_threshold),
         Err(e) => {
             log::warn!("LLM classification failed: {e}");
@@ -1140,7 +1163,8 @@ mod tests {
 
         // Tags say ai (3 matches), source says tech - tags should win because
         // classify_note tries tags first
-        let result = classify_note(&note, &config, None);
+        let fabric = FabricConfig::default();
+        let result = classify_note(&note, &config, &fabric, None);
         assert!(result.is_some());
         assert_eq!(result.expect("should classify").domain, Domain::Ai);
     }
@@ -1179,7 +1203,17 @@ mod tests {
 
         let notes = vault.scan();
         let config = vault.config();
-        let report = apply_classify(vault.root(), &notes, &config.actions.classify, false, false, None, None).unwrap();
+        let report = apply_classify(
+            vault.root(),
+            &notes,
+            &config.actions.classify,
+            &config.fabric,
+            false,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
 
         // The orphan should have been catch-up classified
         let content = vault.read("notes/reingest-orphan.md");
@@ -1212,7 +1246,8 @@ mod tests {
         let notes = vec![inbox_note, orphan];
 
         let config = test_config();
-        let report = lint_classify(&notes, &config, None);
+        let fabric = FabricConfig::default();
+        let report = lint_classify(&notes, &config, &fabric, None);
         // Both should produce violations
         let paths: Vec<String> = report
             .violations

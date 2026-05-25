@@ -3,21 +3,19 @@ use std::process::Command;
 use std::time::Duration;
 
 /// Map a bare pattern name (e.g. `distill-article`) to its absolute file path
-/// inside `~/.config/borg/patterns/`. Tries the literal name first, then with
-/// `.md` appended. Path-like inputs (`/`, `.`, `~`) pass through unchanged.
-/// Falls back to the bare name when nothing matches, letting fabric's own
-/// pattern-loader take a try.
-fn resolve_pattern(name: &str) -> String {
+/// inside `vault::paths::patterns_dir()` (the unified `~/.config/sb/patterns/`).
+/// Tries the literal name first, then with `.md` appended. Path-like inputs
+/// (`/`, `.`, `~`) pass through unchanged. Falls back to the bare name when
+/// nothing matches, letting fabric's own pattern-loader take a try.
+pub fn resolve_pattern(name: &str) -> String {
     if name.starts_with('/') || name.starts_with('.') || name.starts_with('~') {
         return name.to_string();
     }
-    if let Some(home) = dirs::home_dir() {
-        let base = home.join(".config/borg/patterns");
-        for candidate in [base.join(name), base.join(format!("{name}.md"))] {
-            if candidate.exists() {
-                log::debug!("resolve_pattern: {name} -> {}", candidate.display());
-                return candidate.to_string_lossy().to_string();
-            }
+    let base = crate::paths::patterns_dir();
+    for candidate in [base.join(name), base.join(format!("{name}.md"))] {
+        if candidate.exists() {
+            log::debug!("resolve_pattern: {name} -> {}", candidate.display());
+            return candidate.to_string_lossy().to_string();
         }
     }
     name.to_string()
@@ -175,9 +173,39 @@ mod tests {
 
     #[test]
     fn test_resolve_pattern_unknown_name_passes_through() {
-        // No file at ~/.config/borg/patterns/this-pattern-does-not-exist*
-        // so the bare name is returned and fabric's own loader can try.
+        // No file at vault::paths::patterns_dir() for this name, so the bare
+        // name is returned and fabric's own loader can try.
         let result = resolve_pattern("this-pattern-does-not-exist-xyz-12345");
         assert_eq!(result, "this-pattern-does-not-exist-xyz-12345");
+    }
+
+    #[test]
+    fn test_resolve_pattern_canonical_path_for_present_file() {
+        // Write a fake pattern file at the canonical patterns_dir() location
+        // (under a tempdir-pointed XDG_CONFIG_HOME) and assert the resolver
+        // joins it correctly.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // SAFETY: env var mutation; serialized via #[serial_test::serial] or run
+        // with RUST_TEST_THREADS=1 if the surrounding test file grows parallel-unsafe tests.
+        // This single test only sets, reads, then unsets, so a brief mutation window is fine.
+        let original = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: env mutation is intentional for testing path resolution.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", tmp.path()) };
+
+        let patterns_dir = crate::paths::patterns_dir();
+        std::fs::create_dir_all(&patterns_dir).expect("create patterns dir");
+        let pattern_path = patterns_dir.join("test-pattern.md");
+        std::fs::write(&pattern_path, "test content").expect("write pattern");
+
+        let resolved = resolve_pattern("test-pattern");
+        assert_eq!(resolved, pattern_path.to_string_lossy());
+
+        // SAFETY: restore env to avoid leaking state to other tests.
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
     }
 }

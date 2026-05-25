@@ -50,10 +50,15 @@ async fn get_or_init_canonical(config: &Config) -> Option<std::sync::Arc<Canonic
     let canonical_path = Path::new(&config.tags.canonical_path);
     let mapping_path = Path::new(&config.tags.mapping_path);
 
+    // Borg's startup precondition (`borg::startup::validate_canonical_assets`)
+    // guarantees both files exist and parse before serve_init returns. A
+    // failure here is therefore a genuine I/O/parse regression, not a
+    // missing-file condition the operator can fix via `sb bootstrap`. Bail
+    // with context rather than soft-failing into an unfiltered tag pipeline.
     let canonical_file = match CanonicalTagsFile::load(canonical_path) {
         Ok(f) => f,
         Err(e) => {
-            log::warn!("Could not load canonical tags: {e}. Tag filtering disabled.");
+            log::error!("canonical-tags load failed after startup validation: {e}");
             return None;
         }
     };
@@ -61,7 +66,7 @@ async fn get_or_init_canonical(config: &Config) -> Option<std::sync::Arc<Canonic
     let mapping = match canonical::load_tag_mapping(mapping_path) {
         Ok(m) => m,
         Err(e) => {
-            log::warn!("Could not load tag mapping: {e}. Using empty mapping.");
+            log::error!("tag-mapping load failed after startup validation: {e}");
             TagMapping::new()
         }
     };

@@ -1,67 +1,46 @@
 //! Fabric pattern integration for LLM-powered features.
 //!
-//! Shells out to the `fabric` CLI binary for pattern-based text processing
-//! (extract_wisdom, summarize, etc.). Used by the intel module for daily
-//! digests and weekly reviews.
+//! Thin wrapper around `vault::fabric::run_pattern` so every fabric
+//! invocation in the workspace shares one pattern resolver
+//! (`vault::fabric::resolve_pattern` reading from
+//! `vault::paths::patterns_dir()`) and one set of knobs (binary, model,
+//! max_content_chars) from the cortex FabricConfig.
+//!
+//! Per-feature timeouts stay tunable (autotag 120s, classify 30s,
+//! intel 120s); binary/model/max-chars are global.
 
-use eyre::{Context, Result};
-use std::process::Command;
-use std::time::Duration;
+use eyre::Result;
 
-/// Run a Fabric pattern against input text with a timeout.
-/// Returns the pattern output or an error if fabric is not available or times out.
-pub fn run_pattern(pattern: &str, input: &str, timeout_secs: u64) -> Result<String> {
-    let mut child = Command::new("fabric")
-        .args(["--pattern", pattern])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("failed to run fabric - is it installed?")?;
+use crate::config::FabricConfig;
 
-    // Write input to stdin
-    {
-        use std::io::Write;
-        if let Some(ref mut stdin) = child.stdin {
-            stdin.write_all(input.as_bytes())?;
-        }
-        // Drop stdin to signal EOF
-        child.stdin.take();
-    }
-
-    // Wait with timeout
-    let timeout = Duration::from_secs(timeout_secs);
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child.wait_with_output()?;
-                if !status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(eyre::eyre!("fabric pattern '{}' failed: {}", pattern, stderr));
-                }
-                return Ok(String::from_utf8_lossy(&output.stdout).to_string());
-            }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    return Err(eyre::eyre!(
-                        "fabric pattern '{}' timed out after {}s",
-                        pattern,
-                        timeout_secs
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => return Err(eyre::eyre!("failed to check fabric process status: {}", e)),
-        }
-    }
+/// Run a Fabric pattern against input text, using the cortex
+/// `FabricConfig` for binary/model/max-chars and the caller-supplied
+/// `timeout_secs` for the per-feature timeout.
+///
+/// Routes through `vault::fabric::run_pattern`, which resolves the
+/// pattern name against `vault::paths::patterns_dir()`.
+pub fn run_pattern(fabric: &FabricConfig, pattern: &str, input: &str, timeout_secs: u64) -> Result<String> {
+    log::debug!(
+        "cortex::fabric::run_pattern: pattern={pattern} binary={} model={} max_chars={} timeout_secs={timeout_secs} input_len={}",
+        fabric.binary,
+        fabric.model,
+        fabric.max_content_chars,
+        input.len()
+    );
+    vault::fabric::run_pattern(
+        pattern,
+        input,
+        &fabric.binary,
+        &fabric.model,
+        fabric.max_content_chars,
+        timeout_secs,
+    )
 }
 
-/// Check if fabric is available on the system.
-pub fn is_available() -> bool {
-    // Just check if the binary exists on PATH - don't invoke it, some subcommands hang
-    which::which("fabric").is_ok()
+/// Check if fabric is available on the system. Uses `which` rather than
+/// invoking the binary (some fabric subcommands hang on first call).
+pub fn is_available(binary: &str) -> bool {
+    vault::fabric::is_available(binary)
 }
 
 /// Truncate input text to approximately max_tokens (estimated at ~4 chars per token).
@@ -70,7 +49,6 @@ pub fn truncate_input(input: &str, max_tokens: usize) -> &str {
     if input.len() <= max_chars {
         input
     } else {
-        // Find a char boundary near the limit
         let end = input.floor_char_boundary(max_chars);
         &input[..end]
     }
@@ -82,8 +60,7 @@ mod tests {
 
     #[test]
     fn test_is_available_returns_bool() {
-        // Just verify it doesn't panic - result depends on whether fabric is installed
-        let _ = is_available();
+        let _ = is_available("fabric");
     }
 
     #[test]

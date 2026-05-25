@@ -57,5 +57,57 @@ pub fn log_ffmpeg_thread_caps(cfg: &Config) {
     );
 }
 
+/// Precondition: every consumer of canonical-tag filtering or the fabric
+/// patterns directory must call this before any work that can touch the
+/// vocabulary. Verifies presence AND parseability so a malformed file
+/// fails as loudly as a missing one.
+///
+/// Bails with an actionable error message naming `sb bootstrap`
+/// (write-if-missing) or `sb bootstrap --force` (refresh from binary).
+pub fn validate_canonical_assets() -> Result<()> {
+    let canonical = vault::paths::canonical_tags();
+    if !canonical.exists() {
+        bail!(
+            "missing canonical-tags vocabulary at {}\n\
+             run `sb bootstrap` to provision (or `sb bootstrap --force` to refresh from the binary's embedded copy)",
+            canonical.display()
+        );
+    }
+    vault::canonical::CanonicalTagsFile::load(&canonical).map_err(|e| {
+        eyre::eyre!(
+            "canonical-tags vocabulary at {} failed to parse: {e}\n\
+         run `sb bootstrap --force` to restore from the binary's embedded copy",
+            canonical.display()
+        )
+    })?;
+
+    let mapping = vault::paths::tag_mapping();
+    if !mapping.exists() {
+        bail!(
+            "missing tag-mapping at {}\n\
+             run `sb bootstrap` to provision (or `sb bootstrap --force` to refresh from the binary's embedded copy)",
+            mapping.display()
+        );
+    }
+    vault::canonical::load_tag_mapping(&mapping).map_err(|e| {
+        eyre::eyre!(
+            "tag-mapping at {} failed to parse: {e}\n\
+         run `sb bootstrap --force` to restore from the binary's embedded copy",
+            mapping.display()
+        )
+    })?;
+
+    let patterns = vault::paths::patterns_dir();
+    if !patterns.is_dir() {
+        bail!(
+            "missing fabric patterns directory at {}\n\
+             run `sb bootstrap` to provision (or `sb bootstrap --force` to refresh from the binary's embedded copy)",
+            patterns.display()
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

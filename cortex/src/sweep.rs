@@ -43,6 +43,7 @@ pub enum SweepMode {
 /// branches between cold-sweep, tag migration, and proposal-scan modes, and
 /// returns a typed report; sb formats the output.
 pub fn run(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<SweepReport> {
+    crate::startup::validate_canonical_assets()?;
     log::info!("starting sweep command (vault_root={})", vault_root.display());
 
     if opts.cold && (opts.migrate || opts.proposals) {
@@ -131,6 +132,7 @@ pub struct ProposalsFile {
 /// Rewrites each note's tags using the canonical mapping.
 /// Returns the number of notes modified.
 pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run: bool) -> Result<usize> {
+    crate::startup::validate_canonical_assets()?;
     let canonical_file =
         CanonicalTagsFile::load(Path::new(&config.canonical_path)).wrap_err("failed to load canonical tags")?;
     let mapping =
@@ -178,6 +180,7 @@ pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run:
 
 /// Scan notes for non-canonical tags and generate proposals.
 pub fn scan_proposals(notes: &[Note], config: &SweepConfig) -> Result<Vec<Proposal>> {
+    crate::startup::validate_canonical_assets()?;
     let canonical_file =
         CanonicalTagsFile::load(Path::new(&config.canonical_path)).wrap_err("failed to load canonical tags")?;
     let mapping =

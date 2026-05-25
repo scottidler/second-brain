@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::config::AutoTagConfig;
+use crate::config::{AutoTagConfig, FabricConfig};
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::vault::Note;
 
@@ -95,6 +95,7 @@ pub fn apply_autotag(
     notes: &[Note],
     all_notes: &[Note],
     config: &AutoTagConfig,
+    fabric: &FabricConfig,
 ) -> eyre::Result<usize> {
     log::debug!(
         "autotag::apply_autotag: vault_root={} notes={} all_notes={}",
@@ -137,7 +138,7 @@ pub fn apply_autotag(
 
     // If Fabric is available and a pattern is configured, enhance suggestions
     if let Some(ref pattern) = config.fabric_pattern
-        && crate::fabric::is_available()
+        && crate::fabric::is_available(&fabric.binary)
     {
         for note in notes {
             if note.frontmatter.extra.contains_key("cortex-tagged") {
@@ -151,7 +152,7 @@ pub fn apply_autotag(
             }
 
             let input = crate::fabric::truncate_input(&note.body, config.max_input_tokens);
-            match crate::fabric::run_pattern(pattern, input, config.fabric_timeout_secs) {
+            match crate::fabric::run_pattern(fabric, pattern, input, config.fabric_timeout_secs) {
                 Ok(output) => {
                     let canonical = build_canonical_tags(all_notes, config);
                     let fabric_tags = extract_tags_from_output(&output, &canonical);
@@ -381,7 +382,8 @@ mod tests {
         let notes = v.scan();
         let config = default_config();
 
-        let count = apply_autotag(v.root(), &notes, &notes, &config).expect("apply");
+        let fabric = FabricConfig::default();
+        let count = apply_autotag(v.root(), &notes, &notes, &config, &fabric).expect("apply");
         assert!(count > 0);
 
         let content = v.read("tag-me.md");

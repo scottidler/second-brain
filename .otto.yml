@@ -232,17 +232,15 @@ tasks:
         install -m 0755 "target/release/$bin" "$HOME/.cargo/bin/$bin"
       done
 
-      # Sync borg fabric patterns to where vault::fabric::resolve_pattern looks.
-      # Source-of-truth lives in borg/patterns/; this avoids drift between repo
-      # state and the deployed install location (the gap that caused the
-      # 2026-05-16 fabric-error regression).
-      mkdir -p "$HOME/.config/borg/patterns"
-      cp -f borg/patterns/*.md "$HOME/.config/borg/patterns/"
-
-      # Sync shared config (canonical tags, tag mapping, tag proposals) so
-      # borg + cortex agree on the canonical vocabulary.
-      mkdir -p "$HOME/.config/second-brain"
-      cp -f config/*.yml "$HOME/.config/second-brain/"
+      # Sync every canonical asset (shared YAMLs + 14 fabric patterns) to
+      # ~/.config/sb/ via the same `sb bootstrap` code path a public consumer
+      # uses. --force refreshes shared YAMLs + patterns from the binary's
+      # embedded copies (per-host templates stay write-if-missing).
+      # --skip-systemd because the deploy task restarts daemons explicitly
+      # below; --skip-prefetch-model because the model is already cached on
+      # the deploy host. First-machine bootstrap uses `sb bootstrap` with
+      # no flags.
+      sb bootstrap --force --skip-systemd --skip-prefetch-model
 
       # Restart any workspace daemons whose systemd units exist. Units are
       # written + maintained by `sb borg daemon --install` and `sb cortex
@@ -257,8 +255,8 @@ tasks:
       [ -n "$DAEMONS" ] && systemctl --user restart $DAEMONS
 
       echo "✅ Installed bins:$(echo $BINS | tr '\n' ' ' | sed 's/^/ /')"
-      echo "✅ Synced patterns -> ~/.config/borg/patterns/, shared config -> ~/.config/second-brain/"
-      echo "✅ Restarted daemons:${DAEMONS:- (none — run \`sb borg daemon --install\` / \`sb cortex daemon --install\` first)}"
+      echo "✅ Refreshed canonical assets in ~/.config/sb/ via sb bootstrap --force"
+      echo "✅ Restarted daemons:${DAEMONS:- (none - run \`sb borg daemon --install\` / \`sb cortex daemon --install\` first)}"
 
       # Refresh the Firefox extension iff this machine has it installed.
       # --if-installed short-circuits (no sign, no sudo, no Firefox dep) on

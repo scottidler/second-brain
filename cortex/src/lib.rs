@@ -22,6 +22,7 @@ pub mod opts;
 pub mod quality;
 pub mod report;
 pub mod scope;
+pub mod startup;
 pub mod state;
 pub mod summarize;
 pub mod sweep;
@@ -176,7 +177,13 @@ pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Repor
             &config.actions.auto_tag,
         ));
         if opts.apply {
-            autotag::apply_autotag(vault_root, &lintable_notes, &all_notes, &config.actions.auto_tag)?;
+            autotag::apply_autotag(
+                vault_root,
+                &lintable_notes,
+                &all_notes,
+                &config.actions.auto_tag,
+                &config.fabric,
+            )?;
         }
     }
 

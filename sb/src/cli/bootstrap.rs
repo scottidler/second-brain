@@ -3,6 +3,9 @@ use std::path::Path;
 
 mod migrate;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(clap::Args)]
 pub struct BootstrapArgs {
     /// Skip the fastembed model prefetch (network-light bootstrap on install machines without GPU/disk budget).
@@ -25,11 +28,84 @@ pub struct BootstrapArgs {
     /// Subsequent runs are unattended; pair with `otto deploy` for auto-refresh.
     #[arg(long)]
     pub extension: bool,
+
+    /// Refresh shared YAMLs (canonical-tags, tag-mapping, tag-proposals) and
+    /// the patterns directory from the binary's embedded copies, overwriting
+    /// any operator edits. Per-host templates (borg.yml, cortex.yml, oracle.yml)
+    /// are still write-if-missing under --force - those hold per-host config.
+    #[arg(long)]
+    pub force: bool,
 }
 
-const BORG_TEMPLATE: &str = include_str!("../../../config/templates/borg.yml.example");
-const CORTEX_TEMPLATE: &str = include_str!("../../../config/templates/cortex.yml.example");
-const ORACLE_TEMPLATE: &str = include_str!("../../../config/templates/oracle.yml.example");
+pub(crate) const BORG_TEMPLATE: &str = include_str!("../../../config/templates/borg.yml.example");
+pub(crate) const CORTEX_TEMPLATE: &str = include_str!("../../../config/templates/cortex.yml.example");
+pub(crate) const ORACLE_TEMPLATE: &str = include_str!("../../../config/templates/oracle.yml.example");
+
+pub(crate) const CANONICAL_TAGS_YML: &str = include_str!("../../../config/canonical-tags.yml");
+pub(crate) const TAG_MAPPING_YML: &str = include_str!("../../../config/tag-mapping.yml");
+pub(crate) const TAG_PROPOSALS_YML: &str = include_str!("../../../config/tag-proposals.yml");
+
+/// Custom fabric patterns shipped with sb. Embedded byte-for-byte; the
+/// explicit list (rather than `include_dir!`) makes adding a pattern a
+/// deliberate code change reviewable in a PR.
+///
+/// Public consumer's install verb writes these to
+/// `vault::paths::patterns_dir()`; doctor's drift check reads them back.
+pub(crate) const PATTERNS: &[(&str, &str)] = &[
+    ("condense.md", include_str!("../../../borg/patterns/condense.md")),
+    (
+        "distill-article.md",
+        include_str!("../../../borg/patterns/distill-article.md"),
+    ),
+    (
+        "distill-image.md",
+        include_str!("../../../borg/patterns/distill-image.md"),
+    ),
+    (
+        "distill-repo.md",
+        include_str!("../../../borg/patterns/distill-repo.md"),
+    ),
+    (
+        "distill-thread.md",
+        include_str!("../../../borg/patterns/distill-thread.md"),
+    ),
+    (
+        "distill-video.md",
+        include_str!("../../../borg/patterns/distill-video.md"),
+    ),
+    (
+        "distill-video-chunk.md",
+        include_str!("../../../borg/patterns/distill-video-chunk.md"),
+    ),
+    (
+        "distill-video-reduce.md",
+        include_str!("../../../borg/patterns/distill-video-reduce.md"),
+    ),
+    (
+        "distill-voicenote.md",
+        include_str!("../../../borg/patterns/distill-voicenote.md"),
+    ),
+    (
+        "distill-voicenote-chunk.md",
+        include_str!("../../../borg/patterns/distill-voicenote-chunk.md"),
+    ),
+    (
+        "distill-voicenote-reduce.md",
+        include_str!("../../../borg/patterns/distill-voicenote-reduce.md"),
+    ),
+    (
+        "obsidian-classify.md",
+        include_str!("../../../borg/patterns/obsidian-classify.md"),
+    ),
+    (
+        "obsidian-note.md",
+        include_str!("../../../borg/patterns/obsidian-note.md"),
+    ),
+    (
+        "obsidian-youtube-slides.md",
+        include_str!("../../../borg/patterns/obsidian-youtube-slides.md"),
+    ),
+];
 
 pub async fn run(args: BootstrapArgs) -> Result<()> {
     // Auto-migrate on first invocation that detects a legacy directory, unless
@@ -49,14 +125,7 @@ pub async fn run(args: BootstrapArgs) -> Result<()> {
         println!();
     }
 
-    let targets = [
-        ("borg", vault::paths::borg_config(), BORG_TEMPLATE),
-        ("cortex", vault::paths::cortex_config(), CORTEX_TEMPLATE),
-        ("oracle", vault::paths::oracle_config(), ORACLE_TEMPLATE),
-    ];
-    for (name, path, template) in &targets {
-        write_if_missing(name, path, template)?;
-    }
+    extract_canonical_assets(args.force)?;
 
     if !args.skip_systemd {
         println!();
@@ -101,6 +170,51 @@ fn install_extension() -> Result<()> {
     Ok(())
 }
 
+/// Extract every embedded canonical asset to `~/.config/sb/`. Templates
+/// (borg.yml, cortex.yml, oracle.yml) are always write-if-missing because
+/// they hold per-host config. Shared YAMLs and patterns honor `force`:
+/// write-if-missing by default, always-write under `--force`.
+///
+/// Pulled out of `run` so unit tests can exercise the extraction in
+/// isolation against an `XDG_CONFIG_HOME` tempdir.
+pub(crate) fn extract_canonical_assets(force: bool) -> Result<()> {
+    let targets = [
+        ("borg", vault::paths::borg_config(), BORG_TEMPLATE),
+        ("cortex", vault::paths::cortex_config(), CORTEX_TEMPLATE),
+        ("oracle", vault::paths::oracle_config(), ORACLE_TEMPLATE),
+    ];
+    for (name, path, template) in &targets {
+        write_if_missing(name, path, template)?;
+    }
+
+    let shared = [
+        ("canonical-tags", vault::paths::canonical_tags(), CANONICAL_TAGS_YML),
+        ("tag-mapping", vault::paths::tag_mapping(), TAG_MAPPING_YML),
+        ("tag-proposals", vault::paths::tag_proposals(), TAG_PROPOSALS_YML),
+    ];
+    for (name, path, contents) in &shared {
+        if force {
+            write_always(name, path, contents)?;
+        } else {
+            write_if_missing(name, path, contents)?;
+        }
+    }
+
+    let patterns_dir = vault::paths::patterns_dir();
+    std::fs::create_dir_all(&patterns_dir)
+        .with_context(|| format!("create patterns dir: {}", patterns_dir.display()))?;
+    for (filename, contents) in PATTERNS {
+        let path = patterns_dir.join(filename);
+        if force {
+            write_always(filename, &path, contents)?;
+        } else {
+            write_if_missing(filename, &path, contents)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn write_if_missing(name: &str, path: &Path, template: &str) -> Result<()> {
     if path.exists() {
         println!("\u{2139}\u{fe0f}  {name}: already present at {}", path.display());
@@ -112,6 +226,16 @@ fn write_if_missing(name: &str, path: &Path, template: &str) -> Result<()> {
     std::fs::create_dir_all(parent).with_context(|| format!("create parent dir for {name}: {}", parent.display()))?;
     std::fs::write(path, template).with_context(|| format!("write {name} template to {}", path.display()))?;
     println!("\u{2705} {name}: wrote template -> {}", path.display());
+    Ok(())
+}
+
+fn write_always(name: &str, path: &Path, contents: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| eyre::eyre!("config path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create parent dir for {name}: {}", parent.display()))?;
+    std::fs::write(path, contents).with_context(|| format!("write {name} to {}", path.display()))?;
+    println!("\u{2705} {name}: refreshed from embedded copy -> {}", path.display());
     Ok(())
 }
 

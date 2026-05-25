@@ -150,6 +150,12 @@ impl ServerHandle {
 pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartup, ServerHandle)> {
     log::info!("Starting obsidian-borg daemon");
 
+    // Refuse to start without canonical assets present and parseable. The
+    // alternative (silent-degrade ingest) lets junk tags accumulate in the
+    // vault and breaks the canonical contract every other subsystem
+    // depends on. Operator gets an actionable `sb bootstrap` pointer.
+    startup::validate_canonical_assets().context("borg::serve_init")?;
+
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
         .parse()
         .context("Invalid server address")?;

@@ -65,6 +65,7 @@ pub async fn run(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Resul
 
 /// Start filesystem watcher and run actions on changes using async tokio::select! loop.
 async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
+    crate::startup::validate_canonical_assets()?;
     let daemon_config = &config.daemon;
     let poll_interval = Duration::from_secs(daemon_config.poll_interval);
 
@@ -455,7 +456,13 @@ fn configured_actions(
                 match crate::vault::scan_vault(vault_root, &config.vault) {
                     Ok(notes) => {
                         if auto {
-                            match crate::autotag::apply_autotag(vault_root, &notes, &notes, &config.actions.auto_tag) {
+                            match crate::autotag::apply_autotag(
+                                vault_root,
+                                &notes,
+                                &notes,
+                                &config.actions.auto_tag,
+                                &config.fabric,
+                            ) {
                                 Ok(count) if count > 0 => {
                                     fingerprint.add("auto-tag", vec!["__applied__".to_string()]);
                                     log::info!("auto-applied auto-tag: {count} fix(es)");

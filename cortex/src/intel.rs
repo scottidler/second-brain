@@ -2,7 +2,7 @@ use chrono::{Datelike, Local, NaiveDate};
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::config::{Config, IntelConfig, LlmConfig};
+use crate::config::{Config, FabricConfig, IntelConfig, LlmConfig};
 use crate::opts::IntelOpts;
 use crate::vault::{Note, scan_vault};
 
@@ -28,9 +28,17 @@ pub struct IntelReport {
 /// the daily-digest or weekly-review generator based on `opts.mode`. The
 /// cortex daemon calls this directly on its daily/weekly tick.
 pub fn run(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<IntelReport> {
+    crate::startup::validate_canonical_assets()?;
     log::info!("starting intel command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
-    generate(vault_root, &notes, &config.actions.intel, &config.llm, opts)
+    generate(
+        vault_root,
+        &notes,
+        &config.actions.intel,
+        &config.llm,
+        &config.fabric,
+        opts,
+    )
 }
 
 const DAILY_SYSTEM_PROMPT: &str = "\
@@ -65,11 +73,12 @@ pub fn generate(
     notes: &[Note],
     config: &IntelConfig,
     llm_config: &LlmConfig,
+    fabric: &FabricConfig,
     opts: &IntelOpts,
 ) -> Result<IntelReport> {
     let output_path = match opts.mode {
         IntelMode::Daily => generate_daily_digest(vault_root, notes, config, llm_config, opts)?,
-        IntelMode::Weekly => generate_weekly_review(vault_root, notes, config, opts)?,
+        IntelMode::Weekly => generate_weekly_review(vault_root, notes, config, fabric, opts)?,
     };
     Ok(IntelReport {
         mode: opts.mode,
@@ -79,13 +88,18 @@ pub fn generate(
 
 /// Process new/unread notes with Fabric pattern.
 /// Sets cortex-insights in frontmatter and updates status to processed.
-pub fn process_new_notes(vault_root: &Path, notes: &[Note], config: &IntelConfig) -> Result<usize> {
+pub fn process_new_notes(
+    vault_root: &Path,
+    notes: &[Note],
+    config: &IntelConfig,
+    fabric: &FabricConfig,
+) -> Result<usize> {
     let pattern = match &config.on_new_note {
         Some(p) => p.clone(),
         None => return Ok(0),
     };
 
-    if !crate::fabric::is_available() {
+    if !crate::fabric::is_available(&fabric.binary) {
         log::debug!("fabric not available, skipping new note processing");
         return Ok(0);
     }
@@ -109,7 +123,7 @@ pub fn process_new_notes(vault_root: &Path, notes: &[Note], config: &IntelConfig
         }
 
         let input = crate::fabric::truncate_input(&note.body, config.max_input_tokens);
-        match crate::fabric::run_pattern(&pattern, input, config.fabric_timeout_secs) {
+        match crate::fabric::run_pattern(fabric, &pattern, input, config.fabric_timeout_secs) {
             Ok(insights) => {
                 let abs_path = vault_root.join(&note.path);
                 let content = std::fs::read_to_string(&abs_path)?;
@@ -249,6 +263,7 @@ fn generate_weekly_review(
     vault_root: &Path,
     notes: &[Note],
     config: &IntelConfig,
+    fabric: &FabricConfig,
     opts: &IntelOpts,
 ) -> Result<PathBuf> {
     let today = Local::now().date_naive();
@@ -334,7 +349,7 @@ fn generate_weekly_review(
 
     // Fabric enhancement: synthesize across all of the week's notes
     if let Some(ref pattern) = config.batch_weekly
-        && crate::fabric::is_available()
+        && crate::fabric::is_available(&fabric.binary)
         && !week_notes.is_empty()
     {
         let concatenated: String = week_notes
@@ -346,7 +361,7 @@ fn generate_weekly_review(
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
         let input = crate::fabric::truncate_input(&concatenated, config.max_input_tokens);
-        match crate::fabric::run_pattern(pattern, input, config.fabric_timeout_secs) {
+        match crate::fabric::run_pattern(fabric, pattern, input, config.fabric_timeout_secs) {
             Ok(wisdom) => {
                 review.push_str("## AI Insights\n\n");
                 review.push_str(wisdom.trim());
@@ -399,7 +414,8 @@ mod tests {
             output: None,
         };
 
-        generate(v.root(), &notes, &config, &llm_config, &opts).expect("generate");
+        let fabric = FabricConfig::default();
+        generate(v.root(), &notes, &config, &llm_config, &fabric, &opts).expect("generate");
 
         let today = Local::now().format("%Y-%m-%d").to_string();
         let digest_path = v.root().join("notes/ai").join(format!("daily-{today}.md"));
@@ -424,7 +440,8 @@ mod tests {
             output: None,
         };
 
-        generate(v.root(), &notes, &config, &llm_config, &opts).expect("generate");
+        let fabric = FabricConfig::default();
+        generate(v.root(), &notes, &config, &llm_config, &fabric, &opts).expect("generate");
 
         let output_dir = v.root().join("notes/ai");
         assert!(output_dir.exists());
@@ -473,7 +490,8 @@ mod tests {
             ..Default::default()
         };
 
-        let count = process_new_notes(v.root(), &notes, &config).expect("process");
+        let fabric = FabricConfig::default();
+        let count = process_new_notes(v.root(), &notes, &config, &fabric).expect("process");
         assert_eq!(count, 0, "should skip when on_new_note is None");
     }
 
@@ -524,7 +542,8 @@ mod tests {
             output: None,
         };
 
-        generate(v.root(), &notes, &config, &llm_config, &opts).expect("generate");
+        let fabric = FabricConfig::default();
+        generate(v.root(), &notes, &config, &llm_config, &fabric, &opts).expect("generate");
 
         let today = Local::now().format("%Y-%m-%d").to_string();
         let digest_path = v.root().join("notes/ai").join(format!("daily-{today}.md"));
