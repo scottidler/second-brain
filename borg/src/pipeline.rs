@@ -695,7 +695,10 @@ async fn process_url_inner(
     let filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
     // Resolve write path: reingest preserves the original location, new ingests go to inbox
-    let dest_path = reingest_dest.unwrap_or_else(|| resolve_destination(&config.vault.inbox_path));
+    let dest_path = match reingest_dest {
+        Some(d) => d,
+        None => config.inbox_dir()?,
+    };
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&filename);
@@ -1326,7 +1329,7 @@ async fn process_image_inner(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let note_filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.inbox_path);
+    let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&note_filename);
@@ -1564,7 +1567,7 @@ async fn process_audio_inner(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let note_filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.inbox_path);
+    let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&note_filename);
@@ -1817,7 +1820,7 @@ async fn process_document_file_inner(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let note_filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.inbox_path);
+    let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&note_filename);
@@ -2022,7 +2025,7 @@ async fn process_text_inner(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.inbox_path);
+    let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&filename);
@@ -2197,7 +2200,7 @@ async fn process_vocab(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.inbox_path);
+    let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&filename);
@@ -2593,7 +2596,7 @@ async fn process_code_snippet(
     let rendered = markdown::render_note(&note, &config.frontmatter);
     let filename = format!("{}.md", hygiene::sanitize_filename(&title));
 
-    let dest_path = resolve_destination(&config.vault.inbox_path);
+    let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
     let note_path = dest_path.join(&filename);
@@ -2658,10 +2661,6 @@ async fn detect_language(word: &str, use_fabric: bool, config: &Config) -> Strin
 
     // Fallback: assume English
     "english".to_string()
-}
-
-fn resolve_destination(inbox_path: &str) -> PathBuf {
-    expand_tilde(inbox_path)
 }
 
 /// Build an obsidian://search deep link from vault name and note path.
@@ -2850,18 +2849,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_destination_uses_inbox_path() {
-        let dest = resolve_destination("/vault/inbox");
-        assert_eq!(dest, PathBuf::from("/vault/inbox"));
-    }
-
-    #[test]
-    fn test_resolve_destination_with_trailing_slash() {
-        let dest = resolve_destination("/vault/inbox/");
-        assert_eq!(dest, PathBuf::from("/vault/inbox/"));
-    }
-
-    #[test]
     fn test_extract_title_from_fabric_metadata() {
         let md = "Title: Rust Programming Language\n\nURL Source: https://rust-lang.org\n\nMarkdown Content:\n# Rust\n";
         assert_eq!(
@@ -2901,12 +2888,6 @@ mod tests {
     async fn test_process_content_formerly_unsupported_types() {
         // All content types (Image, PDF, Document, Audio) are now implemented.
         // This test is retained as a placeholder; type-specific tests cover each.
-    }
-
-    #[test]
-    fn test_resolve_destination_absolute_path() {
-        let dest = resolve_destination("/home/user/obsidian/inbox");
-        assert_eq!(dest, PathBuf::from("/home/user/obsidian/inbox"));
     }
 
     #[test]
@@ -3363,7 +3344,7 @@ int main() {
         let found = find_note_by_source(vault, "https://example.com/brand-new");
         assert!(found.is_none());
 
-        // reingest_dest would be None, so resolve_destination is used
+        // reingest_dest would be None, so config.inbox_dir() is used
         let dest = inbox_path.clone();
         assert_eq!(dest, inbox_path, "new URLs should land in inbox/");
     }

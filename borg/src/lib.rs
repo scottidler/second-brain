@@ -161,7 +161,7 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
         .context("Invalid server address")?;
 
     log::info!("Server address: {addr}");
-    log::debug!("Vault inbox: {}", config.vault.inbox_path);
+    log::debug!("Vault inbox: {}", config.inbox_dir()?.display());
     log::debug!("Transcriber URL: {}", config.transcriber.url);
     log::debug!("Groq model: {}", config.groq.model);
     log::debug!("LLM provider: {}, model: {}", config.llm.provider, config.llm.model);

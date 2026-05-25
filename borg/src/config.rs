@@ -805,7 +805,10 @@ pub struct VaultConfig {
     /// a `.obsidian/` directory in CWD. See `vault::paths::resolve_vault_root`.
     #[serde(default)]
     pub root_path: Option<String>,
-    pub inbox_path: String,
+    /// Inbox directory. `None` means `<vault_root>/inbox`. A literal value
+    /// must be a real path; `~/...` is tilde-expanded at use time via
+    /// `Config::inbox_dir`.
+    pub inbox_path: Option<String>,
     pub vault_name: String,
 }
 
@@ -882,7 +885,7 @@ impl Default for VaultConfig {
     fn default() -> Self {
         Self {
             root_path: None,
-            inbox_path: "~/obsidian-vault/inbox".to_string(),
+            inbox_path: None,
             vault_name: "obsidian".to_string(),
         }
     }
@@ -894,6 +897,18 @@ impl Config {
     /// (in marker-gated CWD mode) from a `.obsidian/` directory in CWD.
     pub fn vault_root(&self) -> Result<PathBuf> {
         vault::paths::resolve_vault_root(None, self.vault.root_path.as_deref())
+    }
+
+    /// Inbox directory for fresh notes. Explicit `vault.inbox-path` wins
+    /// (tilde-expanded); otherwise computed as `<vault_root>/inbox` so the
+    /// inbox always tracks the resolved vault — no hardcoded fallback that
+    /// can leak writes into a phantom directory.
+    pub fn inbox_dir(&self) -> Result<PathBuf> {
+        if let Some(s) = self.vault.inbox_path.as_deref() {
+            Ok(vault::paths::expand_tilde(s))
+        } else {
+            Ok(self.vault_root()?.join("inbox"))
+        }
     }
 
     /// Validate cross-cutting invariants on a freshly-loaded Config. Today
@@ -1140,7 +1155,7 @@ log-level: debug
         let config: Config = serde_yaml::from_str(yaml).expect("should parse");
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 9090);
-        assert_eq!(config.vault.inbox_path, "/tmp/vault/inbox");
+        assert_eq!(config.vault.inbox_path.as_deref(), Some("/tmp/vault/inbox"));
         assert_eq!(config.transcriber.url, "http://192.168.1.100:8090");
         assert_eq!(config.transcriber.timeout_secs, 60);
         assert_eq!(config.groq.model, "whisper-large-v3-turbo");
