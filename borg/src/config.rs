@@ -481,6 +481,7 @@ pub struct StagingConfig {
     /// once the artifact store + Stage 0 plumbing is live.
     pub enabled: bool,
     /// Root directory for staging artifacts. Per-trace directories hang off this.
+    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
     pub root: PathBuf,
     /// Retention window for successful traces. A directory without a
     /// `rejection.yml` older than this is deleted by the retention sweep.
@@ -509,6 +510,7 @@ impl Default for StagingConfig {
     fn default() -> Self {
         let root = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from(".local/share"))
+            .join("sb")
             .join("borg")
             .join("stages");
         Self {

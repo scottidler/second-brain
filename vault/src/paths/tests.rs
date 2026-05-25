@@ -65,6 +65,38 @@ fn config_root_lands_under_dirs_config_dir() {
 }
 
 #[test]
+fn expand_tilde_expands_leading_tilde() {
+    let expanded = expand_tilde("~/foo/bar");
+    let home = std::env::var("HOME").unwrap();
+    assert_eq!(expanded, PathBuf::from(home).join("foo/bar"));
+}
+
+#[test]
+fn expand_tilde_passes_absolute_path_through() {
+    let expanded = expand_tilde("/etc/passwd");
+    assert_eq!(expanded, PathBuf::from("/etc/passwd"));
+}
+
+#[test]
+fn expand_tilde_passes_relative_path_through() {
+    let expanded = expand_tilde("relative/path");
+    assert_eq!(expanded, PathBuf::from("relative/path"));
+}
+
+#[test]
+fn deserialize_tilde_pathbuf_expands_tilde_in_yaml() {
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+        #[serde(deserialize_with = "super::deserialize_tilde_pathbuf")]
+        path: PathBuf,
+    }
+    let yaml = "path: ~/.local/share/borg/stages\n";
+    let parsed: Wrapper = serde_yaml::from_str(yaml).unwrap();
+    let home = std::env::var("HOME").unwrap();
+    assert_eq!(parsed.path, PathBuf::from(home).join(".local/share/borg/stages"));
+}
+
+#[test]
 fn all_config_files_land_under_config_root() {
     let root = config_root();
     assert_eq!(borg_config(), root.join("borg.yml"));

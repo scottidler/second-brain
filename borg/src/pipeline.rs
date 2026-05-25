@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
 use vault::canonical::{self, CanonicalTagsFile, TagMapping};
+use vault::paths::expand_tilde;
 use vault::receipts::FailureStage;
 use vault::schema::CORTEX_PRESERVE_KEYS;
 
@@ -2763,15 +2764,6 @@ fn read_cortex_fields(path: &std::path::Path) -> Vec<(String, String)> {
         }
     }
     fields
-}
-
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(stripped);
-    }
-    PathBuf::from(path)
 }
 
 #[cfg(test)]

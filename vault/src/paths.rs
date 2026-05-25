@@ -24,9 +24,37 @@
 use std::path::{Path, PathBuf};
 
 use eyre::{Result, eyre};
+use serde::{Deserialize, Deserializer};
 
 /// Subdirectory under `dirs::config_dir()` that owns every sb config file.
 pub const SB_DIR: &str = "sb";
+
+/// Expand a leading `~` or `~/` in a user-supplied path to `$HOME`.
+///
+/// Users routinely type `~/foo` in YAML config; YAML stores that as the
+/// literal three characters. If we hand the literal to `fs::create_dir_all`
+/// or any other filesystem call, a directory literally named `~` is created
+/// in the process's CWD. Every `PathBuf` field that originates from user
+/// config must pass through this (or a serde wrapper that calls it) before
+/// it reaches the filesystem.
+///
+/// Non-tilde paths pass through untouched.
+pub fn expand_tilde(path: impl AsRef<Path>) -> PathBuf {
+    let s = path.as_ref().to_string_lossy();
+    PathBuf::from(shellexpand::tilde(s.as_ref()).as_ref())
+}
+
+/// `#[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]`
+/// for `PathBuf` config fields. Runs the deserialized value through
+/// [`expand_tilde`] so a literal `~/...` in YAML becomes a real absolute
+/// path the moment the config loads.
+pub fn deserialize_tilde_pathbuf<'de, D>(deserializer: D) -> std::result::Result<PathBuf, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = PathBuf::deserialize(deserializer)?;
+    Ok(expand_tilde(raw))
+}
 
 /// `~/.config/sb/` (or platform equivalent via `dirs`).
 ///
