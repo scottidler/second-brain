@@ -692,3 +692,7 @@ The seven phases below describe code work, not release gates. The entire integra
 - `borg/src/notify.rs` - sink pattern being mirrored for `notify::Signal`
 - `borg/src/intake.rs` - transport-agnostic recording path (`record_intake`, `record_intake_with_sidecar`)
 - `sb/src/cli/checks.rs` - where new doctor sections plug in
+
+## Addendum (post-implementation): state_dir retraction
+
+The `state_dir: PathBuf` field on `SignalConfig` described in §Data Model and threaded through every code section of this memo was **removed** post-ship as operator-surface leakage of `signal-rs`-internal storage layout. The retraction memo at `docs/design/2026-05-24-signal-state-dir-internalization.md` is the source of truth for the current shape: the path is now canonical (`vault::paths::borg_signal_state_dir()`), not configurable, and not present in `borg.yml`. References below in this memo to `signal.state_dir` / `state-dir:` should be read as superseded; the rest of the design (privacy gate, rate gate, supervisor pattern, notify::Signal, doctor section, bootstrap runbook) is unchanged.
