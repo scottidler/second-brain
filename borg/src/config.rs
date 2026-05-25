@@ -700,11 +700,6 @@ pub struct DiscordConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SignalConfig {
-    /// Directory holding the linked state from
-    /// `signal-rs link --state-dir <here>`. The bootstrap template
-    /// defaults to `~/.local/share/sb/borg/signal-state/`.
-    pub state_dir: PathBuf,
-
     /// ACI UUIDs (string form) allowed to send borg peer DMs.
     /// Note-to-Self is structural and never gated by this list.
     #[serde(default)]
@@ -1233,7 +1228,6 @@ discord:
     fn test_config_with_signal_section() {
         let yaml = r#"
 signal:
-  state-dir: /tmp/signal-state
   allowed-senders:
     - "00000000-0000-0000-0000-000000000001"
   host: home-server
@@ -1243,7 +1237,6 @@ signal:
             .validate()
             .expect("validate should accept a populated signal section");
         let sg = config.signal.as_ref().expect("signal should be Some");
-        assert_eq!(sg.state_dir, PathBuf::from("/tmp/signal-state"));
         assert_eq!(
             sg.allowed_senders,
             vec!["00000000-0000-0000-0000-000000000001".to_string()]
@@ -1257,7 +1250,6 @@ signal:
     fn test_config_with_signal_overrides_rate_threshold() {
         let yaml = r#"
 signal:
-  state-dir: /tmp/signal-state
   host: home-server
   notetoself-rate-threshold-per-hour: 250
   notification-recipient: "00000000-0000-0000-0000-000000000002"
@@ -1275,7 +1267,6 @@ signal:
     fn test_validate_rejects_signal_with_empty_host() {
         let yaml = r#"
 signal:
-  state-dir: /tmp/signal-state
   host: ""
 "#;
         let config: Config = serde_yaml::from_str(yaml).expect("should parse");
@@ -1291,7 +1282,6 @@ signal:
     fn test_validate_rejects_signal_with_whitespace_host() {
         let yaml = r#"
 signal:
-  state-dir: /tmp/signal-state
   host: "   "
 "#;
         let config: Config = serde_yaml::from_str(yaml).expect("should parse");

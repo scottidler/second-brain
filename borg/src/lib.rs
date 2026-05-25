@@ -328,9 +328,14 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
             );
             signal_status = SubsystemStatus::SkippedHostMismatch;
         } else {
+            // Resolve the canonical signal state path ONCE here. This is the
+            // operator-visible breadcrumb -- if the path the daemon expects
+            // diverges from the one the operator passed to `signal-rs link
+            // --state-dir`, the absolute resolved path is in the journal.
+            let state_dir = vault::paths::borg_signal_state_dir();
             log::info!(
                 "Signal transport enabled (state_dir: {}, allowed_senders: {})",
-                signal_config.state_dir.display(),
+                state_dir.display(),
                 signal_config.allowed_senders.len()
             );
             let cfg = config.clone();
@@ -347,7 +352,7 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
                         }
                     };
                     let local = tokio::task::LocalSet::new();
-                    let result = rt.block_on(local.run_until(signal::run(signal_config, cfg, desk)));
+                    let result = rt.block_on(local.run_until(signal::run(signal_config, state_dir, cfg, desk)));
                     let _ = tx.send(result);
                 })
                 .context("failed to spawn signal-runtime thread")?;

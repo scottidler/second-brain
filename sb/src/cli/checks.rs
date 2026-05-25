@@ -742,11 +742,16 @@ fn signal_findings_for(sg: &SignalConfig) -> Vec<Finding> {
         return findings;
     }
 
-    findings.extend(state_dir_findings(&sg.state_dir));
+    // state_dir is internal to borg, not a config field: the canonical
+    // path comes from vault::paths. See
+    // docs/design/2026-05-24-signal-state-dir-internalization.md.
+    let state_dir = vault::paths::borg_signal_state_dir();
+    findings.extend(state_dir_findings(&state_dir));
 
     // Live open + status probe. signal-rs futures are !Send so run on a
-    // current-thread runtime + LocalSet.
-    match signal_probe_status(&sg.state_dir) {
+    // current-thread runtime + LocalSet inside an isolated OS thread (see
+    // signal_probe_status).
+    match signal_probe_status(&state_dir) {
         Ok(SignalProbe::Linked {
             account,
             device_id,
@@ -755,21 +760,21 @@ fn signal_findings_for(sg: &SignalConfig) -> Vec<Finding> {
             "linked as account={account} device_id={device_id} linked_devices={linked_devices}"
         ))),
         Ok(SignalProbe::NotLinked) => findings.push(Finding::error(
-            format!("state_dir {} is not linked", sg.state_dir.display()),
-            format!("signal-rs link --name borg --state-dir {}", sg.state_dir.display()),
+            format!("state_dir {} is not linked", state_dir.display()),
+            format!("signal-rs link --name borg --state-dir {}", state_dir.display()),
         )),
         Ok(SignalProbe::PartiallyLinked) => findings.push(Finding::error(
-            format!("state_dir {} is partially linked", sg.state_dir.display()),
+            format!("state_dir {} is partially linked", state_dir.display()),
             format!(
                 "re-run signal-rs link --name borg --state-dir {} to resume",
-                sg.state_dir.display()
+                state_dir.display()
             ),
         )),
         Ok(SignalProbe::Deauthorized) => findings.push(Finding::error(
-            format!("state_dir {} is deauthorized", sg.state_dir.display()),
+            format!("state_dir {} is deauthorized", state_dir.display()),
             format!(
                 "re-run signal-rs link --name borg --state-dir {} after re-authorizing on the primary phone",
-                sg.state_dir.display()
+                state_dir.display()
             ),
         )),
         Ok(SignalProbe::OpenFailed(msg)) => findings.push(Finding::error(
@@ -801,24 +806,6 @@ fn state_dir_findings(state_dir: &Path) -> Vec<Finding> {
         return findings;
     }
     findings.push(Finding::ok(format!("state_dir exists at {}", state_dir.display())));
-
-    // Resolve symlinks before comparing so a state_dir that symlinks into
-    // signal-rs's CLI default is still caught.
-    let configured = std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
-    let default = dirs::data_local_dir().map(|d| d.join("signal-rs"));
-    if let Some(default) = default {
-        let default = std::fs::canonicalize(&default).unwrap_or(default);
-        if configured == default {
-            findings.push(Finding::warn(
-                format!(
-                    "state_dir {} collides with signal-rs's CLI default ({})",
-                    configured.display(),
-                    default.display()
-                ),
-                "use a borg-owned path like ~/.local/share/sb/borg/signal-state/ to avoid Double-Ratchet contention with ad-hoc signal-rs CLI use",
-            ));
-        }
-    }
     findings
 }
 
@@ -877,11 +864,9 @@ fn current_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    fn make_signal(host: &str, state_dir: PathBuf) -> SignalConfig {
+    fn make_signal(host: &str) -> SignalConfig {
         SignalConfig {
-            state_dir,
             allowed_senders: vec![],
             notification_recipient: None,
             host: host.to_string(),
@@ -900,7 +885,7 @@ mod tests {
 
     #[test]
     fn signal_findings_host_mismatch_short_circuits() {
-        let sg = make_signal("definitely-not-this-host-abc-xyz", PathBuf::from("/nonexistent"));
+        let sg = make_signal("definitely-not-this-host-abc-xyz");
         let findings = signal_findings_for(&sg);
         assert_eq!(findings.len(), 1, "host mismatch must short-circuit");
         assert_eq!(findings[0].severity, Severity::Info);
@@ -909,7 +894,7 @@ mod tests {
 
     #[test]
     fn signal_findings_empty_host_is_error() {
-        let sg = make_signal("", PathBuf::from("/nonexistent"));
+        let sg = make_signal("");
         let findings = signal_findings_for(&sg);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Error);
@@ -921,25 +906,6 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Error);
         assert!(findings[0].message.contains("does not exist"));
-    }
-
-    #[test]
-    fn signal_state_dir_collision_with_default_is_warn() {
-        let Some(default) = dirs::data_local_dir() else {
-            return;
-        };
-        let default = default.join("signal-rs");
-        if !default.exists() {
-            std::fs::create_dir_all(&default).expect("create signal-rs default");
-        }
-        let findings = state_dir_findings(&default);
-        let has_collision = findings
-            .iter()
-            .any(|f| f.severity == Severity::Warn && f.message.contains("collides"));
-        assert!(
-            has_collision,
-            "state_dir == signal-rs CLI default must emit a collision Warn"
-        );
     }
 
     #[test]

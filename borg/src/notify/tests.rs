@@ -219,7 +219,6 @@ fn test_format_desktop_body_appends_obsidian_url_unescaped() {
 
 fn mk_signal_config(notification_recipient: Option<&str>) -> SignalConfig {
     SignalConfig {
-        state_dir: std::path::PathBuf::from("/tmp/borg-test-signal-state"),
         allowed_senders: vec![],
         notification_recipient: notification_recipient.map(str::to_string),
         host: "test-host".to_string(),

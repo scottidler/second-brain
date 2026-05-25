@@ -703,10 +703,21 @@ fn outcome_label(outcome: &ClassifyOutcome) -> &'static str {
 }
 
 /// Entry point for the Signal transport. Mirrors `telegram::run`.
-pub async fn run(signal_config: SignalConfig, config: Arc<Config>, desktop: Option<notify::Desktop>) -> Result<()> {
+///
+/// `state_dir` is the resolved canonical signal-state path
+/// (`vault::paths::borg_signal_state_dir()`). It is supplied by the
+/// daemon supervisor and never read from `SignalConfig` -- the path
+/// is a borg implementation detail, not an operator-tunable config
+/// field. See `docs/design/2026-05-24-signal-state-dir-internalization.md`.
+pub async fn run(
+    signal_config: SignalConfig,
+    state_dir: PathBuf,
+    config: Arc<Config>,
+    desktop: Option<notify::Desktop>,
+) -> Result<()> {
     log::info!(
         "signal::run: state_dir={} host={} allowed_senders={} rate_threshold={}",
-        signal_config.state_dir.display(),
+        state_dir.display(),
         signal_config.host,
         signal_config.allowed_senders.len(),
         signal_config.notetoself_rate_threshold_per_hour
@@ -720,7 +731,7 @@ pub async fn run(signal_config: SignalConfig, config: Arc<Config>, desktop: Opti
     let mut backoff = ExponentialBackoff::new();
 
     loop {
-        let client = open_or_fail(&signal_config.state_dir).await?;
+        let client = open_or_fail(&state_dir).await?;
 
         // Pre-flight: confirm we're still linked from the server's view.
         match client.status().await {
@@ -820,7 +831,7 @@ pub async fn run(signal_config: SignalConfig, config: Arc<Config>, desktop: Opti
             eyre::bail!(
                 "signal: receive loop returned Deauthorized - the primary device removed this link; \
                  re-run `signal-rs link --name borg --state-dir {}` and restart the borg daemon",
-                signal_config.state_dir.display()
+                state_dir.display()
             );
         }
         if !should_reconnect {

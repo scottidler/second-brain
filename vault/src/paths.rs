@@ -67,6 +67,31 @@ pub fn patterns_dir() -> PathBuf {
     config_root().join("patterns")
 }
 
+/// Subdirectory under `dirs::data_local_dir()` that owns borg's
+/// signal-rs linked-device state (Double Ratchet sessions, prekeys,
+/// identity). One canonical path per borg installation; the operator
+/// does NOT pick it. `signal-rs link --state-dir <path>` matches this
+/// constant by convention.
+pub const SB_BORG_SIGNAL_STATE_DIR: &str = "sb/borg/signal-state";
+
+/// `~/.local/share/sb/borg/signal-state/` on Linux,
+/// `~/Library/Application Support/sb/borg/signal-state/` on macOS.
+/// Resolved at runtime via `dirs::data_local_dir()`.
+///
+/// Named `borg_signal_state_dir` (not `signal_state_dir`) so the
+/// borg-scoped ownership is obvious in call sites — matches the
+/// `SB_BORG_DATA_DIR` / `receipts_db_path` convention in
+/// `vault::receipts`.
+///
+/// Panics only when `dirs::data_local_dir()` returns `None`, which
+/// requires both `$HOME` and `$XDG_DATA_HOME` to be unset - a broken
+/// environment where the rest of borg would also fail.
+pub fn borg_signal_state_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join(SB_BORG_SIGNAL_STATE_DIR)
+}
+
 /// Resolve the vault root with explicit precedence: CLI > config > marker-gated CWD.
 ///
 /// Returns an error rather than silently picking up an arbitrary working directory.
