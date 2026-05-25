@@ -27,7 +27,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Re
     let notes = scan_vault(vault_root, &config.vault)?;
 
     let db_path = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
+        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
         .join("oracle")
         .join("oracle.db");
     let search_index = SearchIndex::open(&db_path).ok();

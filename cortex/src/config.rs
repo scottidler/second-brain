@@ -653,7 +653,7 @@ impl Config {
     /// both processes see the same notes + embeddings on every query.
     pub fn oracle_db_path(&self) -> PathBuf {
         dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("~/.local/share"))
+            .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
             .join("oracle")
             .join("oracle.db")
     }

@@ -569,7 +569,7 @@ fn configured_actions(
 fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<String>> {
     let mut lines = Vec::new();
     let service_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .expect("dirs::config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
         .join("systemd")
         .join("user");
 
@@ -691,7 +691,7 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<Str
 /// should print.
 fn uninstall_systemd_service() -> Result<Vec<String>> {
     let service_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .expect("dirs::config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
         .join("systemd")
         .join("user");
 
@@ -727,7 +727,7 @@ fn uninstall_systemd_service() -> Result<Vec<String>> {
 /// mirroring borg's `--status` pattern. Returns the lines sb should print.
 fn show_status() -> Result<Vec<String>> {
     let service_path = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .expect("dirs::config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
         .join("systemd")
         .join("user")
         .join("cortex.service");

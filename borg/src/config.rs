@@ -509,7 +509,7 @@ pub struct StagingConfig {
 impl Default for StagingConfig {
     fn default() -> Self {
         let root = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from(".local/share"))
+            .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
             .join("sb")
             .join("borg")
             .join("stages");
