@@ -80,14 +80,6 @@ pub fn all_sections() -> Vec<Section> {
             findings: config_findings(),
         },
         Section {
-            name: "shared config",
-            findings: shared_config_findings(),
-        },
-        Section {
-            name: "patterns",
-            findings: pattern_findings(),
-        },
-        Section {
             name: "embedding cache",
             findings: embedding_findings(),
         },
@@ -218,127 +210,13 @@ fn parse_typed<T: serde::de::DeserializeOwned>(name: &str, path: &std::path::Pat
     }
 }
 
-/// Compare the shared-config files in the repo (`config/*.yml`) against the
-/// installed copies in `~/.config/sb/`. Drift here means borg and
-/// cortex disagree on the canonical tag vocabulary - a class of silent bugs
-/// only caught by hash-comparing the source-of-truth against the runtime
-/// copy. Mirror of `pattern_findings`.
-fn shared_config_findings() -> Vec<Finding> {
-    let repo_shared = std::path::Path::new("config");
-    let installed = Some(vault::paths::config_root());
-    let mut findings = Vec::new();
-    let Some(installed) = installed else {
-        findings.push(Finding::error(
-            "dirs::config_dir() returned None",
-            "check XDG_CONFIG_HOME",
-        ));
-        return findings;
-    };
-    if !repo_shared.exists() {
-        findings.push(Finding::info(
-            "config/ not present in CWD (run from repo root for drift detection)",
-        ));
-        return findings;
-    }
-    if !installed.exists() {
-        findings.push(Finding::warn(
-            format!("{} missing", installed.display()),
-            "otto deploy".to_string(),
-        ));
-        return findings;
-    }
-    let repo_files: Vec<_> = std::fs::read_dir(repo_shared)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("yml"))
-        .collect();
-    if repo_files.is_empty() {
-        findings.push(Finding::info("no .yml files under config/ (nothing to compare)"));
-        return findings;
-    }
-    let mut drift = 0usize;
-    for entry in &repo_files {
-        let name = entry.file_name();
-        let installed_path = installed.join(&name);
-        if !installed_path.exists() {
-            drift += 1;
-            continue;
-        }
-        if std::fs::read(entry.path()).ok() != std::fs::read(&installed_path).ok() {
-            drift += 1;
-        }
-    }
-    if drift == 0 {
-        findings.push(Finding::ok(format!(
-            "{} shared-config file(s) in sync",
-            repo_files.len()
-        )));
-    } else {
-        findings.push(Finding::warn(
-            format!("{drift} of {} shared-config file(s) drifted vs repo", repo_files.len()),
-            "otto deploy".to_string(),
-        ));
-    }
-    findings
-}
-
-fn pattern_findings() -> Vec<Finding> {
-    // Compare borg/patterns/*.md in the repo (working tree) against ~/.config/sb/patterns/*.md.
-    // We can only detect drift on machines where the repo is checked out at the expected path.
-    let repo_patterns = std::path::Path::new("borg/patterns");
-    let installed = Some(vault::paths::patterns_dir());
-    let mut findings = Vec::new();
-    let Some(installed) = installed else {
-        findings.push(Finding::error(
-            "dirs::config_dir() returned None",
-            "check XDG_CONFIG_HOME",
-        ));
-        return findings;
-    };
-    if !repo_patterns.exists() {
-        findings.push(Finding::info(
-            "borg/patterns not present in CWD (run from repo root for drift detection)",
-        ));
-        return findings;
-    }
-    if !installed.exists() {
-        findings.push(Finding::warn(
-            format!("{} missing", installed.display()),
-            "otto deploy".to_string(),
-        ));
-        return findings;
-    }
-    let repo_files: Vec<_> = std::fs::read_dir(repo_patterns)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("md"))
-        .collect();
-    let mut drift = 0usize;
-    for entry in &repo_files {
-        let name = entry.file_name();
-        let installed_path = installed.join(&name);
-        if !installed_path.exists() {
-            drift += 1;
-            continue;
-        }
-        if std::fs::read(entry.path()).ok() != std::fs::read(&installed_path).ok() {
-            drift += 1;
-        }
-    }
-    if drift == 0 {
-        findings.push(Finding::ok(format!("{} patterns in sync", repo_files.len())));
-    } else {
-        findings.push(Finding::warn(
-            format!("{drift} of {} patterns drifted vs repo", repo_files.len()),
-            "otto deploy".to_string(),
-        ));
-    }
-    findings
-}
+// Note: shared_config_findings and pattern_findings used to live here. They
+// compared the repo working tree (`./config/`, `./borg/patterns/`) against
+// the installed copies in `~/.config/sb/`, which is a *developer*-side drift
+// check, not an operator-side health check. They forced the operator to run
+// `sb doctor` from inside the cloned repo to get a non-Info finding, which
+// is backwards. `otto deploy` is what keeps the installed copies in sync;
+// CI catches drift in the repo. Dropped from sb doctor entirely.
 
 fn embedding_findings() -> Vec<Finding> {
     // The active embedding backend (candle vs fastembed) is a compile-time
