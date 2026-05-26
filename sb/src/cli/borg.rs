@@ -63,8 +63,10 @@ pub enum Command {
     },
     /// Audit ledger and vault for misclassified or broken entries
     Audit {
-        #[arg(long)]
-        fix: bool,
+        /// Apply fixes. With no value, fixes every class. With one or more
+        /// kinds (space-separated), fixes only those classes. Case-insensitive.
+        #[arg(long, num_args = 0.., value_name = "KINDS", ignore_case = true)]
+        fix: Option<Vec<borg::audit::FindingKind>>,
         #[arg(long)]
         invariant: bool,
         #[arg(long, default_value_t = 1800)]
@@ -403,9 +405,11 @@ impl BorgCli {
                     Ok(())
                 } else {
                     let mut report = borg::audit::scan(&config)?;
-                    print_audit_summary(&report, fix);
-                    if fix && !report.no_ledger {
-                        report.fixed_count = borg::audit::apply_fixes(&report, |event| {
+                    print_audit_summary(&report, fix.is_some());
+                    if let Some(kinds) = fix
+                        && !report.no_ledger
+                    {
+                        report.fixed_count = borg::audit::apply_fixes(&report, &kinds, |event| {
                             print_audit_event(event);
                         });
                     }
@@ -895,7 +899,7 @@ fn print_audit_event(event: &borg::audit::AuditEvent) {
     match event {
         AuditEvent::FixStart { count } => {
             println!();
-            println!("Fixing {count} misclassified types...");
+            println!("Fixing {count} finding(s)...");
         }
         AuditEvent::Fixed {
             rel_path,
@@ -908,7 +912,30 @@ fn print_audit_event(event: &borg::audit::AuditEvent) {
         }
         AuditEvent::NothingFixable => {
             println!();
-            println!("No fixable issues (only type misclassifications can be auto-fixed).");
+            println!("No fixable findings for the requested kinds.");
+        }
+        AuditEvent::RowDropped { source, date } => {
+            println!("  Dropped \u{1F504} ledger row: {date}  {source}");
+        }
+        AuditEvent::NoteRemoved { rel_path, source } => {
+            println!("  rkvr rmrf: {} ({source})", rel_path.display());
+        }
+        AuditEvent::Quarantined {
+            source,
+            kept,
+            quarantined,
+        } => {
+            println!(
+                "  Quarantined {} dup(s) for source: {source}",
+                quarantined.len()
+            );
+            println!("    kept: {}", kept.display());
+            for q in quarantined {
+                println!("    moved: {}", q.display());
+            }
+        }
+        AuditEvent::RkvrUnavailable { path, error } => {
+            eprintln!("  rkvr unavailable for {}: {error}", path.display());
         }
     }
 }
@@ -935,11 +962,11 @@ fn print_audit_summary(report: &borg::audit::AuditReport, fix: bool) {
     let mut orphan_count = 0;
     for finding in &report.findings {
         match finding {
-            borg::audit::AuditFinding::MistypedContent { .. } => mistype_count += 1,
-            borg::audit::AuditFinding::BlockedContent { .. } => blocked_count += 1,
-            borg::audit::AuditFinding::RawUrlTitle { .. } => raw_title_count += 1,
-            borg::audit::AuditFinding::DuplicateNotes { .. } => duplicate_count += 1,
-            borg::audit::AuditFinding::OrphanedReplacement { .. } => orphan_count += 1,
+            borg::audit::AuditFinding::Mistype { .. } => mistype_count += 1,
+            borg::audit::AuditFinding::Blocked { .. } => blocked_count += 1,
+            borg::audit::AuditFinding::RawTitle { .. } => raw_title_count += 1,
+            borg::audit::AuditFinding::Duplicate { .. } => duplicate_count += 1,
+            borg::audit::AuditFinding::OrphanReplace { .. } => orphan_count += 1,
         }
     }
 
@@ -966,9 +993,13 @@ fn print_audit_summary(report: &borg::audit::AuditReport, fix: bool) {
         println!("  {finding}");
     }
 
-    if !fix && mistype_count > 0 {
+    if !fix {
+        let total = mistype_count + blocked_count + raw_title_count + duplicate_count + orphan_count;
         println!();
-        println!("Run with --fix to correct {mistype_count} misclassified types.");
+        println!(
+            "Run with --fix to address all {total} finding(s), or --fix <kinds...> to target specific classes."
+        );
+        println!("  Kinds: mistype | orphan-replace | blocked | raw-title | duplicate");
     }
 }
 

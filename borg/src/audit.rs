@@ -2,42 +2,84 @@ use crate::config::Config;
 use crate::ledger;
 use crate::migrate::reclassify_type;
 use crate::quality;
+use clap::ValueEnum;
 use eyre::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
+/// The kind of an audit finding. Single source of truth for the five
+/// finding classes — `AuditFinding` (data-carrying) and the CLI parser
+/// both project off this enum. Wire names are kebab-case (`mistype`,
+/// `orphan-replace`, etc.); the CLI parses any case via `ignore_case`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum FindingKind {
+    /// `type:` frontmatter doesn't match the URL's classifier output.
+    /// Fix: edit the frontmatter `type:` field.
+    Mistype,
+    /// `🔄` ledger row exists but no corresponding `✅` row followed.
+    /// Fix: drop the `🔄` row from the ledger.
+    OrphanReplace,
+    /// Note title matches the blocked-content heuristic (e.g. Cloudflare
+    /// interstitial). Fix: `rkvr rmrf` the note + drop its `✅` row.
+    Blocked,
+    /// Note title is the literal source URL (title extraction failed).
+    /// Fix: `rkvr rmrf` the note + drop its `✅` row.
+    RawTitle,
+    /// Multiple notes share the same `source:` value. Fix: keep newest
+    /// by mtime, move the rest to `system/quarantine/<source-key>/`.
+    Duplicate,
+}
+
+/// A single audit finding. Variant names mirror `FindingKind` 1:1 — the
+/// data payload lives on the variants because Rust can't have a single
+/// enum that's both a unit-variant `ValueEnum` (for CLI parsing) and a
+/// data-carrying variant enum. Use `kind()` to project to `FindingKind`.
 #[derive(Debug)]
 pub enum AuditFinding {
-    MistypedContent {
+    Mistype {
         source: String,
         current_type: String,
         expected_type: String,
         note_path: Option<PathBuf>,
     },
-    BlockedContent {
-        source: String,
-        title: String,
-        note_path: Option<PathBuf>,
-    },
-    RawUrlTitle {
-        source: String,
-        title: String,
-        note_path: Option<PathBuf>,
-    },
-    DuplicateNotes {
-        source: String,
-        note_paths: Vec<PathBuf>,
-    },
-    OrphanedReplacement {
+    OrphanReplace {
         source: String,
         replaced_date: String,
     },
+    Blocked {
+        source: String,
+        title: String,
+        note_path: Option<PathBuf>,
+    },
+    RawTitle {
+        source: String,
+        title: String,
+        note_path: Option<PathBuf>,
+    },
+    Duplicate {
+        source: String,
+        note_paths: Vec<PathBuf>,
+    },
+}
+
+impl AuditFinding {
+    pub fn kind(&self) -> FindingKind {
+        match self {
+            AuditFinding::Mistype { .. } => FindingKind::Mistype,
+            AuditFinding::OrphanReplace { .. } => FindingKind::OrphanReplace,
+            AuditFinding::Blocked { .. } => FindingKind::Blocked,
+            AuditFinding::RawTitle { .. } => FindingKind::RawTitle,
+            AuditFinding::Duplicate { .. } => FindingKind::Duplicate,
+        }
+    }
 }
 
 impl std::fmt::Display for AuditFinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AuditFinding::MistypedContent {
+            AuditFinding::Mistype {
                 source,
                 current_type,
                 expected_type,
@@ -46,16 +88,16 @@ impl std::fmt::Display for AuditFinding {
                 f,
                 "[MISTYPE] {source} -> type should be: {expected_type} (currently: {current_type})"
             ),
-            AuditFinding::BlockedContent { source, title, .. } => {
+            AuditFinding::Blocked { source, title, .. } => {
                 write!(f, "[BLOCKED] {source} -> title: \"{title}\"")
             }
-            AuditFinding::RawUrlTitle { source, title, .. } => {
+            AuditFinding::RawTitle { source, title, .. } => {
                 write!(f, "[RAW-TITLE] {source} -> title is raw URL: \"{title}\"")
             }
-            AuditFinding::DuplicateNotes { source, note_paths } => {
+            AuditFinding::Duplicate { source, note_paths } => {
                 write!(f, "[DUPLICATE] {source} -> {} notes found", note_paths.len())
             }
-            AuditFinding::OrphanedReplacement { source, replaced_date } => {
+            AuditFinding::OrphanReplace { source, replaced_date } => {
                 write!(
                     f,
                     "[ORPHAN-REPLACE] {source} -> marked replaced on {replaced_date} but no replacement ✅ exists"
@@ -91,19 +133,92 @@ pub struct AuditReport {
 /// used to print directly.
 #[derive(Debug)]
 pub enum AuditEvent {
-    FixStart { count: usize },
-    Fixed { rel_path: PathBuf, expected_type: String },
-    FixError { path: PathBuf, error: String },
+    FixStart {
+        count: usize,
+    },
+    Fixed {
+        rel_path: PathBuf,
+        expected_type: String,
+    },
+    FixError {
+        path: PathBuf,
+        error: String,
+    },
     NothingFixable,
+    /// One `🔄` orphan row dropped from the markdown ledger.
+    RowDropped {
+        source: String,
+        date: String,
+    },
+    /// One note removed via `rkvr rmrf` for blocked / raw-title cleanup.
+    NoteRemoved {
+        rel_path: PathBuf,
+        source: String,
+    },
+    /// One duplicate set quarantined: `kept` stays in place, `quarantined`
+    /// were moved into `system/quarantine/<source-key>/`.
+    Quarantined {
+        source: String,
+        kept: PathBuf,
+        quarantined: Vec<PathBuf>,
+    },
+    /// `rkvr` was needed but missing or failed.
+    RkvrUnavailable {
+        path: PathBuf,
+        error: String,
+    },
+}
+
+/// Shell out to `rkvr rmrf <path>` so the deleted file lands in rkvr's
+/// archive (recoverable via `rkvr rcvr`). Tests bypass to `remove_file` so
+/// the recovery store under `~/.local/share/rkvr/` is not polluted.
+fn rkvr_remove(path: &Path) -> Result<()> {
+    if cfg!(test) {
+        std::fs::remove_file(path).context("test bypass: remove_file failed")?;
+        return Ok(());
+    }
+    let status = std::process::Command::new("rkvr")
+        .arg("rmrf")
+        .arg(path)
+        .status()
+        .context("Failed to invoke rkvr (install rkvr or check PATH)")?;
+    if !status.success() {
+        eyre::bail!("rkvr rmrf exited with status {status}");
+    }
+    Ok(())
+}
+
+/// Sanitize a source identifier (URL or arbitrary string) into a path-safe
+/// quarantine key. Non-alphanumeric characters become dashes; runs of dashes
+/// collapse; output is capped at 80 chars so quarantine paths stay reasonable.
+fn quarantine_key(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut last_was_dash = false;
+    for c in source.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash && !out.is_empty() {
+            out.push('-');
+            last_was_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out.truncate(80);
+    if out.is_empty() { "unknown".to_string() } else { out }
 }
 
 /// Convenience: scan + optionally apply fixes in one call. sb does NOT
 /// use this entry point (it needs to print the summary BEFORE the fix
 /// loop streams events); use `scan` + `apply_fixes` for that.
-pub fn run(config: &Config, fix: bool) -> Result<AuditReport> {
+pub fn run(config: &Config, fix: Option<&[FindingKind]>) -> Result<AuditReport> {
     let mut report = scan(config)?;
-    if fix && !report.no_ledger {
-        report.fixed_count = apply_fixes(&report, |_| {});
+    if let Some(kinds) = fix
+        && !report.no_ledger
+    {
+        report.fixed_count = apply_fixes(&report, kinds, |_| {});
     }
     Ok(report)
 }
@@ -148,7 +263,7 @@ pub fn scan(config: &Config) -> Result<AuditReport> {
                 if let Some(current_type) = read_note_type(path)
                     && current_type != expected_type
                 {
-                    findings.push(AuditFinding::MistypedContent {
+                    findings.push(AuditFinding::Mistype {
                         source: entry.source.clone(),
                         current_type,
                         expected_type: expected_type.to_string(),
@@ -167,13 +282,13 @@ pub fn scan(config: &Config) -> Result<AuditReport> {
             && let Some(reason) = quality::detect_blocked_content("", &note_title)
         {
             if reason.contains("raw URL") {
-                findings.push(AuditFinding::RawUrlTitle {
+                findings.push(AuditFinding::RawTitle {
                     source: entry.source.clone(),
                     title: note_title,
                     note_path,
                 });
             } else {
-                findings.push(AuditFinding::BlockedContent {
+                findings.push(AuditFinding::Blocked {
                     source: entry.source.clone(),
                     title: note_title,
                     note_path,
@@ -208,7 +323,7 @@ pub fn scan(config: &Config) -> Result<AuditReport> {
 
         for (source, date) in &replaced_sources {
             if !completed_sources.contains(source) {
-                findings.push(AuditFinding::OrphanedReplacement {
+                findings.push(AuditFinding::OrphanReplace {
                     source: source.clone(),
                     replaced_date: date.clone(),
                 });
@@ -219,7 +334,7 @@ pub fn scan(config: &Config) -> Result<AuditReport> {
     // 4. Duplicate notes (multiple notes with same source URL)
     for (source, paths) in &note_index {
         if paths.len() > 1 {
-            findings.push(AuditFinding::DuplicateNotes {
+            findings.push(AuditFinding::Duplicate {
                 source: source.clone(),
                 note_paths: paths.clone(),
             });
@@ -236,17 +351,23 @@ pub fn scan(config: &Config) -> Result<AuditReport> {
     })
 }
 
-/// Apply fixes for the mistyped-content findings in `report`. Each fix
-/// is a real disk I/O event, so this streams `AuditEvent`s through the
-/// callback (per architect Alternative 3, audit --fix is sequential I/O
-/// where live UX matters). Returns the number of fixes successfully
-/// applied; sb writes that back into `report.fixed_count`.
-pub fn apply_fixes(report: &AuditReport, mut progress: impl FnMut(&AuditEvent)) -> usize {
-    let fixable: Vec<&AuditFinding> = report
-        .findings
-        .iter()
-        .filter(|f| matches!(f, AuditFinding::MistypedContent { .. }))
-        .collect();
+/// Apply fixes for the findings in `report`, filtered to the requested
+/// `kinds`. An empty `kinds` slice means "all fixable kinds". Streams
+/// `AuditEvent`s through the callback as each fix lands (per architect
+/// Alternative 3, audit --fix is sequential I/O where live UX matters).
+/// Returns the number of fixes successfully applied; sb writes that back
+/// into `report.fixed_count`.
+pub fn apply_fixes(report: &AuditReport, kinds: &[FindingKind], mut progress: impl FnMut(&AuditEvent)) -> usize {
+    log::debug!(
+        "audit::apply_fixes: kinds={:?} findings={} vault_root={}",
+        kinds,
+        report.findings.len(),
+        report.vault_root.display(),
+    );
+
+    let want = |finding: &AuditFinding| -> bool { kinds.is_empty() || kinds.contains(&finding.kind()) };
+
+    let fixable: Vec<&AuditFinding> = report.findings.iter().filter(|f| want(f)).collect();
 
     if fixable.is_empty() {
         progress(&AuditEvent::NothingFixable);
@@ -256,31 +377,230 @@ pub fn apply_fixes(report: &AuditReport, mut progress: impl FnMut(&AuditEvent)) 
     progress(&AuditEvent::FixStart { count: fixable.len() });
     let mut fixed = 0usize;
     for finding in &fixable {
-        if let AuditFinding::MistypedContent {
-            expected_type,
-            note_path: Some(path),
-            ..
-        } = finding
-        {
-            match fix_note_type(path, expected_type) {
-                Ok(()) => {
-                    let rel = path.strip_prefix(&report.vault_root).unwrap_or(path).to_path_buf();
-                    progress(&AuditEvent::Fixed {
-                        rel_path: rel,
-                        expected_type: expected_type.clone(),
-                    });
-                    fixed += 1;
-                }
-                Err(e) => {
-                    progress(&AuditEvent::FixError {
-                        path: path.clone(),
-                        error: format!("{e:#}"),
-                    });
-                }
+        match finding {
+            AuditFinding::Mistype {
+                expected_type,
+                note_path: Some(path),
+                ..
+            } => {
+                fixed += apply_fix_mistype(report, path, expected_type, &mut progress);
             }
+            AuditFinding::OrphanReplace { source, replaced_date } => {
+                fixed += apply_fix_orphan_replace(report, source, replaced_date, &mut progress);
+            }
+            AuditFinding::Blocked {
+                source,
+                note_path: Some(path),
+                ..
+            }
+            | AuditFinding::RawTitle {
+                source,
+                note_path: Some(path),
+                ..
+            } => {
+                fixed += apply_fix_delete_and_drop(report, source, path, &mut progress);
+            }
+            AuditFinding::Duplicate { source, note_paths } => {
+                fixed += apply_fix_duplicate(report, source, note_paths, &mut progress);
+            }
+            _ => {}
         }
     }
     fixed
+}
+
+fn apply_fix_mistype(
+    report: &AuditReport,
+    path: &Path,
+    expected_type: &str,
+    progress: &mut impl FnMut(&AuditEvent),
+) -> usize {
+    match fix_note_type(path, expected_type) {
+        Ok(()) => {
+            let rel = path.strip_prefix(&report.vault_root).unwrap_or(path).to_path_buf();
+            progress(&AuditEvent::Fixed {
+                rel_path: rel,
+                expected_type: expected_type.to_string(),
+            });
+            1
+        }
+        Err(e) => {
+            progress(&AuditEvent::FixError {
+                path: path.to_path_buf(),
+                error: format!("{e:#}"),
+            });
+            0
+        }
+    }
+}
+
+fn apply_fix_orphan_replace(
+    report: &AuditReport,
+    source: &str,
+    replaced_date: &str,
+    progress: &mut impl FnMut(&AuditEvent),
+) -> usize {
+    match drop_ledger_row(&report.ledger_path, source, "\u{1F504}", Some(replaced_date)) {
+        Ok(true) => {
+            progress(&AuditEvent::RowDropped {
+                source: source.to_string(),
+                date: replaced_date.to_string(),
+            });
+            1
+        }
+        Ok(false) => 0,
+        Err(e) => {
+            progress(&AuditEvent::FixError {
+                path: report.ledger_path.clone(),
+                error: format!("{e:#}"),
+            });
+            0
+        }
+    }
+}
+
+fn apply_fix_delete_and_drop(
+    report: &AuditReport,
+    source: &str,
+    path: &Path,
+    progress: &mut impl FnMut(&AuditEvent),
+) -> usize {
+    if let Err(e) = rkvr_remove(path) {
+        progress(&AuditEvent::RkvrUnavailable {
+            path: path.to_path_buf(),
+            error: format!("{e:#}"),
+        });
+        return 0;
+    }
+    let rel = path.strip_prefix(&report.vault_root).unwrap_or(path).to_path_buf();
+    progress(&AuditEvent::NoteRemoved {
+        rel_path: rel,
+        source: source.to_string(),
+    });
+
+    match drop_ledger_row(&report.ledger_path, source, "\u{2705}", None) {
+        Ok(_) => 1,
+        Err(e) => {
+            progress(&AuditEvent::FixError {
+                path: report.ledger_path.clone(),
+                error: format!("{e:#}"),
+            });
+            // The note is gone but the ledger drop failed; don't double-count.
+            0
+        }
+    }
+}
+
+fn apply_fix_duplicate(
+    report: &AuditReport,
+    source: &str,
+    note_paths: &[PathBuf],
+    progress: &mut impl FnMut(&AuditEvent),
+) -> usize {
+    if note_paths.len() < 2 {
+        return 0;
+    }
+    let mut with_mtime: Vec<(PathBuf, SystemTime)> = note_paths
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok()?.modified().ok().map(|t| (p.clone(), t)))
+        .collect();
+    if with_mtime.len() < 2 {
+        // Need at least two readable mtimes to pick a winner; punt.
+        return 0;
+    }
+    with_mtime.sort_by(|a, b| b.1.cmp(&a.1));
+    let (keep, _) = with_mtime.first().cloned().expect("len >= 2 verified above");
+    let losers: Vec<PathBuf> = with_mtime.into_iter().skip(1).map(|(p, _)| p).collect();
+
+    let quarantine_root = report
+        .vault_root
+        .join("system")
+        .join("quarantine")
+        .join(quarantine_key(source));
+
+    let mut moved: Vec<PathBuf> = Vec::with_capacity(losers.len());
+    for loser in &losers {
+        let rel = loser.strip_prefix(&report.vault_root).unwrap_or(loser);
+        let dest = quarantine_root.join(rel);
+        if let Some(parent) = dest.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            progress(&AuditEvent::FixError {
+                path: dest.clone(),
+                error: format!("create_dir_all failed: {e:#}"),
+            });
+            continue;
+        }
+        match std::fs::rename(loser, &dest) {
+            Ok(()) => moved.push(loser.clone()),
+            Err(e) => progress(&AuditEvent::FixError {
+                path: loser.clone(),
+                error: format!("rename to {} failed: {e:#}", dest.display()),
+            }),
+        }
+    }
+
+    if moved.is_empty() {
+        return 0;
+    }
+    progress(&AuditEvent::Quarantined {
+        source: source.to_string(),
+        kept: keep,
+        quarantined: moved,
+    });
+    1
+}
+
+/// Rewrite the markdown ledger, dropping rows whose status matches `status_glyph`
+/// and whose source column matches `source`. If `date_filter` is `Some`, only
+/// drop rows whose date column matches as well (used for orphan-replace to
+/// avoid removing unrelated rows that happen to share a source). Returns
+/// whether any rows were dropped.
+fn drop_ledger_row(ledger_path: &Path, source: &str, status_glyph: &str, date_filter: Option<&str>) -> Result<bool> {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(ledger_path)
+        .context("Failed to open Borg Ledger for write")?;
+    file.lock_exclusive()
+        .context("Failed to acquire exclusive lock on Borg Ledger")?;
+
+    let content = std::fs::read_to_string(ledger_path).context("Failed to read Borg Ledger")?;
+    let mut out_lines: Vec<&str> = Vec::with_capacity(content.lines().count());
+    let mut dropped = false;
+    for line in content.lines() {
+        if !line.starts_with('|') || line.starts_with("| Date") || line.starts_with("|--") {
+            out_lines.push(line);
+            continue;
+        }
+        let cols: Vec<&str> = line.split('|').collect();
+        if cols.len() < 8 {
+            out_lines.push(line);
+            continue;
+        }
+        let status = cols[4].trim();
+        let row_source = if cols.len() >= 11 { cols[7].trim() } else { cols[6].trim() };
+        let row_date = cols[1].trim();
+        let date_ok = match date_filter {
+            Some(d) => row_date == d,
+            None => true,
+        };
+        if status == status_glyph && row_source == source && date_ok {
+            dropped = true;
+            continue;
+        }
+        out_lines.push(line);
+    }
+
+    if dropped {
+        let new_content = format!("{}\n", out_lines.join("\n"));
+        std::fs::write(ledger_path, new_content).context("Failed to write Borg Ledger")?;
+    }
+    file.unlock().ok();
+    Ok(dropped)
 }
 
 /// Build an index mapping source URL -> list of note file paths in the vault.
@@ -446,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_audit_finding_display() {
-        let finding = AuditFinding::MistypedContent {
+        let finding = AuditFinding::Mistype {
             source: "https://github.com/owner/repo".to_string(),
             current_type: "article".to_string(),
             expected_type: "github".to_string(),
@@ -460,7 +780,7 @@ mod tests {
 
     #[test]
     fn test_audit_finding_display_blocked() {
-        let finding = AuditFinding::BlockedContent {
+        let finding = AuditFinding::Blocked {
             source: "https://example.com".to_string(),
             title: "Just a moment...".to_string(),
             note_path: None,
@@ -472,7 +792,7 @@ mod tests {
 
     #[test]
     fn test_audit_finding_display_raw_title() {
-        let finding = AuditFinding::RawUrlTitle {
+        let finding = AuditFinding::RawTitle {
             source: "https://example.com".to_string(),
             title: "https://example.com".to_string(),
             note_path: None,
@@ -483,7 +803,7 @@ mod tests {
 
     #[test]
     fn test_audit_finding_display_duplicate() {
-        let finding = AuditFinding::DuplicateNotes {
+        let finding = AuditFinding::Duplicate {
             source: "https://example.com".to_string(),
             note_paths: vec![PathBuf::from("/a.md"), PathBuf::from("/b.md")],
         };
@@ -515,7 +835,7 @@ mod tests {
 
     #[test]
     fn test_audit_finding_display_orphaned_replacement() {
-        let finding = AuditFinding::OrphanedReplacement {
+        let finding = AuditFinding::OrphanReplace {
             source: "https://example.com/video".to_string(),
             replaced_date: "2026-03-18".to_string(),
         };
@@ -591,5 +911,297 @@ mod tests {
 
         let unique = index.get(unique_url).expect("unique key present");
         assert_eq!(unique.len(), 1);
+    }
+
+    // ---- fixtures for the new --fix <kinds> integration tests ----
+
+    fn make_vault() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        std::fs::create_dir_all(root.join("system").join("views")).expect("mkdir views");
+        (tmp, root)
+    }
+
+    fn write_ledger(root: &Path, body: &str) -> PathBuf {
+        let path = root.join("system").join("views").join("borg-ledger.md");
+        let header = "| Date | Time | Method | Status | Note | Source | Domain | Trace |\n|------|------|--------|--------|------|--------|--------|-------|\n";
+        std::fs::write(
+            &path,
+            format!("---\ntitle: Borg Ledger\n---\n\n# Borg Ledger\n\n{header}{body}\n"),
+        )
+        .expect("write ledger");
+        path
+    }
+
+    fn write_note(root: &Path, rel: &str, source: &str, title: &str) -> PathBuf {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir note parent");
+        }
+        std::fs::write(
+            &path,
+            format!("---\ntitle: \"{title}\"\nsource: {source}\ntype: article\n---\n\n# Body\n"),
+        )
+        .expect("write note");
+        path
+    }
+
+    fn set_mtime(path: &Path, seconds_since_epoch: u64) {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds_since_epoch);
+        std::fs::File::open(path)
+            .and_then(|f| f.set_modified(t))
+            .expect("set_modified");
+    }
+
+    fn collect_events<F>(report: &AuditReport, kinds: &[FindingKind], f: F) -> Vec<String>
+    where
+        F: FnOnce(usize),
+    {
+        let mut lines: Vec<String> = Vec::new();
+        let fixed = apply_fixes(report, kinds, |event| {
+            lines.push(format!("{event:?}"));
+        });
+        f(fixed);
+        lines
+    }
+
+    // ---- new tests ----
+
+    #[test]
+    fn quarantine_key_sanitizes_urls() {
+        assert_eq!(quarantine_key("https://example.com/foo"), "https-example-com-foo");
+        assert_eq!(quarantine_key("pais-migration"), "pais-migration");
+        assert_eq!(quarantine_key("!!!"), "unknown");
+        // Cap at 80 chars.
+        let long = "x".repeat(200);
+        assert!(quarantine_key(&long).len() <= 80);
+        // Trailing dashes trimmed.
+        assert!(!quarantine_key("https://x/").ends_with('-'));
+    }
+
+    #[test]
+    fn finding_kind_projection() {
+        let f = AuditFinding::Mistype {
+            source: "s".into(),
+            current_type: "a".into(),
+            expected_type: "b".into(),
+            note_path: None,
+        };
+        assert_eq!(f.kind(), FindingKind::Mistype);
+        let f = AuditFinding::OrphanReplace {
+            source: "s".into(),
+            replaced_date: "2026-01-01".into(),
+        };
+        assert_eq!(f.kind(), FindingKind::OrphanReplace);
+    }
+
+    #[test]
+    fn apply_fix_orphan_replace_drops_row() {
+        let (_tmp, root) = make_vault();
+        let src = "https://example.com/abandoned";
+        let body = format!(
+            "| 2026-03-29 | 10:00 | http | \u{1F504} | [[old]] | {src} | ai | tr-1 |\n\
+             | 2026-03-28 | 09:00 | http | \u{2705} | [[other]] | https://example.com/other | ai | tr-0 |\n"
+        );
+        let ledger_path = write_ledger(&root, &body);
+
+        let report = AuditReport {
+            ledger_path: ledger_path.clone(),
+            vault_root: root.clone(),
+            entries_scanned: 0,
+            no_ledger: false,
+            findings: vec![AuditFinding::OrphanReplace {
+                source: src.to_string(),
+                replaced_date: "2026-03-29".to_string(),
+            }],
+            fixed_count: 0,
+        };
+
+        let lines = collect_events(&report, &[FindingKind::OrphanReplace], |fixed| assert_eq!(fixed, 1));
+        assert!(
+            lines.iter().any(|l| l.contains("RowDropped")),
+            "expected RowDropped event in {lines:?}"
+        );
+
+        let after = std::fs::read_to_string(&ledger_path).expect("read");
+        assert!(!after.contains(src), "orphan row should be gone:\n{after}");
+        assert!(after.contains("https://example.com/other"), "unrelated row preserved");
+    }
+
+    #[test]
+    fn apply_fix_blocked_removes_note_and_drops_row() {
+        let (_tmp, root) = make_vault();
+        let src = "https://blocked.example.com/post";
+        let note_path = write_note(&root, "inbox/blocked-note.md", src, "Just a moment...");
+        let body = format!(
+            "| 2026-03-20 | 10:00 | http | \u{2705} | [[blocked-note]] | {src} | ai | tr-1 |\n\
+             | 2026-03-19 | 09:00 | http | \u{2705} | [[other]] | https://example.com/other | ai | tr-0 |\n"
+        );
+        let ledger_path = write_ledger(&root, &body);
+
+        let report = AuditReport {
+            ledger_path: ledger_path.clone(),
+            vault_root: root.clone(),
+            entries_scanned: 0,
+            no_ledger: false,
+            findings: vec![AuditFinding::Blocked {
+                source: src.to_string(),
+                title: "Just a moment...".to_string(),
+                note_path: Some(note_path.clone()),
+            }],
+            fixed_count: 0,
+        };
+
+        let lines = collect_events(&report, &[FindingKind::Blocked], |fixed| assert_eq!(fixed, 1));
+        assert!(lines.iter().any(|l| l.contains("NoteRemoved")));
+
+        assert!(!note_path.exists(), "blocked note should be removed");
+        let after = std::fs::read_to_string(&ledger_path).expect("read");
+        assert!(!after.contains(src), "blocked ledger row should be gone");
+        assert!(after.contains("https://example.com/other"));
+    }
+
+    #[test]
+    fn apply_fix_raw_title_removes_note_and_drops_row() {
+        let (_tmp, root) = make_vault();
+        let src = "https://example.com/no-title";
+        let note_path = write_note(&root, "inbox/no-title.md", src, src);
+        let body = format!("| 2026-03-20 | 10:00 | http | \u{2705} | [[no-title]] | {src} | x | tr-1 |\n");
+        let ledger_path = write_ledger(&root, &body);
+
+        let report = AuditReport {
+            ledger_path: ledger_path.clone(),
+            vault_root: root.clone(),
+            entries_scanned: 0,
+            no_ledger: false,
+            findings: vec![AuditFinding::RawTitle {
+                source: src.to_string(),
+                title: src.to_string(),
+                note_path: Some(note_path.clone()),
+            }],
+            fixed_count: 0,
+        };
+
+        let lines = collect_events(&report, &[FindingKind::RawTitle], |fixed| assert_eq!(fixed, 1));
+        assert!(lines.iter().any(|l| l.contains("NoteRemoved")));
+
+        assert!(!note_path.exists());
+        let after = std::fs::read_to_string(&ledger_path).expect("read");
+        assert!(!after.contains(src));
+    }
+
+    #[test]
+    fn apply_fix_duplicate_keeps_newest_quarantines_rest() {
+        let (_tmp, root) = make_vault();
+        let src = "https://example.com/dup";
+
+        let oldest = write_note(&root, "inbox/dup-a.md", src, "A");
+        let middle = write_note(&root, "inbox/dup-b.md", src, "B");
+        let newest = write_note(&root, "inbox/dup-c.md", src, "C");
+        set_mtime(&oldest, 1_000_000);
+        set_mtime(&middle, 2_000_000);
+        set_mtime(&newest, 3_000_000);
+
+        let ledger_path = write_ledger(&root, "");
+
+        let report = AuditReport {
+            ledger_path,
+            vault_root: root.clone(),
+            entries_scanned: 0,
+            no_ledger: false,
+            findings: vec![AuditFinding::Duplicate {
+                source: src.to_string(),
+                note_paths: vec![oldest.clone(), middle.clone(), newest.clone()],
+            }],
+            fixed_count: 0,
+        };
+
+        let lines = collect_events(&report, &[FindingKind::Duplicate], |fixed| assert_eq!(fixed, 1));
+        assert!(
+            lines.iter().any(|l| l.contains("Quarantined")),
+            "expected Quarantined event in {lines:?}"
+        );
+
+        assert!(newest.exists(), "newest should be kept in place");
+        assert!(!oldest.exists(), "oldest should be moved out");
+        assert!(!middle.exists(), "middle should be moved out");
+
+        let key = quarantine_key(src);
+        let quarantine_root = root.join("system").join("quarantine").join(&key);
+        assert!(
+            quarantine_root.join("inbox").join("dup-a.md").exists(),
+            "oldest should be at quarantine/{key}/inbox/dup-a.md"
+        );
+        assert!(quarantine_root.join("inbox").join("dup-b.md").exists());
+    }
+
+    #[test]
+    fn apply_fixes_filters_by_kind() {
+        let (_tmp, root) = make_vault();
+        let src_orphan = "https://example.com/orphan";
+        let src_other = "https://example.com/other";
+        let body = format!(
+            "| 2026-03-29 | 10:00 | http | \u{1F504} | [[old]] | {src_orphan} | ai | tr-1 |\n\
+             | 2026-03-28 | 09:00 | http | \u{2705} | [[other]] | {src_other} | ai | tr-0 |\n"
+        );
+        let ledger_path = write_ledger(&root, &body);
+
+        let report = AuditReport {
+            ledger_path: ledger_path.clone(),
+            vault_root: root.clone(),
+            entries_scanned: 0,
+            no_ledger: false,
+            findings: vec![
+                AuditFinding::OrphanReplace {
+                    source: src_orphan.to_string(),
+                    replaced_date: "2026-03-29".to_string(),
+                },
+                AuditFinding::Mistype {
+                    source: src_other.to_string(),
+                    current_type: "article".to_string(),
+                    expected_type: "github".to_string(),
+                    // Note: no note_path -> mistype is unfixable; that's fine
+                    // since we're verifying the kind filter, not the fix.
+                    note_path: None,
+                },
+            ],
+            fixed_count: 0,
+        };
+
+        // Only request OrphanReplace; the Mistype finding should be ignored.
+        let lines = collect_events(&report, &[FindingKind::OrphanReplace], |fixed| {
+            assert_eq!(fixed, 1, "only orphan-replace should be fixed");
+        });
+        assert!(lines.iter().any(|l| l.contains("RowDropped")));
+        assert!(!lines.iter().any(|l| l.contains("Fixed {")));
+
+        let after = std::fs::read_to_string(&ledger_path).expect("read");
+        assert!(!after.contains(src_orphan), "orphan row gone");
+        assert!(after.contains(src_other), "other row preserved");
+    }
+
+    #[test]
+    fn apply_fixes_empty_kinds_means_all() {
+        let (_tmp, root) = make_vault();
+        let src = "https://example.com/orphan";
+        let body = format!("| 2026-03-29 | 10:00 | http | \u{1F504} | [[old]] | {src} | ai | tr-1 |\n");
+        let ledger_path = write_ledger(&root, &body);
+
+        let report = AuditReport {
+            ledger_path: ledger_path.clone(),
+            vault_root: root.clone(),
+            entries_scanned: 0,
+            no_ledger: false,
+            findings: vec![AuditFinding::OrphanReplace {
+                source: src.to_string(),
+                replaced_date: "2026-03-29".to_string(),
+            }],
+            fixed_count: 0,
+        };
+
+        // Empty kinds slice means "fix everything".
+        collect_events(&report, &[], |fixed| assert_eq!(fixed, 1));
+        let after = std::fs::read_to_string(&ledger_path).expect("read");
+        assert!(!after.contains(src));
     }
 }
