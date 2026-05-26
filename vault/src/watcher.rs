@@ -25,18 +25,14 @@ pub struct WatcherConfig {
 
 impl Default for WatcherConfig {
     fn default() -> Self {
+        // `quarantine` is where audit `--fix duplicate` parks set-aside notes;
+        // ignoring it here keeps every move event from waking the debounce
+        // loop for paths the indexer would only filter out anyway.
         Self {
             debounce_secs: 5,
-            ignore_dirs: vec![
-                ".git".into(),
-                ".obsidian".into(),
-                "templates".into(),
-                // Audit `--fix duplicate` writes set-aside notes into
-                // `system/quarantine/<source-key>/...`. Without this,
-                // every quarantine event (re)triggers oracle reindex
-                // for notes whose paths the indexer will then ignore.
-                "quarantine".into(),
-            ],
+            ignore_dirs: [".git", ".obsidian", "templates", "quarantine"]
+                .map(String::from)
+                .to_vec(),
         }
     }
 }

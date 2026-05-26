@@ -11,23 +11,14 @@ pub struct ScanConfig {
 
 impl Default for ScanConfig {
     fn default() -> Self {
+        // `quarantine` is where audit `--fix duplicate` parks set-aside notes
+        // (`system/quarantine/<source-key>/...`); they keep their original
+        // frontmatter, so without this exclusion every consumer of
+        // `scan_vault` would index them as live knowledge.
         Self {
-            ignore: vec![
-                ".git".to_string(),
-                ".obsidian".to_string(),
-                ".cortex".to_string(),
-                "assets".to_string(),
-                "attachments".to_string(),
-                // Audit `--fix duplicate` moves N-1 of each duplicate set into
-                // `system/quarantine/<source-key>/...`. The quarantined notes
-                // still carry their original frontmatter (source, type, tags),
-                // so without this exclusion every consumer of `scan_vault`
-                // would index them as if they were live knowledge - oracle
-                // would surface them in `knowledge_search`, cortex's embed
-                // tick would compute embeddings for them. They are explicitly
-                // set-aside-pending-review state, not searchable content.
-                "quarantine".to_string(),
-            ],
+            ignore: [".git", ".obsidian", ".cortex", "assets", "attachments", "quarantine"]
+                .map(String::from)
+                .to_vec(),
         }
     }
 }
