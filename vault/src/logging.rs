@@ -55,6 +55,29 @@ pub fn setup_logging(log_file_path: &Path, log_level: &str) -> Result<()> {
     Ok(())
 }
 
+/// Init env_logger writing to stderr only, with no "Logging initialized" line.
+///
+/// For short-lived CLI verbs (status/list/show/install/doctor/bootstrap) where
+/// writing into the daemon's `<subsystem>.log` is pure noise — the daemon
+/// process owns that file. Inspection verbs go to stderr, period.
+pub fn setup_logging_stderr(log_level: &str) -> Result<()> {
+    env_logger::Builder::new()
+        .parse_filters(log_level)
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "{} [{}] {}: {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
+        .target(env_logger::Target::Stderr)
+        .init();
+    Ok(())
+}
+
 struct DualWriter {
     file: std::sync::Mutex<fs::File>,
     stderr: std::io::Stderr,

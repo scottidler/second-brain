@@ -95,6 +95,97 @@ pub fn patterns_dir() -> PathBuf {
     config_root().join("patterns")
 }
 
+pub fn cli_config() -> PathBuf {
+    config_root().join("cli.yml")
+}
+
+/// CLI ergonomics config for short-lived sb invocations.
+///
+/// Lives at `~/.config/sb/cli.yml`. All fields optional; missing file falls
+/// back to defaults. Schema:
+///
+/// ```yaml
+/// logging:
+///   level: debug         # log level for sb CLI invocations (not the daemon)
+///   status: true         # per-verb: do CLI verbs write to the subsystem log file?
+///   doctor: false
+///   bootstrap: true
+///   borg-daemon-status: false
+///   # verbs not listed default to false (stderr only)
+/// ```
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct CliConfig {
+    pub logging: CliLogging,
+}
+
+/// YAML shape mirrors the CLI command tree exactly:
+///
+/// ```yaml
+/// logging:
+///   level: debug              # log level for sb CLI processes
+///   status: true              # sb status
+///   doctor: true              # sb doctor
+///   bootstrap: true           # sb bootstrap
+///   borg:
+///     daemon:
+///       status: true          # sb borg daemon --status
+///       install: true         # sb borg daemon --install
+///     log: true               # sb borg log
+///   cortex:
+///     daemon:
+///       status: true          # sb cortex daemon --status
+///   oracle:
+///     stats: true             # sb oracle stats
+/// ```
+///
+/// Verbs absent from the file default to `false` (stderr-only). The
+/// command hierarchy under `logging:` is held as an opaque YAML
+/// mapping; lookup is by path slice (see [`CliLogging::opted_in`]).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct CliLogging {
+    /// Log level for short-lived sb CLI processes. Daemon log level stays
+    /// in `borg.yml` / `cortex.yml`. Resolution order in `sb`:
+    /// `--log-level` flag > `--verbose` > this field > `"info"`.
+    pub level: Option<String>,
+    /// Everything else under `logging:` is the verb-opt-in tree. Stored
+    /// as a raw mapping so we don't have to mirror the CLI command tree
+    /// with one struct per node. Walk it with `opted_in(&["borg", "log"])`.
+    #[serde(flatten)]
+    pub verbs: serde_yaml::Mapping,
+}
+
+impl CliLogging {
+    /// `true` iff the YAML path resolves to a literal `true` leaf.
+    /// Missing keys, missing intermediate nodes, and non-bool leaves all
+    /// return `false` so a default-empty config is the safe state.
+    pub fn opted_in(&self, path: &[&str]) -> bool {
+        let mut current = &self.verbs;
+        for (i, segment) in path.iter().enumerate() {
+            let Some(value) = current.get(*segment) else { return false };
+            if i + 1 == path.len() {
+                return matches!(value, serde_yaml::Value::Bool(true));
+            }
+            let serde_yaml::Value::Mapping(m) = value else { return false };
+            current = m;
+        }
+        false
+    }
+}
+
+impl CliConfig {
+    /// Load `~/.config/sb/cli.yml`. Missing file or parse failure returns
+    /// defaults (so a freshly bootstrapped machine does not need the file).
+    pub fn load() -> Self {
+        let path = cli_config();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        serde_yaml::from_str(&text).unwrap_or_default()
+    }
+}
+
 /// Subdirectory under `dirs::data_local_dir()` that owns borg's
 /// signal-rs linked-device state (Double Ratchet sessions, prekeys,
 /// identity). One canonical path per borg installation; the operator
