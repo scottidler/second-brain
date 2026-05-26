@@ -66,18 +66,30 @@ fn verb_logs_to_file(cli: &Cli, cli_cfg: &CliConfig) -> VerbLogging {
         opted_in: cli_cfg.logging.opted_in(path),
     };
     let daemon_flag = |d: &borg::DaemonArgs| -> &'static str {
-        if d.install { "install" }
-        else if d.uninstall { "uninstall" }
-        else if d.reinstall { "reinstall" }
-        else if d.stop { "stop" }
-        else if d.restart { "restart" }
-        else { "status" }
+        if d.install {
+            "install"
+        } else if d.uninstall {
+            "uninstall"
+        } else if d.reinstall {
+            "reinstall"
+        } else if d.stop {
+            "stop"
+        } else if d.restart {
+            "restart"
+        } else {
+            "status"
+        }
     };
     let cortex_daemon_flag = |d: &cortex::DaemonArgs| -> &'static str {
-        if d.install { "install" }
-        else if d.uninstall { "uninstall" }
-        else if d.stop { "stop" }
-        else { "status" }
+        if d.install {
+            "install"
+        } else if d.uninstall {
+            "uninstall"
+        } else if d.stop {
+            "stop"
+        } else {
+            "status"
+        }
     };
     match &cli.cmd {
         Cmd::Status(_) => inspect(&["status"]),
@@ -115,11 +127,21 @@ fn name_and_level(cli: &Cli, cli_cfg: &CliConfig) -> (String, String) {
     match &cli.cmd {
         Cmd::Borg(c) => (
             "borg".into(),
-            resolve_level(cli.log_level.as_deref(), c.log_level.as_deref(), cli_yaml_level, cli.verbose),
+            resolve_level(
+                cli.log_level.as_deref(),
+                c.log_level.as_deref(),
+                cli_yaml_level,
+                cli.verbose,
+            ),
         ),
         Cmd::Cortex(c) => (
             "cortex".into(),
-            resolve_level(cli.log_level.as_deref(), c.log_level.as_deref(), cli_yaml_level, cli.verbose),
+            resolve_level(
+                cli.log_level.as_deref(),
+                c.log_level.as_deref(),
+                cli_yaml_level,
+                cli.verbose,
+            ),
         ),
         Cmd::Oracle(_) => (
             "oracle".into(),

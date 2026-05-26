@@ -210,7 +210,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         fs::write(root.join("live.md"), "---\ntitle: live\ntype: note\n---\nbody\n").expect("write live");
-        let quarantine_dir = root.join("system").join("quarantine").join("https-example-com").join("notes");
+        let quarantine_dir = root
+            .join("system")
+            .join("quarantine")
+            .join("https-example-com")
+            .join("notes");
         fs::create_dir_all(&quarantine_dir).expect("mkdir quarantine");
         fs::write(
             quarantine_dir.join("quarantined.md"),
@@ -220,7 +224,10 @@ mod tests {
 
         let notes = scan_vault(root, &crate::config::ScanConfig::default()).expect("scan");
         let paths: Vec<String> = notes.iter().map(|n| n.path.to_string_lossy().to_string()).collect();
-        assert!(paths.iter().any(|p| p == "live.md"), "live note must be returned: {paths:?}");
+        assert!(
+            paths.iter().any(|p| p == "live.md"),
+            "live note must be returned: {paths:?}"
+        );
         assert!(
             !paths.iter().any(|p| p.contains("quarantine")),
             "quarantined note must be excluded from scan: {paths:?}"

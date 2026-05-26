@@ -925,10 +925,7 @@ fn print_audit_event(event: &borg::audit::AuditEvent) {
             kept,
             quarantined,
         } => {
-            println!(
-                "  Quarantined {} dup(s) for source: {source}",
-                quarantined.len()
-            );
+            println!("  Quarantined {} dup(s) for source: {source}", quarantined.len());
             println!("    kept: {}", kept.display());
             for q in quarantined {
                 println!("    moved: {}", q.display());
@@ -996,9 +993,7 @@ fn print_audit_summary(report: &borg::audit::AuditReport, fix: bool) {
     if !fix {
         let total = mistype_count + blocked_count + raw_title_count + duplicate_count + orphan_count;
         println!();
-        println!(
-            "Run with --fix to address all {total} finding(s), or --fix <kinds...> to target specific classes."
-        );
+        println!("Run with --fix to address all {total} finding(s), or --fix <kinds...> to target specific classes.");
         println!("  Kinds: mistype | orphan-replace | blocked | raw-title | duplicate");
     }
 }
