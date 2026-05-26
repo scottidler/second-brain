@@ -27,7 +27,16 @@ impl Default for WatcherConfig {
     fn default() -> Self {
         Self {
             debounce_secs: 5,
-            ignore_dirs: vec![".git".into(), ".obsidian".into(), "templates".into()],
+            ignore_dirs: vec![
+                ".git".into(),
+                ".obsidian".into(),
+                "templates".into(),
+                // Audit `--fix duplicate` writes set-aside notes into
+                // `system/quarantine/<source-key>/...`. Without this,
+                // every quarantine event (re)triggers oracle reindex
+                // for notes whose paths the indexer will then ignore.
+                "quarantine".into(),
+            ],
         }
     }
 }
@@ -195,6 +204,7 @@ mod tests {
         assert_eq!(config.debounce_secs, 5);
         assert!(config.ignore_dirs.contains(&".git".to_string()));
         assert!(config.ignore_dirs.contains(&".obsidian".to_string()));
+        assert!(config.ignore_dirs.contains(&"quarantine".to_string()));
         assert!(config.ignore_dirs.contains(&"templates".to_string()));
     }
 

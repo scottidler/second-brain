@@ -199,6 +199,34 @@ mod tests {
         );
     }
 
+    /// Regression guard: when audit `--fix duplicate` moves notes into
+    /// `system/quarantine/<source-key>/...`, those notes still carry valid
+    /// frontmatter. The default `ScanConfig` includes `"quarantine"` so any
+    /// downstream consumer (oracle's `index_vault`, cortex's vault scanner,
+    /// etc.) excludes them automatically. Without this, the quarantined
+    /// notes would re-enter the search index as if they were live knowledge.
+    #[test]
+    fn scan_vault_default_config_excludes_quarantine_subdirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("live.md"), "---\ntitle: live\ntype: note\n---\nbody\n").expect("write live");
+        let quarantine_dir = root.join("system").join("quarantine").join("https-example-com").join("notes");
+        fs::create_dir_all(&quarantine_dir).expect("mkdir quarantine");
+        fs::write(
+            quarantine_dir.join("quarantined.md"),
+            "---\ntitle: quarantined\ntype: note\nsource: https://example.com\n---\nbody\n",
+        )
+        .expect("write quarantined");
+
+        let notes = scan_vault(root, &crate::config::ScanConfig::default()).expect("scan");
+        let paths: Vec<String> = notes.iter().map(|n| n.path.to_string_lossy().to_string()).collect();
+        assert!(paths.iter().any(|p| p == "live.md"), "live note must be returned: {paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.contains("quarantine")),
+            "quarantined note must be excluded from scan: {paths:?}"
+        );
+    }
+
     /// Phase 1 error-path guard: an unreadable `.md` file (non-UTF-8 bytes) is warn-logged and
     /// skipped without aborting the whole scan; sibling notes still parse. This exercises the
     /// `parse_note` -> `fs::read_to_string` error branch, which is the only branch that returns
