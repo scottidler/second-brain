@@ -2223,6 +2223,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "facet"
+version = "0.8.31"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clap",
+ "dirs",
+ "distillers",
+ "env_logger",
+ "eyre",
+ "log",
+ "rayon",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "shellexpand",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "vault",
+ "walkdir",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

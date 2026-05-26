@@ -122,6 +122,10 @@ pub enum NoteType {
     Link,
     Poem,
     System,
+    #[serde(rename = "facet-workitem")]
+    FacetWorkitem,
+    #[serde(rename = "facet-portrait")]
+    FacetPortrait,
 }
 
 impl NoteType {
@@ -148,6 +152,8 @@ impl NoteType {
             Self::Link => "link",
             Self::Poem => "poem",
             Self::System => "system",
+            Self::FacetWorkitem => "facet-workitem",
+            Self::FacetPortrait => "facet-portrait",
         }
     }
 
@@ -174,6 +180,8 @@ impl NoteType {
             Self::Link,
             Self::Poem,
             Self::System,
+            Self::FacetWorkitem,
+            Self::FacetPortrait,
         ]
     }
 
@@ -235,6 +243,8 @@ impl FromStr for NoteType {
             "link" => Ok(Self::Link),
             "poem" => Ok(Self::Poem),
             "system" => Ok(Self::System),
+            "facet-workitem" => Ok(Self::FacetWorkitem),
+            "facet-portrait" => Ok(Self::FacetPortrait),
             _ => Err(format!("unknown note type: {s}")),
         }
     }
@@ -337,6 +347,7 @@ pub enum Method {
     Ntfy,
     Signal,
     Manual,
+    Facet,
 }
 
 impl Method {
@@ -350,6 +361,7 @@ impl Method {
             Self::Ntfy => "ntfy",
             Self::Signal => "signal",
             Self::Manual => "manual",
+            Self::Facet => "facet",
         }
     }
 
@@ -363,6 +375,7 @@ impl Method {
             Self::Ntfy,
             Self::Signal,
             Self::Manual,
+            Self::Facet,
         ]
     }
 }
@@ -385,6 +398,7 @@ impl FromStr for Method {
             "ntfy" => Ok(Self::Ntfy),
             "signal" => Ok(Self::Signal),
             "manual" => Ok(Self::Manual),
+            "facet" => Ok(Self::Facet),
             _ => Err(format!("unknown method: {s}")),
         }
     }

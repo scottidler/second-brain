@@ -79,6 +79,25 @@ pub fn oracle_config() -> PathBuf {
     config_root().join("oracle.yml")
 }
 
+pub fn facet_config() -> PathBuf {
+    config_root().join("facet.yml")
+}
+
+/// Per-machine durable state directory for facet
+/// (`~/.local/share/sb/facet/`). The ledger SQLite file and any test
+/// fixtures live here. Panics if `dirs::data_local_dir()` returns `None`,
+/// matching the established `config_root` pattern.
+pub fn facet_state_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("sb")
+        .join("facet")
+}
+
+pub fn facet_state_db() -> PathBuf {
+    facet_state_dir().join("state.db")
+}
+
 pub fn canonical_tags() -> PathBuf {
     config_root().join("canonical-tags.yml")
 }
@@ -163,11 +182,15 @@ impl CliLogging {
     pub fn opted_in(&self, path: &[&str]) -> bool {
         let mut current = &self.verbs;
         for (i, segment) in path.iter().enumerate() {
-            let Some(value) = current.get(*segment) else { return false };
+            let Some(value) = current.get(*segment) else {
+                return false;
+            };
             if i + 1 == path.len() {
                 return matches!(value, serde_yaml::Value::Bool(true));
             }
-            let serde_yaml::Value::Mapping(m) = value else { return false };
+            let serde_yaml::Value::Mapping(m) = value else {
+                return false;
+            };
             current = m;
         }
         false

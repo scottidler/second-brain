@@ -40,6 +40,7 @@ pub struct BootstrapArgs {
 pub(crate) const BORG_TEMPLATE: &str = include_str!("../../../config/templates/borg.yml.example");
 pub(crate) const CORTEX_TEMPLATE: &str = include_str!("../../../config/templates/cortex.yml.example");
 pub(crate) const ORACLE_TEMPLATE: &str = include_str!("../../../config/templates/oracle.yml.example");
+pub(crate) const FACET_TEMPLATE: &str = include_str!("../../../config/templates/facet.yml.example");
 
 pub(crate) const CANONICAL_TAGS_YML: &str = include_str!("../../../config/canonical-tags.yml");
 pub(crate) const TAG_MAPPING_YML: &str = include_str!("../../../config/tag-mapping.yml");
@@ -182,10 +183,15 @@ pub(crate) fn extract_canonical_assets(force: bool) -> Result<()> {
         ("borg", vault::paths::borg_config(), BORG_TEMPLATE),
         ("cortex", vault::paths::cortex_config(), CORTEX_TEMPLATE),
         ("oracle", vault::paths::oracle_config(), ORACLE_TEMPLATE),
+        ("facet", vault::paths::facet_config(), FACET_TEMPLATE),
     ];
     for (name, path, template) in &targets {
         write_if_missing(name, path, template)?;
     }
+
+    let facet_state = vault::paths::facet_state_dir();
+    std::fs::create_dir_all(&facet_state)
+        .with_context(|| format!("create facet state dir: {}", facet_state.display()))?;
 
     let shared = [
         ("canonical-tags", vault::paths::canonical_tags(), CANONICAL_TAGS_YML),
