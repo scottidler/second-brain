@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod discover;
 pub mod narrate;
+pub mod present;
 pub mod render;
 pub mod run;
 

@@ -13,6 +13,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod discover;
+pub mod render;
+pub mod run;
+
 #[cfg(test)]
 mod tests;
 

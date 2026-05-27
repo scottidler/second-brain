@@ -191,3 +191,41 @@ Artifacts:
 - **Evergreen vs discovered: when do we drop evergreen?** Open Question retained from the doc. Default kept-in for back-compat; revisit after Cross-Session proves out.
 
 ---
+
+## Phase 6: Dreaming layer
+
+Artifacts:
+- `facet/src/dream/discover.rs` + `dream/discover/tests.rs`: four dream-finders (`find_semantic_duplicate_groups`, `find_cross_references`, `find_narrative_candidates`, `find_stale_spectra`) plus a `find_all_dreams` aggregator.
+- `facet/src/dream/render.rs` + `dream/render/tests.rs`: per-dream markdown renderer with `type: facet-dream`, `facet-dream-kind`, `facet-dream-status: proposed`. Stable filename `<kind>-<sha256-12>.md` so re-renders overwrite. NEVER auto-applies.
+- `facet/src/dream/run.rs` + `dream/run/tests.rs`: orchestrator + `DreamReport`.
+- `facet/src/config.rs`: VaultLayout gains `dreams_dir` (default `notes/facet/dreams`).
+- `sb/src/cli/facet.rs`: `Commands::Dream` runs the pass once.
+- Bundled Phase 7 prep: `facet/src/narrative/present.rs` + `present/tests.rs` (slide-deck rendering) and `Commands::Present { slug }`.
+- 18 new tests; otto ci green; 188 total facet lib tests.
+
+### Design decisions
+
+- **`SemanticDuplicateGroup` heuristic is `task.trim().to_lowercase()` exact match.** No embedding similarity, no Levenshtein — keeps the dream pass dependency-free of the embedding model and cheap enough to run on every tick. The operator-facing semantics is "these gems share the same task summary text"; that's the entry-point signal. A more sophisticated similarity-based dedup is a future iteration.
+- **`CrossReference` is a substring search of `review.{accepted,rejected,verified_manually}` against earlier gems' `task` text, with a 12-char minimum needle.** Cheap, low-false-positive at reasonable corpus sizes. Skipped if needle is too short (avoids "fix" matching every fix-mention).
+- **`NarrativeCandidate` is per-session, NOT per-cross-session-cluster.** Matches the dream's role: "this session has enough gems to be a narrative; the narrate pass hasn't produced one." Cross-session candidates would require duplicating the agglomerative cluster logic in dream-land; defer.
+- **`StaleSpectrum` only fires for Session-Arc narratives.** Cross-Session narratives would need to know which `cluster_key` covers which current gems; that's another full discovery pass. Defer.
+- **Dream filenames are content-addressed (`<kind>-<sha256-12>.md`).** Idempotent across re-runs: the same dream produces the same filename, so re-render overwrites. New dreams produce new filenames. Stale dreams are not currently reaped (a content-addressed dream that goes away on the next pass leaves an orphan file). Tracked as an open question.
+- **Phase 7 bridge: `narrative/present.rs` shipped with Phase 6.** The CLI for `Dream` and `Present` both land in the same `Commands` enum; shipping them together avoids a CLI rewrite right after.
+
+### Deviations
+
+- **No "apply dream" CLI subcommand.** The doc says "a separate 'apply dream' subcommand (later) lets the operator confirm and apply." Confirmed by the doc as later; not in Phase 6 scope. Operator opens the dream note, edits `facet-dream-status: accepted`, then runs a future `sb facet dream apply` (TBD).
+- **`Dream::CrossReference` is heuristic, not embedding-based.** The doc says "Gem A's review references the same constraint as gem B's task" — implemented as literal-substring matching. Embedding-similarity would catch paraphrases but adds the embedding-model call cost; defer.
+
+### Tradeoffs
+
+- **Content-addressed filenames vs human-readable filenames.** Content-addressed gives idempotency for free (same dream → same path → overwrite); human-readable would need a dedup step. Lost: the operator can't grep by topic in the filename. Defer optimisation.
+- **Dreams are NOT persisted in SQLite (per Architect Round 2 consensus).** Each dream pass regenerates from canonical. Cost: the operator's `facet-dream-status` edits to the markdown file are the ONLY persistent state; if a dream's underlying signal disappears (the duplicate is resolved), the dream stops appearing and the operator's "accepted" annotation is on an orphan file. Acceptable for the current corpus size.
+
+### Open questions
+
+- **Stale-dream reaping.** The current dream pass writes content-addressed files; if the underlying signal goes away, the file remains as an orphan. A reap step (delete dream files whose content_hash is not in the current finding set) would clean up. Defer.
+- **Cross-session NarrativeCandidate.** Would catch the case where 5 gems across 4 sessions form a real story but no Cross-Session Arc was synthesised. Requires duplicating the cluster discovery; defer to a future iteration.
+- **Operator-applied dream → ledger mutation.** When the operator marks a SemanticDuplicateGroup dream `accepted`, what runs? `sb facet dream apply <id>` would need to merge gems (and update content_hash, citations, etc.). Out of Phase 6 scope per the doc.
+
+---

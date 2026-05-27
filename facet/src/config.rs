@@ -149,6 +149,7 @@ impl Default for DormancyConfig {
 pub struct VaultLayout {
     pub prisms_dir: String,
     pub spectra_dir: String,
+    pub dreams_dir: String,
     pub quarantine_dir: String,
     pub archive_dir: String,
 }
@@ -158,6 +159,7 @@ impl Default for VaultLayout {
         Self {
             prisms_dir: "notes/facet/prisms".to_string(),
             spectra_dir: "notes/facet/spectra".to_string(),
+            dreams_dir: "notes/facet/dreams".to_string(),
             quarantine_dir: "notes/facet/quarantine".to_string(),
             archive_dir: "notes/facet/archive".to_string(),
         }

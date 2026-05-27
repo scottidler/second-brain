@@ -43,6 +43,16 @@ pub enum Commands {
         #[arg(long)]
         archetype: Option<String>,
     },
+    /// One-shot dreaming pass: detect semantic-duplicate gems, cross-
+    /// references, stale spectra, and narrative candidates. Writes one
+    /// proposal note per finding under `notes/facet/dreams/`. Never
+    /// auto-applies; the operator confirms by editing
+    /// `facet-dream-status:` on each proposal.
+    Dream,
+    /// Reformat a narrative spectrum as a slide-deck outline (one
+    /// slide per gem citation, speaker notes inline). Prints to
+    /// stdout.
+    Present { slug: String },
     /// Long-running daemon. `--install` writes the systemd unit;
     /// `--uninstall` removes it; no flag runs the cadence loop.
     Daemon {
@@ -98,6 +108,8 @@ impl FacetCli {
             Commands::Harvest { v1 } => harvest(&config, self.vault.as_deref(), v1).await,
             Commands::Spectra => spectra(&config, self.vault.as_deref()).await,
             Commands::Narrate { archetype } => narrate(&config, self.vault.as_deref(), archetype).await,
+            Commands::Dream => dream(&config, self.vault.as_deref()),
+            Commands::Present { slug } => present(&config, &slug),
             Commands::Daemon { install, uninstall } => daemon(config, install, uninstall, self.vault.as_deref()).await,
             Commands::List { repo, mode, status } => list(&config, repo, mode, status),
             Commands::Show { slug } => show(&config, &slug),
@@ -142,6 +154,29 @@ async fn spectra(config: &facet::Config, vault_override: Option<&std::path::Path
     let vault = vault_root(vault_override)?;
     let written = facet::daemon::harvest::run_spectra_rollup(config, &ledger, &vault).await?;
     println!("facet spectra rollup complete: {written} spectra written");
+    Ok(())
+}
+
+fn dream(config: &facet::Config, vault_override: Option<&std::path::Path>) -> Result<()> {
+    let ledger = ledger_open(config)?;
+    let vault = vault_root(vault_override)?;
+    let report = facet::dream::run::run(config, &ledger, &vault)?;
+    println!(
+        "facet dream complete:\n  dreams_discovered: {}\n  notes_written:     {}",
+        report.dreams_discovered, report.notes_written
+    );
+    Ok(())
+}
+
+fn present(config: &facet::Config, slug: &str) -> Result<()> {
+    let ledger = ledger_open(config)?;
+    // Look up by cluster_key first (the v2 idempotency key); fall back
+    // to a `cluster_key = slug` query for evergreens and CLI ergonomics.
+    let narrative = ledger
+        .narrative_by_cluster_key(slug)?
+        .ok_or_else(|| eyre::eyre!("no narrative found with cluster_key {slug:?}"))?;
+    let body = facet::narrative::present::render_outline(&narrative);
+    print!("{body}");
     Ok(())
 }
 
