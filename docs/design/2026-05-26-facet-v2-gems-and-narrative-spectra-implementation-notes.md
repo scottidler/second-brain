@@ -36,3 +36,36 @@ formalised here for the record. Artifacts: `facet/patterns/facet-extract-v2.md`,
 - None for Phase 1. The schema, prototype, and fixtures are complete; chunker generalisation is a Phase 3 question.
 
 ---
+
+## Phase 2: Ledger schema + bash migration + Rust models
+
+Artifacts:
+- `bin/migrate-facet-v2.sh` (bash script; idempotent; v2 tables alongside v1)
+- `facet/src/gems.rs` + `gems/tests.rs` (`Gem`, `InteractionTurn`, `Review` + `content_hash` impl)
+- `facet/src/narrative.rs` + `narrative/tests.rs` (`Narrative`, `NarrativeAxes`, `Archetype`, `SpectrumStatus`)
+- `facet/src/dream.rs` + `dream/tests.rs` (`Dream` enum; kebab-case tagged JSON)
+- `facet/src/lib.rs` (new module declarations)
+- `facet/Cargo.toml` (`sha2`, `hex` deps added via `cargo add`)
+
+### Design decisions
+
+- **SQLite schema split into four tables, not two with JSON columns** — `bin/migrate-facet-v2.sh` — design doc named `gems`, `interaction_turns`, `narratives`, `narrative_axes` as separate tables; honored that split. `interaction_turns` is FK to `gems.id` with a `seq` column for ordering; `narrative_axes` is one row per narrative (FK PK) so queries that don't need axes can ignore the join.
+- **`Archetype` and `SpectrumStatus` Rust enums introduced beyond doc Data Model** — `facet/src/narrative.rs` — the doc names these as frontmatter values (`facet-spectrum-archetype: session | cross-session | evergreen`, `facet-spectrum-status: active | rejected`) but does not require a Rust type. Adding typed enums now so Phase 5's narrate-pass code can be discriminated-union safe; serde renames to kebab-case so the frontmatter values are the wire format.
+- **`Gem::content_hash` hashes both AI and user turn UUIDs, sorted** — `facet/src/gems.rs:73` — design doc says "sha256(sorted turn UUIDs in span)" without specifying which turns. Chose to hash every UUID in the gem's interaction (both ai_turn_uuid and user_turn_uuid for every turn), sorted ascending, joined with `|`, hex-encoded. This makes the hash maximally stable against chunker shifts: if a chunker re-decide doesn't add or remove any turn, the hash is unchanged.
+- **`boundary_user_turn_uuids()` returns `Option<(&str, &str)>`** — `facet/src/gems.rs:96` — empty interaction is invalid (gem must have >= 2 turns per the v2 pattern) but the type returns `None` rather than panicking so callers can decide. The doc's idempotency-key spec stores `first_user_turn_uuid` and `last_user_turn_uuid` for inspection only.
+
+### Deviations
+
+- **None from the design doc spec.** The schema and structs match the Data Model section verbatim except for the additive `Archetype`/`SpectrumStatus` enums noted above.
+
+### Tradeoffs
+
+- **JSON columns for `Vec<String>` fields (`context_loaded`, `context_missing`, `tags`, `gem_ids`, `mode_mix`, `repos`, `workitem_ids`) vs. side tables** — chose JSON columns. Reasons: (a) these are always read together with the parent row, never queried independently; (b) one less JOIN per gem-read; (c) write transaction stays small. Tradeoff: cannot index into them efficiently, so any future "find all gems with tag X" query needs a json_each() scan or a denormalised tag table. Acceptable for the current corpus size.
+- **`expect(...)` over `unwrap()` in tests** — the crate denies `clippy::unwrap_used` at the root, which extends into test modules. Matched the existing convention from `facet/src/ledger/tests.rs` (uses `.expect("reason")`). Adds one expected message per call, costs no runtime, gives a better panic message on test failure.
+
+### Open questions
+
+- **Should the v2 schema also be registered with `facet/src/ledger/schema.rs`'s `MIGRATIONS` slice as a v2 entry?** Currently no - bash-only per the doc. Phase 7 cleanup (drop v1 tables) is the natural moment to fold v2 into Rust schema management. Until then, fresh installs need to run `bin/migrate-facet-v2.sh` after the v1 schema is created by the Rust `migrate()` function. The bash script errors with a clear message if the DB doesn't exist yet.
+- **Should `Gem::content_hash` include the `task` text or other gem-level fields?** Currently it's pure-UUID. If an extract re-run produces a different `task` summary for the same turn span, we'd lose that revision. Argued the other way: the UUIDs ARE the canonical content; gem-level fields are LLM-derived and naturally re-generated. Defer until Phase 3 surfaces an actual case.
+
+---

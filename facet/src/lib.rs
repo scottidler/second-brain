@@ -27,10 +27,13 @@
 pub mod config;
 pub mod daemon;
 pub mod dedupe;
+pub mod dream;
 pub mod extract;
 pub mod fabric;
+pub mod gems;
 pub mod jsonl;
 pub mod ledger;
+pub mod narrative;
 pub mod notify;
 pub mod render;
 pub mod repo;
