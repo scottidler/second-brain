@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Cargo workspace consolidating obsidian-borg (ingestion daemon), obsidian-cortex (vault governance), and oracle (knowledge retrieval MCP) with a shared `vault` library crate. All tools operate on the same Obsidian vault with the same schema.
+Cargo workspace consolidating obsidian-borg (ingestion daemon), obsidian-cortex (vault governance), oracle (knowledge retrieval MCP), and facet (judgment-moment harvester) with a shared `vault` library crate. All tools operate on the same Obsidian vault with the same schema.
 
 - **Repo:** `~/repos/scottidler/second-brain/`
 - **Vault:** `~/repos/scottidler/obsidian/`
@@ -17,12 +17,15 @@ second-brain/
   borg/        -- ingestion library (Telegram, Discord, ntfy, HTTP, clipboard, CLI) -- lib-only, consumed by sb
   cortex/      -- governance library (lint, link, intel, sweep, daemon, migrate, summarize --backfill, embed) -- lib-only, consumed by sb
   oracle/      -- knowledge retrieval library (search [bm25/vector/hybrid], browse, domain briefs, ledger queries) -- lib-only, consumed by sb
-  sb/          -- unified CLI binary: `sb borg ...`, `sb cortex ...`, `sb oracle ...`, plus `sb status/doctor/bootstrap`
+  facet/       -- judgment-moment harvester library (jsonl parser, scan, repo, cluster, extract, render, daemon) -- lib-only, consumed by sb
+  sb/          -- unified CLI binary: `sb borg ...`, `sb cortex ...`, `sb oracle ...`, `sb facet ...`, plus `sb status/doctor/bootstrap`
   config/      -- shared config source of truth (canonical-tags.yml, tag-mapping.yml, tag-proposals.yml)
   config/templates/ -- starter configs that `sb bootstrap` drops into ~/.config/sb/
 ```
 
-Systemd unit files are NOT in the repo. They are written into `~/.config/systemd/user/` by `sb borg daemon --install` and `sb cortex daemon --install`. Source of truth for unit content lives in `borg::install_systemd` (`borg/src/lib.rs`) and `cortex::install_systemd_service` (`cortex/src/daemon.rs`).
+Systemd unit files are NOT in the repo. They are written into `~/.config/systemd/user/` by `sb borg daemon --install`, `sb cortex daemon --install`, and `sb facet daemon --install`. Source of truth for unit content lives in `borg::install_systemd` (`borg/src/lib.rs`), `cortex::install_systemd_service` (`cortex/src/daemon.rs`), and `facet::daemon::systemd::install_systemd_service` (`facet/src/daemon/systemd.rs`).
+
+`facet` reads JSONL transcripts under `~/.claude/projects/`, clusters turns into cross-session work-items, mines judgment moments via fabric (haiku/sonnet/opus tiers), and renders one fencepost-merged markdown note per work-item under `notes/facet/work-items/<slug>.md`. Per-mode "portrait" rollups land in `notes/facet/portraits/<mode>.md` on a separate cadence. The ledger lives at `~/.local/share/sb/facet/state.db` (rusqlite). Config at `~/.config/sb/facet.yml`. See `docs/design/2026-05-26-facet-judgment-harvester.md`.
 
 ## Key Conventions
 
