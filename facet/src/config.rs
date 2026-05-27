@@ -22,8 +22,19 @@ pub struct Config {
     /// Daemon harvest interval. Default 24h.
     pub harvest_interval_secs: u64,
 
-    /// Daemon spectrum-rollup interval. 0 disables. Default weekly.
+    /// Daemon spectrum-rollup interval (v1 mode-bucketed rollups). 0
+    /// disables. Default weekly.
     pub spectra_interval_secs: u64,
+
+    /// Daemon v2 narrate-pass interval (Session Arc + Cross-Session
+    /// Arc + Evergreen discovery, opus synthesis, rejection-gate).
+    /// 0 disables. Default weekly.
+    pub narrate_interval_secs: u64,
+
+    /// Daemon dream-pass interval (semantic-duplicate / cross-ref /
+    /// stale-spectrum / narrative-candidate proposals). 0 disables.
+    /// Default 24h (cheap, no LLM calls).
+    pub dream_interval_secs: u64,
 
     /// Paths (tilde-expanded, prefix-match) that ARE eligible for harvest.
     /// Empty means "all roots not in exclude_cwds".
@@ -67,6 +78,8 @@ impl Default for Config {
             claude_projects_root: shellexpand_path("~/.claude/projects"),
             harvest_interval_secs: 86_400,
             spectra_interval_secs: 604_800,
+            narrate_interval_secs: 604_800,
+            dream_interval_secs: 86_400,
             include_cwds: vec![],
             exclude_cwds: vec![
                 shellexpand_path("~/repos/tatari-tv"),

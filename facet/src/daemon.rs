@@ -44,6 +44,8 @@ pub async fn run_loop(config: Config, ledger: crate::Ledger, vault_root: std::pa
     // who want the legacy path invoke `sb facet harvest --v1`
     // directly.
     let use_v1 = false;
+    let mut last_narrate_ts: u64 = 0;
+    let mut last_dream_ts: u64 = 0;
     loop {
         match harvest_once(&config, &ledger, &vault_root, use_v1).await {
             Ok(report) => {
@@ -60,16 +62,52 @@ pub async fn run_loop(config: Config, ledger: crate::Ledger, vault_root: std::pa
                 log::error!("facet daemon tick failed: {e:#}");
             }
         }
-        if config.spectra_interval_secs > 0 {
-            let now = chrono::Utc::now().timestamp() as u64;
-            if now.saturating_sub(last_spectrum_ts) >= config.spectra_interval_secs {
-                match harvest::run_spectra_rollup(&config, &ledger, &vault_root).await {
-                    Ok(n) => {
-                        log::info!("facet spectrum rollup: {n} spectra written");
-                        last_spectrum_ts = now;
-                    }
-                    Err(e) => log::error!("facet spectrum rollup failed: {e:#}"),
+        let now = chrono::Utc::now().timestamp() as u64;
+
+        if config.spectra_interval_secs > 0 && now.saturating_sub(last_spectrum_ts) >= config.spectra_interval_secs {
+            match harvest::run_spectra_rollup(&config, &ledger, &vault_root).await {
+                Ok(n) => {
+                    log::info!("facet spectrum rollup: {n} spectra written");
+                    last_spectrum_ts = now;
                 }
+                Err(e) => log::error!("facet spectrum rollup failed: {e:#}"),
+            }
+        }
+
+        if config.narrate_interval_secs > 0 && now.saturating_sub(last_narrate_ts) >= config.narrate_interval_secs {
+            match crate::narrative::run::run(
+                &config,
+                &ledger,
+                &vault_root,
+                crate::narrative::run::ArchetypeFilter::All,
+            )
+            .await
+            {
+                Ok(r) => {
+                    log::info!(
+                        "facet narrate: considered={} suppressed={} synthesised={} skipped_by_gate={}",
+                        r.candidates_considered,
+                        r.candidates_suppressed_by_rejection,
+                        r.narratives_synthesised,
+                        r.narratives_skipped_by_gate
+                    );
+                    last_narrate_ts = now;
+                }
+                Err(e) => log::error!("facet narrate failed: {e:#}"),
+            }
+        }
+
+        if config.dream_interval_secs > 0 && now.saturating_sub(last_dream_ts) >= config.dream_interval_secs {
+            match crate::dream::run::run(&config, &ledger, &vault_root) {
+                Ok(r) => {
+                    log::info!(
+                        "facet dream: discovered={} written={}",
+                        r.dreams_discovered,
+                        r.notes_written
+                    );
+                    last_dream_ts = now;
+                }
+                Err(e) => log::error!("facet dream failed: {e:#}"),
             }
         }
         tokio::time::sleep(interval).await;
