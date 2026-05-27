@@ -1,7 +1,13 @@
 //! Work-item identity, slug derivation, cross-session clustering.
 //!
-//! Phase 3 implementation. Phase 1 ships the `WorkItem`, `WorkItemStatus`,
-//! and `Assignment` types so the ledger can persist them.
+//! The cluster stage feeds the cluster LLM a YAML digest of one session's
+//! NEW turns plus a list of known work-items the same repo touches. The
+//! LLM returns one or more [`Assignment`] ranges that partition the new
+//! turns by underlying problem. Each assignment becomes one
+//! `cluster_assignments` row in the ledger, and the extract stage later
+//! picks those rows up.
+
+pub mod cluster;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -51,15 +57,19 @@ pub struct WorkItem {
 }
 
 /// One cluster assignment output by the cluster LLM. A row in
-/// `cluster_assignments` corresponds to one [`Assignment`].
+/// `cluster_assignments` corresponds to one [`Assignment`]. The
+/// `AssignmentKind` is flattened so the wire YAML uses
+/// `kind: existing|new` plus the matching `slug` / `title` field at the
+/// same indent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Assignment {
     pub first_turn_uuid: String,
     pub last_turn_uuid: String,
+    #[serde(flatten)]
     pub kind: AssignmentKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum AssignmentKind {
     Existing { slug: String },

@@ -106,6 +106,10 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
         "obsidian-youtube-slides.md",
         include_str!("../../../borg/patterns/obsidian-youtube-slides.md"),
     ),
+    (
+        "facet-cluster.md",
+        include_str!("../../../facet/patterns/facet-cluster.md"),
+    ),
 ];
 
 pub async fn run(args: BootstrapArgs) -> Result<()> {
