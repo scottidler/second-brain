@@ -5,12 +5,21 @@
 //! (Phase 5). One narrative renders into one
 //! `notes/facet/spectra/<slug>.md` file.
 //!
-//! This module owns only the struct definitions. Discovery and
-//! synthesis land in Phase 5 (`facet/src/narrative/discover.rs`);
-//! ledger persistence lands alongside.
+//! Submodules (Phase 5):
+//! - [`discover`]: find candidate clusters (Session Arc + Cross-Session
+//!   Arc + evergreen mode rollups)
+//! - [`narrate`]: invoke `facet-narrate.md` per cluster, parse JSON,
+//!   honour the rejection gate
+//! - [`render`]: write the per-narrative markdown note to
+//!   `notes/facet/spectra/<slug>.md`
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+pub mod discover;
+pub mod narrate;
+pub mod render;
+pub mod run;
 
 #[cfg(test)]
 mod tests;

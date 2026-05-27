@@ -147,3 +147,47 @@ Artifacts:
 - **What about existing v1 prism notes on disk when v2 lands?** Per the doc Migration Plan: "Existing prism notes on disk stay as-is until the first v2 render touches them. New v2 renders write to the same path with new body shape (replacing the v1 fencepost content)." Implemented as-is: `block::merge` will overwrite v1 fencepost content with v2 fencepost content on first re-render, preserving operator content outside fenceposts. Has NOT been tested against a real v1 note in the wild; the test only covers `merge_preserves_operator_content_outside_fenceposts` with a v2-shaped existing note. A more rigorous test would mock a v1 prism note + run v2 render against it. Defer to Phase 7 cleanup test.
 
 ---
+
+## Phase 5: Spectra discovery (two archetypes + rejection gate)
+
+Artifacts:
+- `facet/patterns/facet-narrate.md`: opus pattern with strict rejection gate ("if the cluster is a changelog not a story, return empty title").
+- `facet/src/narrative/discover.rs` + `discover/tests.rs`: three archetype builders. Session Arc filters by `gem_count >= 3 AND has obstacle tag`. Cross-Session Arc embeds via injected closure, runs greedy single-link agglomerative clustering with `CROSS_SESSION_SIMILARITY_THRESHOLD = 0.78`, chronologically orders results. Evergreen builds one synthetic cluster per scaffold mode.
+- `facet/src/narrative/narrate.rs` + `narrate/tests.rs`: fabric pattern dispatch + JSON parsing + rejection-gate enforcement. Returns `NarrateOutcome::{Accepted, Skipped}`.
+- `facet/src/narrative/render.rs` + `render/tests.rs`: spectrum-note renderer with `type: facet-spectrum` frontmatter carrying `facet-spectrum-status` (Active/Rejected), `facet-spectrum-archetype`, `facet-spectrum-cluster-key`, `facet-spectrum-gem-ids`. `SpectrumMeta` reader walks the file's frontmatter for the next narrate pass's suppression logic.
+- `facet/src/narrative/run.rs` + `run/tests.rs`: orchestrator. Reads existing spectrum notes, builds the rejection-suppression set, loads all gems, runs all three archetypes (or one if `--archetype` is set), filters >= 80% gem-id overlap with rejected spectra, calls narrate per candidate, upserts on Accepted, renders the spectrum note. Exposes an `Embedder` trait so tests inject deterministic vectors.
+- `facet/src/ledger/narratives.rs` + `narratives/tests.rs`: `upsert_narrative` (transaction: narratives + narrative_axes upsert; ON CONFLICT bumps revision), `narrative_by_cluster_key` read.
+- `facet/src/ledger/gems.rs::V2_DDL`: extended to include `narratives` (with `cluster_key UNIQUE` + `archetype` columns) and `narrative_axes` tables.
+- `bin/migrate-facet-v2.sh`: matching DDL update so the bash path and Rust path stay consistent.
+- `facet/Cargo.toml`: `vault = { ..., features = ["vec"] }` so production code can call `vault::embedding::embed_query`.
+- `sb/src/cli/facet.rs`: new `Commands::Narrate { archetype: Option<String> }`; the `narrate` async fn parses the optional archetype string, builds an `ArchetypeFilter`, and prints the `NarrateReport` counts.
+- 24 new tests across the narrative module; otto ci green; 170 total facet lib tests passing.
+
+### Design decisions
+
+- **Greedy single-link agglomerative clustering, NOT HDBSCAN.** The doc said "HDBSCAN or simpler agglomerative with a threshold." Implementing HDBSCAN as a fresh Rust dep added scope without changing the Architectural intent (tight semantic clusters, tunable threshold). Greedy single-link with a cosine-similarity threshold (`CROSS_SESSION_SIMILARITY_THRESHOLD = 0.78`) is the simplest thing that satisfies the spec; if it underperforms in practice, swapping to HDBSCAN later is local to `discover.rs`. Architect Round 2's "tune for tightness" rule is honoured: a 100-gem cluster is a tuning signal, not a runtime case to cap.
+- **`cluster_key` added as a NOT NULL UNIQUE column on `narratives` (and `archetype` column added).** The original V2 schema keyed `narratives` only on `slug`, which is title-derived and drifts when Opus re-titles on re-narrate. `cluster_key` is the stable identity (session_uuid / `xs-<sha256-prefix>` / `mode-<name>`); the schema evolution lands in both the Rust `V2_DDL` const and the bash script. Idempotency now survives title drift.
+- **`Embedder` trait for dependency injection.** Tests cannot run candle/fastembed in CI; the trait + `ProductionEmbedder` + `ConstEmbedder` (test-only) split keeps real-network code out of the test path. The production embedder lazy-loads on first call via `vault::embedding::embed_query`.
+- **Rejection suppression compares BOTH overlap directions (>= 80% of candidate OR >= 80% of rejected).** The doc said ">= 80% gem-id overlap"; asymmetry would let a 100-gem candidate that contains a rejected 5-gem sub-cluster slip through. Symmetric overlap catches both shapes (candidate is mostly the rejection, OR rejection is mostly a subset of the candidate).
+- **Evergreen back-compat lands as a Phase 5 special case, not a separate code path.** The doc says evergreen spectra are "all gems with primary tag X" — implemented as a third discovery archetype that produces `ClusterCandidate { archetype: Evergreen, cluster_key: "mode-<name>", ... }`. Saves the duplication of having a separate rollup module; same narrate + render flow.
+- **Spectrum filename for Evergreen is `mode-<name>.md`; for Session/CrossSession it is `<slug>.md`.** The doc filename convention is explicit and the Phase 5 spec calls it out; this keeps Obsidian-side queries against `mode-*.md` working unchanged after the rename.
+
+### Deviations
+
+- **HDBSCAN not implemented** (using greedy agglomerative instead — see Design Decisions). The doc explicitly permits this substitution.
+- **Cluster `semantic_cluster_id` is set to `None` in `NarrativeAxes` on first narrate.** No persistent cluster registry exists yet; the field is reserved for a future fastembed-cluster handle. Not a problem since `narrative_axes` doesn't index on it.
+
+### Tradeoffs
+
+- **Single-link agglomerative is O(N²) worst case** vs HDBSCAN's better asymptotic complexity. Acceptable at the current corpus size; if N grows past ~5000, swap.
+- **Embedding text composition (`task + why_it_matters + first_user_says[..500]`)** matches the doc verbatim but the cap on first_user_says is somewhat arbitrary. Trade against embedding-model context window: bge-small's 512 token window means we'd lose info anyway beyond that.
+- **`vault = { features = ["vec"] }` adds candle/fastembed to facet's compile-time graph.** Adds build time. Acceptable since `sb facet narrate` is a real production command that needs embeddings; CLI-only paths don't pull these models at runtime (`embed_query` is lazy).
+
+### Open questions
+
+- **What's the right `CROSS_SESSION_SIMILARITY_THRESHOLD` value?** Hard-coded at 0.78 (a number I picked by intuition). Architect Round 2 said "tune for tightness." Probably needs to be configurable via `SpectraConfig` once real-corpus signal is available. Defer.
+- **Should the daemon loop call `narrative::run::run`?** Currently it does not — `sb facet narrate` is a manual command. The doc Phase 7 says "Migrate the systemd unit to call `sb facet narrate` on a separate cadence from harvest." Defer to Phase 7.
+- **Rejection-suppression reads spectrum notes from disk every narrate pass.** For a vault with 100s of spectra this could be slow. A cached index in the ledger (`narratives.is_rejected_at_path`?) would amortise but adds complexity. Defer until the spectrum corpus grows.
+- **Evergreen vs discovered: when do we drop evergreen?** Open Question retained from the doc. Default kept-in for back-compat; revisit after Cross-Session proves out.
+
+---

@@ -6,7 +6,7 @@ authors.workspace = true
 description = "judgment-moment harvester for Claude Code JSONL transcripts"
 
 [dependencies]
-vault = { path = "../vault" }
+vault = { path = "../vault", features = ["vec"] }
 distillers = { path = "../distillers" }
 
 async-trait = "0.1"

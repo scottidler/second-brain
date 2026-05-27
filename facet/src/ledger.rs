@@ -19,6 +19,7 @@ pub mod clusters;
 pub mod gems;
 pub mod meta;
 pub mod moments;
+pub mod narratives;
 pub mod schema;
 pub mod sessions;
 pub mod workitems;

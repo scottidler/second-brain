@@ -27,11 +27,22 @@ pub enum Commands {
         #[arg(long)]
         v1: bool,
     },
-    /// One-shot spectra rollup. Synthesises one
+    /// One-shot spectra rollup (v1 / legacy). Synthesises one
     /// `notes/facet/spectra/<mode>.md` per scaffolding mode that has at
     /// least two moments in the configured window. Idempotent and
     /// merge-safe (operator content outside fenceposts is preserved).
     Spectra,
+    /// One-shot v2 narrative discovery + synthesis. Runs Session Arc,
+    /// Cross-Session Arc, and Evergreen archetypes by default;
+    /// `--archetype` restricts to a single archetype. Honours operator
+    /// rejection via `facet-spectrum-status: rejected` frontmatter on
+    /// existing notes (>= 80% gem overlap suppresses regeneration).
+    Narrate {
+        /// Limit to one archetype: `session`, `cross-session`, or
+        /// `evergreen`. Default runs all three.
+        #[arg(long)]
+        archetype: Option<String>,
+    },
     /// Long-running daemon. `--install` writes the systemd unit;
     /// `--uninstall` removes it; no flag runs the cadence loop.
     Daemon {
@@ -86,6 +97,7 @@ impl FacetCli {
         match self.command {
             Commands::Harvest { v1 } => harvest(&config, self.vault.as_deref(), v1).await,
             Commands::Spectra => spectra(&config, self.vault.as_deref()).await,
+            Commands::Narrate { archetype } => narrate(&config, self.vault.as_deref(), archetype).await,
             Commands::Daemon { install, uninstall } => daemon(config, install, uninstall, self.vault.as_deref()).await,
             Commands::List { repo, mode, status } => list(&config, repo, mode, status),
             Commands::Show { slug } => show(&config, &slug),
@@ -130,6 +142,34 @@ async fn spectra(config: &facet::Config, vault_override: Option<&std::path::Path
     let vault = vault_root(vault_override)?;
     let written = facet::daemon::harvest::run_spectra_rollup(config, &ledger, &vault).await?;
     println!("facet spectra rollup complete: {written} spectra written");
+    Ok(())
+}
+
+async fn narrate(
+    config: &facet::Config,
+    vault_override: Option<&std::path::Path>,
+    archetype: Option<String>,
+) -> Result<()> {
+    let ledger = ledger_open(config)?;
+    let vault = vault_root(vault_override)?;
+    let filter = match archetype.as_deref() {
+        None => facet::narrative::run::ArchetypeFilter::All,
+        Some("session") => facet::narrative::run::ArchetypeFilter::Only(facet::narrative::Archetype::Session),
+        Some("cross-session") => {
+            facet::narrative::run::ArchetypeFilter::Only(facet::narrative::Archetype::CrossSession)
+        }
+        Some("evergreen") => facet::narrative::run::ArchetypeFilter::Only(facet::narrative::Archetype::Evergreen),
+        Some(other) => eyre::bail!("unknown --archetype {other:?}; valid values: session, cross-session, evergreen"),
+    };
+    let report = facet::narrative::run::run(config, &ledger, &vault, filter).await?;
+    println!(
+        "facet narrate complete:\n  candidates_considered:           {}\n  candidates_suppressed_by_reject: {}\n  narratives_synthesised:          {}\n  narratives_skipped_by_gate:      {}\n  render_failures:                 {}",
+        report.candidates_considered,
+        report.candidates_suppressed_by_rejection,
+        report.narratives_synthesised,
+        report.narratives_skipped_by_gate,
+        report.render_failures,
+    );
     Ok(())
 }
 

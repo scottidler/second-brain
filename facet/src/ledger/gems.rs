@@ -64,6 +64,40 @@ CREATE TABLE IF NOT EXISTS interaction_turns (
 );
 
 CREATE INDEX IF NOT EXISTS idx_interaction_turns_gem ON interaction_turns(gem_id);
+
+-- One row per discovered narrative (Session Arc, Cross-Session Arc, or
+-- evergreen mode rollup). `cluster_key` is the stable identity per
+-- cluster (session_uuid / sha256-derived xs-... / mode-<name>) and is
+-- the idempotency key; titles may drift on re-narrate. `gem_ids` is a
+-- JSON array of citations into the gems table.
+CREATE TABLE IF NOT EXISTS narratives (
+    id INTEGER PRIMARY KEY,
+    cluster_key TEXT NOT NULL UNIQUE,
+    slug TEXT NOT NULL,
+    title TEXT NOT NULL,
+    thesis TEXT NOT NULL,
+    body_md TEXT NOT NULL,
+    gem_ids TEXT NOT NULL,
+    archetype TEXT NOT NULL,
+    synthesised_at TEXT NOT NULL,
+    synthesiser_model TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_narratives_slug      ON narratives(slug);
+CREATE INDEX IF NOT EXISTS idx_narratives_archetype ON narratives(archetype);
+
+-- Sidecar of narrative metadata describing what holds the cluster
+-- together. One row per narrative.
+CREATE TABLE IF NOT EXISTS narrative_axes (
+    narrative_id INTEGER PRIMARY KEY REFERENCES narratives(id) ON DELETE CASCADE,
+    semantic_cluster_id INTEGER,
+    mode_mix TEXT NOT NULL,
+    time_window_start TEXT,
+    time_window_end TEXT,
+    repos TEXT NOT NULL,
+    workitem_ids TEXT NOT NULL
+);
 "#;
 
 /// Apply the v2 DDL idempotently. Used by tests and as the inner
