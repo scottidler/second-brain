@@ -223,3 +223,60 @@ Design doc: docs/design/2026-05-26-facet-judgment-harvester.md
 ### Open questions
 
 - None.
+
+## Post-implementation: Architect audit (rounds 1 & 2)
+
+The Architect audit (Gemini, post-implementation) ran after the
+initial Phase 8 commit. Two rounds. Round 1 surfaced 11 findings; Round
+2 reached consensus on the two I pushed back on.
+
+### Fixes landed (commit 047ed77)
+
+- **tilde-expand include-cwds / exclude-cwds** — Vec<PathBuf> serde
+  helper added to `vault::paths::deserialize_tilde_pathbuf_vec`; both
+  list fields use it. Regression test:
+  `tilde_paths_in_include_and_exclude_lists_are_expanded`.
+- **real SQLite transaction in cluster_new_turns** — `Ledger::with_tx`
+  added; cluster path now uses tx_* helpers. Regression test:
+  `cluster_persist_is_one_transaction`.
+- **extract.max_input_tokens splitting** — `split_turns_by_budget`
+  chunks at turn boundaries; idempotency absorbs overlap. Regression
+  test: `oversize_range_splits_into_multiple_extract_calls`.
+- **sb facet retry / archive verbs** — added to `sb::cli::facet`.
+  `retry` accepts a session UUID or work-item slug; `archive` calls
+  out to `rkvr rmrf` per safety.md.
+- **notify no longer a stub** — `facet::notify::on_new_workitem` /
+  `on_budget_exhausted` route to log INFO / WARN gated on config
+  opt-in. Cluster fires after-commit (no ghost notifications on
+  rollback). Harvest fires when `max-sessions-per-tick` defers.
+- **set_last_extract_turn_uuid into ledger::workitems** — raw SQL
+  lifted out of `extract::mine.rs` into a type-safe ledger method.
+- **sb status / sb doctor wiring** — `sb::cli::checks` gained a
+  `facet` section; `sb-facet.service` joins systemd enumeration;
+  `facet.yml` joins the parse-status surface.
+
+### Findings carried over to Round 2 (consensus reached)
+
+- **Concurrency caps (`max_llm_inflight`, `parse_rayon_threads`)** —
+  unused-by-design until parallel session dispatch is added. The
+  per-tick session loop is strictly sequential (`for session in
+  sessions.iter().take(cap)`) so unbounded fanout is structurally
+  impossible. The semaphore would guard a fanout that does not exist
+  today. Track for the day actual parallelism lands; the right
+  sequence is to add the cap **with** the fanout, not before it.
+  *Architect verdict (round 2):* Accepted.
+- **LLM exponential backoff** — design doc contradicted itself: the
+  Failure-handling-per-stage paragraph proposed in-tick backoff;
+  Non-Goals explicitly forbid LLM retries. *Architect verdict (round
+  2):* Non-Goal wins. First failure is terminal for the tick; the
+  next tick re-runs the same range because `sessions
+  .last_cluster_offset` did not advance. `sb facet retry` is the
+  manual escape. Design doc patched to remove the stale paragraph.
+
+### Open items
+
+- Concurrency caps stay in `ConcurrencyConfig` so they are ready the
+  moment fanout lands. Document this in code comments at the
+  config-field site if we touch it again.
+- Telegram/desktop notification transports are an additive future
+  upgrade. The current log-based sink is the v1 floor.
