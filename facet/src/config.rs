@@ -22,8 +22,8 @@ pub struct Config {
     /// Daemon harvest interval. Default 24h.
     pub harvest_interval_secs: u64,
 
-    /// Daemon portrait-rollup interval. 0 disables. Default weekly.
-    pub portrait_interval_secs: u64,
+    /// Daemon spectrum-rollup interval. 0 disables. Default weekly.
+    pub spectra_interval_secs: u64,
 
     /// Paths (tilde-expanded, prefix-match) that ARE eligible for harvest.
     /// Empty means "all roots not in exclude_cwds".
@@ -57,8 +57,8 @@ pub struct Config {
     /// token estimate (used to split oversized cluster_assignments rows).
     pub extract: ExtractConfig,
 
-    /// Portrait-rollup tuning - per-mode moment cap, time window.
-    pub portrait: PortraitConfig,
+    /// Spectrum-rollup tuning - per-mode moment cap, time window.
+    pub spectra: SpectraConfig,
 }
 
 impl Default for Config {
@@ -66,7 +66,7 @@ impl Default for Config {
         Self {
             claude_projects_root: shellexpand_path("~/.claude/projects"),
             harvest_interval_secs: 86_400,
-            portrait_interval_secs: 604_800,
+            spectra_interval_secs: 604_800,
             include_cwds: vec![],
             exclude_cwds: vec![
                 shellexpand_path("~/repos/tatari-tv"),
@@ -78,7 +78,7 @@ impl Default for Config {
             vault: VaultLayout::default(),
             notify: NotifyConfig::default(),
             extract: ExtractConfig::default(),
-            portrait: PortraitConfig::default(),
+            spectra: SpectraConfig::default(),
         }
     }
 }
@@ -92,7 +92,7 @@ fn shellexpand_path(s: &str) -> PathBuf {
 pub struct LlmConfig {
     pub cluster_model: String,
     pub extract_model: String,
-    pub portrait_model: String,
+    pub spectra_model: String,
     pub per_tick_budget_usd: f64,
     pub per_day_budget_usd: f64,
     pub fabric_binary: String,
@@ -105,7 +105,7 @@ impl Default for LlmConfig {
         Self {
             cluster_model: "claude-haiku-4-5".to_string(),
             extract_model: "claude-sonnet-4-6".to_string(),
-            portrait_model: "claude-opus-4-7".to_string(),
+            spectra_model: "claude-opus-4-7".to_string(),
             per_tick_budget_usd: 5.0,
             per_day_budget_usd: 20.0,
             fabric_binary: "fabric".to_string(),
@@ -147,16 +147,18 @@ impl Default for DormancyConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct VaultLayout {
-    pub workitems_dir: String,
-    pub portraits_dir: String,
+    pub prisms_dir: String,
+    pub spectra_dir: String,
+    pub quarantine_dir: String,
     pub archive_dir: String,
 }
 
 impl Default for VaultLayout {
     fn default() -> Self {
         Self {
-            workitems_dir: "notes/facet/work-items".to_string(),
-            portraits_dir: "notes/facet/portraits".to_string(),
+            prisms_dir: "notes/facet/prisms".to_string(),
+            spectra_dir: "notes/facet/spectra".to_string(),
+            quarantine_dir: "notes/facet/quarantine".to_string(),
             archive_dir: "notes/facet/archive".to_string(),
         }
     }
@@ -191,12 +193,12 @@ impl Default for ExtractConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
-pub struct PortraitConfig {
+pub struct SpectraConfig {
     pub max_moments_per_mode: usize,
     pub window_days: u32,
 }
 
-impl Default for PortraitConfig {
+impl Default for SpectraConfig {
     fn default() -> Self {
         Self {
             max_moments_per_mode: 80,

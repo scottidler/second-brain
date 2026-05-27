@@ -64,7 +64,10 @@ async fn each_scaffolding_mode_persists() {
     let fabric = FakeFabric::new();
     fabric.set_response(
         "facet-extract",
-        "moments:\n  - turn_uuid: t1\n    mode: frame\n    ai_move: \"AI proposed X\"\n    scott_move: \"reframed to Y\"\n    quote_excerpt: \"actually it's not X, it's Y\"\n    why_it_matters: \"naming the framing matters\"\n  - turn_uuid: t2\n    mode: reject\n    ai_move: \"AI suggested a bad name\"\n    scott_move: \"rejected and renamed\"\n    quote_excerpt: \"no - call it foo\"\n    why_it_matters: \"naming sets taste\"\n",
+        r#"{"moments": [
+  {"turn_uuid": "t1", "mode": "frame", "ai_move": "AI proposed X", "scott_move": "reframed to Y", "quote_excerpt": "actually it's not X, it's Y", "why_it_matters": "naming the framing matters"},
+  {"turn_uuid": "t2", "mode": "reject", "ai_move": "AI suggested a bad name", "scott_move": "rejected and renamed", "quote_excerpt": "no - call it foo", "why_it_matters": "naming sets taste"}
+]}"#,
     );
     let turns = vec![
         turn("t1", Role::User, "actually it's not X, it's Y"),
@@ -92,7 +95,9 @@ async fn open_vocabulary_mode_accepted() {
     let fabric = FakeFabric::new();
     fabric.set_response(
         "facet-extract",
-        "moments:\n  - turn_uuid: t1\n    mode: re-scope\n    ai_move: \"AI offered the wrong slice\"\n    scott_move: \"narrowed the scope\"\n    quote_excerpt: \"just do the first half\"\n    why_it_matters: \"scope control\"\n",
+        r#"{"moments": [
+  {"turn_uuid": "t1", "mode": "re-scope", "ai_move": "AI offered the wrong slice", "scott_move": "narrowed the scope", "quote_excerpt": "just do the first half", "why_it_matters": "scope control"}
+]}"#,
     );
     let turns = vec![turn("t1", Role::User, "just do the first half")];
     let out = mine_moments(&assignment, &turns, &slug, "The thing", Some("me/r"), &cfg, &l, &fabric)
@@ -124,7 +129,7 @@ async fn empty_moments_list_is_valid_outcome() {
     let (assignment, slug) = seed_ledger_with_assignment(&l);
     let cfg = Config::default();
     let fabric = FakeFabric::new();
-    fabric.set_response("facet-extract", "moments: []\n");
+    fabric.set_response("facet-extract", r#"{"moments": []}"#);
     let turns = vec![turn("t1", Role::User, "thanks")];
     let out = mine_moments(&assignment, &turns, &slug, "The thing", Some("me/r"), &cfg, &l, &fabric)
         .await
@@ -156,7 +161,9 @@ async fn oversize_range_splits_into_multiple_extract_calls() {
     // (workitem_id, turn_uuid, mode) collapses duplicates.
     fabric.set_response(
         "facet-extract",
-        "moments:\n  - turn_uuid: t1\n    mode: frame\n    ai_move: x\n    scott_move: y\n    quote_excerpt: \"some quote\"\n    why_it_matters: z\n",
+        r#"{"moments": [
+  {"turn_uuid": "t1", "mode": "frame", "ai_move": "x", "scott_move": "y", "quote_excerpt": "some quote", "why_it_matters": "z"}
+]}"#,
     );
 
     // Build a slice large enough that even the .max(2_000) floor splits it.
@@ -200,7 +207,9 @@ async fn quote_excerpt_capped_at_config_chars() {
     fabric.set_response(
         "facet-extract",
         format!(
-            "moments:\n  - turn_uuid: t1\n    mode: frame\n    ai_move: \"x\"\n    scott_move: \"y\"\n    quote_excerpt: \"{long}\"\n    why_it_matters: \"z\"\n"
+            r#"{{"moments": [
+  {{"turn_uuid": "t1", "mode": "frame", "ai_move": "x", "scott_move": "y", "quote_excerpt": "{long}", "why_it_matters": "z"}}
+]}}"#
         ),
     );
     let turns = vec![turn("t1", Role::User, &long)];

@@ -8,11 +8,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use eyre::{Context, Result};
+use futures::stream::{self, StreamExt};
 
 use super::TickReport;
 use crate::config::Config;
 use crate::extract::mine::mine_moments;
-use crate::extract::portrait::portrait_for_mode;
+use crate::extract::spectrum::spectrum_for_mode;
 use crate::fabric::{FabricCaller, FabricShell};
 use crate::jsonl::Turn;
 use crate::ledger::Ledger;
@@ -22,7 +23,7 @@ use crate::workitem::cluster::cluster_new_turns;
 
 /// Drive one tick end-to-end with a production fabric caller. The
 /// `vault_root` is the resolved vault path; notes are written under
-/// `<vault_root>/<config.vault.workitems_dir>/<slug>.md`.
+/// `<vault_root>/<config.vault.prisms_dir>/<slug>.md`.
 pub async fn run_once(config: &Config, ledger: &Ledger, vault_root: &Path) -> Result<TickReport> {
     log::info!("facet::harvest::run_once: vault_root={}", vault_root.display());
     let fabric: Arc<dyn FabricCaller> = Arc::new(FabricShell::new(config.llm.fabric_binary.clone()));
@@ -56,13 +57,27 @@ pub async fn run_with_fabric(
             &format!("max-sessions-per-tick={cap} reached; deferring {deferred} session(s) to next tick"),
         );
     }
+    // LLM calls are network-bound; gate concurrency on
+    // `max_llm_inflight` (Anthropic rate-limit guard, not a serial loop).
+    let inflight = config.concurrency.max_llm_inflight.max(1);
     let mut touched_workitems: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
-    for session in sessions.iter().take(cap) {
-        match cluster_new_turns(session, config, ledger, fabric).await {
-            Ok(assignments) => {
-                report.cluster_assignments_created += assignments.len();
-                // Track touched work-items for the final render pass.
-                if let Some(ws) = lookup_session_workitems(ledger, &session.session_uuid)? {
+
+    let cluster_outcomes: Vec<(String, eyre::Result<usize>)> = stream::iter(sessions.iter().take(cap))
+        .map(|session| async move {
+            let r = cluster_new_turns(session, config, ledger, fabric)
+                .await
+                .map(|a| a.len());
+            (session.session_uuid.clone(), r)
+        })
+        .buffer_unordered(inflight)
+        .collect()
+        .await;
+
+    for (session_uuid, r) in cluster_outcomes {
+        match r {
+            Ok(n_assignments) => {
+                report.cluster_assignments_created += n_assignments;
+                if let Some(ws) = lookup_session_workitems(ledger, &session_uuid)? {
                     for id in ws {
                         touched_workitems.insert(id);
                     }
@@ -70,18 +85,16 @@ pub async fn run_with_fabric(
             }
             Err(e) => {
                 report.failures += 1;
-                log::warn!(
-                    "facet::harvest: cluster failed for session {}: {e:#}",
-                    session.session_uuid
-                );
-                ledger.record_session_failure(&session.session_uuid, "cluster", &format!("{e:#}"))?;
+                log::warn!("facet::harvest: cluster failed for session {session_uuid}: {e:#}");
+                ledger.record_session_failure(&session_uuid, "cluster", &format!("{e:#}"))?;
             }
         }
     }
 
     // 3. Extract every pending cluster_assignments row up to the
-    //    per-tick session cap. Each row failure is local.
+    //    per-tick session cap, fanned out under the same inflight cap.
     let pending = ledger.pending_cluster_assignments(cap as u32 * 4)?;
+    let mut extract_jobs = Vec::with_capacity(pending.len());
     for row in pending {
         let workitem = match ledger.workitem_by_id(row.workitem_id)? {
             Some(w) => w,
@@ -116,20 +129,37 @@ pub async fn run_with_fabric(
                 continue;
             }
         };
-        match mine_moments(
-            &row,
-            &turns,
-            &workitem.slug,
-            &workitem.title,
-            workitem.repos.first().map(|s| s.as_str()),
-            config,
-            ledger,
-            fabric,
-        )
-        .await
-        {
-            Ok(out) => {
-                report.moments_extracted += out.len();
+        extract_jobs.push((row, workitem, turns));
+    }
+
+    let extract_outcomes: Vec<(
+        crate::ledger::clusters::ClusterAssignmentRow,
+        crate::workitem::WorkItem,
+        eyre::Result<usize>,
+    )> = stream::iter(extract_jobs)
+        .map(|(row, workitem, turns)| async move {
+            let r = mine_moments(
+                &row,
+                &turns,
+                &workitem.slug,
+                &workitem.title,
+                workitem.repos.first().map(|s| s.as_str()),
+                config,
+                ledger,
+                fabric,
+            )
+            .await
+            .map(|out| out.len());
+            (row, workitem, r)
+        })
+        .buffer_unordered(inflight)
+        .collect()
+        .await;
+
+    for (row, workitem, r) in extract_outcomes {
+        match r {
+            Ok(n_moments) => {
+                report.moments_extracted += n_moments;
                 touched_workitems.insert(workitem.id);
             }
             Err(e) => {
@@ -144,13 +174,21 @@ pub async fn run_with_fabric(
         }
     }
 
-    // 4. Render every touched work-item.
+    // 4. Render every touched work-item that actually has moments.
+    //    Empty work-items must not be written as placeholder files
+    //    (they accumulate as husks across ticks and pollute the vault).
     for id in touched_workitems {
         let Some(w) = ledger.workitem_by_id(id)? else { continue };
         let moments = ledger.moments_for_workitem(id)?;
-        let target = vault_root
-            .join(&config.vault.workitems_dir)
-            .join(format!("{}.md", w.slug));
+        if moments.is_empty() {
+            log::debug!(
+                "facet::harvest: skip render workitem {} ({}) - no moments yet",
+                w.id,
+                w.slug
+            );
+            continue;
+        }
+        let target = vault_root.join(&config.vault.prisms_dir).join(format!("{}.md", w.slug));
         if let Err(e) = render_work_item_note(&target, &w, &moments) {
             report.failures += 1;
             log::warn!(
@@ -163,24 +201,102 @@ pub async fn run_with_fabric(
         }
     }
 
-    // 5. Dormancy sweep.
+    // 4.5 Stale-render sweep. Any work-item with moments whose vault
+    //     note is missing on disk (because a previous tick failed to
+    //     render, or the file was deleted) gets re-rendered now.
+    //     Idempotent: if the file already exists, we skip - the touched
+    //     loop above handles the in-tick fresh content path.
+    let all_with_moments = ledger.workitem_ids_with_moments()?;
+    for id in all_with_moments {
+        let target = {
+            let Some(w) = ledger.workitem_by_id(id)? else { continue };
+            vault_root.join(&config.vault.prisms_dir).join(format!("{}.md", w.slug))
+        };
+        if target.exists() {
+            continue;
+        }
+        let Some(w) = ledger.workitem_by_id(id)? else { continue };
+        let moments = ledger.moments_for_workitem(id)?;
+        if moments.is_empty() {
+            continue;
+        }
+        if let Err(e) = render_work_item_note(&target, &w, &moments) {
+            report.failures += 1;
+            log::warn!(
+                "facet::harvest: stale-render failed for workitem {} ({}): {e:#}",
+                w.id,
+                w.slug
+            );
+        } else {
+            report.workitems_rendered += 1;
+            log::info!("facet::harvest: stale-render recovered workitem {} ({})", w.id, w.slug);
+        }
+    }
+
+    // 5. Quarantine pass. Render one note per session with failures so
+    //    the parse-error backlog is visible inside Obsidian. Any
+    //    quarantine file on disk whose session no longer has failures
+    //    (operator ran `sb facet retry <uuid>`) gets archived via rkvr.
+    let quarantine_root = vault_root.join(&config.vault.quarantine_dir);
+    if let Err(e) = std::fs::create_dir_all(&quarantine_root) {
+        log::warn!(
+            "facet::harvest: cannot create quarantine dir {}: {e:#}",
+            quarantine_root.display()
+        );
+    }
+    let failing = ledger.sessions_with_failures()?;
+    let mut current_quarantine_files: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    for session in &failing {
+        let target =
+            crate::render::quarantine::target_path(vault_root, &config.vault.quarantine_dir, &session.session_uuid);
+        current_quarantine_files.insert(target.clone());
+        if let Err(e) = crate::render::quarantine::render(&target, session) {
+            log::warn!(
+                "facet::harvest: quarantine render failed for session {}: {e:#}",
+                session.session_uuid
+            );
+        }
+    }
+    // Reap cleared-failure quarantine files. Read the dir; any .md
+    // whose path is not in `current_quarantine_files` was rendered in
+    // a previous tick for a session that is no longer failing.
+    if let Ok(entries) = std::fs::read_dir(&quarantine_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            if current_quarantine_files.contains(&path) {
+                continue;
+            }
+            let _ = std::process::Command::new("rkvr")
+                .arg("rmrf")
+                .arg(&path)
+                .status()
+                .map_err(|e| {
+                    log::warn!("facet::harvest: rkvr cleanup failed for {}: {e:#}", path.display());
+                });
+        }
+    }
+
+    // 6. Dormancy sweep.
     let _flipped = ledger.mark_dormant(chrono::Utc::now(), config.dormancy.inactive_days)?;
     ledger.meta_set("last-harvest-tick", &chrono::Utc::now().to_rfc3339())?;
 
     Ok(report)
 }
 
-/// Run the portrait rollup over every distinct mode that has at least
+/// Run the spectrum rollup over every distinct mode that has at least
 /// two moments in the configured window. Writes one
-/// `<vault_root>/<config.vault.portraits_dir>/<mode>.md` per portrait
+/// `<vault_root>/<config.vault.spectra_dir>/<mode>.md` per spectrum
 /// that was actually synthesised; the rest are skipped silently per
 /// the LLM contract (empty title => skip).
-pub async fn run_portrait_rollup(config: &Config, ledger: &Ledger, vault_root: &Path) -> Result<usize> {
+pub async fn run_spectra_rollup(config: &Config, ledger: &Ledger, vault_root: &Path) -> Result<usize> {
     let fabric: Arc<dyn FabricCaller> = Arc::new(FabricShell::new(config.llm.fabric_binary.clone()));
-    run_portrait_rollup_with_fabric(config, ledger, vault_root, fabric.as_ref()).await
+    run_spectra_rollup_with_fabric(config, ledger, vault_root, fabric.as_ref()).await
 }
 
-pub async fn run_portrait_rollup_with_fabric(
+pub async fn run_spectra_rollup_with_fabric(
     config: &Config,
     ledger: &Ledger,
     vault_root: &Path,
@@ -189,9 +305,9 @@ pub async fn run_portrait_rollup_with_fabric(
     let modes = list_modes(ledger)?;
     let mut written = 0usize;
     for mode in modes {
-        match portrait_for_mode(&mode, config, ledger, fabric).await {
+        match spectrum_for_mode(&mode, config, ledger, fabric).await {
             Ok(Some(body)) => {
-                let target = vault_root.join(&config.vault.portraits_dir).join(format!("{mode}.md"));
+                let target = vault_root.join(&config.vault.spectra_dir).join(format!("{mode}.md"));
                 if let Some(parent) = target.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -199,14 +315,14 @@ pub async fn run_portrait_rollup_with_fabric(
                     Ok(existing) => crate::render::block::merge(&existing, &body),
                     Err(_) => body,
                 };
-                std::fs::write(&target, merged).context("write portrait note")?;
+                std::fs::write(&target, merged).context("write spectrum note")?;
                 written += 1;
             }
             Ok(None) => {}
-            Err(e) => log::warn!("portrait rollup failed for mode {mode}: {e:#}"),
+            Err(e) => log::warn!("spectrum rollup failed for mode {mode}: {e:#}"),
         }
     }
-    ledger.meta_set("last-portrait-tick", &chrono::Utc::now().to_rfc3339())?;
+    ledger.meta_set("last-spectrum-tick", &chrono::Utc::now().to_rfc3339())?;
     Ok(written)
 }
 

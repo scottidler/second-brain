@@ -64,7 +64,7 @@ async fn harvest_e2e_produces_workitem_note_then_is_idempotent() {
         llm: LlmConfig {
             cluster_model: "haiku".to_string(),
             extract_model: "sonnet".to_string(),
-            portrait_model: "opus".to_string(),
+            spectra_model: "opus".to_string(),
             ..Default::default()
         },
         ..Default::default()
@@ -77,7 +77,9 @@ async fn harvest_e2e_produces_workitem_note_then_is_idempotent() {
     );
     fabric.set_response(
         "facet-extract",
-        "moments:\n  - turn_uuid: t1\n    mode: reject\n    ai_move: \"AI proposed something\"\n    scott_move: \"rejected and redirected\"\n    quote_excerpt: \"actually no, do this\"\n    why_it_matters: \"redirecting the AI mid-task\"\n",
+        r#"{"moments": [
+  {"turn_uuid": "t1", "mode": "reject", "ai_move": "AI proposed something", "scott_move": "rejected and redirected", "quote_excerpt": "actually no, do this", "why_it_matters": "redirecting the AI mid-task"}
+]}"#,
     );
 
     let report = facet::daemon::harvest::run_with_fabric(&cfg, &ledger, &vault_root, &fabric)
@@ -92,7 +94,7 @@ async fn harvest_e2e_produces_workitem_note_then_is_idempotent() {
     let note_path = vault_root
         .join("notes")
         .join("facet")
-        .join("work-items")
+        .join("prisms")
         .join("loopr-stage-eight.md");
     let body = fs::read_to_string(&note_path).expect("read note");
     assert!(body.contains("<!-- facet:auto:begin frontmatter -->"));

@@ -9,7 +9,7 @@
 //! work-items' extracts are unaffected by one failure.
 
 pub mod mine;
-pub mod portrait;
+pub mod spectrum;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

@@ -44,29 +44,29 @@ async fn skips_when_too_few_moments() {
     let cfg = Config::default();
     let fabric = FakeFabric::new();
     // The LLM should never be called.
-    let out = portrait_for_mode("reject", &cfg, &l, &fabric).await.expect("call");
+    let out = spectrum_for_mode("reject", &cfg, &l, &fabric).await.expect("call");
     assert!(out.is_none());
 }
 
 #[tokio::test]
-async fn synthesises_a_portrait_note() {
+async fn synthesises_a_spectrum_note() {
     let l = Ledger::open_in_memory().expect("ledger");
     seed(&l, 5);
     let cfg = Config::default();
     let fabric = FakeFabric::new();
     fabric.set_response(
-        "facet-portrait",
+        "facet-spectrum",
         "title: \"How Scott rejects plausible-but-wrong\"\nbody: |\n  Paragraph one names a shape.\n\n  Paragraph two names another.\nmoments_cited:\n  - workitem_slug: wi-0\n    short_description: rejected a premature abstraction\n  - workitem_slug: wi-1\n    short_description: rejected a bad name\n",
     );
-    let body = portrait_for_mode("reject", &cfg, &l, &fabric)
+    let body = spectrum_for_mode("reject", &cfg, &l, &fabric)
         .await
         .expect("call")
-        .expect("got a portrait body");
+        .expect("got a spectrum body");
     assert!(body.contains("# How Scott rejects plausible-but-wrong"));
     assert!(body.contains("Paragraph one names a shape."));
     assert!(body.contains("## Representative moments"));
-    assert!(body.contains("[[work-items/wi-0]]"));
-    assert!(body.contains("type: facet-portrait"));
+    assert!(body.contains("[[prisms/wi-0]]"));
+    assert!(body.contains("type: facet-spectrum"));
     assert!(body.contains("facet-mode: reject"));
 }
 
@@ -76,7 +76,7 @@ async fn llm_can_request_skip_with_empty_title() {
     seed(&l, 3);
     let cfg = Config::default();
     let fabric = FakeFabric::new();
-    fabric.set_response("facet-portrait", "title: \"\"\nbody: \"\"\nmoments_cited: []\n");
-    let out = portrait_for_mode("reject", &cfg, &l, &fabric).await.expect("call");
+    fabric.set_response("facet-spectrum", "title: \"\"\nbody: \"\"\nmoments_cited: []\n");
+    let out = spectrum_for_mode("reject", &cfg, &l, &fabric).await.expect("call");
     assert!(out.is_none(), "empty title from LLM means skip");
 }

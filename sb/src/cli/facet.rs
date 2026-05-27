@@ -20,6 +20,11 @@ pub struct FacetCli {
 pub enum Commands {
     /// One-shot harvest tick.
     Harvest,
+    /// One-shot spectra rollup. Synthesises one
+    /// `notes/facet/spectra/<mode>.md` per scaffolding mode that has at
+    /// least two moments in the configured window. Idempotent and
+    /// merge-safe (operator content outside fenceposts is preserved).
+    Spectra,
     /// Long-running daemon. `--install` writes the systemd unit;
     /// `--uninstall` removes it; no flag runs the cadence loop.
     Daemon {
@@ -55,6 +60,17 @@ pub enum Commands {
     Status,
     /// Config + filesystem + LLM sanity check.
     Doctor,
+    /// Merge mechanically-suffixed duplicate work-items into their
+    /// base concept. Detects slugs like `<base>-2` when `<base>` also
+    /// exists, re-points judgment moments / cluster assignments /
+    /// session links / repo links at the base, deletes the duplicate
+    /// row, and (unless --dry-run) archives the duplicate's prism
+    /// note via `rkvr rmrf`.
+    Dedupe {
+        /// Print the merge plan; touch nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 impl FacetCli {
@@ -62,6 +78,7 @@ impl FacetCli {
         let config = facet::Config::load(self.config.as_deref()).context("load facet config")?;
         match self.command {
             Commands::Harvest => harvest(&config, self.vault.as_deref()).await,
+            Commands::Spectra => spectra(&config, self.vault.as_deref()).await,
             Commands::Daemon { install, uninstall } => daemon(config, install, uninstall, self.vault.as_deref()).await,
             Commands::List { repo, mode, status } => list(&config, repo, mode, status),
             Commands::Show { slug } => show(&config, &slug),
@@ -70,6 +87,7 @@ impl FacetCli {
             Commands::Archive { slug } => archive(&config, self.vault.as_deref(), &slug),
             Commands::Status => status(&config),
             Commands::Doctor => doctor(&config, self.vault.as_deref()),
+            Commands::Dedupe { dry_run } => dedupe(&config, self.vault.as_deref(), dry_run),
         }
     }
 }
@@ -95,6 +113,14 @@ async fn harvest(config: &facet::Config, vault_override: Option<&std::path::Path
         report.workitems_rendered,
         report.failures
     );
+    Ok(())
+}
+
+async fn spectra(config: &facet::Config, vault_override: Option<&std::path::Path>) -> Result<()> {
+    let ledger = ledger_open(config)?;
+    let vault = vault_root(vault_override)?;
+    let written = facet::daemon::harvest::run_spectra_rollup(config, &ledger, &vault).await?;
+    println!("facet spectra rollup complete: {written} spectra written");
     Ok(())
 }
 
@@ -187,7 +213,7 @@ fn show(config: &facet::Config, slug: &str) -> Result<()> {
     println!("sessions: {}", w.sessions_count);
     println!("modes: {}", w.modes_present.join(", "));
     println!("moments: {}", moments.len());
-    println!("vault path: {}/{}.md", config.vault.workitems_dir, w.slug);
+    println!("vault path: {}/{}.md", config.vault.prisms_dir, w.slug);
     Ok(())
 }
 
@@ -198,7 +224,7 @@ fn render(config: &facet::Config, vault_override: Option<&std::path::Path>, slug
         .ok_or_else(|| eyre::eyre!("no work-item with slug {slug}"))?;
     let moments = ledger.moments_for_workitem(w.id)?;
     let vault = vault_root(vault_override)?;
-    let path = vault.join(&config.vault.workitems_dir).join(format!("{}.md", w.slug));
+    let path = vault.join(&config.vault.prisms_dir).join(format!("{}.md", w.slug));
     facet::render::render_work_item_note(&path, &w, &moments)?;
     println!("Re-rendered: {}", path.display());
     Ok(())
@@ -262,7 +288,7 @@ fn archive(config: &facet::Config, vault_override: Option<&std::path::Path>, slu
     })?;
     let vault = vault_root(vault_override)?;
     let note_path = vault
-        .join(&config.vault.workitems_dir)
+        .join(&config.vault.prisms_dir)
         .join(format!("{}.md", workitem.slug));
     if note_path.exists() {
         // Per ~/.claude/refs/safety.md + memory `feedback-rust-deletes-via-rkvr`:
@@ -345,6 +371,82 @@ fn doctor(config: &facet::Config, vault_override: Option<&std::path::Path>) -> R
             config.llm.per_day_budget_usd,
             config.llm.per_tick_budget_usd
         );
+    }
+    Ok(())
+}
+
+fn dedupe(config: &facet::Config, vault_override: Option<&std::path::Path>, dry_run: bool) -> Result<()> {
+    let ledger = ledger_open(config)?;
+    let plans = facet::dedupe::plan_merges(&ledger)?;
+    if plans.is_empty() {
+        println!("facet dedupe: no slug-suffix duplicates found.");
+        return Ok(());
+    }
+    println!(
+        "facet dedupe: {} merge(s) {}:",
+        plans.len(),
+        if dry_run { "planned (dry-run)" } else { "executing" }
+    );
+    for p in &plans {
+        println!("  {} -> {}", p.duplicate_slug, p.base_slug);
+    }
+    if dry_run {
+        return Ok(());
+    }
+    let vault = vault_root(vault_override)?;
+    let mut totals = facet::dedupe::MergeReport::default();
+    let mut rkvr_failures = 0usize;
+    let mut rerender_failures = 0usize;
+    for p in &plans {
+        let r = facet::dedupe::execute(&ledger, p)?;
+        totals.moments_moved += r.moments_moved;
+        totals.moments_collided += r.moments_collided;
+        totals.cluster_rows_moved += r.cluster_rows_moved;
+        totals.cluster_rows_collided += r.cluster_rows_collided;
+        totals.session_links_moved += r.session_links_moved;
+        totals.session_links_collided += r.session_links_collided;
+        totals.repo_links_moved += r.repo_links_moved;
+        totals.repo_links_collided += r.repo_links_collided;
+        // Archive the duplicate's prism note (recoverable via rkvr rcvr).
+        let dup_note = vault
+            .join(&config.vault.prisms_dir)
+            .join(format!("{}.md", p.duplicate_slug));
+        if dup_note.exists() {
+            let out = std::process::Command::new("rkvr")
+                .arg("rmrf")
+                .arg(&dup_note)
+                .output()
+                .context("invoke rkvr rmrf")?;
+            if !out.status.success() {
+                rkvr_failures += 1;
+            }
+        }
+        // Re-render the base so the merged moments / sessions / repos are visible.
+        if let Some(base) = ledger.workitem_by_id(p.base_id)? {
+            let moments = ledger.moments_for_workitem(p.base_id)?;
+            let target = vault.join(&config.vault.prisms_dir).join(format!("{}.md", base.slug));
+            if let Err(e) = facet::render::render_work_item_note(&target, &base, &moments) {
+                eprintln!("rerender failed for {}: {e:#}", base.slug);
+                rerender_failures += 1;
+            }
+        }
+    }
+    println!(
+        "facet dedupe complete:\n  moments moved/collided:        {}/{}\n  cluster rows moved/collided:   {}/{}\n  session links moved/collided:  {}/{}\n  repo links moved/collided:     {}/{}",
+        totals.moments_moved,
+        totals.moments_collided,
+        totals.cluster_rows_moved,
+        totals.cluster_rows_collided,
+        totals.session_links_moved,
+        totals.session_links_collided,
+        totals.repo_links_moved,
+        totals.repo_links_collided,
+    );
+    if rkvr_failures > 0 {
+        println!("  rkvr archive failures: {rkvr_failures}");
+    }
+    if rerender_failures > 0 {
+        println!("  re-render failures:    {rerender_failures}");
     }
     Ok(())
 }

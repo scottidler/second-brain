@@ -107,6 +107,25 @@ impl Ledger {
         })
     }
 
+    /// IDs of every work-item that has at least one judgment moment.
+    /// Used by the harvest's stale-render sweep so notes that lost their
+    /// render in a previous tick are still picked up.
+    pub fn workitem_ids_with_moments(&self) -> Result<Vec<i64>> {
+        self.with_conn(|c| {
+            let mut stmt = c
+                .prepare("SELECT DISTINCT workitem_id FROM judgment_moments ORDER BY workitem_id")
+                .context("prep workitem_ids_with_moments")?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, i64>(0))
+                .context("query workitem_ids_with_moments")?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.context("row workitem_ids_with_moments")?);
+            }
+            Ok(out)
+        })
+    }
+
     /// Mark work-items dormant whose `last_contribution_at` is older than
     /// `now - inactive_days * 86400`. Returns the number of rows flipped.
     pub fn mark_dormant(&self, now: DateTime<Utc>, inactive_days: u32) -> Result<u32> {

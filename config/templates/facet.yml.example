@@ -6,10 +6,10 @@
 # Source of JSONL transcripts.
 # claude-projects-root: ~/.claude/projects
 
-# Cadence. harvest-interval runs every <secs>; portrait-interval runs the
-# cross-work-item rollup. Set portrait-interval-secs: 0 to disable.
+# Cadence. harvest-interval runs every <secs>; spectrum-interval runs the
+# cross-work-item rollup. Set spectra-interval-secs: 0 to disable.
 # harvest-interval-secs: 86400        # daily
-# portrait-interval-secs: 604800      # weekly
+# spectra-interval-secs: 604800      # weekly
 
 # Scope. An empty include-cwds means "all roots not in exclude-cwds".
 # Excludes win on overlap. Match is path-prefix on tilde-expanded values.
@@ -20,10 +20,12 @@ exclude-cwds:
   - ~/repos/scottidler/obsidian
 
 # LLM tiering, models, and budget caps.
+# Model names must match what `fabric --listmodels` reports on this
+# machine. Update via `fabric --listmodels` if these stop resolving.
 llm:
   cluster-model: claude-haiku-4-5
   extract-model: claude-sonnet-4-6
-  portrait-model: claude-opus-4-7
+  spectra-model: claude-opus-4-7
   per-tick-budget-usd: 5.00
   per-day-budget-usd: 20.00
   fabric-binary: fabric
@@ -40,9 +42,13 @@ dormancy:
   inactive-days: 14
 
 # Vault output layout under the resolved vault root.
+# prisms = data layer (one note per concept, with the 6 scaffold-mode
+# sections); spectra = analysis layer (one note per mode, synthesised
+# across all prisms); quarantine = failure landings for parse errors.
 vault:
-  workitems-dir: notes/facet/work-items
-  portraits-dir: notes/facet/portraits
+  prisms-dir: notes/facet/prisms
+  spectra-dir: notes/facet/spectra
+  quarantine-dir: notes/facet/quarantine
   archive-dir: notes/facet/archive
 
 # Optional notifications.
@@ -55,7 +61,7 @@ extract:
   quote-max-chars: 800
   max-input-tokens: 60000
 
-# Portrait-rollup tuning.
-portrait:
+# Spectrum-rollup tuning.
+spectrum:
   max-moments-per-mode: 80
   window-days: 30

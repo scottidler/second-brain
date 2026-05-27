@@ -2233,6 +2233,7 @@ dependencies = [
  "distillers",
  "env_logger",
  "eyre",
+ "futures",
  "log",
  "rayon",
  "rusqlite",

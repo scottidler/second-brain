@@ -93,6 +93,29 @@ impl Ledger {
         })
     }
 
+    /// Sessions with at least one recorded failure (currently in quarantine).
+    /// Used by the harvest's quarantine-render pass.
+    pub fn sessions_with_failures(&self) -> Result<Vec<SessionRow>> {
+        self.with_conn(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT session_uuid, cwd, repo_slug, first_seen_at, last_seen_at, \
+                            last_cluster_offset, last_cluster_turn_uuid, failure_count, \
+                            last_failure_reason, last_failure_stage \
+                     FROM sessions WHERE failure_count > 0 ORDER BY session_uuid",
+                )
+                .context("prep sessions_with_failures")?;
+            let rows = stmt
+                .query_map([], row_to_session)
+                .context("query sessions_with_failures")?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.context("row sessions_with_failures")?);
+            }
+            Ok(out)
+        })
+    }
+
     /// Record a stage failure on the session. Bumps the count and
     /// stores the most recent reason + stage.
     pub fn record_session_failure(&self, session_uuid: &str, stage: &str, reason: &str) -> Result<()> {

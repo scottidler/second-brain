@@ -28,22 +28,26 @@ vocabulary.
 
 # SCHEMA
 
-```yaml
-moments:
-  - turn_uuid: "<uuid of the user turn that contains Scott's move>"
-    mode: "<frame | iterate | reject | push-for | sequence |
-            name-the-failure | other-mode-name>"
-    ai_move: "<short, what the AI did that triggered the moment>"
-    scott_move: "<short, what Scott did in response>"
-    quote_excerpt: "<verbatim from Scott's turn, <= 800 chars,
-                     no leading whitespace>"
-    why_it_matters: "<one sentence: why this move is worth showing
-                     to someone learning to use AI well>"
+Return ONE JSON object matching this exact shape:
+
+```json
+{
+  "moments": [
+    {
+      "turn_uuid": "<uuid of the user turn that carries Scott's move>",
+      "mode": "<frame | iterate | reject | push-for | sequence | name-the-failure | other-kebab-case-name>",
+      "ai_move": "<short, what the AI did that triggered the moment>",
+      "scott_move": "<short, what Scott did in response>",
+      "quote_excerpt": "<verbatim from Scott's turn, <= 800 chars>",
+      "why_it_matters": "<one sentence: why this is worth showing someone learning to use AI well>"
+    }
+  ]
+}
 ```
 
 # INPUT FORMAT
 
-The user message is YAML:
+The user message is YAML (input only; output is JSON):
 
 ```yaml
 workitem_slug: "<slug>"
@@ -59,8 +63,13 @@ turns:
 
 # RULES
 
-- Output ONLY valid YAML matching the schema above. No prose, no
-  Markdown code fences.
+- Output ONE valid JSON document matching the schema above.
+- NO Markdown code fences, NO prose before or after, NO comments inside
+  the JSON. Just the JSON object, parseable by `JSON.parse`.
+- ALL strings are JSON-quoted (`"..."`). Every embedded `"` is escaped
+  as `\"`. Every embedded newline is `\n`. Every embedded backslash is
+  `\\`. This is the most important rule - a single unescaped quote
+  breaks the document.
 - ONLY emit a moment when the user turn carries a deliberate judgment
   move. Skip routine pasting, clarifying questions, formatting nits,
   "ok"/"thanks", and tool-result digestion.
@@ -68,19 +77,20 @@ turns:
   - never the AI turn that triggered it.
 - `quote_excerpt` is verbatim from Scott's turn text. Trim leading
   whitespace; never paraphrase. Cap at 800 chars; truncate mid-word
-  with `…` if needed.
+  with the `…` ellipsis (which becomes `…` in JSON-escaped form if
+  needed) when over budget.
 - Strip any API keys, tokens, or other secrets from `quote_excerpt`;
-  replace with `<redacted>` if present.
+  replace with `<redacted>`.
 - `mode` defaults to one of the six listed names. If none fit,
   introduce a short kebab-case mode name (one or two words).
 - Aim for 1-5 moments per session slice. Quality over quantity: a
   cluster of seven micro-moments is worse than one well-chosen one.
 - If the slice contains NO judgment moves worth surfacing, return
-  `moments: []`. An empty list is a valid and expected outcome.
+  `{"moments": []}`. An empty list is a valid and expected outcome.
 
 # OUTPUT
 
-Just the YAML body. Nothing else.
+Just the JSON object. Nothing else.
 
 # INPUT
 

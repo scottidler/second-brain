@@ -115,8 +115,8 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
         include_str!("../../../facet/patterns/facet-extract.md"),
     ),
     (
-        "facet-portrait.md",
-        include_str!("../../../facet/patterns/facet-portrait.md"),
+        "facet-spectrum.md",
+        include_str!("../../../facet/patterns/facet-spectrum.md"),
     ),
 ];
 

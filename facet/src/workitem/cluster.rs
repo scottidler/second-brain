@@ -40,7 +40,7 @@ pub async fn cluster_new_turns(
     );
 
     // 1. Build the YAML digest the cluster LLM consumes.
-    let known = known_workitems_for_repo(ledger, session.repo_slug.as_deref())?;
+    let known = known_workitems(ledger, session.repo_slug.as_deref())?;
     let digest = build_digest(session, &known);
 
     // 2. Call the cluster LLM.
@@ -51,8 +51,14 @@ pub async fn cluster_new_turns(
         config.llm.timeout_secs,
     );
     let raw = fabric.call(req).await.context("cluster LLM call")?;
-    let parsed: ClusterOutput =
-        serde_yaml::from_str(&raw).with_context(|| format!("parse cluster YAML output (got {} bytes)", raw.len()))?;
+    let body = crate::yaml_out::strip_fences(&raw);
+    let parsed: ClusterOutput = serde_yaml::from_str(body).with_context(|| {
+        let preview: String = body.chars().take(240).collect();
+        format!(
+            "parse cluster YAML output (got {} bytes); preview: {preview:?}",
+            raw.len()
+        )
+    })?;
     if parsed.assignments.is_empty() {
         eyre::bail!("cluster LLM returned no assignments");
     }
@@ -359,23 +365,41 @@ fn yaml_str(s: &str) -> String {
 /// Look up active+dormant work-items in the same repo so the cluster LLM
 /// can attach new turns to existing identity. Empty `repo_slug` returns
 /// no candidates (a fresh-cwd session always starts new work-items).
-fn known_workitems_for_repo(ledger: &Ledger, repo_slug: Option<&str>) -> Result<Vec<(String, String, Vec<String>)>> {
-    let Some(repo) = repo_slug else {
-        return Ok(Vec::new());
-    };
+/// Candidate work-items the LLM is allowed to extend.
+///
+/// Returns up to `KNOWN_WORKITEMS_LIMIT` work-items in this priority
+/// order: same-repo first (when `repo_slug` is set), then any-repo
+/// most-recently-updated. Cross-repo visibility is intentional: a
+/// concept that spans repos must not spawn a duplicate workitem just
+/// because the second session happens to be clustered from a different
+/// cwd.
+fn known_workitems(ledger: &Ledger, repo_slug: Option<&str>) -> Result<Vec<(String, String, Vec<String>)>> {
+    const KNOWN_WORKITEMS_LIMIT: i64 = 40;
     ledger.with_conn(|c| {
-        let mut stmt = c
-            .prepare(
-                "SELECT DISTINCT w.id, w.slug, w.title \
-                 FROM work_items w \
-                 JOIN work_item_repos r ON r.workitem_id = w.id \
-                 WHERE r.repo_slug = ?1 AND w.status IN ('active', 'dormant') \
-                 ORDER BY w.updated_at DESC \
-                 LIMIT 40",
-            )
-            .context("prep known_workitems")?;
+        // Two-stage select: same-repo block first, then a recency-ranked
+        // fill from the rest. Done as a UNION ALL inside a CTE so
+        // SQLite produces the priority order with one query plan.
+        let sql = "\
+            WITH same_repo AS ( \
+              SELECT DISTINCT w.id, w.slug, w.title, 0 AS rank, w.updated_at \
+              FROM work_items w \
+              JOIN work_item_repos r ON r.workitem_id = w.id \
+              WHERE r.repo_slug = COALESCE(?1, '') AND w.status IN ('active', 'dormant') \
+            ), \
+            other_repo AS ( \
+              SELECT w.id, w.slug, w.title, 1 AS rank, w.updated_at \
+              FROM work_items w \
+              WHERE w.status IN ('active', 'dormant') \
+                AND w.id NOT IN (SELECT id FROM same_repo) \
+            ) \
+            SELECT id, slug, title FROM ( \
+              SELECT * FROM same_repo \
+              UNION ALL \
+              SELECT * FROM other_repo \
+            ) ORDER BY rank ASC, updated_at DESC LIMIT ?2";
+        let mut stmt = c.prepare(sql).context("prep known_workitems")?;
         let rows = stmt
-            .query_map(rusqlite::params![repo], |row| {
+            .query_map(rusqlite::params![repo_slug, KNOWN_WORKITEMS_LIMIT], |row| {
                 let id: i64 = row.get(0)?;
                 let slug: String = row.get(1)?;
                 let title: String = row.get(2)?;

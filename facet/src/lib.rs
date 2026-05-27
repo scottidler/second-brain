@@ -26,6 +26,7 @@
 
 pub mod config;
 pub mod daemon;
+pub mod dedupe;
 pub mod extract;
 pub mod fabric;
 pub mod jsonl;
@@ -35,6 +36,7 @@ pub mod render;
 pub mod repo;
 pub mod scan;
 pub mod workitem;
+pub mod yaml_out;
 
 pub use config::Config;
 pub use ledger::Ledger;

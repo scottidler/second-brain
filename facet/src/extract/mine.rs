@@ -78,8 +78,14 @@ pub async fn mine_moments(
             config.llm.timeout_secs,
         );
         let raw = fabric.call(req).await.context("extract LLM call")?;
-        let parsed: ExtractOutput = serde_yaml::from_str(&raw)
-            .with_context(|| format!("parse extract YAML output (got {} bytes)", raw.len()))?;
+        let body = crate::yaml_out::strip_fences(&raw);
+        let parsed: ExtractOutput = serde_json::from_str(body).with_context(|| {
+            let preview: String = body.chars().take(240).collect();
+            format!(
+                "parse extract JSON output (got {} bytes); preview: {preview:?}",
+                raw.len()
+            )
+        })?;
         all_moments.extend(parsed.moments);
     }
 

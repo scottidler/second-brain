@@ -16,6 +16,7 @@
 
 pub mod block;
 pub mod frontmatter;
+pub mod quarantine;
 
 use std::path::{Path, PathBuf};
 
@@ -220,7 +221,7 @@ fn escape_inline(s: &str) -> String {
     s.replace('\n', " ").trim().to_string()
 }
 
-fn write_atomic(path: &Path, body: &str) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, body: &str) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| eyre::eyre!("target path has no parent: {}", path.display()))?;

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 fn default_loads_with_no_file() {
     let cfg = Config::default();
     assert_eq!(cfg.harvest_interval_secs, 86_400);
-    assert_eq!(cfg.portrait_interval_secs, 604_800);
+    assert_eq!(cfg.spectra_interval_secs, 604_800);
     assert!(
         cfg.exclude_cwds
             .iter()
@@ -13,7 +13,7 @@ fn default_loads_with_no_file() {
     );
     assert_eq!(cfg.llm.cluster_model, "claude-haiku-4-5");
     assert_eq!(cfg.llm.extract_model, "claude-sonnet-4-6");
-    assert_eq!(cfg.llm.portrait_model, "claude-opus-4-7");
+    assert_eq!(cfg.llm.spectra_model, "claude-opus-4-7");
     assert_eq!(cfg.extract.quote_max_chars, 800);
     assert_eq!(cfg.dormancy.inactive_days, 14);
 }
@@ -26,13 +26,13 @@ fn explicit_path_loads_yaml() {
         &p,
         r#"
 harvest-interval-secs: 3600
-portrait-interval-secs: 0
+spectra-interval-secs: 0
 exclude-cwds:
   - ~/secret
 llm:
   cluster-model: alt-haiku
   extract-model: alt-sonnet
-  portrait-model: alt-opus
+  spectra-model: alt-opus
   per-tick-budget-usd: 1.5
   per-day-budget-usd: 7.0
   fabric-binary: fabric
@@ -42,7 +42,7 @@ llm:
     .expect("write");
     let cfg = Config::load(Some(&p)).expect("load");
     assert_eq!(cfg.harvest_interval_secs, 3600);
-    assert_eq!(cfg.portrait_interval_secs, 0);
+    assert_eq!(cfg.spectra_interval_secs, 0);
     assert_eq!(cfg.llm.cluster_model, "alt-haiku");
     assert!(cfg.exclude_cwds.iter().any(|p| p.to_string_lossy().contains("secret")));
 }
