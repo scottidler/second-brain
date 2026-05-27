@@ -1,4 +1,4 @@
-# facet config - judgment-moment harvester for Claude Code JSONL transcripts.
+# facet config - dialog-slice gem harvester for Claude Code JSONL transcripts.
 # Lives at ~/.config/sb/facet.yml. Tilde-prefixed paths are expanded at load
 # time. All values shown are the built-in defaults; uncomment + tweak only
 # what differs.
@@ -6,10 +6,14 @@
 # Source of JSONL transcripts.
 # claude-projects-root: ~/.claude/projects
 
-# Cadence. harvest-interval runs every <secs>; spectrum-interval runs the
-# cross-work-item rollup. Set spectra-interval-secs: 0 to disable.
+# Cadence. harvest-interval runs scan -> cluster -> extract -> render every
+# <secs>; narrate-interval runs Session Arc + Cross-Session Arc discovery +
+# synthesis; dream-interval runs semantic-duplicate / cross-reference /
+# stale-spectrum / narrative-candidate proposals. Set any cadence to 0 to
+# disable that pass in the daemon loop.
 # harvest-interval-secs: 86400        # daily
-# spectra-interval-secs: 604800      # weekly
+# narrate-interval-secs: 604800       # weekly
+# dream-interval-secs: 86400          # daily
 
 # Scope. An empty include-cwds means "all roots not in exclude-cwds".
 # Excludes win on overlap. Match is path-prefix on tilde-expanded values.
@@ -42,12 +46,15 @@ dormancy:
   inactive-days: 14
 
 # Vault output layout under the resolved vault root.
-# prisms = data layer (one note per concept, with the 6 scaffold-mode
-# sections); spectra = analysis layer (one note per mode, synthesised
-# across all prisms); quarantine = failure landings for parse errors.
+# prisms   = canonical capture (one prism note per work-item, body is an
+#            ordered sequence of gems)
+# spectra  = synthesis layer (one spectrum note per discovered narrative)
+# dreams   = non-destructive proposals (dedup, cross-ref, stale-spectrum)
+# quarantine = failure landings for parse errors
 vault:
   prisms-dir: notes/facet/prisms
   spectra-dir: notes/facet/spectra
+  dreams-dir: notes/facet/dreams
   quarantine-dir: notes/facet/quarantine
   archive-dir: notes/facet/archive
 
@@ -60,8 +67,3 @@ notify:
 extract:
   quote-max-chars: 800
   max-input-tokens: 60000
-
-# Spectrum-rollup tuning.
-spectrum:
-  max-moments-per-mode: 80
-  window-days: 30

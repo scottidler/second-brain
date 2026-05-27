@@ -1,19 +1,16 @@
 //! Narrative discovery: turn the gems corpus into candidate clusters.
 //!
-//! Phase 5 implements two real archetypes plus an evergreen back-compat
-//! shape (see the design doc):
+//! Two archetypes:
 //!
 //! - **Session Arc**: gems within a single `session_uuid`, chronologically
-//!   ordered. Eligible when `gem_count >= 3` AND the session contains at
-//!   least one `name-the-failure` or `reject` gem. No HDBSCAN, no
-//!   embedding step.
+//!   ordered. Eligible when `gem_count >= MIN_CLUSTER_SIZE` AND the
+//!   session contains at least one `name-the-failure` or `reject` gem.
+//!   No HDBSCAN, no embedding step.
 //! - **Cross-Session Arc**: gems clustered across sessions by semantic
 //!   similarity. Eligible when the cluster has at least
 //!   `MIN_CLUSTER_SIZE` gems. Uses [`vault::embedding`] for embeddings
 //!   and a simple agglomerative (greedy single-link) cluster builder
 //!   tuned for tightness by `CROSS_SESSION_SIMILARITY_THRESHOLD`.
-//! - **Evergreen**: synthetic clusters keyed by primary tag (mode
-//!   bucket). Back-compat with the v1 mode spectra.
 //!
 //! Each candidate is returned as a [`ClusterCandidate`] and consumed by
 //! `narrate.rs`.
@@ -46,8 +43,7 @@ pub const CROSS_SESSION_SIMILARITY_THRESHOLD: f32 = 0.78;
 pub struct ClusterCandidate {
     pub archetype: Archetype,
     /// Stable key per archetype: a session_uuid for Session Arc, a
-    /// hash of the gem-id set for Cross-Session Arc, the mode name
-    /// for Evergreen.
+    /// hash of the gem-id set for Cross-Session Arc.
     pub cluster_key: String,
     /// Gems in this cluster, ordered chronologically by `extracted_at`.
     pub gems: Vec<Gem>,
@@ -87,33 +83,6 @@ pub fn discover_session_arcs(all_gems: &[Gem]) -> Vec<ClusterCandidate> {
 fn has_obstacle_tag(gems: &[Gem]) -> bool {
     gems.iter()
         .any(|g| g.tags.iter().any(|t| t == "name-the-failure" || t == "reject"))
-}
-
-/// Discover Evergreen candidates: synthetic clusters keyed by primary
-/// tag (mode). One cluster per scaffolding mode, gems within ordered
-/// chronologically. Skips clusters that fail `MIN_CLUSTER_SIZE`.
-pub fn discover_evergreen_clusters(all_gems: &[Gem]) -> Vec<ClusterCandidate> {
-    log::debug!("discover_evergreen_clusters: total_gems={}", all_gems.len());
-    const SCAFFOLD_MODES: &[&str] = &["frame", "iterate", "reject", "push-for", "sequence", "name-the-failure"];
-    let mut out = Vec::new();
-    for mode in SCAFFOLD_MODES {
-        let mut gems: Vec<Gem> = all_gems
-            .iter()
-            .filter(|g| g.tags.iter().any(|t| t == *mode))
-            .cloned()
-            .collect();
-        if gems.len() < MIN_CLUSTER_SIZE {
-            continue;
-        }
-        gems.sort_by(|a, b| a.extracted_at.cmp(&b.extracted_at).then(a.id.cmp(&b.id)));
-        out.push(ClusterCandidate {
-            archetype: Archetype::Evergreen,
-            cluster_key: format!("mode-{mode}"),
-            gems,
-        });
-    }
-    log::debug!("discover_evergreen_clusters: produced {} candidate(s)", out.len());
-    out
 }
 
 /// Discover Cross-Session Arc candidates by clustering gem embeddings.

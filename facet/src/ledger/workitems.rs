@@ -107,25 +107,6 @@ impl Ledger {
         })
     }
 
-    /// IDs of every work-item that has at least one judgment moment.
-    /// Used by the harvest's stale-render sweep so notes that lost their
-    /// render in a previous tick are still picked up.
-    pub fn workitem_ids_with_moments(&self) -> Result<Vec<i64>> {
-        self.with_conn(|c| {
-            let mut stmt = c
-                .prepare("SELECT DISTINCT workitem_id FROM judgment_moments ORDER BY workitem_id")
-                .context("prep workitem_ids_with_moments")?;
-            let rows = stmt
-                .query_map([], |r| r.get::<_, i64>(0))
-                .context("query workitem_ids_with_moments")?;
-            let mut out = Vec::new();
-            for r in rows {
-                out.push(r.context("row workitem_ids_with_moments")?);
-            }
-            Ok(out)
-        })
-    }
-
     /// Mark work-items dormant whose `last_contribution_at` is older than
     /// `now - inactive_days * 86400`. Returns the number of rows flipped.
     pub fn mark_dormant(&self, now: DateTime<Utc>, inactive_days: u32) -> Result<u32> {
@@ -242,14 +223,18 @@ fn sessions_for_workitem(conn: &rusqlite::Connection, id: i64) -> Result<u32> {
 
 fn modes_for_workitem(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>> {
     let mut stmt = conn
-        .prepare_cached("SELECT DISTINCT mode FROM judgment_moments WHERE workitem_id = ?1 ORDER BY mode")
+        .prepare_cached("SELECT tags FROM gems WHERE workitem_id = ?1")
         .context("prep modes")?;
     let rows = stmt
         .query_map(rusqlite::params![id], |r| r.get::<_, String>(0))
         .context("query modes")?;
-    let mut out = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for r in rows {
-        out.push(r.context("modes row")?);
+        let tags_json = r.context("modes row")?;
+        let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+        for t in tags {
+            seen.insert(t);
+        }
     }
-    Ok(out)
+    Ok(seen.into_iter().collect())
 }

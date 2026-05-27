@@ -1,24 +1,25 @@
 //! SQLite ledger for facet.
 //!
 //! Lives at `~/.local/share/sb/facet/state.db`. The ledger is the
-//! durable, daemon-internal source of truth for sessions seen, work-items,
-//! cluster assignments, and judgment moments. Vault output is rendered
-//! from this ledger; the ledger is never reconstructed from the vault.
+//! durable, daemon-internal source of truth for sessions seen,
+//! work-items, cluster assignments, gems + interaction turns, and
+//! narratives. Vault output is rendered from this ledger; the ledger
+//! is never reconstructed from the vault.
 //!
 //! Decomposed into submodules so the file count stays well under the
 //! 1500 line bloat limit even as the schema grows:
 //!
-//! - [`schema`]   - DDL + schema-version migrations
-//! - [`sessions`] - sessions table accessors
-//! - [`workitems`] - work_items, work_item_repos, session_workitem
-//! - [`clusters`] - cluster_assignments
-//! - [`moments`]  - judgment_moments
-//! - [`meta`]     - ledger_meta
+//! - [`schema`]     - DDL, applied idempotently on every open
+//! - [`sessions`]   - sessions table accessors
+//! - [`workitems`]  - work_items, work_item_repos, session_workitem
+//! - [`clusters`]   - cluster_assignments
+//! - [`gems`]       - gems + interaction_turns
+//! - [`narratives`] - narratives + narrative_axes
+//! - [`meta`]       - ledger_meta
 
 pub mod clusters;
 pub mod gems;
 pub mod meta;
-pub mod moments;
 pub mod narratives;
 pub mod schema;
 pub mod sessions;
@@ -31,16 +32,15 @@ use std::sync::Mutex;
 
 /// Handle to the facet SQLite ledger. Wraps the rusqlite Connection in a
 /// Mutex because rusqlite::Connection is `!Sync` but the daemon needs
-/// shared access across tokio tasks. CPU-bound transactions stay short
-/// (the receipts-log design's "under 200 ms per write tx" rule applies).
+/// shared access across tokio tasks. CPU-bound transactions stay short.
 pub struct Ledger {
     conn: Mutex<Connection>,
     path: PathBuf,
 }
 
 impl Ledger {
-    /// Open (or create) the ledger at the given path. Runs schema
-    /// migrations to the current version.
+    /// Open (or create) the ledger at the given path. Applies the
+    /// schema idempotently.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         log::debug!("Ledger::open: path={}", path.display());
@@ -58,7 +58,7 @@ impl Ledger {
             conn: Mutex::new(conn),
             path,
         };
-        schema::migrate(&ledger).context("schema migrate")?;
+        schema::apply(&ledger).context("apply schema")?;
         Ok(ledger)
     }
 
@@ -72,7 +72,7 @@ impl Ledger {
             conn: Mutex::new(conn),
             path: PathBuf::from(":memory:"),
         };
-        schema::migrate(&ledger).context("schema migrate (in-memory)")?;
+        schema::apply(&ledger).context("apply schema (in-memory)")?;
         Ok(ledger)
     }
 
@@ -91,10 +91,8 @@ impl Ledger {
     }
 
     /// Run a closure inside one SQLite transaction. The closure receives a
-    /// `&mut rusqlite::Transaction`; if it returns `Ok`, the transaction
-    /// commits, otherwise it rolls back. Use this whenever a multi-row
-    /// write needs to be atomic — split-brain on crash is the failure
-    /// the per-session cluster path must avoid (Architect round 1).
+    /// `&rusqlite::Transaction`; if it returns `Ok`, the transaction
+    /// commits, otherwise it rolls back.
     pub fn with_tx<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> Result<R>,
@@ -105,13 +103,4 @@ impl Ledger {
         tx.commit().context("commit tx")?;
         Ok(out)
     }
-
-    /// Current schema version, read from `ledger_meta`. Returns 0 for a
-    /// fresh database that has not yet been migrated.
-    pub fn schema_version(&self) -> Result<u32> {
-        self.with_conn(|c| schema::current_version(c))
-    }
 }
-
-#[cfg(test)]
-mod tests;

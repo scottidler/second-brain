@@ -1,13 +1,13 @@
-//! Gem: multi-turn dialog-slice unit of capture for facet v2.
+//! Gem: multi-turn dialog-slice unit of capture.
 //!
 //! A gem is the four-part anatomy from the Shopify-CEO talk (task,
 //! context, interaction, review) carrying VERBATIM AI output alongside
 //! Scott's. See design doc
-//! `docs/design/2026-05-26-facet-v2-gems-and-narrative-spectra.md`.
+//! `docs/design/2026-05-26-facet-v2-gems-and-narrative-spectra.md` (filename is a date-stamped historical artifact).
 //!
 //! This module owns only the struct definitions and the `content_hash`
 //! identity calculation. Persistence (upsert against the `gems` and
-//! `interaction_turns` tables created by `bin/migrate-facet-v2.sh`)
+//! `interaction_turns` tables created by `facet::ledger::schema::apply`)
 //! lands in Phase 3.
 
 use chrono::{DateTime, Utc};
@@ -44,7 +44,7 @@ pub struct Gem {
 /// One turn inside a gem's interaction. `ai_says` and `user_says` are
 /// verbatim; tool-result `user_says` values over 800 chars are replaced
 /// with a `<tool-result: N lines, $tool>` placeholder at extract time
-/// per the v2 pattern (see `facet/patterns/facet-extract-v2.md` and the
+/// per the extract pattern (see `facet/patterns/facet-extract.md` and the
 /// risk-table entry "Tool-result blowout").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InteractionTurn {
@@ -100,7 +100,7 @@ impl Gem {
     /// Boundary user-turn UUIDs for inspection. Stored as `gems`
     /// columns but does not participate in the idempotency key.
     /// Returns `None` if the gem has no interaction turns (which is
-    /// invalid; a gem must have at least 2 turns per the v2 pattern).
+    /// invalid; a gem must have at least 2 turns per the extract pattern).
     pub fn boundary_user_turn_uuids(&self) -> Option<(&str, &str)> {
         let first = self.interaction.first()?;
         let last = self.interaction.last()?;

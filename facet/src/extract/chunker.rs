@@ -1,4 +1,4 @@
-//! Turn-range chunker for the v2 extractor.
+//! Turn-range chunker for the gem extractor.
 //!
 //! Splits a span of [`Turn`]s into chunks suitable for one fabric call
 //! each. Per the design doc's Phase 3 sub-spec:
@@ -29,7 +29,7 @@ pub const DEFAULT_OVERLAP_TURNS: usize = 4;
 /// chunker falls back to splitting at `max_turns` exactly (logged at
 /// WARN; rare in practice because user turns are interleaved).
 ///
-/// Returns owned `Vec<Vec<Turn>>` because the v2 extractor wants to
+/// Returns owned `Vec<Vec<Turn>>` because the gem extractor wants to
 /// pass each chunk to a separate fabric task. Callers that hold onto
 /// the original slice can wrap each `Vec<Turn>` in `Arc` if needed.
 pub fn chunk_turns(turns: &[Turn], max_turns: usize, overlap: usize) -> Vec<Vec<Turn>> {

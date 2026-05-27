@@ -12,7 +12,6 @@ fn ts(year: i32, month: u32, day: u32, hour: u32) -> chrono::DateTime<chrono::Ut
 #[test]
 fn run_writes_dream_notes_under_dreams_dir() {
     let l = Ledger::open_in_memory().expect("ledger");
-    l.apply_facet_v2_schema().expect("schema");
     let wid = l
         .insert_workitem(NewWorkItem {
             slug: "wi",

@@ -73,21 +73,6 @@ fn session_arc_orders_chronologically() {
 }
 
 #[test]
-fn evergreen_clusters_emitted_for_scaffold_modes_with_enough_gems() {
-    let gems = vec![
-        make_gem(1, "s1", vec!["frame"], ts(2026, 5, 1, 10)),
-        make_gem(2, "s1", vec!["frame"], ts(2026, 5, 1, 11)),
-        make_gem(3, "s2", vec!["frame"], ts(2026, 5, 2, 10)),
-        make_gem(4, "s2", vec!["reject"], ts(2026, 5, 2, 11)),
-    ];
-    let evergreens = discover_evergreen_clusters(&gems);
-    // frame has 3 gems -> emitted; reject has 1 -> filtered.
-    assert_eq!(evergreens.len(), 1);
-    assert_eq!(evergreens[0].cluster_key, "mode-frame");
-    assert_eq!(evergreens[0].gems.len(), 3);
-}
-
-#[test]
 fn cross_session_clustering_groups_by_similarity_and_orders_chronologically() {
     // Two pairs of similar vectors -> two clusters of 2; total cluster count
     // = 0 (below MIN_CLUSTER_SIZE). Bump to 6 gems in two groups of 3 each.

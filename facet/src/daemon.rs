@@ -1,8 +1,8 @@
 //! Cadence loop + systemd unit installation.
 //!
-//! Daemon mode (`sb facet daemon`) runs harvest on a configurable
-//! interval. One-shot mode (`sb facet harvest`) runs a single tick.
-//! Both call the same [`harvest_once`] code path.
+//! Daemon mode (`sb facet daemon`) runs harvest, narrate, and dream on
+//! configurable intervals. One-shot mode (`sb facet harvest`) runs a
+//! single harvest tick. Both call the same [`harvest_once`] code path.
 
 pub mod harvest;
 pub mod systemd;
@@ -14,46 +14,33 @@ use eyre::Result;
 
 use crate::config::Config;
 
-/// Drive one full tick: scan -> cluster -> extract -> render. Returns a
-/// tick report so the operator surface can show counts and failures.
-///
-/// `use_v1` selects the legacy one-line-moment extractor + renderer
-/// (true), or the v2 dialog-slice gem extractor + prism renderer
-/// (false; the default for new harvests).
-pub async fn harvest_once(
-    config: &Config,
-    ledger: &crate::Ledger,
-    vault_root: &Path,
-    use_v1: bool,
-) -> Result<TickReport> {
-    harvest::run_once(config, ledger, vault_root, use_v1).await
+/// Drive one full harvest tick: scan -> cluster -> extract -> render.
+/// Returns a tick report so the operator surface can show counts and
+/// failures.
+pub async fn harvest_once(config: &Config, ledger: &crate::Ledger, vault_root: &Path) -> Result<TickReport> {
+    harvest::run_once(config, ledger, vault_root).await
 }
 
-/// Run the cadence loop forever, sleeping `harvest_interval_secs`
-/// between ticks. The spectrum rollup fires on its own cadence in
-/// the same loop (controlled by `spectra_interval_secs`; 0 disables).
+/// Run the cadence loop forever. Each pass advances `harvest`,
+/// `narrate`, and `dream` based on their own intervals (0 disables).
 pub async fn run_loop(config: Config, ledger: crate::Ledger, vault_root: std::path::PathBuf) -> Result<()> {
     log::info!(
-        "facet::daemon::run_loop: harvest_interval_secs={} spectra_interval_secs={}",
+        "facet::daemon::run_loop: harvest_interval_secs={} narrate_interval_secs={} dream_interval_secs={}",
         config.harvest_interval_secs,
-        config.spectra_interval_secs
+        config.narrate_interval_secs,
+        config.dream_interval_secs
     );
     let interval = Duration::from_secs(config.harvest_interval_secs.max(60));
-    let mut last_spectrum_ts: u64 = 0;
-    // Daemon loop defaults to v2 (gems + prism renderer). Operators
-    // who want the legacy path invoke `sb facet harvest --v1`
-    // directly.
-    let use_v1 = false;
     let mut last_narrate_ts: u64 = 0;
     let mut last_dream_ts: u64 = 0;
     loop {
-        match harvest_once(&config, &ledger, &vault_root, use_v1).await {
+        match harvest_once(&config, &ledger, &vault_root).await {
             Ok(report) => {
                 log::info!(
-                    "facet daemon tick complete: sessions={} clustered={} extracted={} rendered={} failures={}",
+                    "facet daemon tick complete: sessions={} clustered={} gems={} rendered={} failures={}",
                     report.sessions_seen,
                     report.cluster_assignments_created,
-                    report.moments_extracted,
+                    report.gems_extracted,
                     report.workitems_rendered,
                     report.failures
                 );
@@ -63,16 +50,6 @@ pub async fn run_loop(config: Config, ledger: crate::Ledger, vault_root: std::pa
             }
         }
         let now = chrono::Utc::now().timestamp() as u64;
-
-        if config.spectra_interval_secs > 0 && now.saturating_sub(last_spectrum_ts) >= config.spectra_interval_secs {
-            match harvest::run_spectra_rollup(&config, &ledger, &vault_root).await {
-                Ok(n) => {
-                    log::info!("facet spectrum rollup: {n} spectra written");
-                    last_spectrum_ts = now;
-                }
-                Err(e) => log::error!("facet spectrum rollup failed: {e:#}"),
-            }
-        }
 
         if config.narrate_interval_secs > 0 && now.saturating_sub(last_narrate_ts) >= config.narrate_interval_secs {
             match crate::narrative::run::run(
@@ -118,7 +95,7 @@ pub async fn run_loop(config: Config, ledger: crate::Ledger, vault_root: std::pa
 pub struct TickReport {
     pub sessions_seen: usize,
     pub cluster_assignments_created: usize,
-    pub moments_extracted: usize,
+    pub gems_extracted: usize,
     pub workitems_rendered: usize,
     pub failures: usize,
 }

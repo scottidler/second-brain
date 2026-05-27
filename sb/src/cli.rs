@@ -38,7 +38,7 @@ pub enum Cmd {
     Cortex(cortex::CortexCli),
     /// Knowledge retrieval MCP server (serve, index, stats, call)
     Oracle(oracle::OracleCli),
-    /// Judgment-moment harvester for Claude Code transcripts
+    /// Dialog-slice gem harvester for Claude Code transcripts
     Facet(facet::FacetCli),
     /// Aggregated health across all subsystems
     Status(status::StatusArgs),

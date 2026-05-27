@@ -7,57 +7,37 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use eyre::{Context, Result};
+use eyre::Result;
 use futures::stream::{self, StreamExt};
 
 use super::TickReport;
 use crate::config::Config;
-use crate::extract::spectrum::spectrum_for_mode;
-use crate::extract::v1::mine::mine_moments;
-use crate::extract::v2::gems::mine_gems;
+use crate::extract::gems::mine_gems;
 use crate::fabric::{FabricCaller, FabricShell};
 use crate::jsonl::Turn;
 use crate::ledger::Ledger;
 use crate::render::prism::render_prism_note;
-use crate::render::render_work_item_note;
 use crate::scan::{FacetSession, enumerate};
 use crate::workitem::cluster::cluster_new_turns;
 
 /// Drive one tick end-to-end with a production fabric caller. The
 /// `vault_root` is the resolved vault path; notes are written under
 /// `<vault_root>/<config.vault.prisms_dir>/<slug>.md`.
-///
-/// `use_v1` selects the legacy one-line-moment extractor + renderer
-/// (true), or the v2 dialog-slice gem extractor + prism renderer
-/// (false; the default for new harvests).
-pub async fn run_once(config: &Config, ledger: &Ledger, vault_root: &Path, use_v1: bool) -> Result<TickReport> {
-    log::info!(
-        "facet::harvest::run_once: vault_root={} use_v1={}",
-        vault_root.display(),
-        use_v1
-    );
+pub async fn run_once(config: &Config, ledger: &Ledger, vault_root: &Path) -> Result<TickReport> {
+    log::info!("facet::harvest::run_once: vault_root={}", vault_root.display());
     let fabric: Arc<dyn FabricCaller> = Arc::new(FabricShell::new(config.llm.fabric_binary.clone()));
-    run_with_fabric(config, ledger, vault_root, fabric.as_ref(), use_v1).await
+    run_with_fabric(config, ledger, vault_root, fabric.as_ref()).await
 }
 
 /// Generic over the fabric caller so integration tests can swap in a
-/// `FakeFabric`. See [`run_once`] for the `use_v1` semantics.
+/// `FakeFabric`.
 pub async fn run_with_fabric(
     config: &Config,
     ledger: &Ledger,
     vault_root: &Path,
     fabric: &dyn FabricCaller,
-    use_v1: bool,
 ) -> Result<TickReport> {
-    if !use_v1 {
-        // Idempotently ensure the v2 schema exists. Operators on
-        // existing installs can also run `bin/migrate-facet-v2.sh`
-        // explicitly; calling it here is safe because every statement
-        // is `CREATE ... IF NOT EXISTS`.
-        ledger
-            .apply_facet_v2_schema()
-            .context("apply v2 schema for v2 harvest path")?;
-    }
+    log::debug!("facet::harvest::run_with_fabric: vault_root={}", vault_root.display());
     let mut report = TickReport::default();
 
     // 1. Scan.
@@ -68,17 +48,11 @@ pub async fn run_with_fabric(
     let cap = config.concurrency.max_sessions_per_tick.max(1);
     let deferred = sessions.len().saturating_sub(cap);
     if deferred > 0 {
-        // The per-tick cap is our v1 stand-in for budget enforcement (the
-        // real budget caps are a known gap; see Architect round 1). Fire
-        // the notification anyway so operators see when ticks are
-        // shedding load.
         crate::notify::on_budget_exhausted(
             &config.notify,
             &format!("max-sessions-per-tick={cap} reached; deferring {deferred} session(s) to next tick"),
         );
     }
-    // LLM calls are network-bound; gate concurrency on
-    // `max_llm_inflight` (Anthropic rate-limit guard, not a serial loop).
     let inflight = config.concurrency.max_llm_inflight.max(1);
     let mut touched_workitems: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
 
@@ -111,8 +85,7 @@ pub async fn run_with_fabric(
         }
     }
 
-    // 3. Extract every pending cluster_assignments row up to the
-    //    per-tick session cap, fanned out under the same inflight cap.
+    // 3. Extract every pending cluster_assignments row.
     let pending = ledger.pending_cluster_assignments(cap as u32 * 4)?;
     let mut extract_jobs = Vec::with_capacity(pending.len());
     for row in pending {
@@ -138,7 +111,7 @@ pub async fn run_with_fabric(
                 continue;
             }
         };
-        let turns = match read_turn_slice(config, &row, &session_row, &sessions) {
+        let turns = match read_turn_slice(&row, &session_row, &sessions) {
             Ok(t) => t,
             Err(e) => {
                 report.failures += 1;
@@ -158,33 +131,18 @@ pub async fn run_with_fabric(
         eyre::Result<usize>,
     )> = stream::iter(extract_jobs)
         .map(|(row, workitem, turns)| async move {
-            let r = if use_v1 {
-                mine_moments(
-                    &row,
-                    &turns,
-                    &workitem.slug,
-                    &workitem.title,
-                    workitem.repos.first().map(|s| s.as_str()),
-                    config,
-                    ledger,
-                    fabric,
-                )
-                .await
-                .map(|out| out.len())
-            } else {
-                mine_gems(
-                    &row,
-                    &turns,
-                    &workitem.slug,
-                    &workitem.title,
-                    workitem.repos.first().map(|s| s.as_str()),
-                    config,
-                    ledger,
-                    fabric,
-                )
-                .await
-                .map(|out| out.len())
-            };
+            let r = mine_gems(
+                &row,
+                &turns,
+                &workitem.slug,
+                &workitem.title,
+                workitem.repos.first().map(|s| s.as_str()),
+                config,
+                ledger,
+                fabric,
+            )
+            .await
+            .map(|out| out.len());
             (row, workitem, r)
         })
         .buffer_unordered(inflight)
@@ -194,7 +152,7 @@ pub async fn run_with_fabric(
     for (row, workitem, r) in extract_outcomes {
         match r {
             Ok(n_rows) => {
-                report.moments_extracted += n_rows;
+                report.gems_extracted += n_rows;
                 touched_workitems.insert(workitem.id);
             }
             Err(e) => {
@@ -209,36 +167,20 @@ pub async fn run_with_fabric(
         }
     }
 
-    // 4. Render every touched work-item that actually has content.
-    //    Empty work-items must not be written as placeholder files
-    //    (they accumulate as husks across ticks and pollute the vault).
+    // 4. Render every touched work-item that actually has gems.
     for id in touched_workitems {
         let Some(w) = ledger.workitem_by_id(id)? else { continue };
         let target = vault_root.join(&config.vault.prisms_dir).join(format!("{}.md", w.slug));
-        let render_result = if use_v1 {
-            let moments = ledger.moments_for_workitem(id)?;
-            if moments.is_empty() {
-                log::debug!(
-                    "facet::harvest: skip render workitem {} ({}) - no moments yet",
-                    w.id,
-                    w.slug
-                );
-                continue;
-            }
-            render_work_item_note(&target, &w, &moments)
-        } else {
-            let gems = ledger.gems_for_workitem(id)?;
-            if gems.is_empty() {
-                log::debug!(
-                    "facet::harvest: skip prism render workitem {} ({}) - no gems yet",
-                    w.id,
-                    w.slug
-                );
-                continue;
-            }
-            render_prism_note(&target, &w, &gems)
-        };
-        if let Err(e) = render_result {
+        let gems = ledger.gems_for_workitem(id)?;
+        if gems.is_empty() {
+            log::debug!(
+                "facet::harvest: skip prism render workitem {} ({}) - no gems yet",
+                w.id,
+                w.slug
+            );
+            continue;
+        }
+        if let Err(e) = render_prism_note(&target, &w, &gems) {
             report.failures += 1;
             log::warn!(
                 "facet::harvest: render failed for workitem {} ({}): {e:#}",
@@ -250,38 +192,20 @@ pub async fn run_with_fabric(
         }
     }
 
-    // 4.5 Stale-render sweep. Any work-item with content (v1 moments
-    //     or v2 gems, depending on path) whose vault note is missing
-    //     on disk (because a previous tick failed to render, or the
-    //     file was deleted) gets re-rendered now.
-    let stale_ids: Vec<i64> = if use_v1 {
-        ledger.workitem_ids_with_moments()?
-    } else {
-        ledger.workitem_ids_with_gems()?
-    };
+    // 4.5 Stale-render sweep. Any work-item with gems whose prism note
+    //     is missing on disk gets re-rendered now.
+    let stale_ids: Vec<i64> = ledger.workitem_ids_with_gems()?;
     for id in stale_ids {
-        let target = {
-            let Some(w) = ledger.workitem_by_id(id)? else { continue };
-            vault_root.join(&config.vault.prisms_dir).join(format!("{}.md", w.slug))
-        };
+        let Some(w) = ledger.workitem_by_id(id)? else { continue };
+        let target = vault_root.join(&config.vault.prisms_dir).join(format!("{}.md", w.slug));
         if target.exists() {
             continue;
         }
-        let Some(w) = ledger.workitem_by_id(id)? else { continue };
-        let render_result = if use_v1 {
-            let moments = ledger.moments_for_workitem(id)?;
-            if moments.is_empty() {
-                continue;
-            }
-            render_work_item_note(&target, &w, &moments)
-        } else {
-            let gems = ledger.gems_for_workitem(id)?;
-            if gems.is_empty() {
-                continue;
-            }
-            render_prism_note(&target, &w, &gems)
-        };
-        if let Err(e) = render_result {
+        let gems = ledger.gems_for_workitem(id)?;
+        if gems.is_empty() {
+            continue;
+        }
+        if let Err(e) = render_prism_note(&target, &w, &gems) {
             report.failures += 1;
             log::warn!(
                 "facet::harvest: stale-render failed for workitem {} ({}): {e:#}",
@@ -318,9 +242,6 @@ pub async fn run_with_fabric(
             );
         }
     }
-    // Reap cleared-failure quarantine files. Read the dir; any .md
-    // whose path is not in `current_quarantine_files` was rendered in
-    // a previous tick for a session that is no longer failing.
     if let Ok(entries) = std::fs::read_dir(&quarantine_root) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -347,69 +268,11 @@ pub async fn run_with_fabric(
     Ok(report)
 }
 
-/// Run the spectrum rollup over every distinct mode that has at least
-/// two moments in the configured window. Writes one
-/// `<vault_root>/<config.vault.spectra_dir>/<mode>.md` per spectrum
-/// that was actually synthesised; the rest are skipped silently per
-/// the LLM contract (empty title => skip).
-pub async fn run_spectra_rollup(config: &Config, ledger: &Ledger, vault_root: &Path) -> Result<usize> {
-    let fabric: Arc<dyn FabricCaller> = Arc::new(FabricShell::new(config.llm.fabric_binary.clone()));
-    run_spectra_rollup_with_fabric(config, ledger, vault_root, fabric.as_ref()).await
-}
-
-pub async fn run_spectra_rollup_with_fabric(
-    config: &Config,
-    ledger: &Ledger,
-    vault_root: &Path,
-    fabric: &dyn FabricCaller,
-) -> Result<usize> {
-    let modes = list_modes(ledger)?;
-    let mut written = 0usize;
-    for mode in modes {
-        match spectrum_for_mode(&mode, config, ledger, fabric).await {
-            Ok(Some(body)) => {
-                let target = vault_root.join(&config.vault.spectra_dir).join(format!("{mode}.md"));
-                if let Some(parent) = target.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let merged = match std::fs::read_to_string(&target) {
-                    Ok(existing) => crate::render::block::merge(&existing, &body),
-                    Err(_) => body,
-                };
-                std::fs::write(&target, merged).context("write spectrum note")?;
-                written += 1;
-            }
-            Ok(None) => {}
-            Err(e) => log::warn!("spectrum rollup failed for mode {mode}: {e:#}"),
-        }
-    }
-    ledger.meta_set("last-spectrum-tick", &chrono::Utc::now().to_rfc3339())?;
-    Ok(written)
-}
-
-fn list_modes(ledger: &Ledger) -> Result<Vec<String>> {
-    ledger.with_conn(|c| {
-        let mut stmt = c.prepare("SELECT DISTINCT mode FROM judgment_moments ORDER BY mode")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    })
-}
-
 fn read_turn_slice(
-    _config: &Config,
     row: &crate::ledger::clusters::ClusterAssignmentRow,
     session_row: &crate::ledger::sessions::SessionRow,
     sessions: &[FacetSession],
 ) -> Result<Vec<Turn>> {
-    // Fast path: the in-memory FacetSession from the same tick already
-    // carries the new turns. If extract is running on a row that was
-    // clustered in a previous tick, fall back to re-parsing the JSONL
-    // from offset 0 and taking the [first_turn_uuid, last_turn_uuid]
-    // slice.
     if let Some(s) = sessions.iter().find(|s| s.session_uuid == row.session_uuid)
         && let Some(slice) = bound_slice(&s.parsed.turns, &row.first_turn_uuid, &row.last_turn_uuid)
     {
@@ -421,9 +284,6 @@ fn read_turn_slice(
         .ok_or_else(|| eyre::eyre!("turn range not found in session file"))
 }
 
-/// Reconstruct the JSONL path from a session row. The encoded-cwd
-/// directory follows Claude Code's convention: leading `-` plus every
-/// path separator replaced with `-`.
 fn jsonl_path_for(session_row: &crate::ledger::sessions::SessionRow) -> Result<std::path::PathBuf> {
     let projects = crate::config::Config::default().claude_projects_root;
     let encoded = format!("-{}", session_row.cwd.trim_start_matches('/').replace('/', "-"));

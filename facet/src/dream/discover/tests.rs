@@ -32,7 +32,6 @@ fn make_gem(id: i64, task: &str, session: &str, at: chrono::DateTime<chrono::Utc
 
 fn ledger_with_workitem() -> crate::Ledger {
     let l = crate::Ledger::open_in_memory().expect("ledger");
-    l.apply_facet_v2_schema().expect("schema");
     l.insert_workitem(NewWorkItem {
         slug: "wi",
         title: "wi",

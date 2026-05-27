@@ -26,8 +26,7 @@ use crate::gems::Gem;
 use crate::ledger::Ledger;
 use crate::ledger::narratives::NewNarrative;
 use crate::narrative::discover::{
-    self, ClusterCandidate, MIN_CLUSTER_SIZE, discover_cross_session_arcs, discover_evergreen_clusters,
-    discover_session_arcs,
+    self, ClusterCandidate, MIN_CLUSTER_SIZE, discover_cross_session_arcs, discover_session_arcs,
 };
 use crate::narrative::narrate::{NarrateOutcome, narrate};
 use crate::narrative::render::{SpectrumMeta, read_spectrum_meta, render_spectrum_note};
@@ -140,12 +139,6 @@ pub async fn run_with_fabric<E: Embedder>(
         let xs = discover_cross_session_arcs(&all_gems, |g| embedder.embed(&discover::embedding_text(g)))?;
         candidates.extend(xs);
     }
-    if matches!(
-        filter,
-        ArchetypeFilter::All | ArchetypeFilter::Only(Archetype::Evergreen)
-    ) {
-        candidates.extend(discover_evergreen_clusters(&all_gems));
-    }
     report.candidates_considered = candidates.len();
 
     // 4. Filter by rejection overlap.
@@ -209,13 +202,7 @@ pub async fn run_with_fabric<E: Embedder>(
                         continue;
                     }
                 }
-                let filename = if matches!(c.archetype, Archetype::Evergreen) {
-                    // Evergreen back-compat: rendered at `mode-<name>.md`
-                    format!("{}.md", c.cluster_key)
-                } else {
-                    format!("{}.md", n.slug)
-                };
-                let target = spectra_dir.join(filename);
+                let target = spectra_dir.join(format!("{}.md", n.slug));
                 if let Some(parent) = target.parent()
                     && let Err(e) = std::fs::create_dir_all(parent)
                 {

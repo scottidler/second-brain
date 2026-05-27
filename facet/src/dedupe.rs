@@ -4,9 +4,9 @@
 //! already has a work-item, suffixing with `-2`, `-3`, etc. (cross-repo
 //! visibility from `known_workitems` reduces but does not eliminate
 //! this). This module detects those mechanical duplicates and merges
-//! them: judgment moments, cluster assignments, session links, and
-//! repo links from the suffixed work-item are re-pointed at the base
-//! work-item; the suffixed work-item is then deleted.
+//! them: gems, cluster assignments, session links, and repo links from
+//! the suffixed work-item are re-pointed at the base work-item; the
+//! suffixed work-item is then deleted.
 //!
 //! Vault-side cleanup (rkvr-archive the duplicate's prism note, then
 //! re-render the base) is the CLI wrapper's responsibility - this
@@ -30,8 +30,8 @@ pub struct MergePlan {
 /// Summary of one executed merge.
 #[derive(Debug, Default, Clone)]
 pub struct MergeReport {
-    pub moments_moved: usize,
-    pub moments_collided: usize,
+    pub gems_moved: usize,
+    pub gems_collided: usize,
     pub cluster_rows_moved: usize,
     pub cluster_rows_collided: usize,
     pub session_links_moved: usize,
@@ -122,9 +122,9 @@ struct MoveSpec {
 
 const MOVE_SPECS: [MoveSpec; 4] = [
     MoveSpec {
-        table: "judgment_moments",
-        assign_moved: |r, n| r.moments_moved = n,
-        assign_collided: |r, n| r.moments_collided = n,
+        table: "gems",
+        assign_moved: |r, n| r.gems_moved = n,
+        assign_collided: |r, n| r.gems_collided = n,
     },
     MoveSpec {
         table: "cluster_assignments",

@@ -1,13 +1,12 @@
 //! Narrative: the discovery-side of a spectrum.
 //!
 //! A narrative is a synthesised story over a cluster of gems: a
-//! Session Arc, a Cross-Session Arc, or an evergreen mode rollup
-//! (Phase 5). One narrative renders into one
+//! Session Arc or a Cross-Session Arc. One narrative renders into one
 //! `notes/facet/spectra/<slug>.md` file.
 //!
-//! Submodules (Phase 5):
+//! Submodules:
 //! - [`discover`]: find candidate clusters (Session Arc + Cross-Session
-//!   Arc + evergreen mode rollups)
+//!   Arc)
 //! - [`narrate`]: invoke `facet-narrate.md` per cluster, parse JSON,
 //!   honour the rejection gate
 //! - [`render`]: write the per-narrative markdown note to
@@ -64,8 +63,7 @@ pub struct NarrativeAxes {
     pub workitem_ids: Vec<i64>,
 }
 
-/// The narrative-discovery archetype. Two real shapes plus an
-/// evergreen back-compat shape. Phase 5 implements all three.
+/// The narrative-discovery archetype. Two shapes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Archetype {
@@ -73,8 +71,6 @@ pub enum Archetype {
     Session,
     /// HDBSCAN cluster across sessions, chronologically ordered.
     CrossSession,
-    /// Synthetic mode-bucket rollup (back-compat with v1 spectra).
-    Evergreen,
 }
 
 impl Archetype {
@@ -82,15 +78,13 @@ impl Archetype {
         match self {
             Self::Session => "session",
             Self::CrossSession => "cross-session",
-            Self::Evergreen => "evergreen",
         }
     }
 }
 
 /// Operator-editable status, mirrored from the spectrum note's
 /// frontmatter (`facet-spectrum-status`). The narrate pass reads this
-/// to decide whether to suppress regeneration of a rejected cluster
-/// (per the operator-rejection mechanism in Phase 5).
+/// to decide whether to suppress regeneration of a rejected cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SpectrumStatus {

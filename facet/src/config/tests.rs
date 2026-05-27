@@ -5,7 +5,7 @@ use std::path::PathBuf;
 fn default_loads_with_no_file() {
     let cfg = Config::default();
     assert_eq!(cfg.harvest_interval_secs, 86_400);
-    assert_eq!(cfg.spectra_interval_secs, 604_800);
+    assert_eq!(cfg.narrate_interval_secs, 604_800);
     assert!(
         cfg.exclude_cwds
             .iter()
@@ -26,7 +26,7 @@ fn explicit_path_loads_yaml() {
         &p,
         r#"
 harvest-interval-secs: 3600
-spectra-interval-secs: 0
+narrate-interval-secs: 0
 exclude-cwds:
   - ~/secret
 llm:
@@ -42,7 +42,7 @@ llm:
     .expect("write");
     let cfg = Config::load(Some(&p)).expect("load");
     assert_eq!(cfg.harvest_interval_secs, 3600);
-    assert_eq!(cfg.spectra_interval_secs, 0);
+    assert_eq!(cfg.narrate_interval_secs, 0);
     assert_eq!(cfg.llm.cluster_model, "alt-haiku");
     assert!(cfg.exclude_cwds.iter().any(|p| p.to_string_lossy().contains("secret")));
 }

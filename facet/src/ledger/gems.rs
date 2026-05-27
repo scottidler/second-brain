@@ -1,9 +1,7 @@
-//! `gems` and `interaction_turns` accessors (facet v2).
+//! `gems` and `interaction_turns` accessors.
 //!
-//! The schema is created by `bin/migrate-facet-v2.sh`; this module is
-//! purely accessor code that assumes the tables exist. Tests apply
-//! [`apply_v2_ddl`] after `Ledger::open_in_memory` to get a working
-//! schema in-process.
+//! The schema is owned by [`crate::ledger::schema`] and applied
+//! idempotently on every `Ledger::open`.
 //!
 //! Idempotency contract: `UNIQUE (workitem_id, content_hash)` on
 //! `gems`. Re-extracting a gem whose interaction turns span the same
@@ -22,90 +20,6 @@ use crate::gems::{Gem, InteractionTurn, Review};
 #[cfg(test)]
 mod tests;
 
-/// The v2 DDL mirrors `bin/migrate-facet-v2.sh`. Kept here so tests
-/// (and any future folding into the main migrate path) have a single
-/// Rust-side source of truth. If you change this, change the bash
-/// script too.
-pub const V2_DDL: &str = r#"
-CREATE TABLE IF NOT EXISTS gems (
-    id INTEGER PRIMARY KEY,
-    workitem_id INTEGER NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
-    session_uuid TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    first_user_turn_uuid TEXT NOT NULL,
-    last_user_turn_uuid TEXT NOT NULL,
-    task TEXT NOT NULL,
-    context_loaded TEXT NOT NULL,
-    context_missing TEXT NOT NULL,
-    review_accepted TEXT,
-    review_rejected TEXT,
-    review_verified_manually TEXT,
-    review_rewrote_by_hand TEXT,
-    tags TEXT NOT NULL,
-    why_it_matters TEXT NOT NULL,
-    extractor_model TEXT NOT NULL,
-    extracted_at TEXT NOT NULL,
-    UNIQUE (workitem_id, content_hash)
-);
-
-CREATE INDEX IF NOT EXISTS idx_gems_session  ON gems(session_uuid);
-CREATE INDEX IF NOT EXISTS idx_gems_workitem ON gems(workitem_id);
-
-CREATE TABLE IF NOT EXISTS interaction_turns (
-    id INTEGER PRIMARY KEY,
-    gem_id INTEGER NOT NULL REFERENCES gems(id) ON DELETE CASCADE,
-    seq INTEGER NOT NULL,
-    ai_says TEXT NOT NULL,
-    ai_turn_uuid TEXT NOT NULL,
-    user_says TEXT NOT NULL,
-    user_turn_uuid TEXT NOT NULL,
-    tags TEXT NOT NULL,
-    UNIQUE (gem_id, seq)
-);
-
-CREATE INDEX IF NOT EXISTS idx_interaction_turns_gem ON interaction_turns(gem_id);
-
--- One row per discovered narrative (Session Arc, Cross-Session Arc, or
--- evergreen mode rollup). `cluster_key` is the stable identity per
--- cluster (session_uuid / sha256-derived xs-... / mode-<name>) and is
--- the idempotency key; titles may drift on re-narrate. `gem_ids` is a
--- JSON array of citations into the gems table.
-CREATE TABLE IF NOT EXISTS narratives (
-    id INTEGER PRIMARY KEY,
-    cluster_key TEXT NOT NULL UNIQUE,
-    slug TEXT NOT NULL,
-    title TEXT NOT NULL,
-    thesis TEXT NOT NULL,
-    body_md TEXT NOT NULL,
-    gem_ids TEXT NOT NULL,
-    archetype TEXT NOT NULL,
-    synthesised_at TEXT NOT NULL,
-    synthesiser_model TEXT NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE INDEX IF NOT EXISTS idx_narratives_slug      ON narratives(slug);
-CREATE INDEX IF NOT EXISTS idx_narratives_archetype ON narratives(archetype);
-
--- Sidecar of narrative metadata describing what holds the cluster
--- together. One row per narrative.
-CREATE TABLE IF NOT EXISTS narrative_axes (
-    narrative_id INTEGER PRIMARY KEY REFERENCES narratives(id) ON DELETE CASCADE,
-    semantic_cluster_id INTEGER,
-    mode_mix TEXT NOT NULL,
-    time_window_start TEXT,
-    time_window_end TEXT,
-    repos TEXT NOT NULL,
-    workitem_ids TEXT NOT NULL
-);
-"#;
-
-/// Apply the v2 DDL idempotently. Used by tests and as the inner
-/// helper if the schema-management path eventually moves to Rust.
-pub fn apply_v2_ddl(conn: &mut Connection) -> Result<()> {
-    conn.execute_batch(V2_DDL).context("apply v2 ddl")
-}
-
 #[derive(Debug, Clone)]
 pub struct NewGem<'a> {
     pub workitem_id: i64,
@@ -122,15 +36,6 @@ pub struct NewGem<'a> {
 }
 
 impl Ledger {
-    /// Apply the v2 schema (gems + interaction_turns). Idempotent.
-    /// Production installs invoke `bin/migrate-facet-v2.sh` instead;
-    /// this method exists for in-process callers (tests, future
-    /// schema-version bump).
-    pub fn apply_facet_v2_schema(&self) -> Result<()> {
-        log::debug!("ledger::apply_facet_v2_schema");
-        self.with_conn(apply_v2_ddl)
-    }
-
     /// Upsert a gem with its interaction turns. Returns the gem id.
     ///
     /// On conflict (workitem_id, content_hash):

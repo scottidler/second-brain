@@ -1,4 +1,4 @@
-//! `narratives` and `narrative_axes` accessors (facet v2 / Phase 5).
+//! `narratives` and `narrative_axes` accessors.
 //!
 //! Idempotency contract: `UNIQUE (cluster_key)` on `narratives`.
 //! Re-narrating the same cluster upserts the existing row and bumps

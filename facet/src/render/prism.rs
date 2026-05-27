@@ -1,4 +1,4 @@
-//! v2 prism renderer.
+//! Prism renderer.
 //!
 //! One vault note per work-item, body composed of:
 //!
@@ -21,10 +21,8 @@
 //!
 //! Each section is wrapped in HTML-comment fenceposts so operator
 //! content placed outside fenceposts survives re-renders. The same
-//! `block::merge` machinery the v1 renderer uses applies here.
+//! `block::merge` machinery for fencepost-preserved operator content.
 //!
-//! Phase 4 of the v2 redesign. See
-//! `docs/design/2026-05-26-facet-v2-gems-and-narrative-spectra.md`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -38,7 +36,7 @@ use crate::workitem::WorkItem;
 #[cfg(test)]
 mod tests;
 
-/// Render and write the prism (v2) note for `workitem`. Reads any
+/// Render and write the prism note for `workitem`. Reads any
 /// pre-existing file at `target_path` to preserve operator-owned
 /// content. Writes atomically via tempfile + rename.
 pub fn render_prism_note(target_path: &Path, workitem: &WorkItem, gems: &[Gem]) -> Result<()> {

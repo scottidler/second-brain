@@ -73,7 +73,6 @@ fn archetype_serializes_as_kebab_case() {
 fn archetype_as_str_matches_frontmatter_values() {
     assert_eq!(Archetype::Session.as_str(), "session");
     assert_eq!(Archetype::CrossSession.as_str(), "cross-session");
-    assert_eq!(Archetype::Evergreen.as_str(), "evergreen");
 }
 
 #[test]

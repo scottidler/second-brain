@@ -1,4 +1,6 @@
 use super::*;
+use crate::gems::{InteractionTurn, Review};
+use crate::ledger::gems::NewGem;
 
 #[test]
 fn strip_suffix_two_digits() {
@@ -28,10 +30,6 @@ fn no_suffix_returns_none() {
 
 #[test]
 fn embedded_digit_is_not_a_suffix() {
-    // "phase-8" is itself a legitimate slug, not a duplicate-of-"phase".
-    // The dedupe planner uses `strip_dup_suffix` + "base exists" check,
-    // so this is only a duplicate when "phase" also exists - which is
-    // the correct semantic.
     assert_eq!(strip_dup_suffix("phase-8"), Some("phase"));
 }
 
@@ -49,8 +47,6 @@ fn plan_finds_only_real_duplicates() {
 
 #[test]
 fn plan_skips_suffix_without_base() {
-    // "phase-12" has no base "phase" in the ledger so it should not be
-    // flagged. We track these as standalone work-items.
     let l = Ledger::open_in_memory().expect("ledger");
     insert_workitem(&l, "phase-12");
     insert_workitem(&l, "other-thing");
@@ -59,12 +55,12 @@ fn plan_skips_suffix_without_base() {
 }
 
 #[test]
-fn execute_merges_moments_and_deletes_duplicate() {
+fn execute_merges_gems_and_deletes_duplicate() {
     let l = Ledger::open_in_memory().expect("ledger");
     let base_id = insert_workitem(&l, "concept");
     let dup_id = insert_workitem(&l, "concept-2");
-    insert_moment(&l, base_id, "session-A", "turn-1", "frame");
-    insert_moment(&l, dup_id, "session-B", "turn-9", "reject");
+    insert_gem(&l, base_id, "session-A", "ai-1", "u-1");
+    insert_gem(&l, dup_id, "session-B", "ai-2", "u-2");
     let plan = MergePlan {
         base_id,
         base_slug: "concept".to_string(),
@@ -72,9 +68,8 @@ fn execute_merges_moments_and_deletes_duplicate() {
         duplicate_slug: "concept-2".to_string(),
     };
     let report = execute(&l, &plan).expect("execute");
-    assert_eq!(report.moments_moved, 1);
-    assert_eq!(report.moments_collided, 0);
-    // Duplicate work-item gone.
+    assert_eq!(report.gems_moved, 1);
+    assert_eq!(report.gems_collided, 0);
     let dup_remaining: i64 = l
         .with_conn(|c| {
             Ok(c.query_row(
@@ -85,21 +80,21 @@ fn execute_merges_moments_and_deletes_duplicate() {
         })
         .expect("count");
     assert_eq!(dup_remaining, 0);
-    // Both moments now under base.
-    let base_moments = l.moments_for_workitem(base_id).expect("moments");
-    assert_eq!(base_moments.len(), 2);
+    let base_gems = l.gems_for_workitem(base_id).expect("gems");
+    assert_eq!(base_gems.len(), 2);
 }
 
 #[test]
 fn execute_handles_unique_constraint_collisions() {
-    // If base and dup both carry a moment with the same (turn_uuid, mode),
+    // If base and dup both carry a gem with the same content_hash,
     // the dup row collides; UPDATE OR IGNORE leaves it, DELETE then
     // removes it. Net: dup row is gone, base keeps its existing.
     let l = Ledger::open_in_memory().expect("ledger");
     let base_id = insert_workitem(&l, "concept");
     let dup_id = insert_workitem(&l, "concept-2");
-    insert_moment(&l, base_id, "session-A", "turn-1", "frame");
-    insert_moment(&l, dup_id, "session-B", "turn-1", "frame"); // same turn/mode
+    // Identical interaction UUIDs produce identical content_hash.
+    insert_gem(&l, base_id, "session-A", "ai-x", "u-x");
+    insert_gem(&l, dup_id, "session-B", "ai-x", "u-x");
     let plan = MergePlan {
         base_id,
         base_slug: "concept".to_string(),
@@ -107,10 +102,10 @@ fn execute_handles_unique_constraint_collisions() {
         duplicate_slug: "concept-2".to_string(),
     };
     let report = execute(&l, &plan).expect("execute");
-    assert_eq!(report.moments_moved, 0);
-    assert_eq!(report.moments_collided, 1);
-    let base_moments = l.moments_for_workitem(base_id).expect("moments");
-    assert_eq!(base_moments.len(), 1, "base moment unchanged");
+    assert_eq!(report.gems_moved, 0);
+    assert_eq!(report.gems_collided, 1);
+    let base_gems = l.gems_for_workitem(base_id).expect("gems");
+    assert_eq!(base_gems.len(), 1, "base gem unchanged");
 }
 
 fn insert_workitem(l: &Ledger, slug: &str) -> i64 {
@@ -122,22 +117,36 @@ fn insert_workitem(l: &Ledger, slug: &str) -> i64 {
     .expect("insert workitem")
 }
 
-fn insert_moment(l: &Ledger, workitem_id: i64, session_uuid: &str, turn_uuid: &str, mode: &str) {
-    l.with_conn(|c| {
-        c.execute(
-            "INSERT INTO judgment_moments \
-             (workitem_id, session_uuid, turn_uuid, mode, ai_move, scott_move, \
-              quote_excerpt, why_it_matters, extractor_model, extracted_at) \
-             VALUES (?1, ?2, ?3, ?4, 'a', 's', 'q', 'w', 'test-model', ?5)",
-            rusqlite::params![
-                workitem_id,
-                session_uuid,
-                turn_uuid,
-                mode,
-                chrono::Utc::now().to_rfc3339()
-            ],
-        )?;
-        Ok(())
+fn insert_gem(l: &Ledger, workitem_id: i64, session_uuid: &str, ai_uuid: &str, user_uuid: &str) {
+    let turn = InteractionTurn {
+        ai_says: "ai".to_string(),
+        ai_turn_uuid: ai_uuid.to_string(),
+        user_says: "user".to_string(),
+        user_turn_uuid: user_uuid.to_string(),
+        tags: vec![],
+    };
+    let review = Review {
+        accepted: None,
+        rejected: None,
+        verified_manually: None,
+        rewrote_by_hand: None,
+    };
+    let context_loaded: Vec<String> = vec![];
+    let context_missing: Vec<String> = vec![];
+    let interaction = vec![turn];
+    let tags: Vec<String> = vec![];
+    l.upsert_gem(NewGem {
+        workitem_id,
+        session_uuid,
+        task: "task",
+        context_loaded: &context_loaded,
+        context_missing: &context_missing,
+        interaction: &interaction,
+        review: &review,
+        tags: &tags,
+        why_it_matters: "why",
+        extractor_model: "test-model",
+        extracted_at: chrono::Utc::now(),
     })
-    .expect("insert moment");
+    .expect("upsert gem");
 }

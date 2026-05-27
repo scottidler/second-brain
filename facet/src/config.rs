@@ -22,13 +22,9 @@ pub struct Config {
     /// Daemon harvest interval. Default 24h.
     pub harvest_interval_secs: u64,
 
-    /// Daemon spectrum-rollup interval (v1 mode-bucketed rollups). 0
-    /// disables. Default weekly.
-    pub spectra_interval_secs: u64,
-
-    /// Daemon v2 narrate-pass interval (Session Arc + Cross-Session
-    /// Arc + Evergreen discovery, opus synthesis, rejection-gate).
-    /// 0 disables. Default weekly.
+    /// Daemon narrate-pass interval (Session Arc + Cross-Session Arc
+    /// discovery, opus synthesis, rejection-gate). 0 disables.
+    /// Default weekly.
     pub narrate_interval_secs: u64,
 
     /// Daemon dream-pass interval (semantic-duplicate / cross-ref /
@@ -67,9 +63,6 @@ pub struct Config {
     /// Extraction-stage tuning - quote excerpt cap, per-call max input
     /// token estimate (used to split oversized cluster_assignments rows).
     pub extract: ExtractConfig,
-
-    /// Spectrum-rollup tuning - per-mode moment cap, time window.
-    pub spectra: SpectraConfig,
 }
 
 impl Default for Config {
@@ -77,7 +70,6 @@ impl Default for Config {
         Self {
             claude_projects_root: shellexpand_path("~/.claude/projects"),
             harvest_interval_secs: 86_400,
-            spectra_interval_secs: 604_800,
             narrate_interval_secs: 604_800,
             dream_interval_secs: 86_400,
             include_cwds: vec![],
@@ -91,7 +83,6 @@ impl Default for Config {
             vault: VaultLayout::default(),
             notify: NotifyConfig::default(),
             extract: ExtractConfig::default(),
-            spectra: SpectraConfig::default(),
         }
     }
 }
@@ -202,22 +193,6 @@ impl Default for ExtractConfig {
         Self {
             quote_max_chars: 800,
             max_input_tokens: 60_000,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, rename_all = "kebab-case")]
-pub struct SpectraConfig {
-    pub max_moments_per_mode: usize,
-    pub window_days: u32,
-}
-
-impl Default for SpectraConfig {
-    fn default() -> Self {
-        Self {
-            max_moments_per_mode: 80,
-            window_days: 30,
         }
     }
 }

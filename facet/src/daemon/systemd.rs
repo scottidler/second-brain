@@ -26,16 +26,15 @@ pub fn install_systemd_service() -> Result<InstallOutcome> {
     let binary = std::env::current_exe().context("get current_exe")?;
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("dirs::home_dir() returned None"))?;
     // The daemon entrypoint runs the cadence loop: harvest on
-    // `harvest_interval_secs`, spectrum-rollup on
-    // `spectra_interval_secs` (v1 mode-buckets), narrate-pass on
-    // `narrate_interval_secs` (v2 Session+CrossSession+Evergreen
-    // archetypes with rejection gate), and dream-pass on
-    // `dream_interval_secs` (semantic-duplicate / cross-ref /
-    // stale-spectrum / narrative-candidate proposals). All four are
-    // driven by one process; no separate systemd timer per pass.
+    // `harvest_interval_secs`, narrate-pass on
+    // `narrate_interval_secs` (Session Arc + Cross-Session Arc with
+    // rejection gate), and dream-pass on `dream_interval_secs`
+    // (semantic-duplicate / cross-ref / stale-spectrum /
+    // narrative-candidate proposals). All three are driven by one
+    // process; no separate systemd timer per pass.
     let unit = format!(
         "[Unit]\n\
-         Description=facet - v2 gem harvester + narrative-spectra synthesis + dreaming\n\
+         Description=facet - gem harvester + narrative-spectra synthesis + dreaming\n\
          After=default.target\n\
          \n\
          [Service]\n\

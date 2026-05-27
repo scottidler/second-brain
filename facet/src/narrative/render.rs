@@ -1,11 +1,10 @@
 //! Spectrum (narrative) note renderer.
 //!
 //! One file per narrative under `notes/facet/spectra/<slug>.md`.
-//! Frontmatter carries the v2 archetype + status + cluster-key + gem
+//! Frontmatter carries the archetype + status + cluster-key + gem
 //! citations so the next narrate pass can read existing notes to
 //! honour operator rejections (see [`crate::narrative::SpectrumStatus`]).
 //!
-//! Phase 5 of the v2 redesign.
 
 use std::path::Path;
 
@@ -219,7 +218,6 @@ fn parse_meta_from_body(body: &str) -> Option<SpectrumMeta> {
         .and_then(|s| match s {
             "session" => Some(Archetype::Session),
             "cross-session" => Some(Archetype::CrossSession),
-            "evergreen" => Some(Archetype::Evergreen),
             _ => None,
         });
     Some(SpectrumMeta {

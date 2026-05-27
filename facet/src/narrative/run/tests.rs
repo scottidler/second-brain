@@ -12,7 +12,6 @@ fn ts(year: i32, month: u32, day: u32, hour: u32) -> chrono::DateTime<chrono::Ut
 
 fn ledger_with_session_gems(session: &str, with_obstacle: bool, count: usize) -> (Ledger, i64) {
     let l = Ledger::open_in_memory().expect("ledger");
-    l.apply_facet_v2_schema().expect("schema");
     let wid = l
         .insert_workitem(NewWorkItem {
             slug: "wi",

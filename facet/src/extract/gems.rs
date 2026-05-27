@@ -1,5 +1,5 @@
-//! v2 gem extractor. Reads the JSONL slice bounded by a
-//! `cluster_assignments` row, runs the `facet-extract-v2.md` Fabric
+//! Gem extractor. Reads the JSONL slice bounded by a
+//! `cluster_assignments` row, runs the `facet-extract.md` Fabric
 //! pattern (one call per chunk produced by [`super::chunker`]), parses
 //! the JSON output into `Vec<Gem>`, and persists each gem via the
 //! `(workitem_id, content_hash)` idempotency key.
@@ -24,7 +24,7 @@ use crate::ledger::workitems::SessionContribution;
 #[cfg(test)]
 mod tests;
 
-/// LLM-output shape for one gem (matches `facet-extract-v2.md`'s
+/// LLM-output shape for one gem (matches `facet-extract.md`'s
 /// SCHEMA section). Server-side fields (`workitem_id`, `session_uuid`,
 /// `extractor_model`, `extracted_at`) are filled in by the extract
 /// pipeline, not the LLM.
@@ -53,7 +53,7 @@ pub struct ExtractV2Output {
 
 /// Mine gems from a single cluster_assignment row.
 ///
-/// Mirrors `v1::mine::mine_moments` in shape: takes the
+/// Takes the
 /// cluster_assignment, the JSONL turn slice for its range, the
 /// work-item identifying info, the config, ledger, and a Fabric
 /// caller. Returns the list of [`Gem`]s persisted (each with its
@@ -107,17 +107,17 @@ pub async fn mine_gems(
             digest.len()
         );
         let req = request(
-            "facet-extract-v2",
+            "facet-extract",
             digest,
             &config.llm.extract_model,
             config.llm.timeout_secs,
         );
-        let raw = fabric.call(req).await.context("extract-v2 LLM call")?;
+        let raw = fabric.call(req).await.context("extract LLM call")?;
         let body = crate::yaml_out::strip_fences(&raw);
         let parsed: ExtractV2Output = serde_json::from_str(body).with_context(|| {
             let preview: String = body.chars().take(240).collect();
             format!(
-                "parse extract-v2 JSON output (got {} bytes); preview: {preview:?}",
+                "parse extract JSON output (got {} bytes); preview: {preview:?}",
                 raw.len()
             )
         })?;

@@ -93,8 +93,8 @@ fn gem_roundtrips_through_json() {
 }
 
 #[test]
-fn gem_deserializes_v2_extractor_output() {
-    // Minimal shape matching the v2 pattern's output. id defaults to 0
+fn gem_deserializes_extractor_output() {
+    // Minimal shape matching the extract pattern's output. id defaults to 0
     // (not present in extractor output; ledger fills it on upsert).
     let raw = r#"{
         "workitem_id": 1,
@@ -124,7 +124,7 @@ fn gem_deserializes_v2_extractor_output() {
         "extractor_model": "claude-sonnet-4-6",
         "extracted_at": "2026-05-26T12:00:00Z"
     }"#;
-    let g: Gem = serde_json::from_str(raw).expect("deserialize v2 extractor output");
+    let g: Gem = serde_json::from_str(raw).expect("deserialize extractor output");
     assert_eq!(g.id, 0);
     assert_eq!(g.interaction.len(), 2);
     assert_eq!(g.review.accepted.as_deref(), Some("ack"));

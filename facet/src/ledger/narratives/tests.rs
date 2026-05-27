@@ -1,9 +1,7 @@
 use super::*;
 
 fn open() -> Ledger {
-    let l = Ledger::open_in_memory().expect("open");
-    l.apply_facet_v2_schema().expect("v2 schema");
-    l
+    Ledger::open_in_memory().expect("open")
 }
 
 fn axes_fixture() -> NarrativeAxes {

@@ -1,4 +1,4 @@
-//! Dream: derived, regenerable enrichment artifact (facet v2).
+//! Dream: derived, regenerable enrichment artifact.
 //!
 //! Per the design doc and Architect Round 2 consensus, dreams have NO
 //! SQLite table. Each dream pass queries `gems` and `narratives`

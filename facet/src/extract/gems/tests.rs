@@ -124,11 +124,10 @@ fn fabric_response_2_gems() -> &'static str {
 #[tokio::test]
 async fn mine_gems_persists_and_marks_extracted() {
     let l = Ledger::open_in_memory().expect("ledger");
-    l.apply_facet_v2_schema().expect("apply v2 schema");
     let (assignment, slug) = seed_ledger_with_assignment(&l);
     let cfg = Config::default();
     let fabric = FakeFabric::new();
-    fabric.set_response("facet-extract-v2", fabric_response_2_gems());
+    fabric.set_response("facet-extract", fabric_response_2_gems());
 
     let turns = vec![
         turn("ai-1", Role::Assistant, "I'll rename portrait.rs"),
@@ -159,11 +158,10 @@ async fn mine_gems_persists_and_marks_extracted() {
 #[tokio::test]
 async fn mine_gems_is_idempotent_on_replay() {
     let l = Ledger::open_in_memory().expect("ledger");
-    l.apply_facet_v2_schema().expect("apply v2 schema");
     let (assignment, slug) = seed_ledger_with_assignment(&l);
     let cfg = Config::default();
     let fabric = FakeFabric::new();
-    fabric.set_response("facet-extract-v2", fabric_response_2_gems());
+    fabric.set_response("facet-extract", fabric_response_2_gems());
 
     let turns = vec![
         turn("ai-1", Role::Assistant, "I'll rename"),
@@ -189,7 +187,7 @@ async fn mine_gems_is_idempotent_on_replay() {
     let pending = l.pending_cluster_assignments(10).expect("pending");
     let assignment2 = pending.into_iter().next().expect("one pending");
 
-    fabric.set_response("facet-extract-v2", fabric_response_2_gems());
+    fabric.set_response("facet-extract", fabric_response_2_gems());
     let out2 = mine_gems(&assignment2, &turns, &slug, "Rename", Some("me/r"), &cfg, &l, &fabric)
         .await
         .expect("mine 2");
@@ -206,11 +204,10 @@ async fn mine_gems_is_idempotent_on_replay() {
 #[tokio::test]
 async fn mine_gems_handles_empty_gem_list() {
     let l = Ledger::open_in_memory().expect("ledger");
-    l.apply_facet_v2_schema().expect("apply v2 schema");
     let (assignment, slug) = seed_ledger_with_assignment(&l);
     let cfg = Config::default();
     let fabric = FakeFabric::new();
-    fabric.set_response("facet-extract-v2", r#"{"gems": []}"#);
+    fabric.set_response("facet-extract", r#"{"gems": []}"#);
 
     let turns = vec![
         turn("ai-1", Role::Assistant, "boilerplate"),
@@ -230,18 +227,17 @@ async fn mine_gems_handles_empty_gem_list() {
 #[tokio::test]
 async fn mine_gems_errors_on_malformed_llm_output() {
     let l = Ledger::open_in_memory().expect("ledger");
-    l.apply_facet_v2_schema().expect("apply v2 schema");
     let (assignment, slug) = seed_ledger_with_assignment(&l);
     let cfg = Config::default();
     let fabric = FakeFabric::new();
-    fabric.set_response("facet-extract-v2", "this is not json");
+    fabric.set_response("facet-extract", "this is not json");
 
     let turns = vec![turn("ai-1", Role::Assistant, "x"), turn("u-1", Role::User, "y")];
     let err = mine_gems(&assignment, &turns, &slug, "Bad", Some("me/r"), &cfg, &l, &fabric)
         .await
         .expect_err("expected parse error");
     let msg = format!("{err:#}");
-    assert!(msg.contains("parse extract-v2"));
+    assert!(msg.contains("parse extract"));
     // Cluster_assignment stays pending so the next tick retries.
     let pending = l.pending_cluster_assignments(10).expect("pending");
     assert_eq!(pending.len(), 1);
@@ -254,12 +250,11 @@ async fn mine_gems_skips_extracted_gems_with_empty_interaction() {
     // rather than failing the whole chunk. This preserves the
     // remaining good gems.
     let l = Ledger::open_in_memory().expect("ledger");
-    l.apply_facet_v2_schema().expect("apply v2 schema");
     let (assignment, slug) = seed_ledger_with_assignment(&l);
     let cfg = Config::default();
     let fabric = FakeFabric::new();
     fabric.set_response(
-        "facet-extract-v2",
+        "facet-extract",
         r#"{"gems": [
             {
                 "task": "empty",

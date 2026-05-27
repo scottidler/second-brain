@@ -3,9 +3,7 @@ use crate::ledger::workitems::NewWorkItem;
 use chrono::TimeZone;
 
 fn open() -> Ledger {
-    let l = Ledger::open_in_memory().expect("open in-memory");
-    l.apply_facet_v2_schema().expect("apply v2 schema");
-    l
+    Ledger::open_in_memory().expect("open in-memory")
 }
 
 fn ensure_workitem(l: &Ledger, slug: &str) -> i64 {
@@ -54,10 +52,12 @@ fn new_gem<'a>(workitem_id: i64, turns: &'a [InteractionTurn], review: &'a Revie
 }
 
 #[test]
-fn apply_v2_schema_is_idempotent() {
+fn schema_apply_is_idempotent() {
+    // Ledger::open_in_memory applies schema once; re-applying is a no-op
+    // because every CREATE statement is IF NOT EXISTS.
     let l = open();
-    l.apply_facet_v2_schema().expect("re-apply v2");
-    l.apply_facet_v2_schema().expect("re-apply v2 again");
+    crate::ledger::schema::apply(&l).expect("re-apply schema");
+    crate::ledger::schema::apply(&l).expect("re-apply schema again");
 }
 
 #[test]
@@ -127,19 +127,19 @@ fn upsert_replaces_interaction_turns_on_revision() {
     // stale rows).
     let l = open();
     let wid = ensure_workitem(&l, "rename");
-    let mut turns_v1 = vec![turn_fixture("ai-1", "u-1"), turn_fixture("ai-2", "u-2")];
-    turns_v1[0].tags = vec!["frame".to_string()];
+    let mut turns_first = vec![turn_fixture("ai-1", "u-1"), turn_fixture("ai-2", "u-2")];
+    turns_first[0].tags = vec!["frame".to_string()];
     let review = Review::default();
     let tags = vec!["reject".to_string()];
     let id = l
-        .upsert_gem(new_gem(wid, &turns_v1, &review, &tags))
-        .expect("upsert v1");
+        .upsert_gem(new_gem(wid, &turns_first, &review, &tags))
+        .expect("upsert first");
 
-    let mut turns_v2 = turns_v1.clone();
-    turns_v2[0].tags = vec!["reject".to_string(), "name-the-failure".to_string()];
+    let mut turns_second = turns_first.clone();
+    turns_second[0].tags = vec!["reject".to_string(), "name-the-failure".to_string()];
     let id_again = l
-        .upsert_gem(new_gem(wid, &turns_v2, &review, &tags))
-        .expect("upsert v2");
+        .upsert_gem(new_gem(wid, &turns_second, &review, &tags))
+        .expect("upsert second");
     assert_eq!(id, id_again);
 
     let g = l.gem_by_id(id).expect("read").expect("present");
