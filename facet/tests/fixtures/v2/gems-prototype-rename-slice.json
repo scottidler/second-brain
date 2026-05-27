@@ -1,0 +1,129 @@
+{
+  "gems": [
+    {
+      "task": "Diagnose why 23 drain rows are stuck failing and determine if they are recoverable",
+      "context_loaded": [
+        "SQLite query output showing last_failure_reason for stuck rows: LLM emitted prose/YAML instead of JSON",
+        "Drain loop tail logs showing sessions_seen:0, failures:23 persisting across loops 8-10",
+        "Loop 6 log showing 1 session processed successfully (15 moments extracted) confirming the pipeline works for well-formed sessions"
+      ],
+      "context_missing": [],
+      "interaction": [
+        {
+          "ai_turn_uuid": "eb194ece-7cc9-44ed-a9ed-d897faa5fb55",
+          "ai_says": "23 rows are stuck — failing instantly (~0.3s each). Inspecting.",
+          "user_turn_uuid": "55783847-7084-49f5-9f04-d83b11ab73f3",
+          "user_says": "[tool_result: === failure reasons currently in DB ===\n\n    parse extract JSON output (got 4673 bytes); preview: \"I'll search through the JSONL session logs to find that artifact about agentic AI and the git comparison. …]",
+          "tags": ["verify"]
+        },
+        {
+          "ai_turn_uuid": "5eb81faa-3b7d-41db-af6a-c748da16d236",
+          "ai_says": "Drain complete. 5 sessions keep failing on JSON parse (LLM emits prose or YAML despite the JSON pattern). Moving to dedupe.",
+          "user_turn_uuid": "ee4c5582-11a0-4d5b-9ce8-9de8fcd45ccf",
+          "user_says": "[tool_result: === dedupe dry-run preview ===\n\n    2026-05-26 22:24:02.656 [INFO] vault::logging: Logging initialized (level=info), writing to: /home/saidler/.local/share/sb/facet.log + stderr\n\n    2026-05-26 22:24:02.660 [IN…]",
+          "tags": ["verify", "sequence"]
+        }
+      ],
+      "review": {
+        "accepted": "5 genuinely stuck sessions classified as LLM refusals, quarantined; 23 originally stuck rows bounded to those 5; dedupe proceeded",
+        "rejected": "null",
+        "verified_manually": "sqlite3 query on last_failure_reason + drain loop tail logs confirming failures:23 stable across loops",
+        "rewrote_by_hand": null
+      },
+      "tags": ["verify", "sequence"],
+      "why_it_matters": "When a pipeline has persistent failures, running a targeted DB query to read the actual failure reason — rather than guessing — is the fastest path to knowing whether failures are recoverable or bounded noise."
+    },
+    {
+      "task": "Show Scott a randomly sampled prism note and explain what was produced; discover that spectra directory is missing",
+      "context_loaded": [
+        "ls output: spectra/ directory does not exist at expected vault path",
+        "DB query output: moments by mode — push-for:263, name-the-failure:133, sequence:124, reject:120, frame:100, iterate:68",
+        "Live config showing portrait.max-moments-per-mode:80, window-days:30"
+      ],
+      "context_missing": [
+        "The spectra rollup had never fired; AI initially assumed it ran on a separate cadence rather than confirming the directory existed"
+      ],
+      "interaction": [
+        {
+          "ai_turn_uuid": "29080d65-6f01-4939-bd4b-f2b1030ec291",
+          "ai_says": "[tool_use:Bash('/usr/bin/ls ~/repos/scottidler/obsidian/notes/facet/prisms/ | /usr/bin/shuf | /usr/bin/head -1')]",
+          "user_turn_uuid": "6ac0f010-9c2d-4d83-90e6-2d47c43d1416",
+          "user_says": "[tool_result: ls: cannot access '/home/saidler/repos/scottidler/obsidian/notes/facet/spectra/': No such file or directory\n\n    ---\n\n    total 156\n\n    drwxrwxr-x 4 saidler saidler   4096 May 26 21:55 .\n\n    drwxrwxr-x 4 saidler saidle…]",
+          "tags": ["verify"]
+        },
+        {
+          "ai_turn_uuid": "fe6b136a-88df-4e28-be86-228b8a20bc04",
+          "ai_says": "No spectra yet — the rollup runs on a separate cadence and hasn't fired. Adding `sb facet portrait` subcommand to trigger one manually.",
+          "user_turn_uuid": "2d77f987-f34e-4d1a-a92d-41fc7d358953",
+          "user_says": "[tool_result: 16:use crate::extract::portrait::portrait_for_mode;\n\n27:pub async fn run_once(config: &Config, ledger: &Ledger, vault_root: &Path) -> Result<TickReport> {\n\n35:pub async fn run_with_fabric(\n\n303:pub async…]",
+          "tags": ["push-for", "sequence"]
+        },
+        {
+          "ai_turn_uuid": "e823ea30-4c6e-443f-917f-3c3dafac3630",
+          "ai_says": "You're right, I missed the whole layer. Doing a full sweep now.",
+          "user_turn_uuid": "1fe8a9a0-0c92-4bf0-919c-5bde0d09d7d1",
+          "user_says": "[tool_result: /home/saidler/repos/scottidler/second-brain/facet/src/daemon.rs\n\n    /home/saidler/repos/scottidler/second-brain/facet/patterns/facet-portrait.md\n\n    /home/saidler/repos/scottidler/second-brain/facet/src/confi…]",
+          "tags": ["name-the-failure", "iterate"]
+        }
+      ],
+      "review": {
+        "accepted": "sb facet spectra subcommand added to trigger rollup manually; portrait→spectrum rename swept across all files",
+        "rejected": "sb facet portrait subcommand name — renamed to spectra (plural) to match what it produces",
+        "verified_manually": "cargo build -p facet -p sb: Finished dev profile; cargo test -p facet: 100 passed, 0 failed",
+        "rewrote_by_hand": null
+      },
+      "tags": ["verify", "name-the-failure", "push-for"],
+      "why_it_matters": "Sampling a real output immediately exposed a missing directory the AI had assumed existed; the AI's honest 'I missed the whole layer' and immediate sweep is a model for how to recover from a wrong assumption without deflecting."
+    },
+    {
+      "task": "Rename the portrait→spectrum/spectra terminology consistently across the entire codebase and config",
+      "context_loaded": [
+        "grep output listing all files containing portrait/Portrait references across facet/ and sb/",
+        "grep output showing config.rs still had `pub spectrum: SpectraConfig` field (not yet renamed to `spectra`)",
+        "Live config file content after rewrite showing spectra-interval-secs key",
+        "Verification grep showing facet-spectrum pattern string still in spectrum.rs (intentional)"
+      ],
+      "context_missing": [
+        "Initial sed invocation used a newline-embedded FILES variable that broke the command — sed can't read a path with a leading newline"
+      ],
+      "interaction": [
+        {
+          "ai_turn_uuid": "5d29866b-a3fc-4b34-9d7d-e4aa13579014",
+          "ai_says": "[tool_use:Bash('FILES=\"\\n/home/saidler/repos/scottidler/second-brain/facet/src/extract/portrait.rs\\n/home/saidler/repos/scottidler/second-brain/facet/src/extract/portrait/tests.rs\\n/home/saidler/repos/…')]",
+          "user_turn_uuid": "980391ce-8b8b-466f-9aca-098ce2fdc315",
+          "user_says": "[tool_result: /usr/bin/sed: can't read \\n/home/saidler/repos/scottidler/second-brain/facet/src/extract/portrait.rs\\n/home/saidler/repos/scottidler/second-brain/facet/src/extract/portrait/tests.rs\\n/home/saidler/repos/…]",
+          "tags": ["verify"]
+        },
+        {
+          "ai_turn_uuid": "2ddeccc4-1f9c-4231-bc9e-1dafe72beb35",
+          "ai_says": "[tool_use:Bash('cd /home/saidler/repos/scottidler/second-brain\\nFILES=(\\n  facet/src/extract/portrait.rs\\n  facet/src/extract/portrait/test…')]",
+          "user_turn_uuid": "3a257579-9083-449e-b787-77402f461c2b",
+          "user_says": "[tool_result: ---residual portrait/Portrait references---]",
+          "tags": ["iterate"]
+        },
+        {
+          "ai_turn_uuid": "0284224f-78bd-4f19-9f97-073e366a7b1e",
+          "ai_says": "The sed did most of it but left `config.spectrum: SpectraConfig` — the field should be `spectra` to match siblings. Fixing.",
+          "user_turn_uuid": "c8b9961e-7b63-4172-aef9-5dcbb33c63b3",
+          "user_says": "[tool_result: facet/src/config.rs:61:    pub spectrum: SpectraConfig,\n\n    facet/src/config.rs:81:            spectrum: SpectraConfig::default(),\n\n    facet/src/extract/portrait.rs:44:        config.spectrum.window_days,\n\nfac…]",
+          "tags": ["verify", "iterate"]
+        },
+        {
+          "ai_turn_uuid": "c4c6d645-d09f-4200-9561-746b39b51581",
+          "ai_says": "Subcommand should be `spectra` (plural — it produces multiple spectrum files). Fixing.",
+          "user_turn_uuid": "66b11334-d1c6-4b1f-a7b0-bb31db29a03b",
+          "user_says": "[tool_result: /home/saidler/repos/scottidler/second-brain/facet/src/daemon.rs:24:/// between ticks. The spectrum rollup fires on its own cadence in\n\n    /home/saidler/repos/scottidler/second-brain/facet/src/daemon.rs:55…]",
+          "tags": ["push-for", "iterate"]
+        }
+      ],
+      "review": {
+        "accepted": "Full portrait→spectrum/spectra rename across all source files, config, and CLI subcommand name (`sb facet spectra`); field name `spectra` in config struct",
+        "rejected": "sed invocation with newline-prefixed FILES string — fixed by switching to bash array syntax",
+        "verified_manually": "cargo build -p facet -p sb: Finished dev profile; cargo test -p facet: 100 passed, 0 failed after rename",
+        "rewrote_by_hand": null
+      },
+      "tags": ["iterate", "verify", "push-for"],
+      "why_it_matters": "A bulk rename across a codebase requires iterative grep-verify loops after each sed pass — the AI catching its own residual `config.spectrum` field and the plural/singular subcommand name shows the value of re-grepping after every automated substitution rather than assuming the first pass was complete."
+    }
+  ]
+}
