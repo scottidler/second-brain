@@ -263,6 +263,26 @@ impl Ledger {
         })
     }
 
+    /// Distinct workitem ids that have at least one gem. Used by the
+    /// stale-render sweep so a deleted prism note can be re-rendered
+    /// from canonical even when the current tick produced no new gems.
+    pub fn workitem_ids_with_gems(&self) -> Result<Vec<i64>> {
+        log::debug!("ledger::workitem_ids_with_gems");
+        self.with_conn(|c| {
+            let mut stmt = c
+                .prepare_cached("SELECT DISTINCT workitem_id FROM gems ORDER BY workitem_id ASC")
+                .context("prep workitem_ids_with_gems")?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, i64>(0))
+                .context("query workitem_ids_with_gems")?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.context("workitem_id row")?);
+            }
+            Ok(out)
+        })
+    }
+
     /// All gems for a workitem, ordered by extracted_at (then id).
     pub fn gems_for_workitem(&self, workitem_id: i64) -> Result<Vec<Gem>> {
         log::debug!("ledger::gems_for_workitem: workitem_id={workitem_id}");

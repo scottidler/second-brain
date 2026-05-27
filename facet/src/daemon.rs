@@ -16,8 +16,17 @@ use crate::config::Config;
 
 /// Drive one full tick: scan -> cluster -> extract -> render. Returns a
 /// tick report so the operator surface can show counts and failures.
-pub async fn harvest_once(config: &Config, ledger: &crate::Ledger, vault_root: &Path) -> Result<TickReport> {
-    harvest::run_once(config, ledger, vault_root).await
+///
+/// `use_v1` selects the legacy one-line-moment extractor + renderer
+/// (true), or the v2 dialog-slice gem extractor + prism renderer
+/// (false; the default for new harvests).
+pub async fn harvest_once(
+    config: &Config,
+    ledger: &crate::Ledger,
+    vault_root: &Path,
+    use_v1: bool,
+) -> Result<TickReport> {
+    harvest::run_once(config, ledger, vault_root, use_v1).await
 }
 
 /// Run the cadence loop forever, sleeping `harvest_interval_secs`
@@ -31,8 +40,12 @@ pub async fn run_loop(config: Config, ledger: crate::Ledger, vault_root: std::pa
     );
     let interval = Duration::from_secs(config.harvest_interval_secs.max(60));
     let mut last_spectrum_ts: u64 = 0;
+    // Daemon loop defaults to v2 (gems + prism renderer). Operators
+    // who want the legacy path invoke `sb facet harvest --v1`
+    // directly.
+    let use_v1 = false;
     loop {
-        match harvest_once(&config, &ledger, &vault_root).await {
+        match harvest_once(&config, &ledger, &vault_root, use_v1).await {
             Ok(report) => {
                 log::info!(
                     "facet daemon tick complete: sessions={} clustered={} extracted={} rendered={} failures={}",

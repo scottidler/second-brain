@@ -108,3 +108,42 @@ Artifacts:
 - **Phase 3 sub-spec called for "per-turn AND per-gem mode tags" — implemented. But the doc's risk table also calls out tag-vocabulary drift between per-turn and per-gem.** The pattern enforces the same closed list in both places; no separation of vocabularies. Note for Phase 5 narrate-pass: if it relies on tag mix, it should look at gem-level tags first, fall back to aggregating turn tags.
 
 ---
+
+## Phase 4: Prism renderer v2 + harvest dispatcher
+
+Artifacts:
+- `facet/src/render/prism.rs` + `render/prism/tests.rs`: new v2 prism renderer (frontmatter with `facet-gem-count`/`facet-tag-mix`, header with tag-mix summary, gem-index TOC, per-gem `## Gem N: <task>` sections with task/context/interaction/review sub-sections, fencepost-merge via existing `block::merge`)
+- `facet/src/render.rs`: `pub mod prism;` declaration
+- `facet/src/ledger/gems.rs`: new `workitem_ids_with_gems()` accessor for the stale-render sweep
+- `facet/src/daemon/harvest.rs`: `run_once` and `run_with_fabric` gain a `use_v1: bool` param; the extract loop and the render+stale-render passes branch on it; the v2 path idempotently applies the v2 schema on entry
+- `facet/src/daemon.rs`: `harvest_once` gains `use_v1`; the daemon loop hard-codes `use_v1 = false` (v2 is the default)
+- `sb/src/cli/facet.rs`: `Commands::Harvest { v1: bool }` and harvest fn pass `use_v1` through; the operator-visible summary now reports `gems_extracted` or `moments_extracted` depending on path
+- `facet/tests/harvest_end_to_end.rs`: existing test pinned to `use_v1 = true` so the v1 fixture path stays exercised; v2 has its own unit-test coverage in render/prism + extract/v2/gems
+- 7 new renderer tests; otto ci green; daemon loop now defaults to v2.
+
+### Design decisions
+
+- **v2 is the default for the daemon and for `sb facet harvest`; `--v1` is the fallback.** The doc Migration Plan calls v2 the default after Phase 4 ships. Implementing this as a hard-coded `use_v1 = false` in the daemon loop (vs a config field) keeps the cutover atomic — the operator does not need to flip a config knob to opt in. The CLI flag exists for diagnostics during the soak window.
+- **`apply_facet_v2_schema()` is called at the top of every v2 harvest tick.** Architecturally this lets existing installs upgrade without a manual bash step; defensively, it guarantees the v2 schema is current even if the operator's bash script is out of sync. Idempotent (all `CREATE ... IF NOT EXISTS`); cost is one SQLite transaction per tick. Minor deviation from the Phase 2 stance "bash-only"; the bash script remains as the documented operator path. This is the second time Phase 2's bash-only stance has been softened (Phase 3 added the Rust `V2_DDL` const; Phase 4 calls `apply_facet_v2_schema` from the runtime path). Phase 7 should formally fold v2 into the Rust `MIGRATIONS` slice and retire the bash script.
+- **Reusing the existing `block::merge` machinery for fencepost-merge.** Architect Round 2 did not flag the fencepost mechanism; it's content-agnostic and works fine for the per-gem sections. No new merge code needed.
+- **Frontmatter `facet-tag-mix` is a sequence of `{tag, count}` mappings, not a flat string array.** Operator queries against the vault (oracle, dataview, manual) get the count without re-aggregating. The `Vec<(String, u32)>` shape in `NarrativeAxes::mode_mix` follows the same pattern.
+- **Per-turn tags appear inline in the rendered turn header (e.g., `**Turn 1** — `name-the-failure``).** The doc says the four-part anatomy + verbatim turns; making tags visible at the turn level lets a reader scan the prism for specific judgment moves without reading every word.
+- **Gem section fenceposts are keyed by `gem:{id}`, not by sequential turn number.** Re-renders after a re-extract may reorder gems (e.g., a new gem inserts in the middle by `extracted_at`); keying by stable id keeps operator-edited content tethered to the right gem across re-renders.
+
+### Deviations
+
+- **`render_prism_note` lives next to `render.rs` rather than replacing it.** The doc says "Phase 4: Prism renderer v2"; my reading is the v2 renderer is a sibling module, not an in-place replacement. v1 callers (e.g., spectrum rollup, retry CLI command) keep working unchanged. Phase 7 drops v1.
+- **`extract_outcomes` Vec now counts gems-extracted into `report.moments_extracted` (same field, repurposed).** Renaming the field would ripple through every report/notify call site for cosmetic gain only. The CLI surface label is dispatched on `use_v1` so the operator sees the correct noun.
+
+### Tradeoffs
+
+- **`workitem_ids_with_gems()` is a separate SQL query rather than parametrised on a "kind" arg shared with `workitem_ids_with_moments()`.** Symmetry over premature abstraction; the two tables are not shape-compatible in any other query path.
+- **`render_prism_note` returns `eyre::Result<()>` not a `RenderReport`** matching `render_work_item_note`'s shape. The doc does not name a report shape; matching the v1 path keeps the harvest call site uniform.
+
+### Open questions
+
+- **Should `sb facet render <slug>` (one-shot manual render) also dispatch on a `--v1` flag?** Currently it does not. The single-shot render path is a v1-only command today; v2 callers would need an equivalent. Defer until an operator complains.
+- **Should the prism renderer expose a `--dry-run` that prints the body to stdout?** Useful for testing pattern + render changes without writing to the vault. Defer.
+- **What about existing v1 prism notes on disk when v2 lands?** Per the doc Migration Plan: "Existing prism notes on disk stay as-is until the first v2 render touches them. New v2 renders write to the same path with new body shape (replacing the v1 fencepost content)." Implemented as-is: `block::merge` will overwrite v1 fencepost content with v2 fencepost content on first re-render, preserving operator content outside fenceposts. Has NOT been tested against a real v1 note in the wild; the test only covers `merge_preserves_operator_content_outside_fenceposts` with a v2-shaped existing note. A more rigorous test would mock a v1 prism note + run v2 render against it. Defer to Phase 7 cleanup test.
+
+---

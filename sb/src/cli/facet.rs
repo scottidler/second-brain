@@ -18,8 +18,15 @@ pub struct FacetCli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// One-shot harvest tick.
-    Harvest,
+    /// One-shot harvest tick. Defaults to the v2 dialog-slice gem
+    /// extractor + prism renderer; pass `--v1` to invoke the legacy
+    /// one-line judgment-moment pipeline during cutover.
+    Harvest {
+        /// Fall back to the v1 (one-line moment) extractor + renderer.
+        /// Deprecated after the cutover soak window.
+        #[arg(long)]
+        v1: bool,
+    },
     /// One-shot spectra rollup. Synthesises one
     /// `notes/facet/spectra/<mode>.md` per scaffolding mode that has at
     /// least two moments in the configured window. Idempotent and
@@ -77,7 +84,7 @@ impl FacetCli {
     pub async fn run(self) -> Result<()> {
         let config = facet::Config::load(self.config.as_deref()).context("load facet config")?;
         match self.command {
-            Commands::Harvest => harvest(&config, self.vault.as_deref()).await,
+            Commands::Harvest { v1 } => harvest(&config, self.vault.as_deref(), v1).await,
             Commands::Spectra => spectra(&config, self.vault.as_deref()).await,
             Commands::Daemon { install, uninstall } => daemon(config, install, uninstall, self.vault.as_deref()).await,
             Commands::List { repo, mode, status } => list(&config, repo, mode, status),
@@ -101,12 +108,14 @@ fn vault_root(cli_override: Option<&std::path::Path>) -> Result<PathBuf> {
     vault::paths::resolve_vault_root(cli_override, None).context("resolve vault root")
 }
 
-async fn harvest(config: &facet::Config, vault_override: Option<&std::path::Path>) -> Result<()> {
+async fn harvest(config: &facet::Config, vault_override: Option<&std::path::Path>, use_v1: bool) -> Result<()> {
     let ledger = ledger_open(config)?;
     let vault = vault_root(vault_override)?;
-    let report = facet::daemon::harvest_once(config, &ledger, &vault).await?;
+    let report = facet::daemon::harvest_once(config, &ledger, &vault, use_v1).await?;
+    let row_label = if use_v1 { "moments_extracted" } else { "gems_extracted" };
     println!(
-        "facet harvest complete:\n  sessions_seen: {}\n  cluster_assignments_created: {}\n  moments_extracted: {}\n  workitems_rendered: {}\n  failures: {}",
+        "facet harvest complete (path={}):\n  sessions_seen: {}\n  cluster_assignments_created: {}\n  {row_label}: {}\n  workitems_rendered: {}\n  failures: {}",
+        if use_v1 { "v1" } else { "v2" },
         report.sessions_seen,
         report.cluster_assignments_created,
         report.moments_extracted,

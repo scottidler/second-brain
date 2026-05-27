@@ -16,6 +16,7 @@
 
 pub mod block;
 pub mod frontmatter;
+pub mod prism;
 pub mod quarantine;
 
 use std::path::{Path, PathBuf};

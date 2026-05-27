@@ -14,9 +14,11 @@ use super::TickReport;
 use crate::config::Config;
 use crate::extract::spectrum::spectrum_for_mode;
 use crate::extract::v1::mine::mine_moments;
+use crate::extract::v2::gems::mine_gems;
 use crate::fabric::{FabricCaller, FabricShell};
 use crate::jsonl::Turn;
 use crate::ledger::Ledger;
+use crate::render::prism::render_prism_note;
 use crate::render::render_work_item_note;
 use crate::scan::{FacetSession, enumerate};
 use crate::workitem::cluster::cluster_new_turns;
@@ -24,20 +26,38 @@ use crate::workitem::cluster::cluster_new_turns;
 /// Drive one tick end-to-end with a production fabric caller. The
 /// `vault_root` is the resolved vault path; notes are written under
 /// `<vault_root>/<config.vault.prisms_dir>/<slug>.md`.
-pub async fn run_once(config: &Config, ledger: &Ledger, vault_root: &Path) -> Result<TickReport> {
-    log::info!("facet::harvest::run_once: vault_root={}", vault_root.display());
+///
+/// `use_v1` selects the legacy one-line-moment extractor + renderer
+/// (true), or the v2 dialog-slice gem extractor + prism renderer
+/// (false; the default for new harvests).
+pub async fn run_once(config: &Config, ledger: &Ledger, vault_root: &Path, use_v1: bool) -> Result<TickReport> {
+    log::info!(
+        "facet::harvest::run_once: vault_root={} use_v1={}",
+        vault_root.display(),
+        use_v1
+    );
     let fabric: Arc<dyn FabricCaller> = Arc::new(FabricShell::new(config.llm.fabric_binary.clone()));
-    run_with_fabric(config, ledger, vault_root, fabric.as_ref()).await
+    run_with_fabric(config, ledger, vault_root, fabric.as_ref(), use_v1).await
 }
 
 /// Generic over the fabric caller so integration tests can swap in a
-/// `FakeFabric`.
+/// `FakeFabric`. See [`run_once`] for the `use_v1` semantics.
 pub async fn run_with_fabric(
     config: &Config,
     ledger: &Ledger,
     vault_root: &Path,
     fabric: &dyn FabricCaller,
+    use_v1: bool,
 ) -> Result<TickReport> {
+    if !use_v1 {
+        // Idempotently ensure the v2 schema exists. Operators on
+        // existing installs can also run `bin/migrate-facet-v2.sh`
+        // explicitly; calling it here is safe because every statement
+        // is `CREATE ... IF NOT EXISTS`.
+        ledger
+            .apply_facet_v2_schema()
+            .context("apply v2 schema for v2 harvest path")?;
+    }
     let mut report = TickReport::default();
 
     // 1. Scan.
@@ -138,18 +158,33 @@ pub async fn run_with_fabric(
         eyre::Result<usize>,
     )> = stream::iter(extract_jobs)
         .map(|(row, workitem, turns)| async move {
-            let r = mine_moments(
-                &row,
-                &turns,
-                &workitem.slug,
-                &workitem.title,
-                workitem.repos.first().map(|s| s.as_str()),
-                config,
-                ledger,
-                fabric,
-            )
-            .await
-            .map(|out| out.len());
+            let r = if use_v1 {
+                mine_moments(
+                    &row,
+                    &turns,
+                    &workitem.slug,
+                    &workitem.title,
+                    workitem.repos.first().map(|s| s.as_str()),
+                    config,
+                    ledger,
+                    fabric,
+                )
+                .await
+                .map(|out| out.len())
+            } else {
+                mine_gems(
+                    &row,
+                    &turns,
+                    &workitem.slug,
+                    &workitem.title,
+                    workitem.repos.first().map(|s| s.as_str()),
+                    config,
+                    ledger,
+                    fabric,
+                )
+                .await
+                .map(|out| out.len())
+            };
             (row, workitem, r)
         })
         .buffer_unordered(inflight)
@@ -158,8 +193,8 @@ pub async fn run_with_fabric(
 
     for (row, workitem, r) in extract_outcomes {
         match r {
-            Ok(n_moments) => {
-                report.moments_extracted += n_moments;
+            Ok(n_rows) => {
+                report.moments_extracted += n_rows;
                 touched_workitems.insert(workitem.id);
             }
             Err(e) => {
@@ -174,22 +209,36 @@ pub async fn run_with_fabric(
         }
     }
 
-    // 4. Render every touched work-item that actually has moments.
+    // 4. Render every touched work-item that actually has content.
     //    Empty work-items must not be written as placeholder files
     //    (they accumulate as husks across ticks and pollute the vault).
     for id in touched_workitems {
         let Some(w) = ledger.workitem_by_id(id)? else { continue };
-        let moments = ledger.moments_for_workitem(id)?;
-        if moments.is_empty() {
-            log::debug!(
-                "facet::harvest: skip render workitem {} ({}) - no moments yet",
-                w.id,
-                w.slug
-            );
-            continue;
-        }
         let target = vault_root.join(&config.vault.prisms_dir).join(format!("{}.md", w.slug));
-        if let Err(e) = render_work_item_note(&target, &w, &moments) {
+        let render_result = if use_v1 {
+            let moments = ledger.moments_for_workitem(id)?;
+            if moments.is_empty() {
+                log::debug!(
+                    "facet::harvest: skip render workitem {} ({}) - no moments yet",
+                    w.id,
+                    w.slug
+                );
+                continue;
+            }
+            render_work_item_note(&target, &w, &moments)
+        } else {
+            let gems = ledger.gems_for_workitem(id)?;
+            if gems.is_empty() {
+                log::debug!(
+                    "facet::harvest: skip prism render workitem {} ({}) - no gems yet",
+                    w.id,
+                    w.slug
+                );
+                continue;
+            }
+            render_prism_note(&target, &w, &gems)
+        };
+        if let Err(e) = render_result {
             report.failures += 1;
             log::warn!(
                 "facet::harvest: render failed for workitem {} ({}): {e:#}",
@@ -201,13 +250,16 @@ pub async fn run_with_fabric(
         }
     }
 
-    // 4.5 Stale-render sweep. Any work-item with moments whose vault
-    //     note is missing on disk (because a previous tick failed to
-    //     render, or the file was deleted) gets re-rendered now.
-    //     Idempotent: if the file already exists, we skip - the touched
-    //     loop above handles the in-tick fresh content path.
-    let all_with_moments = ledger.workitem_ids_with_moments()?;
-    for id in all_with_moments {
+    // 4.5 Stale-render sweep. Any work-item with content (v1 moments
+    //     or v2 gems, depending on path) whose vault note is missing
+    //     on disk (because a previous tick failed to render, or the
+    //     file was deleted) gets re-rendered now.
+    let stale_ids: Vec<i64> = if use_v1 {
+        ledger.workitem_ids_with_moments()?
+    } else {
+        ledger.workitem_ids_with_gems()?
+    };
+    for id in stale_ids {
         let target = {
             let Some(w) = ledger.workitem_by_id(id)? else { continue };
             vault_root.join(&config.vault.prisms_dir).join(format!("{}.md", w.slug))
@@ -216,11 +268,20 @@ pub async fn run_with_fabric(
             continue;
         }
         let Some(w) = ledger.workitem_by_id(id)? else { continue };
-        let moments = ledger.moments_for_workitem(id)?;
-        if moments.is_empty() {
-            continue;
-        }
-        if let Err(e) = render_work_item_note(&target, &w, &moments) {
+        let render_result = if use_v1 {
+            let moments = ledger.moments_for_workitem(id)?;
+            if moments.is_empty() {
+                continue;
+            }
+            render_work_item_note(&target, &w, &moments)
+        } else {
+            let gems = ledger.gems_for_workitem(id)?;
+            if gems.is_empty() {
+                continue;
+            }
+            render_prism_note(&target, &w, &gems)
+        };
+        if let Err(e) = render_result {
             report.failures += 1;
             log::warn!(
                 "facet::harvest: stale-render failed for workitem {} ({}): {e:#}",

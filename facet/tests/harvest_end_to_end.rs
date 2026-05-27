@@ -82,7 +82,7 @@ async fn harvest_e2e_produces_workitem_note_then_is_idempotent() {
 ]}"#,
     );
 
-    let report = facet::daemon::harvest::run_with_fabric(&cfg, &ledger, &vault_root, &fabric)
+    let report = facet::daemon::harvest::run_with_fabric(&cfg, &ledger, &vault_root, &fabric, true)
         .await
         .expect("harvest");
     assert_eq!(report.sessions_seen, 1);
@@ -106,7 +106,7 @@ async fn harvest_e2e_produces_workitem_note_then_is_idempotent() {
 
     // Second tick: no new turns, no new LLM calls, vault note byte-identical.
     let calls_before = fabric.calls().len();
-    let report2 = facet::daemon::harvest::run_with_fabric(&cfg, &ledger, &vault_root, &fabric)
+    let report2 = facet::daemon::harvest::run_with_fabric(&cfg, &ledger, &vault_root, &fabric, true)
         .await
         .expect("second harvest");
     assert_eq!(report2.sessions_seen, 0, "no new turns -> no sessions");
