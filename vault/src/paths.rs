@@ -56,6 +56,21 @@ where
     Ok(expand_tilde(raw))
 }
 
+/// `#[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf_vec")]`
+/// for `Vec<PathBuf>` config fields (e.g. `include-cwds`, `exclude-cwds`).
+/// Without this, a YAML list like `[~/repos/x, ~/repos/y]` would leave
+/// each element with a literal leading `~`, and every consumer would
+/// silently fail to apply path-prefix filtering — the exact failure
+/// mode the single-element [`deserialize_tilde_pathbuf`] exists to
+/// prevent.
+pub fn deserialize_tilde_pathbuf_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<PathBuf>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw: Vec<PathBuf> = Vec::deserialize(deserializer)?;
+    Ok(raw.into_iter().map(expand_tilde).collect())
+}
+
 /// `~/.config/sb/` (or platform equivalent via `dirs`).
 ///
 /// Panics only if `dirs::config_dir()` returns `None`, which on Linux

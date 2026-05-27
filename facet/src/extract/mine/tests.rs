@@ -135,6 +135,56 @@ async fn empty_moments_list_is_valid_outcome() {
 }
 
 #[tokio::test]
+async fn oversize_range_splits_into_multiple_extract_calls() {
+    // Architect round-1 finding: `extract.max_input_tokens` was config
+    // theatre — the field existed but the splitter did not. Verify
+    // that a low cap forces multiple LLM calls and idempotent merge
+    // of the resulting moments.
+    let l = Ledger::open_in_memory().expect("ledger");
+    let (assignment, slug) = seed_ledger_with_assignment(&l);
+    let cfg = Config {
+        extract: crate::config::ExtractConfig {
+            quote_max_chars: 800,
+            // ~2_000-char budget after the .max() floor — small enough to
+            // split a slice of 4 turns into multiple chunks.
+            max_input_tokens: 200,
+        },
+        ..Default::default()
+    };
+    let fabric = FakeFabric::new();
+    // Same response for every call; idempotency on
+    // (workitem_id, turn_uuid, mode) collapses duplicates.
+    fabric.set_response(
+        "facet-extract",
+        "moments:\n  - turn_uuid: t1\n    mode: frame\n    ai_move: x\n    scott_move: y\n    quote_excerpt: \"some quote\"\n    why_it_matters: z\n",
+    );
+
+    // Build a slice large enough that even the .max(2_000) floor splits it.
+    // Each turn carries ~600 chars of text so 8 turns blow past the cap.
+    let long_text = "x".repeat(600);
+    let turns: Vec<crate::jsonl::Turn> = (0..8)
+        .map(|i| {
+            let mut t = turn(&format!("t{i}"), Role::User, &long_text);
+            t.uuid = format!("t{i}");
+            t
+        })
+        .collect();
+    mine_moments(&assignment, &turns, &slug, "The thing", Some("me/r"), &cfg, &l, &fabric)
+        .await
+        .expect("mine");
+    let calls = fabric.calls();
+    assert!(
+        calls.len() >= 2,
+        "expected splitter to issue >= 2 extract calls, got {}",
+        calls.len()
+    );
+    // Idempotency: only one row in judgment_moments even though every chunk
+    // returned the same turn_uuid+mode pair.
+    let stored = l.moments_for_workitem(assignment.workitem_id).expect("query");
+    assert_eq!(stored.len(), 1);
+}
+
+#[tokio::test]
 async fn quote_excerpt_capped_at_config_chars() {
     let l = Ledger::open_in_memory().expect("ledger");
     let (assignment, slug) = seed_ledger_with_assignment(&l);

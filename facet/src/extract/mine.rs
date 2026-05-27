@@ -1,8 +1,9 @@
 //! Per-row extract. Reads the JSONL slice bounded by a
 //! `cluster_assignments` row's `first_turn_uuid`/`last_turn_uuid`,
-//! invokes the extract LLM, and persists the resulting judgment
-//! moments. On LLM failure, the row stays `extracted=0` and no moment
-//! rows land.
+//! invokes the extract LLM (splitting at a turn boundary if the
+//! digest exceeds `extract.max_input_tokens`), and persists the
+//! resulting judgment moments. On LLM failure, the row stays
+//! `extracted=0` and no moment rows land.
 
 use chrono::Utc;
 use eyre::{Context, Result};
@@ -23,11 +24,16 @@ use crate::ledger::workitems::SessionContribution;
 /// inclusive. `workitem_slug` and `workitem_title` are looked up by
 /// the caller and threaded through into the prompt.
 ///
-/// On success: inserts one `judgment_moments` row per mined moment
-/// (idempotent on `(workitem_id, turn_uuid, mode)`), advances
-/// `session_workitem.last_extract_turn_uuid`, flips
+/// If the digest would exceed `extract.max_input_tokens`, the slice is
+/// split at a turn boundary and each chunk gets its own LLM call.
+/// Judgment moments are idempotent on `(workitem_id, turn_uuid, mode)`
+/// so chunk overlap is harmless.
+///
+/// On success: inserts one `judgment_moments` row per mined moment,
+/// advances `session_workitem.last_extract_turn_uuid`, flips
 /// `cluster_assignments.extracted` to 1.
-/// On failure: returns Err; ledger is untouched.
+/// On failure (any chunk): returns Err; ledger writes for this row are
+/// not persisted (the row stays `extracted=0` for the next tick).
 pub async fn mine_moments(
     assignment: &ClusterAssignmentRow,
     turns: &[Turn],
@@ -52,25 +58,38 @@ pub async fn mine_moments(
         );
     }
 
-    let digest = build_digest(workitem_slug, workitem_title, repo_slug, turns);
-    let req = request(
-        "facet-extract",
-        digest,
-        &config.llm.extract_model,
-        config.llm.timeout_secs,
-    );
-    let raw = fabric.call(req).await.context("extract LLM call")?;
-    let parsed: ExtractOutput =
-        serde_yaml::from_str(&raw).with_context(|| format!("parse extract YAML output (got {} bytes)", raw.len()))?;
+    let chunks = split_turns_by_budget(workitem_slug, workitem_title, repo_slug, turns, config);
+    log::debug!("mine_moments: split into {} chunk(s)", chunks.len());
+
+    let mut all_moments: Vec<ExtractedMoment> = Vec::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let digest = build_digest(workitem_slug, workitem_title, repo_slug, chunk);
+        log::debug!(
+            "mine_moments: chunk {}/{} turns={} digest_chars={}",
+            i + 1,
+            chunks.len(),
+            chunk.len(),
+            digest.len()
+        );
+        let req = request(
+            "facet-extract",
+            digest,
+            &config.llm.extract_model,
+            config.llm.timeout_secs,
+        );
+        let raw = fabric.call(req).await.context("extract LLM call")?;
+        let parsed: ExtractOutput = serde_yaml::from_str(&raw)
+            .with_context(|| format!("parse extract YAML output (got {} bytes)", raw.len()))?;
+        all_moments.extend(parsed.moments);
+    }
 
     let now = Utc::now();
     let max_chars = config.extract.quote_max_chars;
-    for m in &parsed.moments {
+    for m in &all_moments {
         let mut quote = m.quote_excerpt.clone();
         quote = quote.trim_start().to_string();
         if quote.chars().count() > max_chars {
             let mut end = max_chars;
-            // Walk back to a char boundary in bytes.
             let mut indices = quote.char_indices();
             let last_idx = indices.nth(end).map(|(i, _)| i).unwrap_or(quote.len());
             end = last_idx;
@@ -90,31 +109,58 @@ pub async fn mine_moments(
             extracted_at: now,
         })?;
     }
-    // Advance per-(session, workitem) extract cursor.
     ledger.record_contribution(SessionContribution {
         session_uuid: &assignment.session_uuid,
         workitem_id: assignment.workitem_id,
         at: now,
     })?;
-    set_last_extract_turn_uuid(ledger, assignment)?;
+    ledger.set_last_extract_turn_uuid(
+        &assignment.session_uuid,
+        assignment.workitem_id,
+        &assignment.last_turn_uuid,
+    )?;
     ledger.mark_extracted(assignment.id)?;
-    Ok(parsed.moments)
+    Ok(all_moments)
 }
 
-fn set_last_extract_turn_uuid(ledger: &Ledger, assignment: &ClusterAssignmentRow) -> Result<()> {
-    ledger.with_conn(|c| {
-        c.execute(
-            "UPDATE session_workitem SET last_extract_turn_uuid = ?3 \
-             WHERE session_uuid = ?1 AND workitem_id = ?2",
-            rusqlite::params![
-                assignment.session_uuid,
-                assignment.workitem_id,
-                assignment.last_turn_uuid,
-            ],
-        )
-        .context("update last_extract_turn_uuid")?;
-        Ok(())
-    })
+/// Split a turn slice into contiguous chunks each below the
+/// `extract.max_input_tokens` digest budget. The split happens between
+/// turns, never inside one. A single turn that exceeds the budget on
+/// its own still lands in a chunk (one oversized call beats zero
+/// coverage).
+///
+/// The cap is `max_input_tokens * 4` characters, applying the standard
+/// ~4-chars-per-token approximation. We floor the budget at 2_000 chars
+/// so an absurdly small config value cannot defeat the splitter.
+fn split_turns_by_budget(
+    workitem_slug: &str,
+    workitem_title: &str,
+    repo_slug: Option<&str>,
+    turns: &[Turn],
+    config: &Config,
+) -> Vec<Vec<Turn>> {
+    let budget_chars = (config.extract.max_input_tokens.saturating_mul(4)).max(2_000);
+    let header_chars = build_digest(workitem_slug, workitem_title, repo_slug, &[]).len();
+    let mut out: Vec<Vec<Turn>> = Vec::new();
+    let mut cur: Vec<Turn> = Vec::new();
+    let mut cur_chars: usize = header_chars;
+    for t in turns {
+        let one_chars =
+            build_digest(workitem_slug, workitem_title, repo_slug, std::slice::from_ref(t)).len() - header_chars;
+        if !cur.is_empty() && cur_chars + one_chars > budget_chars {
+            out.push(std::mem::take(&mut cur));
+            cur_chars = header_chars;
+        }
+        cur.push(t.clone());
+        cur_chars += one_chars;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    if out.is_empty() {
+        out.push(turns.to_vec());
+    }
+    out
 }
 
 fn build_digest(workitem_slug: &str, workitem_title: &str, repo_slug: Option<&str>, turns: &[Turn]) -> String {

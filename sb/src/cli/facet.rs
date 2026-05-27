@@ -41,6 +41,16 @@ pub enum Commands {
     Show { slug: String },
     /// Force a fresh render of one work-item from current ledger state.
     Render { slug: String },
+    /// Re-process a session or work-item. For a session UUID: rewinds the
+    /// cluster offset so the next tick re-clusters from there. For a
+    /// work-item slug: flips its `cluster_assignments.extracted` rows
+    /// back to 0 so the next tick re-extracts. Useful after fixing a
+    /// transient LLM error or rolling a pattern file.
+    Retry { target: String },
+    /// Archive a work-item: marks status='archived' and moves the
+    /// note via `rkvr rmrf` semantics (recoverable). The slug stays in
+    /// the ledger so it does not collide with future work.
+    Archive { slug: String },
     /// Last-tick status: counts, budget, last harvest.
     Status,
     /// Config + filesystem + LLM sanity check.
@@ -56,6 +66,8 @@ impl FacetCli {
             Commands::List { repo, mode, status } => list(&config, repo, mode, status),
             Commands::Show { slug } => show(&config, &slug),
             Commands::Render { slug } => render(&config, self.vault.as_deref(), &slug),
+            Commands::Retry { target } => retry(&config, &target),
+            Commands::Archive { slug } => archive(&config, self.vault.as_deref(), &slug),
             Commands::Status => status(&config),
             Commands::Doctor => doctor(&config, self.vault.as_deref()),
         }
@@ -189,6 +201,89 @@ fn render(config: &facet::Config, vault_override: Option<&std::path::Path>, slug
     let path = vault.join(&config.vault.workitems_dir).join(format!("{}.md", w.slug));
     facet::render::render_work_item_note(&path, &w, &moments)?;
     println!("Re-rendered: {}", path.display());
+    Ok(())
+}
+
+/// `sb facet retry <target>` — `target` is either a session UUID or a
+/// work-item slug. UUIDs match `\^[0-9a-f-]+$\` and are 36 chars; anything
+/// else is treated as a slug.
+fn retry(config: &facet::Config, target: &str) -> Result<()> {
+    let ledger = ledger_open(config)?;
+    let is_uuid = target.len() == 36 && target.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    if is_uuid {
+        let n = ledger.with_conn(|c| {
+            let n = c
+                .execute(
+                    "UPDATE sessions SET last_cluster_offset = 0, last_cluster_turn_uuid = NULL, \
+                            failure_count = 0, last_failure_reason = NULL, last_failure_stage = NULL \
+                     WHERE session_uuid = ?1",
+                    rusqlite::params![target],
+                )
+                .context("rewind session cluster offset")?;
+            Ok(n)
+        })?;
+        if n == 0 {
+            eyre::bail!("no session with uuid {target}");
+        }
+        println!("Rewound cluster offset for session {target}; next tick will re-cluster from byte 0.");
+        return Ok(());
+    }
+    let workitem_id = ledger
+        .workitem_by_slug(target)?
+        .ok_or_else(|| eyre::eyre!("no work-item with slug {target}"))?
+        .id;
+    let n = ledger.with_conn(|c| {
+        let n = c
+            .execute(
+                "UPDATE cluster_assignments SET extracted = 0 WHERE workitem_id = ?1",
+                rusqlite::params![workitem_id],
+            )
+            .context("reset cluster_assignments.extracted")?;
+        Ok(n)
+    })?;
+    println!("Flipped {n} cluster_assignments row(s) for workitem {target} to extracted=0; next tick will re-extract.");
+    Ok(())
+}
+
+/// `sb facet archive <slug>` — mark a work-item archived in the ledger
+/// and move its vault note via `rkvr rmrf` (recoverable archive).
+fn archive(config: &facet::Config, vault_override: Option<&std::path::Path>, slug: &str) -> Result<()> {
+    let ledger = ledger_open(config)?;
+    let workitem = ledger
+        .workitem_by_slug(slug)?
+        .ok_or_else(|| eyre::eyre!("no work-item with slug {slug}"))?;
+    ledger.with_conn(|c| {
+        c.execute(
+            "UPDATE work_items SET status = 'archived', updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![workitem.id, chrono::Utc::now().to_rfc3339()],
+        )
+        .context("update work_items status")?;
+        Ok(())
+    })?;
+    let vault = vault_root(vault_override)?;
+    let note_path = vault
+        .join(&config.vault.workitems_dir)
+        .join(format!("{}.md", workitem.slug));
+    if note_path.exists() {
+        // Per ~/.claude/refs/safety.md + memory `feedback-rust-deletes-via-rkvr`:
+        // Rust code that deletes user-meaningful files (vault notes,
+        // artifacts) must shell out to `rkvr rmrf`, not `std::fs::remove_*`.
+        let out = std::process::Command::new("rkvr")
+            .arg("rmrf")
+            .arg(&note_path)
+            .output()
+            .context("invoke rkvr rmrf")?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eyre::bail!("rkvr rmrf failed: {stderr}");
+        }
+        println!("Archived: ledger status='archived', note moved via rkvr (recoverable via `rkvr rcvr`).");
+    } else {
+        println!(
+            "Archived: ledger status='archived'. No vault note at {} to move.",
+            note_path.display()
+        );
+    }
     Ok(())
 }
 

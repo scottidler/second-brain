@@ -86,6 +86,27 @@ impl Ledger {
         })
     }
 
+    /// Advance the per-(session, workitem) extract cursor. Called by the
+    /// extract stage on success so retries pick up after the last
+    /// extracted range, not from offset 0.
+    pub fn set_last_extract_turn_uuid(&self, session_uuid: &str, workitem_id: i64, last_turn_uuid: &str) -> Result<()> {
+        log::debug!(
+            "ledger::set_last_extract_turn_uuid: session_uuid={} workitem_id={} last_turn_uuid={}",
+            session_uuid,
+            workitem_id,
+            last_turn_uuid
+        );
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE session_workitem SET last_extract_turn_uuid = ?3 \
+                 WHERE session_uuid = ?1 AND workitem_id = ?2",
+                rusqlite::params![session_uuid, workitem_id, last_turn_uuid],
+            )
+            .context("update last_extract_turn_uuid")?;
+            Ok(())
+        })
+    }
+
     /// Mark work-items dormant whose `last_contribution_at` is older than
     /// `now - inactive_days * 86400`. Returns the number of rows flipped.
     pub fn mark_dormant(&self, now: DateTime<Utc>, inactive_days: u32) -> Result<u32> {

@@ -168,6 +168,45 @@ async fn duplicate_slug_auto_suffixes() {
 }
 
 #[tokio::test]
+async fn cluster_persist_is_one_transaction() {
+    // Architect round-1 finding: the per-session persist must be
+    // atomic. If the LLM returns garbage that causes a downstream
+    // violation, none of the prior writes should survive.
+    let l = Ledger::open_in_memory().expect("ledger");
+    let cfg = config_with("haiku");
+    let fabric = FakeFabric::new();
+    // Two assignments; the second one references the same
+    // (first_turn_uuid, last_turn_uuid) as a pre-seeded `cluster_assignments`
+    // row but for a DIFFERENT workitem. The UNIQUE (session_uuid,
+    // first_turn_uuid, last_turn_uuid) constraint is on session+range,
+    // not workitem, so this would not cause a violation. Instead we
+    // simulate failure by passing duplicate slugs that the LLM should
+    // not produce — auto-suffix handles it. Cleaner test:
+    // Force a failure by exhausting the slug suffix budget.
+    // Generate 60 assignments all asking for slug "x" — past the 50 retry cap.
+    let mut yaml = String::from("assignments:\n");
+    for i in 0..60 {
+        yaml.push_str(&format!(
+            "  - first_turn_uuid: t{i}\n    last_turn_uuid: t{i}\n    kind: new\n    title: \"x\"\n"
+        ));
+    }
+    fabric.set_response("facet-cluster", yaml);
+    let turns: Vec<crate::jsonl::Turn> = (0..60).map(|i| turn(&format!("t{i}"), Role::User, "x")).collect();
+    let s = session("me/r", turns);
+    let res = cluster_new_turns(&s, &cfg, &l, &fabric).await;
+    assert!(res.is_err(), "expected slug exhaustion failure");
+    // The whole transaction should have rolled back: no work-items, no
+    // cluster_assignments, no session_workitem rows. The session row may
+    // still be absent too because tx_upsert_session is inside the same tx.
+    let pending = l.pending_cluster_assignments(100).expect("pending");
+    assert!(pending.is_empty(), "no cluster_assignments rows after rollback");
+    let s_row = l.get_session("sess-1").expect("get");
+    assert!(s_row.is_none(), "no sessions row after rollback");
+    let wi = l.workitem_by_slug("x").expect("query");
+    assert!(wi.is_none(), "no work_items row after rollback");
+}
+
+#[tokio::test]
 async fn retry_after_transient_failure_succeeds() {
     let l = Ledger::open_in_memory().expect("ledger");
     let cfg = config_with("haiku");

@@ -27,12 +27,12 @@ pub struct Config {
 
     /// Paths (tilde-expanded, prefix-match) that ARE eligible for harvest.
     /// Empty means "all roots not in exclude_cwds".
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vault::paths::deserialize_tilde_pathbuf_vec")]
     pub include_cwds: Vec<PathBuf>,
 
     /// Paths (tilde-expanded, prefix-match) NEVER harvested. Wins on overlap
     /// with include_cwds.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vault::paths::deserialize_tilde_pathbuf_vec")]
     pub exclude_cwds: Vec<PathBuf>,
 
     /// LLM tiering, models, and per-tick / per-day budget caps.

@@ -88,6 +88,22 @@ impl Ledger {
         f(&mut guard)
     }
 
+    /// Run a closure inside one SQLite transaction. The closure receives a
+    /// `&mut rusqlite::Transaction`; if it returns `Ok`, the transaction
+    /// commits, otherwise it rolls back. Use this whenever a multi-row
+    /// write needs to be atomic — split-brain on crash is the failure
+    /// the per-session cluster path must avoid (Architect round 1).
+    pub fn with_tx<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<R>,
+    {
+        let mut guard = self.conn.lock().map_err(|e| eyre::eyre!("ledger poisoned: {e}"))?;
+        let tx = guard.transaction().context("begin tx")?;
+        let out = f(&tx)?;
+        tx.commit().context("commit tx")?;
+        Ok(out)
+    }
+
     /// Current schema version, read from `ledger_meta`. Returns 0 for a
     /// fresh database that has not yet been migrated.
     pub fn schema_version(&self) -> Result<u32> {

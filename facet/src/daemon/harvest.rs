@@ -45,6 +45,17 @@ pub async fn run_with_fabric(
 
     // 2. Cluster, bounded by max_sessions_per_tick.
     let cap = config.concurrency.max_sessions_per_tick.max(1);
+    let deferred = sessions.len().saturating_sub(cap);
+    if deferred > 0 {
+        // The per-tick cap is our v1 stand-in for budget enforcement (the
+        // real budget caps are a known gap; see Architect round 1). Fire
+        // the notification anyway so operators see when ticks are
+        // shedding load.
+        crate::notify::on_budget_exhausted(
+            &config.notify,
+            &format!("max-sessions-per-tick={cap} reached; deferring {deferred} session(s) to next tick"),
+        );
+    }
     let mut touched_workitems: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     for session in sessions.iter().take(cap) {
         match cluster_new_turns(session, config, ledger, fabric).await {

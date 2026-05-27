@@ -58,6 +58,30 @@ fn tilde_paths_are_expanded() {
 }
 
 #[test]
+fn tilde_paths_in_include_and_exclude_lists_are_expanded() {
+    // Architect round-1 finding: silent work-repo-hygiene failure when a
+    // ~/-prefixed path lands in include-cwds/exclude-cwds.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = dir.path().join("facet.yml");
+    std::fs::write(
+        &p,
+        "include-cwds:\n  - ~/repos/scottidler\n  - /absolute/already\nexclude-cwds:\n  - ~/repos/tatari-tv\n",
+    )
+    .expect("write");
+    let cfg = Config::load(Some(&p)).expect("load");
+    assert_eq!(cfg.include_cwds.len(), 2);
+    for path in cfg.include_cwds.iter().chain(cfg.exclude_cwds.iter()) {
+        let s = path.to_string_lossy();
+        assert!(!s.starts_with('~'), "tilde was not expanded for list element {s}");
+    }
+    assert!(
+        cfg.exclude_cwds
+            .iter()
+            .any(|p| p.to_string_lossy().ends_with("tatari-tv"))
+    );
+}
+
+#[test]
 fn is_cwd_eligible_excludes_subpaths() {
     let cfg = Config {
         include_cwds: vec![PathBuf::from("/home/u/repos")],

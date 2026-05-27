@@ -124,6 +124,8 @@ fn verb_logs_to_file(cli: &Cli, cli_cfg: &CliConfig) -> VerbLogging {
             crate::cli::facet::Commands::Doctor => inspect(&["facet", "doctor"]),
             crate::cli::facet::Commands::List { .. } => inspect(&["facet", "list"]),
             crate::cli::facet::Commands::Show { .. } => inspect(&["facet", "show"]),
+            crate::cli::facet::Commands::Retry { .. } => inspect(&["facet", "retry"]),
+            crate::cli::facet::Commands::Archive { .. } => inspect(&["facet", "archive"]),
             _ => VerbLogging::AlwaysFile,
         },
     }

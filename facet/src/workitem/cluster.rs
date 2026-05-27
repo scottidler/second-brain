@@ -11,9 +11,6 @@ use crate::config::Config;
 use crate::fabric::{FabricCaller, request};
 use crate::jsonl::{ContentBlock, Turn};
 use crate::ledger::Ledger;
-use crate::ledger::clusters::NewClusterAssignment;
-use crate::ledger::sessions::UpsertSession;
-use crate::ledger::workitems::{NewWorkItem, SessionContribution};
 use crate::scan::FacetSession;
 
 /// LLM output shape. Wrapped in `assignments:` so the YAML body is one
@@ -60,59 +57,213 @@ pub async fn cluster_new_turns(
         eyre::bail!("cluster LLM returned no assignments");
     }
 
-    // 3. Persist atomically per session: ensure session row, ensure
-    //    work-items exist, link repo affinity, record contributions,
-    //    insert cluster_assignments rows, advance offset.
+    // 3. Persist atomically per session inside one SQLite transaction.
+    //    If any insert fails, the whole batch rolls back so the ledger
+    //    never enters split-brain (Architect round 1).
     let now = Utc::now();
-    ledger
-        .upsert_session(UpsertSession {
-            session_uuid: &session.session_uuid,
-            cwd: &session.cwd.to_string_lossy(),
-            repo_slug: session.repo_slug.as_deref(),
-            seen_at: now,
-        })
-        .context("upsert session before persist")?;
-    for a in &parsed.assignments {
-        let workitem_id = match &a.kind {
-            AssignmentKind::Existing { slug } => match ledger.workitem_by_slug(slug)? {
-                Some(w) => w.id,
-                None => {
-                    log::warn!(
-                        "cluster_new_turns: LLM returned existing slug {slug} but it is not in the ledger; treating as new"
-                    );
-                    create_workitem_with_unique_slug(ledger, slug, slug, now)?
+    let cluster_model = config.llm.cluster_model.clone();
+    let session_uuid = session.session_uuid.clone();
+    let cwd_str = session.cwd.to_string_lossy().to_string();
+    let repo_slug_opt = session.repo_slug.clone();
+    let end_offset = session.parsed.end_byte_offset;
+    let last_turn_uuid = session.parsed.turns.last().map(|t| t.uuid.clone());
+    let assignments = parsed.assignments.clone();
+
+    let new_workitems: Vec<(String, String)> = ledger.with_tx(|tx| {
+        let mut new_items: Vec<(String, String)> = Vec::new();
+        tx_upsert_session(tx, &session_uuid, &cwd_str, repo_slug_opt.as_deref(), now)?;
+        for a in &assignments {
+            let (workitem_id, freshly_created) = match &a.kind {
+                AssignmentKind::Existing { slug } => match tx_workitem_id_by_slug(tx, slug)? {
+                    Some(id) => (id, None),
+                    None => {
+                        log::warn!(
+                            "cluster_new_turns: LLM returned existing slug {slug} but it is not in the ledger; treating as new"
+                        );
+                        let (id, slug_out) = tx_create_workitem_with_unique_slug(tx, slug, slug, now)?;
+                        (id, Some((slug_out, slug.clone())))
+                    }
+                },
+                AssignmentKind::New { title } => {
+                    let base = derive_slug(title);
+                    let (id, slug_out) = tx_create_workitem_with_unique_slug(tx, &base, title, now)?;
+                    (id, Some((slug_out, title.clone())))
                 }
-            },
-            AssignmentKind::New { title } => {
-                let base = derive_slug(title);
-                create_workitem_with_unique_slug(ledger, &base, title, now)?
+            };
+            if let Some((slug, title)) = freshly_created {
+                new_items.push((slug, title));
             }
-        };
-        if let Some(slug) = session.repo_slug.as_deref() {
-            ledger.link_workitem_repo(workitem_id, slug)?;
+            if let Some(slug) = repo_slug_opt.as_deref() {
+                tx_link_workitem_repo(tx, workitem_id, slug)?;
+            }
+            tx_record_contribution(tx, &session_uuid, workitem_id, now)?;
+            tx_insert_cluster_assignment(
+                tx,
+                &session_uuid,
+                workitem_id,
+                &a.first_turn_uuid,
+                &a.last_turn_uuid,
+                now,
+                &cluster_model,
+            )?;
         }
-        ledger.record_contribution(SessionContribution {
-            session_uuid: &session.session_uuid,
-            workitem_id,
-            at: now,
-        })?;
-        ledger.insert_cluster_assignment(NewClusterAssignment {
-            session_uuid: &session.session_uuid,
-            workitem_id,
-            first_turn_uuid: &a.first_turn_uuid,
-            last_turn_uuid: &a.last_turn_uuid,
-            clustered_at: now,
-            cluster_model: &config.llm.cluster_model,
-        })?;
+        tx_set_cluster_offset(tx, &session_uuid, end_offset, last_turn_uuid.as_deref())?;
+        Ok(new_items)
+    })?;
+    // Notifications fire AFTER commit so a rollback never produces a
+    // ghost notification for a work-item that never landed.
+    for (slug, title) in &new_workitems {
+        crate::notify::on_new_workitem(&config.notify, slug, title);
     }
-    ledger
-        .set_cluster_offset(
-            &session.session_uuid,
-            session.parsed.end_byte_offset,
-            session.parsed.turns.last().map(|t| t.uuid.as_str()),
-        )
-        .context("advance cluster offset")?;
     Ok(parsed.assignments)
+}
+
+// -- transaction-scoped persist helpers ---------------------------------
+// Mirror the Ledger::* methods but accept &rusqlite::Transaction so the
+// whole batch lands inside one BEGIN/COMMIT.
+
+fn tx_upsert_session(
+    tx: &rusqlite::Transaction<'_>,
+    session_uuid: &str,
+    cwd: &str,
+    repo_slug: Option<&str>,
+    seen_at: chrono::DateTime<Utc>,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO sessions(session_uuid, cwd, repo_slug, first_seen_at, last_seen_at) \
+         VALUES (?1, ?2, ?3, ?4, ?4) \
+         ON CONFLICT(session_uuid) DO UPDATE SET \
+            cwd = excluded.cwd, \
+            repo_slug = excluded.repo_slug, \
+            last_seen_at = excluded.last_seen_at",
+        rusqlite::params![session_uuid, cwd, repo_slug, seen_at.to_rfc3339()],
+    )
+    .context("tx_upsert_session")?;
+    Ok(())
+}
+
+fn tx_workitem_id_by_slug(tx: &rusqlite::Transaction<'_>, slug: &str) -> Result<Option<i64>> {
+    use rusqlite::OptionalExtension;
+    tx.query_row(
+        "SELECT id FROM work_items WHERE slug = ?1",
+        rusqlite::params![slug],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .context("tx_workitem_id_by_slug")
+}
+
+fn tx_insert_workitem(
+    tx: &rusqlite::Transaction<'_>,
+    slug: &str,
+    title: &str,
+    created_at: chrono::DateTime<Utc>,
+) -> Result<i64> {
+    tx.execute(
+        "INSERT INTO work_items(slug, title, status, created_at, updated_at) \
+         VALUES (?1, ?2, 'active', ?3, ?3)",
+        rusqlite::params![slug, title, created_at.to_rfc3339()],
+    )
+    .context("tx_insert_workitem")?;
+    Ok(tx.last_insert_rowid())
+}
+
+fn tx_link_workitem_repo(tx: &rusqlite::Transaction<'_>, workitem_id: i64, repo_slug: &str) -> Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO work_item_repos(workitem_id, repo_slug) VALUES (?1, ?2)",
+        rusqlite::params![workitem_id, repo_slug],
+    )
+    .context("tx_link_workitem_repo")?;
+    Ok(())
+}
+
+fn tx_record_contribution(
+    tx: &rusqlite::Transaction<'_>,
+    session_uuid: &str,
+    workitem_id: i64,
+    at: chrono::DateTime<Utc>,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO session_workitem(session_uuid, workitem_id, first_contribution_at, last_contribution_at) \
+         VALUES (?1, ?2, ?3, ?3) \
+         ON CONFLICT(session_uuid, workitem_id) DO UPDATE SET \
+            last_contribution_at = excluded.last_contribution_at",
+        rusqlite::params![session_uuid, workitem_id, at.to_rfc3339()],
+    )
+    .context("tx_record_contribution")?;
+    Ok(())
+}
+
+fn tx_insert_cluster_assignment(
+    tx: &rusqlite::Transaction<'_>,
+    session_uuid: &str,
+    workitem_id: i64,
+    first_turn_uuid: &str,
+    last_turn_uuid: &str,
+    clustered_at: chrono::DateTime<Utc>,
+    cluster_model: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO cluster_assignments \
+            (session_uuid, workitem_id, first_turn_uuid, last_turn_uuid, clustered_at, cluster_model, extracted) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+        rusqlite::params![
+            session_uuid,
+            workitem_id,
+            first_turn_uuid,
+            last_turn_uuid,
+            clustered_at.to_rfc3339(),
+            cluster_model,
+        ],
+    )
+    .context("tx_insert_cluster_assignment")?;
+    Ok(())
+}
+
+fn tx_set_cluster_offset(
+    tx: &rusqlite::Transaction<'_>,
+    session_uuid: &str,
+    offset: u64,
+    last_turn_uuid: Option<&str>,
+) -> Result<()> {
+    tx.execute(
+        "UPDATE sessions SET last_cluster_offset = ?2, last_cluster_turn_uuid = ?3 WHERE session_uuid = ?1",
+        rusqlite::params![session_uuid, offset as i64, last_turn_uuid],
+    )
+    .context("tx_set_cluster_offset")?;
+    Ok(())
+}
+
+/// Insert a new work-item inside a transaction with auto-suffixing on
+/// UNIQUE(slug) violation. Returns `(workitem_id, final_slug)` so the
+/// caller can fire a post-commit notification with the slug that
+/// actually landed (auto-suffixed clashes mean the caller's `base_slug`
+/// is not necessarily the row's slug).
+fn tx_create_workitem_with_unique_slug(
+    tx: &rusqlite::Transaction<'_>,
+    base_slug: &str,
+    title: &str,
+    created_at: chrono::DateTime<Utc>,
+) -> Result<(i64, String)> {
+    let mut candidate = derive_slug(base_slug);
+    if candidate.is_empty() {
+        candidate = "untitled".to_string();
+    }
+    for n in 1..=50 {
+        let attempt = if n == 1 { candidate.clone() } else { format!("{candidate}-{n}") };
+        match tx_insert_workitem(tx, &attempt, title, created_at) {
+            Ok(id) => return Ok((id, attempt)),
+            Err(e) => {
+                if is_unique_violation(&e) {
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    eyre::bail!(
+        "could not allocate a free slug after 50 attempts for base {base_slug:?}; archived-slug collision storm?"
+    )
 }
 
 /// Build the YAML digest the cluster pattern consumes. Truncates each
@@ -248,41 +399,6 @@ fn known_workitems_for_repo(ledger: &Ledger, repo_slug: Option<&str>) -> Result<
         }
         Ok(out)
     })
-}
-
-/// Insert a new work-item, auto-suffixing the slug on UNIQUE violation
-/// so an archived (or live) slug clash deterministically produces
-/// `<base>-2`, `<base>-3`, etc. The slug is frozen on creation; the
-/// title can update later via a separate path.
-fn create_workitem_with_unique_slug(
-    ledger: &Ledger,
-    base_slug: &str,
-    title: &str,
-    created_at: chrono::DateTime<Utc>,
-) -> Result<i64> {
-    let mut candidate = derive_slug(base_slug);
-    if candidate.is_empty() {
-        candidate = "untitled".to_string();
-    }
-    for n in 1..=50 {
-        let attempt = if n == 1 { candidate.clone() } else { format!("{candidate}-{n}") };
-        match ledger.insert_workitem(NewWorkItem {
-            slug: &attempt,
-            title,
-            created_at,
-        }) {
-            Ok(id) => return Ok(id),
-            Err(e) => {
-                if is_unique_violation(&e) {
-                    continue;
-                }
-                return Err(e);
-            }
-        }
-    }
-    eyre::bail!(
-        "could not allocate a free slug after 50 attempts for base {base_slug:?}; archived-slug collision storm?"
-    )
 }
 
 /// Walk the eyre error chain looking for the rusqlite UNIQUE violation

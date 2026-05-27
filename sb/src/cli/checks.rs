@@ -111,12 +111,16 @@ pub fn all_sections() -> Vec<Section> {
             name: "vault",
             findings: vault_findings(),
         },
+        Section {
+            name: "facet",
+            findings: facet_findings(),
+        },
     ]
 }
 
 fn systemd_findings() -> Vec<Finding> {
     let mut findings = Vec::new();
-    for unit in &["borg.service", "cortex.service"] {
+    for unit in &["borg.service", "cortex.service", "sb-facet.service"] {
         match systemctl_show(unit) {
             Ok(state) => {
                 if state.active_state == "active" {
@@ -157,10 +161,12 @@ fn config_findings() -> Vec<Finding> {
     let cortex_path = vault::paths::cortex_config();
     let oracle_path = vault::paths::oracle_config();
 
+    let facet_path = vault::paths::facet_config();
     let mut findings = vec![
         parse_typed::<borg::config::Config>("borg", &borg_path),
         parse_typed::<cortex::config::Config>("cortex", &cortex_path),
         parse_typed::<oracle::Config>("oracle", &oracle_path),
+        parse_typed::<facet::config::Config>("facet", &facet_path),
     ];
 
     // Surface unset vault.root-path values per Phase 1b. A missing root_path is
@@ -631,6 +637,110 @@ fn vault_findings() -> Vec<Finding> {
         )),
     }
 
+    findings
+}
+
+/// facet doctor section. Surfaces:
+/// - claude-projects-root presence
+/// - facet ledger SQLite file presence
+/// - work-item counts by status
+/// - pending cluster_assignments rows (extract backlog)
+/// - last-harvest-tick timestamp
+///
+/// Errors fall back to a single error finding so the section never
+/// becomes invisible just because the daemon was never installed.
+fn facet_findings() -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let cfg = match facet::config::Config::load(None) {
+        Ok(c) => c,
+        Err(e) => {
+            findings.push(Finding::error(
+                format!("facet: config load failed: {e:#}"),
+                format!("check {}", vault::paths::facet_config().display()),
+            ));
+            return findings;
+        }
+    };
+    let projects = &cfg.claude_projects_root;
+    if projects.is_dir() {
+        findings.push(Finding::ok(format!(
+            "claude-projects-root present: {}",
+            projects.display()
+        )));
+    } else {
+        findings.push(Finding::warn(
+            format!("claude-projects-root missing: {}", projects.display()),
+            "verify the path or set claude-projects-root in facet.yml".to_string(),
+        ));
+    }
+    let db = vault::paths::facet_state_db();
+    if !db.exists() {
+        findings.push(Finding::info(format!(
+            "ledger not yet created: {} (first `sb facet harvest` will create it)",
+            db.display()
+        )));
+        return findings;
+    }
+    match facet::Ledger::open(&db) {
+        Ok(ledger) => {
+            let counts = ledger.with_conn(|c| {
+                let active: i64 = c.query_row("SELECT COUNT(*) FROM work_items WHERE status = 'active'", [], |r| {
+                    r.get(0)
+                })?;
+                let dormant: i64 =
+                    c.query_row("SELECT COUNT(*) FROM work_items WHERE status = 'dormant'", [], |r| {
+                        r.get(0)
+                    })?;
+                let archived: i64 =
+                    c.query_row("SELECT COUNT(*) FROM work_items WHERE status = 'archived'", [], |r| {
+                        r.get(0)
+                    })?;
+                let pending: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM cluster_assignments WHERE extracted = 0",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok((active, dormant, archived, pending))
+            });
+            match counts {
+                Ok((active, dormant, archived, pending)) => {
+                    findings.push(Finding::ok(format!(
+                        "ledger: active={active} dormant={dormant} archived={archived}"
+                    )));
+                    if pending > 0 {
+                        findings.push(Finding::info(format!(
+                            "{pending} cluster_assignments row(s) pending extract"
+                        )));
+                    }
+                }
+                Err(e) => findings.push(Finding::error(
+                    format!("ledger query failed: {e:#}"),
+                    "sb facet doctor".to_string(),
+                )),
+            }
+            match ledger.meta_get("last-harvest-tick") {
+                Ok(Some(ts)) => findings.push(Finding::ok(format!("last-harvest-tick: {ts}"))),
+                Ok(None) => findings.push(Finding::info("last-harvest-tick: (never)".to_string())),
+                Err(e) => findings.push(Finding::warn(
+                    format!("last-harvest-tick read failed: {e:#}"),
+                    "sb facet doctor".to_string(),
+                )),
+            }
+        }
+        Err(e) => findings.push(Finding::error(
+            format!("ledger open failed: {e:#}"),
+            "sb facet doctor".to_string(),
+        )),
+    }
+    if cfg.llm.per_day_budget_usd < cfg.llm.per_tick_budget_usd {
+        findings.push(Finding::warn(
+            format!(
+                "llm.per-day-budget-usd ({}) < per-tick-budget-usd ({})",
+                cfg.llm.per_day_budget_usd, cfg.llm.per_tick_budget_usd
+            ),
+            "raise per-day-budget-usd in facet.yml".to_string(),
+        ));
+    }
     findings
 }
 
