@@ -8,8 +8,8 @@
 use chrono::Utc;
 use eyre::{Context, Result};
 
-use super::{ExtractOutput, ExtractedMoment};
 use crate::config::Config;
+use crate::extract::{ExtractOutput, ExtractedMoment};
 use crate::fabric::{FabricCaller, request};
 use crate::jsonl::{ContentBlock, Turn};
 use crate::ledger::Ledger;

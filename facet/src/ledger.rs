@@ -16,6 +16,7 @@
 //! - [`meta`]     - ledger_meta
 
 pub mod clusters;
+pub mod gems;
 pub mod meta;
 pub mod moments;
 pub mod schema;

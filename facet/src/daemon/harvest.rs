@@ -12,8 +12,8 @@ use futures::stream::{self, StreamExt};
 
 use super::TickReport;
 use crate::config::Config;
-use crate::extract::mine::mine_moments;
 use crate::extract::spectrum::spectrum_for_mode;
+use crate::extract::v1::mine::mine_moments;
 use crate::fabric::{FabricCaller, FabricShell};
 use crate::jsonl::Turn;
 use crate::ledger::Ledger;

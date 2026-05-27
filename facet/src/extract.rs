@@ -1,15 +1,26 @@
-//! Judgment-moment extraction. Per (session, cluster_assignment), mine
-//! the moments of senior judgment from the bounded turn range.
+//! Judgment-slice extraction. Per (session, cluster_assignment), mine
+//! the moments / gems of senior judgment from the bounded turn range.
 //!
-//! The extract LLM is fed a YAML digest of the cluster_assignment's
-//! turn range (bounded by `first_turn_uuid` / `last_turn_uuid`) and
-//! emits a list of [`JudgmentMoment`]-shaped rows. The function
-//! persists each row + flips the `cluster_assignments.extracted` flag
-//! to 1 in a single transaction, so retries are safe and other
-//! work-items' extracts are unaffected by one failure.
+//! Phase 3 of the v2 redesign reshaped this module into a thin dispatch
+//! layer over two extractors:
+//!
+//! - [`v1`]: the legacy one-line `JudgmentMoment` extractor. Retained
+//!   intact during cutover; selected by the `--v1` flag on
+//!   `sb facet harvest`.
+//! - [`v2`]: the multi-turn dialog-slice `Gem` extractor. Default for
+//!   new harvests; produces `Vec<Gem>` per cluster_assignment.
+//!
+//! The `JudgmentMoment` / `ExtractOutput` / `ExtractedMoment` types
+//! below are v1-shape; they stay at this level for back-compat with
+//! existing callers and the spectrum (evergreen) renderer. They land
+//! in `v1/` as part of Phase 7 cleanup.
 
-pub mod mine;
 pub mod spectrum;
+pub mod v1;
+pub mod v2;
+
+#[doc(inline)]
+pub use v1::mine;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
