@@ -7,11 +7,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use eyre::Result;
+use eyre::{Context, Result};
 
 use super::TickReport;
 use crate::config::Config;
 use crate::extract::mine::mine_moments;
+use crate::extract::portrait::portrait_for_mode;
 use crate::fabric::{FabricCaller, FabricShell};
 use crate::jsonl::Turn;
 use crate::ledger::Ledger;
@@ -156,6 +157,58 @@ pub async fn run_with_fabric(
     ledger.meta_set("last-harvest-tick", &chrono::Utc::now().to_rfc3339())?;
 
     Ok(report)
+}
+
+/// Run the portrait rollup over every distinct mode that has at least
+/// two moments in the configured window. Writes one
+/// `<vault_root>/<config.vault.portraits_dir>/<mode>.md` per portrait
+/// that was actually synthesised; the rest are skipped silently per
+/// the LLM contract (empty title => skip).
+pub async fn run_portrait_rollup(config: &Config, ledger: &Ledger, vault_root: &Path) -> Result<usize> {
+    let fabric: Arc<dyn FabricCaller> = Arc::new(FabricShell::new(config.llm.fabric_binary.clone()));
+    run_portrait_rollup_with_fabric(config, ledger, vault_root, fabric.as_ref()).await
+}
+
+pub async fn run_portrait_rollup_with_fabric(
+    config: &Config,
+    ledger: &Ledger,
+    vault_root: &Path,
+    fabric: &dyn FabricCaller,
+) -> Result<usize> {
+    let modes = list_modes(ledger)?;
+    let mut written = 0usize;
+    for mode in modes {
+        match portrait_for_mode(&mode, config, ledger, fabric).await {
+            Ok(Some(body)) => {
+                let target = vault_root.join(&config.vault.portraits_dir).join(format!("{mode}.md"));
+                if let Some(parent) = target.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let merged = match std::fs::read_to_string(&target) {
+                    Ok(existing) => crate::render::block::merge(&existing, &body),
+                    Err(_) => body,
+                };
+                std::fs::write(&target, merged).context("write portrait note")?;
+                written += 1;
+            }
+            Ok(None) => {}
+            Err(e) => log::warn!("portrait rollup failed for mode {mode}: {e:#}"),
+        }
+    }
+    ledger.meta_set("last-portrait-tick", &chrono::Utc::now().to_rfc3339())?;
+    Ok(written)
+}
+
+fn list_modes(ledger: &Ledger) -> Result<Vec<String>> {
+    ledger.with_conn(|c| {
+        let mut stmt = c.prepare("SELECT DISTINCT mode FROM judgment_moments ORDER BY mode")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    })
 }
 
 fn read_turn_slice(

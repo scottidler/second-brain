@@ -21,8 +21,8 @@ pub async fn harvest_once(config: &Config, ledger: &crate::Ledger, vault_root: &
 }
 
 /// Run the cadence loop forever, sleeping `harvest_interval_secs`
-/// between ticks. The portrait rollup (Phase 7) fires on its own
-/// cadence in the same loop.
+/// between ticks. The portrait rollup fires on its own cadence in
+/// the same loop (controlled by `portrait_interval_secs`; 0 disables).
 pub async fn run_loop(config: Config, ledger: crate::Ledger, vault_root: std::path::PathBuf) -> Result<()> {
     log::info!(
         "facet::daemon::run_loop: harvest_interval_secs={} portrait_interval_secs={}",
@@ -30,6 +30,7 @@ pub async fn run_loop(config: Config, ledger: crate::Ledger, vault_root: std::pa
         config.portrait_interval_secs
     );
     let interval = Duration::from_secs(config.harvest_interval_secs.max(60));
+    let mut last_portrait_ts: u64 = 0;
     loop {
         match harvest_once(&config, &ledger, &vault_root).await {
             Ok(report) => {
@@ -44,6 +45,18 @@ pub async fn run_loop(config: Config, ledger: crate::Ledger, vault_root: std::pa
             }
             Err(e) => {
                 log::error!("facet daemon tick failed: {e:#}");
+            }
+        }
+        if config.portrait_interval_secs > 0 {
+            let now = chrono::Utc::now().timestamp() as u64;
+            if now.saturating_sub(last_portrait_ts) >= config.portrait_interval_secs {
+                match harvest::run_portrait_rollup(&config, &ledger, &vault_root).await {
+                    Ok(n) => {
+                        log::info!("facet portrait rollup: {n} portraits written");
+                        last_portrait_ts = now;
+                    }
+                    Err(e) => log::error!("facet portrait rollup failed: {e:#}"),
+                }
             }
         }
         tokio::time::sleep(interval).await;

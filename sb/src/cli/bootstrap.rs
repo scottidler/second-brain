@@ -114,6 +114,10 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
         "facet-extract.md",
         include_str!("../../../facet/patterns/facet-extract.md"),
     ),
+    (
+        "facet-portrait.md",
+        include_str!("../../../facet/patterns/facet-portrait.md"),
+    ),
 ];
 
 pub async fn run(args: BootstrapArgs) -> Result<()> {
