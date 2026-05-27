@@ -119,6 +119,13 @@ fn verb_logs_to_file(cli: &Cli, cli_cfg: &CliConfig) -> VerbLogging {
             oracle::Commands::Call { .. } => inspect(&["oracle", "call"]),
             _ => VerbLogging::AlwaysFile,
         },
+        Cmd::Facet(c) => match c.command {
+            crate::cli::facet::Commands::Status => inspect(&["facet", "status"]),
+            crate::cli::facet::Commands::Doctor => inspect(&["facet", "doctor"]),
+            crate::cli::facet::Commands::List { .. } => inspect(&["facet", "list"]),
+            crate::cli::facet::Commands::Show { .. } => inspect(&["facet", "show"]),
+            _ => VerbLogging::AlwaysFile,
+        },
     }
 }
 
@@ -157,6 +164,10 @@ fn name_and_level(cli: &Cli, cli_cfg: &CliConfig) -> (String, String) {
         ),
         Cmd::Bootstrap(_) => (
             "bootstrap".into(),
+            resolve_level(cli.log_level.as_deref(), None, cli_yaml_level, cli.verbose),
+        ),
+        Cmd::Facet(_) => (
+            "facet".into(),
             resolve_level(cli.log_level.as_deref(), None, cli_yaml_level, cli.verbose),
         ),
     }

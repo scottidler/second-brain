@@ -6,6 +6,7 @@ pub mod borg;
 pub mod checks;
 pub mod cortex;
 pub mod doctor;
+pub mod facet;
 pub mod oracle;
 pub mod status;
 
@@ -37,6 +38,8 @@ pub enum Cmd {
     Cortex(cortex::CortexCli),
     /// Knowledge retrieval MCP server (serve, index, stats, call)
     Oracle(oracle::OracleCli),
+    /// Judgment-moment harvester for Claude Code transcripts
+    Facet(facet::FacetCli),
     /// Aggregated health across all subsystems
     Status(status::StatusArgs),
     /// Severity-tagged health check
@@ -51,6 +54,7 @@ impl Cmd {
             Cmd::Borg(c) => c.run().await,
             Cmd::Cortex(c) => c.run().await,
             Cmd::Oracle(c) => c.run().await,
+            Cmd::Facet(c) => c.run().await,
             Cmd::Status(a) => status::run(a),
             Cmd::Doctor(a) => doctor::run(a),
             Cmd::Bootstrap(a) => bootstrap::run(a).await,

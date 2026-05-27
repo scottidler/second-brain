@@ -10,8 +10,10 @@ build = "build.rs"
 borg = { path = "../borg" }
 cortex = { path = "../cortex" }
 oracle = { path = "../oracle" }
+facet = { path = "../facet" }
 vault = { path = "../vault", features = ["search", "watcher", "vec"] }
 distillers = { path = "../distillers" }
+rusqlite = { version = "0.34", features = ["bundled"] }
 
 clap = { workspace = true }
 eyre = { workspace = true }
