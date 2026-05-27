@@ -1,5 +1,5 @@
 //! systemd unit installation. Mirrors the borg / cortex install path:
-//! writes a per-user unit at `~/.config/systemd/user/sb-facet.service`
+//! writes a per-user unit at `~/.config/systemd/user/facet.service`
 //! with `ExecStart=` resolved to the running sb binary's
 //! `std::env::current_exe()`.
 
@@ -7,16 +7,16 @@ use std::path::PathBuf;
 
 use eyre::{Context, Result};
 
-const UNIT_NAME: &str = "sb-facet.service";
+const UNIT_NAME: &str = "facet.service";
 
 #[derive(Debug, Clone)]
 pub struct InstallOutcome {
     pub unit_path: PathBuf,
 }
 
-/// Write `~/.config/systemd/user/sb-facet.service`. Idempotent
+/// Write `~/.config/systemd/user/facet.service`. Idempotent
 /// overwrite; the caller is responsible for `systemctl --user
-/// daemon-reload && systemctl --user enable --now sb-facet.service`.
+/// daemon-reload && systemctl --user enable --now facet.service`.
 pub fn install_systemd_service() -> Result<InstallOutcome> {
     let service_dir = dirs::config_dir()
         .expect("dirs::config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
@@ -57,8 +57,8 @@ pub fn install_systemd_service() -> Result<InstallOutcome> {
 }
 
 /// Remove the unit file if present. The caller is responsible for
-/// `systemctl --user stop sb-facet.service && systemctl --user
-/// disable sb-facet.service` before/after.
+/// `systemctl --user stop facet.service && systemctl --user
+/// disable facet.service` before/after.
 pub fn uninstall_systemd_service() -> Result<Option<PathBuf>> {
     let path = dirs::config_dir()
         .expect("dirs::config_dir() returned None")

@@ -220,7 +220,7 @@ async fn daemon(
     if install {
         let outcome = facet::daemon::install_systemd_service()?;
         println!("Wrote {}", outcome.unit_path.display());
-        println!("Run: systemctl --user daemon-reload && systemctl --user enable --now sb-facet.service");
+        println!("Run: systemctl --user daemon-reload && systemctl --user enable --now facet.service");
         return Ok(());
     }
     if uninstall {

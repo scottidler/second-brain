@@ -120,7 +120,7 @@ pub fn all_sections() -> Vec<Section> {
 
 fn systemd_findings() -> Vec<Finding> {
     let mut findings = Vec::new();
-    for unit in &["borg.service", "cortex.service", "sb-facet.service"] {
+    for unit in &["borg.service", "cortex.service", "facet.service"] {
         match systemctl_show(unit) {
             Ok(state) => {
                 if state.active_state == "active" {
