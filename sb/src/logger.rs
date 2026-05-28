@@ -119,6 +119,7 @@ fn verb_logs_to_file(cli: &Cli, cli_cfg: &CliConfig) -> VerbLogging {
             oracle::Commands::Call { .. } => inspect(&["oracle", "call"]),
             _ => VerbLogging::AlwaysFile,
         },
+        Cmd::Glean(_) => VerbLogging::AlwaysFile,
     }
 }
 
@@ -157,6 +158,10 @@ fn name_and_level(cli: &Cli, cli_cfg: &CliConfig) -> (String, String) {
         ),
         Cmd::Bootstrap(_) => (
             "bootstrap".into(),
+            resolve_level(cli.log_level.as_deref(), None, cli_yaml_level, cli.verbose),
+        ),
+        Cmd::Glean(_) => (
+            "glean".into(),
             resolve_level(cli.log_level.as_deref(), None, cli_yaml_level, cli.verbose),
         ),
     }

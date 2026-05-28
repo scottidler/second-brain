@@ -1,0 +1,48 @@
+# glean config - Claude Code session distiller
+# Installed by `sb bootstrap` to ~/.config/sb/glean.yml if absent.
+# Full schema: see glean/src/config.rs in the second-brain workspace.
+
+# Where the Obsidian vault lives, plus the subdirs glean writes to.
+vault:
+  # root-path: ~/path/to/your/vault
+  glean-dir: notes/glean
+  dreams-dir: notes/glean-dreams
+
+# Where Claude Code's session JSONL transcripts live.
+claude:
+  projects-dir: ~/.claude/projects
+
+# Fabric invocation knobs.
+fabric:
+  binary: fabric
+  max-input-chars: 600000
+  classify-model: claude-sonnet-4-6
+  distill-model: claude-opus-4-7
+  dream-model: claude-sonnet-4-6
+  classify-timeout-secs: 240
+  distill-timeout-secs: 600
+  dream-timeout-secs: 240
+
+# Cluster-stage knobs. complete-link is the default because single-link
+# can chain unrelated work-items together via one weak connector. Tune
+# the similarity threshold during Phase 6 soak.
+cluster:
+  algorithm: complete-link
+  similarity-threshold: 0.78
+  min-cluster-size: 2
+
+# Daemon cadence.
+daemon:
+  harvest-interval-secs: 600
+  dream-interval-secs: 86400
+  debounce-secs: 30
+  distill-parallelism: 2
+  dream-parallelism: 2
+
+# Per-turn truncation and per-bundle budget. Tool-result blobs longer
+# than the per-turn budget become `<tool-result: N lines, $tool>`
+# placeholders. The bundle budget is the soft cap; the cluster step
+# splits a work-item temporally when its full bundle would exceed it.
+bundle:
+  interaction-turn-budget-chars: 800
+  bundle-budget-chars: 500000

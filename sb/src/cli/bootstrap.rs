@@ -40,6 +40,7 @@ pub struct BootstrapArgs {
 pub(crate) const BORG_TEMPLATE: &str = include_str!("../../../config/templates/borg.yml.example");
 pub(crate) const CORTEX_TEMPLATE: &str = include_str!("../../../config/templates/cortex.yml.example");
 pub(crate) const ORACLE_TEMPLATE: &str = include_str!("../../../config/templates/oracle.yml.example");
+pub(crate) const GLEAN_TEMPLATE: &str = include_str!("../../../config/templates/glean.yml.example");
 
 pub(crate) const CANONICAL_TAGS_YML: &str = include_str!("../../../config/canonical-tags.yml");
 pub(crate) const TAG_MAPPING_YML: &str = include_str!("../../../config/tag-mapping.yml");
@@ -104,6 +105,26 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
     (
         "obsidian-youtube-slides.md",
         include_str!("../../../borg/patterns/obsidian-youtube-slides.md"),
+    ),
+    (
+        "glean-classify.md",
+        include_str!("../../../glean/patterns/glean-classify.md"),
+    ),
+    (
+        "glean-distill.md",
+        include_str!("../../../glean/patterns/glean-distill.md"),
+    ),
+    (
+        "glean-dream-dedup.md",
+        include_str!("../../../glean/patterns/glean-dream-dedup.md"),
+    ),
+    (
+        "glean-dream-xref.md",
+        include_str!("../../../glean/patterns/glean-dream-xref.md"),
+    ),
+    (
+        "glean-dream-stale.md",
+        include_str!("../../../glean/patterns/glean-dream-stale.md"),
     ),
 ];
 
@@ -182,6 +203,7 @@ pub(crate) fn extract_canonical_assets(force: bool) -> Result<()> {
         ("borg", vault::paths::borg_config(), BORG_TEMPLATE),
         ("cortex", vault::paths::cortex_config(), CORTEX_TEMPLATE),
         ("oracle", vault::paths::oracle_config(), ORACLE_TEMPLATE),
+        ("glean", vault::paths::glean_config(), GLEAN_TEMPLATE),
     ];
     for (name, path, template) in &targets {
         write_if_missing(name, path, template)?;

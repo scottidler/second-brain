@@ -1,5 +1,5 @@
 [workspace]
-members = ["vault", "distillers", "borg", "cortex", "oracle", "sb"]
+members = ["vault", "distillers", "borg", "cortex", "oracle", "glean", "sb"]
 default-members = ["sb"]
 resolver = "3"
 

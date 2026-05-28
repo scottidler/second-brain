@@ -35,8 +35,8 @@ fn patterns_array_matches_source_tree() {
     // assertion catches it.
     assert_eq!(
         PATTERNS.len(),
-        14,
-        "expected 14 patterns; update PATTERNS in sb/src/cli/bootstrap.rs"
+        19,
+        "expected 19 patterns (14 borg + 5 glean); update PATTERNS in sb/src/cli/bootstrap.rs"
     );
 }
 
@@ -53,6 +53,7 @@ fn extract_writes_all_canonical_assets_when_missing() {
         "borg.yml",
         "cortex.yml",
         "oracle.yml",
+        "glean.yml",
         "canonical-tags.yml",
         "tag-mapping.yml",
         "tag-proposals.yml",
@@ -80,6 +81,7 @@ fn extract_byte_identical_to_embedded_constants() {
         ("borg.yml", BORG_TEMPLATE),
         ("cortex.yml", CORTEX_TEMPLATE),
         ("oracle.yml", ORACLE_TEMPLATE),
+        ("glean.yml", GLEAN_TEMPLATE),
         ("canonical-tags.yml", CANONICAL_TAGS_YML),
         ("tag-mapping.yml", TAG_MAPPING_YML),
         ("tag-proposals.yml", TAG_PROPOSALS_YML),

@@ -99,6 +99,31 @@ pub fn cli_config() -> PathBuf {
     config_root().join("cli.yml")
 }
 
+pub fn glean_config() -> PathBuf {
+    config_root().join("glean.yml")
+}
+
+/// Subdirectory under `dirs::data_local_dir()` that owns glean's
+/// SQLite ledger.
+pub const SB_GLEAN_DATA_DIR: &str = "sb/glean";
+
+/// `~/.local/share/sb/glean/state.db` on Linux. Glean's sessions /
+/// quarantine / work_items live here.
+pub fn glean_db_path() -> PathBuf {
+    dirs::data_local_dir()
+        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join(SB_GLEAN_DATA_DIR)
+        .join("state.db")
+}
+
+/// Directory where Phase 0 regression artifacts and other on-disk
+/// glean state live. Created on demand by the daemon's bootstrap step.
+pub fn glean_data_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join(SB_GLEAN_DATA_DIR)
+}
+
 /// CLI ergonomics config for short-lived sb invocations.
 ///
 /// Lives at `~/.config/sb/cli.yml`. All fields optional; missing file falls
@@ -163,11 +188,15 @@ impl CliLogging {
     pub fn opted_in(&self, path: &[&str]) -> bool {
         let mut current = &self.verbs;
         for (i, segment) in path.iter().enumerate() {
-            let Some(value) = current.get(*segment) else { return false };
+            let Some(value) = current.get(*segment) else {
+                return false;
+            };
             if i + 1 == path.len() {
                 return matches!(value, serde_yaml::Value::Bool(true));
             }
-            let serde_yaml::Value::Mapping(m) = value else { return false };
+            let serde_yaml::Value::Mapping(m) = value else {
+                return false;
+            };
             current = m;
         }
         false

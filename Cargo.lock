@@ -2762,6 +2762,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "glean"
+version = "0.8.31"
+dependencies = [
+ "chrono",
+ "clap",
+ "dirs",
+ "env_logger",
+ "eyre",
+ "hex",
+ "log",
+ "rayon",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "shellexpand",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "vault",
+ "walkdir",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6180,6 +6206,7 @@ dependencies = [
  "distillers",
  "env_logger",
  "eyre",
+ "glean",
  "hostname",
  "log",
  "oracle",

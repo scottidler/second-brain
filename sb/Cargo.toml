@@ -10,6 +10,7 @@ build = "build.rs"
 borg = { path = "../borg" }
 cortex = { path = "../cortex" }
 oracle = { path = "../oracle" }
+glean = { path = "../glean" }
 vault = { path = "../vault", features = ["search", "watcher", "vec"] }
 distillers = { path = "../distillers" }
 
