@@ -1,7 +1,9 @@
 //! Dedup detector: pairs of work-items that read as the same.
 
 use eyre::{Context, Result};
+use rayon::prelude::*;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::Config;
 use crate::ledger::Ledger;
@@ -19,20 +21,34 @@ struct Response {
 
 /// Run the dedup detector. Returns the number of proposals written.
 pub fn run(ledger: &Ledger, config: &Config) -> Result<usize> {
-    log::info!("dream::dedup::run");
     let items = ledger.all_work_items().context("load work_items")?;
     let dreams_dir = config.vault.root_path.join(&config.vault.dreams_dir);
-    let mut n = 0;
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
     for i in 0..items.len() {
         for j in (i + 1)..items.len() {
-            let Some(proposal) = consider_pair(&items[i], &items[j], config)? else {
-                continue;
-            };
-            write_proposal(&dreams_dir, &proposal)?;
-            n += 1;
+            pairs.push((i, j));
         }
     }
-    Ok(n)
+    log::info!(
+        "dream::dedup::run: pairs={} parallelism={}",
+        pairs.len(),
+        config.daemon.dream_parallelism
+    );
+    let written = AtomicUsize::new(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(config.daemon.dream_parallelism.max(1))
+        .build()
+        .context("build rayon thread pool for dream::dedup")?;
+    pool.install(|| -> Result<()> {
+        pairs.par_iter().try_for_each(|(i, j)| -> Result<()> {
+            if let Some(proposal) = consider_pair(&items[*i], &items[*j], config)? {
+                write_proposal(&dreams_dir, &proposal)?;
+                written.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        })
+    })?;
+    Ok(written.load(Ordering::Relaxed))
 }
 
 fn consider_pair(a: &WorkItem, b: &WorkItem, config: &Config) -> Result<Option<DreamProposal>> {

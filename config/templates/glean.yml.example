@@ -31,13 +31,17 @@ cluster:
   similarity-threshold: 0.78
   min-cluster-size: 2
 
-# Daemon cadence.
+# Daemon cadence and per-stage parallelism. Each parallelism knob
+# bounds the rayon thread pool for that stage; concurrent fabric calls
+# are bounded by the Anthropic API rate limit (HTTP 429s degrade
+# gracefully into quarantine entries that retry on the next pass).
 daemon:
   harvest-interval-secs: 600
   dream-interval-secs: 86400
   debounce-secs: 30
-  distill-parallelism: 2
-  dream-parallelism: 2
+  harvest-parallelism: 8
+  distill-parallelism: 4
+  dream-parallelism: 4
 
 # Per-turn truncation and per-bundle budget. Tool-result blobs longer
 # than the per-turn budget become `<tool-result: N lines, $tool>`

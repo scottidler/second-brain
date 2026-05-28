@@ -2,7 +2,9 @@
 //! chunk was last distilled.
 
 use eyre::{Context, Result};
+use rayon::prelude::*;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::Config;
 use crate::ledger::Ledger;
@@ -18,18 +20,28 @@ struct Response {
 }
 
 pub fn run(ledger: &Ledger, config: &Config) -> Result<usize> {
-    log::info!("dream::stale::run");
     let items = ledger.all_work_items().context("load work_items")?;
     let dreams_dir = config.vault.root_path.join(&config.vault.dreams_dir);
-    let mut n = 0;
-    for item in &items {
-        let Some(proposal) = consider_one(item, ledger, config)? else {
-            continue;
-        };
-        write_proposal(&dreams_dir, &proposal)?;
-        n += 1;
-    }
-    Ok(n)
+    log::info!(
+        "dream::stale::run: n={} parallelism={}",
+        items.len(),
+        config.daemon.dream_parallelism
+    );
+    let written = AtomicUsize::new(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(config.daemon.dream_parallelism.max(1))
+        .build()
+        .context("build rayon thread pool for dream::stale")?;
+    pool.install(|| -> Result<()> {
+        items.par_iter().try_for_each(|item| -> Result<()> {
+            if let Some(proposal) = consider_one(item, ledger, config)? {
+                write_proposal(&dreams_dir, &proposal)?;
+                written.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        })
+    })?;
+    Ok(written.load(Ordering::Relaxed))
 }
 
 fn consider_one(work_item: &WorkItem, ledger: &Ledger, config: &Config) -> Result<Option<DreamProposal>> {

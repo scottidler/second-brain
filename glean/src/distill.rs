@@ -10,8 +10,10 @@
 //! pass blocks until the transaction closes.
 
 use eyre::{Context, Result};
+use rayon::prelude::*;
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::classify;
 use crate::config::Config;
@@ -21,17 +23,17 @@ use crate::ledger::Ledger;
 use crate::render::{self, DistillOutput};
 use crate::types::WorkItem;
 
-const EXTRACTOR_NAME: &str = "glean-distill-v1";
+const EXTRACTOR_NAME: &str = "glean-distill";
 const SESSION_SEPARATOR_FMT: &str = "=== session {uuid} ===";
 
 #[derive(Debug, Deserialize)]
 struct DistillResponse {
     title: String,
     tldr: String,
-    task: String,
-    context: String,
-    interaction: String,
-    review: String,
+    setting: String,
+    moves: Vec<String>,
+    refusals: Vec<String>,
+    carryover: String,
 }
 
 #[derive(Debug, Clone)]
@@ -78,10 +80,10 @@ pub fn distill_one(ledger: &Ledger, config: &Config, work_item: &WorkItem) -> Re
     let out = DistillOutput {
         title: parsed.title,
         tldr: parsed.tldr,
-        task: parsed.task,
-        context: parsed.context,
-        interaction: parsed.interaction,
-        review: parsed.review,
+        setting: parsed.setting,
+        moves: parsed.moves,
+        refusals: parsed.refusals,
+        carryover: parsed.carryover,
     };
     let glean_dir = config.vault.root_path.join(&config.vault.glean_dir);
     let chunk_path = render::render_chunk(
@@ -129,17 +131,44 @@ fn compose_bundle(sessions: &[crate::types::SessionRecord], turn_budget: usize) 
 /// in materialized order. Failures on individual work-items log at
 /// WARN and are skipped.
 pub fn distill_all(ledger: &Ledger, config: &Config) -> Result<Vec<DistillReport>> {
-    log::info!("distill::distill_all");
     let items = ledger.all_work_items().context("load work_items")?;
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        match distill_one(ledger, config, &item) {
-            Ok(r) => out.push(r),
-            Err(e) => log::warn!(
-                "distill::distill_all: work_item {} failed: {e:?}",
-                &item.content_hash[..8.min(item.content_hash.len())]
-            ),
-        }
-    }
-    Ok(out)
+    log::info!(
+        "distill::distill_all: n={} parallelism={}",
+        items.len(),
+        config.daemon.distill_parallelism
+    );
+    let total = items.len();
+    let progress = AtomicUsize::new(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(config.daemon.distill_parallelism.max(1))
+        .build()
+        .context("build rayon thread pool for distill")?;
+    let reports: Vec<Option<DistillReport>> = pool.install(|| {
+        items
+            .par_iter()
+            .map(|item| match distill_one(ledger, config, item) {
+                Ok(r) => {
+                    let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+                    log::info!(
+                        "distill::distill_all: progress {}/{} {}",
+                        done,
+                        total,
+                        r.chunk_path.display()
+                    );
+                    Some(r)
+                }
+                Err(e) => {
+                    let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+                    log::warn!(
+                        "distill::distill_all: progress {}/{} work_item {} failed: {e:?}",
+                        done,
+                        total,
+                        &item.content_hash[..8.min(item.content_hash.len())]
+                    );
+                    None
+                }
+            })
+            .collect()
+    });
+    Ok(reports.into_iter().flatten().collect())
 }

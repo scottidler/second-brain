@@ -26,8 +26,9 @@ const DEFAULT_FABRIC_DISTILL_MODEL: &str = "claude-opus-4-7";
 const DEFAULT_FABRIC_DREAM_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_HARVEST_INTERVAL_SECS: u64 = 600;
 const DEFAULT_DREAM_INTERVAL_SECS: u64 = 86_400;
-const DEFAULT_DISTILL_PARALLELISM: usize = 2;
-const DEFAULT_DREAM_PARALLELISM: usize = 2;
+const DEFAULT_HARVEST_PARALLELISM: usize = 8;
+const DEFAULT_DISTILL_PARALLELISM: usize = 4;
+const DEFAULT_DREAM_PARALLELISM: usize = 4;
 const DEFAULT_DAEMON_DEBOUNCE_SECS: u64 = 30;
 const DEFAULT_GLEAN_DIR: &str = "notes/glean";
 const DEFAULT_DREAMS_DIR: &str = "notes/glean-dreams";
@@ -155,6 +156,7 @@ pub struct DaemonConfig {
     pub harvest_interval_secs: u64,
     pub dream_interval_secs: u64,
     pub debounce_secs: u64,
+    pub harvest_parallelism: usize,
     pub distill_parallelism: usize,
     pub dream_parallelism: usize,
 }
@@ -165,6 +167,7 @@ impl Default for DaemonConfig {
             harvest_interval_secs: DEFAULT_HARVEST_INTERVAL_SECS,
             dream_interval_secs: DEFAULT_DREAM_INTERVAL_SECS,
             debounce_secs: DEFAULT_DAEMON_DEBOUNCE_SECS,
+            harvest_parallelism: DEFAULT_HARVEST_PARALLELISM,
             distill_parallelism: DEFAULT_DISTILL_PARALLELISM,
             dream_parallelism: DEFAULT_DREAM_PARALLELISM,
         }

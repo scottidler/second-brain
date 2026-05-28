@@ -25,10 +25,10 @@ const MAX_SLUG_LEN: usize = 80;
 pub struct DistillOutput {
     pub title: String,
     pub tldr: String,
-    pub task: String,
-    pub context: String,
-    pub interaction: String,
-    pub review: String,
+    pub setting: String,
+    pub moves: Vec<String>,
+    pub refusals: Vec<String>,
+    pub carryover: String,
 }
 
 /// Write or update a chunk file for `work_item`. Returns the final
@@ -54,8 +54,8 @@ pub fn render_chunk(
         out.title
     );
     std::fs::create_dir_all(glean_dir).context("mkdir glean_dir")?;
-    let target_slug = slugify(&out.title, &work_item.content_hash);
-    let target_path = glean_dir.join(format!("{target_slug}.md"));
+    let base_slug = slugify(&out.title);
+    let target_path = disambiguated_path(glean_dir, &base_slug, &work_item.content_hash)?;
     let existing = find_existing_by_content_hash(glean_dir, &work_item.content_hash)?;
     if let Some(existing_path) = existing
         && existing_path != target_path
@@ -122,14 +122,36 @@ fn compose_body(
     s.push_str(&format!("> [!tldr]\n> {}\n\n", out.tldr.replace('\n', "\n> ")));
     s.push_str(FENCEPOST_START);
     s.push('\n');
-    s.push_str("## Task\n\n");
-    s.push_str(&out.task);
-    s.push_str("\n\n## Context\n\n");
-    s.push_str(&out.context);
-    s.push_str("\n\n## Interaction\n\n");
-    s.push_str(&out.interaction);
-    s.push_str("\n\n## Review\n\n");
-    s.push_str(&out.review);
+    s.push_str("## Setting\n\n");
+    s.push_str(out.setting.trim());
+    s.push_str("\n\n## Moves\n\n");
+    for m in &out.moves {
+        let trimmed = m.trim();
+        if trimmed.starts_with("- ") {
+            s.push_str(trimmed);
+        } else {
+            s.push_str("- ");
+            s.push_str(trimmed);
+        }
+        s.push('\n');
+    }
+    s.push_str("\n## Refusals\n\n");
+    if out.refusals.is_empty() {
+        s.push_str("- No load-bearing refusals in this work-item.\n");
+    } else {
+        for r in &out.refusals {
+            let trimmed = r.trim();
+            if trimmed.starts_with("- ") {
+                s.push_str(trimmed);
+            } else {
+                s.push_str("- ");
+                s.push_str(trimmed);
+            }
+            s.push('\n');
+        }
+    }
+    s.push_str("\n## Carryover\n\n");
+    s.push_str(out.carryover.trim());
     s.push_str("\n\n");
     s.push_str(FENCEPOST_END);
     s.push('\n');
@@ -156,10 +178,11 @@ fn yaml_quote(s: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-/// Turn a title into a slug. Slug shape is `<kebab-title>-<hash8>` so
-/// two work-items with similar titles do not collide.
-pub fn slugify(title: &str, content_hash: &str) -> String {
-    let hash_prefix: String = content_hash.chars().take(8).collect();
+/// Turn a title into a slug. Lowercased kebab-case, truncated to
+/// `MAX_SLUG_LEN`. The `content_hash` is NOT mixed into the slug;
+/// it lives in the frontmatter as the load-bearing identity. Slug
+/// collisions are resolved by `disambiguated_slug` at render time.
+pub fn slugify(title: &str) -> String {
     let kebab: String = title
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
@@ -179,11 +202,41 @@ pub fn slugify(title: &str, content_hash: &str) -> String {
     }
     let trimmed = squashed.trim_matches('-').to_string();
     let stem: String = trimmed.chars().take(MAX_SLUG_LEN).collect();
-    let stem = stem.trim_end_matches('-');
+    let stem = stem.trim_end_matches('-').to_string();
     if stem.is_empty() {
-        return format!("glean-{hash_prefix}");
+        return "glean-untitled".to_string();
     }
-    format!("{stem}-{hash_prefix}")
+    stem
+}
+
+/// Find a non-colliding filename inside `glean_dir` starting from
+/// `base_slug`. If `base_slug.md` is free or already belongs to this
+/// `content_hash`, return that. Otherwise try `base_slug-2.md`,
+/// `base_slug-3.md`, ... until a free name is found.
+fn disambiguated_path(
+    glean_dir: &Path,
+    base_slug: &str,
+    content_hash: &str,
+) -> Result<PathBuf> {
+    let primary = glean_dir.join(format!("{base_slug}.md"));
+    if claim_path(&primary, content_hash)? {
+        return Ok(primary);
+    }
+    for n in 2.. {
+        let candidate = glean_dir.join(format!("{base_slug}-{n}.md"));
+        if claim_path(&candidate, content_hash)? {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("disambiguated_path: infinite loop bound by content-hash uniqueness")
+}
+
+fn claim_path(path: &Path, content_hash: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(true);
+    }
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(extract_frontmatter_content_hash(&raw).as_deref() == Some(content_hash))
 }
 
 /// Walk `glean_dir` looking for a chunk whose frontmatter has a
@@ -238,9 +291,9 @@ pub fn slug_for_work_item(work_item: &WorkItem) -> String {
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| work_item.key_value.clone());
-            slugify(&stem, &work_item.content_hash)
+            slugify(&stem)
         }
-        WorkItemKey::Theme | WorkItemKey::Singleton => slugify(&work_item.key_value, &work_item.content_hash),
+        WorkItemKey::Theme | WorkItemKey::Singleton => slugify(&work_item.key_value),
     }
 }
 

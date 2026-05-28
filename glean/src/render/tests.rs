@@ -22,10 +22,10 @@ fn sample_distill_output() -> DistillOutput {
     DistillOutput {
         title: "design and ship the glean two-tier distiller".to_string(),
         tldr: "tldr line".to_string(),
-        task: "task content".to_string(),
-        context: "context content".to_string(),
-        interaction: "interaction content".to_string(),
-        review: "review content".to_string(),
+        setting: "setting paragraph".to_string(),
+        moves: vec!["**A move.** Caught X.".to_string()],
+        refusals: vec!["Proposal Y — rejected because Z.".to_string()],
+        carryover: "Carryover paragraph.".to_string(),
     }
 }
 
@@ -37,9 +37,12 @@ fn render_chunk_writes_file_with_content_hash_in_frontmatter() {
     let path = render_chunk(tmp.path(), &wi, &out, "glean-distill-v1", "claude-opus-4-7").expect("render");
     let body = std::fs::read_to_string(&path).expect("read");
     assert!(body.contains("content-hash: deadbeefcafe1234"));
-    assert!(body.contains("## Task"));
-    assert!(body.contains("## Interaction"));
-    assert!(body.contains("interaction content"));
+    assert!(body.contains("## Setting"));
+    assert!(body.contains("## Moves"));
+    assert!(body.contains("## Refusals"));
+    assert!(body.contains("## Carryover"));
+    assert!(body.contains("**A move.** Caught X."));
+    assert!(body.contains("Proposal Y \u{2014} rejected because Z."));
 }
 
 #[test]
@@ -74,14 +77,36 @@ fn render_chunk_renames_on_slug_drift_preserving_operator_content() {
 }
 
 #[test]
-fn slugify_includes_hash_prefix() {
-    let s = slugify("a long human title with spaces", "abcdef1234567890");
-    assert!(s.ends_with("-abcdef12"));
-    assert!(s.starts_with("a-long-human"));
+fn slugify_is_kebab_lowercase_no_hash() {
+    let s = slugify("A Long Human Title With Spaces!");
+    assert_eq!(s, "a-long-human-title-with-spaces");
 }
 
 #[test]
 fn slugify_falls_back_when_title_is_empty() {
-    let s = slugify("...", "abcdef1234567890");
-    assert!(s.starts_with("glean-"));
+    let s = slugify("...");
+    assert_eq!(s, "glean-untitled");
+}
+
+#[test]
+fn render_chunk_collision_appends_numeric_suffix() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut wi_a = sample_work_item(&["u1"], "hash000000000a");
+    let mut wi_b = sample_work_item(&["u2"], "hash000000000b");
+    let same_title = DistillOutput {
+        title: "the same title".to_string(),
+        ..sample_distill_output()
+    };
+    wi_a.materialized_at = chrono::Utc::now();
+    wi_b.materialized_at = chrono::Utc::now();
+    let p_a =
+        render_chunk(tmp.path(), &wi_a, &same_title, "glean-distill-v1", "claude-opus-4-7").expect("render a");
+    let p_b =
+        render_chunk(tmp.path(), &wi_b, &same_title, "glean-distill-v1", "claude-opus-4-7").expect("render b");
+    assert_ne!(p_a, p_b, "collisions must disambiguate");
+    let name_a = p_a.file_name().unwrap().to_string_lossy().to_string();
+    let name_b = p_b.file_name().unwrap().to_string_lossy().to_string();
+    assert!(name_a.contains("the-same-title"));
+    assert!(name_b.contains("the-same-title"));
+    assert!(name_b.contains("-2.md"), "second chunk should be -2: {name_b}");
 }

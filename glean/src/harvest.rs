@@ -5,6 +5,8 @@
 //! is skipped unless `opts.force` is set.
 
 use eyre::{Context, Result};
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::classify::{self, ClassifyOutcome};
 use crate::config::Config;
@@ -24,35 +26,61 @@ pub struct HarvestReport {
 
 pub fn run(ledger: &Ledger, config: &Config, opts: &HarvestOpts) -> Result<HarvestReport> {
     log::info!(
-        "harvest::run: projects_dir={} force={} only_jsonl={:?}",
+        "harvest::run: projects_dir={} force={} only_jsonl={:?} parallelism={}",
         config.claude.projects_dir.display(),
         opts.force,
-        opts.only_jsonl
+        opts.only_jsonl,
+        config.daemon.harvest_parallelism
     );
     let discovered = scan::discover(&config.claude.projects_dir).context("scan claude projects")?;
+    let targets: Vec<_> = discovered
+        .into_iter()
+        .filter(|d| opts.only_jsonl.as_ref().is_none_or(|only| only == &d.jsonl_path))
+        .collect();
+    let total = targets.len();
+    let progress = AtomicUsize::new(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(config.daemon.harvest_parallelism.max(1))
+        .build()
+        .context("build rayon thread pool for harvest")?;
+    let outcomes: Vec<HarvestOne> = pool.install(|| {
+        targets
+            .par_iter()
+            .map(|d| {
+                let outcome = match harvest_one(ledger, config, &d.jsonl_path, opts.force) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        log::warn!("harvest::run: failed on {}: {e:?}", d.jsonl_path.display());
+                        HarvestOne::Quarantined
+                    }
+                };
+                let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+                log::info!(
+                    "harvest::run: progress {}/{} ({:?}): {}",
+                    done,
+                    total,
+                    outcome,
+                    d.jsonl_path.display()
+                );
+                outcome
+            })
+            .collect()
+    });
     let mut report = HarvestReport {
-        n_discovered: discovered.len(),
+        n_discovered: total,
         ..Default::default()
     };
-    for d in discovered {
-        if let Some(only) = &opts.only_jsonl
-            && only != &d.jsonl_path
-        {
-            continue;
-        }
-        match harvest_one(ledger, config, &d.jsonl_path, opts.force) {
-            Ok(HarvestOne::Classified) => report.n_classified += 1,
-            Ok(HarvestOne::SkippedUnchanged) => report.n_skipped_unchanged += 1,
-            Ok(HarvestOne::Quarantined) => report.n_quarantined += 1,
-            Err(e) => {
-                log::warn!("harvest::run: failed on {}: {e:?}", d.jsonl_path.display());
-                report.n_quarantined += 1;
-            }
+    for o in outcomes {
+        match o {
+            HarvestOne::Classified => report.n_classified += 1,
+            HarvestOne::SkippedUnchanged => report.n_skipped_unchanged += 1,
+            HarvestOne::Quarantined => report.n_quarantined += 1,
         }
     }
     Ok(report)
 }
 
+#[derive(Debug, Clone, Copy)]
 enum HarvestOne {
     Classified,
     SkippedUnchanged,
