@@ -72,60 +72,8 @@ jobs:
             sb-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz
             sb-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz.sha256
 
-  build-macos:
-    runs-on: macos-14
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-apple-darwin
-            suffix: macos-x86_64
-          - target: aarch64-apple-darwin
-            suffix: macos-arm64
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Install protoc
-        run: brew install protobuf
-
-      - name: Set up Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ env.RUST_VERSION }}
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          rustup target add ${{ matrix.target }}
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v1-rust"
-          shared-key: ${{ matrix.target }}
-
-      - name: Build sb for ${{ matrix.target }}
-        run: cargo build --release -p sb --target ${{ matrix.target }}
-
-      - name: Package binary
-        run: |
-          mkdir -p artifacts/
-          cp target/${{ matrix.target }}/release/sb artifacts/
-
-      - name: Archive artifacts
-        run: tar -czvf sb-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz -C artifacts sb
-
-      - name: Generate checksum
-        run: shasum -a 256 sb-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz > sb-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz.sha256
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: sb-${{ matrix.suffix }}
-          path: |
-            sb-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz
-            sb-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz.sha256
-
   create-release:
-    needs: [build-linux, build-macos]
+    needs: [build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
