@@ -104,9 +104,58 @@ fn print_vault_stats(config: &oracle::Config, stats: &vault::search::VaultStats)
     }
 }
 
+/// Fallback terminal width when stdout is not a tty (e.g. piped to a file).
+const DEFAULT_TERM_WIDTH: usize = 80;
+/// Gap between the name column and the description column.
+const NAME_COL_GAP: usize = 2;
+/// Floor on the description column so a narrow terminal still wraps sanely.
+const MIN_DESC_WIDTH: usize = 20;
+
+fn terminal_width() -> usize {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        terminal_size::terminal_size().map_or(DEFAULT_TERM_WIDTH, |(w, _)| w.0 as usize)
+    } else {
+        DEFAULT_TERM_WIDTH
+    }
+}
+
+/// Greedy word-wrap on whitespace. A word longer than `width` overflows its
+/// own line rather than being split.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.len() + 1 + word.len() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 fn print_tool_list(tools: &[rmcp::model::Tool]) {
+    let name_col = tools.iter().map(|t| t.name.len()).max().unwrap_or(0) + NAME_COL_GAP;
+    let desc_width = terminal_width().saturating_sub(name_col).max(MIN_DESC_WIDTH);
     for tool in tools {
-        println!("{:<20} {}", tool.name, tool.description.as_deref().unwrap_or(""));
+        let lines = wrap(tool.description.as_deref().unwrap_or(""), desc_width);
+        match lines.split_first() {
+            Some((first, rest)) => {
+                println!("{:<name_col$}{first}", tool.name);
+                for line in rest {
+                    println!("{:name_col$}{line}", "");
+                }
+            }
+            None => println!("{}", tool.name),
+        }
     }
 }
 
