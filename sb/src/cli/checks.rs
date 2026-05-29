@@ -785,9 +785,21 @@ fn signal_findings_for(sg: &SignalConfig) -> Vec<Finding> {
             account,
             device_id,
             linked_devices,
-        }) => findings.push(Finding::ok(format!(
-            "linked as account={account} device_id={device_id} linked_devices={linked_devices}"
-        ))),
+            bootstrapped,
+        }) => {
+            findings.push(Finding::ok(format!(
+                "linked as account={account} device_id={device_id} linked_devices={linked_devices}"
+            )));
+            if !bootstrapped {
+                findings.push(Finding::warn(
+                    "linked but the phone->device sync session is not yet established - Note-to-Self will NOT be ingested until borg sends once",
+                    format!(
+                        "normally auto-fixed on borg (re)start; if it persists, run: signal-rs send --to self --state-dir {} \"ping\"",
+                        state_dir.display()
+                    ),
+                ));
+            }
+        }
         Ok(SignalProbe::NotLinked) => findings.push(Finding::error(
             format!("state_dir {} is not linked", state_dir.display()),
             format!("signal-rs link --name borg --state-dir {}", state_dir.display()),
@@ -843,6 +855,11 @@ enum SignalProbe {
         account: String,
         device_id: u32,
         linked_devices: usize,
+        /// Whether a successful cold-start bootstrap self-send has been
+        /// recorded for this identity. `false` while linked means Note-to-Self
+        /// ingest is not yet established (the phone has no sync session to us).
+        /// See docs/design/2026-05-28-signal-cold-start-bootstrap.md.
+        bootstrapped: bool,
     },
     NotLinked,
     PartiallyLinked,
@@ -866,11 +883,15 @@ fn signal_probe_status(state_dir: &Path) -> Result<SignalProbe, String> {
             use signal_rs::{Client, OpenError};
             match Client::open(&dir).await {
                 Ok(client) => match client.status().await {
-                    Ok(status) => SignalProbe::Linked {
-                        account: status.account_number,
-                        device_id: status.device_id,
-                        linked_devices: status.linked_devices.len(),
-                    },
+                    Ok(status) => {
+                        let bootstrapped = borg::signal::bootstrap_recorded(&status.account_number, status.device_id);
+                        SignalProbe::Linked {
+                            account: status.account_number,
+                            device_id: status.device_id,
+                            linked_devices: status.linked_devices.len(),
+                            bootstrapped,
+                        }
+                    }
                     Err(e) => SignalProbe::StatusFailed(e.to_string()),
                 },
                 Err(OpenError::NotLinked) => SignalProbe::NotLinked,

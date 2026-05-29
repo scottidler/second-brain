@@ -163,11 +163,15 @@ impl CliLogging {
     pub fn opted_in(&self, path: &[&str]) -> bool {
         let mut current = &self.verbs;
         for (i, segment) in path.iter().enumerate() {
-            let Some(value) = current.get(*segment) else { return false };
+            let Some(value) = current.get(*segment) else {
+                return false;
+            };
             if i + 1 == path.len() {
                 return matches!(value, serde_yaml::Value::Bool(true));
             }
-            let serde_yaml::Value::Mapping(m) = value else { return false };
+            let serde_yaml::Value::Mapping(m) = value else {
+                return false;
+            };
             current = m;
         }
         false
@@ -209,6 +213,23 @@ pub fn borg_signal_state_dir() -> PathBuf {
     dirs::data_local_dir()
         .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
         .join(SB_BORG_SIGNAL_STATE_DIR)
+}
+
+/// borg-owned marker recording the last successful Signal cold-start
+/// bootstrap self-send (see
+/// `docs/design/2026-05-28-signal-cold-start-bootstrap.md`). Lives
+/// directly under `sb/borg/` - deliberately OUTSIDE the
+/// signal-rs-owned `signal-state/` dir so it never collides with the
+/// `store.db` signal-rs manages there.
+///
+/// `~/.local/share/sb/borg/signal-bootstrap.json` on Linux. Panics only
+/// when `dirs::data_local_dir()` returns `None` (see
+/// [`borg_signal_state_dir`]).
+pub fn borg_signal_bootstrap_marker() -> PathBuf {
+    dirs::data_local_dir()
+        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("sb/borg")
+        .join("signal-bootstrap.json")
 }
 
 /// Resolve the vault root with explicit precedence: CLI > config > marker-gated CWD.

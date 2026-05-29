@@ -5,6 +5,8 @@
 **Status:** Implemented
 **Review Passes Completed:** 5/5 + Architect Rounds 1-2 (verified against borg/src/lib.rs and signal-rs/src/envelope.rs; six Round 1 findings applied, two Round 2 corrections applied: result_partial sink method for accurate partial-attachment ack, intake-rate anomaly gate promoted to mandatory v1)
 
+> **Follow-up (2026-05-29):** a live shakedown found that a freshly-linked device receives no Note-to-Self until it has *sent* once (Signal builds the primary's outbound sync session to a linked device lazily; borg only listens). The cold-start auto-bootstrap + doctor Warn that fixes this is specced in `docs/design/2026-05-28-signal-cold-start-bootstrap.md`.
+
 ## Summary
 
 Add Signal as a second inbound + outbound transport for borg, peer to the existing Telegram path, consuming the in-process `signal-rs` v0.2.1 library that the parallel `scottidler/signal-rs` repo shipped specifically for this integration. Scope is full parity with the Telegram surface: inbound receive (Note-to-Self - the Signal-native private conversation with one's own account - plus allowlisted peer DMs), outbound notify sink for processing / Saved / Duplicate / Failed acks, intake_log + receipts.db participation, doctor checks, single-machine operation pinned by hostname. Bootstrap (the one-time QR scan that links borg as a Signal device) happens out of band via `signal-rs link`, just as Telegram bootstrap happens out of band via `@BotFather`; borg never wraps the link verb. A privacy-load-bearing Note-to-Self structural filter is enforced by a mandatory unit test so a future refactor cannot silently regress it into ingesting every outbound message the user sends from any linked device.

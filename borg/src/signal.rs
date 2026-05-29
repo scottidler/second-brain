@@ -29,6 +29,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
+mod bootstrap;
+
 #[cfg(test)]
 mod tests;
 
@@ -709,6 +711,49 @@ fn outcome_label(outcome: &ClassifyOutcome) -> &'static str {
 /// daemon supervisor and never read from `SignalConfig` -- the path
 /// is a borg implementation detail, not an operator-tunable config
 /// field. See `docs/design/2026-05-24-signal-state-dir-internalization.md`.
+/// Public probe for `sb doctor`: has a successful Signal cold-start bootstrap
+/// been recorded for this identity? Resolves the marker path internally so the
+/// caller (the `sb` crate) does not depend on borg's data-dir layout. A `false`
+/// while linked means Note-to-Self ingest is not yet established.
+pub fn bootstrap_recorded(account: &str, device_id: u32) -> bool {
+    bootstrap::bootstrap_done(&vault::paths::borg_signal_bootstrap_marker(), account, device_id)
+}
+
+/// Cold-start self-ping. If this identity has not recorded a successful
+/// bootstrap send, send one Note-to-Self so the phone establishes its outbound
+/// sync session to us, then latch on success. Suppressed under the same gate as
+/// every other borg Signal send. See `bootstrap.rs`.
+async fn maybe_bootstrap_session(client: &Client, marker_path: &Path, account: &str, device_id: u32) {
+    if notify::real_notifications_disabled() {
+        log::debug!("signal: cold-start bootstrap suppressed (real notifications disabled)");
+        return;
+    }
+    if bootstrap::bootstrap_done(marker_path, account, device_id) {
+        log::debug!(
+            "signal: cold-start bootstrap already recorded (account={account} device_id={device_id}); skipping"
+        );
+        return;
+    }
+    log::info!(
+        "signal: cold-start bootstrap not recorded (account={account} device_id={device_id}); \
+         sending one Note-to-Self to establish the phone->device sync session"
+    );
+    match client
+        .send(Recipient::SelfSync, bootstrap::COLD_START_BOOTSTRAP_BODY)
+        .await
+    {
+        Ok(sent_at_ms) => {
+            bootstrap::record_bootstrap(marker_path, account, device_id, sent_at_ms);
+            log::info!("signal: cold-start bootstrap self-ping sent ts={sent_at_ms}; latch recorded");
+        }
+        Err(e) => log::warn!(
+            "signal: cold-start bootstrap self-ping failed: {e} (Note-to-Self ingest will not \
+             work until this succeeds; it retries on next borg start, or run \
+             `signal-rs send --to self`)"
+        ),
+    }
+}
+
 pub async fn run(
     signal_config: SignalConfig,
     state_dir: PathBuf,
@@ -728,13 +773,15 @@ pub async fn run(
         signal_config.notetoself_rate_threshold_per_hour,
     ));
 
+    let marker_path = vault::paths::borg_signal_bootstrap_marker();
+    let mut bootstrap_attempted = false;
     let mut backoff = ExponentialBackoff::new();
 
     loop {
         let client = open_or_fail(&state_dir).await?;
 
         // Pre-flight: confirm we're still linked from the server's view.
-        match client.status().await {
+        let status = match client.status().await {
             Ok(status) => {
                 log::info!(
                     "signal: connected account={} device_id={} linked_devices={}",
@@ -743,12 +790,23 @@ pub async fn run(
                     status.linked_devices.len()
                 );
                 backoff.reset();
+                status
             }
             Err(e) => {
                 log::warn!("signal: status pre-flight failed: {e}");
                 backoff.wait().await;
                 continue;
             }
+        };
+
+        // Cold-start bootstrap: a freshly-linked device receives no
+        // Note-to-Self until it has sent once (the phone builds its outbound
+        // sync session lazily). Attempt at most once per run(); the on-disk
+        // latch keeps it idempotent across restarts. See bootstrap.rs and
+        // docs/design/2026-05-28-signal-cold-start-bootstrap.md.
+        if !bootstrap_attempted {
+            bootstrap_attempted = true;
+            maybe_bootstrap_session(&client, &marker_path, &status.account_number, status.device_id).await;
         }
 
         let notify_signal = match notify::Signal::new(Arc::clone(&client), &signal_config) {
