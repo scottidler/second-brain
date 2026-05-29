@@ -27,7 +27,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y curl build-essential git pkg-config libssl-dev \
-            cmake golang perl protobuf-compiler clang libclang-dev
+            cmake protobuf-compiler clang libclang-dev
 
       - uses: actions/checkout@v4
         with:
