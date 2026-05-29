@@ -169,23 +169,11 @@ pub enum AuditEvent {
     },
 }
 
-/// Shell out to `rkvr rmrf <path>` so the deleted file lands in rkvr's
-/// archive (recoverable via `rkvr rcvr`). Tests bypass to `remove_file` so
-/// the recovery store under `~/.local/share/rkvr/` is not polluted.
+/// Delete a vault file, preferring `rkvr rmrf` (recoverable via `rkvr rcvr`)
+/// and falling back to non-recoverable removal with a WARN when rkvr is not on
+/// PATH. rkvr is preferred, not required. See [`crate::rkvr`].
 fn rkvr_remove(path: &Path) -> Result<()> {
-    if cfg!(test) {
-        std::fs::remove_file(path).context("test bypass: remove_file failed")?;
-        return Ok(());
-    }
-    let status = std::process::Command::new("rkvr")
-        .arg("rmrf")
-        .arg(path)
-        .status()
-        .context("Failed to invoke rkvr (install rkvr or check PATH)")?;
-    if !status.success() {
-        eyre::bail!("rkvr rmrf exited with status {status}");
-    }
-    Ok(())
+    crate::rkvr::remove(&[path])
 }
 
 /// Sanitize a source identifier (URL or arbitrary string) into a path-safe

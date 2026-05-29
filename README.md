@@ -14,6 +14,12 @@ that share one Obsidian vault:
 All three operate against `~/.config/sb/` for config and the vault
 filesystem for content.
 
+> **New here / setting up a fresh machine?** See
+> [`docs/onboarding.md`](docs/onboarding.md) for the linear, gotcha-aware
+> walkthrough - the full dependency checklist (including the runtime CLIs this
+> README does not list), account linking, and the known traps. This README is
+> the install reference; the onboarding guide is the end-to-end path.
+
 ## Prerequisites
 
 - **Rust toolchain** - `rustup` or your distro's package. Required for

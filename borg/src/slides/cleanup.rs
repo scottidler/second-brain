@@ -19,7 +19,6 @@
 
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Pull the `slides:` list out of a vault note's YAML frontmatter. Returns
 /// an empty vec if the note has no frontmatter or no `slides:` field, or if
@@ -79,26 +78,11 @@ pub fn resolve_existing(vault_root: &Path, vault_relative: &[String]) -> Vec<Pat
         .collect()
 }
 
-/// Shell out to `rkvr rmrf <paths...>`. Per the safety rule the user's
-/// dotfiles configure `rkvr` to archive before deleting, so this is
-/// recoverable. Returns an error if the binary is missing or the command
-/// fails - the caller decides whether to surface or log-and-continue.
+/// Delete orphan slide files, preferring `rkvr rmrf` (recoverable) and falling
+/// back to non-recoverable removal with a WARN when rkvr is not on PATH. rkvr
+/// is preferred, not required. See [`crate::rkvr`].
 pub fn rkvr_remove(paths: &[PathBuf]) -> Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    let mut cmd = Command::new("rkvr");
-    cmd.arg("rmrf");
-    for p in paths {
-        cmd.arg(p);
-    }
-    let output = cmd.output().context("Failed to run `rkvr rmrf` - is rkvr installed?")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eyre::bail!("rkvr rmrf failed (exit {}): {stderr}", output.status);
-    }
-    log::info!("rkvr rmrf: archived {} orphan slide(s)", paths.len());
-    Ok(())
+    crate::rkvr::remove(paths)
 }
 
 /// End-to-end orphan cleanup. Reads the old note's `slides:` list from

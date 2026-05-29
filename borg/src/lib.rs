@@ -40,6 +40,7 @@ pub mod quality;
 pub mod receipts;
 pub mod replay;
 pub mod retention;
+pub mod rkvr;
 pub mod router;
 pub mod routes;
 pub mod signal;
