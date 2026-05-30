@@ -84,6 +84,10 @@ pub struct IntelOpts {
 
     /// Write to specific path (default: vault daily note).
     pub output: Option<PathBuf>,
+
+    /// Treat this date as "today" instead of the system clock. Lets a past
+    /// day's digest be regenerated (backfill). `None` = real today.
+    pub as_of: Option<chrono::NaiveDate>,
 }
 
 #[derive(Debug, Clone)]

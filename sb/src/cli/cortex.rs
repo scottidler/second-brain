@@ -148,6 +148,10 @@ pub struct IntelArgs {
     pub weekly: bool,
     #[arg(long)]
     pub output: Option<PathBuf>,
+    /// Treat this date (YYYY-MM-DD) as "today" instead of the system clock,
+    /// to regenerate (backfill) a past day's digest/review.
+    #[arg(long)]
+    pub date: Option<chrono::NaiveDate>,
 }
 impl From<IntelArgs> for opts::IntelOpts {
     fn from(a: IntelArgs) -> Self {
@@ -156,7 +160,7 @@ impl From<IntelArgs> for opts::IntelOpts {
         } else {
             cortex::intel::IntelMode::Daily
         };
-        Self { mode, output: a.output }
+        Self { mode, output: a.output, as_of: a.date }
     }
 }
 

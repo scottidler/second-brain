@@ -206,6 +206,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 let opts = crate::opts::IntelOpts {
                     mode: crate::intel::IntelMode::Daily,
                     output: None,
+                    as_of: None,
                 };
                 if let Err(e) = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts)) {
                     log::error!("scheduled daily intel failed: {e}");
@@ -223,6 +224,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 let opts = crate::opts::IntelOpts {
                     mode: crate::intel::IntelMode::Weekly,
                     output: None,
+                    as_of: None,
                 };
                 if let Err(e) = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts)) {
                     log::error!("scheduled weekly intel failed: {e}");
@@ -509,6 +511,7 @@ fn configured_actions(
                 let opts = crate::opts::IntelOpts {
                     mode: crate::intel::IntelMode::Daily,
                     output: None,
+                    as_of: None,
                 };
                 if let Err(e) = crate::intel::run(vault_root, config, &opts) {
                     log::error!("intel action failed: {e}");

@@ -31,6 +31,7 @@ teloxide = { version = "0.17.0", default-features = false, features = ["macros",
 hostname = "0.4.2"
 signal-rs = { git = "https://github.com/scottidler/signal-rs", tag = "v0.2.1", version = "0.2.1" }
 terminal_size = "0.4.4"
+chrono.workspace = true
 
 [dev-dependencies]
 serial_test = "3.4.0"
