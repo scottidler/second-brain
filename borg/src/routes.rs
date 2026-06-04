@@ -6,7 +6,8 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::assets;
 use crate::health::HealthResponse;
-use crate::intake::{self as intake_log, Kind as IntakeKind, Stage as DlqStage};
+use crate::intake::{self as intake_log, Kind as IntakeKind};
+use vault::receipts::FailureStage;
 use crate::pipeline;
 use crate::trace;
 use crate::types::{ContentKind, IngestMethod, IngestRequest, IngestResult, IngestStatus};
@@ -50,7 +51,14 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
     // Durable intake BEFORE any pipeline dispatch. Synchronous so a write
     // failure returns Failed to the caller; everything beyond this point
     // runs on a detached task and is invisible to the client.
-    if let Err(e) = intake_log::record_intake(&state.config, method, "http", IntakeKind::Url, &request.url, &trace_id) {
+    if let Err(e) = intake_log::record_received_with_sidecar(
+        &state.config,
+        method,
+        IntakeKind::Url,
+        &request.url,
+        request.url.as_bytes(),
+        &trace_id,
+    ) {
         log::error!("http/ingest: failed to record intake trace={trace_id}: {e:#}");
         return Json(IngestResult {
             status: IngestStatus::Failed {
@@ -128,10 +136,9 @@ pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest
         request.text.clone()
     };
 
-    if let Err(e) = intake_log::record_intake_with_sidecar(
+    if let Err(e) = intake_log::record_received_with_sidecar(
         &state.config,
         IngestMethod::Http,
-        "http",
         IntakeKind::Text,
         &intake_log::preview_text(&request.text),
         request.text.as_bytes(),
@@ -272,12 +279,12 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
     // For multipart, the sidecar carries the descriptor (not the raw binary)
     // so `system/intake/` stays small regardless of upload size.
     let _ = intake_bytes; // we only needed the bytes for descriptor sizing above
-    if let Err(e) = intake_log::record_intake(
+    if let Err(e) = intake_log::record_received_with_sidecar(
         &state.config,
         IngestMethod::Http,
-        "http",
         intake_kind,
         &intake_preview,
+        intake_preview.as_bytes(),
         &trace_id,
     ) {
         log::error!("http/ingest_multipart: failed to record intake trace={trace_id}: {e:#}");
@@ -291,14 +298,11 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
     }
 
     if let Some(err) = decode_error {
-        intake_log::record_dlq(
-            &state.config,
+        intake_log::record_failure_at_door(
             IngestMethod::Http,
-            DlqStage::IntakeReject,
-            &format!("bad-payload: {err}"),
-            &intake_preview,
             &trace_id,
-            None,
+            FailureStage::IntakeRejected,
+            &format!("bad-payload: {err}"),
         );
         return Json(IngestResult {
             status: IngestStatus::Failed { reason: err },
@@ -309,14 +313,11 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
 
     let Some((data, filename)) = file_data else {
         let reason = "No 'file' field in multipart upload".to_string();
-        intake_log::record_dlq(
-            &state.config,
+        intake_log::record_failure_at_door(
             IngestMethod::Http,
-            DlqStage::IntakeReject,
-            &format!("bad-payload: {reason}"),
-            &intake_preview,
             &trace_id,
-            None,
+            FailureStage::IntakeRejected,
+            &format!("bad-payload: {reason}"),
         );
         return Json(IngestResult {
             status: IngestStatus::Failed { reason },
@@ -353,15 +354,7 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
             filename,
             all_extensions.join(", ")
         );
-        intake_log::record_dlq(
-            &state.config,
-            IngestMethod::Http,
-            DlqStage::IntakeReject,
-            &reason,
-            &intake_preview,
-            &trace_id,
-            None,
-        );
+        intake_log::record_failure_at_door(IngestMethod::Http, &trace_id, FailureStage::IntakeRejected, &reason);
         return Json(IngestResult {
             status: IngestStatus::Failed { reason },
             trace_id: Some(trace_id),

@@ -13,7 +13,8 @@
 use crate::assets;
 use crate::backoff::ExponentialBackoff;
 use crate::config::{Config, SignalConfig};
-use crate::intake::{self as intake_log, Kind as IntakeKind, Stage as DlqStage};
+use crate::intake::{self as intake_log, Kind as IntakeKind};
+use vault::receipts::FailureStage;
 use crate::notify;
 use crate::pipeline;
 use crate::router::extract_url_from_text;
@@ -458,38 +459,34 @@ async fn dispatch_envelope(env: Envelope, ctx: DispatchEnv) -> Result<()> {
         outcome_label(&outcome)
     );
 
-    let origin_ctx = source.display();
     match &outcome {
         ClassifyOutcome::Empty => {
             log::debug!("signal::dispatch_envelope: empty envelope dropped trace={trace_id}");
-            if let Err(e) = intake_log::record_intake(
+            if let Err(e) = intake_log::record_received_with_sidecar(
                 &ctx.config,
                 IngestMethod::Signal,
-                &origin_ctx,
                 IntakeKind::Empty,
                 "[empty]",
+                b"[empty]",
                 &trace_id,
             ) {
                 log::warn!("signal::dispatch_envelope: failed to record empty intake trace={trace_id}: {e:#}");
             }
-            intake_log::record_dlq(
-                &ctx.config,
+            intake_log::record_failure_at_door(
                 IngestMethod::Signal,
-                DlqStage::IntakeReject,
-                "empty Signal envelope (no body, no attachments)",
-                "[empty]",
                 &trace_id,
-                None,
+                FailureStage::IntakeRejected,
+                "empty Signal envelope (no body, no attachments)",
             );
             return Ok(());
         }
         ClassifyOutcome::Single { kind, preview } => {
-            if let Err(e) = intake_log::record_intake(
+            if let Err(e) = intake_log::record_received_with_sidecar(
                 &ctx.config,
                 IngestMethod::Signal,
-                &origin_ctx,
                 *kind,
                 preview,
+                preview.as_bytes(),
                 &trace_id,
             ) {
                 log::error!("signal::dispatch_envelope: failed to record intake trace={trace_id}: {e:#}");
@@ -513,12 +510,12 @@ async fn dispatch_envelope(env: Envelope, ctx: DispatchEnv) -> Result<()> {
             log::warn!(
                 "signal::dispatch_envelope: multi-attachment envelope trace={trace_id} processed=1 dropped={dropped_count}: {dropped_summary:?}"
             );
-            if let Err(e) = intake_log::record_intake(
+            if let Err(e) = intake_log::record_received_with_sidecar(
                 &ctx.config,
                 IngestMethod::Signal,
-                &origin_ctx,
                 *kind,
                 preview,
+                preview.as_bytes(),
                 &trace_id,
             ) {
                 log::error!(
@@ -534,14 +531,11 @@ async fn dispatch_envelope(env: Envelope, ctx: DispatchEnv) -> Result<()> {
             Some(payload) => payload,
             None => {
                 log::error!("signal::dispatch_envelope: payload build failed trace={trace_id}");
-                intake_log::record_dlq(
-                    &ctx.config,
+                intake_log::record_failure_at_door(
                     IngestMethod::Signal,
-                    DlqStage::FetchFailed,
-                    "failed to materialise Signal payload",
-                    "[fetch]",
                     &trace_id,
-                    None,
+                    FailureStage::FetchFailed,
+                    "failed to materialise Signal payload",
                 );
                 let _ = ctx
                     .notify_signal

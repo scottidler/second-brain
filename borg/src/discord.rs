@@ -1,7 +1,8 @@
 use crate::assets;
 use crate::backoff::ExponentialBackoff;
 use crate::config::{Config, DiscordConfig};
-use crate::intake::{self as intake_log, Kind as IntakeKind, Stage as DlqStage};
+use crate::intake::{self as intake_log, Kind as IntakeKind};
+use vault::receipts::FailureStage;
 use crate::notify::Desktop;
 use crate::pipeline;
 use crate::router::{extract_url_from_text, format_reply};
@@ -80,7 +81,6 @@ impl EventHandler for Handler {
         // Generate trace at the door so disallowed-channel messages and
         // empty messages still get a durable record (and a DLQ row).
         let trace_id = trace::generate(IngestMethod::Discord);
-        let origin_ctx = format!("channel={}", msg.channel_id);
 
         let (intake_kind, intake_preview) = if let Some(att) = msg.attachments.first() {
             let mime = att.content_type.as_deref();
@@ -110,10 +110,9 @@ impl EventHandler for Handler {
             (IntakeKind::Text, intake_log::preview_text(&msg.content))
         };
 
-        if let Err(e) = intake_log::record_intake_with_sidecar(
+        if let Err(e) = intake_log::record_received_with_sidecar(
             &self.config,
             IngestMethod::Discord,
-            &origin_ctx,
             intake_kind,
             &intake_preview,
             msg.content.as_bytes(),
@@ -132,28 +131,22 @@ impl EventHandler for Handler {
                 "discord: rejecting disallowed channel {} (trace={trace_id})",
                 msg.channel_id
             );
-            intake_log::record_dlq(
-                &self.config,
+            intake_log::record_failure_at_door(
                 IngestMethod::Discord,
-                DlqStage::IntakeReject,
-                &format!("channel {} not configured", msg.channel_id),
-                &intake_preview,
                 &trace_id,
-                None,
+                FailureStage::IntakeRejected,
+                &format!("channel {} not configured", msg.channel_id),
             );
             return;
         }
 
         if intake_kind == IntakeKind::Empty {
             log::info!("discord: rejecting empty message (trace={trace_id})");
-            intake_log::record_dlq(
-                &self.config,
+            intake_log::record_failure_at_door(
                 IngestMethod::Discord,
-                DlqStage::IntakeReject,
-                "empty discord message",
-                &intake_preview,
                 &trace_id,
-                None,
+                FailureStage::IntakeRejected,
+                "empty discord message",
             );
             return;
         }

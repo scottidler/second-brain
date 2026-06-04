@@ -1,6 +1,7 @@
 use crate::backoff::ExponentialBackoff;
 use crate::config::Config;
-use crate::intake::{self as intake_log, Kind as IntakeKind, Stage as DlqStage};
+use crate::intake::{self as intake_log, Kind as IntakeKind};
+use vault::receipts::FailureStage;
 use crate::notify::{Desktop, Telegram};
 use crate::pipeline;
 use crate::router::extract_url_from_text;
@@ -137,7 +138,6 @@ pub async fn run(
             // Generate trace at the door so every event - including empty
             // and undeliverable ones - gets a durable record.
             let trace_id = trace::generate(IngestMethod::Ntfy);
-            let origin_ctx = format!("topic={topic}");
             let parsed = parse_message(&event.message);
             let (intake_kind, intake_preview) = match &parsed {
                 Some(ParsedMessage::Url { url, .. }) => (IntakeKind::Url, url.clone()),
@@ -145,10 +145,9 @@ pub async fn run(
                 None => (IntakeKind::Empty, "[empty ntfy message]".to_string()),
             };
 
-            if let Err(e) = intake_log::record_intake_with_sidecar(
+            if let Err(e) = intake_log::record_received_with_sidecar(
                 &config,
                 IngestMethod::Ntfy,
-                &origin_ctx,
                 intake_kind,
                 &intake_preview,
                 event.message.as_bytes(),
@@ -160,14 +159,11 @@ pub async fn run(
 
             let Some(parsed) = parsed else {
                 log::info!("ntfy: empty message (trace={trace_id})");
-                intake_log::record_dlq(
-                    &config,
+                intake_log::record_failure_at_door(
                     IngestMethod::Ntfy,
-                    DlqStage::IntakeReject,
-                    "empty ntfy message",
-                    &intake_preview,
                     &trace_id,
-                    None,
+                    FailureStage::IntakeRejected,
+                    "empty ntfy message",
                 );
                 continue;
             };

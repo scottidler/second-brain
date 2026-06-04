@@ -433,10 +433,9 @@ pub enum IngestOutcome {
 
 pub async fn note(config: Config, text: String, tags: Option<Vec<String>>) -> Result<IngestOutcome> {
     let trace_id = trace::generate(types::IngestMethod::Cli);
-    intake::record_intake_with_sidecar(
+    intake::record_received_with_sidecar(
         &config,
         types::IngestMethod::Cli,
-        "cli",
         intake::Kind::Text,
         &intake::preview_text(&text),
         text.as_bytes(),
@@ -490,12 +489,12 @@ pub async fn ingest_file(
         intake::Kind::Unknown
     };
     let preview = intake::binary_descriptor(intake_kind, &filename, data.len(), None);
-    intake::record_intake(
+    intake::record_received_with_sidecar(
         &config,
         types::IngestMethod::Cli,
-        "cli",
         intake_kind,
         &preview,
+        preview.as_bytes(),
         &trace_id,
     )
     .context("Failed to record cli intake")?;
@@ -521,14 +520,11 @@ pub async fn ingest_file(
             filename,
             all_extensions.join(", ")
         );
-        intake::record_dlq(
-            &config,
+        intake::record_failure_at_door(
             types::IngestMethod::Cli,
-            intake::Stage::IntakeReject,
-            &reason,
-            &preview,
             &trace_id,
-            None,
+            vault::receipts::FailureStage::IntakeRejected,
+            &reason,
         );
         eyre::bail!("{reason}");
     };

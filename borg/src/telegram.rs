@@ -1,7 +1,8 @@
 use crate::assets;
 use crate::backoff::ExponentialBackoff;
 use crate::config::{Config, TelegramConfig};
-use crate::intake::{self as intake_log, Kind as IntakeKind, Stage as DlqStage};
+use crate::intake::{self as intake_log, Kind as IntakeKind};
+use vault::receipts::FailureStage;
 use crate::notify;
 use crate::pipeline;
 use crate::router::extract_url_from_text;
@@ -203,16 +204,20 @@ pub async fn run(
             async move {
                 let chat_id = message.chat.id;
                 let chat_id_override = Some(chat_id.0);
-                let chat_id_ctx = chat_id.0.to_string();
 
                 // ── Durable intake: BEFORE the allowed-chat filter, BEFORE
                 // dispatch. The trace_id generated here is reused by every
                 // downstream branch.
                 let trace_id = trace::generate(IngestMethod::Telegram);
                 let (kind, preview) = classify_telegram_message(&message);
-                if let Err(e) =
-                    intake_log::record_intake(&config, IngestMethod::Telegram, &chat_id_ctx, kind, &preview, &trace_id)
-                {
+                if let Err(e) = intake_log::record_received_with_sidecar(
+                    &config,
+                    IngestMethod::Telegram,
+                    kind,
+                    &preview,
+                    preview.as_bytes(),
+                    &trace_id,
+                ) {
                     log::error!("telegram: failed to record intake trace={trace_id}: {e:#}");
                     let _ = bot
                         .send_message(chat_id, format!("[{trace_id}] borg failed to record your input: {e}"))
@@ -222,14 +227,11 @@ pub async fn run(
 
                 if !allowed.is_empty() && !allowed.contains(&message.chat.id.0) {
                     log::info!("telegram: rejecting disallowed chat {chat_id} (trace={trace_id})");
-                    intake_log::record_dlq(
-                        &config,
+                    intake_log::record_failure_at_door(
                         IngestMethod::Telegram,
-                        DlqStage::IntakeReject,
-                        &format!("chat {chat_id} not in allowed-chat-ids"),
-                        &preview,
                         &trace_id,
-                        None,
+                        FailureStage::IntakeRejected,
+                        &format!("chat {chat_id} not in allowed-chat-ids"),
                     );
                     return Ok::<(), teloxide::RequestError>(());
                 }
@@ -252,14 +254,11 @@ pub async fn run(
                     } else {
                         format!("unsupported media: {kind}")
                     };
-                    intake_log::record_dlq(
-                        &config,
+                    intake_log::record_failure_at_door(
                         IngestMethod::Telegram,
-                        DlqStage::IntakeReject,
-                        &reason,
-                        &preview,
                         &trace_id,
-                        None,
+                        FailureStage::IntakeRejected,
+                        &reason,
                     );
                     return Ok::<(), teloxide::RequestError>(());
                 }
