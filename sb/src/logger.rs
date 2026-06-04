@@ -100,8 +100,6 @@ fn verb_logs_to_file(cli: &Cli, cli_cfg: &CliConfig) -> VerbLogging {
             Some(borg::Command::Daemon(d)) if d.start => VerbLogging::AlwaysFile,
             Some(borg::Command::Daemon(d)) => inspect(&["borg", "daemon", daemon_flag(d)]),
             Some(borg::Command::Log(_)) => inspect(&["borg", "log"]),
-            Some(borg::Command::Dlq(_)) => inspect(&["borg", "dlq"]),
-            Some(borg::Command::Intake(_)) => inspect(&["borg", "intake"]),
             Some(borg::Command::Blocklist(_)) => inspect(&["borg", "blocklist"]),
             Some(borg::Command::Retention(_)) => inspect(&["borg", "retention"]),
             Some(borg::Command::Dashboard(_)) => inspect(&["borg", "dashboard"]),

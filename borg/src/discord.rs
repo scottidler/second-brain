@@ -2,7 +2,6 @@ use crate::assets;
 use crate::backoff::ExponentialBackoff;
 use crate::config::{Config, DiscordConfig};
 use crate::intake::{self as intake_log, Kind as IntakeKind};
-use vault::receipts::FailureStage;
 use crate::notify::Desktop;
 use crate::pipeline;
 use crate::router::{extract_url_from_text, format_reply};
@@ -14,6 +13,7 @@ use serenity::model::channel::Message;
 use serenity::model::gateway::GatewayIntents;
 use serenity::prelude::*;
 use std::sync::Arc;
+use vault::receipts::FailureStage;
 
 /// Classify a Discord attachment into a ContentKind based on content_type or filename extension.
 fn classify_attachment(data: Vec<u8>, filename: String, content_type: Option<&str>) -> Option<ContentKind> {

@@ -431,6 +431,36 @@ fn watchdog_crash_promotion_is_queryable_by_stage_crashed() {
 }
 
 #[test]
+fn count_since_helpers_window_on_terminal_at() {
+    let conn = fresh();
+    // recent crashed + recent fetch-failed (terminal_at = now)
+    record_received(&conn, "c1", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    mark_failed(&conn, "c1", FailureStage::Crashed, "x").expect("fail");
+    record_received(&conn, "f1", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    mark_failed(&conn, "f1", FailureStage::FetchFailed, "x").expect("fail");
+    // old crashed: received recently but terminal_at far in the past
+    record_received(&conn, "c0", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    mark_failed(&conn, "c0", FailureStage::Crashed, "x").expect("fail");
+    conn.execute(
+        "UPDATE receipts SET terminal_at='2024-01-01T00:00:00Z' WHERE trace_id='c0'",
+        [],
+    )
+    .expect("backdate terminal_at");
+
+    let since = hours_ago_iso(24);
+    assert_eq!(
+        count_failed_since(&conn, &since).expect("failed_since"),
+        2,
+        "c1 + f1 in window; c0 old"
+    );
+    assert_eq!(
+        count_crashed_since(&conn, &since).expect("crashed_since"),
+        1,
+        "only c1 crashed in window"
+    );
+}
+
+#[test]
 fn count_by_status_groups_correctly() {
     let conn = fresh();
     record_received(&conn, "r1", Method::Http, ReceiptKind::Url, "u").expect("ins");

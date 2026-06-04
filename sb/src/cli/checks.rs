@@ -473,53 +473,39 @@ fn human_bytes(bytes: u64) -> String {
 }
 
 fn borg_findings() -> Vec<Finding> {
-    // Run borg's invariant audit and surface the counts. This is the same
-    // computation behind GET /health/audit, so the numbers match what the
-    // running daemon's HTTP endpoint reports.
-    let config = match borg::config::load_config(None) {
-        Ok(c) => c,
-        Err(e) => {
-            return vec![Finding::error(
-                format!("could not load borg config: {e}"),
-                format!("ensure {} exists (sb bootstrap)", vault::paths::borg_config().display()),
-            )];
-        }
-    };
-
-    let health = match borg::triage::audit_health_stats(&config) {
-        Ok(h) => h,
-        Err(e) => {
-            return vec![Finding::error(
-                format!("borg audit health query failed: {e}"),
-                "sb borg audit --invariant (manual investigation)".to_string(),
-            )];
-        }
-    };
-
-    let mut findings = vec![Finding::ok(format!(
-        "intake: {} row(s), ledger: {} row(s), dlq: {} row(s)",
-        health.intake_rows, health.ledger_rows, health.dlq_rows
-    ))];
-    if health.dlq_pending > 0 {
-        findings.push(Finding::warn(
-            format!("dlq: {} pending row(s)", health.dlq_pending),
-            "sb borg dlq list --status pending (or sb borg dlq replay <trace>)".to_string(),
-        ));
-    } else {
-        findings.push(Finding::ok("dlq: 0 pending".to_string()));
+    // Config load is itself a health signal; receipts health comes from the
+    // DB (the same computation behind GET /health/audit).
+    if let Err(e) = borg::config::load_config::<borg::config::Config>(None) {
+        return vec![Finding::error(
+            format!("could not load borg config: {e}"),
+            format!("ensure {} exists (sb bootstrap)", vault::paths::borg_config().display()),
+        )];
     }
-    if health.orphan_count > 0 {
-        let age = health
-            .oldest_orphan_secs
-            .map(|s| format!("{}s", s))
-            .unwrap_or_else(|| "unknown".to_string());
-        findings.push(Finding::warn(
-            format!(
-                "{} orphan(s) in intake without ledger or dlq resolution (oldest: {age})",
-                health.orphan_count
-            ),
-            "sb borg audit --invariant".to_string(),
-        ));
+
+    let mut findings = Vec::new();
+    // The actionable silent-drop signal: crashes the watchdog declared in the
+    // last 24h. Lifetime counts are in the receipts_summary line below.
+    match borg::triage::audit_health_stats() {
+        Ok(h) => {
+            if h.crashed_24h > 0 {
+                findings.push(Finding::warn(
+                    format!(
+                        "{} input(s) crashed in the last 24h (watchdog declared them lost)",
+                        h.crashed_24h
+                    ),
+                    "sb borg log --stage crashed --since 24h".to_string(),
+                ));
+            } else {
+                findings.push(Finding::ok("no crashes in the last 24h".to_string()));
+            }
+            if h.failed_24h > 0 {
+                findings.push(Finding::info(format!("{} failure(s) in the last 24h", h.failed_24h)));
+            }
+        }
+        Err(e) => findings.push(Finding::warn(
+            format!("borg receipts health query failed: {e}"),
+            "sb borg log --status failed (manual investigation)".to_string(),
+        )),
     }
     // Receipts DB summary: open read-only, group by status, group failures
     // by stage. Reported as info (the file may not exist yet on a fresh

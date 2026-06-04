@@ -1,7 +1,6 @@
 use crate::backoff::ExponentialBackoff;
 use crate::config::Config;
 use crate::intake::{self as intake_log, Kind as IntakeKind};
-use vault::receipts::FailureStage;
 use crate::notify::{Desktop, Telegram};
 use crate::pipeline;
 use crate::router::extract_url_from_text;
@@ -12,6 +11,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use tokio_stream::StreamExt;
+use vault::receipts::FailureStage;
 
 #[derive(Debug, Deserialize)]
 struct NtfyEvent {

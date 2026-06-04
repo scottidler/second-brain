@@ -2,7 +2,6 @@ use crate::assets;
 use crate::backoff::ExponentialBackoff;
 use crate::config::{Config, TelegramConfig};
 use crate::intake::{self as intake_log, Kind as IntakeKind};
-use vault::receipts::FailureStage;
 use crate::notify;
 use crate::pipeline;
 use crate::router::extract_url_from_text;
@@ -14,6 +13,7 @@ use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::requests::Requester;
 use teloxide::types::{AllowedUpdate, FileId};
+use vault::receipts::FailureStage;
 
 /// Download a file from Telegram by its file_id.
 async fn download_telegram_file(bot: &Bot, file_id: &FileId) -> Result<Vec<u8>, teloxide::RequestError> {

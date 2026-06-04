@@ -7,10 +7,10 @@ use crate::AppState;
 use crate::assets;
 use crate::health::HealthResponse;
 use crate::intake::{self as intake_log, Kind as IntakeKind};
-use vault::receipts::FailureStage;
 use crate::pipeline;
 use crate::trace;
 use crate::types::{ContentKind, IngestMethod, IngestRequest, IngestResult, IngestStatus};
+use vault::receipts::FailureStage;
 
 #[derive(Debug, Deserialize)]
 pub struct NoteRequest {
@@ -24,20 +24,20 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 
 #[derive(serde::Serialize, Default)]
 pub struct AuditHealth {
-    pub orphan_count: usize,
-    pub oldest_orphan_secs: Option<i64>,
-    pub intake_rows: usize,
-    pub ledger_rows: usize,
-    pub dlq_rows: usize,
-    pub dlq_pending: usize,
+    pub received: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub crashed: usize,
+    pub failed_24h: usize,
+    pub crashed_24h: usize,
 }
 
-/// Live invariant status: how many intake rows currently have no ledger /
-/// DLQ resolution, and how old the oldest such row is. Operators can poll
-/// this to detect a silent-drop regression without reading the markdown
-/// tables.
-pub async fn health_audit(State(state): State<AppState>) -> Json<AuditHealth> {
-    let stats = crate::triage::audit_health_stats(&state.config).unwrap_or_default();
+/// Live receipts health: lifetime status counts plus the last-24h failed /
+/// crashed counts. Operators poll this to detect a silent-drop regression
+/// (`crashed_24h > 0` = the watchdog had to declare an input lost) without
+/// shelling into `sb borg log`.
+pub async fn health_audit(State(_state): State<AppState>) -> Json<AuditHealth> {
+    let stats = crate::triage::audit_health_stats().unwrap_or_default();
     Json(stats)
 }
 

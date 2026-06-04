@@ -177,14 +177,6 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
     if let Err(e) = dashboard::ensure_dashboard_exists(&dashboard_p) {
         log::warn!("Failed to ensure Borg Dashboard exists: {e:#}");
     }
-    let intake_p = intake::intake_path(&config)?;
-    if let Err(e) = vault::intake::ensure_intake_exists(&intake_p) {
-        log::warn!("Failed to ensure Borg Intake exists: {e:#}");
-    }
-    let dlq_p = intake::dlq_path(&config)?;
-    if let Err(e) = vault::dlq::ensure_dlq_exists(&dlq_p) {
-        log::warn!("Failed to ensure Borg DLQ exists: {e:#}");
-    }
 
     let config = Arc::new(config);
     let mut tasks = tokio::task::JoinSet::new();

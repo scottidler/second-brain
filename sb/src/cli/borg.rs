@@ -67,15 +67,7 @@ pub enum Command {
         /// kinds (space-separated), fixes only those classes. Case-insensitive.
         #[arg(long, num_args = 0.., value_name = "KINDS", ignore_case = true)]
         fix: Option<Vec<borg::audit::FindingKind>>,
-        #[arg(long)]
-        invariant: bool,
-        #[arg(long, default_value_t = 1800)]
-        bound_secs: u64,
     },
-    /// Inspect the intake log
-    Intake(IntakeCliArgs),
-    /// Inspect and replay the dead letter queue
-    Dlq(DlqCliArgs),
     /// Query the receipts log (durable record of every input borg ever saw)
     Log(LogCliArgs),
     /// Reingest existing entries through the current pipeline
@@ -183,26 +175,6 @@ pub enum DashboardAction {
 }
 
 #[derive(Args)]
-pub struct IntakeCliArgs {
-    #[command(subcommand)]
-    pub action: IntakeAction,
-}
-#[derive(Subcommand)]
-pub enum IntakeAction {
-    /// List recent intake rows
-    List {
-        #[arg(long)]
-        method: Option<String>,
-        #[arg(long)]
-        since: Option<String>,
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
-    },
-    /// Show the intake row + raw-input sidecar for a single trace
-    Show { trace_id: String },
-}
-
-#[derive(Args)]
 pub struct LogCliArgs {
     /// Filter by receipt status (received | succeeded | failed).
     #[arg(long)]
@@ -227,38 +199,6 @@ pub struct LogCliArgs {
     /// Show a single trace's full detail instead of the list view.
     #[arg(long)]
     pub trace: Option<String>,
-}
-
-#[derive(Args)]
-pub struct DlqCliArgs {
-    #[command(subcommand)]
-    pub action: DlqAction,
-}
-#[derive(Subcommand)]
-pub enum DlqAction {
-    /// List DLQ rows
-    List {
-        #[arg(long)]
-        method: Option<String>,
-        #[arg(long)]
-        stage: Option<String>,
-        #[arg(long)]
-        status: Option<String>,
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
-    },
-    /// Show one DLQ row + its intake row + the raw-input sidecar
-    Show { trace_id: String },
-    /// Mark a DLQ row as resolved
-    Archive {
-        trace_id: Option<String>,
-        #[arg(long, default_value = "resolved")]
-        status: String,
-        #[arg(long)]
-        resolved: bool,
-    },
-    /// Replay a DLQ entry
-    Replay { trace_id: String },
 }
 
 #[derive(Args)]
@@ -396,68 +336,15 @@ impl BorgCli {
                 print_migrate_report(&report);
                 Ok(())
             }
-            Some(Command::Audit {
-                fix,
-                invariant,
-                bound_secs,
-            }) => {
-                if invariant {
-                    let report = borg::triage::orphan_audit(&config, bound_secs).await?;
-                    print_orphan_audit_report(&report);
-                    Ok(())
-                } else {
-                    let mut report = borg::audit::scan(&config)?;
-                    print_audit_summary(&report, fix.is_some());
-                    if let Some(kinds) = fix
-                        && !report.no_ledger
-                    {
-                        report.fixed_count = borg::audit::apply_fixes(&report, &kinds, |event| {
-                            print_audit_event(event);
-                        });
-                    }
-                    Ok(())
-                }
-            }
-            Some(Command::Intake(args)) => {
-                match args.action {
-                    IntakeAction::List { method, since, limit } => {
-                        let rows = borg::triage::intake_rows(&config, method, since, limit).await?;
-                        print_intake_rows(&rows);
-                    }
-                    IntakeAction::Show { trace_id } => {
-                        let detail = borg::triage::intake_row(&config, &trace_id).await?;
-                        print_intake_row_detail(&detail);
-                    }
-                }
-                Ok(())
-            }
-            Some(Command::Dlq(args)) => {
-                match args.action {
-                    DlqAction::List {
-                        method,
-                        stage,
-                        status,
-                        limit,
-                    } => {
-                        let rows = borg::triage::dlq_rows(&config, method, stage, status, limit).await?;
-                        print_dlq_rows(&rows);
-                    }
-                    DlqAction::Show { trace_id } => {
-                        let detail = borg::triage::dlq_row(&config, &trace_id).await?;
-                        print_dlq_row_detail(&detail);
-                    }
-                    DlqAction::Archive {
-                        trace_id,
-                        status,
-                        resolved,
-                    } => {
-                        let outcome = borg::triage::dlq_archive(&config, trace_id, &status, resolved).await?;
-                        print_dlq_archive_outcome(&outcome);
-                    }
-                    DlqAction::Replay { trace_id } => {
-                        let outcome = borg::triage::dlq_replay(&config, &trace_id).await?;
-                        print_dlq_replay_outcome(&outcome);
-                    }
+            Some(Command::Audit { fix }) => {
+                let mut report = borg::audit::scan(&config)?;
+                print_audit_summary(&report, fix.is_some());
+                if let Some(kinds) = fix
+                    && !report.no_ledger
+                {
+                    report.fixed_count = borg::audit::apply_fixes(&report, &kinds, |event| {
+                        print_audit_event(event);
+                    });
                 }
                 Ok(())
             }
@@ -665,135 +552,6 @@ fn print_daemon_outcome(outcome: &borg::DaemonOutcome) {
             println!("No daemon action specified. See: sb borg daemon --help");
         }
     }
-}
-
-fn print_orphan_audit_report(r: &borg::triage::OrphanAuditReport) {
-    println!("audit --invariant complete:");
-    println!("  intake rows scanned: {}", r.intake_scanned);
-    println!("  ledger resolutions: {}", r.ledger_resolutions);
-    println!("  dlq resolutions: {}", r.dlq_resolutions);
-    println!("  orphans (>{}s no resolution): {}", r.bound_secs, r.orphans_found);
-    println!("  intake rows still within deadline: {}", r.intake_recent);
-    println!("  ledger rows with no intake row: {}", r.asymmetric_ledger);
-    println!("  dlq rows with no intake row: {}", r.asymmetric_dlq);
-    println!("  wrote: {}", r.orphans_path.display());
-}
-
-fn print_intake_rows(rows: &[vault::intake::ParsedIntakeRow]) {
-    if rows.is_empty() {
-        println!("(no intake rows match)");
-        return;
-    }
-    println!("Date        Time  Method    Origin        Kind      Trace      Preview");
-    for r in rows {
-        let preview = if r.preview.len() > 60 {
-            format!("{}...", &r.preview[..60])
-        } else {
-            r.preview.clone()
-        };
-        println!(
-            "{:11} {:5} {:9} {:13} {:9} {:9} {}",
-            r.date, r.time, r.method, r.origin_ctx, r.kind, r.trace_id, preview
-        );
-    }
-}
-
-fn print_intake_row_detail(d: &borg::triage::IntakeRowDetail) {
-    use borg::triage::{IntakeSidecar, SidecarContent};
-    let r = &d.row;
-    println!("Intake row:");
-    println!("  date: {}", r.date);
-    println!("  time: {}", r.time);
-    println!("  method: {}", r.method);
-    println!("  origin: {}", r.origin_ctx);
-    println!("  kind: {}", r.kind);
-    println!("  preview: {}", r.preview);
-    println!("  trace: {}", r.trace_id);
-    match &d.sidecar {
-        Ok(IntakeSidecar {
-            path,
-            size_bytes,
-            content,
-        }) => {
-            println!();
-            println!("--- sidecar {} ({} bytes) ---", path.display(), size_bytes);
-            match content {
-                SidecarContent::Utf8(s) => println!("{s}"),
-                SidecarContent::Binary => println!("[binary - {size_bytes} bytes]"),
-            }
-        }
-        Err(expected) => {
-            println!();
-            println!("(no sidecar at {})", expected.display());
-        }
-    }
-}
-
-fn print_dlq_rows(rows: &[vault::dlq::ParsedDlqRow]) {
-    if rows.is_empty() {
-        println!("(no dlq rows match)");
-        return;
-    }
-    println!("Date        Time  Method    Stage              Status     Trace      Reason");
-    for r in rows {
-        let reason = if r.reason.len() > 60 {
-            format!("{}...", &r.reason[..60])
-        } else {
-            r.reason.clone()
-        };
-        println!(
-            "{:11} {:5} {:9} {:18} {:10} {:9} {}",
-            r.date, r.time, r.method, r.stage, r.status, r.trace_id, reason
-        );
-    }
-}
-
-fn print_dlq_row_detail(d: &borg::triage::DlqRowDetail) {
-    let r = &d.row;
-    println!("DLQ row:");
-    println!("  date: {} {}", r.date, r.time);
-    println!("  method: {}", r.method);
-    println!("  stage: {}", r.stage);
-    println!("  status: {}", r.status);
-    println!("  retries: {}", r.retries);
-    println!("  trace: {}", r.trace_id);
-    if let Some(replay) = &r.replay_of {
-        println!("  replay-of: {replay}");
-    }
-    println!("  reason: {}", r.reason);
-    println!("  preview: {}", r.preview);
-
-    if let Some(intake) = &d.intake {
-        println!();
-        print_intake_row_detail(intake);
-    }
-    if let Some(source) = &d.ledger_has_completed_for {
-        println!();
-        println!("(ledger has a completed row for this source: {source})");
-    }
-}
-
-fn print_dlq_archive_outcome(o: &borg::triage::DlqArchiveOutcome) {
-    use borg::triage::DlqArchiveOutcome;
-    match o {
-        DlqArchiveOutcome::ResolvedBatch { moved, archive_path } => {
-            println!(
-                "archive --resolved: moved {moved} resolved/abandoned row(s) to {}",
-                archive_path.display()
-            );
-        }
-        DlqArchiveOutcome::StatusUpdated { trace_id, new_status } => {
-            println!("updated dlq trace={trace_id} status={new_status}");
-        }
-    }
-}
-
-fn print_dlq_replay_outcome(o: &borg::triage::DlqReplayOutcome) {
-    println!(
-        "replay: trace={} replay_of={} result={:?}",
-        o.new_trace, o.original_trace, o.result_status
-    );
-    let _ = o.method;
 }
 
 fn print_receipt_rows(rows: &[borg::receipts::Receipt]) {

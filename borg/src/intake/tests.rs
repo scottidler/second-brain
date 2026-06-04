@@ -11,8 +11,16 @@ fn capture_writes_sidecar_and_received_row() {
     let root = tmp.path();
     let url = "https://example.com/article";
 
-    record_received_with_sidecar_to(&conn, root, IngestMethod::Http, IntakeKind::Url, url, url.as_bytes(), "tr-cap")
-        .unwrap();
+    record_received_with_sidecar_to(
+        &conn,
+        root,
+        IngestMethod::Http,
+        IntakeKind::Url,
+        url,
+        url.as_bytes(),
+        "tr-cap",
+    )
+    .unwrap();
 
     // Sidecar holds the verbatim input.
     let sidecar = std::fs::read(intake::raw_input_path(root, "tr-cap")).unwrap();
@@ -54,11 +62,23 @@ fn capture_propagates_sidecar_write_failure() {
 fn failure_marks_existing_row_without_clobbering() {
     let conn = receipts::open_memory().unwrap();
     // Prior capture: a real photo with its real kind + descriptor.
-    receipts::record_received(&conn, "tr-x", IngestMethod::Telegram.into(), ReceiptKind::Binary, "[photo: a.jpg]")
-        .unwrap();
+    receipts::record_received(
+        &conn,
+        "tr-x",
+        IngestMethod::Telegram.into(),
+        ReceiptKind::Binary,
+        "[photo: a.jpg]",
+    )
+    .unwrap();
 
-    record_failure_at_door_to(&conn, IngestMethod::Telegram, "tr-x", FailureStage::IntakeRejected, "chat not allowed")
-        .unwrap();
+    record_failure_at_door_to(
+        &conn,
+        IngestMethod::Telegram,
+        "tr-x",
+        FailureStage::IntakeRejected,
+        "chat not allowed",
+    )
+    .unwrap();
 
     let r = receipts::get(&conn, "tr-x").unwrap().expect("row");
     assert_eq!(r.status, "failed");
@@ -74,12 +94,23 @@ fn failure_marks_existing_row_without_clobbering() {
 #[test]
 fn failure_with_no_prior_row_still_lands_failed_row() {
     let conn = receipts::open_memory().unwrap();
-    assert!(receipts::get(&conn, "tr-cold").unwrap().is_none(), "precondition: no row yet");
+    assert!(
+        receipts::get(&conn, "tr-cold").unwrap().is_none(),
+        "precondition: no row yet"
+    );
 
-    record_failure_at_door_to(&conn, IngestMethod::Signal, "tr-cold", FailureStage::IntakeRejected, "cold reject")
-        .unwrap();
+    record_failure_at_door_to(
+        &conn,
+        IngestMethod::Signal,
+        "tr-cold",
+        FailureStage::IntakeRejected,
+        "cold reject",
+    )
+    .unwrap();
 
-    let r = receipts::get(&conn, "tr-cold").unwrap().expect("upsert created the row");
+    let r = receipts::get(&conn, "tr-cold")
+        .unwrap()
+        .expect("upsert created the row");
     assert_eq!(r.status, "failed");
     assert_eq!(r.failure_stage.as_deref(), Some("intake-rejected"));
     assert_eq!(r.raw_input, "cold reject", "cold-path raw_input is the reason");
@@ -90,7 +121,14 @@ fn failure_with_no_prior_row_still_lands_failed_row() {
 #[test]
 fn failure_preserves_fetch_failed_stage() {
     let conn = receipts::open_memory().unwrap();
-    receipts::record_received(&conn, "tr-sig", IngestMethod::Signal.into(), ReceiptKind::Binary, "[fetch]").unwrap();
+    receipts::record_received(
+        &conn,
+        "tr-sig",
+        IngestMethod::Signal.into(),
+        ReceiptKind::Binary,
+        "[fetch]",
+    )
+    .unwrap();
 
     record_failure_at_door_to(
         &conn,
@@ -102,5 +140,9 @@ fn failure_preserves_fetch_failed_stage() {
     .unwrap();
 
     let r = receipts::get(&conn, "tr-sig").unwrap().expect("row");
-    assert_eq!(r.failure_stage.as_deref(), Some("fetch-failed"), "FetchFailed must survive");
+    assert_eq!(
+        r.failure_stage.as_deref(),
+        Some("fetch-failed"),
+        "FetchFailed must survive"
+    );
 }

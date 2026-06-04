@@ -592,5 +592,40 @@ pub fn count_failed_by_stage(conn: &Connection) -> Result<Vec<(FailureStage, i64
     Ok(out)
 }
 
+/// Count receipts that reached a `failed` terminal state at or after
+/// `since_iso` (compared against `terminal_at`, not `received_at` - a row may
+/// have been received long before it failed). `since_iso` must be in
+/// [`TIMESTAMP_FMT`].
+pub fn count_failed_since(conn: &Connection, since_iso: &str) -> Result<i64> {
+    log::debug!("receipts::count_failed_since: since={since_iso}");
+    conn.query_row(
+        "SELECT COUNT(*) FROM receipts WHERE status='failed' AND terminal_at >= ?",
+        params![since_iso],
+        |row| row.get(0),
+    )
+    .context("count_failed_since")
+}
+
+/// Count receipts promoted to `crashed` at or after `since_iso` (the watchdog's
+/// silent-drop signal). Compared against `terminal_at`. `since_iso` must be in
+/// [`TIMESTAMP_FMT`].
+pub fn count_crashed_since(conn: &Connection, since_iso: &str) -> Result<i64> {
+    log::debug!("receipts::count_crashed_since: since={since_iso}");
+    conn.query_row(
+        "SELECT COUNT(*) FROM receipts WHERE status='failed' AND failure_stage='crashed' AND terminal_at >= ?",
+        params![since_iso],
+        |row| row.get(0),
+    )
+    .context("count_crashed_since")
+}
+
+/// Format `now - hours` as a [`TIMESTAMP_FMT`] lower bound for the
+/// `*_since` counters.
+pub fn hours_ago_iso(hours: i64) -> String {
+    (Utc::now() - chrono::Duration::hours(hours))
+        .format(TIMESTAMP_FMT)
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests;

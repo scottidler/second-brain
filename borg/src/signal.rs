@@ -14,12 +14,12 @@ use crate::assets;
 use crate::backoff::ExponentialBackoff;
 use crate::config::{Config, SignalConfig};
 use crate::intake::{self as intake_log, Kind as IntakeKind};
-use vault::receipts::FailureStage;
 use crate::notify;
 use crate::pipeline;
 use crate::router::extract_url_from_text;
 use crate::trace;
 use crate::types::{ContentKind, IngestMethod};
+use vault::receipts::FailureStage;
 
 use eyre::Result;
 use signal_rs::{AttachmentPointer, Client, Envelope, OpenError, ReceiveError, Recipient, SyncMessage};
