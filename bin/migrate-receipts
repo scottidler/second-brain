@@ -111,7 +111,13 @@ run_sql() {
 # Skips header / separator / non-table lines.
 table_to_tsv() {
     local path="$1"
+    # NOTE: assigning to $i below forces awk to rebuild $0 using OFS; we set
+    # OFS='|' so the emitted line stays pipe-delimited for the `IFS='|' read`
+    # consumers. Without this, $0 is rebuilt space-delimited and every row
+    # collapses into the leading throwaway field (trace ends up empty -> all
+    # rows silently skipped).
     awk -F'|' '
+        BEGIN { OFS = "|" }
         /^\| Date / { next }
         /^\|-+/    { next }
         /^\|/      {
@@ -130,12 +136,9 @@ echo "$(prefix)Step 1: intake.md -> receipts"
 INTAKE_INSERTED=0
 if [[ -f "$INTAKE_MD" ]]; then
     while IFS='|' read -r _ date time method origin kind preview trace _rest; do
-        date=$(echo "$date" | xargs)
-        time=$(echo "$time" | xargs)
-        method=$(echo "$method" | xargs)
-        kind=$(echo "$kind" | xargs)
-        preview=$(echo "$preview" | xargs)
-        trace=$(echo "$trace" | xargs)
+        # Fields are already whitespace-trimmed by table_to_tsv's awk gsub.
+        # Do NOT pipe through xargs here: a field containing a `"` (e.g. a URL
+        # or title) makes xargs abort with "unmatched double quote".
         [[ -z "$trace" || "$trace" == "-" ]] && continue
         # Map IntakeKind -> ReceiptKind { url, text, binary }.
         case "$kind" in
@@ -160,11 +163,7 @@ LEDGER_SUCC=0
 LEDGER_FAIL=0
 if [[ -f "$LEDGER_MD" ]]; then
     while IFS='|' read -r _ date time method status note source domain trace _rest; do
-        date=$(echo "$date" | xargs)
-        time=$(echo "$time" | xargs)
-        status=$(echo "$status" | xargs)
-        note=$(echo "$note" | xargs)
-        trace=$(echo "$trace" | xargs)
+        # Fields pre-trimmed by table_to_tsv; no xargs (see Step 1 note).
         [[ -z "$trace" || "$trace" == "-" ]] && continue
         # Derive note_path from the [[slug]] wikilink target.
         note_path=""
@@ -198,11 +197,7 @@ DLQ_ONLY=0
 for src in "$DLQ_MD" "$DLQ_ARCHIVE_MD"; do
     [[ -f "$src" ]] || continue
     while IFS='|' read -r _ date time method stage reason _preview _retries _dlqstatus trace _replay _rest; do
-        date=$(echo "$date" | xargs)
-        time=$(echo "$time" | xargs)
-        stage=$(echo "$stage" | xargs)
-        reason=$(echo "$reason" | xargs)
-        trace=$(echo "$trace" | xargs)
+        # Fields pre-trimmed by table_to_tsv; no xargs (see Step 1 note).
         [[ -z "$trace" || "$trace" == "-" ]] && continue
         # Map DlqStage -> FailureStage.
         case "$stage" in
