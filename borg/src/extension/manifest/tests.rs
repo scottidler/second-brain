@@ -108,7 +108,6 @@ fn manifest_contains_required_top_level_keys() {
         "version",
         "icons",
         "action",
-        "background",
         "permissions",
         "host_permissions",
         "content_security_policy",
@@ -172,10 +171,22 @@ fn gecko_strict_min_version_is_140() {
 }
 
 #[test]
-fn capture_url_suggested_key_is_alt_shift_b() {
+fn execute_action_suggested_key_is_alt_shift_b() {
     let manifest = build_manifest("0.0.0-test", &Config::default());
     assert_eq!(
-        manifest["commands"]["capture-url"]["suggested_key"]["default"].as_str(),
+        manifest["commands"]["_execute_action"]["suggested_key"]["default"].as_str(),
         Some("Alt+Shift+B")
+    );
+}
+
+#[test]
+fn action_opens_popup_and_background_is_removed() {
+    let manifest = build_manifest("0.0.0-test", &Config::default());
+    // The toolbar action opens a fresh popup per click, so capture does not
+    // depend on a long-lived background context (which can die mid-session).
+    assert_eq!(manifest["action"]["default_popup"].as_str(), Some("popup.html"));
+    assert!(
+        manifest.get("background").is_none(),
+        "background context must be removed; its presence reintroduces the crashable capture path"
     );
 }

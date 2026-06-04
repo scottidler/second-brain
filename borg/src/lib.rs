@@ -812,7 +812,7 @@ pub async fn ingest(
     // POST itself fails (daemon not running), the daemon by definition
     // cannot deliver the failure notification. The CLI may be wired to a
     // desktop hotkey where stderr is not visible. This is the symmetric
-    // counterpart to the `catch (err)` branch in background.js.
+    // counterpart to the `fail()` / `catch (err)` path in popup.js.
     let response = client.post(&endpoint).json(&body).send().await.map_err(|e| {
         let msg = if e.is_connect() {
             format!("cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?")

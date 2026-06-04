@@ -48,7 +48,8 @@ pub fn stage(target_dir: &Path, version: &str, config: &Config) -> Result<StageR
     std::fs::create_dir_all(target_dir.join("icons")).context("create target icons dir")?;
 
     let static_files: &[&str] = &[
-        "background.js",
+        "popup.html",
+        "popup.js",
         "options.html",
         "options.js",
         "icons/locutus-16.png",

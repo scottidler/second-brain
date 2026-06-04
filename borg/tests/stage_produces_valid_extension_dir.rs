@@ -24,7 +24,8 @@ fn stage_materialises_manifest_schema_and_static_assets() {
 
     // Static assets copied from source tree verbatim.
     for asset in [
-        "background.js",
+        "popup.html",
+        "popup.js",
         "options.html",
         "options.js",
         "icons/locutus-16.png",

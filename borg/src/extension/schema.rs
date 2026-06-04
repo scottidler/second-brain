@@ -36,7 +36,7 @@ mod tests {
         let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(
             names.contains(&"url"),
-            "schema.required must include 'url' (the field background.js sends); got {names:?}"
+            "schema.required must include 'url' (the field popup.js sends); got {names:?}"
         );
     }
 }

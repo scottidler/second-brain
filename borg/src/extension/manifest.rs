@@ -63,23 +63,19 @@ pub fn build_manifest(version: &str, config: &Config) -> Value {
             "128": "icons/locutus-128.png"
         },
         "action": {
+            "default_popup": "popup.html",
             "default_icon": {
                 "16": "icons/locutus-16.png",
                 "48": "icons/locutus-48.png",
                 "128": "icons/locutus-128.png"
             }
         },
-        "background": {
-            "scripts": ["background.js"],
-            "service_worker": "background.js"
-        },
         "permissions": ["activeTab", "storage", "notifications"],
         "host_permissions": host_perms,
         "content_security_policy": { "extension_pages": csp },
         "options_ui": { "page": "options.html", "open_in_tab": false },
         "commands": {
-            "capture-url": {
-                "description": "Capture current tab URL",
+            "_execute_action": {
                 "suggested_key": { "default": "Alt+Shift+B" }
             }
         },
