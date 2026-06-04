@@ -23,6 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use eyre::{Context, Result, eyre};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -40,6 +41,12 @@ pub const POOL_SIZE: u32 = 8;
 pub const SCHEMA_VERSION: i64 = 1;
 
 const SCHEMA_SQL: &str = include_str!("receipts/schema.sql");
+
+/// The fixed-width UTC timestamp format used for every `received_at` /
+/// `terminal_at` value. Because the column is compared lexicographically in
+/// SQL (`received_at >= ?`), any value bound against it MUST be produced with
+/// this exact format or string ordering diverges from chronological ordering.
+const TIMESTAMP_FMT: &str = "%Y-%m-%dT%H:%M:%SZ";
 
 /// One row from the `receipts` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,7 +186,45 @@ fn run_migrations(conn: &Connection) -> Result<()> {
 }
 
 fn now_iso8601() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    Utc::now().format(TIMESTAMP_FMT).to_string()
+}
+
+/// Parse a `--since` value into an absolute UTC timestamp string in the same
+/// format the receipts table stores (`TIMESTAMP_FMT`), so it can be bound
+/// directly into the `received_at >= ?` comparison. Accepts three forms:
+///
+///   - relative duration measured back from `now` (`5m`, `2h`, `7d`, `1h30m`)
+///   - absolute RFC-3339 / ISO-8601 datetime (`2026-06-04T05:18:59Z`, or with
+///     an offset, normalized to UTC)
+///   - bare calendar date (`2026-06-04`, interpreted as `00:00:00Z`) - this is
+///     what `sb borg log --since "$(date -I ...)"` produces
+///
+/// Returns a loud error on anything it cannot parse. The old behavior bound
+/// the raw string verbatim, so a relative duration like `5m` was compared
+/// lexicographically against ISO timestamps (`"2026-..." >= "5m"` is always
+/// false) and silently excluded every row - masquerading as "no data".
+pub fn parse_since(input: &str, now: DateTime<Utc>) -> Result<String> {
+    let trimmed = input.trim();
+    log::debug!("receipts::parse_since: input={trimmed}");
+    if let Ok(dur) = humantime::parse_duration(trimmed) {
+        let chrono_dur =
+            chrono::Duration::from_std(dur).map_err(|e| eyre!("--since duration {trimmed:?} out of range: {e}"))?;
+        let cutoff = now
+            .checked_sub_signed(chrono_dur)
+            .ok_or_else(|| eyre!("--since duration {trimmed:?} overflows the representable range"))?;
+        return Ok(cutoff.format(TIMESTAMP_FMT).to_string());
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Ok(dt.with_timezone(&Utc).format(TIMESTAMP_FMT).to_string());
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        let midnight = date.and_hms_opt(0, 0, 0).expect("00:00:00 is a valid time");
+        return Ok(Utc.from_utc_datetime(&midnight).format(TIMESTAMP_FMT).to_string());
+    }
+    Err(eyre!(
+        "could not parse --since {trimmed:?}: expected a relative duration (e.g. 5m, 2h, 7d), \
+         an ISO-8601 datetime (e.g. 2026-06-04T05:18:59Z), or a date (e.g. 2026-06-04)"
+    ))
 }
 
 /// INSERT a `received` row at the door. Idempotent on `trace_id` (INSERT OR
@@ -294,9 +339,9 @@ pub fn mark_failed(conn: &Connection, trace_id: &str, stage: FailureStage, reaso
 /// crashed.
 pub fn promote_stale_to_crashed(conn: &Connection, deadline_secs: u64) -> Result<usize> {
     log::debug!("receipts::promote_stale_to_crashed: deadline_secs={deadline_secs}");
-    let now = chrono::Utc::now();
+    let now = Utc::now();
     let cutoff = now - chrono::Duration::seconds(deadline_secs as i64);
-    let cutoff_iso = cutoff.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let cutoff_iso = cutoff.format(TIMESTAMP_FMT).to_string();
     let reason = format!("no terminal event within {deadline_secs}s");
     let rows = conn
         .execute(
@@ -313,9 +358,9 @@ pub fn promote_stale_to_crashed(conn: &Connection, deadline_secs: u64) -> Result
 /// `received` with `received_at` older than the deadline. Returned in
 /// reverse-chronological order so the watchdog can sample / log.
 pub fn list_stale(conn: &Connection, deadline_secs: u64) -> Result<Vec<(String, String)>> {
-    let now = chrono::Utc::now();
+    let now = Utc::now();
     let cutoff = now - chrono::Duration::seconds(deadline_secs as i64);
-    let cutoff_iso = cutoff.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let cutoff_iso = cutoff.format(TIMESTAMP_FMT).to_string();
     let mut stmt = conn
         .prepare(
             "SELECT trace_id, received_at FROM receipts \

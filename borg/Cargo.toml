@@ -47,6 +47,7 @@ r2d2 = "0.8.10"
 r2d2_sqlite = "0.27.0"
 schemars = "1.2.1"
 signal-rs = { git = "https://github.com/scottidler/signal-rs", tag = "v0.2.1", version = "0.2.1" }
+humantime = "2.3.0"
 
 [dependencies.serenity]
 version = "0.12"

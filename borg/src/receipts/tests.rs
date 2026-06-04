@@ -334,6 +334,76 @@ fn query_limit_caps_results() {
 }
 
 #[test]
+fn query_filters_by_since_with_parsed_relative_duration() {
+    // The load-bearing property: parse_since output must be in the exact same
+    // fixed-width UTC format as stored received_at, so the SQL `>= ?`
+    // lexicographic comparison equals chronological comparison. This test
+    // fails if that format ever diverges (the original bug bound a raw "5m").
+    let conn = fresh();
+    record_received(&conn, "inside", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    record_received(&conn, "outside", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    conn.execute(
+        "UPDATE receipts SET received_at='2026-06-04T11:58:00Z' WHERE trace_id='inside'",
+        [],
+    )
+    .expect("backdate inside");
+    conn.execute(
+        "UPDATE receipts SET received_at='2026-06-04T11:00:00Z' WHERE trace_id='outside'",
+        [],
+    )
+    .expect("backdate outside");
+    let now = Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+    let since = parse_since("5m", now).expect("parse 5m");
+    let rows = query(
+        &conn,
+        &Filter {
+            since: Some(since),
+            ..Default::default()
+        },
+    )
+    .expect("query");
+    let ids: Vec<&str> = rows.iter().map(|r| r.trace_id.as_str()).collect();
+    assert_eq!(ids, vec!["inside"], "only the row inside the 5m window is returned");
+}
+
+#[test]
+fn parse_since_relative_duration_subtracts_from_now() {
+    let now = Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+    assert_eq!(parse_since("5m", now).expect("5m"), "2026-06-04T11:55:00Z");
+    assert_eq!(parse_since("2h", now).expect("2h"), "2026-06-04T10:00:00Z");
+    assert_eq!(parse_since("7d", now).expect("7d"), "2026-05-28T12:00:00Z");
+}
+
+#[test]
+fn parse_since_absolute_iso_is_normalized_to_utc() {
+    let now = Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+    // Already-UTC datetime passes through unchanged.
+    assert_eq!(
+        parse_since("2026-06-01T08:30:00Z", now).expect("iso"),
+        "2026-06-01T08:30:00Z"
+    );
+    // An offset datetime is converted to UTC.
+    assert_eq!(
+        parse_since("2026-06-01T08:30:00+02:00", now).expect("iso offset"),
+        "2026-06-01T06:30:00Z"
+    );
+}
+
+#[test]
+fn parse_since_bare_date_is_midnight_utc() {
+    let now = Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+    assert_eq!(parse_since("2026-06-02", now).expect("date"), "2026-06-02T00:00:00Z");
+}
+
+#[test]
+fn parse_since_rejects_garbage_loudly() {
+    let now = Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+    let err = parse_since("not-a-time", now).expect_err("garbage must error");
+    let msg = err.to_string();
+    assert!(msg.contains("could not parse --since"), "got: {msg}");
+}
+
+#[test]
 fn count_by_status_groups_correctly() {
     let conn = fresh();
     record_received(&conn, "r1", Method::Http, ReceiptKind::Url, "u").expect("ins");

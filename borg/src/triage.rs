@@ -525,11 +525,17 @@ pub fn receipts_log(filter: ReceiptLogFilter) -> Result<Vec<crate::receipts::Rec
         .map(|s| s.parse::<FailureStage>().map_err(|e| eyre::eyre!(e)))
         .transpose()
         .context("parse --stage")?;
+    let since = filter
+        .since
+        .as_deref()
+        .map(|s| receipts::parse_since(s, chrono::Utc::now()))
+        .transpose()
+        .context("parse --since")?;
     let receipts_filter = receipts::Filter {
         status,
         method,
         stage,
-        since: filter.since,
+        since,
         source_like: filter.source,
         limit: Some(filter.limit),
     };

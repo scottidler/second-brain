@@ -213,7 +213,9 @@ pub struct LogCliArgs {
     /// Filter failed rows by failure_stage.
     #[arg(long)]
     pub stage: Option<String>,
-    /// ISO-8601 lower bound on received_at (inclusive).
+    /// Lower bound on received_at (inclusive). Accepts a relative duration
+    /// (5m, 2h, 7d), an ISO-8601 datetime (2026-06-04T05:18:59Z), or a date
+    /// (2026-06-04).
     #[arg(long)]
     pub since: Option<String>,
     /// SQL LIKE pattern matched against raw_input (e.g. `%youtube.com%`).
