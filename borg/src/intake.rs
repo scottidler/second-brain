@@ -15,10 +15,11 @@ use crate::config::Config;
 use crate::receipts;
 use crate::types::IngestMethod;
 use eyre::{Context, Result};
-use std::path::PathBuf;
+use rusqlite::Connection;
+use std::path::{Path, PathBuf};
 use vault::dlq::{self, DlqEntry, DlqStage, DlqStatus};
 use vault::intake::{self, IntakeEntry, IntakeKind};
-use vault::receipts::{ReceiptKind, failure_stage_from_dlq};
+use vault::receipts::{FailureStage, ReceiptKind, failure_stage_from_dlq};
 
 /// Map the intake-side kind (rich classification, includes media subtypes) to
 /// the receipts-side kind (flat `url`/`text`/`binary`).
@@ -181,6 +182,95 @@ pub fn record_intake_with_sidecar(
     Ok(())
 }
 
+/// Capture an input at the door: write the raw-input sidecar AND the
+/// `received` receipts row. BOTH writes propagate - on any failure the caller
+/// (the door) surfaces `Failed` and does not dispatch. This is the
+/// immediate-capture invariant. The sidecar payload is unchanged from the
+/// legacy path: verbatim text/URL, or a short descriptor for large binaries
+/// (the remote doors do not hold the raw bytes at this checkpoint).
+///
+/// Replaces `record_intake` / `record_intake_with_sidecar` (markdown +
+/// sidecar + best-effort receipts) once the call sites are switched in Phase 2.
+pub fn record_received_with_sidecar(
+    config: &Config,
+    method: IngestMethod,
+    kind: IntakeKind,
+    preview: &str,
+    sidecar_bytes: &[u8],
+    trace_id: &str,
+) -> Result<()> {
+    log::debug!(
+        "intake::record_received_with_sidecar: trace={trace_id} method={method} kind={kind} sidecar_bytes={}",
+        sidecar_bytes.len()
+    );
+    let conn = receipts::open_default().context("open receipts DB for capture")?;
+    let root = vault_root(config)?;
+    record_received_with_sidecar_to(&conn, &root, method, kind, preview, sidecar_bytes, trace_id)
+}
+
+/// Conn/root-injectable core of [`record_received_with_sidecar`]. Sidecar
+/// first (raw-input record lands on disk), then the receipts row. Both
+/// propagate.
+fn record_received_with_sidecar_to(
+    conn: &Connection,
+    vault_root: &Path,
+    method: IngestMethod,
+    kind: IntakeKind,
+    preview: &str,
+    sidecar_bytes: &[u8],
+    trace_id: &str,
+) -> Result<()> {
+    intake::write_raw_input(vault_root, trace_id, sidecar_bytes).context("Failed to write intake sidecar")?;
+    receipts::record_received(conn, trace_id, method.into(), receipt_kind(kind), preview)
+        .with_context(|| format!("Failed to record receipts row trace={trace_id}"))?;
+    log::info!(
+        "intake: captured trace={trace_id} method={method} kind={kind} preview={}",
+        preview_text(preview)
+    );
+    Ok(())
+}
+
+/// Record a terminal failure at the door (rejection or fetch-fail), replacing
+/// `record_dlq`. Carries the per-site `FailureStage` so Signal's `FetchFailed`
+/// is not collapsed to `IntakeRejected`. Best-effort: the input's durability
+/// is already guaranteed by the preceding [`record_received_with_sidecar`]; a
+/// failed `mark_failed` leaves the row `received` for the watchdog to
+/// crash-promote, so we log and move on.
+pub fn record_failure_at_door(method: IngestMethod, trace_id: &str, stage: FailureStage, reason: &str) {
+    log::debug!("intake::record_failure_at_door: trace={trace_id} method={method} stage={stage} reason={reason}");
+    let conn = match receipts::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("receipts: failed to open DB for failure trace={trace_id}: {e:#}");
+            return;
+        }
+    };
+    if let Err(e) = record_failure_at_door_to(&conn, method, trace_id, stage, reason) {
+        log::error!("receipts: failed to record failure trace={trace_id} stage={stage}: {e:#}");
+    }
+}
+
+/// Conn-injectable core of [`record_failure_at_door`]. UPSERT (gap-proof):
+/// INSERT-OR-IGNORE a `received` row (a no-op preserving the real captured
+/// data when the preceding capture already ran; a cold-path insert otherwise),
+/// then `mark_failed` with the given stage. A rejection therefore lands a
+/// `failed` row regardless of whether a prior capture ran in this control flow.
+fn record_failure_at_door_to(
+    conn: &Connection,
+    method: IngestMethod,
+    trace_id: &str,
+    stage: FailureStage,
+    reason: &str,
+) -> Result<()> {
+    // Cold-path values (kind=Text, raw_input=reason) apply only if no row
+    // exists yet; INSERT OR IGNORE never clobbers a prior capture's data.
+    receipts::record_received(conn, trace_id, method.into(), ReceiptKind::Text, reason)
+        .with_context(|| format!("upsert received row for failure trace={trace_id}"))?;
+    receipts::mark_failed(conn, trace_id, stage, reason)
+        .with_context(|| format!("mark_failed trace={trace_id} stage={stage}"))?;
+    Ok(())
+}
+
 /// Append a DLQ row. Best-effort: errors are logged but do NOT propagate -
 /// the caller (intake path or pipeline) already has its own error to
 /// surface, and we don't want a DLQ write failure to mask the real failure.
@@ -241,3 +331,6 @@ pub fn record_dlq(
 pub use vault::dlq::DlqStage as Stage;
 pub use vault::dlq::DlqStatus as Status;
 pub use vault::intake::IntakeKind as Kind;
+
+#[cfg(test)]
+mod tests;

@@ -2,7 +2,13 @@
 
 use super::*;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tempfile::TempDir;
+
+/// `set_current_dir` mutates process-global state; serialize the CWD-mutating
+/// tests so a concurrent test's CWD cannot bleed into `resolve_vault_root`'s
+/// marker walk (which would make the marker-less test find a marker and fail).
+static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn cli_override_wins_when_both_set() {
@@ -26,6 +32,7 @@ fn config_value_expands_tilde() {
 
 #[test]
 fn cwd_with_obsidian_marker_wins_when_both_none() {
+    let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join(".obsidian")).unwrap();
     // Canonicalize the tmp path because std::env::current_dir() returns the canonical form
@@ -43,6 +50,7 @@ fn cwd_with_obsidian_marker_wins_when_both_none() {
 
 #[test]
 fn cwd_without_marker_errors() {
+    let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = TempDir::new().unwrap();
 
     let prev = std::env::current_dir().unwrap();

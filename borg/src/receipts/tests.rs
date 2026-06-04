@@ -404,6 +404,33 @@ fn parse_since_rejects_garbage_loudly() {
 }
 
 #[test]
+fn watchdog_crash_promotion_is_queryable_by_stage_crashed() {
+    // The receipts-only replacement for borg-orphans.md: a stale `received`
+    // row is promoted to failed/crashed, and `sb borg log --stage crashed`
+    // (a query with stage=Crashed) returns it.
+    let conn = fresh();
+    record_received(&conn, "stale", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    conn.execute(
+        "UPDATE receipts SET received_at='2024-01-01T00:00:00Z' WHERE trace_id='stale'",
+        [],
+    )
+    .expect("backdate");
+    let promoted = promote_stale_to_crashed(&conn, 60).expect("promote");
+    assert_eq!(promoted, 1);
+    let crashed = query(
+        &conn,
+        &Filter {
+            stage: Some(FailureStage::Crashed),
+            ..Default::default()
+        },
+    )
+    .expect("query --stage crashed");
+    assert_eq!(crashed.len(), 1);
+    assert_eq!(crashed[0].trace_id, "stale");
+    assert_eq!(crashed[0].failure_stage.as_deref(), Some("crashed"));
+}
+
+#[test]
 fn count_by_status_groups_correctly() {
     let conn = fresh();
     record_received(&conn, "r1", Method::Http, ReceiptKind::Url, "u").expect("ins");
