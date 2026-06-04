@@ -160,7 +160,11 @@ impl From<IntelArgs> for opts::IntelOpts {
         } else {
             cortex::intel::IntelMode::Daily
         };
-        Self { mode, output: a.output, as_of: a.date }
+        Self {
+            mode,
+            output: a.output,
+            as_of: a.date,
+        }
     }
 }
 

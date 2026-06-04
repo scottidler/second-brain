@@ -409,10 +409,7 @@ fn generate_weekly_review(
             .iter()
             .map(|n| {
                 let title = n.frontmatter.title.as_deref().unwrap_or("Untitled");
-                format!(
-                    "<note title=\"{title}\">\n{}\n</note>",
-                    strip_markdown_headers(&n.body)
-                )
+                format!("<note title=\"{title}\">\n{}\n</note>", strip_markdown_headers(&n.body))
             })
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
@@ -618,7 +615,10 @@ mod tests {
     fn test_strip_markdown_headers() {
         let body = "## Summary\nSome text.\n### Claims\n- a claim\n#notaheader stays\nplain line";
         let out = strip_markdown_headers(body);
-        assert_eq!(out, "Summary\nSome text.\nClaims\n- a claim\n#notaheader stays\nplain line");
+        assert_eq!(
+            out,
+            "Summary\nSome text.\nClaims\n- a claim\n#notaheader stays\nplain line"
+        );
         assert!(!out.contains("## "));
         assert!(!out.contains("### "));
     }
