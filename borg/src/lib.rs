@@ -168,7 +168,7 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
 
     // Ensure vault system files exist on startup. vault_root must resolve here
     // - the daemon cannot start without one.
-    let ledger_p = ledger::ledger_path(&config)?;
+    let ledger_p = ledger::ledger_path()?;
     if let Err(e) = ledger::ensure_ledger_exists(&ledger_p) {
         log::warn!("Failed to ensure Borg Ledger exists: {e:#}");
     }
@@ -651,7 +651,7 @@ pub async fn reingest(
         eyre::bail!("Specify --all, --source <URL>, --type <TYPE>, or --domain <DOMAIN> to select entries");
     }
 
-    let ledger_file = ledger::ledger_path(&config)?;
+    let ledger_file = ledger::ledger_path()?;
 
     let filter = EntryFilter {
         source: source.clone(),

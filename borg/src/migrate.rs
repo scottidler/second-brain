@@ -196,7 +196,7 @@ pub async fn run(config: &Config, apply: bool) -> Result<MigrateReport> {
     // Seed Borg Ledger
     let mut seeded_ledger = 0usize;
     if migration.seed_borg_log && apply && !ledger_entries.is_empty() {
-        let log_path = ledger::ledger_path(config)?;
+        let log_path = ledger::ledger_path()?;
         for entry in &ledger_entries {
             if ledger::check_duplicate(&log_path, &entry.source)?.is_none() {
                 ledger::append_entry(&log_path, entry)?;

@@ -1,11 +1,4 @@
+//! Borg's ledger surface is the vault crate's `ledger` module verbatim. The
+//! ledger now lives in the borg data dir (see `vault::ledger::ledger_path`),
+//! so there is no borg-specific path wrapper - call `ledger_path()` directly.
 pub use vault::ledger::*;
-
-use crate::config::Config;
-use eyre::Result;
-use std::path::PathBuf;
-
-/// Resolve the Borg Ledger path from borg config.
-pub fn ledger_path(config: &Config) -> Result<PathBuf> {
-    let root = config.vault_root()?;
-    Ok(root.join("system").join("views").join("borg-ledger.md"))
-}

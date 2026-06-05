@@ -215,7 +215,7 @@ pub fn run(config: &Config, fix: Option<&[FindingKind]>) -> Result<AuditReport> 
 /// `fixed_count = 0`; no disk writes occur. Run `apply_fixes` afterward
 /// (with the same report) to perform the --fix work.
 pub fn scan(config: &Config) -> Result<AuditReport> {
-    let ledger_path = ledger::ledger_path(config)?;
+    let ledger_path = ledger::ledger_path()?;
     let vault_root = config.vault_root()?;
 
     if !ledger_path.exists() {

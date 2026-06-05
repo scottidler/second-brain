@@ -47,9 +47,12 @@ See also: [[borg-dashboard]]
 const LEDGER_HEADER: &str = "| Date | Time | Method | Status | Note | Source | Domain | Trace |";
 const LEDGER_SEPARATOR: &str = "|------|------|--------|--------|------|--------|--------|-------|";
 
-/// Resolve the Borg Ledger path from a vault root.
-pub fn ledger_path(vault_root: &Path) -> PathBuf {
-    vault_root.join("system").join("views").join("borg-ledger.md")
+/// Resolve the Borg Ledger path. The ledger is a machine-maintained dedup
+/// datastore (not a human note), so it lives alongside `receipts.db` in the
+/// borg data dir - NOT inside the vault, where Obsidian would try (and hang)
+/// rendering its thousands of rows. The human-facing view is `borg-ledger.base`.
+pub fn ledger_path() -> Result<PathBuf> {
+    Ok(crate::receipts::receipts_dir()?.join("borg-ledger.md"))
 }
 
 /// Verify the ledger header matches the canonical column layout. If the header

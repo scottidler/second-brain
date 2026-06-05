@@ -422,7 +422,7 @@ async fn process_url_inner(
     // of the pipeline runs), capture its path here and remove only after
     // the atomic write of the new note succeeds.
     let mut old_path_to_delete: Option<PathBuf> = None;
-    let ledger_file = ledger::ledger_path(config)?;
+    let ledger_file = ledger::ledger_path()?;
 
     // Dedup guard: reject concurrent/duplicate ingestions (skip if --force).
     // Holding `inflight_guard` for the rest of this function keeps the URL
@@ -1345,7 +1345,7 @@ async fn process_image_inner(
     let _ = std::fs::remove_file(&temp_path);
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config)?;
+    let ledger_file = ledger::ledger_path()?;
     let source_display = format!("[image: {filename}]");
     ledger::append_entry(
         &ledger_file,
@@ -1580,7 +1580,7 @@ async fn process_audio_inner(
     log::info!("[{trace_id}] Wrote audio note: {}", note_path.display());
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config)?;
+    let ledger_file = ledger::ledger_path()?;
     let source_display = format!("[audio: {filename}]");
     ledger::append_entry(
         &ledger_file,
@@ -1836,7 +1836,7 @@ async fn process_document_file_inner(
     let _ = std::fs::remove_file(&temp_path);
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config)?;
+    let ledger_file = ledger::ledger_path()?;
     let source_display = format!("[{}: {filename}]", kind.label());
     ledger::append_entry(
         &ledger_file,
@@ -2038,7 +2038,7 @@ async fn process_text_inner(
     log::info!("[{trace_id}] Wrote text note: {}", note_path.display());
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config)?;
+    let ledger_file = ledger::ledger_path()?;
     let source_display = format!(
         "[text: {}]",
         if text.len() > 50 { format!("{}...", &text[..50]) } else { text.to_string() }
@@ -2213,7 +2213,7 @@ async fn process_vocab(
     log::info!("[{trace_id}] Wrote vocab note: {}", note_path.display());
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config)?;
+    let ledger_file = ledger::ledger_path()?;
     ledger::append_entry(
         &ledger_file,
         &LedgerEntry {
@@ -2613,7 +2613,7 @@ async fn process_code_snippet(
     );
 
     // Log to ledger
-    let ledger_file = ledger::ledger_path(config)?;
+    let ledger_file = ledger::ledger_path()?;
     let source_display = format!("[code: {}]", if language.is_empty() { "unknown" } else { language });
     ledger::append_entry(
         &ledger_file,

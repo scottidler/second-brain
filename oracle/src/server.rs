@@ -402,8 +402,7 @@ impl OracleMcpServer {
     )]
     async fn ingest_history(&self, params: Parameters<IngestHistoryRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
-        let vault_root = self.config.vault_root().map_err(Self::err)?;
-        let ledger_path = ledger::ledger_path(&vault_root);
+        let ledger_path = ledger::ledger_path().map_err(Self::err)?;
 
         let filter = vault::ledger::EntryFilter {
             source: req.source,
