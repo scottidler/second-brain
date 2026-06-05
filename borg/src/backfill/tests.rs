@@ -1,4 +1,6 @@
 use super::*;
+use chrono_tz::America::Los_Angeles;
+use std::collections::HashMap;
 use tempfile::tempdir;
 
 #[test]
@@ -67,11 +69,12 @@ fn backfill_on_counter_values_match_known_fixture() {
     std::fs::write(&authored_path, "---\norigin: authored\ndate: 2026-04-02\n---\nbody\n").expect("write authored");
     set_file_mtime(&authored_path, old_mtime).expect("set mtime authored");
 
-    // 3. skipped_already_present: assisted but already has ingested.
+    // 3. skipped_already_present: assisted and already carries a homogeneous
+    //    datetime ingested (the final form), so it is left untouched.
     let already_path = root.join("c-already.md");
     std::fs::write(
         &already_path,
-        "---\norigin: assisted\ndate: 2026-04-03\ningested: 2026-04-03\n---\nbody\n",
+        "---\norigin: assisted\ndate: 2026-04-03\ningested: 2026-04-03T00:00:00-07:00\n---\nbody\n",
     )
     .expect("write already");
     set_file_mtime(&already_path, old_mtime).expect("set mtime already");
@@ -85,7 +88,7 @@ fn backfill_on_counter_values_match_known_fixture() {
     let recent_path = root.join("e-recent.md");
     std::fs::write(&recent_path, "---\norigin: assisted\ndate: 2026-04-05\n---\nbody\n").expect("write recent");
 
-    let report = backfill_on(root, &[], true).expect("backfill_on dry_run");
+    let report = backfill_on(root, &[], &HashMap::new(), Los_Angeles, true).expect("backfill_on dry_run");
 
     assert_eq!(report.scanned, 5, "scanned should count every md file");
     assert_eq!(report.would_backfill, 1, "exactly one note is eligible to backfill");
@@ -106,7 +109,7 @@ fn backfill_on_counter_values_match_known_fixture() {
 #[test]
 fn backfill_ingested_dry_run_empty_vault_smoke() {
     let dir = tempdir().expect("tempdir");
-    let report = backfill_on(dir.path(), &[], true).expect("dry-run on empty vault");
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, true).expect("dry-run on empty vault");
     assert_eq!(report.scanned, 0);
     assert_eq!(report.would_backfill, 0);
     assert_eq!(report.backfilled, 0);
@@ -114,4 +117,151 @@ fn backfill_ingested_dry_run_empty_vault_smoke() {
     assert_eq!(report.skipped_already_had, 0);
     assert_eq!(report.skipped_no_date, 0);
     assert_eq!(report.skipped_recent_mtime, 0);
+}
+
+/// Write a note and backdate its mtime past the 60s race guard so the backfill
+/// will actually consider it (rather than skipping as recently-modified).
+fn write_old(path: &Path, content: &str) {
+    use filetime::{FileTime, set_file_mtime};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    std::fs::write(path, content).expect("write note");
+    let old = FileTime::from_unix_time(
+        (SystemTime::now().duration_since(UNIX_EPOCH).expect("epoch").as_secs() - 7200) as i64,
+        0,
+    );
+    set_file_mtime(path, old).expect("set mtime");
+}
+
+#[test]
+fn local_from_utc_converts_z_to_local_offset() {
+    // 15:27:25Z in LA (PDT, summer) is 08:27:25-07:00.
+    let got = local_from_utc("2026-06-05T15:27:25Z", Los_Angeles).expect("parse");
+    assert_eq!(got, "2026-06-05T08:27:25-07:00");
+}
+
+#[test]
+fn local_from_utc_rejects_garbage() {
+    assert!(local_from_utc("not-a-timestamp", Los_Angeles).is_none());
+}
+
+#[test]
+fn local_date_midnight_homogenizes_to_offset_datetime() {
+    // April is daylight time in LA -> -07:00; the column stays a single type.
+    let got = local_date_midnight("2026-04-01", Los_Angeles).expect("parse");
+    assert_eq!(got, "2026-04-01T00:00:00-07:00");
+}
+
+#[test]
+fn backfill_upgrades_date_only_to_precise_from_receipts() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("note.md");
+    // Date-only ingested already present; a receipt match must OVERWRITE it.
+    write_old(
+        &path,
+        "---\norigin: assisted\ndate: 2026-06-04\ningested: 2026-06-04\ntrace: ht-ea9e2a\n---\nbody\n",
+    );
+
+    let mut receipts = HashMap::new();
+    receipts.insert("ht-ea9e2a".to_string(), "2026-06-05T08:27:25-07:00".to_string());
+
+    let report = backfill_on(dir.path(), &[], &receipts, Los_Angeles, false).expect("backfill");
+    assert_eq!(report.backfilled, 1, "the date-only note is upgraded");
+    assert_eq!(report.precise, 1, "the upgrade is sourced from a receipt");
+
+    let updated = std::fs::read_to_string(&path).expect("read back");
+    assert!(
+        updated.contains("ingested: 2026-06-05T08:27:25-07:00"),
+        "got: {updated}"
+    );
+    assert!(
+        !updated.contains("ingested: 2026-06-04"),
+        "stale date-only value must be gone: {updated}"
+    );
+}
+
+#[test]
+fn backfill_date_fallback_is_homogenized_midnight() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("note.md");
+    // No receipt match, no existing ingested: promote date: to local midnight.
+    write_old(
+        &path,
+        "---\norigin: assisted\ndate: 2026-04-01\ntrace: ht-orphan\n---\nbody\n",
+    );
+
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, false).expect("backfill");
+    assert_eq!(report.backfilled, 1);
+    assert_eq!(report.precise, 0, "no receipt -> not a precise backfill");
+
+    let updated = std::fs::read_to_string(&path).expect("read back");
+    assert!(
+        updated.contains("ingested: 2026-04-01T00:00:00-07:00"),
+        "got: {updated}"
+    );
+}
+
+#[test]
+fn backfill_covers_source_bearing_note_with_mislabeled_origin() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("note.md");
+    // origin: authored (the historical mislabel) but it has a source URL, so it
+    // IS a borg-ingested, view-visible note and must get an `ingested:`.
+    write_old(
+        &path,
+        "---\norigin: authored\ndate: 2026-04-01\nsource: \"https://youtu.be/x\"\n---\nbody\n",
+    );
+
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, false).expect("backfill");
+    assert_eq!(
+        report.backfilled, 1,
+        "source-bearing note is backfilled despite origin: authored"
+    );
+    assert_eq!(report.skipped_origin, 0);
+
+    let updated = std::fs::read_to_string(&path).expect("read back");
+    assert!(
+        updated.contains("ingested: 2026-04-01T00:00:00-07:00"),
+        "got: {updated}"
+    );
+}
+
+#[test]
+fn backfill_homogenizes_existing_date_only_ingested_without_receipt() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("note.md");
+    // Date-only `ingested:` (from the legacy backfill), no receipt match: the
+    // value is homogenized in place to local midnight, NOT replaced by date:.
+    write_old(
+        &path,
+        "---\norigin: assisted\ndate: 2026-04-10\ningested: 2026-04-03\ntrace: ht-orphan\n---\nbody\n",
+    );
+
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, false).expect("backfill");
+    assert_eq!(report.backfilled, 1, "date-only ingested is homogenized");
+    assert_eq!(report.precise, 0);
+
+    let updated = std::fs::read_to_string(&path).expect("read back");
+    // Preserves the ingested date (04-03), not the content date (04-10).
+    assert!(
+        updated.contains("ingested: 2026-04-03T00:00:00-07:00"),
+        "got: {updated}"
+    );
+}
+
+#[test]
+fn backfill_idempotent_when_value_already_matches() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("note.md");
+    // Already carries exactly the precise value the receipt would produce.
+    write_old(
+        &path,
+        "---\norigin: assisted\ndate: 2026-06-04\ningested: 2026-06-05T08:27:25-07:00\ntrace: ht-ea9e2a\n---\nbody\n",
+    );
+
+    let mut receipts = HashMap::new();
+    receipts.insert("ht-ea9e2a".to_string(), "2026-06-05T08:27:25-07:00".to_string());
+
+    let report = backfill_on(dir.path(), &[], &receipts, Los_Angeles, false).expect("backfill");
+    assert_eq!(report.backfilled, 0, "no rewrite when the value is unchanged");
+    assert_eq!(report.skipped_already_had, 1);
 }

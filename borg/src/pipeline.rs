@@ -721,12 +721,16 @@ async fn process_url_inner(
             cortex_fields.iter().map(|(k, _)| k).collect::<Vec<_>>()
         );
     }
-    // `ingested:` records when borg LAST processed this note. Unconditional
-    // on every publish (original ingest AND reingest) so the dashboard's
-    // "this week" query can ask when borg did the work rather than when
-    // the content was originally learned.
-    final_str = apply_ingested_date(&final_str, &log_date);
-    log::debug!("[{trace_id}] Set ingested: {log_date}");
+    // `ingested:` records when borg LAST processed this note, to second
+    // precision in the configured local timezone (ISO-8601 with offset, e.g.
+    // 2026-06-05T08:27:25-07:00). Unconditional on every publish (original
+    // ingest AND reingest) so views can sort/window by when borg did the work
+    // rather than when the content was originally learned. The precise form
+    // lets the borg-dashboard.base sort chronologically; `date:` remains the
+    // original content date.
+    let log_timestamp = now.format("%Y-%m-%dT%H:%M:%S%:z").to_string();
+    final_str = apply_ingested_date(&final_str, &log_timestamp);
+    log::debug!("[{trace_id}] Set ingested: {log_timestamp}");
     write_atomic(&note_path, final_str.as_bytes()).context("Failed to atomically publish note")?;
 
     // The new note exists at note_path. If we were replacing an old note at

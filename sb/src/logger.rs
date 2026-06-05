@@ -102,7 +102,6 @@ fn verb_logs_to_file(cli: &Cli, cli_cfg: &CliConfig) -> VerbLogging {
             Some(borg::Command::Log(_)) => inspect(&["borg", "log"]),
             Some(borg::Command::Blocklist(_)) => inspect(&["borg", "blocklist"]),
             Some(borg::Command::Retention(_)) => inspect(&["borg", "retention"]),
-            Some(borg::Command::Dashboard(_)) => inspect(&["borg", "dashboard"]),
             Some(borg::Command::Extension(_)) => inspect(&["borg", "extension"]),
             Some(borg::Command::Hotkey(_)) => inspect(&["borg", "hotkey"]),
             _ => VerbLogging::AlwaysFile,

@@ -16,7 +16,6 @@ pub mod backfill;
 pub mod backoff;
 pub mod blocklist;
 pub mod config;
-pub mod dashboard;
 pub mod description;
 pub mod discord;
 pub mod error;
@@ -173,10 +172,9 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
     if let Err(e) = ledger::ensure_ledger_exists(&ledger_p) {
         log::warn!("Failed to ensure Borg Ledger exists: {e:#}");
     }
-    let dashboard_p = dashboard::dashboard_path(&config)?;
-    if let Err(e) = dashboard::ensure_dashboard_exists(&dashboard_p) {
-        log::warn!("Failed to ensure Borg Dashboard exists: {e:#}");
-    }
+    // borg-dashboard.md (Dataview) was retired in favour of the live-updating
+    // borg-dashboard.base; its `WHERE ingested = date(today)` queries break now
+    // that `ingested:` is a datetime. The ledger stays as the dedup datastore.
 
     let config = Arc::new(config);
     let mut tasks = tokio::task::JoinSet::new();

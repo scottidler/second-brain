@@ -103,8 +103,6 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Manage the Borg Dashboard view
-    Dashboard(DashboardCliArgs),
 }
 
 #[derive(Args)]
@@ -161,17 +159,6 @@ impl From<DaemonArgs> for opts::DaemonOpts {
             status: a.status,
         }
     }
-}
-
-#[derive(Args)]
-pub struct DashboardCliArgs {
-    #[command(subcommand)]
-    pub action: DashboardAction,
-}
-#[derive(Subcommand)]
-pub enum DashboardAction {
-    /// Rewrite the dashboard with the current canonical template
-    Refresh,
 }
 
 #[derive(Args)]
@@ -477,10 +464,11 @@ impl BorgCli {
                     ("backfilled", report.backfilled)
                 };
                 println!(
-                    "backfill-ingested complete:\n  scanned: {}\n  {}: {}\n  skipped (already had ingested:): {}\n  skipped (origin != assisted): {}\n  skipped (recent mtime): {}\n  skipped (no date: field): {}",
+                    "backfill-ingested complete:\n  scanned: {}\n  {}: {} (precise from receipts: {})\n  skipped (already had ingested:): {}\n  skipped (origin != assisted): {}\n  skipped (recent mtime): {}\n  skipped (no date: field): {}",
                     report.scanned,
                     count_label,
                     count,
+                    report.precise,
                     report.skipped_already_had,
                     report.skipped_origin,
                     report.skipped_recent_mtime,
@@ -488,9 +476,6 @@ impl BorgCli {
                 );
                 Ok(())
             }
-            Some(Command::Dashboard(args)) => match args.action {
-                DashboardAction::Refresh => borg::dashboard::refresh(&borg::dashboard::dashboard_path(&config)?),
-            },
             Some(Command::Blocklist(args)) => match args.action {
                 BlocklistAction::List => {
                     let rows = borg::blocklist::entries()?;
