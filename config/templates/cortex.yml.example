@@ -16,6 +16,21 @@ embedding:
   active-model: bge-small-en-v1.5
   batch-size: 64
 
+# Graph-augmented-memory edge layer (oracle reads; cortex writes). All fields
+# optional; defaults live in cortex/src/config.rs GraphConfig.
+graph:
+  # Deterministic edge tick cadence (seconds). Default 900 (15 min).
+  # graph-interval-secs: 900
+  # Typed LLM `fact` layer: max ingested notes mined per backfill. Triple
+  # extraction has NO advancing cursor, so this cap IS the coverage window -
+  # set it above your ingested-note count for a full corpus sweep. Default 50.
+  # fact-max-per-run: 1000
+  # In-process daemon cadence (seconds) for the fact backfill. Runs the LLM
+  # triple-extraction + consolidation layer; deterministic edges are handled by
+  # the separate graph tick. In-process so it cannot collide with the embed tick
+  # on the shared embed lock (a separate systemd timer would). Default 604800 (weekly).
+  # fact-interval-secs: 604800
+
 # Daemon cadence (sweep loop interval).
 daemon:
   embed-interval-secs: 600

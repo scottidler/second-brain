@@ -302,3 +302,75 @@ from `2026-06-05-graph-augmented-memory.md`. One section per phase.
   extraction resolves hubs by note-path existence, not via the table. Expected
   at this stage; the catalogue is a substrate for future ontology-aware
   retrieval, not yet wired into oracle.
+
+## Phase 6: Scheduled fact-backfill (targeted fix, 2026-06-06)
+
+Not a new feature — closes two gaps Phase 4/5 explicitly named as their own
+fixes. Shipped after the feature went live in **v0.8.54** (merged to main,
+`otto install` + daemon restart on desk).
+
+### The problem
+The deterministic `graph_interval` daemon tick is deterministic-only by design,
+so the typed `fact` layer never refreshed on its own — it only existed after a
+manual `sb cortex graph --backfill`. And the default `fact_max_per_run = 50`
+(no advancing cursor) meant a backfill only ever mined the first 50 path-sorted
+ingested notes. With 729 ingested notes, the first generation produced just **6
+fact edges** (50 scanned → 540 triples → 533 skipped for missing hub endpoints).
+
+### Decisions
+- **Raised cap, not a cursor.** Phase 4/5 named "raised `fact_max_per_run`" as
+  the fix. Set `graph.fact-max-per-run: 1000` in `cortex.yml` (above the 729
+  ingested count): with no cursor, the cap IS the window, so a single pass now
+  covers the whole corpus. Code default stays 50 (conservative for fresh installs).
+- **In-process daemon tick, NOT a systemd timer.** A standalone `sb cortex graph
+  --backfill` run by a timer fails every time with `embed lock held by another
+  process` — `graph::run` takes the shared embed file lock, and a separate
+  process collides with the live daemon (observed 2026-06-06). The daemon's
+  `select!` loop runs one tick arm at a time (each under `block_in_place`), so an
+  in-process `fact_interval` tick serializes against the embed/graph ticks on the
+  same lock with no collision. New `GraphConfig.fact_interval_secs` (default
+  604800 = weekly, matching the cold-note sweep cadence); daemon tick calls
+  `cortex::graph::fact_backfill`.
+- **Fact-only daemon path.** `fact_backfill` runs ONLY triple extraction +
+  consolidation (deterministic edges are maintained incrementally by the separate
+  `graph_interval` tick), so the weekly tick does not redo the full deterministic
+  rebuild. Refactor: the fact block in `graph::run` became the lock-agnostic
+  `extract_fact_layer(index, vault_root, config)` (caller holds the lock); `run`
+  (under `--backfill`) and `fact_backfill` both call it. `fact_backfill` is the
+  lock-managing wrapper the daemon uses.
+
+### First-time generation runbook (ran on desk 2026-06-06)
+1. **No migration.** The four tables (`edges`, `graph_state`, `edge_build_state`,
+   `entities`) auto-create via `ensure_graph_schema` → `ensure_schema`
+   (`CREATE TABLE IF NOT EXISTS`) in oracle's index DB at
+   `~/.local/share/oracle/oracle.db` (NOT under `~/.local/share/sb/`).
+2. **Sync assets first.** `otto install` does NOT deploy patterns/glossary — run
+   `sb bootstrap --force --skip-systemd --skip-prefetch-model` (or `otto deploy`).
+   Without the `extract-entities`/`extract-triples` patterns + `glossary.yml`
+   the LLM passes and concept-linking are dead.
+3. `sb cortex hub --apply` — DEFAULT IS DRY-RUN; bare `sb cortex hub` only reports
+   and fills the `entities` table. `--apply` writes the `entities/<slug>.md` files.
+4. `sb oracle index` — fact-edge endpoints resolve via `note_path_exists` against
+   the `notes` table, so new hubs MUST be reindexed before backfill or every fact
+   edge skips.
+5. `sb cortex graph --backfill` — **stop the cortex daemon first**
+   (`systemctl --user stop cortex`) or it errors on the embed lock; restart after.
+   (The new weekly in-process tick removes the need to do this by hand going forward.)
+
+### Result / caveats
+- Generation on desk: **157,694 deterministic edges** (shared-tag 116845, semantic
+  16436, shared-domain 10692, shared-creator 6988, shared-source 4918, wikilink
+  1809) + entities=653; fact edges grow toward full coverage on the weekly tick.
+- **Derived-vs-distinct counts:** the backfill log reports DERIVED counts
+  (e.g. wikilink 2841); the DB holds DISTINCT rows after `INSERT OR REPLACE` on the
+  edge PK (1809). Not erosion — just dedup.
+- **Fact-edge erosion is real (in code, not currently firing):** `delete_edges_by_src`
+  (`vault/src/search/graph.rs`) deletes ALL kinds incl. `fact`; the deterministic
+  daemon tick re-derives ONLY deterministic kinds. So if a hub note's `modified_at`
+  bumps (e.g. cortex governance rewrites it), the next graph tick drops that hub's
+  fact edges until the next fact backfill. The weekly tick now bounds how long any
+  such loss persists. If hub churn proves heavy, exclude `type: entity` notes from
+  governance (Phase-3 open question) so their `modified_at` stays stable.
+- Side effect: the 653 `entities/*.md` hub notes were written into the Syncthing'd +
+  git-tracked vault → they propagate to all devices and show as a large uncommitted
+  changeset.

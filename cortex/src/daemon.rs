@@ -157,6 +157,15 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut graph_interval = tokio::time::interval(Duration::from_secs(config.graph.graph_interval_secs));
     graph_interval.tick().await; // consume the immediate first tick
 
+    // Typed-`fact` backfill pass (Phase 5/6). The graph tick above is
+    // deterministic-only by design; this is the in-process schedule on which the
+    // LLM fact layer (triple extraction + consolidation) refreshes. In-process
+    // so it serializes against the embed/graph ticks on the shared embed lock
+    // rather than colliding the way a separate-process timer would. Weekly by
+    // default; LLM-bound and bounded by `graph.fact_max_per_run`.
+    let mut fact_interval = tokio::time::interval(Duration::from_secs(config.graph.fact_interval_secs));
+    fact_interval.tick().await; // consume the immediate first tick
+
     // LLM entity-discovery pass (Phase 4). Daily by default; LLM-bound and
     // bounded by `entities.max_per_run`, so it never fans unbounded calls.
     let mut entities_interval = tokio::time::interval(Duration::from_secs(config.entities.discover_interval_secs));
@@ -282,6 +291,20 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                         // Idle tick - no changed notes. Stay quiet.
                     }
                     Err(e) => log::error!("daemon graph tick failed: {e}"),
+                }
+            }
+            _ = fact_interval.tick() => {
+                // Scheduled typed-`fact` backfill (Phase 5/6). block_in_place
+                // because it runs blocking Fabric subprocess calls (triple
+                // extraction) + SQLite IO; bounded by graph.fact_max_per_run.
+                // Takes the embed lock in-process so it cannot collide with the
+                // embed/graph ticks.
+                match tokio::task::block_in_place(|| crate::graph::fact_backfill(vault_root, config)) {
+                    Ok(stats) => log::info!(
+                        "daemon fact tick: facts_written={} noise_removed={} contradictions={} bridges_added={}",
+                        stats.facts_written, stats.noise_removed, stats.contradictions, stats.bridges_added,
+                    ),
+                    Err(e) => log::error!("daemon fact tick failed: {e}"),
                 }
             }
             _ = entities_interval.tick() => {

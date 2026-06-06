@@ -58,6 +58,15 @@ pub struct GraphStats {
     pub skipped: usize,
 }
 
+/// Outcome of the typed-`fact` layer pass (triple extraction + consolidation).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct FactLayerStats {
+    pub facts_written: usize,
+    pub noise_removed: usize,
+    pub contradictions: usize,
+    pub bridges_added: usize,
+}
+
 /// Run the graph pass against the oracle index DB. Opens its own connection
 /// (cortex commands do not share oracle's `Mutex<SearchIndex>`), takes the
 /// shared embed lock, and writes edges in per-note bounded transactions.
@@ -77,30 +86,10 @@ pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<Graph
 
     // Phase 5: --backfill also extracts typed `fact` edges (bounded, LLM) and
     // runs the consolidation agents. Deterministic edges above stand alone; the
-    // factual layer is layered on top only on an explicit backfill.
+    // factual layer is layered on top only on an explicit backfill. The embed
+    // lock is already held, so call the lock-agnostic helper directly.
     if opts.backfill {
-        let notes = crate::vault::scan_vault(vault_root, &config.vault)?;
-        let extractor = crate::memgraph::FabricTripleExtractor {
-            fabric: &config.fabric,
-            pattern: &config.graph.fact_pattern,
-            max_input_tokens: config.graph.fact_max_input_tokens,
-            timeout_secs: config.graph.fact_timeout_secs,
-        };
-        let facts = crate::memgraph::extract_facts(
-            &mut index,
-            &notes,
-            &extractor,
-            &config.graph,
-            config.graph.fact_max_per_run,
-        )?;
-        let consolidation = crate::memgraph::consolidate(&mut index, &config.graph)?;
-        log::info!(
-            "memgraph backfill: facts_written={} noise_removed={} contradictions={} bridges_added={}",
-            facts.facts_written,
-            consolidation.noise_removed,
-            consolidation.contradictions.len(),
-            consolidation.bridges_added,
-        );
+        extract_fact_layer(&mut index, vault_root, config)?;
     }
 
     drop(lock);
@@ -114,6 +103,63 @@ pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<Graph
         stats.metadata,
         stats.skipped,
     );
+    Ok(stats)
+}
+
+/// Extract typed `fact` edges (bounded LLM triple extraction) and run the
+/// consolidation agents (noise removal / contradiction flagging / cluster
+/// bridging) against an already-open index. The caller MUST already hold the
+/// shared embed lock — both `run` (under `--backfill`) and `fact_backfill` take
+/// it before calling — so this helper does not manage the lock and is therefore
+/// safe to reuse without re-entrant locking.
+fn extract_fact_layer(index: &mut SearchIndex, vault_root: &Path, config: &Config) -> Result<FactLayerStats> {
+    log::debug!(
+        "cortex::graph::extract_fact_layer: fact_max_per_run={} fact_pattern={}",
+        config.graph.fact_max_per_run,
+        config.graph.fact_pattern,
+    );
+    let notes = crate::vault::scan_vault(vault_root, &config.vault)?;
+    let extractor = crate::memgraph::FabricTripleExtractor {
+        fabric: &config.fabric,
+        pattern: &config.graph.fact_pattern,
+        max_input_tokens: config.graph.fact_max_input_tokens,
+        timeout_secs: config.graph.fact_timeout_secs,
+    };
+    let facts =
+        crate::memgraph::extract_facts(index, &notes, &extractor, &config.graph, config.graph.fact_max_per_run)?;
+    let consolidation = crate::memgraph::consolidate(index, &config.graph)?;
+    let stats = FactLayerStats {
+        facts_written: facts.facts_written,
+        noise_removed: consolidation.noise_removed,
+        contradictions: consolidation.contradictions.len(),
+        bridges_added: consolidation.bridges_added,
+    };
+    log::info!(
+        "memgraph fact layer: facts_written={} noise_removed={} contradictions={} bridges_added={}",
+        stats.facts_written,
+        stats.noise_removed,
+        stats.contradictions,
+        stats.bridges_added,
+    );
+    Ok(stats)
+}
+
+/// Daemon entry point for the scheduled fact-backfill tick: refresh ONLY the
+/// typed `fact` layer. The deterministic edges are maintained incrementally by
+/// the separate `graph_interval` tick (`daemon_tick`), so this pass skips the
+/// deterministic rebuild and runs just triple extraction + consolidation. Opens
+/// its own index connection and takes the shared embed lock IN-PROCESS, so it
+/// serializes against the daemon's embed/graph ticks via the same lock rather
+/// than colliding the way a separate-process systemd timer would.
+pub fn fact_backfill(vault_root: &Path, config: &Config) -> Result<FactLayerStats> {
+    log::debug!("cortex::graph::fact_backfill: vault_root={}", vault_root.display());
+    let db_path = config.oracle_db_path();
+    let mut index = SearchIndex::open(&db_path)
+        .wrap_err_with(|| format!("failed to open search index at {}", db_path.display()))?;
+    let lock = crate::embed::acquire_lock()?;
+    log::debug!("cortex::graph::fact_backfill: acquired embed file lock");
+    let stats = extract_fact_layer(&mut index, vault_root, config)?;
+    drop(lock);
     Ok(stats)
 }
 

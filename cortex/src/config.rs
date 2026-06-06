@@ -89,6 +89,13 @@ pub struct GraphConfig {
     /// Daemon cadence (seconds) for the graph tick. Runs after the embed tick
     /// so semantic edges see fresh vectors. Default 900 (15 min).
     pub graph_interval_secs: u64,
+    /// Daemon cadence (seconds) for the typed-`fact` backfill tick. The
+    /// deterministic `graph_interval` tick is deterministic-only by design; this
+    /// is the in-process schedule on which the LLM fact layer (triple extraction
+    /// and consolidation) refreshes. Runs in-process so it cannot collide with
+    /// the embed tick on the shared embed lock the way a separate-process timer
+    /// would. Default 604800 (weekly), matching the cold-note sweep cadence.
+    pub fact_interval_secs: u64,
     /// Top-k semantic neighbors retained per note.
     pub semantic_k: usize,
     /// Minimum cosine similarity for a semantic edge.
@@ -130,6 +137,7 @@ impl Default for GraphConfig {
     fn default() -> Self {
         Self {
             graph_interval_secs: 900,
+            fact_interval_secs: 604_800,
             semantic_k: 10,
             min_cosine: 0.6,
             fanout_cap: 100,
