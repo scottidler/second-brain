@@ -21,6 +21,7 @@ pub struct Config {
     pub fabric: FabricConfig,
     pub embed: EmbedConfig,
     pub graph: GraphConfig,
+    pub entities: EntitiesConfig,
 }
 
 impl Default for Config {
@@ -39,6 +40,39 @@ impl Default for Config {
             fabric: FabricConfig::default(),
             embed: EmbedConfig::default(),
             graph: GraphConfig::default(),
+            entities: EntitiesConfig::default(),
+        }
+    }
+}
+
+/// Knobs for `cortex entities --discover` (Phase 4 of graph-augmented-memory):
+/// an off-hot-path LLM pass that proposes new glossary entries into
+/// `entity-proposals.yml`. Bounded by `max_per_run` (notes per pass) so a
+/// backlog never fans unbounded LLM calls; daemon cadence defaults to daily.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct EntitiesConfig {
+    /// Fabric pattern that extracts entity names from a note body.
+    pub fabric_pattern: String,
+    /// Max ingested notes processed per discovery run (bounds LLM cost).
+    pub max_per_run: usize,
+    /// Truncate each note body to this many tokens before extraction.
+    pub max_input_tokens: usize,
+    /// Per-call fabric timeout (seconds).
+    pub fabric_timeout_secs: u64,
+    /// Daemon cadence (seconds) for the discovery tick. Default 86_400 (daily):
+    /// vocabulary grows slowly and the pass is LLM-bound.
+    pub discover_interval_secs: u64,
+}
+
+impl Default for EntitiesConfig {
+    fn default() -> Self {
+        Self {
+            fabric_pattern: "extract-entities".to_string(),
+            max_per_run: 50,
+            max_input_tokens: 4_000,
+            fabric_timeout_secs: 120,
+            discover_interval_secs: 86_400,
         }
     }
 }

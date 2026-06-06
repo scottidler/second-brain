@@ -79,6 +79,8 @@ pub enum Command {
     Graph(GraphArgs),
     /// Stub/refresh entity hub notes (concepts, creators, sources, dense tags)
     Hub(HubArgs),
+    /// Discover candidate glossary entities from ingested notes (LLM)
+    Entities(EntitiesArgs),
 }
 
 #[derive(Args)]
@@ -305,6 +307,24 @@ impl From<HubArgs> for opts::HubOpts {
 }
 
 #[derive(Args)]
+pub struct EntitiesArgs {
+    /// Run the LLM discovery pass, writing proposals to entity-proposals.yml.
+    #[arg(long)]
+    pub discover: bool,
+    /// Override the max ingested notes processed this run.
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+impl From<EntitiesArgs> for opts::EntitiesOpts {
+    fn from(a: EntitiesArgs) -> Self {
+        Self {
+            discover: a.discover,
+            limit: a.limit,
+        }
+    }
+}
+
+#[derive(Args)]
 pub struct SummarizeArgs {
     #[arg(long)]
     pub backfill: bool,
@@ -458,6 +478,22 @@ impl CortexCli {
                     stats.metadata,
                     stats.skipped,
                 );
+            }
+            Command::Entities(a) => {
+                if !a.discover {
+                    eyre::bail!("nothing to do: pass --discover to run the entity discovery pass");
+                }
+                let report = cortex::entities::run(&vault_root, &config, &a.into())?;
+                match &report.proposals_path {
+                    Some(path) => println!(
+                        "entities discover: scanned {} note(s), {} proposal(s) -> {path}",
+                        report.notes_scanned, report.proposals,
+                    ),
+                    None => println!(
+                        "entities discover: scanned {} note(s), no new proposals",
+                        report.notes_scanned,
+                    ),
+                }
             }
             Command::Hub(a) => {
                 let apply = a.apply;

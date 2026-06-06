@@ -157,6 +157,11 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut graph_interval = tokio::time::interval(Duration::from_secs(config.graph.graph_interval_secs));
     graph_interval.tick().await; // consume the immediate first tick
 
+    // LLM entity-discovery pass (Phase 4). Daily by default; LLM-bound and
+    // bounded by `entities.max_per_run`, so it never fans unbounded calls.
+    let mut entities_interval = tokio::time::interval(Duration::from_secs(config.entities.discover_interval_secs));
+    entities_interval.tick().await; // consume the immediate first tick
+
     // Run a full sweep on startup.
     // block_in_place isolates the blocking CPU+I/O sweep from the tokio worker thread, letting
     // the watcher and timers continue to run; once Phase 1 rayon lands inside scan_vault, this
@@ -277,6 +282,21 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                         // Idle tick - no changed notes. Stay quiet.
                     }
                     Err(e) => log::error!("daemon graph tick failed: {e}"),
+                }
+            }
+            _ = entities_interval.tick() => {
+                // Entity-discovery tick (Phase 4). block_in_place because the
+                // pass runs blocking Fabric subprocess calls; bounded by
+                // entities.max_per_run.
+                match tokio::task::block_in_place(|| crate::entities::daemon_tick(vault_root, config)) {
+                    Ok(report) if report.proposals > 0 => log::info!(
+                        "daemon entities tick: scanned={} proposals={}",
+                        report.notes_scanned, report.proposals,
+                    ),
+                    Ok(_) => {
+                        // No new proposals. Stay quiet.
+                    }
+                    Err(e) => log::error!("daemon entities tick failed: {e}"),
                 }
             }
             _ = cold_interval.tick() => {

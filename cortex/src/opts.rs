@@ -183,6 +183,14 @@ pub struct EmbedOpts {
 }
 
 #[derive(Debug, Clone)]
+pub struct EntitiesOpts {
+    /// Run the LLM discovery pass, writing proposals to entity-proposals.yml.
+    pub discover: bool,
+    /// Override the max notes processed this run (defaults to config max-per-run).
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
 pub struct HubOpts {
     /// Write hub notes to disk (default: report what would be stubbed).
     pub apply: bool,

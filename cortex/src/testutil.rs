@@ -324,6 +324,7 @@ impl TestVault {
             fabric: FabricConfig::default(),
             embed: crate::config::EmbedConfig::default(),
             graph: crate::config::GraphConfig::default(),
+            entities: crate::config::EntitiesConfig::default(),
         }
     }
 
