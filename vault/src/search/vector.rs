@@ -227,7 +227,18 @@ impl SearchIndex {
             .into_iter()
             .map(|(note_path, distance)| VectorHit { note_path, distance })
             .collect();
-        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+        // Distance asc, then note_path asc as a stable tiebreaker. Without it,
+        // notes with bitwise-equal cosine distance fall back to the random
+        // HashMap iteration order of `best` above, making both the ranking and
+        // (via the truncate) the membership at the limit boundary non-deterministic
+        // across runs. (v0.8.56 fixed the same class in RRF + graph_dispatch but
+        // missed this raw vector path.)
+        hits.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.note_path.cmp(&b.note_path))
+        });
         hits.truncate(limit as usize);
         Ok(hits)
     }

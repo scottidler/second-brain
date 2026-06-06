@@ -126,6 +126,41 @@ fn search_vector_returns_closest_summary_first() {
 }
 
 #[test]
+fn search_vector_ties_break_by_path_deterministically() {
+    // Three notes share IDENTICAL summary text -> identical embeddings -> equal
+    // distance to any query. Without a stable tiebreaker the order (and, via the
+    // limit, the membership) falls back to random HashMap iteration and varies
+    // run-to-run. Insert out of path order; the result must always be path-asc.
+    let m = MockEmbedder::new(16, "mock-test-v1");
+    let same = "identical summary text for tie test";
+    for _ in 0..30 {
+        let index = SearchIndex::open_memory().expect("open");
+        // inserted c, a, b — deliberately not sorted
+        for p in ["notes/c.md", "notes/a.md", "notes/b.md"] {
+            insert_note(&index, p, "tech", "article", 100);
+            upsert_summary(&index, &m, p, same, 100);
+        }
+        let q = m.embed_one("anything").expect("q");
+
+        let all = index.search_vector(&q, 3, None, None, None).expect("search");
+        let paths: Vec<&str> = all.iter().map(|h| h.note_path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["notes/a.md", "notes/b.md", "notes/c.md"],
+            "tied distances must order by path asc"
+        );
+
+        let top2 = index.search_vector(&q, 2, None, None, None).expect("search");
+        let p2: Vec<&str> = top2.iter().map(|h| h.note_path.as_str()).collect();
+        assert_eq!(
+            p2,
+            vec!["notes/a.md", "notes/b.md"],
+            "tied membership at the limit must be stable"
+        );
+    }
+}
+
+#[test]
 fn search_vector_respects_limit() {
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
