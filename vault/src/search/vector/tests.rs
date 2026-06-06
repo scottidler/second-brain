@@ -359,7 +359,7 @@ fn rrf_fuses_two_rank_lists_correctly() {
         "notes/d.md".to_string(),
         "notes/a.md".to_string(),
     ];
-    let fused = reciprocal_rank_fusion(&bm25, &vec, 60, 10);
+    let fused = reciprocal_rank_fusion(&[&bm25, &vec], 60, 10);
 
     // a appears at rank 1 in bm25 and rank 3 in vec
     // b appears at rank 2 in bm25 and rank 1 in vec
@@ -389,7 +389,7 @@ fn rrf_fuses_two_rank_lists_correctly() {
 fn rrf_respects_limit() {
     let bm25 = vec!["a".into(), "b".into(), "c".into(), "d".into()];
     let vec = vec!["c".into(), "d".into(), "e".into(), "f".into()];
-    let fused = reciprocal_rank_fusion(&bm25, &vec, 60, 3);
+    let fused = reciprocal_rank_fusion(&[&bm25, &vec], 60, 3);
     assert_eq!(fused.len(), 3);
 }
 
@@ -397,7 +397,7 @@ fn rrf_respects_limit() {
 fn rrf_single_list_still_contributes() {
     let bm25 = vec!["a".into(), "b".into()];
     let vec: Vec<String> = vec![];
-    let fused = reciprocal_rank_fusion(&bm25, &vec, 60, 10);
+    let fused = reciprocal_rank_fusion(&[&bm25, &vec], 60, 10);
     assert_eq!(fused.len(), 2);
     // a (rank 1) must beat b (rank 2)
     assert_eq!(fused[0].note_path, "a");
@@ -406,7 +406,8 @@ fn rrf_single_list_still_contributes() {
 
 #[test]
 fn rrf_empty_inputs_return_empty() {
-    let fused = reciprocal_rank_fusion(&[], &[], 60, 5);
+    let empty: [&[String]; 0] = [];
+    let fused = reciprocal_rank_fusion(&empty, 60, 5);
     assert!(fused.is_empty());
 }
 
@@ -492,4 +493,45 @@ fn search_vector_max_pool_picks_best_representation_min_distance() {
         "max-pool must surface the matching chunk (distance ~= 0.0); got {}",
         h.distance
     );
+}
+
+#[test]
+fn semantic_neighbors_ranks_by_cosine_and_honors_k_and_threshold() {
+    let index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-knn-v1");
+    insert_note(&index, "notes/seed.md", "tech", "article", 100);
+    insert_note(&index, "notes/near.md", "tech", "article", 100);
+    insert_note(&index, "notes/far.md", "tech", "article", 100);
+    insert_note(&index, "notes/mid.md", "tech", "article", 100);
+
+    // seed and near share text (cosine 1.0 under the deterministic mock);
+    // far/mid get unrelated text.
+    upsert_summary(&index, &m, "notes/seed.md", "durable execution temporal", 100);
+    upsert_summary(&index, &m, "notes/near.md", "durable execution temporal", 100);
+    upsert_summary(&index, &m, "notes/far.md", "completely unrelated banana", 100);
+    upsert_summary(&index, &m, "notes/mid.md", "execution temporal somewhat", 100);
+
+    // Threshold low enough to admit all, k large: seed itself excluded.
+    let all = index.semantic_neighbors("notes/seed.md", 10, -1.0).expect("knn");
+    assert!(all.iter().all(|(p, _)| p != "notes/seed.md"), "self excluded");
+    // near is the top neighbor (identical vector -> cosine 1.0).
+    assert_eq!(all[0].0, "notes/near.md");
+    assert!((all[0].1 - 1.0).abs() < 1e-5);
+
+    // k caps the count.
+    let capped = index.semantic_neighbors("notes/seed.md", 1, -1.0).expect("knn");
+    assert_eq!(capped.len(), 1);
+
+    // A high threshold keeps only the identical neighbor.
+    let strict = index.semantic_neighbors("notes/seed.md", 10, 0.99).expect("knn");
+    assert_eq!(strict.len(), 1);
+    assert_eq!(strict[0].0, "notes/near.md");
+}
+
+#[test]
+fn semantic_neighbors_empty_when_note_has_no_embedding() {
+    let index = SearchIndex::open_memory().expect("open");
+    insert_note(&index, "notes/bare.md", "tech", "article", 100);
+    let hits = index.semantic_neighbors("notes/bare.md", 10, 0.0).expect("knn");
+    assert!(hits.is_empty(), "note with no summary embedding yields no neighbors");
 }

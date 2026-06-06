@@ -284,7 +284,7 @@ fn hybrid_recovers_union_top3_with_transcript_chunks() {
 
         let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
         let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();
-        let fused = reciprocal_rank_fusion(&bm25_paths, &vec_paths, RRF_K, 10);
+        let fused = reciprocal_rank_fusion(&[&bm25_paths, &vec_paths], RRF_K, 10);
 
         let union_top3: HashSet<String> = bm25_paths
             .iter()
@@ -321,7 +321,7 @@ fn hybrid_recovers_union_top3() {
 
         let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
         let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();
-        let fused = reciprocal_rank_fusion(&bm25_paths, &vec_paths, RRF_K, 10);
+        let fused = reciprocal_rank_fusion(&[&bm25_paths, &vec_paths], RRF_K, 10);
 
         let union_top3: HashSet<String> = bm25_paths
             .iter()

@@ -14,6 +14,14 @@ use vault::ledger;
 use vault::schema::{Domain, Method, NoteType, Origin, Status};
 use vault::search::{NoteRow, SearchIndex};
 
+/// Default hops for graph-expansion modes when the caller omits `expand_hops`.
+const DEFAULT_EXPAND_HOPS: u8 = 1;
+/// Hard cap on graph-expansion hops (bounds traversal cost on the read path).
+const MAX_EXPAND_HOPS: u8 = 2;
+/// Per-hop decay applied to expansion scores so distant neighbors rank lower.
+/// 0.5 ≈ one effective hop. Feeds the graph rank list (an ordering into RRF).
+const GRAPH_HOP_DECAY: f32 = 0.5;
+
 /// Oracle MCP server - knowledge retrieval from an Obsidian vault
 #[derive(Clone)]
 pub struct OracleMcpServer {
@@ -184,6 +192,111 @@ impl OracleMcpServer {
         Ok(())
     }
 
+    /// Graph-expansion retrieval shared by `mode=graph` and
+    /// `mode=graph-hybrid`.
+    ///
+    /// 1. Seed via hybrid (BM25 ∪ vector, top `K_RRF_INPUT` each, fused).
+    /// 2. Expand the seed set `hops` hops along the materialized `edges` graph
+    ///    (`SearchIndex::expand_graph` — the edge read lives in vault; oracle
+    ///    never builds edges).
+    /// 3. Score each expanded neighbor by `Σ w_seed(origin) · edge_weight ·
+    ///    decay^(hop-1)`, then convert to a rank list (RRF consumes order, not
+    ///    raw scores). Schema filters apply to the neighbors before scoring.
+    /// 4. Fuse: `graph` re-fuses the seed list with the graph list;
+    ///    `graph-hybrid` carries the raw BM25 and vector lists in too.
+    /// 5. `limit` truncates last.
+    #[allow(clippy::too_many_arguments)]
+    fn graph_dispatch(
+        &self,
+        db: &SearchIndex,
+        query: &str,
+        domain: Option<&str>,
+        note_type: Option<&str>,
+        status: Option<&str>,
+        limit: u32,
+        hops: u8,
+        edge_kinds: Option<&[String]>,
+        min_weight: f32,
+        include_base_lists: bool,
+    ) -> Result<Vec<NoteRow>, McpError> {
+        let active_model = db.active_embedding_model().map_err(Self::err)?;
+        let q_vec = vault::embedding::embed_query(query, &active_model).map_err(Self::err)?;
+        let bm25 = db
+            .search(query, domain, note_type, status, Some(vault::search::K_RRF_INPUT))
+            .map_err(Self::err)?;
+        let vec_hits = db
+            .search_vector(&q_vec, vault::search::K_RRF_INPUT, domain, note_type, status)
+            .map_err(Self::err)?;
+        self.warn_if_no_embeddings(db, &vec_hits)?;
+
+        let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
+        let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();
+
+        // Seed list = the hybrid-fused order; seed rank feeds w_seed.
+        let seed_fused = vault::search::reciprocal_rank_fusion(
+            &[&bm25_paths, &vec_paths],
+            vault::search::RRF_K,
+            vault::search::K_RRF_INPUT as usize,
+        );
+        let seed_paths: Vec<String> = seed_fused.iter().map(|h| h.note_path.clone()).collect();
+        let seed_rank: std::collections::HashMap<&str, usize> =
+            seed_paths.iter().enumerate().map(|(i, p)| (p.as_str(), i)).collect();
+
+        // Expand and score. Edge read lives in vault.
+        let reaches = db
+            .expand_graph(&seed_paths, hops, edge_kinds, min_weight)
+            .map_err(Self::err)?;
+        let mut scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+        for reach in &reaches {
+            let rank = *seed_rank.get(reach.origin_seed.as_str()).unwrap_or(&0);
+            // w_seed: better-ranked seeds (rank 0 = top) contribute more.
+            let w_seed = 1.0_f32 / (rank as f32 + 1.0);
+            let hop_decay = GRAPH_HOP_DECAY.powi(reach.hop as i32 - 1);
+            *scores.entry(reach.path.clone()).or_insert(0.0) += w_seed * reach.weight * hop_decay;
+        }
+
+        // Order neighbors by expansion score, then keep only those passing the
+        // schema filters (a neighbor in a different domain is dropped).
+        let mut scored: Vec<(String, f32)> = scores.into_iter().collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut graph_paths: Vec<String> = Vec::new();
+        for (path, _) in scored {
+            if Self::note_matches_filters(db, &path, domain, note_type, status)? {
+                graph_paths.push(path);
+            }
+        }
+
+        // Fuse. graph: seed ⊕ graph. graph-hybrid: bm25 ⊕ vector ⊕ graph.
+        let fused = if include_base_lists {
+            vault::search::reciprocal_rank_fusion(
+                &[&bm25_paths, &vec_paths, &graph_paths],
+                vault::search::RRF_K,
+                limit as usize,
+            )
+        } else {
+            vault::search::reciprocal_rank_fusion(&[&seed_paths, &graph_paths], vault::search::RRF_K, limit as usize)
+        };
+        Self::resolve_note_paths(db, fused.iter().map(|h| h.note_path.as_str()))
+    }
+
+    /// True when the note at `path` matches the (optional) schema filters.
+    /// A missing note fails the check (it cannot be a valid result).
+    fn note_matches_filters(
+        db: &SearchIndex,
+        path: &str,
+        domain: Option<&str>,
+        note_type: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<bool, McpError> {
+        let Some(note) = db.get_note(path).map_err(Self::err)? else {
+            return Ok(false);
+        };
+        let ok = domain.is_none_or(|d| note.domain == d)
+            && note_type.is_none_or(|t| note.note_type == t)
+            && status.is_none_or(|s| note.status == s);
+        Ok(ok)
+    }
+
     /// Format a NoteRow according to the requested detail level
     fn format_note(note: &NoteRow, detail_level: &DetailLevel) -> serde_json::Value {
         let metadata = json!({
@@ -283,20 +396,37 @@ impl OracleMcpServer {
                 let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
                 let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();
                 let fused = vault::search::reciprocal_rank_fusion(
-                    &bm25_paths,
-                    &vec_paths,
+                    &[&bm25_paths, &vec_paths],
                     vault::search::RRF_K,
                     limit as usize,
                 );
                 Self::resolve_note_paths(&db, fused.iter().map(|h| h.note_path.as_str()))?
             }
+            SearchMode::Graph | SearchMode::GraphHybrid => self.graph_dispatch(
+                &db,
+                &req.query,
+                domain,
+                note_type,
+                status,
+                limit,
+                req.expand_hops.unwrap_or(DEFAULT_EXPAND_HOPS).min(MAX_EXPAND_HOPS),
+                req.edge_kinds.as_deref(),
+                req.min_edge_weight.unwrap_or(0.0),
+                matches!(mode, SearchMode::GraphHybrid),
+            )?,
         };
 
         let results: Vec<serde_json::Value> = notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
 
         Ok(CallToolResult::success(vec![Content::json(json!({
             "count": results.len(),
-            "mode": match mode { SearchMode::Bm25 => "bm25", SearchMode::Vector => "vector", SearchMode::Hybrid => "hybrid" },
+            "mode": match mode {
+                SearchMode::Bm25 => "bm25",
+                SearchMode::Vector => "vector",
+                SearchMode::Hybrid => "hybrid",
+                SearchMode::Graph => "graph",
+                SearchMode::GraphHybrid => "graph-hybrid",
+            },
             "results": results,
         }))?]))
     }

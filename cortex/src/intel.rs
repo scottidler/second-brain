@@ -447,7 +447,7 @@ fn generate_weekly_review(
     if !by_type.is_empty() {
         review.push_str("## By Type\n\n");
         let mut types: Vec<_> = by_type.iter().collect();
-        types.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        types.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
         for (note_type, type_notes) in types {
             review.push_str(&format!("### {note_type} ({})\n\n", type_notes.len()));
             for note in type_notes {

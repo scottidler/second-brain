@@ -26,7 +26,7 @@ pub fn run(_args: DoctorArgs) -> Result<()> {
         .flat_map(|s| s.findings.into_iter().map(move |f| (s.name, f)))
         .collect();
     // Errors first, then warnings, then info, then ok.
-    all.sort_by(|a, b| b.1.severity.cmp(&a.1.severity));
+    all.sort_by_key(|b| std::cmp::Reverse(b.1.severity));
 
     let mut had_issue = false;
     for (section, f) in &all {

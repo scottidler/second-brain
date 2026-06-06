@@ -649,7 +649,12 @@ fn read_section_text(abs: &Path, header: &str) -> Option<String> {
 
 /// Try to acquire the embed file lock. The lock prevents the cortex
 /// daemon's embed tick from racing an ad-hoc `cortex embed` invocation.
-fn acquire_lock() -> Result<EmbedLock> {
+///
+/// `pub` so the graph pass (`cortex::graph`) can take the *same* lock and
+/// thereby serialize against any concurrent `cortex embed` write — the graph
+/// pass reads `note_embeddings` and must not interleave with an embed batch
+/// rewriting them.
+pub fn acquire_lock() -> Result<EmbedLock> {
     let path = lock_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).wrap_err("failed to create lock dir")?;

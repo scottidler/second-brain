@@ -321,6 +321,7 @@ impl TestVault {
             backfill: BackfillConfig::default(),
             fabric: FabricConfig::default(),
             embed: crate::config::EmbedConfig::default(),
+            graph: crate::config::GraphConfig::default(),
         }
     }
 

@@ -188,6 +188,10 @@ pub use vector::{
     BatchUpsert, EmbeddingKind, FusedHit, K_RRF_INPUT, RRF_K, StaleTarget, VectorHit, reciprocal_rank_fusion,
 };
 
+mod graph;
+
+pub use graph::{Edge, GraphNoteRow, GraphReach};
+
 impl SearchIndex {
     /// Open (or create) the search index at the given path
     pub fn open(db_path: &Path) -> Result<Self> {
@@ -267,6 +271,8 @@ impl SearchIndex {
             -- this index the query is a sequential scan over every note.
             CREATE INDEX IF NOT EXISTS idx_notes_modified_at ON notes(modified_at);",
         )?;
+
+        self.ensure_graph_schema()?;
 
         // Migrate older DBs: add columns the CREATE TABLE above lists but
         // existing schemas may be missing.
@@ -1293,7 +1299,7 @@ impl SearchIndex {
             })
             .collect();
 
-        stats.sort_by(|a, b| b.count.cmp(&a.count));
+        stats.sort_by_key(|b| std::cmp::Reverse(b.count));
         Ok(stats)
     }
 
@@ -1321,7 +1327,7 @@ impl SearchIndex {
         }
 
         let mut result: Vec<(String, u64)> = cooccur.into_iter().collect();
-        result.sort_by(|a, b| b.1.cmp(&a.1));
+        result.sort_by_key(|b| std::cmp::Reverse(b.1));
         Ok(result)
     }
 
@@ -1523,7 +1529,7 @@ impl SearchIndex {
         }
 
         let mut result: Vec<(String, u64)> = host_counts.into_iter().collect();
-        result.sort_by(|a, b| b.1.cmp(&a.1));
+        result.sort_by_key(|b| std::cmp::Reverse(b.1));
         Ok(result)
     }
 
@@ -1639,7 +1645,7 @@ impl SearchIndex {
             })
             .collect();
 
-        result.sort_by(|a, b| b.note_count.cmp(&a.note_count));
+        result.sort_by_key(|b| std::cmp::Reverse(b.note_count));
         Ok(result)
     }
 
@@ -1736,14 +1742,18 @@ fn extract_search_terms(content: &str, max_terms: usize) -> Vec<String> {
 
     // Sort by frequency (descending), take top N
     let mut terms: Vec<(String, usize)> = word_counts.into_iter().collect();
-    terms.sort_by(|a, b| b.1.cmp(&a.1));
+    terms.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     terms.into_iter().take(max_terms).map(|(word, _)| word).collect()
 }
 
 /// Extract wikilink targets from note body, skipping fenced code blocks.
 /// Handles [[simple]], [[with|alias]], [[with#heading]], [[path/to/note]].
-fn extract_wikilinks(body: &str) -> Vec<String> {
+///
+/// `pub` so the cortex graph pass can derive `wikilink` edges from the same
+/// parser oracle's link tools use (single source of wikilink-extraction
+/// truth).
+pub fn extract_wikilinks(body: &str) -> Vec<String> {
     let re = Regex::new(r"\[\[([^\]|#]+)(?:[|#][^\]]+)?\]\]").expect("wikilink regex");
     let mut targets = Vec::new();
     let mut in_code_block = false;

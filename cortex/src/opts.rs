@@ -175,6 +175,14 @@ pub struct EmbedOpts {
 }
 
 #[derive(Debug, Clone)]
+pub struct GraphOpts {
+    /// Force a full rebuild of the `edges` table (clear-then-rebuild every
+    /// note), bypassing the incremental watermarks. Implied on the first run
+    /// after a daemon restart (no persisted `last_run_at`).
+    pub backfill: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct SummarizeOpts {
     /// Backfill legacy notes into the structured L2 (`Distilled`) contract.
     /// Required: this is the only mode `cortex summarize` ships today.

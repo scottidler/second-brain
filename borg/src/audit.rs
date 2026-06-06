@@ -496,7 +496,7 @@ fn apply_fix_duplicate(
         // Need at least two readable mtimes to pick a winner; punt.
         return 0;
     }
-    with_mtime.sort_by(|a, b| b.1.cmp(&a.1));
+    with_mtime.sort_by_key(|b| std::cmp::Reverse(b.1));
     let (keep, _) = with_mtime.first().cloned().expect("len >= 2 verified above");
     let losers: Vec<PathBuf> = with_mtime.into_iter().skip(1).map(|(p, _)| p).collect();
 

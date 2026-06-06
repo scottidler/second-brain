@@ -232,6 +232,69 @@ impl SearchIndex {
         Ok(hits)
     }
 
+    /// Top-`k` semantic neighbors of a note by cosine similarity over the
+    /// `summary` `note_embeddings` rows, restricted to similarity
+    /// `>= min_cosine`.
+    ///
+    /// This is the per-note reader the graph pass needs but `search_vector`
+    /// does not provide: `search_vector` takes an *external* query vector,
+    /// and the per-row BLOB decoder is private. Here we read `note_path`'s own
+    /// stored summary vector, then reuse the same zero-allocation
+    /// dot-product loop against every *other* note's summary vector. Both
+    /// vectors are L2-normalized, so the dot product is cosine similarity in
+    /// `[-1, 1]`; larger is closer. Returns `(neighbor_path, cosine)` pairs
+    /// sorted by descending similarity, capped at `k`. Returns an empty Vec
+    /// when the note has no summary embedding yet (the graph pass skips it).
+    pub fn semantic_neighbors(&self, note_path: &str, k: usize, min_cosine: f32) -> Result<Vec<(String, f32)>> {
+        let active_model = self.active_embedding_model()?;
+
+        // Read the source note's own summary vector.
+        let own: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT embedding FROM note_embeddings
+                 WHERE note_path = ?1 AND kind = ?2 AND model_version = ?3
+                 ORDER BY chunk_index LIMIT 1",
+                params![note_path, EmbeddingKind::Summary.as_str(), active_model],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(own_bytes) = own else {
+            return Ok(vec![]);
+        };
+        if own_bytes.len() % 4 != 0 {
+            eyre::bail!("note {note_path} summary embedding BLOB length not a multiple of 4");
+        }
+        let query_vec: Vec<f32> = own_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        // Scan every other note's summary vector for the active model.
+        let mut stmt = self.conn.prepare(
+            "SELECT note_path, embedding FROM note_embeddings
+             WHERE kind = ?1 AND model_version = ?2 AND note_path != ?3",
+        )?;
+        let mut hits: Vec<(String, f32)> = Vec::new();
+        let mut rows = stmt.query(params![EmbeddingKind::Summary.as_str(), active_model, note_path])?;
+        while let Some(row) = rows.next()? {
+            let neighbor: String = row.get(0)?;
+            let bytes: Vec<u8> = row.get(1)?;
+            if bytes.len() != query_vec.len() * 4 {
+                log::warn!("semantic_neighbors: dim mismatch for {neighbor}, skipping");
+                continue;
+            }
+            let cosine = dot_product_from_bytes(&query_vec, &bytes);
+            if cosine >= min_cosine {
+                hits.push((neighbor, cosine));
+            }
+        }
+
+        hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(k);
+        Ok(hits)
+    }
+
     /// Insert (or replace) a single embedding row.
     ///
     /// The UNIQUE `(note_path, kind, chunk_index, model_version)` constraint
@@ -503,6 +566,45 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Note paths whose newest `summary` embedding (for the active model) was
+    /// produced after their semantic edges were last built —
+    /// `note_embeddings.produced_at > edge_build_state.semantic_built_at`
+    /// (no `edge_build_state` row defaults to 0). This is the **semantic-edge
+    /// incremental trigger**: it keys on `produced_at`, NOT
+    /// `notes.modified_at`, because `cortex embed` bumps `produced_at` when a
+    /// vector lands but never touches `modified_at` — so a note whose
+    /// embedding arrives after it was skipped is picked up here (no stranding).
+    pub fn semantic_edge_targets(&self) -> Result<Vec<String>> {
+        let active_model = self.active_embedding_model()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT e.note_path FROM note_embeddings e
+             LEFT JOIN edge_build_state s ON s.note_path = e.note_path
+             WHERE e.kind = ?1 AND e.model_version = ?2
+               AND e.produced_at > COALESCE(s.semantic_built_at, 0)",
+        )?;
+        let rows = stmt
+            .query_map(params![EmbeddingKind::Summary.as_str(), active_model], |row| {
+                row.get::<_, String>(0)
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Newest `summary`-embedding `produced_at` for one note (0 when it has no
+    /// summary embedding for the active model). Persisted as the note's
+    /// `semantic_built_at` after its edges are rebuilt.
+    pub fn note_summary_produced_at(&self, note_path: &str) -> Result<i64> {
+        let active_model = self.active_embedding_model()?;
+        let v: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(produced_at), 0) FROM note_embeddings
+             WHERE note_path = ?1 AND kind = ?2 AND model_version = ?3",
+            params![note_path, EmbeddingKind::Summary.as_str(), active_model],
+            |row| row.get(0),
+        )?;
+        Ok(v)
+    }
+
     /// Read the active embedding model identifier from `embedding_config`.
     /// Both oracle and cortex read this on every dispatch so they never
     /// drift onto different models.
@@ -537,26 +639,26 @@ pub struct FusedHit {
     pub score: f32,
 }
 
-/// Reciprocal Rank Fusion (Cormack 2009).
+/// Reciprocal Rank Fusion (Cormack 2009) over any number of ranked lists.
 ///
 /// Each input list is treated as a ranking (position 0 = top). A note's
-/// fused score is the sum across both lists of `1 / (k + rank)`. Notes
-/// present in only one list still contribute (their absence from the
-/// other list adds zero). The result is sorted by descending score and
-/// truncated to `limit`.
+/// fused score is the sum across all lists of `1 / (k + rank)`. Notes
+/// present in only some lists still contribute (absence from a list adds
+/// zero). The result is sorted by descending score and truncated to
+/// `limit`. Generalized from the original two-list form so `graph-hybrid`
+/// can fuse bm25 ⊕ vector ⊕ graph in one pass; the two-list hybrid caller
+/// passes `&[&bm25, &vec]` and gets identical output.
 ///
 /// `k` is the smoothing constant; the literature's default of 60 keeps
 /// the contribution of low-rank hits from dominating.
-pub fn reciprocal_rank_fusion(bm25_paths: &[String], vec_paths: &[String], k: usize, limit: usize) -> Vec<FusedHit> {
+pub fn reciprocal_rank_fusion(lists: &[&[String]], k: usize, limit: usize) -> Vec<FusedHit> {
     use std::collections::HashMap;
     let mut scores: HashMap<String, f32> = HashMap::new();
-    for (rank, path) in bm25_paths.iter().enumerate() {
-        let contrib = 1.0_f32 / (k as f32 + (rank + 1) as f32);
-        *scores.entry(path.clone()).or_insert(0.0) += contrib;
-    }
-    for (rank, path) in vec_paths.iter().enumerate() {
-        let contrib = 1.0_f32 / (k as f32 + (rank + 1) as f32);
-        *scores.entry(path.clone()).or_insert(0.0) += contrib;
+    for list in lists {
+        for (rank, path) in list.iter().enumerate() {
+            let contrib = 1.0_f32 / (k as f32 + (rank + 1) as f32);
+            *scores.entry(path.clone()).or_insert(0.0) += contrib;
+        }
     }
     let mut fused: Vec<FusedHit> = scores
         .into_iter()

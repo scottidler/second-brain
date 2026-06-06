@@ -20,6 +20,7 @@ pub struct Config {
     pub backfill: BackfillConfig,
     pub fabric: FabricConfig,
     pub embed: EmbedConfig,
+    pub graph: GraphConfig,
 }
 
 impl Default for Config {
@@ -37,6 +38,49 @@ impl Default for Config {
             backfill: BackfillConfig::default(),
             fabric: FabricConfig::default(),
             embed: EmbedConfig::default(),
+            graph: GraphConfig::default(),
+        }
+    }
+}
+
+/// Knobs for the `cortex graph` deterministic-edge pass and its daemon tick.
+///
+/// All edge-shape constants (kNN `k`, cosine threshold, per-kind weights,
+/// fan-out cap) are tunable here rather than hardcoded so the design's
+/// "calibrate against the labeled query set" open questions are a config edit.
+/// Defaults are the design doc's suggested starting values.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct GraphConfig {
+    /// Daemon cadence (seconds) for the graph tick. Runs after the embed tick
+    /// so semantic edges see fresh vectors. Default 900 (15 min).
+    pub graph_interval_secs: u64,
+    /// Top-k semantic neighbors retained per note.
+    pub semantic_k: usize,
+    /// Minimum cosine similarity for a semantic edge.
+    pub min_cosine: f32,
+    /// Tags/creators/sources/domains held by more than this many notes are
+    /// skipped for pairwise edge emission (routed through hub notes in
+    /// Phase 3 instead) so blanket buckets do not explode the table.
+    pub fanout_cap: usize,
+    /// Fixed weight for shared-creator edges.
+    pub creator_weight: f32,
+    /// Fixed weight for shared-source-host edges.
+    pub source_weight: f32,
+    /// Fixed weight for shared-domain edges.
+    pub domain_weight: f32,
+}
+
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            graph_interval_secs: 900,
+            semantic_k: 10,
+            min_cosine: 0.6,
+            fanout_cap: 100,
+            creator_weight: 0.2,
+            source_weight: 0.15,
+            domain_weight: 0.1,
         }
     }
 }

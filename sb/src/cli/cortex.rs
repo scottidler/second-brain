@@ -75,6 +75,8 @@ pub enum Command {
     Summarize(SummarizeArgs),
     /// Embed note summaries (and Phase B transcripts) into the search DB
     Embed(EmbedArgs),
+    /// Build the deterministic edge graph oracle's graph retrieval reads
+    Graph(GraphArgs),
 }
 
 #[derive(Args)]
@@ -276,6 +278,19 @@ impl From<EmbedArgs> for opts::EmbedOpts {
 }
 
 #[derive(Args)]
+pub struct GraphArgs {
+    /// Force a full rebuild of the edge graph (clear-then-rebuild every note),
+    /// bypassing the incremental per-note watermarks.
+    #[arg(long)]
+    pub backfill: bool,
+}
+impl From<GraphArgs> for opts::GraphOpts {
+    fn from(a: GraphArgs) -> Self {
+        Self { backfill: a.backfill }
+    }
+}
+
+#[derive(Args)]
 pub struct SummarizeArgs {
     #[arg(long)]
     pub backfill: bool,
@@ -416,6 +431,19 @@ impl CortexCli {
                         stats.scanned, stats.embedded, stats.skipped_empty, stats.failed,
                     );
                 }
+            }
+            Command::Graph(a) => {
+                let stats = cortex::graph::run(&vault_root, &config, &a.into())?;
+                println!(
+                    "graph complete: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={} skipped={}",
+                    stats.full_rebuild,
+                    stats.notes_processed,
+                    stats.semantic,
+                    stats.wikilink,
+                    stats.shared_tag,
+                    stats.metadata,
+                    stats.skipped,
+                );
             }
         }
         Ok(())

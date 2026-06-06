@@ -17,12 +17,19 @@ use vault::schema::{Domain, NoteType, Status};
 ///   over `note_embeddings`. Best for conceptual recall.
 /// - `hybrid`: BM25 and vector fused via reciprocal rank fusion (the
 ///   default; recovers both behaviors).
+/// - `graph`: seed via hybrid, then expand one hop along the materialized
+///   `edges` graph and re-fuse the seed list with the graph-expanded list.
+///   Surfaces neighbors that no single query term would reach.
+/// - `graph-hybrid`: like `graph`, but also carries the original BM25 and
+///   vector lists into the fusion (bm25 ⊕ vector ⊕ graph).
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SearchMode {
     Bm25,
     Vector,
     Hybrid,
+    Graph,
+    GraphHybrid,
 }
 
 /// Search the vault's ingested knowledge.
@@ -59,9 +66,26 @@ pub struct KnowledgeSearchRequest {
 
     /// Retrieval mode. Default: hybrid.
     #[schemars(
-        description = "Retrieval mode: bm25 (FTS5 keyword search), vector (semantic, brute-force cosine over embeddings), or hybrid (BM25 + vector fused via RRF). Default: hybrid."
+        description = "Retrieval mode: bm25 (FTS5 keyword search), vector (semantic cosine over embeddings), hybrid (BM25 + vector fused via RRF; default), graph (hybrid seed expanded one hop along the edge graph), or graph-hybrid (bm25 + vector + graph fused)."
     )]
     pub mode: Option<SearchMode>,
+
+    /// Graph modes only: how many hops to expand from each seed (default 1,
+    /// capped at 2).
+    #[schemars(description = "Graph modes: hops to expand from each seed (default 1, max 2)")]
+    pub expand_hops: Option<u8>,
+
+    /// Graph modes only: restrict expansion to these edge kinds (e.g.
+    /// "semantic", "wikilink", "shared-tag"). Default: all kinds.
+    #[schemars(
+        description = "Graph modes: edge kinds to traverse (default: all). e.g. semantic, wikilink, shared-tag"
+    )]
+    pub edge_kinds: Option<Vec<String>>,
+
+    /// Graph modes only: drop edges below this weight during expansion
+    /// (default 0.0).
+    #[schemars(description = "Graph modes: minimum edge weight to traverse (default 0.0)")]
+    pub min_edge_weight: Option<f32>,
 }
 
 /// Read a specific note by its vault-relative path.

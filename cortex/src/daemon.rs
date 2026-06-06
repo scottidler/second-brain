@@ -149,6 +149,14 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut cold_interval = tokio::time::interval(Duration::from_secs(daemon_config.cold_interval_secs));
     cold_interval.tick().await; // consume the immediate first tick
 
+    // Graph-augmented-memory edge pass. Runs on its own cadence, ordered
+    // AFTER the embed tick so semantic edges see fresh vectors. The pass takes
+    // the same embed file lock, so it cannot interleave with an embed write;
+    // its first run after a restart is a full rebuild (no persisted
+    // last_run_at), incremental thereafter.
+    let mut graph_interval = tokio::time::interval(Duration::from_secs(config.graph.graph_interval_secs));
+    graph_interval.tick().await; // consume the immediate first tick
+
     // Run a full sweep on startup.
     // block_in_place isolates the blocking CPU+I/O sweep from the tokio worker thread, letting
     // the watcher and timers continue to run; once Phase 1 rayon lands inside scan_vault, this
@@ -253,6 +261,22 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                         // Idle tick - nothing to embed. Stay quiet to keep the log readable.
                     }
                     Err(e) => log::error!("daemon embed tick failed: {e}"),
+                }
+            }
+            _ = graph_interval.tick() => {
+                // Graph edge pass. block_in_place because the build runs
+                // SQLite IO + brute-force cosine (when notes changed); it must
+                // not starve the watcher/timers. Ordered after the embed tick
+                // via cadence so semantic edges see fresh vectors.
+                match tokio::task::block_in_place(|| crate::graph::daemon_tick(vault_root, config)) {
+                    Ok(stats) if stats.notes_processed > 0 => log::info!(
+                        "daemon graph tick: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={}",
+                        stats.full_rebuild, stats.notes_processed, stats.semantic, stats.wikilink, stats.shared_tag, stats.metadata,
+                    ),
+                    Ok(_) => {
+                        // Idle tick - no changed notes. Stay quiet.
+                    }
+                    Err(e) => log::error!("daemon graph tick failed: {e}"),
                 }
             }
             _ = cold_interval.tick() => {
