@@ -1,47 +1,100 @@
 # Relevance-lift evaluation query set for `sb oracle eval`.
 #
-# Seed queries (hand-written, representative of real retrieval use). The design
-# (docs/design/2026-06-06-oracle-eval-relevance-lift.md) calls for expanding
-# these ~10 seeds to ~30 as a one-time authoring step (Phase 5). Some queries
-# deliberately target fact-dense entities (claude / anthropic / mcp) so the
-# fact-layer ablation is actually exercised.
+# Grounded in the live corpus (AI / claude-code, Obsidian, Rust, tech) — each
+# query sits on a dense answer cluster so the eval measures RANKING quality, not
+# missing content. No domain filters, mirroring how retrieval is actually used.
 #
-# Schema (kebab-case):
-#   id:          stable identifier (cache key; do NOT reuse an id for a new query)
-#   query:       the search string
-#   domain:      optional schema filter passed to search
-#   calibration: optional map of note-path -> graded human label (0..3); present
-#                only on the handful of queries used to validate the LLM judge.
-#                Authored AFTER a first run via `--emit-calibration` reveals the pool.
+# 4 queries carry hand-labeled `calibration:` maps (Scott's blind 0-3 scores)
+# used to validate the LLM judge against human ground truth.
 
 queries:
-  - id: cc-mcp-setup
-    query: "how do I configure claude code MCP servers"
-    domain: ai
-  - id: cc-from-anthropic
-    query: "who builds claude code and what is it"
-    domain: ai
-  - id: mcp-protocol
-    query: "what is the model context protocol and how does it connect to claude"
-    domain: ai
-  - id: rust-error-handling
-    query: "rust eyre vs thiserror when to use which"
-    domain: tech
-  - id: obsidian-claude-workflow
-    query: "using claude code with obsidian for notes"
-    domain: ai
-  - id: ff-pass-install
-    query: "youth football pass concepts for install week"
-    domain: football
-  - id: ff-defense-youth
-    query: "youth football defensive scheme for small teams"
-    domain: football
-  - id: homelab-k8s
-    query: "kubernetes operator pattern for homelab"
-    domain: homelab
-  - id: embeddings-search
-    query: "semantic search with embeddings and cosine similarity"
-    domain: tech
-  - id: agent-orchestration
-    query: "orchestrating multiple AI agents in a loop"
-    domain: ai
+  - id: agent-24-7-secure
+    query: "how to run an AI coding agent 24/7 securely"
+    calibration:
+      "entities/agents.md": 2
+      "entities/claude.md": 1
+      "entities/youtube-com.md": 0
+      "notes/12-claude-code-features-every-engineer-should-know-subagents-claude-md.md": 2
+      "notes/claude-code-cmux-the-ultimate-ai-coding-terminal.md": 1
+      "notes/engineers-delete-the-bash-tool-agentic-security-for-pi-agent-and-claude-code.md": 3
+      "notes/how-to-make-claude-code-less-dumb.md": 1
+      "notes/how-to-set-up-openclaw-clawdbot-without-getting-hacked-isolation-least.md": 3
+      "notes/how-we-claude-code-thariqs-workshop-recap.md": 2
+      "notes/openclaw-vs-hermes-agent-the-race-to-build-ai-assistants-that-never-forget.md": 2
+      "notes/the-best-tuis-powerful-terminal-apps.md": 0
+      "notes/the-rust-sidecar-pattern-that-fixes-python-ai-s-biggest-weakness.md": 0
+      "notes/this-kubernetes-homelab-setup-is-my-favorite-one-yet.md": 0
+      "notes/vibe-coding-levels-1-5-most-devs-are-stuck-at-3.md": 0
+      "notes/why-agent-harnesses-fail-inside-cloud-native-systems.md": 0
+  - id: context-engineering-cc
+    query: "context engineering techniques to get the most out of claude code"
+  - id: cli-tools-claude-code
+    query: "which CLI tools pair best with claude code"
+    calibration:
+      "entities/agents.md": 2
+      "entities/claude.md": 1
+      "entities/youtube-com.md": 0
+      "notes/10-claude-code-plugins-to-10x-your-projects.md": 0
+      "notes/10-cli-tools-im-using-alongside-claude-code-starmorph-ai.md": 3
+      "notes/10-cli-tools-that-make-claude-code-unstoppable.md": 3
+      "notes/9-hacks-to-use-claude-code-better-than-90-of-people-in-9-minutes.md": 2
+      "notes/ai/2026-04-04-claude-code-insights.md": 0
+      "notes/git-worktrees-arent-the-problem-its-your-setup.md": 0
+      "notes/gsd-2-vs-claude-code-a-new-ai-king.md": 0
+      "notes/how-i-quickly-capture-ideas-using-obsidian-md-and-fleeting-notes.md": 0
+      "notes/how-to-build-a-private-ai-agent-with-claude-code-cli-ollama.md": 0
+      "notes/i-use-claude-code-to-set-up-claude-code-better-and-i-wouldnt-have-it-any-other.md": 2
+      "notes/stop-copy-pasting-into-claude-install-claude-code-and-actually-use-it.md": 0
+      "notes/top-10-claude-code-skills-plugins-clis-april-2026.md": 0
+  - id: cc-multi-agent
+    query: "claude code multi-agent orchestration and subagents"
+  - id: second-brain-obsidian
+    query: "building an AI second brain with claude code and obsidian"
+    calibration:
+      "notes/6-claude-code-github-repos-that-change-everything.md": 0
+      "notes/ai/daily/2026-05-11.md": 3
+      "notes/ai/weekly/2026-03-16.md": 3
+      "notes/ai/weekly/2026-05-04.md": 3
+      "notes/build-your-ai-second-brain-with-obsidian-claude-code-free-setup.md": 3
+      "notes/claude-code-obsidian-in-under-1-minute.md": 2
+      "notes/claude-code-obsidian-ultimate-ai-life-os.md": 3
+      "notes/claude-code-turned-obsidian-into-my-dream-second-brain.md": 3
+      "notes/claude-obsidian-full-ai-operating-system.md": 3
+      "notes/dont-use-karpathys-second-brain-i-built-something-better.md": 3
+      "notes/give-me-15-minutes-ill-teach-you-80-of-obsidian.md": 2
+      "notes/how-i-built-a-second-brain-in-obsidian-md-tiago-forte-basb-para-method.md": 3
+      "notes/how-i-quickly-capture-ideas-using-obsidian-md-and-fleeting-notes.md": 2
+      "notes/how-i-set-up-my-ai-powered-second-brain-in-obsidian-chatgpt-search-assistant.md": 3
+      "notes/how-i-use-obsidian-claude-code-to-run-my-life.md": 3
+      "notes/how-to-use-obsidian-without-folders-real-setup-2026-step-by-step.md": 2
+      "notes/i-built-my-second-brain-with-claude-code-obsidian-skills-heres-how.md": 3
+      "notes/obsidian-vault-deep-dive-custom-plugins-agentic-loops-my-full-system.md": 2
+      "notes/the-ultimate-ai-idea-garden-obsidian-claude-code-tutorial.md": 3
+      "notes/what-nobody-tells-you-about-organizing-folders-in-obsidian.md": 2
+      "notes/why-2026-is-the-year-to-build-a-second-brain-and-why-you-need-one.md": 3
+      "notes/why-obsidian-s-daily-notes-feature-is-the-best-starting-point-for-your-second.md": 2
+      "system/design-vault-reorganization.md": 2
+  - id: obsidian-setup
+    query: "obsidian writing and setup workflows"
+  - id: rust-apps
+    query: "building apps in rust - full-stack, shells, and TUIs"
+    calibration:
+      "entities/claude.md": 0
+      "entities/github-com.md": 1
+      "entities/youtube-com.md": 0
+      "notes/ai/daily/2026-04-23.md": 0
+      "notes/brush-v0-4-released-as-significant-release-for-this-rust-based-shell.md": 3
+      "notes/github-rothgar-awesome-tuis-list-of-projects-that-provide-terminal-user.md": 3
+      "notes/how-rust-ides-understand-code-the-rustrover-blog.md": 2
+      "notes/improve-your-rust-apis-with-the-type-state-pattern.md": 2
+      "notes/rust-coreutils-0-8-brings-significant-performance-gains.md": 2
+      "notes/rust-for-the-impatient.md": 2
+      "notes/rust-top-10-cli-programs.md": 3
+      "notes/rust-your-code-can-be-perfect.md": 3
+      "notes/unified-linux-clipboard-research.md": 2
+      "notes/writing-a-rest-api-in-rust.md": 3
+      "notes/yazi-is-the-terminal-based-file-manager-i-didnt-know-i-needed.md": 3
+  - id: homelab-networking
+    query: "homelab networking and firewall security"
+  - id: agent-memory
+    query: "how do AI agents remember and persist memory"
