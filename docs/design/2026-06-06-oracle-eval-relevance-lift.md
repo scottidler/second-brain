@@ -128,12 +128,16 @@ Judgment cache (`~/.local/share/sb/oracle/eval-cache.db`):
 ```sql
 CREATE TABLE eval_judgments (
   query_id        TEXT NOT NULL,
+  query_hash      TEXT NOT NULL,   -- hash of the query TEXT; editing the query in
+                                   -- queries.yml (same id) must NOT hit a stale
+                                   -- judgment made against the old prompt (finding #2)
   note_path       TEXT NOT NULL,
-  content_hash    TEXT NOT NULL,   -- hash of the exact text shown to the judge
+  content_hash    TEXT NOT NULL,   -- hash of the exact note text shown to the judge
   judge_model     TEXT NOT NULL,
   rubric_version  TEXT NOT NULL,   -- bump to invalidate all judgments on rubric change
   score           INTEGER NOT NULL,-- 0..3
-  PRIMARY KEY (query_id, note_path, content_hash, judge_model, rubric_version)
+  truncated       INTEGER NOT NULL DEFAULT 0, -- 1 = judged on a truncated body (low-confidence, finding #1)
+  PRIMARY KEY (query_id, query_hash, note_path, content_hash, judge_model, rubric_version)
 );
 ```
 
@@ -192,14 +196,31 @@ count reported.
 
 ### Judged text source
 
-The judge grades the note's **own content**, fetched once via `db.get_note(path)`
-(not the truncated `NoteRow.summary`, which varies by mode). The text sent is:
-note title + body, with `[[target|Display]]` / `[[target]]` markup rendered to
-plain display text (so the judge reads prose, not link syntax), truncated to a
-fixed token budget. `content_hash` is computed over this exact sent string, so a
-note edit invalidates only that note's cached judgment. The text is identical
-regardless of which mode surfaced the note — a judgment is a property of
-`(query, note)`, never of the mode.
+**The judge grades the note's distilled representation: title + `## Summary` +
+`## Claims`** (the L2 distilled contract, `vault::distilled`), fetched via
+`db.get_note(path)`. This is deliberate, and it resolves the truncation hazard
+the Architect raised (finding #1):
+
+- The distilled summary/claims are **bounded** (they always fit the judge's
+  context — no truncation), **complete** (they are the note's distilled essence,
+  not an arbitrary head-of-body excerpt), and **mode-independent**.
+- Retrieval returns **notes**, not passages, so note-level "is this note about
+  the query" is the correct unit of judgment — and the summary is the faithful
+  note-level representation.
+
+**Truncation-bias guard:** for legacy notes lacking a distilled summary, the
+judge falls back to title + body rendered to plain text (`[[target|Display]]`
+markup flattened to display text) truncated to a fixed token budget — and any
+judgment produced from a *truncated* body is tagged `truncated: true` and
+reported as **low-confidence** (so a baseline mode that matched dropped tail
+content is never silently scored 0 without a flagged caveat). The eval reports
+the count of truncated-source judgments; if it is high, the result carries a
+"long-document judging unreliable" banner.
+
+`content_hash` is computed over the exact string sent to the judge (summary form
+or truncated-body form), so a note edit invalidates only that note's cached
+judgment, and the text is identical regardless of which mode surfaced the note —
+a judgment is a property of `(query, note)`, never of the mode.
 
 The judge's reply is parsed to a single integer 0–3; out-of-range or
 unparseable replies are clamped to range when a leading digit is present, else
@@ -209,12 +230,29 @@ scored 0).
 ### Fact-layer ablation
 
 Beyond the five standard modes, the eval runs one ablation variant:
-`graph-hybrid` with `edge_kinds` restricted to exclude `fact` (deterministic
-edges only). Comparing full `graph-hybrid` against this ablation isolates the
-typed fact layer's marginal contribution — distinct from the deterministic
-edges. Reported as its own row with lift vs both `hybrid` and the ablation. This
-directly answers "does the fact graph help retrieval, or just the deterministic
-edges?"
+`graph-hybrid` restricted to deterministic edges only. Comparing full
+`graph-hybrid` against this ablation isolates the typed fact layer's marginal
+contribution. Reported as its own row with lift vs both `hybrid` and the
+ablation.
+
+**`edge_kinds` is an include-list, not an exclude (finding #5).** Verified in
+`oracle/src/tools.rs`: `KnowledgeSearchRequest.edge_kinds` is `Option<Vec<String>>`
+used as an allow-list by `expand_graph`. So the ablation cannot "exclude fact";
+it must pass the explicit include-list of all non-fact kinds. The harness builds
+it at runtime via `SELECT DISTINCT kind FROM edges WHERE kind != 'fact'` (so new
+deterministic kinds are picked up automatically) rather than hardcoding the six.
+
+**The ablation can be inconclusive, and the eval must say so (finding #4).** With
+only ~130 fact edges against ~162k deterministic edges, a 30-query set may never
+touch the fact layer — in which case the ablation lift is `0.0` meaning *"not
+exercised,"* not *"no value."* Two safeguards:
+- **Seed fact-dense queries:** `queries.yml` deliberately includes queries
+  targeting entities known to carry fact edges (e.g. claude / anthropic / mcp),
+  so the layer is actually exercised.
+- **Report ablation coverage:** the eval counts how many queries' pools *changed*
+  when fact edges were removed. If coverage is ~0, the row prints
+  **"inconclusive — fact layer not exercised (N/30 queries touched a fact edge)"**
+  instead of a misleading `0.0` lift.
 
 ### Calibration workflow (resolves the label chicken-and-egg)
 
@@ -225,8 +263,34 @@ is two-step:
    pool + LLM-judge for the calibration queries and writes a sheet of
    `(query, note, judge_score, human_score: ~)` rows.
 2. You fill `human_score`; a normal eval run reads the filled sheet and reports
-   Cohen's κ (human vs judge). Until a sheet is filled, results print with an
+   judge↔human agreement. Until a sheet is filled, results print with an
    "uncalibrated — judge unvalidated" banner.
+
+**Agreement is reported as a panel, not a single κ (finding #3 — the kappa
+paradox).** IR pools are class-imbalanced (most pooled notes are irrelevant), so
+chance-agreement inflates and Cohen's κ is artificially suppressed — an accurate
+judge can score low κ purely from base rate. The eval therefore reports, and the
+trustworthiness gate considers, all of:
+- **exact-match %** and **adjacent (±1) %** agreement,
+- the judge's **precision and recall at the `rel ≥ 2` boundary** (does the judge
+  agree with you on what counts as a *hit*, which is what the metrics actually
+  use), and
+- **Cohen's κ** (kept for reference, not as the sole gate).
+
+The gate trips low-confidence only if the boundary precision/recall is poor; κ
+alone never suppresses an otherwise-agreeing judge.
+
+### Metric reproducibility (no metric-level tiebreak needed)
+
+The metrics consume each mode's ranked list, so reproducibility depends on those
+lists being totally ordered. This is guaranteed by stable path-ascending
+tiebreakers in every score sort feeding retrieval: `reciprocal_rank_fusion` and
+`graph_dispatch` (v0.8.56) and `search_vector` (v0.8.57 — found during the
+Architect review of this doc; v0.8.56 had missed the raw vector path). With the
+input lists deterministic, nDCG@K and MRR need no metric-level tiebreak. IDCG is
+also well-defined without one: it is the maximum achievable DCG, invariant to how
+equal-relevance notes are ordered. BM25 (`ORDER BY rank`) is SQLite-deterministic
+per database, so it carries no Rust-HashMap-seed nondeterminism.
 
 ### Concurrency / safety
 
@@ -262,11 +326,15 @@ does not need the daemon stopped.
 
 #### Phase 5: Calibration + ablation + report
 **Model:** opus
-- `--emit-calibration` sheet flow; Cohen's κ between hand labels and judge;
-  trustworthiness gate (κ ≥ 0.4 → ok; below → flag results low-confidence).
-- Fact-layer ablation row (`graph-hybrid` minus `fact` edge kind).
-- Report renderer: per-mode table, lift vs hybrid, ablation row, per-query
-  breakdown, coverage (judged/total), excluded-query counts, κ, and caveats.
+- `--emit-calibration` sheet flow; agreement panel (exact %, adjacent %, judge
+  precision/recall at `rel ≥ 2`, plus κ for reference); gate on boundary
+  precision/recall, not κ alone.
+- Fact-layer ablation row via runtime-built non-fact `edge_kinds` include-list;
+  report ablation coverage (queries whose pool changed); print "inconclusive" when
+  coverage ~0.
+- Report renderer: per-mode table, lift vs hybrid + vs ablation, per-query
+  breakdown, coverage (judged/total), truncated-source count, excluded-query
+  counts, agreement panel, and caveats.
 - One-time authoring: expand the 10 seed queries to ~30 → `queries.yml`. Commit
   the first run's report as a dated baseline under `docs/design/`.
 
@@ -333,10 +401,13 @@ does not need the daemon stopped.
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| LLM-judge disagrees with human notion of relevance | Med | High | Calibration κ on hand-labeled subset; flag low-confidence if κ < 0.4 |
+| LLM-judge disagrees with human notion of relevance | Med | High | Agreement panel (exact/adjacent %, boundary precision/recall, κ); gate on boundary precision/recall, not κ alone (kappa-paradox safe) |
+| Truncation blinds judge to deep matches, penalizing full-text baselines | Med | High | Judge on bounded distilled summary+claims (no truncation); legacy fallback flags `truncated` judgments low-confidence and reports the count |
+| Fact-layer ablation inconclusive (130 facts vs 30 queries) | High | Med | Seed fact-dense queries; report ablation coverage; print "inconclusive" when coverage ~0 |
 | Circular labels inflate graph lift | Low | High | Judge is blind to mode/edges/embeddings; pooling is union; relevant-set from judgments only |
 | Pool depth (K) caps measurable recall | High | Med | Document Recall as pool-relative (TREC pooling); raise K if needed |
 | Small N (~30) → noisy lift | High | Med | Report per-query breakdown; treat as directional, not significant |
+| Stale cached judgment after query-text edit | Med | Med | Cache key includes `query_hash`; editing the query invalidates its judgments |
 | Judge nondeterminism across cold runs | Med | Med | Judge at temperature 0 where supported; cache freezes first judgment for reproducibility |
 | Eval measures a different path than users hit | Low | High | `run_search_mode` shared between MCP handler and eval |
 
