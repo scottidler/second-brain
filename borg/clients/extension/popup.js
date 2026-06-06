@@ -4,6 +4,12 @@
 // long-lived background context being alive - that context could die mid-session
 // and brick the silent onClicked path (see
 // docs/design/2026-06-03-extension-popup-capture.md).
+//
+// The fetch deliberately does NOT set `keepalive: true`. On snap Firefox (150.x)
+// the keepalive popup fetch never reached the daemon (no receipt, no daemon log);
+// dropping it fixed capture. The ~17ms POST completes before the popup can lose
+// focus, so the focus-loss-abort case keepalive guarded against does not occur
+// in practice.
 
 async function getEndpoint() {
   const data = await chrome.storage.local.get("endpoint");
@@ -14,6 +20,7 @@ function fail(status, message) {
   // The popup can be destroyed on focus loss before the operator reads inline
   // text, so a desktop notification is the durable error channel.
   status.textContent = message;
+  status.style.color = "#C62828";
   chrome.notifications.create({
     type: "basic",
     iconUrl: "icons/locutus-48.png",
@@ -34,27 +41,24 @@ async function capture() {
 
   const endpoint = await getEndpoint();
   try {
-    const response = await fetch(`${endpoint}/ingest`, {
+    const res = await fetch(`${endpoint}/ingest`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: tab.url }),
-      // Complete the POST even if the popup closes on focus loss; without this
-      // a focus-loss close aborts the in-flight request at the TCP level.
-      keepalive: true,
     });
-    if (!response.ok) {
+    if (!res.ok) {
       // fetch does not reject on HTTP 4xx/5xx - a daemon-side error with a JSON
       // body would otherwise masquerade as success.
-      fail(status, `Daemon error: HTTP ${response.status}`);
+      fail(status, `Daemon error: HTTP ${res.status}`);
       return;
     }
-    await response.json();
-    status.textContent = "Queued";
-    // Brief confirmation, then self-close. Terminal Saved/Duplicate/Failed
-    // arrives via the daemon's desktop notification sink, unchanged.
-    setTimeout(() => window.close(), 400);
+    const body = await res.json();
+    status.textContent = `✓ Queued (${(body && body.trace_id) || "ok"})`;
+    status.style.color = "#2E7D32";
+    // Stay visible briefly as confirmation, then self-close.
+    setTimeout(() => window.close(), 1500);
   } catch (err) {
-    fail(status, `Error: ${err.message}`);
+    fail(status, `Error: ${(err && err.message) || err}`);
   }
 }
 
