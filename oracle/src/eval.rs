@@ -8,30 +8,49 @@
 //! injected via the [`judge::RelevanceJudge`] trait so tests run without an LLM.
 
 pub mod cache;
+pub mod calc;
 pub mod judge;
 pub mod metrics;
 pub mod queries;
+pub mod report;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use eyre::Result;
+use eyre::{Context, Result, eyre};
+use vault::search::SearchIndex;
 
 use crate::config::Config;
+use crate::server::OracleMcpServer;
+use crate::tools::SearchMode;
 
-pub use judge::{MockJudge, RelevanceJudge};
+pub use judge::{FabricJudge, MockJudge, RelevanceJudge};
 pub use queries::{EvalQuery, Queries};
+pub use report::{AblationReport, CalibrationPanel, EvalReport, ModeReport};
+
+/// Fixed hop budget for graph modes during eval: 2 so 2-hop fact paths
+/// (`seed -> hub -> fact -> hub`) are exercised — the ablation needs this too.
+const EVAL_EXPAND_HOPS: u8 = 2;
+/// Label for the fact-layer ablation variant.
+const ABLATION_LABEL: &str = "graph-hybrid (no fact)";
+/// Mode rows in report order (the five standard modes; ablation appended last).
+const MODE_ORDER: &[SearchMode] = &[
+    SearchMode::Bm25,
+    SearchMode::Vector,
+    SearchMode::Hybrid,
+    SearchMode::Graph,
+    SearchMode::GraphHybrid,
+];
 
 /// CLI-derived options for an eval run.
 #[derive(Debug, Clone)]
 pub struct EvalOpts {
-    /// Path to the query set (`config/eval/queries.yml`).
     pub queries_path: PathBuf,
-    /// Pool and metric depth `K` (e.g. nDCG@K).
     pub k: u32,
-    /// Judge model name; empty string means "fabric's default model".
     pub judge_model: String,
-    /// Ignore and overwrite cached judgments.
     pub rebuild_cache: bool,
+    /// When set, write a fillable calibration sheet to this path and skip metrics.
+    pub emit_calibration: Option<PathBuf>,
 }
 
 impl Default for EvalOpts {
@@ -41,31 +60,264 @@ impl Default for EvalOpts {
             k: 10,
             judge_model: String::new(),
             rebuild_cache: false,
+            emit_calibration: None,
         }
     }
 }
 
-/// Phase-1 summary of a loaded query set. Later phases return the full metrics
-/// report; this proves the CLI + loader wiring end to end.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvalSummary {
-    pub query_count: usize,
-    pub calibration_count: usize,
+fn mode_label(m: SearchMode) -> &'static str {
+    match m {
+        SearchMode::Bm25 => "bm25",
+        SearchMode::Vector => "vector",
+        SearchMode::Hybrid => "hybrid",
+        SearchMode::Graph => "graph",
+        SearchMode::GraphHybrid => "graph-hybrid",
+    }
 }
 
-/// Load and validate the query set. (Phases 2-5 extend this to run the modes,
-/// judge the pool, and compute the metrics report.)
-pub fn run(_config: &Config, opts: &EvalOpts) -> Result<EvalSummary> {
-    tracing::debug!(queries_path = %opts.queries_path.display(), k = opts.k, "eval::run");
-    let queries = Queries::load(&opts.queries_path)?;
-    let summary = EvalSummary {
-        query_count: queries.queries.len(),
-        calibration_count: queries.calibration().count(),
-    };
+/// Judgment cache colocated with the oracle index DB (per-host).
+fn eval_cache_path(config: &Config) -> PathBuf {
+    config
+        .db_path()
+        .parent()
+        .map(|p| p.join("eval-cache.db"))
+        .unwrap_or_else(|| PathBuf::from("eval-cache.db"))
+}
+
+/// One row of the `--emit-calibration` sheet the user fills with `human` scores.
+#[derive(Debug, serde::Serialize)]
+struct CalibrationRow {
+    query_id: String,
+    query: String,
+    note: String,
+    judge: u8,
+    human: Option<u8>,
+}
+
+/// Outcome of `run`: either the metrics report, or the path of the calibration
+/// sheet that was written (`--emit-calibration` mode).
+pub enum EvalOutcome {
+    Report(Box<EvalReport>),
+    CalibrationSheet(PathBuf),
+}
+
+/// Run the eval: for each query, run every mode (+ the fact ablation), pool the
+/// union, judge each pooled note once (cache-first, blind), score each mode's
+/// ranked list, and aggregate into per-mode means + lift + calibration.
+pub fn run(config: &Config, opts: &EvalOpts) -> Result<EvalOutcome> {
     tracing::debug!(
-        query_count = summary.query_count,
-        calibration_count = summary.calibration_count,
-        "eval::run loaded query set"
+        queries_path = %opts.queries_path.display(),
+        k = opts.k,
+        emit = opts.emit_calibration.is_some(),
+        "eval::run"
     );
-    Ok(summary)
+    let queries = Queries::load(&opts.queries_path)?;
+    let db = SearchIndex::open(&config.db_path())
+        .with_context(|| format!("opening search index at {}", config.db_path().display()))?;
+    let server = OracleMcpServer::new(config.clone(), db);
+    let cache = cache::JudgmentCache::open(&eval_cache_path(config))?;
+    let judge = FabricJudge::new(opts.judge_model.clone());
+
+    // Non-fact edge-kind include-list for the ablation (edge_kinds is an
+    // allow-list, so "exclude fact" = "include every other kind").
+    let nonfact: Vec<String> = {
+        let handle = server.db_handle();
+        let guard = handle.lock().map_err(|e| eyre!("db lock poisoned: {e}"))?;
+        guard.edge_kinds()?.into_iter().filter(|k| k != "fact").collect()
+    };
+
+    // Accumulators.
+    let labels: Vec<String> = MODE_ORDER
+        .iter()
+        .map(|m| mode_label(*m).to_string())
+        .chain(std::iter::once(ABLATION_LABEL.to_string()))
+        .collect();
+    let mut scores: BTreeMap<String, Vec<metrics::QueryScores>> =
+        labels.iter().map(|l| (l.clone(), Vec::new())).collect();
+    let mut fact_touched = 0usize;
+    let mut total_judgments = 0usize;
+    let mut truncated_judgments = 0usize;
+    let mut calib_pairs: Vec<(u8, u8)> = Vec::new();
+    let mut sheet: Vec<CalibrationRow> = Vec::new();
+
+    for q in &queries.queries {
+        let domain = q.domain.as_deref();
+        let query_hash = cache::stable_hash(&q.query);
+
+        // Phase A (locked): run every mode + the ablation, collect ranked lists
+        // and the judged text of every pooled note. The slow LLM judging happens
+        // after the lock is dropped.
+        let mut ranked: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut texts: BTreeMap<String, (String, String, String, bool)> = BTreeMap::new();
+        {
+            let handle = server.db_handle();
+            let guard = handle.lock().map_err(|e| eyre!("db lock poisoned: {e}"))?;
+            for m in MODE_ORDER {
+                let rows = server
+                    .run_search_mode(
+                        &guard,
+                        *m,
+                        &q.query,
+                        domain,
+                        None,
+                        None,
+                        opts.k,
+                        EVAL_EXPAND_HOPS,
+                        None,
+                        0.0,
+                    )
+                    .map_err(|e| eyre!("run_search_mode {:?}: {e}", m))?;
+                ranked.insert(
+                    mode_label(*m).to_string(),
+                    rows.iter().map(|r| r.path.clone()).collect(),
+                );
+            }
+            let abl = server
+                .run_search_mode(
+                    &guard,
+                    SearchMode::GraphHybrid,
+                    &q.query,
+                    domain,
+                    None,
+                    None,
+                    opts.k,
+                    EVAL_EXPAND_HOPS,
+                    Some(&nonfact),
+                    0.0,
+                )
+                .map_err(|e| eyre!("run_search_mode ablation: {e}"))?;
+            ranked.insert(ABLATION_LABEL.to_string(), abl.iter().map(|r| r.path.clone()).collect());
+
+            let lists: Vec<Vec<String>> = ranked.values().cloned().collect();
+            for path in metrics::pool(&lists) {
+                if let Some(note) = guard.get_note(&path).map_err(|e| eyre!("get_note {path}: {e}"))? {
+                    let (text, truncated) = calc::prepare_note_text(&note.summary, &note.body, judge.max_chars);
+                    let content_hash = cache::stable_hash(&format!("{}\n{}", note.title, text));
+                    texts.insert(path, (note.title, text, content_hash, truncated));
+                }
+            }
+        }
+
+        // Fact-layer coverage: did removing fact edges change graph-hybrid's list?
+        if ranked.get("graph-hybrid") != ranked.get(ABLATION_LABEL) {
+            fact_touched += 1;
+        }
+
+        // Phase B (no lock): judge every pooled note, cache-first.
+        let mut judgments: metrics::Judgments = metrics::Judgments::new();
+        for (path, (title, text, content_hash, truncated)) in &texts {
+            let key = cache::CacheKey {
+                query_id: &q.id,
+                query_hash: &query_hash,
+                note_path: path,
+                content_hash,
+                judge_model: &opts.judge_model,
+            };
+            let cached = if opts.rebuild_cache { None } else { cache.get(&key)? };
+            let cj = match cached {
+                Some(cj) => cj,
+                None => match judge.judge(&q.query, title, text) {
+                    Ok(score) => {
+                        let cj = cache::CachedJudgment {
+                            score,
+                            truncated: *truncated,
+                        };
+                        cache.put(&key, cj)?;
+                        cj
+                    }
+                    Err(e) => {
+                        tracing::warn!(query = %q.id, note = %path, "judge failed, skipping pair: {e}");
+                        continue;
+                    }
+                },
+            };
+            total_judgments += 1;
+            if cj.truncated {
+                truncated_judgments += 1;
+            }
+            judgments.insert(path.clone(), cj.score);
+
+            // Calibration: record judge vs human where a hand label exists.
+            if let Some(map) = &q.calibration {
+                if let Some(human) = map.get(path) {
+                    calib_pairs.push((*human, cj.score));
+                }
+                // Emit-mode: collect every pooled note for calibration queries.
+                if opts.emit_calibration.is_some() {
+                    sheet.push(CalibrationRow {
+                        query_id: q.id.clone(),
+                        query: q.query.clone(),
+                        note: path.clone(),
+                        judge: cj.score,
+                        human: None,
+                    });
+                }
+            }
+        }
+
+        // Phase C: score each mode/label against this query's judgments.
+        for (label, list) in &ranked {
+            let qs = metrics::score_query(list, &judgments, opts.k as usize, judge::HIT_THRESHOLD);
+            scores.entry(label.clone()).or_default().push(qs);
+        }
+    }
+
+    // Emit-calibration short-circuit: write the sheet, skip the report.
+    if let Some(path) = &opts.emit_calibration {
+        let yaml = serde_yaml::to_string(&sheet).context("serializing calibration sheet")?;
+        std::fs::write(path, yaml).with_context(|| format!("writing calibration sheet {}", path.display()))?;
+        tracing::debug!(rows = sheet.len(), path = %path.display(), "wrote calibration sheet");
+        return Ok(EvalOutcome::CalibrationSheet(path.clone()));
+    }
+
+    // Aggregate.
+    let mut modes: Vec<ModeReport> = Vec::new();
+    for label in &labels {
+        modes.push(ModeReport {
+            mode: label.clone(),
+            means: metrics::aggregate(&scores[label]),
+        });
+    }
+    let gh = metrics::aggregate(&scores["graph-hybrid"]);
+    let hy = metrics::aggregate(&scores["hybrid"]);
+    let abl = metrics::aggregate(&scores[ABLATION_LABEL]);
+
+    let calibration = if calib_pairs.is_empty() {
+        None
+    } else {
+        let n = calib_pairs.len() as f64;
+        let exact = calib_pairs.iter().filter(|(h, j)| h == j).count() as f64 / n;
+        let adjacent = calib_pairs.iter().filter(|(h, j)| h.abs_diff(*j) <= 1).count() as f64 / n;
+        let (precision, recall) = calc::boundary_precision_recall(&calib_pairs, judge::HIT_THRESHOLD);
+        let kappa = calc::cohens_kappa(&calib_pairs);
+        Some(CalibrationPanel {
+            pairs: calib_pairs.len(),
+            exact_pct: exact,
+            adjacent_pct: adjacent,
+            boundary_precision: precision,
+            boundary_recall: recall,
+            kappa,
+            trustworthy: (precision + recall) / 2.0 >= report::TRUST_GATE,
+        })
+    };
+
+    let report = EvalReport {
+        k: opts.k,
+        judge_model: opts.judge_model.clone(),
+        total_queries: queries.queries.len(),
+        modes,
+        lift_ndcg: gh.ndcg - hy.ndcg,
+        lift_recall: gh.recall - hy.recall,
+        lift_mrr: gh.mrr - hy.mrr,
+        truncated_judgments,
+        total_judgments,
+        ablation: AblationReport {
+            queries_touching_fact: fact_touched,
+            total_queries: queries.queries.len(),
+            ndcg_lift_vs_ablation: gh.ndcg - abl.ndcg,
+            inconclusive: fact_touched == 0,
+        },
+        calibration,
+    };
+    Ok(EvalOutcome::Report(Box::new(report)))
 }

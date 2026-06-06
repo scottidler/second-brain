@@ -108,3 +108,40 @@ Append-only record of how the implementation interprets or diverges from
 
 ### Open questions
 - None.
+
+## Phase 5: Orchestration - calibration + ablation + report
+
+### Design decisions
+- **`run` returns `EvalOutcome` (`Report` | `CalibrationSheet`)** (`eval.rs`) so
+  `--emit-calibration` writes a fillable sheet and short-circuits before metrics.
+- **`EVAL_EXPAND_HOPS = 2`** — graph modes run at 2 hops so 2-hop fact paths
+  (`seed -> hub -> fact -> hub`) are actually exercised; the ablation needs this.
+- **Lock-then-judge**: Phase A runs every mode + collects pooled note text under
+  the DB lock, then the lock is dropped before the slow LLM judging (Phase B), so
+  the SearchIndex mutex is never held across fabric calls.
+- **Ablation coverage = `graph-hybrid` list != `graph-hybrid (no fact)` list** per
+  query; `inconclusive` when zero queries differ (finding #4).
+- **Trust gate = mean(boundary precision, recall) >= 0.6** (`report::TRUST_GATE`),
+  not Cohen's kappa (finding #3); kappa is still reported.
+- **`calibration` is `Option<BTreeMap>`** (`queries.rs`): `None` = not a
+  calibration query; `Some({})` = candidate awaiting labels (fillable via
+  `--emit-calibration`); `Some(map)` = labeled.
+
+### Deviations
+- **Judged text uses `NoteRow.summary` (fallback body), not a separately-parsed
+  `## Claims` section** — the design said "summary + claims". The `summary`
+  column is the bounded distilled representation already in the index; parsing
+  claims out of the body adds risk for little gain. `prepare_note_text` flags a
+  truncated *body fallback* as low-confidence (finding #1 intact).
+- **Eval graph hops = 2 while the MCP default is 1** — the eval measures the
+  graph at its configured max so the fact layer is exercised; production default
+  retrieval uses 1 hop.
+
+### Tradeoffs
+- **Pure units (metrics, calc, judge parse, cache, report) are unit-tested; the
+  full `run` glue is integration-tested via a real `sb oracle eval`** (needs the
+  live index + fabric), not a CI unit test.
+
+### Open questions
+- Whether to also report graph-hybrid lift at hops=1 (the production default), not
+  just hops=2. Deferred to operational tuning.

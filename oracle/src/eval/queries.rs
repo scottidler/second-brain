@@ -25,9 +25,11 @@ pub struct EvalQuery {
     /// Optional schema filter passed to search.
     #[serde(default)]
     pub domain: Option<String>,
-    /// Hand labels for calibration: vault-relative note path -> graded 0..3.
+    /// Calibration marker. `None` = not a calibration query. `Some(map)` = a
+    /// calibration query; the map is note-path -> graded human label (0..3) and
+    /// may be empty while awaiting labels (filled via `--emit-calibration`).
     #[serde(default)]
-    pub calibration: BTreeMap<String, u8>,
+    pub calibration: Option<BTreeMap<String, u8>>,
 }
 
 impl Queries {
@@ -48,7 +50,7 @@ impl Queries {
             if !seen.insert(q.id.as_str()) {
                 bail!("duplicate query id in {}: {}", path.display(), q.id);
             }
-            for (note, score) in &q.calibration {
+            for (note, score) in q.calibration.iter().flatten() {
                 if *score > 3 {
                     bail!(
                         "calibration score for {note} in query {} is {score}; must be 0..3",
@@ -61,9 +63,18 @@ impl Queries {
         Ok(parsed)
     }
 
-    /// Queries that carry hand labels (used to validate the judge).
+    /// Calibration queries (marked with a `calibration:` key, labeled or not).
     pub fn calibration(&self) -> impl Iterator<Item = &EvalQuery> {
-        self.queries.iter().filter(|q| !q.calibration.is_empty())
+        self.queries.iter().filter(|q| q.calibration.is_some())
+    }
+
+    /// Hand-labeled `(note_path, human_score)` pairs across all calibration
+    /// queries (only the non-empty maps contribute).
+    pub fn labeled(&self) -> impl Iterator<Item = (&str, &BTreeMap<String, u8>)> {
+        self.queries.iter().filter_map(|q| match &q.calibration {
+            Some(m) if !m.is_empty() => Some((q.id.as_str(), m)),
+            _ => None,
+        })
     }
 }
 

@@ -183,6 +183,17 @@ impl SearchIndex {
         self.resolve_wikilink(target)
     }
 
+    /// Distinct edge kinds present in the `edges` table. The eval's fact-layer
+    /// ablation builds a non-fact include-list from this (`edge_kinds` is an
+    /// allow-list, not an exclude-list).
+    pub fn edge_kinds(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT kind FROM edges ORDER BY kind")?;
+        let kinds = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(kinds)
+    }
+
     /// Read a `graph_state` value by key (`None` when unset).
     pub fn graph_state_get(&self, key: &str) -> Result<Option<String>> {
         let v: Option<String> = self
