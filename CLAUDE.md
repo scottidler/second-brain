@@ -24,6 +24,25 @@ second-brain/
 
 Systemd unit files are NOT in the repo. They are written into `~/.config/systemd/user/` by `sb borg daemon --install` and `sb cortex daemon --install`. Source of truth for unit content lives in `borg::install_systemd` (`borg/src/lib.rs`) and `cortex::install_systemd_service` (`cortex/src/daemon.rs`).
 
+## Intent Layer
+
+**Before modifying code in a crate, read its `AGENTS.md` first** to understand that crate's local patterns and invariants. This file (CLAUDE.md) is the single root context node; crate-level depth lives in the per-crate `AGENTS.md` nodes below.
+
+- **vault/** — `vault/AGENTS.md` — shared schema + primitives (the source of truth). Hybrid-search engine: `vault/src/search/AGENTS.md`.
+- **borg/** — `borg/AGENTS.md` — ingestion library. Pipeline orchestration: `borg/src/pipeline/AGENTS.md`; staged-capture artifacts: `borg/src/stages/AGENTS.md`; browser/hotkey clients: `borg/clients/AGENTS.md`.
+- **cortex/** — `cortex/AGENTS.md` — vault governance (lint / link / classify / sweep / embed / daemon).
+- **oracle/** — `oracle/AGENTS.md` — knowledge-retrieval MCP server.
+- **distillers/** — `distillers/AGENTS.md` — Stage-2 per-kind distillers producing the `Distilled` contract.
+- **sb/** — `sb/AGENTS.md` — unified CLI binary (composition root).
+
+### Global Invariants
+
+- **One root context file:** this CLAUDE.md. Do NOT create a root `AGENTS.md` — crate context lives in per-crate `AGENTS.md` nodes.
+- **Schema is law:** `vault::schema` is the single source of truth for Domain/NoteType/Origin/Status/Method. Never hardcode these strings in consumer crates — import the enums.
+- **Tilde expansion at the boundary:** every user-supplied path must pass through `vault::paths::expand_tilde` / `deserialize_tilde_pathbuf` before any filesystem call. Never fabricate a fallback path with a leading `~/`.
+- **Libraries are lib-only and return typed data;** only `sb` prints to stdout/stderr. `println!`/`eprintln!` outside `sb` is an anti-pattern.
+- **One-way data flow:** borg writes the vault + its own receipts DB; oracle owns its own FTS5+vector index (cortex is the *only* embeddings writer); the two SQLite files never share a writer.
+
 ## Key Conventions
 
 - **Edition:** 2024
