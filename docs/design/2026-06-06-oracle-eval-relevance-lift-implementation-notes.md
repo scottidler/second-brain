@@ -57,3 +57,26 @@ Append-only record of how the implementation interprets or diverges from
 
 ### Open questions
 - None.
+
+## Phase 3: Shared mode dispatch
+
+### Design decisions
+- **`run_search_mode` is a `pub` method on `OracleMcpServer`** (`server.rs`), not
+  a free function, because the graph path reuses the instance helpers
+  (`graph_dispatch`, `warn_if_no_embeddings`, `resolve_note_paths`, `err`). The
+  eval will construct an `OracleMcpServer` and call this method, guaranteeing it
+  measures the identical production dispatch.
+- **`knowledge_search` now delegates** to `run_search_mode`; the previous inline
+  `match mode {...}` moved verbatim into the method, with `req`-derived params
+  (expand_hops clamp, edge_kinds, min_edge_weight) resolved at the call site.
+
+### Deviations
+- None — behavior-preserving refactor; all 32 existing oracle tests pass unchanged.
+
+### Tradeoffs
+- **Method-on-server vs. free function** — a free function would have required
+  refactoring `graph_dispatch` and its helpers off `&self`; the method keeps the
+  change small and the shared-path guarantee intact.
+
+### Open questions
+- None.

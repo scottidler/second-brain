@@ -192,6 +192,72 @@ impl OracleMcpServer {
         Ok(())
     }
 
+    /// Run one search mode against `db` and return resolved `NoteRow`s in rank
+    /// order. This is the single dispatch shared by the `knowledge_search` MCP
+    /// tool and the `eval` harness, so the eval measures the exact production
+    /// retrieval path (no divergent re-implementation). `expand_hops` /
+    /// `edge_kinds` / `min_edge_weight` are only consulted by the graph modes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_search_mode(
+        &self,
+        db: &SearchIndex,
+        mode: SearchMode,
+        query: &str,
+        domain: Option<&str>,
+        note_type: Option<&str>,
+        status: Option<&str>,
+        limit: u32,
+        expand_hops: u8,
+        edge_kinds: Option<&[String]>,
+        min_edge_weight: f32,
+    ) -> Result<Vec<NoteRow>, McpError> {
+        match mode {
+            SearchMode::Bm25 => db
+                .search(query, domain, note_type, status, Some(limit))
+                .map_err(Self::err),
+            SearchMode::Vector => {
+                let active_model = db.active_embedding_model().map_err(Self::err)?;
+                let q_vec = vault::embedding::embed_query(query, &active_model).map_err(Self::err)?;
+                let hits = db
+                    .search_vector(&q_vec, limit, domain, note_type, status)
+                    .map_err(Self::err)?;
+                self.warn_if_no_embeddings(db, &hits)?;
+                Self::resolve_note_paths(db, hits.iter().map(|h| h.note_path.as_str()))
+            }
+            SearchMode::Hybrid => {
+                let active_model = db.active_embedding_model().map_err(Self::err)?;
+                let q_vec = vault::embedding::embed_query(query, &active_model).map_err(Self::err)?;
+                let bm25 = db
+                    .search(query, domain, note_type, status, Some(vault::search::K_RRF_INPUT))
+                    .map_err(Self::err)?;
+                let vec_hits = db
+                    .search_vector(&q_vec, vault::search::K_RRF_INPUT, domain, note_type, status)
+                    .map_err(Self::err)?;
+                self.warn_if_no_embeddings(db, &vec_hits)?;
+                let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
+                let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();
+                let fused = vault::search::reciprocal_rank_fusion(
+                    &[&bm25_paths, &vec_paths],
+                    vault::search::RRF_K,
+                    limit as usize,
+                );
+                Self::resolve_note_paths(db, fused.iter().map(|h| h.note_path.as_str()))
+            }
+            SearchMode::Graph | SearchMode::GraphHybrid => self.graph_dispatch(
+                db,
+                query,
+                domain,
+                note_type,
+                status,
+                limit,
+                expand_hops,
+                edge_kinds,
+                min_edge_weight,
+                matches!(mode, SearchMode::GraphHybrid),
+            ),
+        }
+    }
+
     /// Graph-expansion retrieval shared by `mode=graph` and
     /// `mode=graph-hybrid`.
     ///
@@ -376,52 +442,18 @@ impl OracleMcpServer {
         let note_type = req.note_type.as_ref().map(|t| t.as_str());
         let status = req.status.as_ref().map(|s| s.as_str());
 
-        let notes = match mode {
-            SearchMode::Bm25 => db
-                .search(&req.query, domain, note_type, status, Some(limit))
-                .map_err(Self::err)?,
-            SearchMode::Vector => {
-                let active_model = db.active_embedding_model().map_err(Self::err)?;
-                let q_vec = vault::embedding::embed_query(&req.query, &active_model).map_err(Self::err)?;
-                let hits = db
-                    .search_vector(&q_vec, limit, domain, note_type, status)
-                    .map_err(Self::err)?;
-                self.warn_if_no_embeddings(&db, &hits)?;
-                Self::resolve_note_paths(&db, hits.iter().map(|h| h.note_path.as_str()))?
-            }
-            SearchMode::Hybrid => {
-                let active_model = db.active_embedding_model().map_err(Self::err)?;
-                let q_vec = vault::embedding::embed_query(&req.query, &active_model).map_err(Self::err)?;
-                let bm25 = db
-                    .search(&req.query, domain, note_type, status, Some(vault::search::K_RRF_INPUT))
-                    .map_err(Self::err)?;
-                let vec_hits = db
-                    .search_vector(&q_vec, vault::search::K_RRF_INPUT, domain, note_type, status)
-                    .map_err(Self::err)?;
-                self.warn_if_no_embeddings(&db, &vec_hits)?;
-
-                let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
-                let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();
-                let fused = vault::search::reciprocal_rank_fusion(
-                    &[&bm25_paths, &vec_paths],
-                    vault::search::RRF_K,
-                    limit as usize,
-                );
-                Self::resolve_note_paths(&db, fused.iter().map(|h| h.note_path.as_str()))?
-            }
-            SearchMode::Graph | SearchMode::GraphHybrid => self.graph_dispatch(
-                &db,
-                &req.query,
-                domain,
-                note_type,
-                status,
-                limit,
-                req.expand_hops.unwrap_or(DEFAULT_EXPAND_HOPS).min(MAX_EXPAND_HOPS),
-                req.edge_kinds.as_deref(),
-                req.min_edge_weight.unwrap_or(0.0),
-                matches!(mode, SearchMode::GraphHybrid),
-            )?,
-        };
+        let notes = self.run_search_mode(
+            &db,
+            mode,
+            &req.query,
+            domain,
+            note_type,
+            status,
+            limit,
+            req.expand_hops.unwrap_or(DEFAULT_EXPAND_HOPS).min(MAX_EXPAND_HOPS),
+            req.edge_kinds.as_deref(),
+            req.min_edge_weight.unwrap_or(0.0),
+        )?;
 
         let results: Vec<serde_json::Value> = notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
 
