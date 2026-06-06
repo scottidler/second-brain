@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use eyre::Result;
+use eyre::{Result, bail};
 
 /// Maximum graded relevance score. `0` = irrelevant, `MAX_SCORE` = perfect.
 pub const MAX_SCORE: u8 = 3;
@@ -57,6 +57,72 @@ impl RelevanceJudge for MockJudge {
             .unwrap_or(self.default);
         Ok(score.min(MAX_SCORE))
     }
+}
+
+/// Production judge: runs the `judge-relevance` Fabric pattern over the
+/// `(query, note)` text and parses a single integer score. The pattern is blind
+/// by construction — it only ever sees the strings passed to [`judge`].
+#[derive(Debug, Clone)]
+pub struct FabricJudge {
+    /// Fabric binary name (resolved on `PATH`).
+    pub binary: String,
+    /// Model name; empty = fabric's default model.
+    pub model: String,
+    /// Fabric pattern name (resolved under `~/.config/sb/patterns/`).
+    pub pattern: String,
+    /// Truncation budget (chars) for the note text sent to the judge.
+    pub max_chars: usize,
+    /// Per-call fabric timeout.
+    pub timeout_secs: u64,
+}
+
+/// Default char budget for the judged note text.
+const DEFAULT_JUDGE_MAX_CHARS: usize = 8_000;
+/// Default per-call fabric timeout for the judge.
+const DEFAULT_JUDGE_TIMEOUT_SECS: u64 = 60;
+
+impl FabricJudge {
+    /// A judge using the `judge-relevance` pattern and the given model
+    /// (empty string = fabric's default model).
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            binary: "fabric".to_string(),
+            model: model.into(),
+            pattern: "judge-relevance".to_string(),
+            max_chars: DEFAULT_JUDGE_MAX_CHARS,
+            timeout_secs: DEFAULT_JUDGE_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl RelevanceJudge for FabricJudge {
+    fn judge(&self, query: &str, note_title: &str, note_text: &str) -> Result<u8> {
+        let input = format!("# QUERY\n{query}\n\n# NOTE TITLE\n{note_title}\n\n# NOTE\n{note_text}\n");
+        let reply = vault::fabric::run_pattern(
+            &self.pattern,
+            &input,
+            &self.binary,
+            &self.model,
+            self.max_chars,
+            self.timeout_secs,
+        )?;
+        parse_score(&reply)
+    }
+}
+
+/// Parse a graded score from a judge reply: the first integer token, clamped to
+/// `0..=MAX_SCORE`. Errors when the reply contains no integer (caller treats the
+/// pair as uncovered rather than silently scoring 0).
+pub fn parse_score(reply: &str) -> Result<u8> {
+    for token in reply.split(|c: char| !c.is_ascii_digit()) {
+        if let Ok(n) = token.parse::<u32>() {
+            return Ok((n.min(MAX_SCORE as u32)) as u8);
+        }
+    }
+    bail!(
+        "judge reply contains no integer score: {:?}",
+        reply.chars().take(80).collect::<String>()
+    )
 }
 
 #[cfg(test)]

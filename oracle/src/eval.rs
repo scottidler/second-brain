@@ -7,6 +7,7 @@
 //! Library-only: this module returns typed data; `sb` renders it. The judge is
 //! injected via the [`judge::RelevanceJudge`] trait so tests run without an LLM.
 
+pub mod cache;
 pub mod judge;
 pub mod metrics;
 pub mod queries;

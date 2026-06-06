@@ -114,6 +114,10 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
         "extract-triples.md",
         include_str!("../../../borg/patterns/extract-triples.md"),
     ),
+    (
+        "judge-relevance.md",
+        include_str!("../../../borg/patterns/judge-relevance.md"),
+    ),
 ];
 
 pub async fn run(args: BootstrapArgs) -> Result<()> {

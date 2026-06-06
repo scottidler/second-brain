@@ -80,3 +80,31 @@ Append-only record of how the implementation interprets or diverges from
 
 ### Open questions
 - None.
+
+## Phase 4: FabricJudge + judgment cache
+
+### Design decisions
+- **`FabricJudge` runs the `judge-relevance` pattern via `vault::fabric::run_pattern`**
+  (`judge.rs`) — oracle already depends on vault, so no cortex dependency. Added
+  `borg/patterns/judge-relevance.md` and registered it in the bootstrap PATTERNS
+  list so `sb bootstrap`/`otto deploy` sync it.
+- **`parse_score` takes the first integer token, clamped to `0..=MAX_SCORE`**, and
+  errors when none is present (`judge.rs`) — so an unparseable reply becomes an
+  uncovered pair (caller WARN+skip), never a silent 0.
+- **Stable cache key includes `query_hash` and `content_hash`** (`cache.rs`),
+  hashed with `DefaultHasher` (fixed-key, deterministic across runs), plus
+  `judge_model` and `RUBRIC_VERSION` ("v1"). Editing the query text, the note
+  content, the model, or the rubric invalidates only the affected rows.
+- **`truncated` column** persists whether a judgment was made on a truncated body
+  (low-confidence), so the report can surface it (finding #1).
+
+### Deviations
+- None.
+
+### Tradeoffs
+- **`DefaultHasher` over a crypto hash (sha2/blake3)** — deterministic and
+  dependency-free; collision risk is negligible for a per-host judgment cache and
+  a collision only costs one redundant judge call.
+
+### Open questions
+- None.
