@@ -91,6 +91,19 @@ pub fn tag_proposals() -> PathBuf {
     config_root().join("tag-proposals.yml")
 }
 
+/// Concept glossary + alias table used by `cortex link` (Phase 2 of the
+/// graph-augmented-memory design). Kebab-case concept slugs mirror
+/// `canonical-tags.yml`; the `aliases` block maps surface forms to slugs.
+pub fn glossary() -> PathBuf {
+    config_root().join("glossary.yml")
+}
+
+/// LLM-proposed glossary entries awaiting human promotion (Phase 4 of the
+/// graph-augmented-memory design), mirroring `tag-proposals.yml`.
+pub fn entity_proposals() -> PathBuf {
+    config_root().join("entity-proposals.yml")
+}
+
 pub fn patterns_dir() -> PathBuf {
     config_root().join("patterns")
 }

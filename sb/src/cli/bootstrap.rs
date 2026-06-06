@@ -44,6 +44,7 @@ pub(crate) const ORACLE_TEMPLATE: &str = include_str!("../../../config/templates
 pub(crate) const CANONICAL_TAGS_YML: &str = include_str!("../../../config/canonical-tags.yml");
 pub(crate) const TAG_MAPPING_YML: &str = include_str!("../../../config/tag-mapping.yml");
 pub(crate) const TAG_PROPOSALS_YML: &str = include_str!("../../../config/tag-proposals.yml");
+pub(crate) const GLOSSARY_YML: &str = include_str!("../../../config/glossary.yml");
 
 /// Custom fabric patterns shipped with sb. Embedded byte-for-byte; the
 /// explicit list (rather than `include_dir!`) makes adding a pattern a
@@ -191,6 +192,7 @@ pub(crate) fn extract_canonical_assets(force: bool) -> Result<()> {
         ("canonical-tags", vault::paths::canonical_tags(), CANONICAL_TAGS_YML),
         ("tag-mapping", vault::paths::tag_mapping(), TAG_MAPPING_YML),
         ("tag-proposals", vault::paths::tag_proposals(), TAG_PROPOSALS_YML),
+        ("glossary", vault::paths::glossary(), GLOSSARY_YML),
     ];
     for (name, path, contents) in &shared {
         if force {

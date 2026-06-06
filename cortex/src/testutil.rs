@@ -279,9 +279,11 @@ impl TestVault {
                     entities: LinkingEntities {
                         people: vec!["John Smith".to_string()],
                         projects: vec!["obsidian-cortex".to_string()],
+                        concepts: Vec::new(),
                     },
                     targets: Default::default(),
                     min_word_length: 3,
+                    aliases: HashMap::new(),
                 },
                 intel: IntelConfig {
                     daily_note: true,

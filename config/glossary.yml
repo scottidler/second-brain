@@ -1,0 +1,63 @@
+# Concept glossary for `sb cortex link` (Phase 2 of graph-augmented-memory).
+#
+# `concepts` are kebab-case slugs (mirroring canonical-tags.yml). Each is
+# linked at the first body mention as [[slug]] (or [[slug|Surface]] when the
+# prose case differs). Short slugs (< actions.linking.min-word-length, default
+# 5) only link via an `aliases` entry whose surface form is long enough.
+#
+# `aliases` map a surface form found in prose to the canonical slug; the linker
+# emits a piped wikilink [[slug|surface]] preserving the displayed wording.
+# Seeded from the AI/tech vocabulary already evidenced across the vault.
+
+concepts:
+  - graphrag
+  - langchain
+  - langgraph
+  - llamaindex
+  - pinecone
+  - weaviate
+  - chromadb
+  - neo4j
+  - cognee
+  - mem0
+  - memgraphrag
+  - fastembed
+  - tree-sitter
+  - claude-code
+  - anthropic
+  - tinygrad
+  - ollama
+  - llama-cpp
+  - huggingface
+  - transformers
+  - tokenizers
+  - reranking
+  - embeddings
+  - fine-tuning
+  - quantization
+  - distillation
+  - kubernetes
+  - terraform
+  - postgres
+  - sqlite
+  - duckdb
+  - obsidian
+  - syncthing
+
+aliases:
+  Retrieval-Augmented Generation: rag
+  retrieval augmented generation: rag
+  Graph RAG: graphrag
+  GraphRAG: graphrag
+  Reciprocal Rank Fusion: rrf
+  Model Context Protocol: mcp
+  Large Language Model: llm
+  large language models: llm
+  Claude Code: claude-code
+  LangChain: langchain
+  LlamaIndex: llamaindex
+  Hugging Face: huggingface
+  tree-sitter: tree-sitter
+  knowledge graph: knowledge-graph
+  vector database: vector-database
+  approximate nearest neighbor: ann

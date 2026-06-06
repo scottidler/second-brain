@@ -1,11 +1,41 @@
 use regex::Regex;
-use std::collections::HashSet;
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::config::{LinkingConfig, LinkingFilter};
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::vault::Note;
+
+/// The concept glossary + alias table, loaded from `glossary.yml` (Phase 2 of
+/// graph-augmented-memory). Mirrors `canonical-tags.yml`: kebab-case concept
+/// slugs plus an `aliases` map of surface form → canonical slug.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Glossary {
+    pub concepts: Vec<String>,
+    pub aliases: HashMap<String, String>,
+}
+
+/// Load the glossary from `path`. A missing file yields an empty glossary (the
+/// linker simply has no concepts/aliases to apply); a malformed file is a hard
+/// error so a typo is not silently ignored.
+pub fn load_glossary(path: &Path) -> eyre::Result<Glossary> {
+    log::debug!("load_glossary: path={}", path.display());
+    if !path.exists() {
+        log::info!("load_glossary: {} absent; no glossary concepts/aliases", path.display());
+        return Ok(Glossary::default());
+    }
+    let content = std::fs::read_to_string(path)?;
+    let glossary: Glossary = serde_yaml::from_str(&content)?;
+    log::info!(
+        "load_glossary: {} concepts, {} aliases",
+        glossary.concepts.len(),
+        glossary.aliases.len()
+    );
+    Ok(glossary)
+}
 
 /// Check if a value is excluded by a filter.
 /// Excluded if it matches an exclude pattern and no include pattern overrides it.
@@ -100,7 +130,7 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
                 }
 
                 // Check if the title or stem appears in the body (case-insensitive)
-                if let Some(context) = find_mention(&note.body, title, stem, config.min_word_length) {
+                if let Some((context, surface)) = find_mention(&note.body, title, stem, config.min_word_length) {
                     report.add(Violation {
                         path: note.path.clone(),
                         rule: "linking.concept".to_string(),
@@ -108,6 +138,7 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
                         message: format!("mention of '{title}' could be linked as [[{stem}]]"),
                         fix: Some(Fix::AddWikilink {
                             target: stem.clone(),
+                            surface,
                             context,
                         }),
                     });
@@ -121,7 +152,7 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
                 if existing_links.contains(&person.to_lowercase()) {
                     continue;
                 }
-                if let Some(context) = find_mention(&note.body, person, person, config.min_word_length) {
+                if let Some((context, surface)) = find_mention(&note.body, person, person, config.min_word_length) {
                     report.add(Violation {
                         path: note.path.clone(),
                         rule: "linking.person".to_string(),
@@ -129,6 +160,7 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
                         message: format!("mention of '{person}' could be linked"),
                         fix: Some(Fix::AddWikilink {
                             target: person.clone(),
+                            surface,
                             context,
                         }),
                     });
@@ -142,7 +174,7 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
                 if existing_links.contains(&project.to_lowercase()) {
                     continue;
                 }
-                if let Some(context) = find_mention(&note.body, project, project, config.min_word_length) {
+                if let Some((context, surface)) = find_mention(&note.body, project, project, config.min_word_length) {
                     report.add(Violation {
                         path: note.path.clone(),
                         rule: "linking.project".to_string(),
@@ -150,6 +182,55 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
                         message: format!("mention of '{project}' could be linked"),
                         fix: Some(Fix::AddWikilink {
                             target: project.clone(),
+                            surface,
+                            context,
+                        }),
+                    });
+                }
+            }
+        }
+
+        // Match glossary concepts (Phase 2): kebab-case slugs linked at first
+        // body mention as [[slug]] (or [[slug|Surface]] when the prose case
+        // differs). Plus alias surface forms -> canonical slug as piped links.
+        if scan_for.contains("concepts") || scan_for.contains("all") {
+            for slug in &config.entities.concepts {
+                if existing_links.contains(&slug.to_lowercase()) {
+                    continue;
+                }
+                if note.path.file_stem().and_then(|s| s.to_str()) == Some(slug.as_str()) {
+                    continue; // never self-link a concept's own hub note
+                }
+                if let Some((context, surface)) = find_mention(&note.body, slug, slug, config.min_word_length) {
+                    report.add(Violation {
+                        path: note.path.clone(),
+                        rule: "linking.glossary".to_string(),
+                        severity: Severity::Info,
+                        message: format!("mention of '{surface}' could be linked as [[{slug}]]"),
+                        fix: Some(Fix::AddWikilink {
+                            target: slug.clone(),
+                            surface,
+                            context,
+                        }),
+                    });
+                }
+            }
+
+            for (alias_surface, slug) in &config.aliases {
+                if existing_links.contains(&slug.to_lowercase()) {
+                    continue;
+                }
+                if let Some((context, surface)) =
+                    find_mention(&note.body, alias_surface, alias_surface, config.min_word_length)
+                {
+                    report.add(Violation {
+                        path: note.path.clone(),
+                        rule: "linking.alias".to_string(),
+                        severity: Severity::Info,
+                        message: format!("alias '{surface}' could be linked as [[{slug}|{surface}]]"),
+                        fix: Some(Fix::AddWikilink {
+                            target: slug.clone(),
+                            surface,
                             context,
                         }),
                     });
@@ -167,22 +248,27 @@ pub fn apply_linking(vault_root: &Path, notes: &[Note], config: &LinkingConfig) 
     let report = lint_linking(notes, config);
     let mut fixed_count = 0;
 
-    // Group fixes by file
-    let mut fixes_by_path: std::collections::HashMap<&std::path::Path, Vec<&str>> = std::collections::HashMap::new();
+    // Group fixes by file, carrying (target, surface) so the apply step can
+    // emit a piped link that preserves the prose wording.
+    let mut fixes_by_path: std::collections::HashMap<&std::path::Path, Vec<(&str, &str)>> =
+        std::collections::HashMap::new();
     for violation in &report.violations {
-        if let Some(Fix::AddWikilink { target, .. }) = &violation.fix {
-            fixes_by_path.entry(violation.path.as_path()).or_default().push(target);
+        if let Some(Fix::AddWikilink { target, surface, .. }) = &violation.fix {
+            fixes_by_path
+                .entry(violation.path.as_path())
+                .or_default()
+                .push((target, surface));
         }
     }
 
-    for (path, targets) in &fixes_by_path {
+    for (path, fixes) in &fixes_by_path {
         let abs_path = vault_root.join(path);
         let content = std::fs::read_to_string(&abs_path)?;
         let mut new_content = content.clone();
 
-        for target in targets {
-            // Find the first mention and wrap it in [[]]
-            if let Some(new) = insert_first_wikilink(&new_content, target) {
+        for (target, surface) in fixes {
+            // Find the first mention of the surface form and wrap it in [[]].
+            if let Some(new) = insert_first_wikilink(&new_content, target, surface) {
                 new_content = new;
             }
         }
@@ -205,9 +291,11 @@ fn extract_existing_links(body: &str) -> HashSet<String> {
         .collect()
 }
 
-/// Find a case-insensitive mention of a term in body text.
-/// Returns surrounding context if found.
-fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<String> {
+/// Find a case-insensitive mention of a term in body text. Returns
+/// `(context, surface)` where `surface` is the text actually matched in the
+/// body (preserving its original case) so the caller can emit a piped link
+/// `[[target|surface]]` that keeps the prose wording.
+fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<(String, String)> {
     let body_lower = body.to_lowercase();
 
     // Try title first, then stem
@@ -240,20 +328,25 @@ fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<S
                 continue;
             }
 
+            // The surface form is the original-case substring at the match.
+            let surface = body[pos..after_pos].to_string();
             // Extract context (surrounding ~20 chars, snapped to char boundaries)
             let start = body.floor_char_boundary(pos.saturating_sub(20));
             let end = body.ceil_char_boundary((pos + term.len() + 20).min(body.len()));
             let context = body[start..end].to_string();
-            return Some(context);
+            return Some((context, surface));
         }
     }
 
     None
 }
 
-/// Insert a wikilink at the first mention of a target in content.
-/// Only searches the body (after frontmatter) to avoid corrupting YAML fields.
-fn insert_first_wikilink(content: &str, target: &str) -> Option<String> {
+/// Insert a wikilink at the first mention of `surface` in content, pointing at
+/// `target`. Only searches the body (after frontmatter) to avoid corrupting
+/// YAML fields. Emits a piped link `[[target|matched]]` when the matched text
+/// differs from `target` (an alias surface form, or a title whose stem
+/// differs); a plain `[[matched]]` otherwise.
+fn insert_first_wikilink(content: &str, target: &str, surface: &str) -> Option<String> {
     // Find the end of frontmatter so we only search the body
     let body_start = if let Some(after_open) = content.strip_prefix("---") {
         after_open.find("\n---").map(|pos| 3 + pos + "\n---".len()).unwrap_or(0)
@@ -262,7 +355,10 @@ fn insert_first_wikilink(content: &str, target: &str) -> Option<String> {
     };
 
     let body = &content[body_start..];
-    let pattern = format!(r"(?i)\b{}\b", regex::escape(target));
+    // Match the surface form (the text that actually appears) rather than the
+    // target slug, so an alias like "Retrieval-Augmented Generation" is found
+    // even though it points at the slug "rag".
+    let pattern = format!(r"(?i)\b{}\b", regex::escape(surface));
     let re = Regex::new(&pattern).ok()?;
 
     // Only replace the first occurrence in the body
@@ -279,7 +375,15 @@ fn insert_first_wikilink(content: &str, target: &str) -> Option<String> {
         }
 
         let after = &content[abs_end..];
-        Some(format!("{before}[[{matched}]]{after}"))
+        // Plain link only when the matched text is exactly the slug; otherwise
+        // pipe so the canonical slug is the link target while the prose wording
+        // (case, alias surface form) is preserved as the display text.
+        let link = if matched == target {
+            format!("[[{matched}]]")
+        } else {
+            format!("[[{target}|{matched}]]")
+        };
+        Some(format!("{before}{link}{after}"))
     } else {
         None
     }
@@ -345,7 +449,7 @@ mod tests {
     #[test]
     fn test_insert_first_wikilink() {
         let content = "Working on obsidian-cortex and obsidian-cortex improvements.";
-        let result = insert_first_wikilink(content, "obsidian-cortex");
+        let result = insert_first_wikilink(content, "obsidian-cortex", "obsidian-cortex");
         assert!(result.is_some());
         let result = result.expect("should have result");
         assert!(result.starts_with("Working on [[obsidian-cortex]]"));
@@ -355,7 +459,7 @@ mod tests {
     #[test]
     fn test_insert_first_wikilink_skips_frontmatter() {
         let content = "---\ntitle: i replaced commands with one python script\ntype: article\n---\n\nThis article about python is great.";
-        let result = insert_first_wikilink(content, "python");
+        let result = insert_first_wikilink(content, "python", "python");
         assert!(result.is_some());
         let result = result.expect("should have result");
         // Must NOT modify frontmatter title
@@ -367,7 +471,7 @@ mod tests {
     #[test]
     fn test_insert_first_wikilink_no_frontmatter() {
         let content = "Just a body with python mentioned.";
-        let result = insert_first_wikilink(content, "python");
+        let result = insert_first_wikilink(content, "python", "python");
         assert!(result.is_some());
         assert!(result.unwrap().contains("[[python]]"));
     }
@@ -378,5 +482,120 @@ mod tests {
         let links = extract_existing_links(body);
         assert!(links.contains("note-a"));
         assert!(links.contains("note-b"));
+    }
+
+    // --- Phase 2: glossary concepts + piped alias links ---
+
+    #[test]
+    fn insert_first_wikilink_pipes_alias_to_slug() {
+        let content = "We rely on Retrieval-Augmented Generation here.";
+        let result = insert_first_wikilink(content, "rag", "Retrieval-Augmented Generation").expect("link");
+        assert!(
+            result.contains("[[rag|Retrieval-Augmented Generation]]"),
+            "piped link preserves prose surface; got {result}"
+        );
+    }
+
+    #[test]
+    fn insert_first_wikilink_pipes_when_only_case_differs() {
+        let content = "We use LangChain daily.";
+        // surface "LangChain" differs from slug "langchain" only in case -> piped.
+        let result = insert_first_wikilink(content, "langchain", "LangChain").expect("link");
+        assert!(result.contains("[[langchain|LangChain]]"), "got {result}");
+    }
+
+    #[test]
+    fn insert_first_wikilink_plain_when_surface_equals_target() {
+        let content = "About python here.";
+        let result = insert_first_wikilink(content, "python", "python").expect("link");
+        assert!(result.contains("[[python]]"));
+        assert!(!result.contains('|'), "no pipe when surface == target");
+    }
+
+    fn glossary_config(concepts: &[&str], aliases: &[(&str, &str)]) -> LinkingConfig {
+        let mut cfg = LinkingConfig {
+            scan_for: vec!["concepts".to_string()],
+            min_word_length: 3,
+            ..Default::default()
+        };
+        cfg.entities.concepts = concepts.iter().map(|s| s.to_string()).collect();
+        cfg.aliases = aliases.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        cfg
+    }
+
+    fn note_with_body(path: &str, body: &str) -> Note {
+        Note {
+            path: std::path::PathBuf::from(path),
+            frontmatter: crate::vault::Frontmatter::default(),
+            body: body.to_string(),
+            raw: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn glossary_concept_is_flagged_for_linking() {
+        let cfg = glossary_config(&["langchain"], &[]);
+        let notes = vec![note_with_body("notes/x.md", "We use LangChain in production.")];
+        let report = lint_linking(&notes, &cfg);
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.rule == "linking.glossary" && v.message.contains("langchain")),
+            "glossary concept mention flagged"
+        );
+    }
+
+    #[test]
+    fn alias_is_flagged_as_piped_link() {
+        let cfg = glossary_config(&[], &[("Retrieval-Augmented Generation", "rag")]);
+        let notes = vec![note_with_body(
+            "notes/x.md",
+            "Retrieval-Augmented Generation is everywhere.",
+        )];
+        let report = lint_linking(&notes, &cfg);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.rule == "linking.alias")
+            .expect("alias violation");
+        match &v.fix {
+            Some(Fix::AddWikilink { target, surface, .. }) => {
+                assert_eq!(target, "rag");
+                assert_eq!(surface, "Retrieval-Augmented Generation");
+            }
+            other => panic!("expected AddWikilink, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn glossary_does_not_double_link_existing() {
+        let cfg = glossary_config(&["langchain"], &[]);
+        // Body already links it -> no new violation.
+        let notes = vec![note_with_body("notes/x.md", "We use [[langchain]] here.")];
+        let report = lint_linking(&notes, &cfg);
+        assert!(
+            !report.violations.iter().any(|v| v.rule == "linking.glossary"),
+            "already-linked concept is not re-flagged"
+        );
+    }
+
+    #[test]
+    fn glossary_does_not_self_link_hub_note() {
+        let cfg = glossary_config(&["langchain"], &[]);
+        // The note IS the langchain hub note (stem == slug) -> never self-link.
+        let notes = vec![note_with_body("notes/langchain.md", "LangChain is a framework.")];
+        let report = lint_linking(&notes, &cfg);
+        assert!(
+            !report.violations.iter().any(|v| v.rule == "linking.glossary"),
+            "a concept's own hub note is never self-linked"
+        );
+    }
+
+    #[test]
+    fn load_glossary_missing_file_is_empty() {
+        let g = load_glossary(std::path::Path::new("/nonexistent/glossary.yml")).expect("ok");
+        assert!(g.concepts.is_empty());
+        assert!(g.aliases.is_empty());
     }
 }

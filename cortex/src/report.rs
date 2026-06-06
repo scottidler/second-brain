@@ -21,13 +21,36 @@ impl std::fmt::Display for Severity {
 
 #[derive(Debug, Clone, Serialize)]
 pub enum Fix {
-    RenameFile { from: PathBuf, to: PathBuf },
-    SetFrontmatter { key: String, value: serde_yaml::Value },
-    ReplaceTag { old: String, new: String },
-    AddWikilink { target: String, context: String },
-    MoveFile { from: PathBuf, to: PathBuf },
-    SetCortexFields { fields: Vec<(String, String)> },
-    RemoveCortexFields { keys: Vec<String> },
+    RenameFile {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    SetFrontmatter {
+        key: String,
+        value: serde_yaml::Value,
+    },
+    ReplaceTag {
+        old: String,
+        new: String,
+    },
+    AddWikilink {
+        target: String,
+        /// The text actually matched in the body. Emitted as the display half
+        /// of a piped link `[[target|surface]]` when it differs from `target`
+        /// (e.g. an alias surface form, or a title whose stem differs).
+        surface: String,
+        context: String,
+    },
+    MoveFile {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    SetCortexFields {
+        fields: Vec<(String, String)>,
+    },
+    RemoveCortexFields {
+        keys: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

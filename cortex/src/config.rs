@@ -350,7 +350,7 @@ pub struct ScopeMatch {
     pub source_contains: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct LinkingConfig {
     #[serde(rename = "scan-for")]
@@ -359,29 +359,11 @@ pub struct LinkingConfig {
     pub targets: LinkingTargets,
     #[serde(rename = "min-word-length")]
     pub min_word_length: usize,
-}
-
-impl Clone for LinkingConfig {
-    fn clone(&self) -> Self {
-        Self {
-            scan_for: self.scan_for.clone(),
-            entities: LinkingEntities {
-                people: self.entities.people.clone(),
-                projects: self.entities.projects.clone(),
-            },
-            targets: LinkingTargets {
-                types: LinkingFilter {
-                    exclude: self.targets.types.exclude.clone(),
-                    include: self.targets.types.include.clone(),
-                },
-                paths: LinkingFilter {
-                    exclude: self.targets.paths.exclude.clone(),
-                    include: self.targets.paths.include.clone(),
-                },
-            },
-            min_word_length: self.min_word_length,
-        }
-    }
+    /// Alias surface form → canonical concept slug. When `find_mention` matches
+    /// a surface form, the linker emits a piped wikilink `[[slug|surface]]`.
+    /// Loaded from `glossary.yml` (Phase 2 of graph-augmented-memory).
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
 }
 
 impl Default for LinkingConfig {
@@ -391,25 +373,30 @@ impl Default for LinkingConfig {
             entities: LinkingEntities::default(),
             targets: LinkingTargets::default(),
             min_word_length: 5,
+            aliases: HashMap::new(),
         }
     }
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct LinkingEntities {
     pub people: Vec<String>,
     pub projects: Vec<String>,
+    /// Concept glossary: kebab-case slugs (mirroring `canonical-tags.yml`),
+    /// loaded from `glossary.yml`. Each is linked at first body mention as
+    /// `[[slug]]` (Phase 2 of graph-augmented-memory).
+    pub concepts: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct LinkingTargets {
     pub types: LinkingFilter,
     pub paths: LinkingFilter,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct LinkingFilter {
     pub exclude: Vec<String>,

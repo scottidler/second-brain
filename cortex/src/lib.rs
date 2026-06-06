@@ -207,28 +207,28 @@ pub fn link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Repor
         .cloned()
         .collect();
 
-    // `ScanScope::All` falls through to whatever the config holds; any other
-    // variant overrides the config's `actions.linking.scan-for`. This is the
-    // wiring the CLI flag was missing until v0.8.5.
-    let overridden;
-    let linking_config = if opts.scan == crate::opts::ScanScope::All {
-        &config.actions.linking
-    } else {
-        overridden = crate::config::LinkingConfig {
-            scan_for: opts.scan.as_config_scan_for(),
-            ..config.actions.linking.clone()
-        };
-        &overridden
-    };
+    // Build the effective linking config: start from the base (config or the
+    // `--scan`-overridden scan-for), then fold in the shared `glossary.yml`
+    // concepts + aliases (Phase 2). `ScanScope::All` falls through to whatever
+    // the config holds; any other variant overrides `actions.linking.scan-for`.
+    let mut linking_config = config.actions.linking.clone();
+    if opts.scan != crate::opts::ScanScope::All {
+        linking_config.scan_for = opts.scan.as_config_scan_for();
+    }
+    let glossary = linking::load_glossary(&::vault::paths::glossary())?;
+    // Config-provided concepts (if any) plus the glossary's; glossary aliases
+    // win over any config-level aliases on key collision.
+    linking_config.entities.concepts.extend(glossary.concepts);
+    linking_config.aliases.extend(glossary.aliases);
 
     if opts.apply {
-        let count = linking::apply_linking(vault_root, &notes, linking_config)?;
+        let count = linking::apply_linking(vault_root, &notes, &linking_config)?;
         Ok(Report {
             applied: count,
             ..Default::default()
         })
     } else {
-        Ok(linking::lint_linking(&notes, linking_config))
+        Ok(linking::lint_linking(&notes, &linking_config))
     }
 }
 
@@ -296,9 +296,11 @@ mod tests {
             entities: crate::config::LinkingEntities {
                 people: vec!["Alice Smith".to_string()],
                 projects: vec!["ProjectAtlas".to_string()],
+                concepts: Vec::new(),
             },
             targets: crate::config::LinkingTargets::default(),
             min_word_length: 4,
+            aliases: std::collections::HashMap::new(),
         };
         // Concept target: a separate note with title "Distillation" lives in the
         // vault. The probe note mentions Alice Smith, ProjectAtlas, and Distillation

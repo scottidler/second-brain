@@ -49,6 +49,7 @@ pub enum ScanScope {
     People,
     Projects,
     Concepts,
+    Metadata,
     All,
 }
 
@@ -57,11 +58,18 @@ impl ScanScope {
     /// `config.actions.linking.scan_for` (matches the legacy contract:
     /// the linker checks `contains("people")` / `contains("projects")` /
     /// `contains("concepts")` / `contains("all")`).
+    ///
+    /// `Metadata` is accepted for symmetry but produces no wikilink fixes:
+    /// creator/source/domain relationships are materialized as graph `edges`
+    /// by `sb cortex graph`, never written into note frontmatter (the design's
+    /// "no metadata linking into frontmatter" rule). The linker has no
+    /// `metadata` branch, so this scope is a deliberate no-op for `cortex link`.
     pub fn as_config_scan_for(self) -> Vec<String> {
         match self {
             ScanScope::People => vec!["people".to_string()],
             ScanScope::Projects => vec!["projects".to_string()],
             ScanScope::Concepts => vec!["concepts".to_string()],
+            ScanScope::Metadata => vec!["metadata".to_string()],
             ScanScope::All => vec!["all".to_string()],
         }
     }
