@@ -1,0 +1,47 @@
+# Relevance-lift evaluation query set for `sb oracle eval`.
+#
+# Seed queries (hand-written, representative of real retrieval use). The design
+# (docs/design/2026-06-06-oracle-eval-relevance-lift.md) calls for expanding
+# these ~10 seeds to ~30 as a one-time authoring step (Phase 5). Some queries
+# deliberately target fact-dense entities (claude / anthropic / mcp) so the
+# fact-layer ablation is actually exercised.
+#
+# Schema (kebab-case):
+#   id:          stable identifier (cache key; do NOT reuse an id for a new query)
+#   query:       the search string
+#   domain:      optional schema filter passed to search
+#   calibration: optional map of note-path -> graded human label (0..3); present
+#                only on the handful of queries used to validate the LLM judge.
+#                Authored AFTER a first run via `--emit-calibration` reveals the pool.
+
+queries:
+  - id: cc-mcp-setup
+    query: "how do I configure claude code MCP servers"
+    domain: ai
+  - id: cc-from-anthropic
+    query: "who builds claude code and what is it"
+    domain: ai
+  - id: mcp-protocol
+    query: "what is the model context protocol and how does it connect to claude"
+    domain: ai
+  - id: rust-error-handling
+    query: "rust eyre vs thiserror when to use which"
+    domain: tech
+  - id: obsidian-claude-workflow
+    query: "using claude code with obsidian for notes"
+    domain: ai
+  - id: ff-pass-install
+    query: "youth football pass concepts for install week"
+    domain: football
+  - id: ff-defense-youth
+    query: "youth football defensive scheme for small teams"
+    domain: football
+  - id: homelab-k8s
+    query: "kubernetes operator pattern for homelab"
+    domain: homelab
+  - id: embeddings-search
+    query: "semantic search with embeddings and cosine similarity"
+    domain: tech
+  - id: agent-orchestration
+    query: "orchestrating multiple AI agents in a loop"
+    domain: ai

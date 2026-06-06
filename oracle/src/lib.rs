@@ -12,6 +12,7 @@
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 
 pub mod config;
+pub mod eval;
 pub mod server;
 pub mod tools;
 

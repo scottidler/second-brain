@@ -35,6 +35,36 @@ pub enum Commands {
         #[arg(long)]
         list: bool,
     },
+
+    /// Measure relevance lift of graph retrieval vs hybrid (design 2026-06-06)
+    Eval(EvalArgs),
+}
+
+#[derive(Args)]
+pub struct EvalArgs {
+    /// Path to the eval query set
+    #[arg(long, default_value = "config/eval/queries.yml")]
+    pub queries: PathBuf,
+    /// Pool/metric depth (e.g. nDCG@K)
+    #[arg(long, default_value_t = 10)]
+    pub k: u32,
+    /// Judge model name (empty = fabric's default model)
+    #[arg(long, default_value = "")]
+    pub judge_model: String,
+    /// Ignore and overwrite cached judgments
+    #[arg(long)]
+    pub rebuild_cache: bool,
+}
+
+impl From<EvalArgs> for oracle::eval::EvalOpts {
+    fn from(a: EvalArgs) -> Self {
+        Self {
+            queries_path: vault::paths::expand_tilde(&a.queries),
+            k: a.k,
+            judge_model: a.judge_model,
+            rebuild_cache: a.rebuild_cache,
+        }
+    }
 }
 
 impl OracleCli {
@@ -69,6 +99,15 @@ impl OracleCli {
                     let result = oracle::call(config, tool_name, json.as_deref()).await?;
                     print_call_result(&result)
                 }
+            }
+            Commands::Eval(a) => {
+                let opts = a.into();
+                let summary = oracle::eval::run(&config, &opts)?;
+                println!(
+                    "loaded {} eval queries ({} with calibration labels)",
+                    summary.query_count, summary.calibration_count
+                );
+                Ok(())
             }
         }
     }
