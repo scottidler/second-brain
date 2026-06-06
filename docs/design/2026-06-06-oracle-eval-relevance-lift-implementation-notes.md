@@ -145,3 +145,29 @@ Append-only record of how the implementation interprets or diverges from
 ### Open questions
 - Whether to also report graph-hybrid lift at hops=1 (the production default), not
   just hops=2. Deferred to operational tuning.
+
+## Phase 6: Full-pipeline test, docs, ship
+
+### Design decisions
+- **Retrieval (`retrieve`) split from scoring (`evaluate`)** (`eval.rs`) so the
+  scoring pipeline is unit-testable with synthetic `QueryRun`s + a `MockJudge`,
+  with no live index or LLM. `evaluate` takes `judge: &dyn RelevanceJudge`.
+- **Full-pipeline tests** (`eval/tests.rs`) drive `evaluate` over a 2-query
+  fixture: assert all six mode rows, positive graph-hybrid lift, fact-ablation
+  coverage (1/2 queries touched), the calibration panel, cache reuse across runs,
+  and the `--emit-calibration` sheet/short-circuit.
+
+### Deviations
+- **No live end-to-end test against the real vault index in CI** — that path runs
+  real fabric LLM calls (slow, non-deterministic) and is exercised operationally
+  via `sb oracle eval`, not in CI. Retrieval itself is covered by the existing
+  oracle server tests; the split keeps `evaluate` fully deterministic.
+
+### Tradeoffs
+- **`JUDGE_TEXT_MAX_CHARS` const (8000) over a config field** — keeps the eval a
+  measurement tool with no new config surface; revisit if the budget needs tuning.
+
+### Open questions
+- The `judge-relevance` pattern ships via the bootstrap PATTERNS list but reaches
+  `~/.config/sb/patterns/` only after `sb bootstrap --force` / `otto deploy`
+  (not `otto install`). A first real `sb oracle eval` run requires that sync.
