@@ -62,6 +62,9 @@ pub struct GraphNoteRow {
     pub modified_at: i64,
 }
 
+/// One entity row's mutable columns: `(kind, hub_path, ontotype)`.
+pub type EntityRow = (String, Option<String>, Option<String>);
+
 /// One reaching of a neighbor during graph expansion. A neighbor reached by
 /// several paths yields several `GraphReach` rows; the caller (oracle)
 /// aggregates them into an `expansion_score`. `weight` is the accumulated
@@ -184,6 +187,46 @@ impl SearchIndex {
     pub fn clear_edges(&self) -> Result<usize> {
         let n = self.conn.execute("DELETE FROM edges", [])?;
         Ok(n)
+    }
+
+    /// Upsert an `entities` row (Phase 3). `id` is the entity slug; `kind` is
+    /// `concept`/`creator`/`source`/`tag`; `hub_path` is the stubbed hub note's
+    /// vault path (when one exists); `ontotype` is the Phase-5 ontology class.
+    pub fn upsert_entity(&self, id: &str, kind: &str, hub_path: Option<&str>, ontotype: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO entities (id, kind, hub_path, ontotype) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET kind = excluded.kind,
+                hub_path = excluded.hub_path, ontotype = excluded.ontotype",
+            params![id, kind, hub_path, ontotype],
+        )?;
+        Ok(())
+    }
+
+    /// Count `entities` rows (test/diagnostic helper).
+    pub fn count_entities(&self) -> Result<i64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))?;
+        Ok(n)
+    }
+
+    /// Read one entity's `(kind, hub_path, ontotype)` by id (test helper).
+    pub fn get_entity(&self, id: &str) -> Result<Option<EntityRow>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT kind, hub_path, ontotype FROM entities WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .ok();
+        Ok(row)
     }
 
     /// Insert a batch of edges inside a single bounded transaction.
@@ -324,6 +367,15 @@ impl SearchIndex {
                 tags_json, source, creator, body, body, modified_at,
             ],
         )?;
+        Ok(())
+    }
+
+    /// Delete a `notes` row by path, for tests in other crates that need to
+    /// simulate `index_vault` dropping a deleted note (and exercise the edge
+    /// `ON DELETE CASCADE`). Production deletion goes through `index_vault`'s
+    /// `remove_stale_notes`, never this.
+    pub fn delete_note_for_test(&self, path: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM notes WHERE path = ?1", params![path])?;
         Ok(())
     }
 

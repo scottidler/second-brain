@@ -183,6 +183,12 @@ pub struct EmbedOpts {
 }
 
 #[derive(Debug, Clone)]
+pub struct HubOpts {
+    /// Write hub notes to disk (default: report what would be stubbed).
+    pub apply: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct GraphOpts {
     /// Force a full rebuild of the `edges` table (clear-then-rebuild every
     /// note), bypassing the incremental watermarks. Implied on the first run

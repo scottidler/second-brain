@@ -77,6 +77,8 @@ pub enum Command {
     Embed(EmbedArgs),
     /// Build the deterministic edge graph oracle's graph retrieval reads
     Graph(GraphArgs),
+    /// Stub/refresh entity hub notes (concepts, creators, sources, dense tags)
+    Hub(HubArgs),
 }
 
 #[derive(Args)]
@@ -291,6 +293,18 @@ impl From<GraphArgs> for opts::GraphOpts {
 }
 
 #[derive(Args)]
+pub struct HubArgs {
+    /// Write hub notes to disk (default: report what would be stubbed).
+    #[arg(long)]
+    pub apply: bool,
+}
+impl From<HubArgs> for opts::HubOpts {
+    fn from(a: HubArgs) -> Self {
+        Self { apply: a.apply }
+    }
+}
+
+#[derive(Args)]
 pub struct SummarizeArgs {
     #[arg(long)]
     pub backfill: bool,
@@ -444,6 +458,24 @@ impl CortexCli {
                     stats.metadata,
                     stats.skipped,
                 );
+            }
+            Command::Hub(a) => {
+                let apply = a.apply;
+                let report = cortex::hub::run(&vault_root, &config, &a.into())?;
+                if apply {
+                    println!(
+                        "hub complete: created={} existing={} entities_recorded={}",
+                        report.created, report.existing, report.entities_recorded,
+                    );
+                } else {
+                    println!(
+                        "hub dry-run: would create {} hub note(s) ({} already exist):",
+                        report.created, report.existing,
+                    );
+                    for path in &report.stubs {
+                        println!("  + {path}");
+                    }
+                }
             }
         }
         Ok(())

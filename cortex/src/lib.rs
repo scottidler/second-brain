@@ -13,6 +13,7 @@ pub mod embed;
 pub mod fabric;
 pub mod frontmatter;
 pub mod graph;
+pub mod hub;
 pub mod intel;
 pub mod linking;
 pub mod links;

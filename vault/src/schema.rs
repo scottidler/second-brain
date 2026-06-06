@@ -122,6 +122,10 @@ pub enum NoteType {
     Link,
     Poem,
     System,
+    /// Auto-stubbed entity hub note (concept / creator / source) produced by
+    /// `sb cortex hub`. Doubles as human-navigable knowledge and a
+    /// machine-readable knowledge bundle (graph-augmented-memory Phase 3).
+    Entity,
 }
 
 impl NoteType {
@@ -148,6 +152,7 @@ impl NoteType {
             Self::Link => "link",
             Self::Poem => "poem",
             Self::System => "system",
+            Self::Entity => "entity",
         }
     }
 
@@ -174,6 +179,7 @@ impl NoteType {
             Self::Link,
             Self::Poem,
             Self::System,
+            Self::Entity,
         ]
     }
 
@@ -235,6 +241,7 @@ impl FromStr for NoteType {
             "link" => Ok(Self::Link),
             "poem" => Ok(Self::Poem),
             "system" => Ok(Self::System),
+            "entity" => Ok(Self::Entity),
             _ => Err(format!("unknown note type: {s}")),
         }
     }

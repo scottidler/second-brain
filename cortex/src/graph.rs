@@ -194,16 +194,24 @@ fn build_edges_for(
             continue;
         };
         let df = bucket.len();
-        if df > cfg.fanout_cap {
-            log::trace!(
-                "shared-tag: skipping blanket tag '{tag}' (df={df} > cap {})",
-                cfg.fanout_cap
-            );
-            continue;
-        }
         // Rarity weight per the design: 1 / ln(1 + df). A blanket tag (large
         // df) contributes ~nothing; a rare shared tag is discriminating.
         let contrib = 1.0_f32 / (1.0 + df as f32).ln();
+        if df > cfg.fanout_cap {
+            // Over-cap blanket tag: route through the tag's hub note (Phase 3)
+            // if one exists, instead of emitting df-1 pairwise edges. One edge
+            // per note to the hub keeps the dense bucket from exploding.
+            let hub_path = format!("{}/{}.md", crate::hub::HUB_DIR, tag);
+            if index.note_path_exists(&hub_path)? {
+                edges.push(Edge::deterministic(src.clone(), hub_path, KIND_SHARED_TAG, contrib));
+            } else {
+                log::trace!(
+                    "shared-tag: blanket tag '{tag}' (df={df} > cap {}) has no hub; skipping",
+                    cfg.fanout_cap
+                );
+            }
+            continue;
+        }
         for other in bucket {
             if other != src {
                 *tag_weight.entry(other.clone()).or_insert(0.0) += contrib;
