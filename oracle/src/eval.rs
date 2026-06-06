@@ -8,6 +8,7 @@
 //! injected via the [`judge::RelevanceJudge`] trait so tests run without an LLM.
 
 pub mod judge;
+pub mod metrics;
 pub mod queries;
 
 use std::path::PathBuf;

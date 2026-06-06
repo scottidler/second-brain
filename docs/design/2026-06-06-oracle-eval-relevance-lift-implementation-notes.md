@@ -30,3 +30,30 @@ Append-only record of how the implementation interprets or diverges from
 
 ### Open questions
 - None.
+
+## Phase 2: Metrics module
+
+### Design decisions
+- **Exponential graded gain `2^rel - 1`, discount `1/log2(rank+1)`** (`metrics.rs`),
+  the standard nDCG formulation; a note absent from `judgments` scores `0`.
+- **IDCG over the pool's judged scores** (sorted desc, top-k) — `idcg_at_k`. It is
+  the max achievable DCG and is invariant to equal-relevance ordering, so nDCG
+  needs no tiebreak (ties in the ranked list itself are already deterministic per
+  v0.8.56/v0.8.57).
+- **`Option` semantics encode query exclusion** (`score_query`): `ndcg = None`
+  when IDCG is 0; `recall`/`rr` = `None` when the pool has no relevant note.
+  `aggregate` means only the `Some` values and reports per-metric contributing
+  counts, so excluded queries never silently count as 0.
+- **`pool` returns a sorted, deduped union** so the judged-pair set is
+  deterministic.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- **`reciprocal_rank` returns `Some(0.0)` when relevant notes exist but none are
+  in top-k, `None` only when the pool has no relevant note at all** — distinguishes
+  "mode missed them" (a real 0) from "query can't discriminate" (excluded).
+
+### Open questions
+- None.
