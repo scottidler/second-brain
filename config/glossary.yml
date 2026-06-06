@@ -43,6 +43,37 @@ concepts:
   - duckdb
   - obsidian
   - syncthing
+  # Promoted from entity-proposals.yml (2026-06-06): genuine tools/concepts the
+  # corpus actually names, to densify the high-signal wikilink layer.
+  - mcp
+  - tmux
+  - fzf
+  - zoxide
+  - yazi
+  - ratatui
+  - playwright
+  - supabase
+  - vercel
+  - n8n
+  - github-cli
+  - homebrew
+  - ffmpeg
+  - redis
+  - podman
+  - proxmox
+  - jellyfin
+  - immich
+  - pi-hole
+  - home-assistant
+  - raspberry-pi
+  - portainer
+  - uptime-kuma
+  - plex
+  - notebooklm
+  - tdd
+  - cuda
+  - opencode
+  - windsurf
 
 aliases:
   Retrieval-Augmented Generation: rag
@@ -61,3 +92,12 @@ aliases:
   knowledge graph: knowledge-graph
   vector database: vector-database
   approximate nearest neighbor: ann
+  # Multi-word surfaces for the 2026-06-06 promotions (short slugs like mcp/fzf/
+  # tdd only auto-link via a surface form long enough to clear min-word-length).
+  Home Assistant: home-assistant
+  GitHub CLI: github-cli
+  Uptime Kuma: uptime-kuma
+  Raspberry Pi: raspberry-pi
+  Test-Driven Development: tdd
+  test-driven development: tdd
+  NotebookLM: notebooklm
