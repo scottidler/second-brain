@@ -72,6 +72,16 @@ from `2026-06-05-graph-augmented-memory.md`. One section per phase.
   borg/cortex/sb/vault as errors under `-D warnings`. Rewrote them to
   `sort_by_key(|b| Reverse(...))` so the Phase-1 CI is green. Mechanical, not
   part of the graph feature.
+- **The design's "full rebuild on restart" backstop is intentionally NOT
+  implemented** — the doc keys `full_rebuild` on whether the high-water mark
+  survived a restart. Here `last_run_at` lives in the DB's `graph_state`, so it
+  *does* survive a normal restart → no automatic full rebuild after restart.
+  That's deliberate and strictly better: the per-note `edge_build_state` already
+  catches edits/embeddings that landed while cortex was down (a downtime edit
+  bumps `modified_at`/`produced_at` past the per-note watermark), so the global
+  restart-rebuild the doc proposed is unnecessary. A full rebuild is still
+  available on demand via `--backfill` (`force_full`). A future reader should
+  not expect an automatic post-restart rebuild — there isn't one, by design.
 
 ### Tradeoffs
 - **Rebuild-all-kinds per target vs. per-kind partial rebuild** — when a note is
@@ -213,6 +223,19 @@ from `2026-06-05-graph-augmented-memory.md`. One section per phase.
 - Did not ship an empty `entity-proposals.yml` starter via bootstrap (unlike
   `tag-proposals.yml`); the discovery pass creates it on first write. Trivial to
   add for symmetry if desired.
+- **KNOWN LIMITATION — discovery has no advancing coverage window.**
+  `discover` does `scan_vault` (path-sorted) → `filter(is_ingested)` →
+  `.take(limit)`, with **no persisted cursor**. So every run (daemon tick or
+  repeated CLI) mines the *same alphabetical prefix* of ingested notes; notes
+  past `max_per_run` (default 50) are never reached unless the operator runs
+  `--limit <large>` once. Re-mining is harmless (proposals merge, known-set
+  excludes promoted entries) but the historical tail is not covered by the
+  default daily tick. Not fixed here because `entities::run` has no index/DB
+  handle to persist a cursor (it only writes the YAML), so a fix is an
+  architectural change. Recommended fix: give the pass a `graph_state`-backed
+  rotating cursor (mirror the `edge_build_state` per-note pattern), or order by
+  ingest recency so the growing edge is always covered. Surfaced loudly rather
+  than implemented silently.
 
 ## Phase 5: MemGraphRAG
 
@@ -266,3 +289,16 @@ from `2026-06-05-graph-augmented-memory.md`. One section per phase.
   controlled set; `functional_predicates`/`noise_predicates` config lists govern
   consolidation. A controlled predicate vocabulary (mirroring canonical tags) is
   the natural next step if open extraction proves noisy.
+- **KNOWN LIMITATION — fact extraction shares the same no-advancing-window
+  bound as Phase 4.** `extract_facts` does `filter(is_ingested).take(limit)`
+  (`fact_max_per_run`, default 50) over path-sorted notes with no cursor, so
+  repeated `--backfill` re-mines the same prefix. `graph::run` *does* hold the
+  index, so a `graph_state`-backed cursor is the clean fix here (cheaper than
+  for Phase 4). Re-extraction is idempotent (`INSERT OR REPLACE` on the edge
+  PK). For now: run `--backfill` is bounded-by-design; a full historical sweep
+  needs the cursor or a raised `fact_max_per_run`.
+- **`entities` table has no read consumer yet.** `cortex hub` populates it
+  (id/kind/hub_path/ontotype) but nothing reads it on the retrieval path — fact
+  extraction resolves hubs by note-path existence, not via the table. Expected
+  at this stage; the catalogue is a substrate for future ontology-aware
+  retrieval, not yet wired into oracle.
