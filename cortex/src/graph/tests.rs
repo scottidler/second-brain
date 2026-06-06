@@ -7,13 +7,9 @@ use vault::search::{EmbeddingKind, SearchIndex};
 /// a handful of notes.
 fn cfg() -> GraphConfig {
     GraphConfig {
-        graph_interval_secs: 900,
-        semantic_k: 10,
         min_cosine: -1.0, // admit all so tests don't depend on mock geometry
         fanout_cap: 3,
-        creator_weight: 0.2,
-        source_weight: 0.15,
-        domain_weight: 0.1,
+        ..GraphConfig::default()
     }
 }
 

@@ -61,7 +61,7 @@ pub struct GraphStats {
 /// Run the graph pass against the oracle index DB. Opens its own connection
 /// (cortex commands do not share oracle's `Mutex<SearchIndex>`), takes the
 /// shared embed lock, and writes edges in per-note bounded transactions.
-pub fn run(_vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<GraphStats> {
+pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<GraphStats> {
     log::debug!("cortex::graph::run: backfill={}", opts.backfill);
 
     let db_path = config.oracle_db_path();
@@ -74,6 +74,34 @@ pub fn run(_vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<Grap
     log::debug!("cortex::graph: acquired embed file lock");
 
     let stats = build(&mut index, &config.graph, opts.backfill)?;
+
+    // Phase 5: --backfill also extracts typed `fact` edges (bounded, LLM) and
+    // runs the consolidation agents. Deterministic edges above stand alone; the
+    // factual layer is layered on top only on an explicit backfill.
+    if opts.backfill {
+        let notes = crate::vault::scan_vault(vault_root, &config.vault)?;
+        let extractor = crate::memgraph::FabricTripleExtractor {
+            fabric: &config.fabric,
+            pattern: &config.graph.fact_pattern,
+            max_input_tokens: config.graph.fact_max_input_tokens,
+            timeout_secs: config.graph.fact_timeout_secs,
+        };
+        let facts = crate::memgraph::extract_facts(
+            &mut index,
+            &notes,
+            &extractor,
+            &config.graph,
+            config.graph.fact_max_per_run,
+        )?;
+        let consolidation = crate::memgraph::consolidate(&mut index, &config.graph)?;
+        log::info!(
+            "memgraph backfill: facts_written={} noise_removed={} contradictions={} bridges_added={}",
+            facts.facts_written,
+            consolidation.noise_removed,
+            consolidation.contradictions.len(),
+            consolidation.bridges_added,
+        );
+    }
 
     drop(lock);
     log::info!(

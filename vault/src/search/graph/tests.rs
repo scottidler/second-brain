@@ -133,6 +133,25 @@ fn expand_graph_respects_edge_kinds() {
 }
 
 #[test]
+fn expand_graph_edge_kinds_also_matches_predicate() {
+    let mut index = index_with_notes(3);
+    // A typed fact edge (kind="fact", predicate="uses") and a semantic edge.
+    index
+        .insert_edges(&[
+            Edge::fact("notes/0.md", "notes/1.md", "uses", 0.5, "notes/src.md"),
+            det("notes/0.md", "notes/2.md", "semantic", 0.9),
+        ])
+        .expect("insert");
+    // Filtering by the predicate "uses" matches the fact edge (whose kind is
+    // "fact"), not the semantic one.
+    let reaches = index
+        .expand_graph(&["notes/0.md".to_string()], 1, Some(&["uses".to_string()]), 0.0)
+        .expect("expand");
+    let paths: Vec<&str> = reaches.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(paths, vec!["notes/1.md"], "predicate filter selected the fact edge");
+}
+
+#[test]
 fn expand_graph_two_hops_accumulates_weight_and_origin() {
     let mut index = index_with_notes(3);
     // 0 -> 1 -> 2

@@ -46,6 +46,34 @@ impl Edge {
             src_note: String::new(),
         }
     }
+
+    /// Construct a Phase-5 typed `fact` edge: `kind = "fact"`, the relation in
+    /// `predicate`, and the originating note in `src_note` for provenance.
+    pub fn fact(
+        src: impl Into<String>,
+        dst: impl Into<String>,
+        predicate: impl Into<String>,
+        weight: f32,
+        src_note: impl Into<String>,
+    ) -> Self {
+        Self {
+            src: src.into(),
+            dst: dst.into(),
+            kind: "fact".to_string(),
+            weight,
+            predicate: predicate.into(),
+            src_note: src_note.into(),
+        }
+    }
+}
+
+/// One materialized `fact` edge (Phase 5), with provenance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactEdge {
+    pub src: String,
+    pub dst: String,
+    pub predicate: String,
+    pub src_note: String,
 }
 
 /// The columns the cortex graph pass needs to derive deterministic edges,
@@ -231,10 +259,13 @@ impl SearchIndex {
 
     /// Insert a batch of edges inside a single bounded transaction.
     ///
-    /// Enforces the **universal resolve-`dst`-or-skip rule**: any edge whose
-    /// `dst` is absent from `notes` is skipped (and logged at debug), never
-    /// inserted, so the `dst` foreign key can never abort the batch. Self-edges
-    /// (`src == dst`) are likewise skipped. Returns `(inserted, skipped)`.
+    /// Enforces the **universal resolve-endpoint-or-skip rule**: any edge whose
+    /// `src` OR `dst` is absent from `notes` is skipped (and logged at debug),
+    /// never inserted, so neither foreign key can abort the batch. (For
+    /// deterministic edges `src` is always the note being processed and exists;
+    /// the `src` check matters for Phase-5 `fact` edges whose `src` is an entity
+    /// hub that may not be stubbed.) Self-edges (`src == dst`) are likewise
+    /// skipped. Returns `(inserted, skipped)`.
     pub fn insert_edges(&mut self, edges: &[Edge]) -> Result<(usize, usize)> {
         let tx = self.conn.transaction()?;
         let mut inserted = 0usize;
@@ -250,10 +281,10 @@ impl SearchIndex {
                     skipped += 1;
                     continue;
                 }
-                let dst_present = exists.exists(params![edge.dst])?;
-                if !dst_present {
+                let endpoints_present = exists.exists(params![edge.src])? && exists.exists(params![edge.dst])?;
+                if !endpoints_present {
                     log::debug!(
-                        "insert_edges: skipping edge to absent dst src={} dst={} kind={}",
+                        "insert_edges: skipping edge with absent endpoint src={} dst={} kind={}",
                         edge.src,
                         edge.dst,
                         edge.kind
@@ -379,6 +410,52 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// All `fact` edges (Phase 5), for consolidation passes. Ordered by
+    /// `(src, predicate)` so contradiction detection can group functional
+    /// predicates with multiple distinct objects.
+    pub fn fact_edges(&self) -> Result<Vec<FactEdge>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT src, dst, predicate, src_note FROM edges WHERE kind = 'fact'
+             ORDER BY src, predicate, dst",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(FactEdge {
+                    src: r.get(0)?,
+                    dst: r.get(1)?,
+                    predicate: r.get(2)?,
+                    src_note: r.get(3)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Delete one specific `fact` edge (noise removal). Keyed on the full PK
+    /// (src, dst, kind='fact', predicate).
+    pub fn delete_fact_edge(&self, src: &str, dst: &str, predicate: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM edges WHERE src = ?1 AND dst = ?2 AND kind = 'fact' AND predicate = ?3",
+            params![src, dst, predicate],
+        )?;
+        Ok(n)
+    }
+
+    /// Note paths that have NO incident edge of any kind (fully isolated in the
+    /// graph). Cluster bridging targets these. Excludes nothing else.
+    pub fn notes_without_edges(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.path FROM notes n
+             WHERE NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.path OR e.dst = n.path)",
+        )?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     /// Count edges, optionally filtered by `kind`. Test/diagnostic helper.
     pub fn count_edges(&self, kind: Option<&str>) -> Result<i64> {
         let count: i64 = match kind {
@@ -483,8 +560,20 @@ impl SearchIndex {
         if let Some(kinds) = edge_kinds
             && !kinds.is_empty()
         {
-            let placeholders: Vec<String> = (0..kinds.len()).map(|i| format!("?{}", i + 3)).collect();
-            sql.push_str(&format!(" AND kind IN ({})", placeholders.join(", ")));
+            // A filter value matches either the edge `kind` (e.g. "semantic",
+            // "fact") or, for Phase-5 typed edges, the `predicate` (e.g.
+            // "uses", "released-on") — so callers can target a relation
+            // directly. Each value is bound twice (kind list and predicate list).
+            let kind_ph: Vec<String> = (0..kinds.len()).map(|i| format!("?{}", i + 3)).collect();
+            let pred_ph: Vec<String> = (0..kinds.len()).map(|i| format!("?{}", i + 3 + kinds.len())).collect();
+            sql.push_str(&format!(
+                " AND (kind IN ({}) OR predicate IN ({}))",
+                kind_ph.join(", "),
+                pred_ph.join(", ")
+            ));
+            for k in kinds {
+                params_vec.push(Box::new(k.clone()));
+            }
             for k in kinds {
                 params_vec.push(Box::new(k.clone()));
             }

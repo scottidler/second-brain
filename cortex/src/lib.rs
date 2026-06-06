@@ -19,6 +19,7 @@ pub mod intel;
 pub mod linking;
 pub mod links;
 pub mod llm;
+pub mod memgraph;
 pub mod migrate;
 pub mod naming;
 pub mod opts;

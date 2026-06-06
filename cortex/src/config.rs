@@ -103,6 +103,27 @@ pub struct GraphConfig {
     pub source_weight: f32,
     /// Fixed weight for shared-domain edges.
     pub domain_weight: f32,
+    // --- Phase 5 (MemGraphRAG) ---
+    /// Fabric pattern that extracts subject-predicate-object triples.
+    pub fact_pattern: String,
+    /// Weight assigned to typed `fact` edges.
+    pub fact_weight: f32,
+    /// Max ingested notes processed for triple extraction per `--backfill`.
+    pub fact_max_per_run: usize,
+    /// Truncate each note body to this many tokens before triple extraction.
+    pub fact_max_input_tokens: usize,
+    /// Per-call fabric timeout (seconds) for triple extraction.
+    pub fact_timeout_secs: u64,
+    /// Predicates that are single-valued/functional: a subject may have only
+    /// one object. Conflicting objects across notes are flagged (never silently
+    /// overwritten). Everything else is multi-valued and accumulates.
+    pub functional_predicates: Vec<String>,
+    /// Predicates dropped by the noise-removal consolidation agent (too generic
+    /// to carry retrieval value).
+    pub noise_predicates: Vec<String>,
+    /// Minimum cosine for a cluster-bridge edge from an isolated note to its
+    /// nearest semantic neighbor.
+    pub bridge_min_cosine: f32,
 }
 
 impl Default for GraphConfig {
@@ -115,6 +136,29 @@ impl Default for GraphConfig {
             creator_weight: 0.2,
             source_weight: 0.15,
             domain_weight: 0.1,
+            fact_pattern: "extract-triples".to_string(),
+            fact_weight: 0.5,
+            fact_max_per_run: 50,
+            fact_max_input_tokens: 4_000,
+            fact_timeout_secs: 120,
+            functional_predicates: [
+                "born-in",
+                "released-on",
+                "released-by",
+                "created-by",
+                "founded-by",
+                "part-of",
+                "authored-by",
+                "licensed-under",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            noise_predicates: ["is", "has", "relates-to", "related-to", "about"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            bridge_min_cosine: 0.5,
         }
     }
 }

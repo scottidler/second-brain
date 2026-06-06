@@ -190,7 +190,7 @@ pub use vector::{
 
 mod graph;
 
-pub use graph::{Edge, GraphNoteRow, GraphReach};
+pub use graph::{Edge, EntityRow, FactEdge, GraphNoteRow, GraphReach};
 
 impl SearchIndex {
     /// Open (or create) the search index at the given path

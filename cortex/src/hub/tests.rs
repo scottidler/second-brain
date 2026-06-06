@@ -144,13 +144,9 @@ fn graph_skips_edges_to_out_of_band_deleted_hub() {
         .expect("hub");
 
     let cfg = GraphConfig {
-        graph_interval_secs: 900,
-        semantic_k: 10,
         min_cosine: -1.0,
         fanout_cap: 2,
-        creator_weight: 0.2,
-        source_weight: 0.15,
-        domain_weight: 0.1,
+        ..GraphConfig::default()
     };
 
     crate::graph::build(&mut index, &cfg, true).expect("build1");
