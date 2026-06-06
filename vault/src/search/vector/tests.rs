@@ -412,6 +412,36 @@ fn rrf_empty_inputs_return_empty() {
 }
 
 #[test]
+fn rrf_ties_break_by_path_deterministically() {
+    // Symmetric lists make "a" and "b" tie on score exactly. Without a stable
+    // tiebreaker the order falls back to random HashMap iteration and varies
+    // run-to-run; with it, the order is always path-ascending. Loop so the
+    // per-HashMap random seed varies across iterations.
+    let l1 = vec!["b".to_string(), "a".to_string()];
+    let l2 = vec!["a".to_string(), "b".to_string()];
+    for _ in 0..50 {
+        let fused = reciprocal_rank_fusion(&[&l1, &l2], 60, 10);
+        let paths: Vec<&str> = fused.iter().map(|h| h.note_path.as_str()).collect();
+        assert_eq!(paths, vec!["a", "b"], "tied scores must order by path asc");
+    }
+}
+
+#[test]
+fn rrf_tie_at_limit_boundary_keeps_stable_membership() {
+    // Three notes all tie on score (each rank-0 in its own list). With limit=2
+    // the tiebreaker must deterministically keep the two lexicographically
+    // smallest every run, not a random pair from HashMap iteration order.
+    let l1 = vec!["a".to_string()];
+    let l2 = vec!["b".to_string()];
+    let l3 = vec!["c".to_string()];
+    for _ in 0..50 {
+        let fused = reciprocal_rank_fusion(&[&l1, &l2, &l3], 60, 2);
+        let paths: Vec<&str> = fused.iter().map(|h| h.note_path.as_str()).collect();
+        assert_eq!(paths, vec!["a", "b"], "tied membership at the limit must be stable");
+    }
+}
+
+#[test]
 fn active_embedding_model_reads_the_default_seed() {
     let index = SearchIndex::open_memory().expect("open");
     let m = index.active_embedding_model().expect("read");

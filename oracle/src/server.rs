@@ -258,7 +258,14 @@ impl OracleMcpServer {
         // Order neighbors by expansion score, then keep only those passing the
         // schema filters (a neighbor in a different domain is dropped).
         let mut scored: Vec<(String, f32)> = scores.into_iter().collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by expansion score desc, then by path asc as a stable tiebreaker so
+        // tied neighbors do not fall back to the random HashMap iteration order
+        // above (which made the graph rank list non-deterministic across runs).
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         let mut graph_paths: Vec<String> = Vec::new();
         for (path, _) in scored {
             if Self::note_matches_filters(db, &path, domain, note_type, status)? {

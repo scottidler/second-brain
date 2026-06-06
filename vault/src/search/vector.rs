@@ -664,7 +664,17 @@ pub fn reciprocal_rank_fusion(lists: &[&[String]], k: usize, limit: usize) -> Ve
         .into_iter()
         .map(|(note_path, score)| FusedHit { note_path, score })
         .collect();
-    fused.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    // Deterministic order: sort by score desc, then by note_path asc as a stable
+    // tiebreaker. Without the tiebreaker, tied scores fall back to the random
+    // HashMap iteration order above, which makes both the ranking AND (because of
+    // the truncate below) the membership at the limit boundary non-deterministic
+    // across process runs.
+    fused.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.note_path.cmp(&b.note_path))
+    });
     fused.truncate(limit);
     fused
 }
