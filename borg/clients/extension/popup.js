@@ -1,75 +1,58 @@
 // The toolbar action opens this popup (manifest action.default_popup), and the
-// keyboard shortcut opens it via the reserved `_execute_action` command. A
-// popup is a fresh page on every invocation, so capture never depends on a
-// long-lived background context being alive - that context could die mid-session
-// and brick the silent onClicked path (see
+// keyboard shortcut opens it via the reserved `_execute_action` command. A popup
+// is a fresh page on every invocation, so capture never depends on a long-lived
+// background context staying alive (see
 // docs/design/2026-06-03-extension-popup-capture.md).
 //
-// The fetch does NOT set `keepalive: true` (that broke capture on snap Firefox).
-// It DOES await a few chrome.storage round-trips before the POST: empirically,
-// firing the fetch immediately on popup load (without those awaits) causes the
-// request to die before it leaves the browser. The diag() breadcrumbs below
-// provide both that settle time and a profile-readable trace of the capture path.
-
-async function diag(step, extra) {
-  try {
-    const cur = (await chrome.storage.local.get("diag")).diag || [];
-    cur.push(Object.assign({ t: new Date().toISOString(), step }, extra || {}));
-    await chrome.storage.local.set({ diag: cur.slice(-50) });
-  } catch (_) {
-    // storage unavailable - nothing else we can do from here
-  }
-}
+// Three correctness requirements from that design doc:
+//   1. `keepalive: true` on the fetch - a popup is destroyed the instant it loses
+//      focus, and `keepalive` is what lets the POST finish through that unload.
+//      Awaiting the response only covers the programmed close, not focus-loss.
+//   2. Check `res.ok` - fetch does not reject on 4xx/5xx.
+//   3. No scheme filter - mirror background.js: guard only on `!tab.url`, forward
+//      any scheme (including file://) to the daemon.
 
 async function getEndpoint() {
   const data = await chrome.storage.local.get("endpoint");
   return data.endpoint || "http://localhost:8181";
 }
 
+function fail(status, message) {
+  // The popup can be destroyed on focus loss before the operator reads inline
+  // text, so a desktop notification is the durable error channel.
+  status.textContent = message;
+  chrome.notifications.create({
+    type: "basic",
+    iconUrl: "icons/locutus-48.png",
+    title: "obsidian-borg",
+    message,
+  });
+}
+
 async function capture() {
   const status = document.getElementById("status");
-  await diag("loaded");
-
-  let tab;
-  try {
-    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  } catch (err) {
-    await diag("tab-query-error", { msg: String((err && err.message) || err) });
-    status.textContent = "tab query error";
-    return;
-  }
-  await diag("tab-queried", {
-    hasUrl: !!(tab && tab.url),
-    url: tab && tab.url ? tab.url.slice(0, 100) : null,
-  });
-  if (!tab || !tab.url) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.url) {                  // mirror background.js guard; do NOT filter by scheme
     status.textContent = "No active tab URL";
     return;
   }
-
   const endpoint = await getEndpoint();
-  await diag("fetching", { endpoint });
   try {
     const res = await fetch(`${endpoint}/ingest`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: tab.url }),
+      keepalive: true,                     // finish the POST even if the popup closes on focus loss
     });
-    await diag("fetch-returned", { httpStatus: res.status, ok: res.ok });
-    if (!res.ok) {
-      status.textContent = `Daemon error: HTTP ${res.status}`;
-      status.style.color = "#C62828";
+    if (!res.ok) {                         // fetch does not reject on 4xx/5xx
+      fail(status, `Daemon error: HTTP ${res.status}`);
       return;
     }
-    const body = await res.json();
-    await diag("queued", { trace: body && body.trace_id });
-    status.textContent = `✓ Queued (${(body && body.trace_id) || "ok"})`;
-    status.style.color = "#2E7D32";
-    setTimeout(() => window.close(), 2000);
+    await res.json();
+    status.textContent = "Queued";
+    setTimeout(() => window.close(), 400);
   } catch (err) {
-    await diag("fetch-error", { msg: String((err && err.message) || err) });
-    status.textContent = `Error: ${(err && err.message) || err}`;
-    status.style.color = "#C62828";
+    fail(status, `Error: ${err.message}`);  // network-level failure
   }
 }
 
