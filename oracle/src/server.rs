@@ -1,6 +1,6 @@
 //! MCP server implementation for oracle
 
-use crate::config::{Config, ExcludeConfig, RetrievalConfig};
+use crate::config::{Config, ExcludeConfig, RerankConfig, RetrievalConfig};
 use crate::tools::*;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use vault::detail::{self, DetailLevel};
 use vault::ledger;
 use vault::schema::{Domain, Method, NoteType, Origin, Status};
-use vault::search::{NoteRow, SearchIndex};
+use vault::search::{NoteRow, Reranker, SearchIndex};
 
 /// Default hops for graph-expansion modes when the caller omits `expand_hops`.
 const DEFAULT_EXPAND_HOPS: u8 = 1;
@@ -21,6 +21,9 @@ const MAX_EXPAND_HOPS: u8 = 2;
 /// Per-hop decay applied to expansion scores so distant neighbors rank lower.
 /// 0.5 ≈ one effective hop. Feeds the graph rank list (an ordering into RRF).
 const GRAPH_HOP_DECAY: f32 = 0.5;
+/// Char budget for the candidate text sent to the cross-encoder reranker. The
+/// tokenizer truncates to 512 tokens anyway; this bounds memory before that.
+const RERANK_TEXT_MAX_CHARS: usize = 2000;
 
 /// Oracle MCP server - knowledge retrieval from an Obsidian vault
 #[derive(Clone)]
@@ -474,8 +477,13 @@ impl OracleMcpServer {
                 .collect()
         };
 
-        // Stage 4 - rerank (cross-encoder). Filled in Phase 4; reorders the top
-        // `cfg.rerank.input_k` fused candidates, latency-budgeted + fail-open.
+        // Stage 4 - rerank (cross-encoder): reorder the top `input_k` fused
+        // candidates, latency-budgeted with a fail-open probe.
+        let fused_paths = if cfg.rerank.enabled {
+            self.maybe_rerank(db, &cfg.rerank, query, fused_paths)?
+        } else {
+            fused_paths
+        };
 
         // Stage 5 - exclude filters: drop stub (quality=low) and short-body
         // notes from the fused candidates, in rank order.
@@ -553,6 +561,94 @@ impl OracleMcpServer {
         )?;
         g.truncate(cfg.methods.graph.top_k as usize);
         Ok(g)
+    }
+
+    /// Cross-encoder rerank of the top `input_k` fused candidates (stage 4).
+    ///
+    /// Latency-budgeted with a warmup probe: time one `(query, doc)` pair,
+    /// project the batch cost over the available parallelism, and if it exceeds
+    /// `latency_budget_ms` no-op the stage **for the process** (fail-open to the
+    /// fused order) with a WARN. On the AVX-only daemon host the probe is
+    /// expected to trip frequently - that is the documented baseline, not an
+    /// error (the cross-encoder is genuinely too slow there). Reranks only the
+    /// head; the tail beyond `input_k` keeps its fused order.
+    fn maybe_rerank(
+        &self,
+        db: &SearchIndex,
+        cfg: &RerankConfig,
+        query: &str,
+        fused_paths: Vec<String>,
+    ) -> Result<Vec<String>, McpError> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Once the probe trips (or the model fails to load) in a process, stay
+        // off so every subsequent query does not re-pay the probe.
+        static RERANK_DISABLED: AtomicBool = AtomicBool::new(false);
+        if RERANK_DISABLED.load(Ordering::Relaxed) {
+            return Ok(fused_paths);
+        }
+        let input_k = cfg.input_k as usize;
+        if fused_paths.len() <= 1 || input_k == 0 {
+            return Ok(fused_paths);
+        }
+
+        // Head (reranked) / tail (kept in fused order). Cloned up front so the
+        // fail-open branches can return `fused_paths` without borrow conflicts.
+        let head_len = input_k.min(fused_paths.len());
+        let head_paths: Vec<String> = fused_paths.iter().take(head_len).cloned().collect();
+        let tail_paths: Vec<String> = fused_paths.iter().skip(head_len).cloned().collect();
+
+        // Resolve candidate texts (summary preferred, body fallback), truncated.
+        let mut items: Vec<(String, String)> = Vec::with_capacity(head_paths.len());
+        for path in &head_paths {
+            if let Some(note) = db.get_note(path).map_err(Self::err)? {
+                let text = if !note.summary.is_empty() { note.summary } else { note.body };
+                let text: String = text.chars().take(RERANK_TEXT_MAX_CHARS).collect();
+                items.push((path.clone(), text));
+            }
+        }
+        if items.is_empty() {
+            return Ok(fused_paths);
+        }
+
+        let reranker = match vault::search::get_or_load_reranker(&cfg.model) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    "rerank disabled for this process: failed to load model {}: {e}",
+                    cfg.model
+                );
+                RERANK_DISABLED.store(true, Ordering::Relaxed);
+                return Ok(fused_paths);
+            }
+        };
+
+        // Warmup probe: time one pair, project the full batch over the threads.
+        let probe_doc = [items[0].1.as_str()];
+        let start = std::time::Instant::now();
+        if let Err(e) = reranker.score(query, &probe_doc) {
+            warn!("rerank disabled for this process: probe scoring failed: {e}");
+            RERANK_DISABLED.store(true, Ordering::Relaxed);
+            return Ok(fused_paths);
+        }
+        let per_pair_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let projected = vault::search::project_batch_ms(per_pair_ms, items.len(), threads);
+        if projected > cfg.latency_budget_ms as f64 {
+            warn!(
+                "rerank disabled for this process: projected {projected:.0} ms for {} pairs \
+                 ({per_pair_ms:.0} ms/pair, {threads} threads) exceeds budget {} ms; \
+                 falling back to fused order",
+                items.len(),
+                cfg.latency_budget_ms
+            );
+            RERANK_DISABLED.store(true, Ordering::Relaxed);
+            return Ok(fused_paths);
+        }
+
+        // Within budget: rerank the head, then append the untouched tail.
+        let mut out = vault::search::rerank_paths(reranker.as_ref(), query, &items).map_err(Self::err)?;
+        out.extend(tail_paths);
+        Ok(out)
     }
 
     /// True when the note at `path` matches the (optional) schema filters.

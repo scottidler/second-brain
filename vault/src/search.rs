@@ -193,6 +193,15 @@ mod graph;
 
 pub use graph::{Edge, EntityRow, FactEdge, GraphNoteRow, GraphReach};
 
+mod rerank;
+
+// The reranker port, test fake, and pure helpers are backend-independent.
+pub use rerank::{MockReranker, Reranker, project_batch_ms, rerank_paths};
+// The Candle cross-encoder is local model inference, so it lands here (like the
+// embedder); gated to the Candle backend the daemon host must run.
+#[cfg(feature = "vec-candle")]
+pub use rerank::{CandleCrossEncoder, get_or_load_reranker, prefetch_reranker};
+
 impl SearchIndex {
     /// Open (or create) the search index at the given path
     pub fn open(db_path: &Path) -> Result<Self> {
