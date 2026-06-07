@@ -25,6 +25,7 @@ fn make_fetch_meta(source: &str) -> FetchMeta {
         bytes: 12345,
         sha256: "abc123".to_string(),
         fallbacks_attempted: vec![],
+        author: None,
     }
 }
 

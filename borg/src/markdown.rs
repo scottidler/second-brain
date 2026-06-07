@@ -411,6 +411,9 @@ mod tests {
         assert!(rendered.contains("## Summary"));
         assert!(rendered.contains("This is a summary."));
         assert!(rendered.contains("Source: [https://example.com/post]"));
+        // An article with no byline and no default_creator emits no creator:
+        // line (the `fabric -u` default path leaves it empty).
+        assert!(!rendered.contains("creator:"));
     }
 
     #[test]

@@ -734,6 +734,7 @@ pub fn persist_github_stage_0_1_if_staging(
         bytes: fetch_result.raw_json.len() as u64,
         sha256: crate::stages::artifact::sha256_hex(&fetch_result.raw_json),
         fallbacks_attempted: Vec::new(),
+        author: None,
     };
     if let Err(e) = store.write_fetched(trace_id, &fetch_result.raw_json, &fetched_meta) {
         log::warn!("[{trace_id}] persist_github_stage_0_1: fetched.html write failed: {e:#}");

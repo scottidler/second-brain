@@ -36,6 +36,7 @@ impl Fetcher for CountingFakeFetcher {
             bytes: self.body.len() as u64,
             sha256: sha,
             fallbacks_attempted: Vec::new(),
+            author: None,
         };
         Ok(FetchResult {
             bytes: self.body.clone(),

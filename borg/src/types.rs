@@ -121,6 +121,12 @@ pub struct FetchMeta {
     pub sha256: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallbacks_attempted: Vec<String>,
+    /// Byline surfaced by a fetcher that could see the source markup
+    /// (`BrowserUaFetcher` via `byline::extract`, or a future Jina-JSON path).
+    /// `None` on the `fabric -u` default path, which exposes no HTML.
+    /// Additive + `Option`: existing impls default it to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
 }
 
 /// Result of a Stage-0 network fetch.

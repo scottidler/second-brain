@@ -15,6 +15,7 @@ pub mod audit;
 pub mod backfill;
 pub mod backoff;
 pub mod blocklist;
+pub mod byline;
 pub mod config;
 pub mod description;
 pub mod discord;

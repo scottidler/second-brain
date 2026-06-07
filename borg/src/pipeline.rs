@@ -533,18 +533,21 @@ async fn process_url_inner(
             yt_result.yt_tags,
         )
     } else {
-        let (scraped_title, article_md) = if use_fabric {
+        // `byline` is the article author surfaced by whichever fetcher could
+        // see the source markup: `fabric -u` (the default) exposes no HTML and
+        // yields `None`; the Jina markdown path also yields `None`; only the
+        // browser-UA fallback inside `process_article_jina` carries one. It is
+        // folded into `ContentType::Article { author }` below.
+        let (scraped_title, article_md, byline) = if use_fabric {
             match process_article_fabric(&url_match.url, config, trace_id).await {
-                Ok((title, article_md, _)) => (title, article_md),
+                Ok(triple) => triple,
                 Err(e) => {
                     log::warn!("Fabric article fetch failed: {e:#}, falling back to Jina");
-                    let (title, article_md, _) = process_article_jina(&url_match.url, config, trace_id).await?;
-                    (title, article_md)
+                    process_article_jina(&url_match.url, config, trace_id).await?
                 }
             }
         } else {
-            let (title, article_md, _) = process_article_jina(&url_match.url, config, trace_id).await?;
-            (title, article_md)
+            process_article_jina(&url_match.url, config, trace_id).await?
         };
         // For github repo URLs, the HTML <title> is unreliable: auth-walled
         // pages collapse to a generic login title, so distinct repos slug to
@@ -562,15 +565,16 @@ async fn process_url_inner(
         // A github repo root carries its owner (free at dispatch). Deep github
         // paths and every other non-thread URL fall through to the article
         // path - matching the distiller dispatch below, which keys on
-        // `github_repo.is_some()`. The article byline is filled after the fetch
-        // (Phase 2); it is `None` here. social/reddit keep dedicated variants.
+        // `github_repo.is_some()`. The article byline (when a fetcher surfaced
+        // one) rides into `Article { author }`. social/reddit keep dedicated
+        // variants and carry no creator here.
         let ct = if let Some((owner, _)) = &github_repo {
             ContentType::GitHub { owner: owner.clone() }
         } else {
             match url_match.link_name.as_str() {
                 "social" => ContentType::Social,
                 "reddit" => ContentType::Reddit,
-                _ => ContentType::Article { author: None },
+                _ => ContentType::Article { author: byline.clone() },
             }
         };
         // Dispatch by URL kind: github roots → repo distiller (fetches REST
@@ -1084,7 +1088,13 @@ async fn try_extract_slides(
     Ok(Some((manifest, summary, work_dir)))
 }
 
-async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> Result<(String, String, ContentType)> {
+/// Returns `(title, article_md, byline)`. `fabric -u` exposes no HTML, so the
+/// byline is always `None` on this path.
+async fn process_article_fabric(
+    url: &str,
+    config: &Config,
+    trace_id: &str,
+) -> Result<(String, String, Option<String>)> {
     // Heavy permit: fabric -u may internally invoke yt-dlp for media URLs that
     // were classified as "article" upstream, so this is a heavy path even
     // though the dispatch site looks lightweight.
@@ -1120,15 +1130,16 @@ async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> R
     // against the rendered Distilled summary at the dispatch site instead
     // of against the prose summary that used to live here.
 
-    Ok((title, article_md, ContentType::Article { author: None }))
+    Ok((title, article_md, None))
 }
 
-/// Returns `(title, article_md, ContentType)` - same shape as
+/// Returns `(title, article_md, byline)` - same shape as
 /// `process_article_fabric` so callers can pipe either source into the
 /// post-Phase-6 distillation step uniformly. Gate-1 still runs against
-/// the fetched bytes here.
-async fn process_article_jina(url: &str, config: &Config, trace_id: &str) -> Result<(String, String, ContentType)> {
-    let article_md = jina::fetch_article_markdown(url, config.pipeline.jina_timeout_secs).await?;
+/// the fetched bytes here. The byline is `None` on the Jina markdown path and
+/// carries the browser-UA fallback's `byline::extract` result otherwise.
+async fn process_article_jina(url: &str, config: &Config, trace_id: &str) -> Result<(String, String, Option<String>)> {
+    let (article_md, byline) = jina::fetch_article_markdown(url, config.pipeline.jina_timeout_secs).await?;
     if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
         config,
         trace_id,
@@ -1143,7 +1154,7 @@ async fn process_article_jina(url: &str, config: &Config, trace_id: &str) -> Res
     crate::stages::raw::run_gate_1(config, trace_id, url, article_md.as_bytes(), 200)?;
 
     let title = extract_article_title(&article_md, url);
-    Ok((title, article_md, ContentType::Article { author: None }))
+    Ok((title, article_md, byline))
 }
 
 async fn process_image(

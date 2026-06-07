@@ -305,6 +305,7 @@ impl Fetcher for GitHubFetcher {
             bytes: bytes.len() as u64,
             sha256,
             fallbacks_attempted: Vec::new(),
+            author: None,
         };
         Ok(FetchResult { bytes, meta })
     }

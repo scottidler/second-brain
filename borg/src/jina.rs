@@ -3,14 +3,20 @@ use std::time::Duration;
 
 use crate::stages::fetcher::{BrowserUaFetcher, Fetcher};
 
-/// Fetch article markdown. Primary path is Jina Reader (r.jina.ai).
+/// Fetch article markdown plus an optional byline. Primary path is Jina Reader
+/// (r.jina.ai) in markdown mode, which exposes no author and so yields `None`.
 /// On HTTP 451 (Jina IP-block) or any other failure, fall back to a direct
-/// reqwest with a realistic browser User-Agent piped through markitdown.
-/// This recovers URLs whose origin blocks Jina's IP range (e.g. XDA, HowToGeek
-/// circa 2026-04-19) but happily serves requests that look like a browser.
-pub async fn fetch_article_markdown(url: &str, timeout_secs: u64) -> Result<String> {
+/// reqwest with a realistic browser User-Agent piped through markitdown; that
+/// `BrowserUaFetcher` runs `byline::extract` on the raw HTML and surfaces
+/// `meta.author`. This recovers URLs whose origin blocks Jina's IP range (e.g.
+/// XDA, HowToGeek circa 2026-04-19) but happily serves browser-looking
+/// requests - and is the only live blog path that can currently carry a byline.
+///
+/// A Jina-JSON author source is a separate, in-progress workstream; when it
+/// lands it composes here as `json_author.or(browser_byline)`.
+pub async fn fetch_article_markdown(url: &str, timeout_secs: u64) -> Result<(String, Option<String>)> {
     match jina_fetch(url, timeout_secs).await {
-        Ok(text) => Ok(text),
+        Ok(text) => Ok((text, None)),
         Err(e) => {
             log::warn!("jina: failed for {url} ({e:#}); falling back to browser-UA");
             let browser = BrowserUaFetcher::new();
@@ -19,7 +25,7 @@ pub async fn fetch_article_markdown(url: &str, timeout_secs: u64) -> Result<Stri
                 .await
                 .with_context(|| format!("browser-UA fallback also failed for {url}"))?;
             let text = String::from_utf8_lossy(&result.bytes).to_string();
-            Ok(text)
+            Ok((text, result.meta.author))
         }
     }
 }

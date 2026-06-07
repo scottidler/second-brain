@@ -198,6 +198,7 @@ pub fn persist_fetched_if_staging(
         bytes: bytes.len() as u64,
         sha256: sha256_hex(bytes),
         fallbacks_attempted: Vec::new(),
+        author: None,
     };
     store.write_fetched(trace_id, bytes, &meta)?;
     Ok(())

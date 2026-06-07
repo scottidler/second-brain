@@ -140,6 +140,7 @@ impl Fetcher for JinaFetcher {
             bytes: bytes.len() as u64,
             sha256,
             fallbacks_attempted: Vec::new(),
+            author: None,
         };
         Ok(FetchResult { bytes, meta })
     }
@@ -191,6 +192,7 @@ impl Fetcher for FabricFetcher {
             bytes: bytes.len() as u64,
             sha256,
             fallbacks_attempted: Vec::new(),
+            author: None,
         };
         Ok(FetchResult { bytes, meta })
     }
@@ -269,8 +271,12 @@ impl Fetcher for BrowserUaFetcher {
         .context("markitdown: join failed")?
         .unwrap_or_else(|e| {
             log::warn!("browser-ua: markitdown failed, using raw bytes: {e:#}");
-            raw
+            raw.clone()
         });
+        // Surface the byline from the SAME fetch before the HTML is gone -
+        // `byline::extract` runs on the raw HTML this fetcher already cleared
+        // the bot-wall for, so no extra GET is needed (see the design doc).
+        let author = crate::byline::extract(&String::from_utf8_lossy(&raw));
         let sha256 = sha256_hex(&md);
         let meta = FetchMeta {
             source: url.to_string(),
@@ -280,6 +286,7 @@ impl Fetcher for BrowserUaFetcher {
             bytes: md.len() as u64,
             sha256,
             fallbacks_attempted: Vec::new(),
+            author,
         };
         Ok(FetchResult { bytes: md, meta })
     }
