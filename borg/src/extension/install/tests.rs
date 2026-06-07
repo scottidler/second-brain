@@ -135,69 +135,67 @@ fn install_strategy_errors_on_unknown_firefox() {
 }
 
 #[test]
-fn parse_default_profile_path_picks_default_flagged_profile() {
-    // The realistic snap-Firefox profiles.ini from this machine.
-    let ini = "[Profile0]\n\
-               Name=default\n\
-               IsRelative=1\n\
-               Path=qokp77y8.default-1764019811616\n\
-               Default=1\n\
-               \n\
-               [General]\n\
-               StartWithLastProfile=1\n\
-               Version=2\n";
-    assert_eq!(
-        parse_default_profile_path(ini).as_deref(),
-        Some("qokp77y8.default-1764019811616")
+fn install_strategy_errors_on_snap_with_unsupported_message() {
+    // snap is no longer a strategy - it is a terminal error naming the /opt
+    // migration. The "one message, one place" SNAP_UNSUPPORTED const carries
+    // the word "unsupported".
+    let err = install_strategy(&FirefoxInstall::Snap).expect_err("snap must error");
+    assert!(
+        err.to_string().contains("unsupported"),
+        "snap strategy error should mention 'unsupported': {err}"
     );
 }
 
 #[test]
-fn parse_default_profile_path_prefers_default_over_first() {
-    // Profile1 has Default=1 even though Profile0 comes first.
-    let ini = "[Profile0]\n\
-               Name=older\n\
-               IsRelative=1\n\
-               Path=aaaaaaaa.older\n\
-               \n\
-               [Profile1]\n\
-               Name=current\n\
-               IsRelative=1\n\
-               Path=bbbbbbbb.current\n\
-               Default=1\n";
-    assert_eq!(parse_default_profile_path(ini).as_deref(), Some("bbbbbbbb.current"));
+fn classify_firefox_path_maps_each_install_type() {
+    // The regression guard against the canonicalize-wrapper trap (Alternative
+    // 2): a /usr/bin path must classify as AptOrDeb, /opt as Tarball, /snap as
+    // Snap. detect_firefox()'s upstream `snap list` probe is what actually
+    // catches a snap wrapper that resolves to /usr/bin; this proves the pure
+    // classifier never silently upgrades an unknown path to a writable target.
+    assert_eq!(
+        classify_firefox_path("/opt/firefox/firefox"),
+        FirefoxInstall::Tarball(PathBuf::from("/opt/firefox"))
+    );
+    assert_eq!(classify_firefox_path("/usr/bin/firefox"), FirefoxInstall::AptOrDeb);
+    assert_eq!(
+        classify_firefox_path("/usr/lib/firefox/firefox"),
+        FirefoxInstall::AptOrDeb
+    );
+    assert_eq!(
+        classify_firefox_path("/snap/firefox/current/usr/lib/firefox/firefox"),
+        FirefoxInstall::Snap
+    );
+    assert_eq!(
+        classify_firefox_path("/var/lib/flatpak/app/org.mozilla.firefox/x/y/firefox"),
+        FirefoxInstall::Flatpak
+    );
+    assert_eq!(
+        classify_firefox_path("/home/u/.local/bin/firefox"),
+        FirefoxInstall::Unknown
+    );
 }
 
 #[test]
-fn parse_default_profile_path_falls_back_to_first_when_none_marked_default() {
-    let ini = "[Profile0]\n\
-               Name=only\n\
-               IsRelative=1\n\
-               Path=cccccccc.only\n";
-    assert_eq!(parse_default_profile_path(ini).as_deref(), Some("cccccccc.only"));
+fn snap_run_outcome_bails_on_explicit_install() {
+    // Explicit install on snap (no --if-installed) is a hard error: the
+    // operator asked to install and we must tell them why it can't.
+    let err = snap_run_outcome(false).expect_err("explicit snap install must error");
+    assert!(
+        err.to_string().contains("unsupported"),
+        "explicit snap install error should mention 'unsupported': {err}"
+    );
 }
 
 #[test]
-fn parse_default_profile_path_returns_none_when_no_profile_sections() {
-    let ini = "[General]\nStartWithLastProfile=1\nVersion=2\n";
-    assert_eq!(parse_default_profile_path(ini), None);
-}
-
-#[test]
-fn parse_default_profile_path_ignores_install_section_keys() {
-    // [Install<hash>] sections also contain Default= but should not be confused
-    // for profile sections. Our parser only reads keys when the current section
-    // name starts with "Profile".
-    let ini = "[Install4F96D1932A9F858E]\n\
-               Default=Profiles/aaaaaaaa.fake\n\
-               Locked=1\n\
-               \n\
-               [Profile0]\n\
-               Name=real\n\
-               IsRelative=1\n\
-               Path=bbbbbbbb.real\n\
-               Default=1\n";
-    assert_eq!(parse_default_profile_path(ini).as_deref(), Some("bbbbbbbb.real"));
+fn snap_run_outcome_skips_under_if_installed() {
+    // --if-installed (the otto deploy hook) warn+skips so deploy does not fail
+    // on a not-yet-migrated snap box. run() calls this BEFORE resolving
+    // --policy-file, so the override can never force a policy onto snap.
+    let result = snap_run_outcome(true).expect("--if-installed snap must skip, not error");
+    assert!(result.skipped_not_installed, "snap + --if-installed must skip");
+    assert!(result.policy_path.is_none());
+    assert!(!result.policy_changed);
 }
 
 #[test]

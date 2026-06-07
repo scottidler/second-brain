@@ -172,56 +172,6 @@ pub fn install_strategy(install: &FirefoxInstall) -> Result<InstallStrategy> {
     }
 }
 
-/// Parse a Firefox `profiles.ini` and return the active profile's path.
-/// Prefers a `Profile` section with `Default=1`; falls back to the first
-/// `Profile` section if none is marked default.
-pub fn parse_default_profile_path(contents: &str) -> Option<String> {
-    let mut current_section: Option<String> = None;
-    let mut current_is_default = false;
-    let mut current_path: Option<String> = None;
-    let mut first_path: Option<String> = None;
-    let mut default_path: Option<String> = None;
-    for raw_line in contents.lines() {
-        let line = raw_line.trim();
-        if let Some(rest) = line.strip_prefix('[')
-            && let Some(name) = rest.strip_suffix(']')
-        {
-            // Flush previous section before opening a new one.
-            if current_is_default && default_path.is_none() {
-                default_path = current_path.clone();
-            }
-            current_section = Some(name.to_string());
-            current_is_default = false;
-            current_path = None;
-            continue;
-        }
-        if current_section.as_deref().is_some_and(|s| s.starts_with("Profile"))
-            && let Some((key, value)) = line.split_once('=')
-        {
-            match key.trim() {
-                "Default" => {
-                    if value.trim() == "1" {
-                        current_is_default = true;
-                    }
-                }
-                "Path" => {
-                    let v = value.trim().to_string();
-                    if first_path.is_none() {
-                        first_path = Some(v.clone());
-                    }
-                    current_path = Some(v);
-                }
-                _ => {}
-            }
-        }
-    }
-    // Flush the final section.
-    if current_is_default && default_path.is_none() {
-        default_path = current_path;
-    }
-    default_path.or(first_path)
-}
-
 #[cfg(target_os = "linux")]
 fn requires_sudo(path: &Path) -> bool {
     let s = path.to_string_lossy();
