@@ -15,6 +15,7 @@ pub mod config;
 pub mod eval;
 pub mod server;
 pub mod tools;
+pub mod transform;
 
 pub use config::Config;
 

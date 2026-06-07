@@ -431,25 +431,49 @@ impl OracleMcpServer {
             "run_pipeline"
         );
 
-        // Stage 1 - query transform (HyDE / multi-query). Filled in Phase 5;
-        // oracle owns this LLM-bearing stage (it calls `vault::fabric`), and
-        // passes the rewritten query / embedding down into the retrievers.
+        // Stage 1 - query transform (HyDE / multi-query). oracle owns this
+        // LLM-bearing stage (it shells to `vault::fabric`); the rewritten
+        // query/queries are passed *down* into the vault retriever primitives.
+        // Fails open to the original query so a flaky LLM never breaks search.
+        let queries: Vec<String> = if cfg.query_transform.enabled {
+            match crate::transform::fabric_transform(&cfg.query_transform, query) {
+                Ok(qs) if !qs.is_empty() => qs,
+                Ok(_) => vec![query.to_string()],
+                Err(e) => {
+                    warn!("query transform failed; falling back to original query: {e}");
+                    vec![query.to_string()]
+                }
+            }
+        } else {
+            vec![query.to_string()]
+        };
 
         // Stage 2 - retrieve: one ranked list per enabled method, paired with
-        // the fusion weight it contributes. Vector has no `weight` field, so it
-        // always contributes at weight 1.0.
+        // the fusion weight it contributes (vector has no `weight` field, so it
+        // always contributes at weight 1.0). Each method retrieves with every
+        // query variant and unions the lists before fusion - the identity for
+        // the common single-query case, the multi-query union otherwise.
         let mut lists: Vec<(Vec<String>, f32)> = Vec::new();
         if cfg.methods.vector.enabled {
-            let v = self.vector_paths(db, query, domain, note_type, status, cfg.methods.vector.top_k)?;
-            lists.push((v, 1.0));
+            let per_variant = queries
+                .iter()
+                .map(|q| self.vector_paths(db, q, domain, note_type, status, cfg.methods.vector.top_k))
+                .collect::<Result<Vec<_>, _>>()?;
+            lists.push((crate::transform::union_lists(per_variant), 1.0));
         }
         if cfg.methods.bm25.enabled {
-            let b = self.bm25_paths(db, query, domain, note_type, status, cfg.methods.bm25.top_k)?;
-            lists.push((b, cfg.methods.bm25.weight));
+            let per_variant = queries
+                .iter()
+                .map(|q| self.bm25_paths(db, q, domain, note_type, status, cfg.methods.bm25.top_k))
+                .collect::<Result<Vec<_>, _>>()?;
+            lists.push((crate::transform::union_lists(per_variant), cfg.methods.bm25.weight));
         }
         if cfg.methods.graph.enabled {
-            let g = self.pipeline_graph_paths(db, cfg, query, domain, note_type, status)?;
-            lists.push((g, cfg.methods.graph.weight));
+            let per_variant = queries
+                .iter()
+                .map(|q| self.pipeline_graph_paths(db, cfg, q, domain, note_type, status))
+                .collect::<Result<Vec<_>, _>>()?;
+            lists.push((crate::transform::union_lists(per_variant), cfg.methods.graph.weight));
         }
 
         if lists.is_empty() {
