@@ -66,11 +66,14 @@ Systemd unit files are NOT in the repo. They are written into `~/.config/systemd
 
 ## Hybrid retrieval (Doc 2)
 
-Oracle's `knowledge_search` accepts a `mode` parameter:
+Oracle's `knowledge_search` accepts an optional per-call `mode` parameter (the legacy single-path override):
 
 - `bm25` (FTS5 keyword search; the legacy mode)
-- `vector` (semantic - fastembed `bge-small-en-v1.5` embedded query against `note_embeddings` BLOB rows, brute-force cosine)
-- `hybrid` (default; pulls 50 candidates from each list and fuses via reciprocal rank fusion, k=60)
+- `vector` (semantic - `bge-small-en-v1.5` embedded query against `note_embeddings` BLOB rows, brute-force cosine)
+- `hybrid` (BM25 ∪ vector fused via reciprocal rank fusion, k=60)
+- `graph` / `graph-hybrid` (hybrid seed expanded along the edge graph)
+
+**When no `mode` is passed (the common case), oracle composes the configurable retrieval pipeline** declared in `~/.config/sb/oracle.yml` under `retrieval:` (design: `docs/design/2026-06-06-configurable-retrieval-pipeline.md`). Precedence: per-call `mode` > configured pipeline > built-in default. The pipeline stage order is fixed - `query-transform → retrieve → fuse → rerank → exclude → truncate` - and each method/stage has an `enabled` flag (this is the one place config selects *which methodology runs*, per the `general.md` carve-out). **The shipped default is vector-first, not hybrid:** eval showed pure vector (nDCG@10 0.876) beats equal-weight hybrid (0.799) because fusing the weak BM25 list dilutes the strong vector signal, so the default enables vector only with bm25 (weight 0.3) and graph (weight 0.0) demoted and off, plus a stub-exclude filter. The cross-encoder **rerank** and **query-transform** (HyDE / multi-query) stages are built but off by default and inference-bearing; rerank is latency-budgeted with a fail-open warmup probe (the AVX-only daemon host is expected to trip it). `sb oracle eval` includes a `configured` target that scores the live pipeline alongside the 5 legacy modes. The configurable pipeline lives in `oracle::server::run_pipeline`; the weighted-fusion primitive is `vault::search::reciprocal_rank_fusion_weighted`; the cross-encoder is `vault::search::rerank`; query transforms are `oracle::transform` (oracle owns the LLM call, `vault` stays LLM-free).
 
 Embeddings live in the same SQLite file oracle reads for FTS5. Cortex is the only writer: `cortex embed [--backfill]` runs a read/inference/write loop (the write transaction stays under 200 ms regardless of batch size because `embed_batch` runs outside the transaction). The cortex daemon picks up the same code path on a configurable cadence (default 10 min). Active model and dimension are pinned in `embedding_config` so oracle and cortex cannot drift apart.
 

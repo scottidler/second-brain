@@ -18,7 +18,7 @@ Defined as `#[tool]` methods on `OracleMcpServer` (`server.rs`); request types +
 ## Contracts & Invariants
 
 - **`tracing` only** — no `log!` / `println!` / `env_logger`. Load-bearing for MCP stdio compatibility (rmcp).
-- **Search modes** (`knowledge_search`): `bm25` (FTS5), `vector` (cosine), `hybrid` (RRF, default). Detail levels: `metadata` / `tldr` / `summary` / `full`.
+- **Search modes** (`knowledge_search`): explicit per-call `mode` (`bm25` / `vector` / `hybrid` / `graph` / `graph-hybrid`) is the legacy single-path override. **No `mode` → the configurable pipeline** (`run_pipeline`, config in `oracle.yml` `retrieval:`), reported as `mode: "configured"`. Default is vector-first (eval-best), NOT hybrid. Stages: `query-transform → retrieve → fuse → rerank → exclude → truncate`, each `enabled`-gated. rerank (`vault::search::rerank`, cross-encoder, latency-budgeted fail-open) and query-transform (`oracle::transform`, HyDE/multi-query via `vault::fabric`) are off by default. Detail levels: `metadata` / `tldr` / `summary` / `full`. See `docs/design/2026-06-06-configurable-retrieval-pipeline.md`.
 - **Only `note_read` bumps access** (`search_hit_count`, `last_accessed_at`). `knowledge_search` does NOT — regression-tested (`knowledge_search_does_not_bump_access`). Load-bearing for decay-based pruning (avoids a high-BM25 immortality loop).
 - **Not-found vs. error:** a deleted-between-search-and-read note returns `{found:false,…}` with `is_error:false`; only protocol/arg failures set `is_error:true`.
 - **Receipts DB opened read-only** — never with write flags (borg owns it).
@@ -37,6 +37,7 @@ Defined as `#[tool]` methods on `OracleMcpServer` (`server.rs`); request types +
 ## Module Map
 
 - `lib.rs` — public API (serve/call/index/stats/tools) + tracing enforcement.
-- `server.rs` — `OracleMcpServer`, tool implementations, `ServerHandler` (capabilities).
-- `tools.rs` — request types; `SearchMode` (Bm25/Vector/Hybrid); `DetailLevel` (from vault).
-- `config.rs` — vault root, db path, watcher + inbound-recompute config; YAML load.
+- `server.rs` — `OracleMcpServer`, tool implementations, `ServerHandler` (capabilities). `run_search_mode` (legacy modes) + `run_pipeline` (configured) share the bm25/vector/graph primitives; `maybe_rerank` is stage 4.
+- `tools.rs` — request types; `SearchMode` (Bm25/Vector/Hybrid/Graph/GraphHybrid); `DetailLevel` (from vault).
+- `transform.rs` — query-transform stage (HyDE / multi-query); shells to `vault::fabric` (oracle owns the LLM call, `vault` stays LLM-free).
+- `config.rs` — vault root, db path, watcher + inbound-recompute config, and `RetrievalConfig` (the `retrieval:` pipeline); YAML load.

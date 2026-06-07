@@ -25,3 +25,72 @@ inbound-recompute-interval-secs: 600
 logging:
   level: info
   # file: ~/.local/share/oracle/logs/oracle.log
+
+# Retrieval pipeline — composed for any knowledge_search query that arrives with
+# no explicit `mode`. An explicit per-call `mode` (bm25/vector/hybrid/graph/
+# graph-hybrid) overrides this entire section and runs the legacy single path.
+#
+# Stage order is fixed:
+#   query-transform → retrieve → fuse → rerank → exclude → truncate
+# Each method/stage has an `enabled` flag — flip it on to put that methodology
+# in the pipeline. One or more retrievers may be enabled; enabled retrievers
+# fuse via (weighted) RRF.
+#
+# The block below is the SHIPPED DEFAULT and matches the built-in (an oracle.yml
+# with no `retrieval:` section behaves identically): vector-only, because on this
+# vault pure vector (nDCG@10 0.876) beats equal-weight hybrid (0.799) — fusing
+# the weak BM25 list dilutes the strong vector signal. bm25 and graph stay
+# available but demoted (off, low/zero weight) so they are eval-testable without
+# diluting the default ranking. Measure any change with `sb oracle eval`.
+retrieval:
+  # --- 1. Retrievers. Enable one or more; each yields a ranked candidate list. ---
+  methods:
+    vector:
+      enabled: true     # the eval-best retriever for this host
+      top-k: 50         # candidate depth fed into fusion
+    bm25:
+      enabled: false    # exact-keyword (FTS5); off by default (dilutes vector)
+      top-k: 50
+      weight: 0.3       # fusion weight when enabled (demoted relative to vector's 1.0)
+    graph:
+      enabled: false    # wikilink-expansion; off by default (no top-k ranking lift)
+      top-k: 50
+      weight: 0.0       # demoted out of the fused result even if enabled
+      hops: 2
+      hop-decay: 0.5
+      min-edge-weight: 0.0
+      edge-kinds: [wikilink]
+
+  # --- 2. Fusion. Consulted only when more than one retriever is enabled. ---
+  fusion:
+    method: rrf
+    k: 60               # RRF smoothing constant
+
+  # --- 3. Rerank. Optional cross-encoder second stage. OFF by default. ---
+  # WARNING: on an AVX-only CPU the cross-encoder is ~150-300 ms/pair (Candle
+  # scalar), so 50 candidates can be ~7.5-15 s. The warmup probe projects the
+  # batch cost and FAILS OPEN to the fused order (logs a WARN) when it exceeds
+  # latency-budget-ms — expect that to happen on older hardware. Before enabling,
+  # prefetch the model so the first query does not block on a download.
+  rerank:
+    enabled: false
+    method: cross-encoder
+    model: ms-marco-MiniLM-L6-v2
+    input-k: 50               # rerank the top 50 fused candidates
+    latency-budget-ms: 1500   # probe budget; over this, the stage no-ops
+
+  # --- 4. Query transform. Optional pre-retrieval rewrite. OFF by default. ---
+  # Adds an LLM round-trip per query (via the on-box Fabric pattern) and can
+  # poison precision. hyde = embed a hypothetical answer; multi-query = retrieve
+  # with N rewrites and union. Fails open to the original query on error.
+  query-transform:
+    enabled: false
+    method: hyde              # hyde | multi-query
+    pattern: hyde             # Fabric pattern under ~/.config/sb/patterns/
+    model: ""                 # empty = fabric's default model
+    variants: 3               # multi-query only: number of rewrites
+
+  # --- 5. Exclude filters. Structural result-shape filters, applied post-fusion. ---
+  exclude:
+    stub: true            # drop low-content notes (cortex quality = low)
+    min-body-chars: 0     # 0 = off; >0 drops notes with shorter bodies

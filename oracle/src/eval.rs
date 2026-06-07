@@ -37,6 +37,9 @@ const EVAL_EXPAND_HOPS: u8 = 2;
 const JUDGE_TEXT_MAX_CHARS: usize = 8_000;
 /// Label for the fact-layer ablation variant.
 const ABLATION_LABEL: &str = "graph-hybrid (no fact)";
+/// Label for the live operator-configured pipeline (`run_configured_pipeline`).
+/// Lets the operator measure the shipped pipeline, not only the 5 legacy modes.
+const CONFIGURED_LABEL: &str = "configured";
 /// Mode rows in report order (the five standard modes; ablation appended last).
 const MODE_ORDER: &[SearchMode] = &[
     SearchMode::Bm25,
@@ -104,12 +107,13 @@ fn mode_label(m: SearchMode) -> &'static str {
     }
 }
 
-/// Mode/ablation labels in report order.
+/// Mode/ablation/configured labels in report order.
 fn mode_labels() -> Vec<String> {
     MODE_ORDER
         .iter()
         .map(|m| mode_label(*m).to_string())
         .chain(std::iter::once(ABLATION_LABEL.to_string()))
+        .chain(std::iter::once(CONFIGURED_LABEL.to_string()))
         .collect()
 }
 
@@ -204,6 +208,16 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) ->
             .map_err(|e| eyre!("run_search_mode ablation: {e}"))?;
         run.ranked
             .insert(ABLATION_LABEL.to_string(), abl.iter().map(|r| r.path.clone()).collect());
+
+        // The live operator-configured pipeline (the shipped default and any
+        // rerank/transform the operator has turned on).
+        let configured = server
+            .run_configured_pipeline(&guard, &q.query, domain, None, None, opts.k)
+            .map_err(|e| eyre!("run_configured_pipeline: {e}"))?;
+        run.ranked.insert(
+            CONFIGURED_LABEL.to_string(),
+            configured.iter().map(|r| r.path.clone()).collect(),
+        );
 
         let lists: Vec<Vec<String>> = run.ranked.values().cloned().collect();
         for path in metrics::pool(&lists) {

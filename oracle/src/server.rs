@@ -404,6 +404,21 @@ impl OracleMcpServer {
         Self::resolve_note_paths(db, fused.iter().map(|h| h.note_path.as_str()))
     }
 
+    /// Run the operator-configured pipeline (`self.config.retrieval`). The
+    /// `configured` target of `sb oracle eval` calls this so the eval scores the
+    /// exact live pipeline `knowledge_search` runs for a no-`mode` query.
+    pub fn run_configured_pipeline(
+        &self,
+        db: &SearchIndex,
+        query: &str,
+        domain: Option<&str>,
+        note_type: Option<&str>,
+        status: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<NoteRow>, McpError> {
+        self.run_pipeline(db, &self.config.retrieval, query, domain, note_type, status, limit)
+    }
+
     /// Compose the configured retrieval pipeline for a query that arrived with
     /// no explicit `mode`. Stage order is fixed:
     /// `transform -> retrieve -> fuse -> rerank -> exclude -> truncate`. Each

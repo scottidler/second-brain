@@ -102,12 +102,20 @@ fn evaluate_produces_all_mode_rows_and_graph_lift() {
     let report = unwrap_report(evaluate(&queries, &runs, &cache, &judge(), &opts).expect("evaluate"));
 
     assert_eq!(report.total_queries, 2);
-    // five standard modes + ablation
-    assert_eq!(report.modes.len(), 6);
+    // five standard modes + ablation + the live configured pipeline
+    assert_eq!(report.modes.len(), 7);
     let labels: Vec<&str> = report.modes.iter().map(|m| m.mode.as_str()).collect();
     assert_eq!(
         labels,
-        vec!["bm25", "vector", "hybrid", "graph", "graph-hybrid", ABLATION_LABEL]
+        vec![
+            "bm25",
+            "vector",
+            "hybrid",
+            "graph",
+            "graph-hybrid",
+            ABLATION_LABEL,
+            CONFIGURED_LABEL
+        ]
     );
 
     // q1: graph-hybrid surfaces the relevant `d` that hybrid misses -> positive lift.
