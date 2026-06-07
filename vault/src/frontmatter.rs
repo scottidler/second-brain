@@ -1,6 +1,20 @@
 use eyre::{Context, Result};
 use std::collections::HashMap;
 
+/// Coerce a YAML scalar to its natural string form for a string-typed
+/// frontmatter field. A number/bool renders as its plain text; null and
+/// non-scalar values (sequence/mapping/tagged) yield None. Never stores a
+/// `{:?}` debug rendering of the `Value` enum (the `"Number(2023)"` bug).
+fn scalar_to_string(val: serde_yaml::Value) -> Option<String> {
+    match val {
+        serde_yaml::Value::String(s) => Some(s),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        serde_yaml::Value::Null => None,
+        serde_yaml::Value::Sequence(_) | serde_yaml::Value::Mapping(_) | serde_yaml::Value::Tagged(_) => None,
+    }
+}
+
 /// Parsed frontmatter. Known fields extracted; everything else in extra.
 #[derive(Debug, Clone, Default)]
 pub struct Frontmatter {
@@ -56,40 +70,22 @@ impl Frontmatter {
 
             match key_str.as_str() {
                 "title" => {
-                    title = match val {
-                        serde_yaml::Value::String(s) => Some(s),
-                        other => Some(format!("{other:?}")),
-                    };
+                    title = scalar_to_string(val);
                 }
                 "date" => {
-                    date = match val {
-                        serde_yaml::Value::String(s) => Some(s),
-                        other => Some(format!("{other:?}")),
-                    };
+                    date = scalar_to_string(val);
                 }
                 "type" => {
-                    note_type = match val {
-                        serde_yaml::Value::String(s) => Some(s),
-                        other => Some(format!("{other:?}")),
-                    };
+                    note_type = scalar_to_string(val);
                 }
                 "domain" => {
-                    domain = match val {
-                        serde_yaml::Value::String(s) => Some(s),
-                        other => Some(format!("{other:?}")),
-                    };
+                    domain = scalar_to_string(val);
                 }
                 "origin" => {
-                    origin = match val {
-                        serde_yaml::Value::String(s) => Some(s),
-                        other => Some(format!("{other:?}")),
-                    };
+                    origin = scalar_to_string(val);
                 }
                 "status" => {
-                    status = match val {
-                        serde_yaml::Value::String(s) => Some(s),
-                        other => Some(format!("{other:?}")),
-                    };
+                    status = scalar_to_string(val);
                 }
                 "tags" => {
                     if let serde_yaml::Value::Sequence(seq) = val {
@@ -104,16 +100,10 @@ impl Frontmatter {
                     }
                 }
                 "source" => {
-                    source = match val {
-                        serde_yaml::Value::String(s) => Some(s),
-                        other => Some(format!("{other:?}")),
-                    };
+                    source = scalar_to_string(val);
                 }
                 "creator" => {
-                    creator = match val {
-                        serde_yaml::Value::String(s) => Some(s),
-                        other => Some(format!("{other:?}")),
-                    };
+                    creator = scalar_to_string(val);
                 }
                 "pinned" => {
                     // Strict bool-only: a typo (`pinned: "yes"`, `pinned: 1`)
@@ -374,5 +364,45 @@ mod tests {
             }
             .is_empty()
         );
+    }
+
+    #[test]
+    fn scalar_number_coerces_to_plain_text_not_debug() {
+        // `date: 2023` is a bare YAML integer; it must store "2023", not
+        // the old `"Number(2023)"` debug rendering of the Value enum.
+        let raw = "---\ndate: 2023\n---\nBody.";
+        let (fm, _) = parse_frontmatter(raw).expect("parse");
+        assert_eq!(fm.date.as_deref(), Some("2023"));
+    }
+
+    #[test]
+    fn scalar_bool_coerces_to_plain_text() {
+        let raw = "---\nstatus: true\n---\nBody.";
+        let (fm, _) = parse_frontmatter(raw).expect("parse");
+        assert_eq!(fm.status.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn scalar_null_yields_none() {
+        let raw = "---\ntitle: ~\n---\nBody.";
+        let (fm, _) = parse_frontmatter(raw).expect("parse");
+        assert_eq!(fm.title, None);
+    }
+
+    #[test]
+    fn scalar_sequence_yields_none() {
+        // A sequence value on a string-typed field is not coercible to a
+        // scalar string; it drops to None rather than a debug rendering.
+        let raw = "---\nsource:\n  - a\n  - b\n---\nBody.";
+        let (fm, _) = parse_frontmatter(raw).expect("parse");
+        assert_eq!(fm.source, None);
+    }
+
+    #[test]
+    fn scalar_string_passes_through() {
+        let raw = "---\ndate: 2023-01-13\ntitle: Hello\n---\nBody.";
+        let (fm, _) = parse_frontmatter(raw).expect("parse");
+        assert_eq!(fm.date.as_deref(), Some("2023-01-13"));
+        assert_eq!(fm.title.as_deref(), Some("Hello"));
     }
 }
