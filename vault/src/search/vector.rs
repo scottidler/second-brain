@@ -650,24 +650,36 @@ pub struct FusedHit {
     pub score: f32,
 }
 
-/// Reciprocal Rank Fusion (Cormack 2009) over any number of ranked lists.
+/// Weighted Reciprocal Rank Fusion over any number of ranked lists.
 ///
-/// Each input list is treated as a ranking (position 0 = top). A note's
-/// fused score is the sum across all lists of `1 / (k + rank)`. Notes
-/// present in only some lists still contribute (absence from a list adds
-/// zero). The result is sorted by descending score and truncated to
-/// `limit`. Generalized from the original two-list form so `graph-hybrid`
-/// can fuse bm25 ⊕ vector ⊕ graph in one pass; the two-list hybrid caller
-/// passes `&[&bm25, &vec]` and gets identical output.
+/// Each input is a `(ranked paths, weight)` pair. A note's fused score is
+/// the weighted sum across all lists of `weight * 1 / (k + rank)` (rank
+/// position 0 = top). A weight of `0.0` makes a list contribute nothing
+/// (it is then equivalent to not passing it), so a retriever can be
+/// "enabled but demoted out of the result." Notes present in only some
+/// lists still contribute (absence adds zero). The result is sorted by
+/// descending score and truncated to `limit`.
 ///
-/// `k` is the smoothing constant; the literature's default of 60 keeps
-/// the contribution of low-rank hits from dominating.
-pub fn reciprocal_rank_fusion(lists: &[&[String]], k: usize, limit: usize) -> Vec<FusedHit> {
+/// `k` is the smoothing constant; the literature's default of 60 (see
+/// [`RRF_K`]) keeps the contribution of low-rank hits from dominating.
+///
+/// The unweighted [`reciprocal_rank_fusion`] is a thin wrapper that passes
+/// every list a weight of `1.0`, so it produces bit-identical output to the
+/// historical implementation.
+pub fn reciprocal_rank_fusion_weighted(lists: &[(&[String], f32)], k: usize, limit: usize) -> Vec<FusedHit> {
     use std::collections::HashMap;
     let mut scores: HashMap<String, f32> = HashMap::new();
-    for list in lists {
+    for (list, weight) in lists {
+        // A non-positive weight is a true no-op: the list contributes nothing
+        // and a note reachable ONLY through it never enters the result. This is
+        // how a retriever stays "enabled but demoted out of the fused result"
+        // (graph weight 0.0). Skipping (rather than adding a 0.0 score) keeps
+        // such notes out instead of parking them at the bottom by tiebreaker.
+        if *weight <= 0.0 {
+            continue;
+        }
         for (rank, path) in list.iter().enumerate() {
-            let contrib = 1.0_f32 / (k as f32 + (rank + 1) as f32);
+            let contrib = weight * (1.0_f32 / (k as f32 + (rank + 1) as f32));
             *scores.entry(path.clone()).or_insert(0.0) += contrib;
         }
     }
@@ -688,6 +700,24 @@ pub fn reciprocal_rank_fusion(lists: &[&[String]], k: usize, limit: usize) -> Ve
     });
     fused.truncate(limit);
     fused
+}
+
+/// Reciprocal Rank Fusion (Cormack 2009) over any number of ranked lists.
+///
+/// Each input list is treated as a ranking (position 0 = top). A note's
+/// fused score is the sum across all lists of `1 / (k + rank)`. Notes
+/// present in only some lists still contribute (absence from a list adds
+/// zero). The result is sorted by descending score and truncated to
+/// `limit`. Generalized from the original two-list form so `graph-hybrid`
+/// can fuse bm25 ⊕ vector ⊕ graph in one pass; the two-list hybrid caller
+/// passes `&[&bm25, &vec]` and gets identical output.
+///
+/// `k` is the smoothing constant; the literature's default of 60 keeps
+/// the contribution of low-rank hits from dominating. This is the
+/// uniform-weight special case of [`reciprocal_rank_fusion_weighted`].
+pub fn reciprocal_rank_fusion(lists: &[&[String]], k: usize, limit: usize) -> Vec<FusedHit> {
+    let weighted: Vec<(&[String], f32)> = lists.iter().map(|l| (*l, 1.0_f32)).collect();
+    reciprocal_rank_fusion_weighted(&weighted, k, limit)
 }
 
 /// Smoothing constant for [`reciprocal_rank_fusion`]; the literature

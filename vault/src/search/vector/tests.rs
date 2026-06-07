@@ -600,3 +600,50 @@ fn semantic_neighbors_empty_when_note_has_no_embedding() {
     let hits = index.semantic_neighbors("notes/bare.md", 10, 0.0).expect("knn");
     assert!(hits.is_empty(), "note with no summary embedding yields no neighbors");
 }
+
+#[test]
+fn weighted_rrf_with_uniform_weights_equals_unweighted() {
+    // The load-bearing equivalence: uniform weight 1.0 must reproduce the
+    // historical unweighted fusion bit-for-bit (same order AND same scores).
+    let bm25 = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let vec = vec!["b".to_string(), "d".to_string(), "a".to_string()];
+
+    let unweighted = reciprocal_rank_fusion(&[&bm25, &vec], 60, 10);
+    let weighted = reciprocal_rank_fusion_weighted(&[(&bm25[..], 1.0), (&vec[..], 1.0)], 60, 10);
+
+    assert_eq!(unweighted.len(), weighted.len());
+    for (u, w) in unweighted.iter().zip(weighted.iter()) {
+        assert_eq!(u.note_path, w.note_path, "ordering must match");
+        assert!((u.score - w.score).abs() < 1e-9, "score must match for {}", u.note_path);
+    }
+}
+
+#[test]
+fn weighted_rrf_zero_weight_contributes_nothing() {
+    // A list weighted 0.0 is equivalent to not passing it at all: this is how
+    // a retriever can be "enabled but demoted out of the result" (graph 0.0).
+    let strong = ["a".to_string(), "b".to_string()];
+    let muted = ["z".to_string(), "y".to_string()];
+
+    let fused = reciprocal_rank_fusion_weighted(&[(&strong[..], 1.0), (&muted[..], 0.0)], 60, 10);
+    let paths: Vec<&str> = fused.iter().map(|h| h.note_path.as_str()).collect();
+    assert_eq!(paths, vec!["a", "b"], "zero-weighted list must not appear");
+}
+
+#[test]
+fn weighted_rrf_higher_weight_dominates_ranking() {
+    // vector outranks bm25 even when bm25 places a different note first,
+    // because vector carries 3x the weight. This is the fusion-inversion fix:
+    // the strong list dominates instead of being diluted by an equal-weight
+    // weak list.
+    let bm25 = ["weak-top".to_string(), "shared".to_string()];
+    let vector = ["shared".to_string(), "strong-top".to_string()];
+
+    let fused = reciprocal_rank_fusion_weighted(&[(&bm25[..], 0.3), (&vector[..], 1.0)], 60, 10);
+    // "shared" is rank-2 in bm25 (0.3 weight) + rank-1 in vector (1.0 weight),
+    // so it must lead. "strong-top" (vector rank-2, 1.0) must beat "weak-top"
+    // (bm25 rank-1, only 0.3).
+    assert_eq!(fused[0].note_path, "shared");
+    let pos = |p: &str| fused.iter().position(|h| h.note_path == p).expect("present");
+    assert!(pos("strong-top") < pos("weak-top"), "vector hit must outrank bm25 hit");
+}

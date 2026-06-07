@@ -186,6 +186,7 @@ mod vector;
 #[cfg(feature = "vec")]
 pub use vector::{
     BatchUpsert, EmbeddingKind, FusedHit, K_RRF_INPUT, RRF_K, StaleTarget, VectorHit, reciprocal_rank_fusion,
+    reciprocal_rank_fusion_weighted,
 };
 
 mod graph;
