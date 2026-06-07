@@ -16,6 +16,18 @@ use crate::extension::{self, sign};
 const EXTENSION_ID: &str = "obsidian-borg@scottidler";
 const LATEST_XPI_NAME: &str = "obsidian-borg-latest.xpi";
 
+/// Single source of truth for the snap-unsupported message. snap Firefox runs
+/// in a sandbox that cannot read a system `policies.json`, so the capture
+/// extension's POSTs to the local daemon silently fail. We detect snap and
+/// fail loudly rather than mis-install. Shared by `policy_path`,
+/// `install_strategy`, and `run` so the operator always sees the same remedy.
+const SNAP_UNSUPPORTED: &str = "snap Firefox is unsupported - its sandbox cannot load the capture extension \
+     (POSTs to the local daemon silently fail; see \
+     docs/postmortems/2026-06-07-firefox-snap-breaks-borg-capture.md). \
+     Install Mozilla's /opt Firefox and remove the snap:\n    \
+     manifest -C ~/repos/scottidler/dotfiles/manifest.yml -s firefox-opt | bash\n\
+     then re-run this command.";
+
 #[derive(Debug, Default)]
 pub struct InstallOpts {
     pub no_policy: bool,
@@ -66,19 +78,32 @@ pub fn detect_firefox() -> Result<FirefoxInstall> {
     };
     let resolved_str = resolved.to_string_lossy();
     log::debug!("extension::install::detect_firefox: resolved={resolved_str}");
-    if resolved_str.starts_with("/opt/firefox/") {
-        return Ok(FirefoxInstall::Tarball(PathBuf::from("/opt/firefox")));
+    Ok(classify_firefox_path(&resolved_str))
+}
+
+/// Pure path-classification: map a canonicalized `which firefox` result to a
+/// `FirefoxInstall`. Split out of `detect_firefox()` so the classification can
+/// be tested deterministically (the rest of `detect_firefox` shells out to
+/// `snap`/`which` and so depends on whatever Firefox the host runs). This is
+/// the regression guard against the canonicalize-wrapper trap: a snap box whose
+/// `/usr/bin/firefox` wrapper resolves to `/usr/bin/...` must NOT be silently
+/// classified here as `AptOrDeb` - that path is reached only when the upstream
+/// snap probe already returned false, so the `/snap/` arm below is the
+/// belt-and-suspenders second signal.
+pub fn classify_firefox_path(resolved: &str) -> FirefoxInstall {
+    if resolved.starts_with("/opt/firefox/") {
+        return FirefoxInstall::Tarball(PathBuf::from("/opt/firefox"));
     }
-    if resolved_str.starts_with("/snap/") {
-        return Ok(FirefoxInstall::Snap);
+    if resolved.starts_with("/snap/") {
+        return FirefoxInstall::Snap;
     }
-    if resolved_str.contains("/flatpak/") || resolved_str.contains("org.mozilla.firefox") {
-        return Ok(FirefoxInstall::Flatpak);
+    if resolved.contains("/flatpak/") || resolved.contains("org.mozilla.firefox") {
+        return FirefoxInstall::Flatpak;
     }
-    if resolved_str.starts_with("/usr/bin/") || resolved_str.starts_with("/usr/lib/") {
-        return Ok(FirefoxInstall::AptOrDeb);
+    if resolved.starts_with("/usr/bin/") || resolved.starts_with("/usr/lib/") {
+        return FirefoxInstall::AptOrDeb;
     }
-    Ok(FirefoxInstall::Unknown)
+    FirefoxInstall::Unknown
 }
 
 fn is_snap_firefox() -> bool {
@@ -108,10 +133,7 @@ pub fn policy_path(install: &FirefoxInstall) -> Result<PathBuf> {
     match install {
         FirefoxInstall::Tarball(root) => Ok(root.join("distribution").join("policies.json")),
         FirefoxInstall::AptOrDeb => Ok(PathBuf::from("/etc/firefox/policies/policies.json")),
-        FirefoxInstall::Snap => eyre::bail!(
-            "snap-installed Firefox cannot load a system policies.json (it runs inside snap confinement). \
-             Use `install_strategy()` instead, which targets the snap profile's extensions/ directory."
-        ),
+        FirefoxInstall::Snap => eyre::bail!(SNAP_UNSUPPORTED),
         FirefoxInstall::Flatpak => {
             let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("cannot resolve $HOME"))?;
             Ok(home.join(".var/app/org.mozilla.firefox/.mozilla/firefox/policies/policies.json"))
@@ -125,19 +147,14 @@ pub fn policy_path(install: &FirefoxInstall) -> Result<PathBuf> {
 
 /// How to deliver the signed .xpi to a given Firefox install. System Firefox
 /// (apt/deb, tarball, flatpak) reads enterprise policies; snap Firefox is
-/// sandboxed and cannot, so we copy the .xpi straight into the user's snap
-/// profile extensions directory.
+/// sandboxed and cannot, so snap is an unsupported terminal error (handled in
+/// `run`/`install_strategy`), not a strategy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallStrategy {
     /// Write a `policies.json` with a `force_installed` entry pointing at the
     /// .xpi. Firefox picks the extension up from the `file://` URL on next
     /// launch. Used for apt/deb, tarball, and flatpak Firefox.
     PolicyFile { path: PathBuf },
-    /// Copy the .xpi directly into the snap profile's extensions/ directory
-    /// at `<profile>/extensions/<EXTENSION_ID>.xpi`. Snap Firefox reads
-    /// extensions from its confined profile; the system /etc/firefox/policies
-    /// file is invisible inside the sandbox.
-    ProfileExtension { xpi_path: PathBuf },
 }
 
 pub fn install_strategy(install: &FirefoxInstall) -> Result<InstallStrategy> {
@@ -147,39 +164,12 @@ pub fn install_strategy(install: &FirefoxInstall) -> Result<InstallStrategy> {
                 path: policy_path(install)?,
             })
         }
-        FirefoxInstall::Snap => {
-            let profile = snap_active_profile_dir()?;
-            Ok(InstallStrategy::ProfileExtension {
-                xpi_path: profile.join("extensions").join(format!("{EXTENSION_ID}.xpi")),
-            })
-        }
+        FirefoxInstall::Snap => eyre::bail!(SNAP_UNSUPPORTED),
         FirefoxInstall::Unknown => eyre::bail!(
             "could not detect Firefox install type; supported: tarball, apt/deb, snap, flatpak. \
              Pass --policy-file to override."
         ),
     }
-}
-
-/// Locate the active snap-Firefox profile directory by parsing
-/// `~/snap/firefox/common/.mozilla/firefox/profiles.ini`. Snap Firefox
-/// confines its profile under `~/snap/firefox/common/.mozilla/firefox/`,
-/// distinct from the unconfined `~/.mozilla/firefox/` used by apt/deb
-/// Firefox.
-fn snap_active_profile_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("cannot resolve $HOME"))?;
-    let snap_firefox = home.join("snap/firefox/common/.mozilla/firefox");
-    let profiles_ini = snap_firefox.join("profiles.ini");
-    if !profiles_ini.exists() {
-        eyre::bail!(
-            "snap Firefox profiles.ini not found at {} - launch Firefox at least once before installing the extension",
-            profiles_ini.display()
-        );
-    }
-    let contents =
-        std::fs::read_to_string(&profiles_ini).with_context(|| format!("read {}", profiles_ini.display()))?;
-    let profile_path = parse_default_profile_path(&contents)
-        .ok_or_else(|| eyre::eyre!("no profile found in {}", profiles_ini.display()))?;
-    Ok(snap_firefox.join(profile_path))
 }
 
 /// Parse a Firefox `profiles.ini` and return the active profile's path.
@@ -404,6 +394,17 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
         opts.policy_file
     );
 
+    // Snap detection runs FIRST - before --policy-file resolution. snap's
+    // sandbox cannot read ANY system policies.json, so the --policy-file
+    // override must not be able to force one onto it (that would silently
+    // mis-install, the exact failure this whole change exists to kill).
+    // Explicit install -> hard error; --if-installed (deploy hook) -> warn +
+    // skip so `otto deploy` does not fail on a not-yet-migrated snap box.
+    let detected = detect_firefox()?;
+    if matches!(detected, FirefoxInstall::Snap) {
+        return snap_run_outcome(opts.if_installed);
+    }
+
     // Resolve the install strategy. --policy-file overrides detection and
     // always uses the PolicyFile strategy (caller knows what they're doing).
     // --if-installed needs the strategy to check whether our extension is
@@ -413,7 +414,7 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
     let strategy: Option<InstallStrategy> = if let Some(override_path) = opts.policy_file.clone() {
         Some(InstallStrategy::PolicyFile { path: override_path })
     } else {
-        match detect_firefox()? {
+        match detected {
             FirefoxInstall::Unknown => {
                 if opts.if_installed {
                     log::debug!("extension::install: --if-installed and no Firefox detected -> skip");
@@ -469,10 +470,9 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
     }
 
     // Dispatch on strategy. `--no-policy` only applies to the PolicyFile
-    // path (system policies.json) - for ProfileExtension the .xpi copy IS
-    // the install, and skipping it would leave the snap profile stale.
-    // `None` strategy means no Firefox detected AND --no-policy passed: a
-    // daemon-only host where we sign for archival and stop there.
+    // path (system policies.json). `None` strategy means no Firefox detected
+    // AND --no-policy passed: a daemon-only host where we sign for archival
+    // and stop there.
     match strategy {
         None => Ok(InstallResult {
             xpi_path: Some(sign_result.xpi_path),
@@ -505,40 +505,34 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
                 skipped_not_installed: false,
             })
         }
-        Some(InstallStrategy::ProfileExtension { xpi_path }) => {
-            // Snap-style install: copy the .xpi straight into the profile.
-            // `--no-policy` does not gate this - there is no system policy
-            // file to skip writing; the profile copy is the install action.
-            let parent = xpi_path
-                .parent()
-                .ok_or_else(|| eyre::eyre!("profile extension path has no parent: {}", xpi_path.display()))?;
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create profile extensions dir {}", parent.display()))?;
-            std::fs::copy(&sign_result.xpi_path, &xpi_path)
-                .with_context(|| format!("copy {} -> {}", sign_result.xpi_path.display(), xpi_path.display()))?;
-            log::info!(
-                "extension::install: copied signed .xpi into snap profile at {}",
-                xpi_path.display()
-            );
-            Ok(InstallResult {
-                xpi_path: Some(sign_result.xpi_path),
-                policy_path: Some(xpi_path),
-                policy_changed: true,
-                skipped_not_installed: false,
-            })
-        }
     }
+}
+
+/// What `run()` does when it detects snap Firefox, factored out so the
+/// override-loophole guarantee is unit-testable without the host running snap:
+/// explicit install (`if_installed == false`) -> hard error; deploy hook
+/// (`if_installed == true`) -> warn + skip so `otto deploy` does not fail on a
+/// not-yet-migrated snap box. `run()` calls this *before* resolving
+/// `--policy-file`, so the override can never force a policy onto snap.
+#[cfg(target_os = "linux")]
+fn snap_run_outcome(if_installed: bool) -> Result<InstallResult> {
+    if if_installed {
+        log::warn!("extension::install: snap Firefox detected, skipping (--if-installed). {SNAP_UNSUPPORTED}");
+        return Ok(InstallResult {
+            skipped_not_installed: true,
+            ..InstallResult::default()
+        });
+    }
+    eyre::bail!(SNAP_UNSUPPORTED)
 }
 
 /// Returns true if our extension is already installed according to the given
 /// strategy. For PolicyFile, "installed" means the policies.json contains an
-/// `ExtensionSettings.<EXTENSION_ID>` entry. For ProfileExtension, "installed"
-/// means the .xpi exists in the profile.
+/// `ExtensionSettings.<EXTENSION_ID>` entry.
 #[cfg(target_os = "linux")]
 fn is_already_installed(strategy: &InstallStrategy) -> bool {
     match strategy {
         InstallStrategy::PolicyFile { path } => policy_contains_ours(path),
-        InstallStrategy::ProfileExtension { xpi_path } => xpi_path.exists(),
     }
 }
 
@@ -553,26 +547,15 @@ pub fn uninstall(opts: UninstallOpts) -> Result<UninstallResult> {
     let strategy = detect_firefox().ok().and_then(|i| install_strategy(&i).ok());
 
     let mut policy_path_out = None;
-    if let Some(strategy) = strategy {
-        match strategy {
-            InstallStrategy::PolicyFile { path: target } => {
-                if target.exists() && policy_contains_ours(&target) {
-                    let existing = read_policy_file(&target)?;
-                    let stripped = strip_policy(existing);
-                    let stripped_text =
-                        serde_json::to_string_pretty(&stripped).context("serialize stripped policy")? + "\n";
-                    write_policy_file(&target, &stripped_text)?;
-                    policy_path_out = Some(target);
-                }
-            }
-            InstallStrategy::ProfileExtension { xpi_path } => {
-                if xpi_path.exists() {
-                    std::fs::remove_file(&xpi_path)
-                        .with_context(|| format!("remove profile extension {}", xpi_path.display()))?;
-                    policy_path_out = Some(xpi_path);
-                }
-            }
-        }
+    if let Some(InstallStrategy::PolicyFile { path: target }) = strategy
+        && target.exists()
+        && policy_contains_ours(&target)
+    {
+        let existing = read_policy_file(&target)?;
+        let stripped = strip_policy(existing);
+        let stripped_text = serde_json::to_string_pretty(&stripped).context("serialize stripped policy")? + "\n";
+        write_policy_file(&target, &stripped_text)?;
+        policy_path_out = Some(target);
     }
 
     let mut artifacts_removed = false;
