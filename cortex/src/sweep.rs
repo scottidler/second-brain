@@ -295,16 +295,21 @@ pub fn cold(vault_root: &Path, config: &Config) -> Result<ColdStats> {
 /// daemon tick uses the outer `run_cold` so it stays a one-line `select!`
 /// arm matching the embed-tick shape.
 pub fn cold_with_index(vault_root: &Path, index: &SearchIndex, cold: &crate::config::ColdConfig) -> Result<ColdStats> {
-    let now = chrono::Utc::now().timestamp();
-    let older_than = now - (cold.older_than_days as i64) * 86_400;
+    // Floor is a content-date string: a note is cold when its `date:`
+    // frontmatter is lexically older than this. Subtracting from today's
+    // calendar date keeps the comparison in the same `YYYY-MM-DD` space as
+    // the normalized `date` column.
+    let before_date = (chrono::Utc::now().date_naive() - chrono::Duration::days(cold.older_than_days as i64))
+        .format("%Y-%m-%d")
+        .to_string();
     let query = ColdQuery {
-        older_than,
+        before_date: before_date.clone(),
         limit: cold.limit,
     };
 
     let rows = index.cold_notes(&query).wrap_err("cold_notes query failed")?;
     let pinned_excluded = index
-        .count_pinned_excluded(older_than)
+        .count_pinned_excluded(&before_date)
         .wrap_err("count_pinned_excluded failed")?;
     let scanned = index.count_notes().wrap_err("count_notes failed")?;
 
@@ -406,13 +411,11 @@ pub fn render_cold_report_at(
         for (domain, domain_rows) in &groups {
             out.push_str(&format!("## {domain} ({count})\n\n", count = domain_rows.len()));
             for row in domain_rows {
-                let date_str = chrono::DateTime::<chrono::Utc>::from_timestamp(row.modified_at, 0)
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
                 let title = if row.title.is_empty() { "(untitled)".to_string() } else { row.title.clone() };
                 out.push_str(&format!(
-                    "- [ ] `{path}` - \"{title}\" - last modified {date_str}\n",
+                    "- [ ] `{path}` - \"{title}\" - dated {date}\n",
                     path = row.path,
+                    date = row.date,
                 ));
             }
             out.push('\n');
@@ -459,12 +462,12 @@ mod tests {
         }
     }
 
-    fn make_cold_note(path: &str, title: &str, domain: &str, modified_at: i64) -> ColdNote {
+    fn make_cold_note(path: &str, title: &str, domain: &str, date: &str) -> ColdNote {
         ColdNote {
             path: path.to_string(),
             title: title.to_string(),
             domain: domain.to_string(),
-            modified_at,
+            date: date.to_string(),
         }
     }
 
@@ -474,10 +477,9 @@ mod tests {
     /// path see identical input.
     fn snapshot_fixture_input() -> (Vec<ColdNote>, ColdStats, u32, chrono::DateTime<chrono::Utc>) {
         let rows = vec![
-            // 2025-08-12T00:00:00Z = 1_754_956_800
-            make_cold_note("notes/ai/old-paper.md", "Old Paper", "ai", 1_754_956_800),
-            make_cold_note("notes/ai/forgotten.md", "Forgotten Thread", "ai", 1_754_956_800),
-            make_cold_note("notes/diy/unused-jig.md", "Unused Jig", "diy", 1_754_956_800),
+            make_cold_note("notes/ai/old-paper.md", "Old Paper", "ai", "2025-08-12"),
+            make_cold_note("notes/ai/forgotten.md", "Forgotten Thread", "ai", "2025-08-12"),
+            make_cold_note("notes/diy/unused-jig.md", "Unused Jig", "diy", "2025-08-12"),
         ];
         let stats = ColdStats {
             scanned: 1_345,
@@ -525,10 +527,9 @@ mod tests {
     #[test]
     fn render_cold_report_groups_by_domain_and_includes_metadata() {
         let rows = vec![
-            // 2025-08-12T00:00:00Z = 1_754_956_800
-            make_cold_note("notes/ai/a.md", "A Paper", "ai", 1_754_956_800),
-            make_cold_note("notes/ai/b.md", "B Thing", "ai", 1_754_956_800),
-            make_cold_note("notes/diy/c.md", "C Hack", "diy", 1_754_956_800),
+            make_cold_note("notes/ai/a.md", "A Paper", "ai", "2025-08-12"),
+            make_cold_note("notes/ai/b.md", "B Thing", "ai", "2025-08-12"),
+            make_cold_note("notes/diy/c.md", "C Hack", "diy", "2025-08-12"),
         ];
         let stats = ColdStats {
             scanned: 100,
@@ -546,7 +547,7 @@ mod tests {
         assert!(out.contains("## diy (1)"));
         assert!(out.contains("- [ ] `notes/ai/a.md`"));
         assert!(out.contains("\"A Paper\""));
-        assert!(out.contains("last modified 2025-08-12"));
+        assert!(out.contains("dated 2025-08-12"));
     }
 
     #[test]
@@ -562,7 +563,7 @@ mod tests {
 
     #[test]
     fn render_cold_report_groups_empty_domain_as_no_domain() {
-        let rows = vec![make_cold_note("notes/loose.md", "Loose", "", 1_754_956_800)];
+        let rows = vec![make_cold_note("notes/loose.md", "Loose", "", "2025-08-12")];
         let stats = ColdStats {
             scanned: 1,
             surfaced: 1,
@@ -622,10 +623,11 @@ mod tests {
             );
             std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("mkdir db parent");
 
-            // Pre-seed the DB with a cold note (no signals, old mtime).
+            // Pre-seed the DB with a cold note (no signals, old content date).
             let index = SearchIndex::open(&db_path).expect("open db");
             let fm = Frontmatter {
                 title: Some("Stale Note".to_string()),
+                date: Some("2020-01-01".to_string()),
                 note_type: Some("article".to_string()),
                 origin: Some("assisted".to_string()),
                 domain: Some("ai".to_string()),
@@ -674,6 +676,7 @@ mod tests {
         // pinned_excluded, NOT surfaced.
         let fm_pinned = Frontmatter {
             title: Some("Pinned".to_string()),
+            date: Some("2020-01-01".to_string()),
             note_type: Some("article".to_string()),
             origin: Some("assisted".to_string()),
             domain: Some("ai".to_string()),
@@ -691,6 +694,7 @@ mod tests {
         // Old, unpinned, cold: should surface.
         let fm_cold = Frontmatter {
             title: Some("Cold".to_string()),
+            date: Some("2020-01-01".to_string()),
             note_type: Some("article".to_string()),
             origin: Some("assisted".to_string()),
             domain: Some("ai".to_string()),
@@ -738,6 +742,7 @@ mod tests {
         let index = SearchIndex::open_memory().expect("open");
         let fm_cold = Frontmatter {
             title: Some("Old Paper".to_string()),
+            date: Some("2020-01-01".to_string()),
             note_type: Some("article".to_string()),
             origin: Some("assisted".to_string()),
             domain: Some("ai".to_string()),
@@ -779,7 +784,7 @@ mod tests {
 
     #[test]
     fn render_cold_report_handles_missing_title() {
-        let rows = vec![make_cold_note("notes/a.md", "", "ai", 1_754_956_800)];
+        let rows = vec![make_cold_note("notes/a.md", "", "ai", "2025-08-12")];
         let stats = ColdStats {
             scanned: 1,
             surfaced: 1,

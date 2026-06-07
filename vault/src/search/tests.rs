@@ -767,31 +767,88 @@ fn index_one_pinned_clears_when_frontmatter_drops_field() {
     );
 }
 
-fn cold_query(older_than: i64) -> ColdQuery {
-    ColdQuery { older_than, limit: 100 }
+fn cold_query(before_date: &str) -> ColdQuery {
+    ColdQuery {
+        before_date: before_date.to_string(),
+        limit: 100,
+    }
+}
+
+/// Like `make_test_note` but with an explicit content `date:`. Cold is now
+/// measured by `date:` frontmatter, so the cold tests must seed it.
+fn make_dated_note(path: &str, date: &str, body: &str) -> Note {
+    use crate::frontmatter::Frontmatter;
+    use std::path::PathBuf;
+    let fm = Frontmatter {
+        title: Some(format!("title for {path}")),
+        date: Some(date.to_string()),
+        note_type: Some("article".to_string()),
+        origin: Some("assisted".to_string()),
+        tags: Some(vec!["rust".to_string()]),
+        ..Frontmatter::default()
+    };
+    Note {
+        path: PathBuf::from(path),
+        frontmatter: fm,
+        body: body.to_string(),
+        raw: format!("---\n---\n{body}"),
+    }
+}
+
+/// A pinned note carrying an explicit content `date:`.
+fn make_dated_pinned_note(path: &str, date: &str, pinned: Option<bool>, body: &str) -> Note {
+    use crate::frontmatter::Frontmatter;
+    use std::path::PathBuf;
+    let fm = Frontmatter {
+        title: Some(format!("title for {path}")),
+        date: Some(date.to_string()),
+        note_type: Some("article".to_string()),
+        origin: Some("assisted".to_string()),
+        pinned,
+        ..Frontmatter::default()
+    };
+    Note {
+        path: PathBuf::from(path),
+        frontmatter: fm,
+        body: body.to_string(),
+        raw: format!("---\n---\n{body}"),
+    }
 }
 
 #[test]
 fn cold_notes_returns_only_floor_satisfying_rows() {
     let index = SearchIndex::open_memory().expect("open");
-    // Cold candidate: zero signals, old, not pinned.
-    index
-        .index_one(&make_test_note("notes/cold.md", "## Summary\n\nC.\n"), 1_000)
-        .expect("cold");
-    // Recent: shouldn't surface.
-    index
-        .index_one(&make_test_note("notes/recent.md", "## Summary\n\nR.\n"), 9_000)
-        .expect("recent");
-    // Pinned: shouldn't surface.
+    // Cold candidate: zero signals, old content date, not pinned.
     index
         .index_one(
-            &make_pinned_note("notes/pin.md", Some(true), "## Summary\n\nP.\n"),
+            &make_dated_note("notes/cold.md", "2023-01-01", "## Summary\n\nC.\n"),
+            1_000,
+        )
+        .expect("cold");
+    // Recent content date: shouldn't surface.
+    index
+        .index_one(
+            &make_dated_note("notes/recent.md", "2026-01-01", "## Summary\n\nR.\n"),
+            1_000,
+        )
+        .expect("recent");
+    // Pinned: shouldn't surface even though old.
+    index
+        .index_one(
+            &make_dated_pinned_note("notes/pin.md", "2023-01-01", Some(true), "## Summary\n\nP.\n"),
             1_000,
         )
         .expect("pin");
+    // Undated: shouldn't surface - age cannot be inferred.
+    index
+        .index_one(&make_test_note("notes/undated.md", "## Summary\n\nU.\n"), 1_000)
+        .expect("undated");
     // Has inbound (seed signal directly to avoid running recompute):
     index
-        .index_one(&make_test_note("notes/linked.md", "## Summary\n\nL.\n"), 1_000)
+        .index_one(
+            &make_dated_note("notes/linked.md", "2023-01-01", "## Summary\n\nL.\n"),
+            1_000,
+        )
         .expect("linked");
     index
         .conn
@@ -801,25 +858,46 @@ fn cold_notes_returns_only_floor_satisfying_rows() {
         )
         .expect("seed inbound");
 
-    let rows = index.cold_notes(&cold_query(5_000)).expect("cold");
+    let rows = index.cold_notes(&cold_query("2024-01-01")).expect("cold");
     let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
     assert_eq!(paths, vec!["notes/cold.md"]);
+}
+
+#[test]
+fn cold_notes_excludes_undated_rows() {
+    let index = SearchIndex::open_memory().expect("open");
+    // No `date:` frontmatter at all - normalizes to '' in the column.
+    index
+        .index_one(&make_test_note("notes/undated.md", "## Summary\n\nU.\n"), 1_000)
+        .expect("undated");
+
+    let rows = index.cold_notes(&cold_query("2024-01-01")).expect("cold");
+    assert!(rows.is_empty(), "undated note must not surface: got {rows:?}");
 }
 
 #[test]
 fn cold_notes_orders_oldest_first() {
     let index = SearchIndex::open_memory().expect("open");
     index
-        .index_one(&make_test_note("notes/middle.md", "## Summary\n\nM.\n"), 3_000)
+        .index_one(
+            &make_dated_note("notes/middle.md", "2023-06-01", "## Summary\n\nM.\n"),
+            1_000,
+        )
         .expect("m");
     index
-        .index_one(&make_test_note("notes/oldest.md", "## Summary\n\nO.\n"), 1_000)
+        .index_one(
+            &make_dated_note("notes/oldest.md", "2023-01-01", "## Summary\n\nO.\n"),
+            1_000,
+        )
         .expect("o");
     index
-        .index_one(&make_test_note("notes/newer.md", "## Summary\n\nN.\n"), 4_000)
+        .index_one(
+            &make_dated_note("notes/newer.md", "2023-12-01", "## Summary\n\nN.\n"),
+            1_000,
+        )
         .expect("n");
 
-    let rows = index.cold_notes(&cold_query(5_000)).expect("cold");
+    let rows = index.cold_notes(&cold_query("2024-01-01")).expect("cold");
     let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
     assert_eq!(paths, vec!["notes/oldest.md", "notes/middle.md", "notes/newer.md"]);
 }
@@ -828,13 +906,16 @@ fn cold_notes_orders_oldest_first() {
 fn cold_notes_excludes_once_read_notes() {
     let index = SearchIndex::open_memory().expect("open");
     index
-        .index_one(&make_test_note("notes/once.md", "## Summary\n\nO.\n"), 1_000)
+        .index_one(
+            &make_dated_note("notes/once.md", "2023-01-01", "## Summary\n\nO.\n"),
+            1_000,
+        )
         .expect("once");
     // One bump suffices to mark the note permanently warm under the
     // binary decay rule.
     index.bump_access("notes/once.md").expect("bump");
 
-    let rows = index.cold_notes(&cold_query(5_000)).expect("cold");
+    let rows = index.cold_notes(&cold_query("2024-01-01")).expect("cold");
     assert!(rows.is_empty(), "any prior read disqualifies: got {rows:?}");
 }
 
@@ -842,23 +923,71 @@ fn cold_notes_excludes_once_read_notes() {
 fn count_pinned_excluded_counts_only_pinned_floor_satisfiers() {
     let index = SearchIndex::open_memory().expect("open");
     index
-        .index_one(&make_pinned_note("notes/p.md", Some(true), "## Summary\n\nP.\n"), 1_000)
+        .index_one(
+            &make_dated_pinned_note("notes/p.md", "2023-01-01", Some(true), "## Summary\n\nP.\n"),
+            1_000,
+        )
         .expect("pinned");
     // Recent pinned: would not have qualified for the cold report
-    // because it's not old enough, so should NOT count toward
-    // pinned_excluded.
+    // because its content date is not old enough, so should NOT count
+    // toward pinned_excluded.
     index
         .index_one(
-            &make_pinned_note("notes/p-recent.md", Some(true), "## Summary\n\nN.\n"),
-            9_000,
+            &make_dated_pinned_note("notes/p-recent.md", "2026-01-01", Some(true), "## Summary\n\nN.\n"),
+            1_000,
         )
         .expect("pinned-recent");
     index
-        .index_one(&make_test_note("notes/not-pinned.md", "## Summary\n\nU.\n"), 1_000)
+        .index_one(
+            &make_dated_note("notes/not-pinned.md", "2023-01-01", "## Summary\n\nU.\n"),
+            1_000,
+        )
         .expect("unpinned");
 
-    let count = index.count_pinned_excluded(5_000).expect("count");
+    let count = index.count_pinned_excluded("2024-01-01").expect("count");
     assert_eq!(count, 1, "only old, otherwise-cold, pinned rows count");
+}
+
+#[test]
+fn normalize_date_canonical_iso_passes_through() {
+    assert_eq!(normalize_date("2023-01-13"), "2023-01-13");
+}
+
+#[test]
+fn normalize_date_keeps_date_from_iso_with_time_suffix() {
+    assert_eq!(normalize_date("2023-01-13T09:30:00Z"), "2023-01-13");
+}
+
+#[test]
+fn normalize_date_rejects_debug_string_and_non_iso() {
+    // The `"Number(2023)"` garbage path, slash format, a Templater literal,
+    // and an empty string all normalize to '' (undated).
+    assert_eq!(normalize_date("Number(2023)"), "");
+    assert_eq!(normalize_date("05/12/2026"), "");
+    assert_eq!(normalize_date("{{date}}"), "");
+    assert_eq!(normalize_date("2023"), "");
+    assert_eq!(normalize_date(""), "");
+}
+
+#[test]
+fn index_one_writes_empty_date_for_non_iso_frontmatter() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(
+            &make_dated_note("notes/slash.md", "05/12/2026", "## Summary\n\nS.\n"),
+            1_000,
+        )
+        .expect("index");
+    let stored: String = index
+        .conn
+        .query_row("SELECT date FROM notes WHERE path = 'notes/slash.md'", [], |row| {
+            row.get(0)
+        })
+        .expect("read date");
+    assert_eq!(
+        stored, "",
+        "non-ISO date must land as '' so it is excluded, not mis-aged"
+    );
 }
 
 #[test]

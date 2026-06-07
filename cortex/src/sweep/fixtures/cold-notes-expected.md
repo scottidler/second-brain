@@ -15,12 +15,12 @@ This file is regenerated weekly by `cortex sweep --cold`. Do not edit manually; 
 
 ## ai (2)
 
-- [ ] `notes/ai/old-paper.md` - "Old Paper" - last modified 2025-08-12
-- [ ] `notes/ai/forgotten.md` - "Forgotten Thread" - last modified 2025-08-12
+- [ ] `notes/ai/old-paper.md` - "Old Paper" - dated 2025-08-12
+- [ ] `notes/ai/forgotten.md` - "Forgotten Thread" - dated 2025-08-12
 
 ## diy (1)
 
-- [ ] `notes/diy/unused-jig.md` - "Unused Jig" - last modified 2025-08-12
+- [ ] `notes/diy/unused-jig.md` - "Unused Jig" - dated 2025-08-12
 
 ---
 

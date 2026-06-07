@@ -49,6 +49,20 @@ fn normalize_enum<T: std::str::FromStr + std::fmt::Display>(
     }
 }
 
+/// Normalize a raw frontmatter `date:` to canonical `YYYY-MM-DD`. Returns ``
+/// for anything that does not parse as a leading ISO date - absent, a bare
+/// `Number(2023)` debug-string, a slash format, or a Templater literal. The
+/// `notes.date` column is written exclusively through this, so downstream
+/// lexical comparison is over guaranteed-canonical data (or the empty
+/// sentinel, which every consumer treats as "undated").
+fn normalize_date(raw: &str) -> String {
+    let head = raw.get(..10).unwrap_or(raw);
+    match chrono::NaiveDate::parse_from_str(head, "%Y-%m-%d") {
+        Ok(d) => d.format("%Y-%m-%d").to_string(),
+        Err(_) => String::new(),
+    }
+}
+
 /// Extract a string value from the frontmatter extra map (for cortex-* fields)
 fn extract_cortex_string(extra: &HashMap<String, serde_yaml::Value>, key: &str) -> String {
     extra
@@ -276,9 +290,11 @@ impl SearchIndex {
             CREATE INDEX IF NOT EXISTS idx_notes_domain ON notes(domain);
             CREATE INDEX IF NOT EXISTS idx_notes_note_type ON notes(note_type);
             CREATE INDEX IF NOT EXISTS idx_notes_status ON notes(status);
+            -- The cold-note SELECT filters and orders by `date`; this index
+            -- keeps it index-backed instead of a full scan.
             CREATE INDEX IF NOT EXISTS idx_notes_date ON notes(date);
-            -- Doc 3 cold-note SELECT filters on `modified_at < ?`. Without
-            -- this index the query is a sequential scan over every note.
+            -- `modified_at` is still read by other code paths; keep its index
+            -- even though the cold SELECT no longer filters on it.
             CREATE INDEX IF NOT EXISTS idx_notes_modified_at ON notes(modified_at);",
         )?;
 
@@ -420,7 +436,7 @@ impl SearchIndex {
             }
         }
 
-        // Doc 3 cold-note query filters on `modified_at`; ensure the index
+        // `modified_at` is still read by other code paths; ensure its index
         // exists on already-deployed DBs whose CREATE TABLE predates the
         // index addition.
         self.conn
@@ -608,7 +624,10 @@ impl SearchIndex {
             .is_ok();
 
         let title = fm.title.as_deref().unwrap_or("");
-        let date = fm.date.as_deref().unwrap_or("");
+        // Normalize to canonical YYYY-MM-DD (or `` when unparseable) so the
+        // `date` column is structurally trustworthy for lexical comparison;
+        // the cold sweep's date floor rests on this.
+        let date = normalize_date(fm.date.as_deref().unwrap_or(""));
         let source = fm.source.as_deref().unwrap_or("");
         let creator = fm.creator.as_deref().unwrap_or("");
 
@@ -910,29 +929,33 @@ impl SearchIndex {
     ///   via oracle.
     /// - `inbound_link_count = 0`: nothing else in the vault links here.
     /// - `pinned = 0`: not promoted.
-    /// - `modified_at < older_than`: old enough.
+    /// - `date < before_date`: content older than the floor. Undated notes
+    ///   (`date = ''`) are excluded - age cannot be inferred, and they are
+    ///   the lint/quality sweep's responsibility, not cold's.
     ///
-    /// Ordered by `modified_at ASC` so the oldest cold notes surface first.
+    /// Ordered by `date ASC` so the oldest cold notes surface first.
     pub fn cold_notes(&self, q: &ColdQuery) -> Result<Vec<ColdNote>> {
-        log::debug!("cold_notes: older_than={} limit={}", q.older_than, q.limit);
+        log::debug!("cold_notes: before_date={} limit={}", q.before_date, q.limit);
         let mut stmt = self.conn.prepare(
-            "SELECT path, title, domain, modified_at
+            "SELECT path, title, domain, date
              FROM notes
              WHERE search_hit_count = 0
                AND last_accessed_at IS NULL
                AND inbound_link_count = 0
                AND pinned = 0
-               AND modified_at < ?1
-             ORDER BY modified_at ASC
+               AND date != ''
+               AND date IS NOT NULL
+               AND date < ?1
+             ORDER BY date ASC
              LIMIT ?2",
         )?;
         let rows = stmt
-            .query_map(params![q.older_than, q.limit as i64], |row| {
+            .query_map(params![q.before_date, q.limit as i64], |row| {
                 Ok(ColdNote {
                     path: row.get(0)?,
                     title: row.get::<_, String>(1).unwrap_or_default(),
                     domain: row.get::<_, String>(2).unwrap_or_default(),
-                    modified_at: row.get::<_, i64>(3).unwrap_or(0),
+                    date: row.get::<_, String>(3).unwrap_or_default(),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -942,16 +965,19 @@ impl SearchIndex {
 
     /// Count rows that would have qualified for the cold report except
     /// they are pinned. Surfaces visibility into how often the promotion
-    /// floor rescues notes from the report.
-    pub fn count_pinned_excluded(&self, older_than: i64) -> Result<u64> {
+    /// floor rescues notes from the report. Uses the identical age predicate
+    /// as `cold_notes` so the two numbers describe the same population.
+    pub fn count_pinned_excluded(&self, before_date: &str) -> Result<u64> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM notes
              WHERE search_hit_count = 0
                AND last_accessed_at IS NULL
                AND inbound_link_count = 0
                AND pinned = 1
-               AND modified_at < ?1",
-            params![older_than],
+               AND date != ''
+               AND date IS NOT NULL
+               AND date < ?1",
+            params![before_date],
             |row| row.get(0),
         )?;
         Ok(count as u64)
@@ -1944,23 +1970,26 @@ pub struct ClassifyStats {
     pub unclassified: u64,
 }
 
-/// Parameters for `SearchIndex::cold_notes`. `older_than` is a Unix-seconds
-/// boundary; the cold query keeps everything in integer seconds so the
-/// `idx_notes_modified_at` index stays usable.
-#[derive(Debug, Clone, Copy)]
+/// Parameters for `SearchIndex::cold_notes`. `before_date` is an exclusive
+/// ISO `YYYY-MM-DD` floor: a note qualifies when its `date:` frontmatter is
+/// strictly older - lexically less than `before_date`. A note dated exactly
+/// on the floor day does NOT qualify. The lexical compare is correct because
+/// `index_one` normalizes the `date` column to canonical ISO (or `''`).
+#[derive(Debug, Clone)]
 pub struct ColdQuery {
-    pub older_than: i64,
+    pub before_date: String,
     pub limit: u32,
 }
 
 /// Subset of `notes` returned by `cold_notes` - just the fields the
-/// review report needs. Saves a row body load.
+/// review report needs. Saves a row body load. `date` is the note's
+/// content date (`date:` frontmatter), canonical `YYYY-MM-DD`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ColdNote {
     pub path: String,
     pub title: String,
     pub domain: String,
-    pub modified_at: i64,
+    pub date: String,
 }
 
 #[cfg(test)]
