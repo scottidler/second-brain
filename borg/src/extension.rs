@@ -50,8 +50,10 @@ pub fn stage(target_dir: &Path, version: &str, config: &Config) -> Result<StageR
     let static_files: &[&str] = &[
         "popup.html",
         "popup.js",
+        "popup.css",
         "options.html",
         "options.js",
+        "options.css",
         "icons/locutus-16.png",
         "icons/locutus-48.png",
         "icons/locutus-128.png",

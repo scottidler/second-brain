@@ -4,13 +4,18 @@
 // background context staying alive (see
 // docs/design/2026-06-03-extension-popup-capture.md).
 //
-// Three correctness requirements from that design doc:
-//   1. `keepalive: true` on the fetch - a popup is destroyed the instant it loses
-//      focus, and `keepalive` is what lets the POST finish through that unload.
-//      Awaiting the response only covers the programmed close, not focus-loss.
+// Correctness requirements:
+//   1. NO `keepalive: true` on the fetch. On snap Firefox 150.x a keepalive POST
+//      to http://localhost never reaches the daemon (zero receipts, zero daemon
+//      log) - the toolbar click silently produces no ingestion. Found empirically
+//      in 1c3deb0, wrongly "restored per spec" in 4556577, re-confirmed broken
+//      2026-06-06. The daemon is fire-and-forget (returns "Queued" in ~17ms, see
+//      fa79724), so the POST completes before the popup can lose focus; the
+//      focus-loss-abort case keepalive guarded against does not occur in practice.
+//      DO NOT re-add keepalive - the design doc was wrong on this and is corrected.
 //   2. Check `res.ok` - fetch does not reject on 4xx/5xx.
-//   3. No scheme filter - mirror background.js: guard only on `!tab.url`, forward
-//      any scheme (including file://) to the daemon.
+//   3. No scheme filter - guard only on `!tab.url`, forward any scheme
+//      (including file://) to the daemon.
 
 async function getEndpoint() {
   const data = await chrome.storage.local.get("endpoint");
@@ -42,8 +47,7 @@ async function capture() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: tab.url }),
-      keepalive: true,                     // finish the POST even if the popup closes on focus loss
-    });
+    });                                    // NO keepalive - see requirement 1 above
     if (!res.ok) {                         // fetch does not reject on 4xx/5xx
       fail(status, `Daemon error: HTTP ${res.status}`);
       return;

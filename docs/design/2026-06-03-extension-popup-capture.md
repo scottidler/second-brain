@@ -88,9 +88,11 @@ No new persistent data. The POST body is unchanged: `{ "url": <active tab url> }
 
 No daemon API change. The popup calls the existing `POST /ingest` and reads the existing `{status: "Queued", trace_id, ...}` response shape.
 
+> **CORRECTION (2026-06-06): `keepalive: true` was WRONG and is removed.** On snap Firefox 150.x a `keepalive` POST to `http://localhost` never reaches the daemon - zero receipts, zero daemon log - so a toolbar click silently produces no ingestion. This was found empirically (commit 1c3deb0), then wrongly "restored per this spec" (commit 4556577), then re-confirmed broken by live reproduction on desk.lan. The daemon is fire-and-forget (returns `Queued` in ~17ms, commit fa79724), so the POST completes well before any focus-loss close; the abort case keepalive guarded against does not occur in practice. **Do not re-add `keepalive`.** Requirement 1 below is struck; only requirements 2 and 3 stand.
+
 Three correctness requirements (raised in Architect review, 2026-06-03) are baked into the snippet below:
 
-1. **`keepalive: true` on the fetch.** A popup is destroyed the instant it loses focus (e.g. the operator clicks back into the page right after triggering capture). `keepalive` instructs the browser to complete the request even if the page unloads, so a focus-loss close does not abort an in-flight POST. Awaiting the response before `window.close()` only covers the programmed close, not the focus-loss close; `keepalive` is the actual guarantee.
+1. ~~**`keepalive: true` on the fetch.**~~ **STRUCK - see correction above.** keepalive breaks capture on snap Firefox; it is removed. The fast fire-and-forget daemon response is what makes the POST reliable, not keepalive.
 2. **Check `res.ok`.** `fetch` does not reject on HTTP 4xx/5xx; it only rejects on network-level failure. Without an `res.ok` check, a daemon-side 500 with a JSON body would parse cleanly and be reported as "Queued". Both failure paths (network reject and non-ok status) route through a single `fail()` handler.
 3. **No scheme filter.** Today's `background.js` guards only on `!tab.url` and forwards any scheme (including `file://`) to the daemon. The popup mirrors that exactly; it must not introduce an `https?:` regex, which would be an unacknowledged feature regression (silently dropping `file://` ingestion).
 
@@ -129,8 +131,7 @@ async function capture() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: tab.url }),
-      keepalive: true,                     // finish the POST even if the popup closes on focus loss
-    });
+    });                                    // NO keepalive - it breaks capture on snap Firefox (see correction above)
     if (!res.ok) {                         // fetch does not reject on 4xx/5xx
       fail(status, `Daemon error: HTTP ${res.status}`);
       return;
