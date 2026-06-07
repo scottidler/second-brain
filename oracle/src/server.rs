@@ -1,6 +1,6 @@
 //! MCP server implementation for oracle
 
-use crate::config::{Config, RetrievalConfig};
+use crate::config::{Config, ExcludeConfig, RetrievalConfig};
 use crate::tools::*;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -477,11 +477,48 @@ impl OracleMcpServer {
         // Stage 4 - rerank (cross-encoder). Filled in Phase 4; reorders the top
         // `cfg.rerank.input_k` fused candidates, latency-budgeted + fail-open.
 
-        // Stage 5 - exclude filters. Filled in Phase 3; drops stub / short notes.
+        // Stage 5 - exclude filters: drop stub (quality=low) and short-body
+        // notes from the fused candidates, in rank order.
+        let kept_paths = self.apply_exclude_filters(db, &fused_paths, &cfg.exclude)?;
 
         // Stage 6 - truncate to `limit`, resolve to NoteRows in rank order.
-        let final_paths: Vec<String> = fused_paths.into_iter().take(limit as usize).collect();
+        let final_paths: Vec<String> = kept_paths.into_iter().take(limit as usize).collect();
         Self::resolve_note_paths(db, final_paths.iter().map(|p| p.as_str()))
+    }
+
+    /// Apply the post-fusion exclude filters to a ranked candidate list,
+    /// preserving rank order. `stub` drops notes whose cortex `quality` column
+    /// is `low` (the only stub signal in the `notes` table - the richer
+    /// `[stub-body]` marker lives in frontmatter, not a queryable column).
+    /// `min_body_chars` drops notes whose retrieved body is shorter than the
+    /// threshold. With both off the list passes through untouched. A path that
+    /// no longer resolves is left in place; `resolve_note_paths` skips it later.
+    fn apply_exclude_filters(
+        &self,
+        db: &SearchIndex,
+        paths: &[String],
+        cfg: &ExcludeConfig,
+    ) -> Result<Vec<String>, McpError> {
+        if !cfg.stub && cfg.min_body_chars == 0 {
+            return Ok(paths.to_vec());
+        }
+        let mut kept = Vec::with_capacity(paths.len());
+        for path in paths {
+            if cfg.stub
+                && let Some(q) = db.note_quality(path).map_err(Self::err)?
+                && q.eq_ignore_ascii_case("low")
+            {
+                continue;
+            }
+            if cfg.min_body_chars > 0
+                && let Some(note) = db.get_note(path).map_err(Self::err)?
+                && note.body.chars().count() < cfg.min_body_chars
+            {
+                continue;
+            }
+            kept.push(path.clone());
+        }
+        Ok(kept)
     }
 
     /// Build the graph retriever's ranked list for the configured pipeline:
@@ -1312,7 +1349,7 @@ impl ServerHandler for OracleMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Bm25Method, MethodsConfig, RetrievalConfig, VaultConfig, VectorMethod};
+    use crate::config::{Bm25Method, ExcludeConfig, MethodsConfig, RetrievalConfig, VaultConfig, VectorMethod};
     use serde_json::json;
     use std::path::PathBuf;
     use vault::frontmatter::Frontmatter;
@@ -1695,6 +1732,167 @@ mod tests {
         assert_ne!(result.is_error, Some(true));
         let v = first_content_as_json(&result);
         assert_eq!(v.get("mode").and_then(|m| m.as_str()), Some("bm25"), "{v}");
+    }
+
+    /// Seed an article with a cortex `quality` level (empty string = unscored)
+    /// and a chosen body, so the exclude-filter tests can drive the `quality`
+    /// column and body length without the embedding model.
+    fn seed_with_quality(db: &SearchIndex, path: &str, title: &str, body: &str, quality: &str) {
+        let mut extra = std::collections::HashMap::new();
+        if !quality.is_empty() {
+            extra.insert(
+                "cortex-quality".to_string(),
+                serde_yaml::Value::String(quality.to_string()),
+            );
+        }
+        let fm = Frontmatter {
+            title: Some(title.to_string()),
+            note_type: Some("article".to_string()),
+            origin: Some("assisted".to_string()),
+            domain: Some("ai".to_string()),
+            extra,
+            ..Frontmatter::default()
+        };
+        let note = Note {
+            path: PathBuf::from(path),
+            frontmatter: fm,
+            body: body.to_string(),
+            raw: format!("---\n---\n{body}"),
+        };
+        db.index_one(&note, 100).expect("seed note");
+    }
+
+    fn bm25_config_with_exclude(exclude: ExcludeConfig) -> Config {
+        let mut cfg = bm25_only_config();
+        cfg.retrieval.exclude = exclude;
+        cfg
+    }
+
+    /// Phase 3: the stub filter (on by default) drops a `quality=low` note from
+    /// the results while keeping a `quality=high` note that matches the query.
+    #[tokio::test]
+    async fn pipeline_stub_filter_drops_low_quality() {
+        let db = SearchIndex::open_memory().expect("open db");
+        seed_with_quality(
+            &db,
+            "notes/ai/good.md",
+            "Good transformer",
+            "transformer attention good",
+            "high",
+        );
+        seed_with_quality(
+            &db,
+            "notes/ai/stub.md",
+            "Stub transformer",
+            "transformer attention stub",
+            "low",
+        );
+        // bm25_only_config keeps exclude at its default (stub = true).
+        let server = OracleMcpServer::new(bm25_only_config(), db);
+
+        let result = server
+            .dispatch(
+                "knowledge_search",
+                json!({"query": "transformer", "detail": "metadata"}),
+            )
+            .await
+            .expect("dispatch");
+        let v = first_content_as_json(&result);
+        let paths: Vec<String> = v["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .map(|r| r["path"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            paths.contains(&"notes/ai/good.md".to_string()),
+            "high-quality kept: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"notes/ai/stub.md".to_string()),
+            "low-quality stub must be dropped: {paths:?}"
+        );
+    }
+
+    /// Phase 3: with `exclude.stub = false`, the same low-quality note survives.
+    #[tokio::test]
+    async fn pipeline_stub_filter_disabled_keeps_low_quality() {
+        let db = SearchIndex::open_memory().expect("open db");
+        seed_with_quality(
+            &db,
+            "notes/ai/stub.md",
+            "Stub transformer",
+            "transformer attention stub",
+            "low",
+        );
+        let cfg = bm25_config_with_exclude(ExcludeConfig {
+            stub: false,
+            min_body_chars: 0,
+        });
+        let server = OracleMcpServer::new(cfg, db);
+
+        let result = server
+            .dispatch(
+                "knowledge_search",
+                json!({"query": "transformer", "detail": "metadata"}),
+            )
+            .await
+            .expect("dispatch");
+        let v = first_content_as_json(&result);
+        let paths: Vec<String> = v["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .map(|r| r["path"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            paths.contains(&"notes/ai/stub.md".to_string()),
+            "stub filter off must keep low-quality: {paths:?}"
+        );
+    }
+
+    /// Phase 3: `min_body_chars` drops a note whose body is shorter than the
+    /// threshold and keeps a longer one.
+    #[tokio::test]
+    async fn pipeline_min_body_chars_drops_short_body() {
+        let db = SearchIndex::open_memory().expect("open db");
+        // Short body (< 50 chars) and a long one; both match the bm25 query.
+        seed_with_quality(&db, "notes/ai/short.md", "Short", "transformer", "high");
+        seed_with_quality(
+            &db,
+            "notes/ai/long.md",
+            "Long",
+            "transformer attention mechanism explained at length for retrieval testing purposes",
+            "high",
+        );
+        let cfg = bm25_config_with_exclude(ExcludeConfig {
+            stub: false,
+            min_body_chars: 50,
+        });
+        let server = OracleMcpServer::new(cfg, db);
+
+        let result = server
+            .dispatch(
+                "knowledge_search",
+                json!({"query": "transformer", "detail": "metadata"}),
+            )
+            .await
+            .expect("dispatch");
+        let v = first_content_as_json(&result);
+        let paths: Vec<String> = v["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .map(|r| r["path"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            paths.contains(&"notes/ai/long.md".to_string()),
+            "long body kept: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"notes/ai/short.md".to_string()),
+            "short body must be dropped: {paths:?}"
+        );
     }
 
     /// Phase 2: a pipeline with every retriever disabled returns no results
