@@ -350,21 +350,25 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
     // mis-install, the exact failure this whole change exists to kill).
     // Explicit install -> hard error; --if-installed (deploy hook) -> warn +
     // skip so `otto deploy` does not fail on a not-yet-migrated snap box.
-    let detected = detect_firefox()?;
-    if matches!(detected, FirefoxInstall::Snap) {
+    // Use the snap-only `is_snap_firefox()` probe (which returns bool and never
+    // errors), NOT the full `detect_firefox()?`: the latter shells out to
+    // `which firefox` and would propagate a spawn error, breaking the
+    // --policy-file "managed-environment escape hatch" precisely where it is
+    // meant to work (an environment where detection is unreliable).
+    if is_snap_firefox() {
         return snap_run_outcome(opts.if_installed);
     }
 
     // Resolve the install strategy. --policy-file overrides detection and
-    // always uses the PolicyFile strategy (caller knows what they're doing).
-    // --if-installed needs the strategy to check whether our extension is
-    // already present, EVEN WHEN --no-policy is also set (the otto deploy
-    // hook case): --no-policy means "don't WRITE the policy", not "skip the
-    // installed-check."
+    // always uses the PolicyFile strategy (caller knows what they're doing) -
+    // detection is not run at all in that case. --if-installed needs the
+    // strategy to check whether our extension is already present, EVEN WHEN
+    // --no-policy is also set (the otto deploy hook case): --no-policy means
+    // "don't WRITE the policy", not "skip the installed-check."
     let strategy: Option<InstallStrategy> = if let Some(override_path) = opts.policy_file.clone() {
         Some(InstallStrategy::PolicyFile { path: override_path })
     } else {
-        match detected {
+        match detect_firefox()? {
             FirefoxInstall::Unknown => {
                 if opts.if_installed {
                     log::debug!("extension::install: --if-installed and no Firefox detected -> skip");

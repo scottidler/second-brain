@@ -113,3 +113,32 @@ Running record of decisions made while executing
   `firefox-opt`), and set the lappy options endpoint to `http://desk.lan:8181`
   (force-install does not seed `storage.local`). Verify a toolbar click yields an
   `http` receipt on desk.
+
+## Post-Architect-review refinement (supersedes Phase 1 snap-guard mechanism)
+
+### Design decisions
+- The snap guard in `run()` now calls `is_snap_firefox()` (returns `bool`, never
+  errors) instead of `detect_firefox()?`. Functionally identical for the loophole
+  fix, but strictly cleaner and it preserves the `--policy-file`
+  "managed-environment escape hatch": the previous `detect_firefox()?` at the top
+  of `run()` shelled out to `which firefox` unconditionally and would propagate a
+  spawn error, breaking `--policy-file` precisely in the unreliable-detection
+  environment it exists for. `detect_firefox()` is now back to being called only
+  in the non-`--policy-file` branch, as it was before this change. Caught in the
+  advisor review of the shipped code.
+
+### Deviations
+- None from the design (the doc says "run snap detection before the
+  `--policy-file` branch" - still exactly what happens; only the primitive
+  changed from `detect_firefox()?` to `is_snap_firefox()`).
+
+### Tradeoffs
+- `is_snap_firefox()` vs `detect_firefox()?`: the former loses the `/snap/`-path
+  belt-and-suspenders arm at the `run()` guard, but that arm only matters when
+  `snap list firefox` fails to spawn while Firefox resolves under `/snap/` -
+  impossible in practice (a `/snap/` Firefox implies snap is installed). The
+  non-`--policy-file` branch still routes such a path to `install_strategy(Snap)`
+  -> bail, so it remains safe.
+
+### Open questions
+- None.
