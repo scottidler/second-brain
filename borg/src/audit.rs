@@ -444,8 +444,9 @@ pub fn apply_fixes(report: &AuditReport, kinds: &[FindingKind], mut progress: im
 
 /// Backfill an empty `creator:` with the github repo owner. Re-reads the note
 /// and sets `creator:` only when it is still empty (defensive: never clobber a
-/// value written between scan and fix). Inserts the line after `type:` to match
-/// the render's frontmatter ordering, or appends it if `type:` is absent.
+/// non-empty value written between scan and fix). The line goes after `type:`
+/// to match the render's frontmatter ordering (appended if `type:` is absent);
+/// an existing empty `creator:` line is replaced in place, never duplicated.
 fn apply_fix_github_creator(
     report: &AuditReport,
     path: &Path,
@@ -493,15 +494,26 @@ fn set_creator_if_empty(path: &Path, owner: &str) -> Result<bool> {
 
     let creator_line = format!("creator: \"{}\"", owner.replace('"', "\\\""));
     let mut new_fm_lines: Vec<String> = Vec::new();
-    let mut inserted = false;
+    let mut placed = false;
     for line in fm.lines() {
+        // Drop any existing `creator:` line (we only reach here when it was
+        // empty - `extract_frontmatter_field` treats `creator: ""` as absent -
+        // so replacing rather than appending guarantees exactly one creator
+        // line, mirroring how `fix_note_type` replaces in place).
+        if line.trim().starts_with("creator:") {
+            if !placed {
+                new_fm_lines.push(creator_line.clone());
+                placed = true;
+            }
+            continue;
+        }
         new_fm_lines.push(line.to_string());
-        if !inserted && line.trim().starts_with("type:") {
+        if !placed && line.trim().starts_with("type:") {
             new_fm_lines.push(creator_line.clone());
-            inserted = true;
+            placed = true;
         }
     }
-    if !inserted {
+    if !placed {
         new_fm_lines.push(creator_line);
     }
 
@@ -950,6 +962,30 @@ mod tests {
         // Body and other fields are untouched.
         assert!(content.contains("# Body"));
         assert!(content.contains("source: \"https://github.com/open-webui/open-terminal\""));
+    }
+
+    #[test]
+    fn test_set_creator_if_empty_replaces_empty_line_no_duplicate() {
+        // A note with `creator: ""` (treated as absent by extract) must end up
+        // with exactly ONE creator line carrying the owner - not a duplicate.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("repo.md");
+        std::fs::write(
+            &path,
+            "---\ntitle: \"o/r\"\nsource: \"https://github.com/o/r\"\ntype: github\ncreator: \"\"\n---\n\n# Body\n",
+        )
+        .expect("write");
+
+        let changed = set_creator_if_empty(&path, "o").expect("set");
+        assert!(changed);
+
+        let content = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(
+            content.matches("creator:").count(),
+            1,
+            "exactly one creator line:\n{content}"
+        );
+        assert_eq!(extract_frontmatter_field(&content, "creator"), Some("o".to_string()));
     }
 
     #[test]
