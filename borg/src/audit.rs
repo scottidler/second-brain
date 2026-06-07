@@ -8,10 +8,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// The kind of an audit finding. Single source of truth for the five
-/// finding classes — `AuditFinding` (data-carrying) and the CLI parser
-/// both project off this enum. Wire names are kebab-case (`mistype`,
-/// `orphan-replace`, etc.); the CLI parses any case via `ignore_case`.
+/// The kind of an audit finding. Single source of truth for the finding
+/// classes — `AuditFinding` (data-carrying) and the CLI parser both project
+/// off this enum. Wire names are kebab-case (`mistype`, `orphan-replace`,
+/// `github-creator-missing`, etc.); the CLI parses any case via `ignore_case`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum FindingKind {
@@ -30,6 +30,10 @@ pub enum FindingKind {
     /// Multiple notes share the same `source:` value. Fix: keep newest
     /// by mtime, move the rest to `system/quarantine/<source-key>/`.
     Duplicate,
+    /// A note whose `source:` is a github.com repo root has an empty
+    /// `creator:`. Fix: set `creator:` to the repo owner parsed from the URL
+    /// (no network). Never overwrites a non-empty creator.
+    GithubCreatorMissing,
 }
 
 /// A single audit finding. Variant names mirror `FindingKind` 1:1 — the
@@ -62,6 +66,11 @@ pub enum AuditFinding {
         source: String,
         note_paths: Vec<PathBuf>,
     },
+    GithubCreatorMissing {
+        source: String,
+        owner: String,
+        note_path: PathBuf,
+    },
 }
 
 impl AuditFinding {
@@ -72,6 +81,7 @@ impl AuditFinding {
             AuditFinding::Blocked { .. } => FindingKind::Blocked,
             AuditFinding::RawTitle { .. } => FindingKind::RawTitle,
             AuditFinding::Duplicate { .. } => FindingKind::Duplicate,
+            AuditFinding::GithubCreatorMissing { .. } => FindingKind::GithubCreatorMissing,
         }
     }
 }
@@ -102,6 +112,9 @@ impl std::fmt::Display for AuditFinding {
                     f,
                     "[ORPHAN-REPLACE] {source} -> marked replaced on {replaced_date} but no replacement ✅ exists"
                 )
+            }
+            AuditFinding::GithubCreatorMissing { source, owner, .. } => {
+                write!(f, "[GITHUB-CREATOR-MISSING] {source} -> creator should be: {owner}")
             }
         }
     }
@@ -166,6 +179,11 @@ pub enum AuditEvent {
     RkvrUnavailable {
         path: PathBuf,
         error: String,
+    },
+    /// One github note's empty `creator:` backfilled with the repo owner.
+    CreatorSet {
+        rel_path: PathBuf,
+        creator: String,
     },
 }
 
@@ -329,6 +347,30 @@ pub fn scan(config: &Config) -> Result<AuditReport> {
         }
     }
 
+    // 5. GitHub repo-root notes missing a creator. The owner is in the source
+    //    URL, so this is a pure local backfill (no network). Only repo roots
+    //    (`parse_repo_url` -> Some) qualify; deep paths / pseudo-owners return
+    //    None and are skipped. Notes with a non-empty `creator:` are never
+    //    flagged, so a hand-set creator is never clobbered.
+    for (source, paths) in &note_index {
+        let Some((owner, _)) = crate::github::parse_repo_url(source) else {
+            continue;
+        };
+        for path in paths {
+            let has_creator = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|c| extract_frontmatter_field(&c, "creator"))
+                .is_some();
+            if !has_creator {
+                findings.push(AuditFinding::GithubCreatorMissing {
+                    source: source.clone(),
+                    owner: owner.clone(),
+                    note_path: path.clone(),
+                });
+            }
+        }
+    }
+
     Ok(AuditReport {
         ledger_path,
         vault_root,
@@ -391,10 +433,81 @@ pub fn apply_fixes(report: &AuditReport, kinds: &[FindingKind], mut progress: im
             AuditFinding::Duplicate { source, note_paths } => {
                 fixed += apply_fix_duplicate(report, source, note_paths, &mut progress);
             }
+            AuditFinding::GithubCreatorMissing { owner, note_path, .. } => {
+                fixed += apply_fix_github_creator(report, note_path, owner, &mut progress);
+            }
             _ => {}
         }
     }
     fixed
+}
+
+/// Backfill an empty `creator:` with the github repo owner. Re-reads the note
+/// and sets `creator:` only when it is still empty (defensive: never clobber a
+/// value written between scan and fix). Inserts the line after `type:` to match
+/// the render's frontmatter ordering, or appends it if `type:` is absent.
+fn apply_fix_github_creator(
+    report: &AuditReport,
+    path: &Path,
+    owner: &str,
+    progress: &mut impl FnMut(&AuditEvent),
+) -> usize {
+    match set_creator_if_empty(path, owner) {
+        Ok(true) => {
+            let rel = path.strip_prefix(&report.vault_root).unwrap_or(path).to_path_buf();
+            progress(&AuditEvent::CreatorSet {
+                rel_path: rel,
+                creator: owner.to_string(),
+            });
+            1
+        }
+        Ok(false) => 0,
+        Err(e) => {
+            progress(&AuditEvent::FixError {
+                path: path.to_path_buf(),
+                error: format!("{e:#}"),
+            });
+            0
+        }
+    }
+}
+
+/// Set `creator: "<owner>"` in a note's frontmatter, only when no non-empty
+/// `creator:` is already present. Returns `Ok(true)` when the file was written,
+/// `Ok(false)` when an existing creator meant no change was needed.
+fn set_creator_if_empty(path: &Path, owner: &str) -> Result<bool> {
+    let content = std::fs::read_to_string(path).context("Failed to read note")?;
+    if extract_frontmatter_field(&content, "creator").is_some() {
+        return Ok(false);
+    }
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        eyre::bail!("No frontmatter found");
+    }
+    let after_first = &trimmed[3..];
+    let end_pos = after_first
+        .find("\n---")
+        .ok_or_else(|| eyre::eyre!("Unclosed frontmatter"))?;
+    let fm = &after_first[..end_pos];
+    let body = &after_first[end_pos..];
+
+    let creator_line = format!("creator: \"{}\"", owner.replace('"', "\\\""));
+    let mut new_fm_lines: Vec<String> = Vec::new();
+    let mut inserted = false;
+    for line in fm.lines() {
+        new_fm_lines.push(line.to_string());
+        if !inserted && line.trim().starts_with("type:") {
+            new_fm_lines.push(creator_line.clone());
+            inserted = true;
+        }
+    }
+    if !inserted {
+        new_fm_lines.push(creator_line);
+    }
+
+    let new_content = format!("---\n{}{}", new_fm_lines.join("\n"), body);
+    std::fs::write(path, new_content).context("Failed to write fixed note")?;
+    Ok(true)
 }
 
 fn apply_fix_mistype(
@@ -798,6 +911,59 @@ mod tests {
         let display = format!("{finding}");
         assert!(display.contains("[DUPLICATE]"));
         assert!(display.contains("2 notes"));
+    }
+
+    #[test]
+    fn test_audit_finding_display_github_creator_missing() {
+        let finding = AuditFinding::GithubCreatorMissing {
+            source: "https://github.com/open-webui/open-terminal".to_string(),
+            owner: "open-webui".to_string(),
+            note_path: PathBuf::from("/vault/open-webui-open-terminal.md"),
+        };
+        let display = format!("{finding}");
+        assert!(display.contains("[GITHUB-CREATOR-MISSING]"));
+        assert!(display.contains("open-webui"));
+    }
+
+    #[test]
+    fn test_set_creator_if_empty_inserts_after_type() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("repo.md");
+        std::fs::write(
+            &path,
+            "---\ntitle: \"open-webui/open-terminal\"\nsource: \"https://github.com/open-webui/open-terminal\"\ntype: github\ntags:\n  - github\n---\n\n# Body\n",
+        )
+        .expect("write");
+
+        let changed = set_creator_if_empty(&path, "open-webui").expect("set");
+        assert!(changed, "should report a write");
+
+        let content = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(
+            extract_frontmatter_field(&content, "creator"),
+            Some("open-webui".to_string())
+        );
+        // Inserted directly after the type line.
+        let type_pos = content.find("type: github").expect("type line");
+        let creator_pos = content.find("creator: \"open-webui\"").expect("creator line");
+        assert!(creator_pos > type_pos, "creator should follow type");
+        // Body and other fields are untouched.
+        assert!(content.contains("# Body"));
+        assert!(content.contains("source: \"https://github.com/open-webui/open-terminal\""));
+    }
+
+    #[test]
+    fn test_set_creator_if_empty_skips_when_present() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("repo.md");
+        let original = "---\ntitle: \"o/r\"\nsource: \"https://github.com/o/r\"\ntype: github\ncreator: \"hand-set\"\n---\n\n# Body\n";
+        std::fs::write(&path, original).expect("write");
+
+        let changed = set_creator_if_empty(&path, "o").expect("set");
+        assert!(!changed, "must not overwrite an existing creator");
+
+        let content = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(content, original, "file unchanged when creator present");
     }
 
     #[test]

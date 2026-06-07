@@ -679,6 +679,9 @@ fn print_audit_event(event: &borg::audit::AuditEvent) {
         AuditEvent::RkvrUnavailable { path, error } => {
             eprintln!("  rkvr unavailable for {}: {error}", path.display());
         }
+        AuditEvent::CreatorSet { rel_path, creator } => {
+            println!("  set creator: {creator} on {}", rel_path.display());
+        }
     }
 }
 
@@ -702,6 +705,7 @@ fn print_audit_summary(report: &borg::audit::AuditReport, fix: bool) {
     let mut raw_title_count = 0;
     let mut duplicate_count = 0;
     let mut orphan_count = 0;
+    let mut github_creator_count = 0;
     for finding in &report.findings {
         match finding {
             borg::audit::AuditFinding::Mistype { .. } => mistype_count += 1,
@@ -709,6 +713,7 @@ fn print_audit_summary(report: &borg::audit::AuditReport, fix: bool) {
             borg::audit::AuditFinding::RawTitle { .. } => raw_title_count += 1,
             borg::audit::AuditFinding::Duplicate { .. } => duplicate_count += 1,
             borg::audit::AuditFinding::OrphanReplace { .. } => orphan_count += 1,
+            borg::audit::AuditFinding::GithubCreatorMissing { .. } => github_creator_count += 1,
         }
     }
 
@@ -727,6 +732,9 @@ fn print_audit_summary(report: &borg::audit::AuditReport, fix: bool) {
     }
     if orphan_count > 0 {
         println!("  {orphan_count} orphaned replacements (replaced but no new ✅)");
+    }
+    if github_creator_count > 0 {
+        println!("  {github_creator_count} github notes missing a creator (repo owner)");
     }
 
     println!();
