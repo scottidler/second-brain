@@ -1,6 +1,6 @@
 //! MCP server implementation for oracle
 
-use crate::config::Config;
+use crate::config::{Config, RetrievalConfig};
 use crate::tools::*;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -192,6 +192,98 @@ impl OracleMcpServer {
         Ok(())
     }
 
+    /// BM25 (FTS5) retriever primitive: a ranked list of note paths, top `k`.
+    /// Shared by `run_search_mode` (legacy modes) and `run_pipeline` (configured
+    /// pipeline) so there is exactly one BM25 query path.
+    fn bm25_paths(
+        &self,
+        db: &SearchIndex,
+        query: &str,
+        domain: Option<&str>,
+        note_type: Option<&str>,
+        status: Option<&str>,
+        k: u32,
+    ) -> Result<Vec<String>, McpError> {
+        let rows = db
+            .search(query, domain, note_type, status, Some(k))
+            .map_err(Self::err)?;
+        Ok(rows.iter().map(|n| n.path.clone()).collect())
+    }
+
+    /// Vector (brute-force cosine) retriever primitive: a ranked list of note
+    /// paths, top `k`. Calls `warn_if_no_embeddings` on the `VectorHit` slice
+    /// **before** mapping to `Vec<String>` — the warning needs the hit structs,
+    /// which are dropped at the path-map boundary, so it cannot be hoisted into
+    /// the caller. Shared by `run_search_mode` and `run_pipeline`.
+    fn vector_paths(
+        &self,
+        db: &SearchIndex,
+        query: &str,
+        domain: Option<&str>,
+        note_type: Option<&str>,
+        status: Option<&str>,
+        k: u32,
+    ) -> Result<Vec<String>, McpError> {
+        let active_model = db.active_embedding_model().map_err(Self::err)?;
+        let q_vec = vault::embedding::embed_query(query, &active_model).map_err(Self::err)?;
+        let hits = db
+            .search_vector(&q_vec, k, domain, note_type, status)
+            .map_err(Self::err)?;
+        self.warn_if_no_embeddings(db, &hits)?;
+        Ok(hits.iter().map(|h| h.note_path.clone()).collect())
+    }
+
+    /// Graph-expansion primitive: expand `seed_paths` along the materialized
+    /// `edges` graph and return the neighbor paths ranked by expansion score
+    /// (`Σ w_seed(origin) · edge_weight · hop_decay^(hop-1)`), filtered to the
+    /// schema filters. The seed-building and final fusion stay with the caller
+    /// (`graph_dispatch` for legacy modes, `run_pipeline` for the configured
+    /// graph retriever) so both share the exact same scoring logic.
+    #[allow(clippy::too_many_arguments)]
+    fn expand_to_graph_paths(
+        &self,
+        db: &SearchIndex,
+        seed_paths: &[String],
+        domain: Option<&str>,
+        note_type: Option<&str>,
+        status: Option<&str>,
+        hops: u8,
+        edge_kinds: Option<&[String]>,
+        min_weight: f32,
+        hop_decay: f32,
+    ) -> Result<Vec<String>, McpError> {
+        let seed_rank: std::collections::HashMap<&str, usize> =
+            seed_paths.iter().enumerate().map(|(i, p)| (p.as_str(), i)).collect();
+
+        let reaches = db
+            .expand_graph(seed_paths, hops, edge_kinds, min_weight)
+            .map_err(Self::err)?;
+        let mut scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+        for reach in &reaches {
+            let rank = *seed_rank.get(reach.origin_seed.as_str()).unwrap_or(&0);
+            // w_seed: better-ranked seeds (rank 0 = top) contribute more.
+            let w_seed = 1.0_f32 / (rank as f32 + 1.0);
+            let decay = hop_decay.powi(reach.hop as i32 - 1);
+            *scores.entry(reach.path.clone()).or_insert(0.0) += w_seed * reach.weight * decay;
+        }
+
+        // Sort by expansion score desc, then path asc as a stable tiebreaker
+        // (without it, tied neighbors fall back to random HashMap order).
+        let mut scored: Vec<(String, f32)> = scores.into_iter().collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let mut graph_paths: Vec<String> = Vec::new();
+        for (path, _) in scored {
+            if Self::note_matches_filters(db, &path, domain, note_type, status)? {
+                graph_paths.push(path);
+            }
+        }
+        Ok(graph_paths)
+    }
+
     /// Run one search mode against `db` and return resolved `NoteRow`s in rank
     /// order. This is the single dispatch shared by the `knowledge_search` MCP
     /// tool and the `eval` harness, so the eval measures the exact production
@@ -216,26 +308,12 @@ impl OracleMcpServer {
                 .search(query, domain, note_type, status, Some(limit))
                 .map_err(Self::err),
             SearchMode::Vector => {
-                let active_model = db.active_embedding_model().map_err(Self::err)?;
-                let q_vec = vault::embedding::embed_query(query, &active_model).map_err(Self::err)?;
-                let hits = db
-                    .search_vector(&q_vec, limit, domain, note_type, status)
-                    .map_err(Self::err)?;
-                self.warn_if_no_embeddings(db, &hits)?;
-                Self::resolve_note_paths(db, hits.iter().map(|h| h.note_path.as_str()))
+                let paths = self.vector_paths(db, query, domain, note_type, status, limit)?;
+                Self::resolve_note_paths(db, paths.iter().map(|p| p.as_str()))
             }
             SearchMode::Hybrid => {
-                let active_model = db.active_embedding_model().map_err(Self::err)?;
-                let q_vec = vault::embedding::embed_query(query, &active_model).map_err(Self::err)?;
-                let bm25 = db
-                    .search(query, domain, note_type, status, Some(vault::search::K_RRF_INPUT))
-                    .map_err(Self::err)?;
-                let vec_hits = db
-                    .search_vector(&q_vec, vault::search::K_RRF_INPUT, domain, note_type, status)
-                    .map_err(Self::err)?;
-                self.warn_if_no_embeddings(db, &vec_hits)?;
-                let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
-                let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();
+                let bm25_paths = self.bm25_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
+                let vec_paths = self.vector_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
                 let fused = vault::search::reciprocal_rank_fusion(
                     &[&bm25_paths, &vec_paths],
                     vault::search::RRF_K,
@@ -285,18 +363,8 @@ impl OracleMcpServer {
         min_weight: f32,
         include_base_lists: bool,
     ) -> Result<Vec<NoteRow>, McpError> {
-        let active_model = db.active_embedding_model().map_err(Self::err)?;
-        let q_vec = vault::embedding::embed_query(query, &active_model).map_err(Self::err)?;
-        let bm25 = db
-            .search(query, domain, note_type, status, Some(vault::search::K_RRF_INPUT))
-            .map_err(Self::err)?;
-        let vec_hits = db
-            .search_vector(&q_vec, vault::search::K_RRF_INPUT, domain, note_type, status)
-            .map_err(Self::err)?;
-        self.warn_if_no_embeddings(db, &vec_hits)?;
-
-        let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
-        let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();
+        let bm25_paths = self.bm25_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
+        let vec_paths = self.vector_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
 
         // Seed list = the hybrid-fused order; seed rank feeds w_seed.
         let seed_fused = vault::search::reciprocal_rank_fusion(
@@ -305,39 +373,20 @@ impl OracleMcpServer {
             vault::search::K_RRF_INPUT as usize,
         );
         let seed_paths: Vec<String> = seed_fused.iter().map(|h| h.note_path.clone()).collect();
-        let seed_rank: std::collections::HashMap<&str, usize> =
-            seed_paths.iter().enumerate().map(|(i, p)| (p.as_str(), i)).collect();
 
-        // Expand and score. Edge read lives in vault.
-        let reaches = db
-            .expand_graph(&seed_paths, hops, edge_kinds, min_weight)
-            .map_err(Self::err)?;
-        let mut scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
-        for reach in &reaches {
-            let rank = *seed_rank.get(reach.origin_seed.as_str()).unwrap_or(&0);
-            // w_seed: better-ranked seeds (rank 0 = top) contribute more.
-            let w_seed = 1.0_f32 / (rank as f32 + 1.0);
-            let hop_decay = GRAPH_HOP_DECAY.powi(reach.hop as i32 - 1);
-            *scores.entry(reach.path.clone()).or_insert(0.0) += w_seed * reach.weight * hop_decay;
-        }
-
-        // Order neighbors by expansion score, then keep only those passing the
-        // schema filters (a neighbor in a different domain is dropped).
-        let mut scored: Vec<(String, f32)> = scores.into_iter().collect();
-        // Sort by expansion score desc, then by path asc as a stable tiebreaker so
-        // tied neighbors do not fall back to the random HashMap iteration order
-        // above (which made the graph rank list non-deterministic across runs).
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        let mut graph_paths: Vec<String> = Vec::new();
-        for (path, _) in scored {
-            if Self::note_matches_filters(db, &path, domain, note_type, status)? {
-                graph_paths.push(path);
-            }
-        }
+        // Expand and score (edge read lives in vault). Legacy graph modes use
+        // the built-in GRAPH_HOP_DECAY; the configured pipeline passes its own.
+        let graph_paths = self.expand_to_graph_paths(
+            db,
+            &seed_paths,
+            domain,
+            note_type,
+            status,
+            hops,
+            edge_kinds,
+            min_weight,
+            GRAPH_HOP_DECAY,
+        )?;
 
         // Fuse. graph: seed ⊕ graph. graph-hybrid: bm25 ⊕ vector ⊕ graph.
         let fused = if include_base_lists {
@@ -350,6 +399,123 @@ impl OracleMcpServer {
             vault::search::reciprocal_rank_fusion(&[&seed_paths, &graph_paths], vault::search::RRF_K, limit as usize)
         };
         Self::resolve_note_paths(db, fused.iter().map(|h| h.note_path.as_str()))
+    }
+
+    /// Compose the configured retrieval pipeline for a query that arrived with
+    /// no explicit `mode`. Stage order is fixed:
+    /// `transform -> retrieve -> fuse -> rerank -> exclude -> truncate`. Each
+    /// method/stage is gated by its `enabled` flag in `cfg`. Shares the BM25 /
+    /// vector / graph primitives with `run_search_mode`, so the legacy modes and
+    /// the configured pipeline never diverge.
+    pub fn run_pipeline(
+        &self,
+        db: &SearchIndex,
+        cfg: &RetrievalConfig,
+        query: &str,
+        domain: Option<&str>,
+        note_type: Option<&str>,
+        status: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<NoteRow>, McpError> {
+        debug!(
+            query = %query,
+            vector = cfg.methods.vector.enabled,
+            bm25 = cfg.methods.bm25.enabled,
+            graph = cfg.methods.graph.enabled,
+            rerank = cfg.rerank.enabled,
+            transform = cfg.query_transform.enabled,
+            limit,
+            "run_pipeline"
+        );
+
+        // Stage 1 - query transform (HyDE / multi-query). Filled in Phase 5;
+        // oracle owns this LLM-bearing stage (it calls `vault::fabric`), and
+        // passes the rewritten query / embedding down into the retrievers.
+
+        // Stage 2 - retrieve: one ranked list per enabled method, paired with
+        // the fusion weight it contributes. Vector has no `weight` field, so it
+        // always contributes at weight 1.0.
+        let mut lists: Vec<(Vec<String>, f32)> = Vec::new();
+        if cfg.methods.vector.enabled {
+            let v = self.vector_paths(db, query, domain, note_type, status, cfg.methods.vector.top_k)?;
+            lists.push((v, 1.0));
+        }
+        if cfg.methods.bm25.enabled {
+            let b = self.bm25_paths(db, query, domain, note_type, status, cfg.methods.bm25.top_k)?;
+            lists.push((b, cfg.methods.bm25.weight));
+        }
+        if cfg.methods.graph.enabled {
+            let g = self.pipeline_graph_paths(db, cfg, query, domain, note_type, status)?;
+            lists.push((g, cfg.methods.graph.weight));
+        }
+
+        if lists.is_empty() {
+            warn!("run_pipeline: no retrieval methods enabled; returning no results");
+            return Ok(Vec::new());
+        }
+
+        // Candidate pool kept ahead of the final truncate so the later exclude
+        // (Phase 3) and rerank (Phase 4) stages have headroom and the result
+        // still fills `limit`.
+        let candidate_limit = (limit as usize)
+            .max(vault::search::K_RRF_INPUT as usize)
+            .max(if cfg.rerank.enabled { cfg.rerank.input_k as usize } else { 0 });
+
+        // Stage 3 - fuse. A single enabled method passes through in its own
+        // order; more than one fuses via weighted RRF (a zero-weight list
+        // contributes nothing, so a demoted retriever stays out of the result).
+        let fused_paths: Vec<String> = if lists.len() == 1 {
+            lists[0].0.iter().take(candidate_limit).cloned().collect()
+        } else {
+            let weighted: Vec<(&[String], f32)> = lists.iter().map(|(p, w)| (p.as_slice(), *w)).collect();
+            vault::search::reciprocal_rank_fusion_weighted(&weighted, cfg.fusion.k, candidate_limit)
+                .into_iter()
+                .map(|h| h.note_path)
+                .collect()
+        };
+
+        // Stage 4 - rerank (cross-encoder). Filled in Phase 4; reorders the top
+        // `cfg.rerank.input_k` fused candidates, latency-budgeted + fail-open.
+
+        // Stage 5 - exclude filters. Filled in Phase 3; drops stub / short notes.
+
+        // Stage 6 - truncate to `limit`, resolve to NoteRows in rank order.
+        let final_paths: Vec<String> = fused_paths.into_iter().take(limit as usize).collect();
+        Self::resolve_note_paths(db, final_paths.iter().map(|p| p.as_str()))
+    }
+
+    /// Build the graph retriever's ranked list for the configured pipeline:
+    /// seed from the hybrid (bm25 + vector) fused order - mirroring the legacy
+    /// graph modes - then expand with the operator-configured graph params and
+    /// cap at the method's `top-k`. Off by default, so this runs only when the
+    /// operator explicitly enables graph; it re-runs bm25/vector for the seed.
+    fn pipeline_graph_paths(
+        &self,
+        db: &SearchIndex,
+        cfg: &RetrievalConfig,
+        query: &str,
+        domain: Option<&str>,
+        note_type: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Vec<String>, McpError> {
+        let bm25 = self.bm25_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
+        let vec = self.vector_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
+        let seed =
+            vault::search::reciprocal_rank_fusion(&[&bm25, &vec], cfg.fusion.k, vault::search::K_RRF_INPUT as usize);
+        let seed_paths: Vec<String> = seed.iter().map(|h| h.note_path.clone()).collect();
+        let mut g = self.expand_to_graph_paths(
+            db,
+            &seed_paths,
+            domain,
+            note_type,
+            status,
+            cfg.methods.graph.hops,
+            Some(&cfg.methods.graph.edge_kinds),
+            cfg.methods.graph.min_edge_weight,
+            cfg.methods.graph.hop_decay,
+        )?;
+        g.truncate(cfg.methods.graph.top_k as usize);
+        Ok(g)
     }
 
     /// True when the note at `path` matches the (optional) schema filters.
@@ -435,37 +601,55 @@ impl OracleMcpServer {
         }
         let detail_level = req.detail.unwrap_or(DetailLevel::Summary);
         let limit = req.limit.unwrap_or(10);
-        let mode = req.mode.unwrap_or(SearchMode::Hybrid);
 
         let db = self.db.lock().map_err(Self::err)?;
         let domain = req.domain.as_ref().map(|d| d.as_str());
         let note_type = req.note_type.as_ref().map(|t| t.as_str());
         let status = req.status.as_ref().map(|s| s.as_str());
 
-        let notes = self.run_search_mode(
-            &db,
-            mode,
-            &req.query,
-            domain,
-            note_type,
-            status,
-            limit,
-            req.expand_hops.unwrap_or(DEFAULT_EXPAND_HOPS).min(MAX_EXPAND_HOPS),
-            req.edge_kinds.as_deref(),
-            req.min_edge_weight.unwrap_or(0.0),
-        )?;
+        // Precedence: explicit per-call `mode` -> legacy single-mode path;
+        // no `mode` -> the operator-configured pipeline (`run_pipeline`).
+        // Before this change `None` defaulted to `Hybrid`; the configured
+        // default is now vector-first (eval-best). `mode: hybrid` is still
+        // available per-call for exact back-compat.
+        let notes = match req.mode {
+            Some(mode) => self.run_search_mode(
+                &db,
+                mode,
+                &req.query,
+                domain,
+                note_type,
+                status,
+                limit,
+                req.expand_hops.unwrap_or(DEFAULT_EXPAND_HOPS).min(MAX_EXPAND_HOPS),
+                req.edge_kinds.as_deref(),
+                req.min_edge_weight.unwrap_or(0.0),
+            )?,
+            None => self.run_pipeline(
+                &db,
+                &self.config.retrieval,
+                &req.query,
+                domain,
+                note_type,
+                status,
+                limit,
+            )?,
+        };
+
+        let mode_label = match req.mode {
+            Some(SearchMode::Bm25) => "bm25",
+            Some(SearchMode::Vector) => "vector",
+            Some(SearchMode::Hybrid) => "hybrid",
+            Some(SearchMode::Graph) => "graph",
+            Some(SearchMode::GraphHybrid) => "graph-hybrid",
+            None => "configured",
+        };
 
         let results: Vec<serde_json::Value> = notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
 
         Ok(CallToolResult::success(vec![Content::json(json!({
             "count": results.len(),
-            "mode": match mode {
-                SearchMode::Bm25 => "bm25",
-                SearchMode::Vector => "vector",
-                SearchMode::Hybrid => "hybrid",
-                SearchMode::Graph => "graph",
-                SearchMode::GraphHybrid => "graph-hybrid",
-            },
+            "mode": mode_label,
             "results": results,
         }))?]))
     }
@@ -1128,7 +1312,7 @@ impl ServerHandler for OracleMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::VaultConfig;
+    use crate::config::{Bm25Method, MethodsConfig, RetrievalConfig, VaultConfig, VectorMethod};
     use serde_json::json;
     use std::path::PathBuf;
     use vault::frontmatter::Frontmatter;
@@ -1440,5 +1624,112 @@ mod tests {
         let v = first_content_as_json(&result);
         assert_eq!(v.get("found").and_then(|f| f.as_bool()), Some(false), "{v}");
         assert_eq!(v.get("kind").and_then(|k| k.as_str()), Some("duplicate_group"), "{v}");
+    }
+
+    /// A retrieval config with only BM25 enabled. Lets the pipeline tests run
+    /// without loading the real embedding model (the vector path needs it).
+    fn bm25_only_config() -> Config {
+        let retrieval = RetrievalConfig {
+            methods: MethodsConfig {
+                vector: VectorMethod {
+                    enabled: false,
+                    ..Default::default()
+                },
+                bm25: Bm25Method {
+                    enabled: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Config {
+            retrieval,
+            ..Default::default()
+        }
+    }
+
+    /// Phase 2: a `knowledge_search` with no `mode` routes to `run_pipeline`
+    /// (reported as `mode: "configured"`) and returns the configured retrievers'
+    /// results. Uses a bm25-only pipeline to avoid the embedding-model load.
+    #[tokio::test]
+    async fn knowledge_search_no_mode_routes_to_configured_pipeline() {
+        let db = SearchIndex::open_memory().expect("open db");
+        seed_one_article(
+            &db,
+            "notes/ai/transformer.md",
+            "Transformer",
+            "Transformer attention mechanism.",
+        );
+        let server = OracleMcpServer::new(bm25_only_config(), db);
+
+        let result = server
+            .dispatch("knowledge_search", json!({"query": "transformer"}))
+            .await
+            .expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert_eq!(
+            v.get("mode").and_then(|m| m.as_str()),
+            Some("configured"),
+            "no-mode call must route to the configured pipeline: {v}"
+        );
+        assert!(
+            v.get("count").and_then(|c| c.as_u64()).unwrap_or(0) >= 1,
+            "bm25 pipeline must find the seeded note: {v}"
+        );
+    }
+
+    /// Explicit `mode` still uses the legacy single-mode path and reports that
+    /// mode's label (back-compat preserved).
+    #[tokio::test]
+    async fn knowledge_search_explicit_mode_reports_that_mode() {
+        let db = SearchIndex::open_memory().expect("open db");
+        seed_one_article(&db, "notes/ai/transformer.md", "Transformer", "body");
+        let server = OracleMcpServer::new(Config::default(), db);
+
+        let result = server
+            .dispatch("knowledge_search", json!({"query": "transformer", "mode": "bm25"}))
+            .await
+            .expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert_eq!(v.get("mode").and_then(|m| m.as_str()), Some("bm25"), "{v}");
+    }
+
+    /// Phase 2: a pipeline with every retriever disabled returns no results
+    /// (and does not error) - the degenerate operator config.
+    #[tokio::test]
+    async fn run_pipeline_no_methods_enabled_returns_empty() {
+        let db = SearchIndex::open_memory().expect("open db");
+        seed_one_article(&db, "notes/ai/transformer.md", "Transformer", "body");
+        // vector off, bm25/graph already off by default => nothing enabled.
+        let retrieval = RetrievalConfig {
+            methods: MethodsConfig {
+                vector: VectorMethod {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let cfg = Config {
+            retrieval,
+            ..Default::default()
+        };
+        let server = OracleMcpServer::new(cfg, db);
+
+        let result = server
+            .dispatch("knowledge_search", json!({"query": "transformer"}))
+            .await
+            .expect("dispatch");
+        assert_ne!(result.is_error, Some(true));
+        let v = first_content_as_json(&result);
+        assert_eq!(
+            v.get("count").and_then(|c| c.as_u64()),
+            Some(0),
+            "no methods enabled must yield zero results: {v}"
+        );
     }
 }
