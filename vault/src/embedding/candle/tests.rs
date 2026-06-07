@@ -56,3 +56,35 @@ fn pool_batch_matches_one_at_a_time_real_model() {
         );
     }
 }
+
+#[test]
+fn supported_model_resolves_default_and_candidate() {
+    // Default (bge-small) maps to its repo + 384 dim.
+    assert_eq!(supported_model(CANDLE_MODEL_VERSION), Some((MODEL_REPO, DIM)));
+    // Phase 7b candidate (bge-base) maps to its repo + 768 dim.
+    assert_eq!(
+        supported_model(BGE_BASE_MODEL_VERSION),
+        Some(("BAAI/bge-base-en-v1.5", 768))
+    );
+    // Unknown versions (and nomic, which is a different architecture) are absent.
+    assert_eq!(supported_model("nomic-embed-text-v2"), None);
+    assert_eq!(supported_model("bogus"), None);
+}
+
+#[test]
+fn supported_versions_lists_bert_family_only() {
+    let versions = supported_versions();
+    assert!(versions.contains(&CANDLE_MODEL_VERSION));
+    assert!(versions.contains(&BGE_BASE_MODEL_VERSION));
+    assert!(
+        !versions.iter().any(|v| v.contains("nomic")),
+        "nomic needs its own loader; it must not be in the BertModel registry"
+    );
+}
+
+#[test]
+fn load_version_rejects_unknown_model_offline() {
+    // An unsupported id fails at the registry lookup, before any network /
+    // model work - so this asserts offline.
+    assert!(CandleBertModel::load_version("definitely-not-a-model", 1).is_err());
+}

@@ -38,7 +38,9 @@ use std::time::Duration;
 
 use eyre::{Context, Result};
 use fs2::FileExt;
-use vault::embedding::{ACTIVE_MODEL_VERSION, EmbeddingModel, MockEmbedder, load_active_model};
+use vault::embedding::{
+    ACTIVE_MODEL_VERSION, EmbeddingModel, MockEmbedder, load_model_version, prefetch_model_version,
+};
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
 use crate::config::Config;
@@ -97,7 +99,7 @@ pub fn prefetch(model_override: Option<&str>) -> Result<String> {
         None => ACTIVE_MODEL_VERSION.to_string(),
     };
     log::info!("cortex::embed: prefetching model {resolved}");
-    vault::embedding::prefetch_active_model().wrap_err("failed to prefetch embedding model")?;
+    prefetch_model_version(&resolved).wrap_err("failed to prefetch embedding model")?;
     log::info!("prefetched embedding model {resolved}");
     Ok(resolved)
 }
@@ -146,7 +148,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
                 .map(vault::rss::human_bytes)
                 .unwrap_or_else(|| "n/a".to_string()),
         );
-        let m = load_active_model(config.embed.workers).wrap_err("failed to load embedding model")?;
+        let m = load_model_version(&model_version, config.embed.workers).wrap_err("failed to load embedding model")?;
         let rss_post = vault::rss::read_self_rss();
         if let (Some(pre), Some(post)) = (rss_pre, rss_post) {
             log::info!(
@@ -238,15 +240,26 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
 /// pattern; this lifecycle change makes it bounded.
 pub fn load_daemon_model(config: &Config) -> Result<Box<dyn EmbeddingModel>> {
     let rss_pre = vault::rss::read_self_rss();
+    // Honor the pinned model in embedding_config so a restart picks up an A/B
+    // flip (`sb cortex embed --model <version>`). Without this the daemon would
+    // load the compiled default and then re-pin back to it, fighting the flip.
+    // The flip must therefore be done with the daemon stopped, then restarted.
+    let db_path = config.oracle_db_path();
+    let model_version = SearchIndex::open(&db_path)
+        .ok()
+        .and_then(|i| i.active_embedding_model().ok())
+        .unwrap_or_else(|| ACTIVE_MODEL_VERSION.to_string());
     log::info!(
-        "cortex::embed::load_daemon_model: workers={} rss_pre={}",
+        "cortex::embed::load_daemon_model: version={model_version} workers={} rss_pre={}",
         config.embed.workers,
         rss_pre
             .map(vault::rss::human_bytes)
             .unwrap_or_else(|| "n/a".to_string()),
     );
-    let model: Box<dyn EmbeddingModel> =
-        Box::new(load_active_model(config.embed.workers).wrap_err("failed to load embedding model for daemon")?);
+    let model: Box<dyn EmbeddingModel> = Box::new(
+        load_model_version(&model_version, config.embed.workers)
+            .wrap_err("failed to load embedding model for daemon")?,
+    );
     let rss_post = vault::rss::read_self_rss();
     if let (Some(pre), Some(post)) = (rss_pre, rss_post) {
         log::info!(
@@ -389,8 +402,8 @@ fn process_summary_batch(
     let mut work: Vec<EmbedWork> = Vec::with_capacity(targets.len());
     for t in &targets {
         stats.scanned += 1;
-        let text = t.summary.trim();
-        if text.is_empty() {
+        let summary = t.summary.trim();
+        if summary.is_empty() {
             // Defensive: stale_embedding_targets's SQL filter already
             // excludes these, but keep the skip path so a future schema
             // drift cannot reintroduce the infinite-loop bug.
@@ -398,9 +411,19 @@ fn process_summary_batch(
             stats.skipped_empty += 1;
             continue;
         }
+        // Phase 7a: prepend the note title (strong topical signal) to the
+        // summary before embedding. Same model + dimension; existing rows
+        // re-embed on the next `cortex embed --backfill`. A note with an empty
+        // title embeds the bare summary (no leading blank lines).
+        let title = t.title.trim();
+        let text = if title.is_empty() {
+            summary.to_string()
+        } else {
+            format!("{title}\n\n{summary}")
+        };
         work.push(EmbedWork {
             note_path: t.note_path.clone(),
-            text: text.to_string(),
+            text,
             source_modified_at: t.modified_at,
         });
     }

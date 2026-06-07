@@ -79,6 +79,39 @@ fn process_batch_embeds_stale_summary_rows() {
 }
 
 #[test]
+fn process_batch_prefixes_title_to_summary() {
+    // Phase 7a: the embedded text is `"{title}\n\n{summary}"`, not the bare
+    // summary. insert_test_note_row seeds title "T" and summary "summary".
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-batch-test");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    let tmp = TempDir::new().expect("tmp");
+    index.insert_test_note_row("notes/a.md", "article", 100).expect("note");
+
+    let stats = process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::Summary,
+        m.model_version(),
+        tmp.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("process");
+    assert_eq!(stats.embedded, 1);
+
+    let text = index
+        .embedding_text("notes/a.md", EmbeddingKind::Summary)
+        .expect("query")
+        .expect("embedding row present");
+    assert_eq!(
+        text, "T\n\nsummary",
+        "embedded text must be title + blank line + summary"
+    );
+}
+
+#[test]
 fn process_batch_skips_notes_with_empty_summary() {
     // Notes whose `notes.summary` column is empty are filtered out at
     // the SQL level by `stale_embedding_targets`, so the embed loop

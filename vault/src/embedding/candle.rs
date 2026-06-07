@@ -31,14 +31,49 @@ use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 use super::EmbeddingModel;
 
-/// HuggingFace Hub repo id for the model we pin.
+/// HuggingFace Hub repo id for the default model.
 const MODEL_REPO: &str = "BAAI/bge-small-en-v1.5";
 
-/// Canonical model identifier when the active backend is Candle.
+/// Canonical model identifier when the active backend is Candle (the default).
 pub const CANDLE_MODEL_VERSION: &str = "bge-small-en-v1.5-candle";
 
 /// Embedding dimensionality of `BAAI/bge-small-en-v1.5`.
 pub const DIM: usize = 384;
+
+/// Phase 7b candidate: the larger 768-dim bge model. Same `BertModel`
+/// architecture as bge-small, so it rides the identical load + CLS-pool +
+/// forward path - only the weights and dim differ.
+pub const BGE_BASE_MODEL_VERSION: &str = "bge-base-en-v1.5-candle";
+
+/// Candle BERT-family models the backend can load: `(model_version, repo, dim)`.
+///
+/// All entries are standard `BertModel` (CLS-pooled) checkpoints, so adding one
+/// is just a row here - no forward-code change. The operator A/Bs a candidate
+/// by re-pinning `embedding_config.active_model` (via `sb cortex embed --model
+/// <version>`, which re-embeds on the model-version change) and measuring with
+/// `sb oracle eval`; the default stays bge-small unless a candidate wins.
+///
+/// `nomic-embed-text-v2` is deliberately NOT here: it is a different
+/// architecture (`nomic_bert`, not `BertModel`) and would need its own loader,
+/// not a registry entry. Pointing `BertModel` at nomic weights would be
+/// silently wrong.
+const SUPPORTED_MODELS: &[(&str, &str, usize)] = &[
+    (CANDLE_MODEL_VERSION, MODEL_REPO, DIM),
+    (BGE_BASE_MODEL_VERSION, "BAAI/bge-base-en-v1.5", 768),
+];
+
+/// Resolve a supported model version to its `(repo, dim)`; `None` if unknown.
+pub fn supported_model(version: &str) -> Option<(&'static str, usize)> {
+    SUPPORTED_MODELS
+        .iter()
+        .find(|(v, _, _)| *v == version)
+        .map(|(_, repo, dim)| (*repo, *dim))
+}
+
+/// The model-version ids this backend can load (for error messages / probes).
+pub fn supported_versions() -> Vec<&'static str> {
+    SUPPORTED_MODELS.iter().map(|(v, _, _)| *v).collect()
+}
 
 /// Hard token limit declared by the bge-small-en-v1.5 model card.
 const MAX_SEQ_LEN: usize = 512;
@@ -69,6 +104,7 @@ pub struct CandleBertModel {
     replicas: Vec<Mutex<Inner>>,
     next_replica: AtomicUsize,
     model_version: String,
+    dim: usize,
 }
 
 struct Inner {
@@ -86,27 +122,43 @@ impl CandleBertModel {
         Self::load_with_workers(default_worker_count())
     }
 
-    /// Download (if needed) and load `BAAI/bge-small-en-v1.5` with an
-    /// explicit replica count. `workers` is clamped to `[1, MAX_WORKERS]`.
+    /// Download (if needed) and load the **default** model
+    /// (`bge-small-en-v1.5`) with an explicit replica count. Thin wrapper over
+    /// [`load_version`]; preserved so existing callers are byte-identical.
+    pub fn load_with_workers(workers: usize) -> Result<Self> {
+        Self::load_version(CANDLE_MODEL_VERSION, workers)
+    }
+
+    /// Download (if needed) and load a supported model by `version`, with an
+    /// explicit replica count (`workers` clamped to `[1, MAX_WORKERS]`).
     ///
     /// Each replica loads from the same on-disk `model.safetensors` via
-    /// `VarBuilder::from_mmaped_safetensors`; the OS page cache shares
-    /// the underlying physical pages across replicas so total RSS stays
-    /// at one model's worth (~133 MB) regardless of N. We verify that
-    /// invariant empirically once we deploy; if RSS scales with N the
-    /// implementer must drop back to `min(4, num_physical_cores)`.
-    pub fn load_with_workers(workers: usize) -> Result<Self> {
-        let workers = workers.clamp(1, MAX_WORKERS);
-        log::debug!("CandleBertModel::load_with_workers: repo={MODEL_REPO} workers={workers}");
-        let (config_path, tokenizer_path, weights_path) = download_files()?;
+    /// `VarBuilder::from_mmaped_safetensors`; the OS page cache shares the
+    /// underlying physical pages across replicas so total RSS stays at one
+    /// model's worth regardless of N.
+    pub fn load_version(version: &str, workers: usize) -> Result<Self> {
+        let (repo, dim) = supported_model(version).ok_or_else(|| {
+            eyre::eyre!(
+                "unsupported Candle model version {version:?}; supported: {:?}",
+                supported_versions()
+            )
+        })?;
+        // `workers == 0` means "platform default" (matches the old `load()` path).
+        let workers = if workers == 0 {
+            default_worker_count()
+        } else {
+            workers.clamp(1, MAX_WORKERS)
+        };
+        log::debug!("CandleBertModel::load_version: version={version} repo={repo} workers={workers}");
+        let (config_path, tokenizer_path, weights_path) = download_files(repo)?;
 
         let config_str = std::fs::read_to_string(&config_path)
             .wrap_err_with(|| format!("failed to read config.json at {}", config_path.display()))?;
         let config: Config =
-            serde_json::from_str(&config_str).wrap_err("failed to parse bge-small-en-v1.5 config.json")?;
-        if config.hidden_size != DIM {
+            serde_json::from_str(&config_str).wrap_err_with(|| format!("failed to parse {repo} config.json"))?;
+        if config.hidden_size != dim {
             eyre::bail!(
-                "BGE config.hidden_size = {} (expected {DIM}); model checkpoint drifted",
+                "{repo} config.hidden_size = {} (expected {dim} for {version}); model checkpoint drifted",
                 config.hidden_size
             );
         }
@@ -119,23 +171,35 @@ impl CandleBertModel {
         }
 
         log::info!(
-            "CandleBertModel::load_with_workers: loaded {MODEL_REPO} dim={DIM} workers={workers} pad_token_id={pad_token_id}"
+            "CandleBertModel::load_version: loaded {repo} version={version} dim={dim} workers={workers} pad_token_id={pad_token_id}"
         );
         Ok(Self {
             replicas,
             next_replica: AtomicUsize::new(0),
-            model_version: CANDLE_MODEL_VERSION.to_string(),
+            model_version: version.to_string(),
+            dim,
         })
     }
 
-    /// Idempotent prefetch: download the three required files (config,
-    /// tokenizer, weights) into the hf-hub cache without instantiating
-    /// the model. Used by `cortex embed --prefetch-model`.
-    pub fn prefetch_bge_small() -> Result<()> {
-        log::debug!("CandleBertModel::prefetch_bge_small: repo={MODEL_REPO}");
-        let _ = download_files()?;
-        log::info!("CandleBertModel::prefetch_bge_small: cache warmed for {MODEL_REPO}");
+    /// Idempotent prefetch of a supported model's files (config, tokenizer,
+    /// weights) into the hf-hub cache without instantiating the model.
+    pub fn prefetch_version(version: &str) -> Result<()> {
+        let (repo, _dim) = supported_model(version).ok_or_else(|| {
+            eyre::eyre!(
+                "unsupported Candle model version {version:?}; supported: {:?}",
+                supported_versions()
+            )
+        })?;
+        log::debug!("CandleBertModel::prefetch_version: version={version} repo={repo}");
+        let _ = download_files(repo)?;
+        log::info!("CandleBertModel::prefetch_version: cache warmed for {repo}");
         Ok(())
+    }
+
+    /// Prefetch the default model (`bge-small-en-v1.5`). Used by
+    /// `cortex embed --prefetch-model`. Thin wrapper over [`prefetch_version`].
+    pub fn prefetch_bge_small() -> Result<()> {
+        Self::prefetch_version(CANDLE_MODEL_VERSION)
     }
 
     fn embed_inner(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
@@ -157,7 +221,7 @@ impl CandleBertModel {
                 .next_replica
                 .fetch_add(1, Ordering::Relaxed)
                 .rem_euclid(self.replicas.len());
-            return forward_replica(&self.replicas[idx], texts);
+            return forward_replica(&self.replicas[idx], texts, self.dim);
         }
 
         // Split the batch across replicas. `sub_chunk_size` is the size
@@ -176,7 +240,7 @@ impl CandleBertModel {
                 // distinct replica when `chunk_count <= replicas.len()`,
                 // which is the common case for our batch sizes.
                 let replica_idx = i % self.replicas.len();
-                let result = forward_replica(&self.replicas[replica_idx], chunk);
+                let result = forward_replica(&self.replicas[replica_idx], chunk, self.dim);
                 (i, result)
             })
             .collect();
@@ -196,7 +260,7 @@ impl CandleBertModel {
 
 impl EmbeddingModel for CandleBertModel {
     fn dim(&self) -> usize {
-        DIM
+        self.dim
     }
 
     fn model_version(&self) -> &str {
@@ -272,7 +336,7 @@ fn build_inner(
 /// Run inference for one chunk on a chosen replica. Holds the replica's
 /// mutex for the full tokenize → forward → pool → normalize → host
 /// roundtrip; other replicas remain free for concurrent chunks.
-fn forward_replica(replica: &Mutex<Inner>, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+fn forward_replica(replica: &Mutex<Inner>, texts: &[&str], dim: usize) -> Result<Vec<Vec<f32>>> {
     let mut guard = replica
         .lock()
         .map_err(|_| eyre::eyre!("CandleBertModel replica mutex poisoned"))?;
@@ -287,7 +351,7 @@ fn forward_replica(replica: &Mutex<Inner>, texts: &[&str]) -> Result<Vec<Vec<f32
     let batch = encodings.len();
     let seq_len = encodings.iter().map(|e| e.get_ids().len()).max().unwrap_or(0);
     if seq_len == 0 {
-        return Ok(vec![vec![0.0_f32; DIM]; batch]);
+        return Ok(vec![vec![0.0_f32; dim]; batch]);
     }
 
     let mut ids_flat: Vec<u32> = Vec::with_capacity(batch * seq_len);
@@ -325,8 +389,8 @@ fn forward_replica(replica: &Mutex<Inner>, texts: &[&str]) -> Result<Vec<Vec<f32
     if host.len() != batch {
         eyre::bail!("forward_replica: host batch={} expected={batch}", host.len());
     }
-    if host[0].len() != DIM {
-        eyre::bail!("forward_replica: host dim={} expected={DIM}", host[0].len());
+    if host[0].len() != dim {
+        eyre::bail!("forward_replica: host dim={} expected={dim}", host[0].len());
     }
     Ok(host)
 }
@@ -334,9 +398,9 @@ fn forward_replica(replica: &Mutex<Inner>, texts: &[&str]) -> Result<Vec<Vec<f32
 /// Download the three artifacts we need from the HF Hub. Returns the
 /// local cache paths; subsequent calls are no-ops (hf-hub validates the
 /// cached SHA against the Hub-supplied digest).
-fn download_files() -> Result<(PathBuf, PathBuf, PathBuf)> {
+fn download_files(repo_id: &str) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let api = Api::new().wrap_err("hf-hub Api::new")?;
-    let repo = api.model(MODEL_REPO.to_string());
+    let repo = api.model(repo_id.to_string());
     let config = repo.get("config.json").wrap_err("hf-hub fetch config.json")?;
     let tokenizer = repo.get("tokenizer.json").wrap_err("hf-hub fetch tokenizer.json")?;
     let weights = repo

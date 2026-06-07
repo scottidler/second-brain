@@ -301,6 +301,20 @@ fn stale_embedding_targets_returns_unembedded_notes_for_summary() {
 }
 
 #[test]
+fn stale_embedding_targets_carry_note_title() {
+    // Phase 7a: cortex needs the title to prepend it to the summary before
+    // embedding, so the target rows must surface `notes.title`.
+    let index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-test-v1");
+    insert_note(&index, "notes/a.md", "tech", "article", 100);
+    let targets = index
+        .stale_embedding_targets(EmbeddingKind::Summary, m.model_version(), 100)
+        .expect("targets");
+    let a = targets.iter().find(|t| t.note_path == "notes/a.md").expect("a present");
+    assert_eq!(a.title, "T", "StaleTarget must carry notes.title");
+}
+
+#[test]
 fn stale_embedding_targets_returns_modified_notes_for_summary() {
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");

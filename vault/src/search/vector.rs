@@ -84,6 +84,10 @@ pub struct StaleTarget {
     /// heading). For TranscriptChunk this is always an empty string;
     /// cortex reads the `## Transcript` section from disk for those.
     pub summary: String,
+    /// Snapshot of `notes.title` at query time. Cortex prepends it to the
+    /// summary before embedding (the title carries strong topical signal);
+    /// may be empty.
+    pub title: String,
 }
 
 /// Validate that a stored embedding BLOB matches its declared `dim`.
@@ -488,7 +492,7 @@ impl SearchIndex {
             .join(", ");
 
         let sql = match kind {
-            EmbeddingKind::Summary => "SELECT n.path, n.note_type, n.modified_at, n.summary
+            EmbeddingKind::Summary => "SELECT n.path, n.note_type, n.modified_at, n.summary, n.title
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -501,7 +505,7 @@ impl SearchIndex {
                  LIMIT ?3"
                 .to_string(),
             EmbeddingKind::TranscriptChunk => format!(
-                "SELECT n.path, n.note_type, n.modified_at, ''
+                "SELECT n.path, n.note_type, n.modified_at, '', n.title
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -523,6 +527,7 @@ impl SearchIndex {
                     note_type: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
                     modified_at: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
                     summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    title: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -546,6 +551,22 @@ impl SearchIndex {
                 .query_row("SELECT COUNT(*) FROM note_embeddings", [], |row| row.get(0))?,
         };
         Ok(count)
+    }
+
+    /// The `text` actually embedded for a note's `kind` row (chunk 0). `None`
+    /// when no such row exists. Lets tests in other crates assert what was fed
+    /// to the model (e.g. cortex's title+summary prefix) without reaching into
+    /// the private `conn`.
+    pub fn embedding_text(&self, note_path: &str, kind: EmbeddingKind) -> Result<Option<String>> {
+        let text: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT text FROM note_embeddings WHERE note_path = ?1 AND kind = ?2 AND chunk_index = 0",
+                params![note_path, kind.as_str()],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(text)
     }
 
     /// Insert a minimal `notes` row for tests in other crates. Only

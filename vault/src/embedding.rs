@@ -123,18 +123,43 @@ fn registry() -> &'static RwLock<Vec<RegistryEntry>> {
 /// honored only on the Candle backend.
 #[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
 pub fn load_active_model(workers: usize) -> Result<ActiveModel> {
+    load_model_version(ACTIVE_MODEL_VERSION, workers)
+}
+
+/// Load a specific supported model by `model_version` (Phase 7b A/B path).
+/// `workers == 0` means platform-default parallelism. The Candle backend
+/// supports the BERT-family registry (`candle::SUPPORTED_MODELS`); the fastembed
+/// backend pins only the default model and errors on any other version.
+#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+pub fn load_model_version(model_version: &str, workers: usize) -> Result<ActiveModel> {
     #[cfg(feature = "vec-candle")]
     {
-        if workers == 0 {
-            candle::CandleBertModel::load()
-        } else {
-            candle::CandleBertModel::load_with_workers(workers)
-        }
+        candle::CandleBertModel::load_version(model_version, workers)
     }
     #[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
     {
         let _ = workers;
+        if model_version != ACTIVE_MODEL_VERSION {
+            eyre::bail!(
+                "fastembed backend supports only {ACTIVE_MODEL_VERSION:?}, not {model_version:?}; \
+                 the multi-model registry is Candle-only"
+            );
+        }
         fastembed::FastEmbedModel::load()
+    }
+}
+
+/// Whether this binary's backend can load `model_version`. Lets callers
+/// validate a requested pin before re-embedding.
+#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+pub fn is_supported_model_version(model_version: &str) -> bool {
+    #[cfg(feature = "vec-candle")]
+    {
+        candle::supported_model(model_version).is_some()
+    }
+    #[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
+    {
+        model_version == ACTIVE_MODEL_VERSION
     }
 }
 
@@ -152,12 +177,23 @@ pub fn load_active_model(workers: usize) -> Result<ActiveModel> {
 /// call does not pay network latency.
 #[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
 pub fn prefetch_active_model() -> Result<()> {
+    prefetch_model_version(ACTIVE_MODEL_VERSION)
+}
+
+/// Prefetch a specific supported model's weights into the cache (Phase 7b: warm
+/// a candidate before re-embedding). Candle uses the registry; fastembed pins
+/// only the default model.
+#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+pub fn prefetch_model_version(model_version: &str) -> Result<()> {
     #[cfg(feature = "vec-candle")]
     {
-        candle::CandleBertModel::prefetch_bge_small()
+        candle::CandleBertModel::prefetch_version(model_version)
     }
     #[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
     {
+        if model_version != ACTIVE_MODEL_VERSION {
+            eyre::bail!("fastembed backend supports only {ACTIVE_MODEL_VERSION:?}, not {model_version:?}");
+        }
         let _model = fastembed::FastEmbedModel::load()?;
         Ok(())
     }
@@ -191,13 +227,13 @@ fn get_or_load_model(model_version: &str) -> Result<Arc<ActiveModel>> {
             return Ok(entry.1.clone());
         }
     }
-    if model_version != ACTIVE_MODEL_VERSION {
+    if !is_supported_model_version(model_version) {
         eyre::bail!(
             "unknown or backend-mismatched model_version: {model_version:?} \
-             (this binary expects: {ACTIVE_MODEL_VERSION:?})"
+             (this binary's backend cannot load it)"
         );
     }
-    let model = Arc::new(ActiveModel::load()?);
+    let model = Arc::new(load_model_version(model_version, 0)?);
     let mut guard = registry()
         .write()
         .map_err(|_| eyre::eyre!("MODEL_REGISTRY write lock poisoned"))?;
