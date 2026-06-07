@@ -100,6 +100,10 @@ pub fn all_sections() -> Vec<Section> {
             findings: borg_findings(),
         },
         Section {
+            name: "firefox",
+            findings: firefox_findings(),
+        },
+        Section {
             name: "telegram",
             findings: telegram_findings(),
         },
@@ -515,6 +519,35 @@ fn borg_findings() -> Vec<Finding> {
         Err(e) => findings.push(Finding::info(format!("receipts: {e}"))),
     }
     findings
+}
+
+/// Firefox-install health for the capture extension. snap Firefox is the one
+/// state we actively warn about: its sandbox cannot load the extension, so a
+/// box still on snap silently captures nothing. Reuses borg's public
+/// `detect_firefox()` (the enum-returning API) rather than the private
+/// `is_snap_firefox()` probe - no new public surface, same detection we keep.
+fn firefox_findings() -> Vec<Finding> {
+    match borg::extension::install::detect_firefox() {
+        Ok(install) => vec![firefox_finding(&install)],
+        Err(e) => vec![Finding::info(format!("firefox detection skipped: {e}"))],
+    }
+}
+
+/// Pure mapping from a detected install to a finding, so the snap-warns /
+/// others-ok decision is unit-testable without the host actually running any
+/// particular Firefox.
+fn firefox_finding(install: &borg::extension::install::FirefoxInstall) -> Finding {
+    use borg::extension::install::FirefoxInstall;
+    match install {
+        FirefoxInstall::Snap => Finding::warn(
+            "snap Firefox present - its sandbox breaks the capture extension",
+            "migrate to Mozilla /opt Firefox: manifest -C ~/repos/scottidler/dotfiles/manifest.yml -s firefox-opt",
+        ),
+        FirefoxInstall::Tarball(_) => Finding::ok("firefox: Mozilla /opt tarball (capture-capable)"),
+        FirefoxInstall::AptOrDeb => Finding::ok("firefox: apt/deb (capture-capable)"),
+        FirefoxInstall::Flatpak => Finding::ok("firefox: flatpak (capture-capable)"),
+        FirefoxInstall::Unknown => Finding::info("firefox: not detected on this host"),
+    }
 }
 
 /// One-line summary of the receipts DB for `sb status`.
@@ -951,6 +984,28 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Info);
         assert!(findings[0].message.contains("does not run Telegram ingest"));
+    }
+
+    #[test]
+    fn firefox_finding_warns_on_snap_with_migration_fix() {
+        use borg::extension::install::FirefoxInstall;
+        let f = firefox_finding(&FirefoxInstall::Snap);
+        assert_eq!(f.severity, Severity::Warn);
+        assert!(f.message.contains("snap"));
+        assert!(
+            f.suggested_fix.as_deref().unwrap_or_default().contains("firefox-opt"),
+            "snap fix must name the firefox-opt migration"
+        );
+    }
+
+    #[test]
+    fn firefox_finding_ok_on_opt_tarball_and_info_on_unknown() {
+        use borg::extension::install::FirefoxInstall;
+        assert_eq!(
+            firefox_finding(&FirefoxInstall::Tarball(std::path::PathBuf::from("/opt/firefox"))).severity,
+            Severity::Ok
+        );
+        assert_eq!(firefox_finding(&FirefoxInstall::Unknown).severity, Severity::Info);
     }
 
     #[test]
