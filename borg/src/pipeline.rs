@@ -533,12 +533,6 @@ async fn process_url_inner(
             yt_result.yt_tags,
         )
     } else {
-        let ct = match url_match.link_name.as_str() {
-            "github" => ContentType::GitHub,
-            "social" => ContentType::Social,
-            "reddit" => ContentType::Reddit,
-            _ => ContentType::Article,
-        };
         let (scraped_title, article_md) = if use_fabric {
             match process_article_fabric(&url_match.url, config, trace_id).await {
                 Ok((title, article_md, _)) => (title, article_md),
@@ -563,6 +557,21 @@ async fn process_url_inner(
         let title = match &github_repo {
             Some((owner, repo)) => format!("{owner}/{repo}"),
             None => scraped_title.clone(),
+        };
+        // Resolve the note's ContentType once its kind-specific data is known.
+        // A github repo root carries its owner (free at dispatch). Deep github
+        // paths and every other non-thread URL fall through to the article
+        // path - matching the distiller dispatch below, which keys on
+        // `github_repo.is_some()`. The article byline is filled after the fetch
+        // (Phase 2); it is `None` here. social/reddit keep dedicated variants.
+        let ct = if let Some((owner, _)) = &github_repo {
+            ContentType::GitHub { owner: owner.clone() }
+        } else {
+            match url_match.link_name.as_str() {
+                "social" => ContentType::Social,
+                "reddit" => ContentType::Reddit,
+                _ => ContentType::Article { author: None },
+            }
         };
         // Dispatch by URL kind: github roots → repo distiller (fetches REST
         // metadata internally); X/Reddit/HN → thread distiller; everything
@@ -1111,7 +1120,7 @@ async fn process_article_fabric(url: &str, config: &Config, trace_id: &str) -> R
     // against the rendered Distilled summary at the dispatch site instead
     // of against the prose summary that used to live here.
 
-    Ok((title, article_md, ContentType::Article))
+    Ok((title, article_md, ContentType::Article { author: None }))
 }
 
 /// Returns `(title, article_md, ContentType)` - same shape as
@@ -1134,7 +1143,7 @@ async fn process_article_jina(url: &str, config: &Config, trace_id: &str) -> Res
     crate::stages::raw::run_gate_1(config, trace_id, url, article_md.as_bytes(), 200)?;
 
     let title = extract_article_title(&article_md, url);
-    Ok((title, article_md, ContentType::Article))
+    Ok((title, article_md, ContentType::Article { author: None }))
 }
 
 async fn process_image(

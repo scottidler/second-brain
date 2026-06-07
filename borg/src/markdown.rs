@@ -39,8 +39,15 @@ pub enum ContentType {
         uploader: String,
         duration_secs: f64,
     },
-    Article,
-    GitHub,
+    Article {
+        /// Byline extracted from the fetched page, when a fetcher surfaced it.
+        /// `None` on the `fabric -u` default path (no HTML to parse).
+        author: Option<String>,
+    },
+    GitHub {
+        /// Repo owner, parsed from the source URL at dispatch.
+        owner: String,
+    },
     Social,
     Reddit,
     Image {
@@ -94,8 +101,8 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
 
     let type_field = match &note.content_type {
         ContentType::YouTube { .. } => "youtube",
-        ContentType::Article => "article",
-        ContentType::GitHub => "github",
+        ContentType::Article { .. } => "article",
+        ContentType::GitHub { .. } => "github",
         ContentType::Social => "social",
         ContentType::Reddit => "reddit",
         ContentType::Image { .. } => "image",
@@ -138,23 +145,21 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
 
     fm.push_str(&format!("tags:\n{tags_yaml}\n"));
 
-    if !frontmatter_config.default_creator.is_empty() {
-        fm.push_str(&format!(
-            "creator: \"{}\"\n",
-            escape_yaml_string(&frontmatter_config.default_creator)
-        ));
+    // `creator` is written exactly once: resolve the per-kind author via
+    // `creator_for` (uploader / owner / article byline), falling back to a
+    // non-empty `default_creator`. This is the single source of the
+    // `creator:` line - the YouTube arm below no longer emits one, so a
+    // YouTube note with a non-empty `default_creator` can never double-write.
+    if let Some(creator) = creator_for(&note.content_type).or_else(|| {
+        (!frontmatter_config.default_creator.is_empty()).then(|| frontmatter_config.default_creator.clone())
+    }) {
+        fm.push_str(&format!("creator: \"{}\"\n", escape_yaml_string(&creator)));
     }
 
     match &note.content_type {
-        ContentType::YouTube {
-            uploader,
-            duration_secs,
-        } => {
+        ContentType::YouTube { duration_secs, .. } => {
             let minutes = (*duration_secs / 60.0).round() as u32;
-            fm.push_str(&format!(
-                "creator: \"{}\"\nduration: {minutes}\n",
-                escape_yaml_string(uploader)
-            ));
+            fm.push_str(&format!("duration: {minutes}\n"));
         }
         ContentType::Audio {
             duration_secs: Some(secs),
@@ -241,6 +246,20 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
     format!("{fm}{body}")
 }
 
+/// Resolve the canonical `creator` for a note from its kind-specific data:
+/// the YouTube uploader, the GitHub repo owner, or the article byline. Returns
+/// `None` for kinds that carry no author and when the carried value is empty,
+/// so the render can fall back to `default_creator`. Pure and testable.
+pub fn creator_for(ct: &ContentType) -> Option<String> {
+    let raw = match ct {
+        ContentType::YouTube { uploader, .. } => Some(uploader.clone()),
+        ContentType::GitHub { owner } => Some(owner.clone()),
+        ContentType::Article { author } => author.clone(),
+        _ => None,
+    };
+    raw.filter(|s| !s.trim().is_empty())
+}
+
 fn escape_yaml_string(s: &str) -> String {
     s.replace('"', "\\\"")
 }
@@ -307,7 +326,7 @@ mod tests {
             source_url: Some("https://x.com/u/status/1".to_string()),
             tags: vec!["thread".to_string()],
             summary: "Short concise summary.".to_string(),
-            content_type: ContentType::Article,
+            content_type: ContentType::Article { author: None },
             distilled_body: Some("## Summary\n\nShort concise summary.\n\n## Claims\n\n- One claim.\n\n".to_string()),
             frontmatter_additions: additions,
             ..Default::default()
@@ -336,7 +355,7 @@ mod tests {
             source_url: Some("https://example.com/".to_string()),
             tags: vec![],
             summary: "Plain prose summary.".to_string(),
-            content_type: ContentType::Article,
+            content_type: ContentType::Article { author: None },
             ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
@@ -352,7 +371,7 @@ mod tests {
             asset_path: None,
             tags: vec![],
             summary: "S".to_string(),
-            content_type: ContentType::Article,
+            content_type: ContentType::Article { author: None },
             description: None,
             embed_code: None,
             method: None,
@@ -376,7 +395,7 @@ mod tests {
             asset_path: None,
             tags: vec!["rust".to_string(), "programming".to_string()],
             summary: "This is a summary.".to_string(),
-            content_type: ContentType::Article,
+            content_type: ContentType::Article { author: None },
             description: None,
             embed_code: None,
             method: None,
@@ -435,7 +454,7 @@ mod tests {
             asset_path: None,
             tags: vec!["ai".to_string()],
             summary: String::new(),
-            content_type: ContentType::Article,
+            content_type: ContentType::Article { author: None },
             description: None,
             embed_code: None,
             method: None,
@@ -504,7 +523,7 @@ mod tests {
             tags: vec!["test".to_string()],
             summary: "Summary.".to_string(),
             description: None,
-            content_type: ContentType::Article,
+            content_type: ContentType::Article { author: None },
             embed_code: None,
             method: Some(IngestMethod::Telegram),
             trace_id: Some("tg-7f3a2c".to_string()),
@@ -548,7 +567,9 @@ mod tests {
             asset_path: None,
             tags: vec!["github".to_string()],
             summary: "A terminal you can curl.".to_string(),
-            content_type: ContentType::GitHub,
+            content_type: ContentType::GitHub {
+                owner: "open-webui".to_string(),
+            },
             description: None,
             embed_code: None,
             method: Some(IngestMethod::Telegram),
@@ -558,6 +579,8 @@ mod tests {
         };
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: github"));
+        // creator is resolved from the repo owner.
+        assert!(rendered.contains("creator: \"open-webui\""));
     }
 
     #[test]
@@ -645,7 +668,7 @@ mod tests {
             tags: vec![],
             summary: "Content.".to_string(),
             description: None,
-            content_type: ContentType::Article,
+            content_type: ContentType::Article { author: None },
             embed_code: None,
             method: None,
             trace_id: None,
@@ -654,6 +677,112 @@ mod tests {
         };
         let rendered = render_note(&note, &test_config());
         assert!(!rendered.contains("[!info]"), "no callout when description is None");
+    }
+
+    #[test]
+    fn test_creator_for_per_variant() {
+        assert_eq!(
+            creator_for(&ContentType::YouTube {
+                uploader: "TechChannel".to_string(),
+                duration_secs: 600.0,
+            }),
+            Some("TechChannel".to_string())
+        );
+        assert_eq!(
+            creator_for(&ContentType::GitHub {
+                owner: "open-webui".to_string(),
+            }),
+            Some("open-webui".to_string())
+        );
+        assert_eq!(
+            creator_for(&ContentType::Article {
+                author: Some("Jane Doe".to_string()),
+            }),
+            Some("Jane Doe".to_string())
+        );
+        assert_eq!(creator_for(&ContentType::Article { author: None }), None);
+        assert_eq!(creator_for(&ContentType::Social), None);
+        assert_eq!(creator_for(&ContentType::Reddit), None);
+        assert_eq!(creator_for(&ContentType::Note), None);
+        // An empty/whitespace carried value resolves to None (never fabricate).
+        assert_eq!(
+            creator_for(&ContentType::YouTube {
+                uploader: "   ".to_string(),
+                duration_secs: 1.0,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn test_render_article_with_byline() {
+        let note = NoteContent {
+            title: "Bylined Post".to_string(),
+            source_url: Some("https://blog.example.com/post".to_string()),
+            tags: vec![],
+            summary: "Body.".to_string(),
+            content_type: ContentType::Article {
+                author: Some("Jane Doe".to_string()),
+            },
+            ..NoteContent::default()
+        };
+        let rendered = render_note(&note, &test_config());
+        assert!(rendered.contains("creator: \"Jane Doe\""));
+    }
+
+    #[test]
+    fn test_render_emits_exactly_one_creator_line() {
+        // The historical double-write bug: a YouTube note with a non-empty
+        // `default_creator` emitted `creator:` twice (the standalone
+        // default-creator write AND the YouTube-arm write). With a single
+        // `creator_for`-driven write, the uploader wins and only one line
+        // is emitted.
+        let config = FrontmatterConfig {
+            default_tags: vec![],
+            default_creator: "Scott".to_string(),
+            timezone: "UTC".to_string(),
+        };
+        let note = NoteContent {
+            title: "Cool Video".to_string(),
+            source_url: Some("https://youtube.com/watch?v=abc".to_string()),
+            tags: vec!["youtube".to_string()],
+            summary: "Video summary.".to_string(),
+            content_type: ContentType::YouTube {
+                uploader: "TechChannel".to_string(),
+                duration_secs: 600.0,
+            },
+            ..NoteContent::default()
+        };
+        let rendered = render_note(&note, &config);
+        assert_eq!(
+            rendered.matches("creator:").count(),
+            1,
+            "exactly one creator: line expected:\n{rendered}"
+        );
+        // The per-kind author (uploader) wins over default_creator.
+        assert!(rendered.contains("creator: \"TechChannel\""));
+        assert!(!rendered.contains("creator: \"Scott\""));
+    }
+
+    #[test]
+    fn test_render_falls_back_to_default_creator_when_no_author() {
+        // An Article with no byline falls back to default_creator.
+        let config = FrontmatterConfig {
+            default_tags: vec![],
+            default_creator: "Scott".to_string(),
+            timezone: "UTC".to_string(),
+        };
+        let note = NoteContent {
+            title: "No byline".to_string(),
+            source_url: Some("https://blog.example.com/x".to_string()),
+            tags: vec![],
+            summary: "Body.".to_string(),
+            content_type: ContentType::Article { author: None },
+            ..NoteContent::default()
+        };
+        let rendered = render_note(&note, &config);
+        assert_eq!(rendered.matches("creator:").count(), 1);
+        assert!(rendered.contains("creator: \"Scott\""));
     }
 
     #[test]
