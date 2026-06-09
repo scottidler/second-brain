@@ -51,6 +51,9 @@ pub struct VideoMetadata {
     /// ISO 8601 date, e.g. "2026-05-16". Optional because yt-dlp may not
     /// always surface it.
     pub published_at: Option<String>,
+    /// `owner/repo` slugs harvested from the video description (see
+    /// `borg::github::extract_repo_slugs`). Empty when none were found.
+    pub repos: Vec<String>,
 }
 
 /// Tunables for the video distiller.
@@ -447,6 +450,7 @@ fn attach_payload(distilled: &mut Distilled, metadata: Option<&VideoMetadata>) {
         channel: m.channel.clone(),
         duration_seconds: m.duration_seconds,
         published_at: m.published_at.clone(),
+        repos: m.repos.clone(),
     }));
 }
 

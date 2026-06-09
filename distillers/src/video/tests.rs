@@ -84,6 +84,7 @@ links: []
         channel: Some("Raft Talks".to_string()),
         duration_seconds: Some(3600),
         published_at: None,
+        repos: vec![],
     };
     let distilled = distiller
         .distill(DistillInputs {
@@ -130,6 +131,7 @@ links: []
         channel: None,
         duration_seconds: Some(60),
         published_at: None,
+        repos: vec![],
     };
     let distilled = distiller
         .distill(DistillInputs {

@@ -13,8 +13,11 @@
 //! unauthenticated subject to a 60 req/h IP rate limit. Authenticated
 //! callers get 5K req/h.
 
+use std::sync::LazyLock;
+
 use async_trait::async_trait;
 use eyre::{Context, Result, bail};
+use regex::Regex;
 use serde::Deserialize;
 
 use crate::stages::artifact::sha256_hex;
@@ -77,6 +80,132 @@ pub fn parse_repo_url(url: &str) -> Option<(String, String)> {
         return None;
     }
     Some((owner, repo))
+}
+
+/// Owners that are GitHub reserved product/route paths, not user/org accounts.
+/// Best-effort denylist (see design doc `2026-06-08-github-repos-from-video-description.md`):
+/// a slug whose owner matches one of these is dropped because it cannot name a
+/// real `owner/repo`. By construction this is not exhaustive - GitHub can mint
+/// a new top-level route at any time - but extracted slugs are inert (written
+/// to frontmatter, never fetched), so a rare false positive is harmless.
+const RESERVED_OWNERS: &[&str] = &[
+    "sponsors",
+    "features",
+    "marketplace",
+    "orgs",
+    "settings",
+    "about",
+    "pricing",
+    "topics",
+    "collections",
+    "trending",
+    "notifications",
+    "explore",
+    "login",
+    "logout",
+    "join",
+    "signup",
+    "new",
+    "search",
+    "apps",
+    "customer-stories",
+    "readme",
+    "security",
+    "enterprise",
+    "contact",
+    "site",
+    "dashboard",
+    "account",
+    "codespaces",
+    "issues",
+    "pulls",
+    "watching",
+    "stars",
+    "blog",
+    "users",
+    "mobile",
+    "team",
+    "premium-support",
+    "git-guides",
+    "solutions",
+    "resources",
+    "events",
+    "sponsors-account",
+];
+
+/// Trailing characters prose appends to a URL that are not part of the repo
+/// name (sentence punctuation, closers, and a stray path slash).
+const TRAILING_NOISE: &[char] = &['.', ',', ')', ']', '>', '"', '\'', '/'];
+
+/// Matches a `github.com/<path>` candidate in free text. The required left
+/// boundary `(?:^|[^a-z0-9._-])` (start of text or any char that is not a host
+/// label char) is what rejects subdomain hosts - `gist.github.com` has `.`
+/// immediately before `github.com`, `notgithub.com` has `t` - without needing
+/// lookbehind (the `regex` crate has none). Scheme and `www.` are optional;
+/// `(?i)` makes the host and the boundary class case-insensitive. Capture
+/// group 1 is the path following `github.com/`, stopped at the first bracket,
+/// quote, angle, or whitespace so adjacent prose-glued URLs split cleanly.
+static REPO_SLUG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(?:^|[^a-z0-9._-])(?:https?://)?(?:www\.)?github\.com/([^\s()\[\]{}<>"']+)"#)
+        .expect("valid github repo slug regex")
+});
+
+/// Scan free text for GitHub repo references and return deduplicated
+/// `owner/repo` slugs in first-seen order. Lenient by design: it tolerates a
+/// missing scheme, a `www.` prefix, deep paths (`/owner/repo/tree/main` ->
+/// `owner/repo`), a `.git` suffix, query strings, fragments, and trailing
+/// prose punctuation. Owner is filtered through `RESERVED_OWNERS`. Dedup is
+/// case-insensitive (GitHub routing is) but the first occurrence's casing is
+/// preserved. This is deliberately separate from `parse_repo_url`, which gates
+/// fetcher routing and must reject deep paths and must not filter owners.
+pub fn extract_repo_slugs(text: &str) -> Vec<String> {
+    log::debug!("extract_repo_slugs: text_len={}", text.len());
+    let mut slugs: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for caps in REPO_SLUG_RE.captures_iter(text) {
+        let Some(path) = caps.get(1) else {
+            continue;
+        };
+        let Some(slug) = slug_from_path(path.as_str()) else {
+            continue;
+        };
+        let lower = slug.to_ascii_lowercase();
+        if seen.contains(&lower) {
+            continue;
+        }
+        seen.push(lower);
+        slugs.push(slug);
+    }
+    log::debug!("extract_repo_slugs: extracted={}", slugs.len());
+    slugs
+}
+
+/// Turn the raw path captured after `github.com/` into a normalized
+/// `owner/repo` slug, or `None` if the candidate is not a valid repo
+/// reference (too few segments, empty after trimming, or a reserved owner).
+fn slug_from_path(path: &str) -> Option<String> {
+    // Drop query string / fragment first - they can carry slashes that would
+    // otherwise pollute the segment split.
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    let mut segments = path.split('/');
+    let owner = segments.next()?.trim_end_matches(TRAILING_NOISE);
+    // Repo is the trailing meaningful segment: strip prose punctuation, then a
+    // `.git` suffix, then any punctuation the `.git` strip re-exposed.
+    let repo = segments
+        .next()?
+        .trim_end_matches(TRAILING_NOISE)
+        .trim_end_matches(".git")
+        .trim_end_matches(TRAILING_NOISE);
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    if owner.contains([' ', '/']) || repo.contains([' ', '/']) {
+        return None;
+    }
+    if RESERVED_OWNERS.contains(&owner.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
 }
 
 /// Render a markdown transcript from README markdown + the structured

@@ -164,6 +164,7 @@ fn render_emits_video_frontmatter() {
             channel: Some("Some Channel".to_string()),
             duration_seconds: Some(3247),
             published_at: Some("2026-04-22".to_string()),
+            repos: vec![],
         })),
         meta: base_meta("distill-video-v1"),
         transcript: None,

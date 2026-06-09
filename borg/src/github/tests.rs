@@ -124,3 +124,165 @@ fn decode_readme_from_bytes_handles_missing_content() {
     let decoded = decode_readme_from_bytes(body).expect("decode");
     assert_eq!(decoded, "");
 }
+
+#[test]
+fn extract_repo_slugs_bare_host_no_scheme() {
+    assert_eq!(
+        extract_repo_slugs("code at github.com/coleam00/archon today"),
+        vec!["coleam00/archon".to_string()]
+    );
+}
+
+#[test]
+fn extract_repo_slugs_https_and_www_prefixes() {
+    assert_eq!(
+        extract_repo_slugs("see https://github.com/scottidler/second-brain"),
+        vec!["scottidler/second-brain".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("see http://www.github.com/scottidler/second-brain"),
+        vec!["scottidler/second-brain".to_string()]
+    );
+}
+
+#[test]
+fn extract_repo_slugs_truncates_deep_paths() {
+    assert_eq!(
+        extract_repo_slugs("https://github.com/owner/repo/tree/main/src"),
+        vec!["owner/repo".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("github.com/owner/repo/issues/42"),
+        vec!["owner/repo".to_string()]
+    );
+}
+
+#[test]
+fn extract_repo_slugs_strips_dot_git_suffix() {
+    assert_eq!(
+        extract_repo_slugs("clone github.com/owner/repo.git"),
+        vec!["owner/repo".to_string()]
+    );
+}
+
+#[test]
+fn extract_repo_slugs_strips_query_and_fragment() {
+    assert_eq!(
+        extract_repo_slugs("github.com/owner/repo?tab=readme"),
+        vec!["owner/repo".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("github.com/owner/repo#install"),
+        vec!["owner/repo".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("github.com/owner/repo/tree/main?x=1#frag"),
+        vec!["owner/repo".to_string()]
+    );
+}
+
+#[test]
+fn extract_repo_slugs_strips_trailing_prose_punctuation() {
+    assert_eq!(
+        extract_repo_slugs("Repo is github.com/owner/repo."),
+        vec!["owner/repo".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("Repo is github.com/owner/repo,"),
+        vec!["owner/repo".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("(github.com/owner/repo)"),
+        vec!["owner/repo".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("link: <github.com/owner/repo>"),
+        vec!["owner/repo".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("\"github.com/owner/repo\""),
+        vec!["owner/repo".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("github.com/owner/repo/"),
+        vec!["owner/repo".to_string()]
+    );
+}
+
+#[test]
+fn extract_repo_slugs_rejects_every_reserved_owner() {
+    for owner in RESERVED_OWNERS {
+        let text = format!("see github.com/{owner}/something");
+        assert!(
+            extract_repo_slugs(&text).is_empty(),
+            "reserved owner {owner} should yield no slug, got {:?}",
+            extract_repo_slugs(&text)
+        );
+    }
+}
+
+#[test]
+fn extract_repo_slugs_excludes_gist_and_raw_hosts() {
+    assert!(extract_repo_slugs("https://gist.github.com/owner/abc123").is_empty());
+    assert!(extract_repo_slugs("https://raw.githubusercontent.com/owner/repo/main/x.rs").is_empty());
+    // Other subdomains (docs, api) are equally rejected.
+    assert!(extract_repo_slugs("https://docs.github.com/owner/repo").is_empty());
+}
+
+#[test]
+fn extract_repo_slugs_rejects_prefixed_hostnames() {
+    // A non-github host that merely ends in `github.com` must not match.
+    assert!(extract_repo_slugs("notgithub.com/owner/repo").is_empty());
+    assert!(extract_repo_slugs("evil-github.com/owner/repo").is_empty());
+    assert!(extract_repo_slugs("github.com.evil.com/owner/repo").is_empty());
+}
+
+#[test]
+fn extract_repo_slugs_case_insensitive_dedup_preserves_first_casing() {
+    let text = "github.com/Owner/Repo and again GitHub.com/owner/repo";
+    assert_eq!(extract_repo_slugs(text), vec!["Owner/Repo".to_string()]);
+}
+
+#[test]
+fn extract_repo_slugs_case_insensitive_host_matches() {
+    assert_eq!(
+        extract_repo_slugs("GITHUB.COM/owner/repo"),
+        vec!["owner/repo".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("https://GitHub.com/owner/repo"),
+        vec!["owner/repo".to_string()]
+    );
+}
+
+#[test]
+fn extract_repo_slugs_multiple_repos_first_seen_order() {
+    let text = "first github.com/a/one then github.com/b/two and github.com/c/three";
+    assert_eq!(
+        extract_repo_slugs(text),
+        vec!["a/one".to_string(), "b/two".to_string(), "c/three".to_string(),]
+    );
+}
+
+#[test]
+fn extract_repo_slugs_no_repo_yields_empty() {
+    assert!(extract_repo_slugs("just some prose with no links at all").is_empty());
+    assert!(extract_repo_slugs("a bare https://example.com/owner/repo link").is_empty());
+    // Owner-only github URL has no repo segment.
+    assert!(extract_repo_slugs("github.com/owner").is_empty());
+    assert!(extract_repo_slugs("github.com/owner/").is_empty());
+}
+
+#[test]
+fn extract_repo_slugs_matches_at_start_of_text() {
+    assert_eq!(
+        extract_repo_slugs("github.com/owner/repo is the link"),
+        vec!["owner/repo".to_string()]
+    );
+}
+
+#[test]
+fn extract_repo_slugs_matches_at_start_of_line() {
+    let text = "Description:\ngithub.com/owner/repo\nmore text";
+    assert_eq!(extract_repo_slugs(text), vec!["owner/repo".to_string()]);
+}

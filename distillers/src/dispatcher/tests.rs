@@ -149,6 +149,7 @@ async fn dispatches_video_to_fabric_backed_distiller() {
         channel: Some("Some Channel".to_string()),
         duration_seconds: Some(600),
         published_at: None,
+        repos: vec![],
     };
     let inputs = DistillInputs {
         transcript: "short transcript",

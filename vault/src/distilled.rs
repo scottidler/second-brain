@@ -114,6 +114,11 @@ pub struct VideoPayload {
     /// ISO 8601 UTC date.
     #[serde(default)]
     pub published_at: Option<String>,
+    /// `owner/repo` slugs harvested from the video description. Rendered as a
+    /// top-level `github:` YAML sequence. `#[serde(default)]` keeps legacy
+    /// `distilled.yml` artifacts without the field deserializable.
+    #[serde(default)]
+    pub repos: Vec<String>,
 }
 
 /// Thread metadata for X/Reddit/HN sources.

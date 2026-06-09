@@ -60,6 +60,11 @@ pub fn video_metadata_from_yt_dlp(meta: &crate::youtube::VideoMetadata) -> Video
         channel,
         duration_seconds,
         published_at: None,
+        // Stays empty here: this is a pure yt-dlp field mapper. The
+        // description scan that populates `repos` runs at the
+        // `distill_for_publish_video` seam where `metadata.description` is in
+        // scope (see borg::github::extract_repo_slugs).
+        repos: Vec::new(),
     }
 }
 

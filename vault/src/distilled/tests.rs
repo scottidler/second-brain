@@ -95,6 +95,7 @@ fn roundtrip_video_payload() {
             channel: Some("Some Channel".to_string()),
             duration_seconds: Some(3247),
             published_at: Some("2026-04-22".to_string()),
+            repos: vec![],
         })),
         meta: sample_meta(),
         transcript: None,

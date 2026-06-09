@@ -259,6 +259,7 @@ async fn distill_stage_handles_video_through_fabric_with_metadata() {
         channel: Some("Channel".to_string()),
         duration_seconds: Some(60),
         published_at: None,
+        repos: vec![],
     };
     let distilled = stage
         .distill_with_video_metadata(
