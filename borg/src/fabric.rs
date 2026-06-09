@@ -226,7 +226,8 @@ fn summarize_chunked<'a>(
 /// Split text into chunks of approximately `chunk_size` chars with `overlap` char overlap.
 /// Tries to split at paragraph boundaries (\n\n) or sentence boundaries (. ) for cleaner chunks.
 fn split_with_overlap(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
-    if text.len() <= chunk_size {
+    // chunk_size == 0 would never advance; treat as "no chunking".
+    if chunk_size == 0 || text.len() <= chunk_size {
         return vec![text.to_string()];
     }
 
@@ -239,11 +240,18 @@ fn split_with_overlap(text: &str, chunk_size: usize, overlap: usize) -> Vec<Stri
         let end = text.floor_char_boundary((start + chunk_size).min(text.len()));
 
         // Try to find a clean break point near the end
-        let actual_end = if end < text.len() {
+        let mut actual_end = if end < text.len() {
             find_break_point(text, end.saturating_sub(200), end)
         } else {
             end
         };
+
+        // find_break_point's 200-byte lookback can precede `start` for small
+        // chunk sizes and return an offset <= start; never slice backwards or
+        // stall - advance at least one char.
+        if actual_end <= start {
+            actual_end = text.ceil_char_boundary((start + 1).min(text.len()));
+        }
 
         chunks.push(text[start..actual_end].to_string());
 
@@ -251,8 +259,10 @@ fn split_with_overlap(text: &str, chunk_size: usize, overlap: usize) -> Vec<Stri
             break;
         }
 
-        // Next chunk starts `overlap` chars before the end of this one
-        start = text.floor_char_boundary(actual_end.saturating_sub(overlap));
+        // Next chunk starts `overlap` chars before the end of this one, but
+        // must always move forward.
+        let next = text.floor_char_boundary(actual_end.saturating_sub(overlap));
+        start = if next > start { next } else { actual_end };
     }
 
     chunks

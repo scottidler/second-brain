@@ -201,3 +201,30 @@ unused. Rather than correct lying comments on dead code, the dead `PipelineError
 module (`borg/src/pipeline/error.rs` + its tests) and `default_catchall_stage`
 were removed (rkvr-archived), per the "dead code must be removed" convention.
 This resolves the Phase 6 open question (remove vs. keep) in favour of remove.
+
+### Second-round audit (Codex re-review of the follow-up)
+
+Codex re-reviewed the follow-up commit (ran `cargo check -p borg` and
+`--workspace --features vec`, both pass), confirmed every fix above landed, and
+found three more - all addressed:
+- **`cortex/src/linking.rs::find_mention` (real, same class).** `pos` came from
+  `body.to_lowercase().find()` - a byte offset in the LOWERCASED string - and
+  was used to slice the original `body`. `to_lowercase` can change byte length
+  ('İ' is 2 bytes -> "i̇" 3 bytes), so non-ASCII before the match shifted the
+  offset: panic or wrong surface span. Rewrote to build a lowercased-offset ->
+  body-offset map (walking `char_indices` and each char's lowercase expansion)
+  so every slice uses a valid `body` boundary and the correct original-case
+  span. Two regression tests added (length-changing lowercase; many multi-byte
+  chars before the match).
+- **`borg/src/fabric.rs::split_with_overlap` progress/panic edge.** For
+  `chunk_size < 200`, `find_break_point`'s 200-byte lookback could return an
+  offset `< start` -> `text[start..actual_end]` panic; `chunk_size == 0` ->
+  empty-chunk infinite loop. Added a `chunk_size == 0` short-circuit, an
+  `actual_end <= start` ceil-boundary advance, and a forward-progress guard on
+  the next `start`.
+- **Stale "DLQ" comments outside permits.rs** (`telegram.rs`, `discord.rs` x2,
+  `routes.rs`) - reworded to the failed-receipts model.
+
+The loop is converging: round 1 found a class of truncations; round 2 found one
+more byte-offset bug and edge guards. A third review would be expected to come
+back clean.

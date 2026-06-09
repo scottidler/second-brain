@@ -79,7 +79,7 @@ impl EventHandler for Handler {
         }
 
         // Generate trace at the door so disallowed-channel messages and
-        // empty messages still get a durable record (and a DLQ row).
+        // empty messages still get a durable record (a failed receipts row).
         let trace_id = trace::generate(IngestMethod::Discord);
 
         let (intake_kind, intake_preview) = if let Some(att) = msg.attachments.first() {
@@ -251,7 +251,7 @@ impl EventHandler for Handler {
         }
 
         // Priority 2: URL in text
-        // Priority 3: Plain text. Empty was already routed to DLQ above.
+        // Priority 3: Plain text. Empty was already recorded as a failed receipt above.
         let (content, display_source) = if let Some(url) = extract_url_from_text(&msg.content) {
             (ContentKind::Url(url.clone()), url)
         } else {

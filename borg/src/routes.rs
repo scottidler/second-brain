@@ -242,7 +242,7 @@ pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest
 
 pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Multipart) -> Json<IngestResult> {
     // Generate trace at the door. Any decode/validation failure below
-    // produces a DLQ row tied to this trace.
+    // produces a failed receipts row tied to this trace.
     let trace_id = trace::generate(IngestMethod::Http);
     let mut file_data: Option<(Vec<u8>, String)> = None;
     let mut tags: Vec<String> = vec![];

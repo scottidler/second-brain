@@ -529,8 +529,9 @@ pub async fn run(
                 }
 
                 // Priority 5 & 6: Text messages (URL or plain text). Empty
-                // text was already routed to DLQ via the unsupported check
-                // above, so we treat any text here as content to ingest.
+                // text was already recorded as a failed receipt via the
+                // unsupported check above, so we treat any text here as
+                // content to ingest.
                 let text = message.text().unwrap_or("");
                 log::debug!("Telegram message from chat {}: {text}", chat_id);
 

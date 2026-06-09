@@ -296,7 +296,28 @@ fn extract_existing_links(body: &str) -> HashSet<String> {
 /// body (preserving its original case) so the caller can emit a piped link
 /// `[[target|surface]]` that keeps the prose wording.
 fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<(String, String)> {
-    let body_lower = body.to_lowercase();
+    // Build the lowercased body alongside a map from lowercased-byte offsets
+    // back to original `body` byte offsets, recorded at the start of every
+    // body char's lowercase expansion (plus an end sentinel). `to_lowercase`
+    // can change byte length (e.g. Turkish I), so a `body_lower.find()` offset
+    // is NOT a valid index into `body`; mapping back keeps every slice on a
+    // real char boundary in `body` and yields the correct original-case span.
+    let mut body_lower = String::with_capacity(body.len());
+    let mut map: Vec<(usize, usize)> = Vec::new(); // (lower_off, body_off), ascending
+    for (body_off, ch) in body.char_indices() {
+        map.push((body_lower.len(), body_off));
+        for lc in ch.to_lowercase() {
+            body_lower.push(lc);
+        }
+    }
+    map.push((body_lower.len(), body.len()));
+    let to_body = |lower_off: usize| -> usize {
+        match map.binary_search_by_key(&lower_off, |&(l, _)| l) {
+            Ok(i) => map[i].1,
+            // A match landing mid-expansion (rare) snaps back to that char's start.
+            Err(i) => map[i.saturating_sub(1)].1,
+        }
+    };
 
     // Try title first, then stem
     for term in [title, stem] {
@@ -305,7 +326,10 @@ fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<(
             continue;
         }
 
-        if let Some(pos) = body_lower.find(&term_lower) {
+        if let Some(lpos) = body_lower.find(&term_lower) {
+            let pos = to_body(lpos);
+            let after_pos = to_body(lpos + term_lower.len());
+
             // Skip if match is inside an existing wikilink
             let before_slice = &body[..pos];
             if let (Some(open), Some(close)) = (before_slice.rfind("[["), before_slice.rfind("]]"))
@@ -321,7 +345,6 @@ fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<(
 
             // Verify it's a word boundary (not inside another word)
             let before_char = body[..pos].chars().last().unwrap_or(' ');
-            let after_pos = pos + term_lower.len();
             let after_char = body[after_pos..].chars().next().unwrap_or(' ');
 
             if before_char.is_ascii_alphanumeric() || after_char.is_ascii_alphanumeric() {
@@ -332,7 +355,7 @@ fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<(
             let surface = body[pos..after_pos].to_string();
             // Extract context (surrounding ~20 chars, snapped to char boundaries)
             let start = body.floor_char_boundary(pos.saturating_sub(20));
-            let end = body.ceil_char_boundary((pos + term.len() + 20).min(body.len()));
+            let end = body.ceil_char_boundary((after_pos + 20).min(body.len()));
             let context = body[start..end].to_string();
             return Some((context, surface));
         }
@@ -393,6 +416,26 @@ fn insert_first_wikilink(content: &str, target: &str, surface: &str) -> Option<S
 mod tests {
     use super::*;
     use crate::testutil::TestVault;
+
+    #[test]
+    fn find_mention_handles_length_changing_lowercase() {
+        // 'İ' (2 bytes) lowercases to "i̇" (3 bytes), so a `body.to_lowercase()`
+        // match offset is NOT a valid index into `body`. The old code sliced
+        // `body` with that offset and could panic / extract a shifted span.
+        let body = "İstanbul notes mention Rust here.";
+        let (context, surface) = find_mention(body, "Rust", "rust", 3).expect("match");
+        // Surface must be the original-case word, not a byte-shifted slice.
+        assert_eq!(surface, "Rust");
+        assert!(context.contains("Rust"));
+    }
+
+    #[test]
+    fn find_mention_no_panic_on_multibyte_before_match() {
+        // Many length-changing chars before the match must not panic.
+        let body = format!("{} discusses Rust extensively", "İ".repeat(50));
+        let result = find_mention(&body, "Rust", "rust", 3);
+        assert_eq!(result.map(|(_, s)| s), Some("Rust".to_string()));
+    }
 
     #[test]
     fn test_concept_linking_on_vault() {
