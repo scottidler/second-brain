@@ -182,6 +182,54 @@ fn render_emits_video_frontmatter() {
         fm.get("cortex-video-published-at"),
         Some(&serde_yaml::Value::String("2026-04-22".to_string()))
     );
+    // Empty repos renders no github key.
+    assert!(!fm.contains_key("github"));
+}
+
+#[test]
+fn render_emits_github_sequence_for_video_repos() {
+    let distilled = Distilled {
+        summary: "x".to_string(),
+        claims: Vec::new(),
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: Some(KindPayload::Video(VideoPayload {
+            channel: None,
+            duration_seconds: None,
+            published_at: None,
+            repos: vec!["coleam00/archon".to_string(), "scottidler/second-brain".to_string()],
+        })),
+        meta: base_meta("distill-video-v1"),
+        transcript: None,
+    };
+    let fm = render(&distilled).frontmatter_additions;
+    assert_eq!(
+        fm.get("github"),
+        Some(&serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::String("coleam00/archon".to_string()),
+            serde_yaml::Value::String("scottidler/second-brain".to_string()),
+        ]))
+    );
+}
+
+#[test]
+fn render_omits_github_key_when_repos_empty() {
+    let distilled = Distilled {
+        summary: "x".to_string(),
+        claims: Vec::new(),
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: Some(KindPayload::Video(VideoPayload {
+            channel: Some("Chan".to_string()),
+            duration_seconds: None,
+            published_at: None,
+            repos: vec![],
+        })),
+        meta: base_meta("distill-video-v1"),
+        transcript: None,
+    };
+    let fm = render(&distilled).frontmatter_additions;
+    assert!(!fm.contains_key("github"));
 }
 
 #[test]

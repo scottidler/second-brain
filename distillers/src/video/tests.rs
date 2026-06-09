@@ -15,6 +15,34 @@ fn timestamped(lines: &[(&str, &str)]) -> String {
 }
 
 #[test]
+fn attach_payload_attaches_for_repos_only_metadata() {
+    // A video whose only metadata is a description repo link still gets a
+    // Video payload (the guard now checks repos).
+    let mut distilled = crate::fallback_distilled(ID, "test", "transcript", None);
+    assert!(distilled.kind_specific.is_none());
+    let metadata = VideoMetadata {
+        channel: None,
+        duration_seconds: None,
+        published_at: None,
+        repos: vec!["owner/repo".to_string()],
+    };
+    attach_payload(&mut distilled, Some(&metadata));
+    let Some(KindPayload::Video(payload)) = distilled.kind_specific else {
+        panic!("expected Video payload for repos-only metadata");
+    };
+    assert_eq!(payload.repos, vec!["owner/repo".to_string()]);
+    assert!(payload.channel.is_none());
+}
+
+#[test]
+fn attach_payload_skips_when_all_fields_empty() {
+    let mut distilled = crate::fallback_distilled(ID, "test", "transcript", None);
+    let metadata = VideoMetadata::default();
+    attach_payload(&mut distilled, Some(&metadata));
+    assert!(distilled.kind_specific.is_none());
+}
+
+#[test]
 fn parse_anchor_seconds_handles_hhmmss() {
     assert_eq!(parse_anchor_seconds("00:00:05"), Some(5));
     assert_eq!(parse_anchor_seconds("01:02:03"), Some(3723));
