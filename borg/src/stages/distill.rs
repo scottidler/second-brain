@@ -569,7 +569,11 @@ pub async fn distill_for_publish_video(
             );
         }
     };
-    let video_metadata = video_metadata_from_yt_dlp(&metadata);
+    let mut video_metadata = video_metadata_from_yt_dlp(&metadata);
+    // Harvest owner/repo slugs from the description here, at the seam where
+    // `metadata.description` is in scope - keeping video_metadata_from_yt_dlp a
+    // pure yt-dlp field mapper (see borg::github::extract_repo_slugs).
+    video_metadata.repos = crate::github::extract_repo_slugs(&metadata.description);
     let transcript = match subs_result {
         Ok(Some(vtt)) => {
             let segments = crate::youtube::parse_vtt_segments(&vtt);

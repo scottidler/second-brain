@@ -443,7 +443,7 @@ fn attach_payload(distilled: &mut Distilled, metadata: Option<&VideoMetadata>) {
     let Some(m) = metadata else {
         return;
     };
-    if m.channel.is_none() && m.duration_seconds.is_none() && m.published_at.is_none() {
+    if m.channel.is_none() && m.duration_seconds.is_none() && m.published_at.is_none() && m.repos.is_empty() {
         return;
     }
     distilled.kind_specific = Some(KindPayload::Video(VideoPayload {

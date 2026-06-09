@@ -89,6 +89,12 @@ pub fn render(distilled: &Distilled) -> RenderedDistilled {
                     serde_yaml::Value::String(published.clone()),
                 );
             }
+            if !p.repos.is_empty() {
+                fm.insert(
+                    "github".to_string(),
+                    serde_yaml::Value::Sequence(p.repos.iter().cloned().map(serde_yaml::Value::String).collect()),
+                );
+            }
         }
         Some(KindPayload::Thread(p)) => {
             fm.insert(
