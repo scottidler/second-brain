@@ -24,4 +24,4 @@ This file is regenerated weekly by `cortex sweep --cold`. Do not edit manually; 
 
 ---
 
-See also: [[borg-dashboard]] for vault activity overview.
+See also: [[borg-ledger]] for vault ingest activity.

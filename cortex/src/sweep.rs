@@ -422,10 +422,12 @@ pub fn render_cold_report_at(
         }
     }
 
-    // Footer cross-references the dashboard view so a reviewer can hop
-    // back to the broader vault overview after triaging.
+    // Footer cross-references the live ingest-activity view so a reviewer can
+    // hop to the broader vault overview after triaging. The old
+    // `borg-dashboard` markdown was retired; the current view is the
+    // live-updating `borg-ledger.base`.
     out.push_str("---\n\n");
-    out.push_str("See also: [[borg-dashboard]] for vault activity overview.\n");
+    out.push_str("See also: [[borg-ledger]] for vault ingest activity.\n");
 
     out
 }

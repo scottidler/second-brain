@@ -263,21 +263,20 @@ pub async fn process_content(
         }
     };
     result.trace_id = Some(trace_id.clone());
-    // Dual-write: mirror the terminal outcome into the receipts DB. The
-    // markdown ledger still receives its own row in the inner stage; this
-    // is the single chokepoint where the receipts row is closed out so
-    // every successful path lands a `succeeded` row and every failure path
-    // lands a `failed` row with at least a coarse stage classification.
-    // Inner stages will refine stage classification in a follow-up; the
-    // dual-write window keeps the markdown DLQ as the rich-reason source
-    // of truth until that lands.
+    // Close out the receipts row. This is the single chokepoint where the
+    // terminal outcome lands: every successful path writes a `succeeded` row
+    // and every failure path writes a `failed` row with its stage. The
+    // receipts DB is the sole authoritative ingest-state store; the legacy
+    // markdown DLQ was removed (see
+    // docs/design/2026-06-03-receipts-log-legacy-markdown-excision.md).
     record_terminal_to_receipts(&trace_id, &result);
     result
 }
 
 /// Convert an `IngestResult` into the matching receipts UPDATE. Best-effort:
-/// errors are logged but do NOT propagate; the markdown ledger / DLQ still
-/// holds authoritative state during the Phase-2 dual-write window.
+/// errors are logged but do NOT propagate - a terminal-write failure must not
+/// mask the pipeline result the caller already produced. The receipts DB is
+/// the authoritative state store; there is no longer a markdown DLQ behind it.
 fn record_terminal_to_receipts(trace_id: &str, result: &IngestResult) {
     let conn = match receipts::open_default() {
         Ok(c) => c,
