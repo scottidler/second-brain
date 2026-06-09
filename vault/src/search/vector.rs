@@ -16,7 +16,7 @@
 //! storage and API shapes here do not need to change for that work.
 
 use eyre::Result;
-use rusqlite::params;
+use rusqlite::{TransactionBehavior, params};
 
 use super::SearchIndex;
 use crate::schema::NoteType;
@@ -359,8 +359,12 @@ impl SearchIndex {
     /// so a 64-row batch comfortably runs under 200 ms even on slow
     /// disks. Phase A5's regression test asserts the budget.
     pub fn upsert_embeddings_batch(&mut self, items: &[BatchUpsert<'_>]) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute_batch("BEGIN IMMEDIATE;").ok();
+        // BEGIN IMMEDIATE: acquire the write lock at transaction start, not at
+        // first write. transaction_with_behavior issues the IMMEDIATE itself
+        // and propagates any failure, unlike the old deferred transaction +
+        // swallowed `execute_batch("BEGIN IMMEDIATE").ok()` (which never took
+        // the lock up front and hid a SQL error).
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for item in items {
             let bytes = encode_embedding_bytes(item.embedding);
             tx.execute(
@@ -401,8 +405,10 @@ impl SearchIndex {
         model_version: &str,
         source_modified_at: i64,
     ) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute_batch("BEGIN IMMEDIATE;").ok();
+        // BEGIN IMMEDIATE: take the write lock at transaction start. See
+        // upsert_embeddings_batch for why the deferred + swallowed-BEGIN form
+        // this replaced was wrong.
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "DELETE FROM note_embeddings
              WHERE note_path = ?1 AND kind = ?2",
