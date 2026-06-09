@@ -228,3 +228,17 @@ found three more - all addressed:
 The loop is converging: round 1 found a class of truncations; round 2 found one
 more byte-offset bug and edge guards. A third review would be expected to come
 back clean.
+
+### Third-round audit (Codex confirmation)
+
+Codex confirmed all round-2 fixes landed (`cargo check --workspace --features
+vec` passes) and found two final, narrower items - both fixed:
+- **`borg/src/replay.rs::parse_duration`** - `s.split_at(s.len() - 1)` panicked
+  when the last char was multi-byte (a malformed `--since 5é`), before the unit
+  check could reject it. Now splits at the last char boundary via
+  `char_indices().next_back()`. + regression test.
+- **`borg/src/routes.rs`** - one stale "no ledger / DLQ resolution" comment
+  (sibling of the one already fixed) reworded to the receipts `crashed` model.
+
+Convergence: round 1 found a class of truncations, round 2 one byte-offset bug +
+guards, round 3 one `split_at` + one comment. The class is now swept.

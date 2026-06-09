@@ -28,7 +28,12 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     if s.is_empty() {
         bail!("empty duration");
     }
-    let (num_part, unit_part) = s.split_at(s.len().saturating_sub(1));
+    // Split off the trailing unit character at a char boundary; the unit is
+    // always the last char. `split_at(len - 1)` panicked when the last char
+    // was multi-byte (e.g. a malformed "5é"), before the unit check could
+    // reject it.
+    let split = s.char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+    let (num_part, unit_part) = s.split_at(split);
     let num: i64 = num_part
         .parse()
         .with_context(|| format!("invalid duration number: {s}"))?;

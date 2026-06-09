@@ -115,9 +115,9 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
     // within milliseconds so the client's connection slot frees up. This
     // also protects the pipeline from being cancelled if the client gives
     // up - the previous synchronous-await pattern dropped the pipeline
-    // future the moment Firefox recycled its service worker, leaving an
-    // intake row with no ledger / DLQ resolution until the watchdog
-    // caught it 31 minutes later.
+    // future the moment Firefox recycled its service worker, leaving the
+    // receipts row stuck in `received` with no terminal resolution until the
+    // watchdog promoted it to `crashed` 31 minutes later.
     //
     // Per Design Invariant 1 the processing notifications also run inside
     // the spawn so notification-channel latency cannot couple to the HTTP

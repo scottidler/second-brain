@@ -30,6 +30,14 @@ fn parse_duration_rejects_bare_number() {
 }
 
 #[test]
+fn parse_duration_rejects_multibyte_unit_without_panic() {
+    // A malformed duration whose last char is multi-byte must error, not panic
+    // (the old `split_at(len - 1)` split mid-codepoint).
+    assert!(parse_duration("5é").is_err());
+    assert!(parse_duration("30°").is_err());
+}
+
+#[test]
 fn parse_duration_rejects_empty() {
     assert!(parse_duration("").is_err());
 }
