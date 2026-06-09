@@ -815,6 +815,55 @@ fn make_dated_pinned_note(path: &str, date: &str, pinned: Option<bool>, body: &s
     }
 }
 
+/// A dated note with an explicit `type:` (for the daily/journal exclusion).
+fn make_typed_dated_note(path: &str, date: &str, note_type: &str, body: &str) -> Note {
+    use crate::frontmatter::Frontmatter;
+    use std::path::PathBuf;
+    let fm = Frontmatter {
+        title: Some(format!("title for {path}")),
+        date: Some(date.to_string()),
+        note_type: Some(note_type.to_string()),
+        origin: Some("authored".to_string()),
+        ..Frontmatter::default()
+    };
+    Note {
+        path: PathBuf::from(path),
+        frontmatter: fm,
+        body: body.to_string(),
+        raw: format!("---\n---\n{body}"),
+    }
+}
+
+#[test]
+fn cold_notes_excludes_daily_and_journal_notes() {
+    let index = SearchIndex::open_memory().expect("open");
+    // Old, zero-signal knowledge note in notes/ -> surfaces.
+    index
+        .index_one(
+            &make_dated_note("notes/knowledge.md", "2023-01-01", "## Summary\n\nK.\n"),
+            1_000,
+        )
+        .expect("k");
+    // type: daily, even outside journal/ -> excluded by type.
+    index
+        .index_one(
+            &make_typed_dated_note("notes/some-daily.md", "2023-01-01", "daily", "## Summary\n\nD.\n"),
+            1_000,
+        )
+        .expect("d");
+    // journal/ subtree -> excluded by path even without an explicit daily type.
+    index
+        .index_one(
+            &make_dated_note("journal/2023/01/2023-01-02.md", "2023-01-01", "## Summary\n\nJ.\n"),
+            1_000,
+        )
+        .expect("j");
+
+    let rows = index.cold_notes(&cold_query("2025-01-01")).expect("cold");
+    let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(paths, vec!["notes/knowledge.md"]);
+}
+
 #[test]
 fn cold_notes_returns_only_floor_satisfying_rows() {
     let index = SearchIndex::open_memory().expect("open");
