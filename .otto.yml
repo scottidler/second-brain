@@ -3,17 +3,15 @@ otto:
   tasks: [ci]
   envs:
     VERSION: "$(git describe --tags --always --dirty 2>/dev/null || echo 'dev')"
-    # Temporary bump: borg/src/pipeline.rs has grown past 3100 lines as Phase 2
-    # of docs/design/2026-04-19-staged-ingestion-pipeline.md wires Stage-0 hooks
-    # into process_content / process_article_*, plus frame-aware YouTube
-    # ingestion (try_extract_slides + slide publish/cleanup wiring) from
-    # docs/design/2026-04-29-frame-aware-youtube-ingestion.md. As of Phase 9
-    # (docs/design/2026-05-16-extractor-contract-l2-phase-9-cleanup.md) the
-    # Idea/Vocab cutovers add distiller-dispatch + render + frontmatter-
-    # additions blocks (9c-image and 9c-voicenote add more on the image/audio
-    # processors). vault/src/search.rs is 1622. Drop back to 1500 once
-    # pipeline.rs is decomposed into stages/*.rs and search.rs is split.
-    BLOAT_MAX_LINES: "3600"
+    # The 1500-line-per-file rule (rules/rust.md), enforced with no override.
+    # The temporary 3600 bump was removed after the module decomposition in
+    # docs/design/2026-06-09-codebase-review-remediation.md (Phase 9): pipeline.rs
+    # (3562 -> pipeline/{tags,handlers,text,publish,tests}.rs), search.rs (2004 ->
+    # search/{schema,index,query,cold,stats}.rs), plus extracting inline test
+    # modules (borg lib.rs/pipeline.rs, vault search/tests, oracle server/tests).
+    # Every .rs file is now under 1500; if one exceeds it, decompose - do not
+    # raise this number.
+    BLOAT_MAX_LINES: "1500"
 
 tasks:
   lint:
