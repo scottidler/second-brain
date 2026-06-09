@@ -223,6 +223,7 @@ pub async fn process_content(
             status: IngestStatus::Failed { reason },
             trace_id: Some(trace_id),
             method: Some(method),
+            failure_stage: Some(FailureStage::IntakeRejected),
             ..Default::default()
         };
     }
@@ -293,7 +294,9 @@ fn record_terminal_to_receipts(trace_id: &str, result: &IngestResult) {
             }
         }
         IngestStatus::Failed { reason } => {
-            let stage = classify_terminal_failure(reason);
+            // Typed stage carried on the result, classified at the failure
+            // site. No substring matching on the free-form reason.
+            let stage = terminal_failure_stage(result);
             if let Err(e) = receipts::mark_failed(&conn, trace_id, stage, reason) {
                 log::error!("receipts: mark_failed trace={trace_id} failed: {e:#}");
             }
@@ -306,23 +309,12 @@ fn record_terminal_to_receipts(trace_id: &str, result: &IngestResult) {
     }
 }
 
-/// Pick a coarse `FailureStage` from a free-form reason. Refined per-site
-/// classification is the typed-PipelineError refactor planned as the
-/// follow-up to Phase 2; until then this catch-all keeps the receipts row's
-/// `failure_stage` column non-null.
-fn classify_terminal_failure(reason: &str) -> FailureStage {
-    let lower = reason.to_lowercase();
-    if lower == "timeout" || lower.contains("timed out") {
-        FailureStage::PipelineTimedOut
-    } else if lower.contains("quality") || lower.contains("blocked") {
-        FailureStage::QualityBlocked
-    } else if lower.contains("write_atomic") || lower.contains("publish") {
-        FailureStage::PublishFailed
-    } else if lower.contains("classify") {
-        FailureStage::ClassifyFailed
-    } else {
-        FailureStage::FetchFailed
-    }
+/// The receipts `FailureStage` for a terminal `Failed` result. Reads the typed
+/// `failure_stage` classified at the failure site; a failure whose site did
+/// not classify itself defaults to `FetchFailed`. This replaced the old
+/// substring match on free-form reason text.
+fn terminal_failure_stage(result: &IngestResult) -> FailureStage {
+    result.failure_stage.unwrap_or(FailureStage::FetchFailed)
 }
 
 pub async fn process_url(
@@ -341,10 +333,11 @@ pub async fn process_url(
     )
     .await;
 
-    let make_failure = |reason: String, elapsed: std::time::Duration| -> IngestResult {
+    let make_failure = |reason: String, stage: FailureStage, elapsed: std::time::Duration| -> IngestResult {
         // Failures live in the receipts log only; the markdown ledger is
         // success-only as of Phase 4. The receipts row is closed out in
-        // process_content's terminal write at the chokepoint.
+        // process_content's terminal write at the chokepoint, reading the
+        // typed `failure_stage` set here.
         let canonical = hygiene::normalize_url(url, &config.canonicalization.rules).unwrap_or_else(|_| url.to_string());
         IngestResult {
             status: IngestStatus::Failed { reason },
@@ -356,6 +349,7 @@ pub async fn process_url(
             canonical_url: Some(canonical),
             trace_id: None,
             obsidian_url: None,
+            failure_stage: Some(stage),
         }
     };
 
@@ -370,8 +364,11 @@ pub async fn process_url(
             let elapsed = start.elapsed();
             log::error!("[{trace_id}] Pipeline failed for {url} in {elapsed:.2?}: {e:?}");
             // Inflight guard is held inside the inner future; Drop ran when
-            // the future returned Err and went out of scope.
-            make_failure(format!("{:#}", e), elapsed)
+            // the future returned Err and went out of scope. A bubbled-up
+            // eyre error carries no stage, so it classifies as FetchFailed;
+            // classify / quality / publish failures are returned as typed
+            // Failed results inside process_url_inner and never reach here.
+            make_failure(format!("{:#}", e), FailureStage::FetchFailed, elapsed)
         }
         Err(_elapsed) => {
             let elapsed = start.elapsed();
@@ -381,7 +378,7 @@ pub async fn process_url(
             );
             // Same: when timeout fires, the inner future is dropped and the
             // InflightGuard's Drop releases the entry automatically.
-            make_failure("timeout".to_string(), elapsed)
+            make_failure("timeout".to_string(), FailureStage::PipelineTimedOut, elapsed)
         }
     }
 }
@@ -501,7 +498,22 @@ async fn process_url_inner(
         );
     }
 
-    let url_match = router::classify_url(&canonical, &config.links)?;
+    let url_match = match router::classify_url(&canonical, &config.links) {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("[{trace_id}] URL classification failed: {e:#}");
+            return Ok(IngestResult {
+                status: IngestStatus::Failed {
+                    reason: format!("{e:#}"),
+                },
+                method: Some(method),
+                canonical_url: Some(canonical.clone()),
+                trace_id: Some(trace_id.to_string()),
+                failure_stage: Some(FailureStage::ClassifyFailed),
+                ..Default::default()
+            });
+        }
+    };
     log::debug!(
         "URL classified as: {} (cleaned: {})",
         url_match.link_name,
@@ -622,7 +634,17 @@ async fn process_url_inner(
     // an auth-wall indicator; using `scraped_title` here keeps the gate
     // honest about what the fetcher saw.
     if let Some(reason) = crate::quality::detect_blocked_content(&distilled.summary, &scraped_title) {
-        eyre::bail!("Content quality check failed: {reason}");
+        log::warn!("[{trace_id}] quality gate blocked content: {reason}");
+        return Ok(IngestResult {
+            status: IngestStatus::Failed {
+                reason: format!("Content quality check failed: {reason}"),
+            },
+            method: Some(method),
+            canonical_url: Some(canonical.clone()),
+            trace_id: Some(trace_id.to_string()),
+            failure_stage: Some(FailureStage::QualityBlocked),
+            ..Default::default()
+        });
     }
 
     let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
@@ -743,7 +765,19 @@ async fn process_url_inner(
     let log_timestamp = now.format("%Y-%m-%dT%H:%M:%S%:z").to_string();
     final_str = apply_ingested_date(&final_str, &log_timestamp);
     log::debug!("[{trace_id}] Set ingested: {log_timestamp}");
-    write_atomic(&note_path, final_str.as_bytes()).context("Failed to atomically publish note")?;
+    if let Err(e) = write_atomic(&note_path, final_str.as_bytes()) {
+        log::error!("[{trace_id}] atomic publish failed: {e:#}");
+        return Ok(IngestResult {
+            status: IngestStatus::Failed {
+                reason: format!("Failed to atomically publish note: {e:#}"),
+            },
+            method: Some(method),
+            canonical_url: Some(canonical.clone()),
+            trace_id: Some(trace_id.to_string()),
+            failure_stage: Some(FailureStage::PublishFailed),
+            ..Default::default()
+        });
+    }
 
     // The new note exists at note_path. If we were replacing an old note at
     // a different path (rare - happens when the dir heuristic resolves the
@@ -810,6 +844,7 @@ async fn process_url_inner(
         canonical_url: Some(canonical),
         trace_id: None,
         obsidian_url,
+        failure_stage: None,
     })
 }
 
@@ -1391,6 +1426,7 @@ async fn process_image_inner(
         canonical_url: None,
         trace_id: None,
         obsidian_url,
+        failure_stage: None,
     })
 }
 
@@ -1626,6 +1662,7 @@ async fn process_audio_inner(
         canonical_url: None,
         trace_id: None,
         obsidian_url,
+        failure_stage: None,
     })
 }
 
@@ -1874,6 +1911,7 @@ async fn process_document_file_inner(
         canonical_url: None,
         trace_id: None,
         obsidian_url,
+        failure_stage: None,
     })
 }
 
@@ -2076,6 +2114,7 @@ async fn process_text_inner(
         canonical_url: None,
         trace_id: None,
         obsidian_url,
+        failure_stage: None,
     })
 }
 
@@ -2247,6 +2286,7 @@ async fn process_vocab(
         canonical_url: None,
         trace_id: None,
         obsidian_url,
+        failure_stage: None,
     })
 }
 
@@ -2648,6 +2688,7 @@ async fn process_code_snippet(
         canonical_url: None,
         trace_id: None,
         obsidian_url,
+        failure_stage: None,
     })
 }
 
@@ -2781,6 +2822,38 @@ fn read_cortex_fields(path: &std::path::Path) -> Vec<(String, String)> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn failed_result(stage: Option<FailureStage>) -> IngestResult {
+        IngestResult {
+            status: IngestStatus::Failed {
+                reason: "x".to_string(),
+            },
+            failure_stage: stage,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn terminal_failure_stage_reads_typed_field() {
+        // Every stage a failure site can set round-trips unchanged - no
+        // substring matching, no reclassification.
+        for stage in [
+            FailureStage::IntakeRejected,
+            FailureStage::ClassifyFailed,
+            FailureStage::FetchFailed,
+            FailureStage::QualityBlocked,
+            FailureStage::PipelineTimedOut,
+            FailureStage::PublishFailed,
+            FailureStage::Crashed,
+        ] {
+            assert_eq!(terminal_failure_stage(&failed_result(Some(stage))), stage);
+        }
+    }
+
+    #[test]
+    fn terminal_failure_stage_defaults_to_fetch_failed_when_unset() {
+        assert_eq!(terminal_failure_stage(&failed_result(None)), FailureStage::FetchFailed);
+    }
 
     #[test]
     fn test_detect_text_pattern_define() {

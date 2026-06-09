@@ -300,6 +300,14 @@ pub struct IngestResult {
     pub trace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obsidian_url: Option<String>,
+    /// Typed failure classification for a `Failed` result, set at the point
+    /// the failure occurs (intake reject, classify, fetch, quality gate,
+    /// publish, timeout). The terminal receipts write reads this directly
+    /// instead of substring-matching the free-form `reason`. `None` on a
+    /// non-failure result, or a failure whose site did not classify it (the
+    /// terminal write then defaults to `FetchFailed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<vault::receipts::FailureStage>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

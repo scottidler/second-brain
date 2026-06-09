@@ -18,7 +18,8 @@ use eyre::{Result, eyre};
 /// Replaces the older `DlqStage` enum from `vault::dlq`. The variant set is
 /// identical except `WatchdogOrphan` is renamed `Crashed` to match the
 /// receipts schema's `failure_stage` column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum FailureStage {
     /// Filtered or rejected at the intake door (disallowed chat, unsupported
     /// media, bad payload).
