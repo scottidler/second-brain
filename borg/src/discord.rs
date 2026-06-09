@@ -255,11 +255,7 @@ impl EventHandler for Handler {
         let (content, display_source) = if let Some(url) = extract_url_from_text(&msg.content) {
             (ContentKind::Url(url.clone()), url)
         } else {
-            let display = if msg.content.len() > 50 {
-                format!("{}...", &msg.content[..50])
-            } else {
-                msg.content.clone()
-            };
+            let display = vault::text::truncate_with_ellipsis(&msg.content, 50);
             (ContentKind::Text(msg.content.clone()), display)
         };
 

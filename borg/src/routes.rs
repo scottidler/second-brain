@@ -130,11 +130,7 @@ pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest
     log::info!("Received note request: {} chars", request.text.len());
 
     let trace_id = trace::generate(IngestMethod::Http);
-    let display = if request.text.len() > 50 {
-        format!("{}...", &request.text[..50])
-    } else {
-        request.text.clone()
-    };
+    let display = vault::text::truncate_with_ellipsis(&request.text, 50);
 
     if let Err(e) = intake_log::record_received_with_sidecar(
         &state.config,

@@ -675,7 +675,7 @@ async fn build_dispatch_payload(
 }
 
 fn display_for_text(text: &str) -> String {
-    if text.len() > 50 { format!("{}...", &text[..50]) } else { text.to_string() }
+    vault::text::truncate_with_ellipsis(text, 50)
 }
 
 fn display_for_attachment(content: &ContentKind, filename: &str) -> String {

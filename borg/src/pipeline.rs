@@ -1796,20 +1796,12 @@ async fn process_document_file_inner(
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Fabric summarize failed: {e:#}");
-                if extracted_text.len() > 500 {
-                    extracted_text[..500].to_string()
-                } else {
-                    extracted_text.clone()
-                }
+                vault::text::truncate(&extracted_text, 500).to_string()
             }
         }
     } else if !extracted_text.is_empty() {
         // No fabric - use a truncated extract
-        if extracted_text.len() > 1000 {
-            format!("{}...", &extracted_text[..1000])
-        } else {
-            extracted_text.clone()
-        }
+        vault::text::truncate_with_ellipsis(&extracted_text, 1000)
     } else {
         String::new()
     };
@@ -2059,10 +2051,7 @@ async fn process_text_inner(
 
     // Log to ledger
     let ledger_file = ledger::ledger_path()?;
-    let source_display = format!(
-        "[text: {}]",
-        if text.len() > 50 { format!("{}...", &text[..50]) } else { text.to_string() }
-    );
+    let source_display = format!("[text: {}]", vault::text::truncate_with_ellipsis(text, 50));
     ledger::append_entry(
         &ledger_file,
         &LedgerEntry {
@@ -2286,8 +2275,8 @@ async fn generate_text_title(text: &str, use_fabric: bool, config: &Config) -> S
     }
 
     // Fallback: truncate first line
-    if first_line.len() > 80 {
-        format!("{}...", &first_line[..77])
+    if first_line.chars().count() > 80 {
+        vault::text::truncate_with_ellipsis(first_line, 77)
     } else {
         "Quick Note".to_string()
     }

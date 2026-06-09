@@ -542,7 +542,7 @@ pub async fn run(
                     (ContentKind::Url(url.clone()), url)
                 } else {
                     log::info!("Telegram: processing text from chat {} (trace={trace_id})", chat_id);
-                    let display = if text.len() > 50 { format!("{}...", &text[..50]) } else { text.to_string() };
+                    let display = vault::text::truncate_with_ellipsis(text, 50);
                     (ContentKind::Text(text.to_string()), display)
                 };
 

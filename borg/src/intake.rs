@@ -46,7 +46,7 @@ pub fn vault_root(config: &Config) -> Result<PathBuf> {
 /// Truncate `s` to 80 characters (preview budget), appending `...` if cut.
 pub fn preview_text(s: &str) -> String {
     let one_line = s.replace(['\n', '\r'], " ");
-    if one_line.len() <= 80 { one_line } else { format!("{}...", &one_line[..80]) }
+    vault::text::truncate_with_ellipsis(&one_line, 80)
 }
 
 /// Build a structured descriptor for a binary input. Used as the preview

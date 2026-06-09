@@ -585,11 +585,7 @@ fn print_receipt_detail(r: &borg::receipts::Receipt) {
     if let Some(rep) = &r.replay_of {
         println!("replay_of:      {rep}");
     }
-    let preview = if r.raw_input.len() > 200 {
-        format!("{}...", &r.raw_input[..200])
-    } else {
-        r.raw_input.clone()
-    };
+    let preview = vault::text::truncate_with_ellipsis(&r.raw_input, 200);
     println!("raw_input:      {preview}");
 }
 

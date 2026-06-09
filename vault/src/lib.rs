@@ -21,6 +21,7 @@ pub mod schema;
 #[cfg(feature = "search")]
 pub mod search;
 pub mod table;
+pub mod text;
 pub mod trace;
 #[cfg(feature = "watcher")]
 pub mod watcher;

@@ -209,7 +209,7 @@ pub async fn run(
                     let cfg = config.clone();
                     let tg = telegram.clone();
                     let desk = desktop.clone();
-                    let display = if text.len() > 50 { format!("{}...", &text[..50]) } else { text.clone() };
+                    let display = vault::text::truncate_with_ellipsis(&text, 50);
                     let trace_for_spawn = trace_id.clone();
                     tokio::spawn(async move {
                         let prior = if let Some(d) = &desk {
