@@ -796,6 +796,15 @@ pub fn is_local_host(host: &Option<String>) -> bool {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// Optional auth token for the HTTP write routes (`/ingest`,
+    /// `/ingest/file`, `/note`). This holds a **secret reference** - an
+    /// env-var name or a file path - NOT a literal token, mirroring
+    /// `telegram.bot-token` and `ntfy.token`. It is resolved at startup via
+    /// `vault::config::resolve_secret`. When set, write routes require a
+    /// matching `Authorization: Bearer <token>` header. When `None` (the
+    /// default), the routes are unauthenticated and behavior is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -877,6 +886,7 @@ impl Default for ServerConfig {
         Self {
             host: "0.0.0.0".to_string(),
             port: 8181,
+            auth_token: None,
         }
     }
 }
@@ -1226,6 +1236,26 @@ telegram:
         let config: Config = serde_yaml::from_str(yaml).expect("should parse");
         let tg = config.telegram.expect("telegram should be Some");
         assert!(tg.allowed_chat_ids.is_empty());
+    }
+
+    #[test]
+    fn test_server_auth_token_parses_as_reference() {
+        let yaml = r#"
+server:
+  host: "0.0.0.0"
+  port: 8181
+  auth-token: BORG_AUTH_TOKEN
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+        // The field holds the secret *reference* (env-var name / file path),
+        // not a literal token; resolution happens at startup.
+        assert_eq!(config.server.auth_token, Some("BORG_AUTH_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn test_server_auth_token_defaults_none() {
+        let config = Config::default();
+        assert_eq!(config.server.auth_token, None);
     }
 
     #[test]

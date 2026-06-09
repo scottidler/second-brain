@@ -3,8 +3,20 @@
 # Fields use kebab-case; the Rust struct (borg::config::Config) translates to snake_case via serde.
 
 server:
+  # Default bind is 0.0.0.0 to preserve the LAN ingest path (e.g. the laptop's
+  # Firefox extension POSTing to desk.lan:8181). On an exposed network the
+  # write routes (/ingest, /ingest/file, /note) are reachable by anyone who can
+  # reach this port unless you set auth-token below; /health* stays open.
   host: "0.0.0.0"
   port: 8181
+  # Optional bearer-token auth for the write routes. Like telegram.bot-token,
+  # this is a secret REFERENCE - an env-var name or a file path - resolved at
+  # startup, NOT a literal token. When set, requests must carry
+  # `Authorization: Bearer <resolved-token>`; configure the same token in the
+  # Firefox extension options. When unset, the routes are unauthenticated
+  # (backward compatible). On a non-loopback bind with no token, the daemon
+  # logs a WARN at startup naming the exposure.
+  # auth-token: BORG_AUTH_TOKEN
 
 vault:
   # Set root-path to your Obsidian vault, or leave it commented out and

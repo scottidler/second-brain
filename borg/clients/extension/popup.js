@@ -17,9 +17,12 @@
 //   3. No scheme filter - guard only on `!tab.url`, forward any scheme
 //      (including file://) to the daemon.
 
-async function getEndpoint() {
-  const data = await chrome.storage.local.get("endpoint");
-  return data.endpoint || "http://localhost:8181";
+async function getConfig() {
+  const data = await chrome.storage.local.get(["endpoint", "authToken"]);
+  return {
+    endpoint: data.endpoint || "http://localhost:8181",
+    authToken: data.authToken || "",
+  };
 }
 
 function fail(status, message) {
@@ -37,15 +40,19 @@ function fail(status, message) {
 async function capture() {
   const status = document.getElementById("status");
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.url) {                  // mirror background.js guard; do NOT filter by scheme
+  if (!tab || !tab.url) {                  // guard only on missing URL; do NOT filter by scheme
     status.textContent = "No active tab URL";
     return;
   }
-  const endpoint = await getEndpoint();
+  const { endpoint, authToken } = await getConfig();
+  const headers = { "Content-Type": "application/json" };
+  if (authToken) {                         // optional Bearer; daemon requires it only when configured
+    headers["Authorization"] = `Bearer ${authToken}`;
+  }
   try {
     const res = await fetch(`${endpoint}/ingest`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ url: tab.url }),
     });                                    // NO keepalive - see requirement 1 above
     if (!res.ok) {                         // fetch does not reject on 4xx/5xx

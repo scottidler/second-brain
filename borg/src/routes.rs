@@ -1,5 +1,8 @@
 use axum::Json;
-use axum::extract::{Multipart, State};
+use axum::extract::{Multipart, Request, State};
+use axum::http::{StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 
 use serde::Deserialize;
 
@@ -16,6 +19,45 @@ use vault::receipts::FailureStage;
 pub struct NoteRequest {
     pub text: String,
     pub tags: Option<Vec<String>>,
+}
+
+/// Auth gate for the HTTP write routes (`/ingest`, `/ingest/file`, `/note`).
+///
+/// When `state.auth_token` is `Some` (a token was configured and resolved at
+/// startup), the request must carry a matching `Authorization: Bearer <token>`
+/// header; otherwise it is rejected with `401`. When `None` (the default), the
+/// request passes through unchanged - backward-compatible, unauthenticated.
+///
+/// This runs as a layer in FRONT of the write handlers, so the check executes
+/// before any intake write (`record_received_with_sidecar`). A rejected
+/// request therefore never creates a receipts row or a raw-input sidecar - a
+/// `401` is a *refused* request, not a *dropped* input, so borg's
+/// durable-capture-at-the-door invariant does not apply to it.
+pub async fn require_auth(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    log::debug!(
+        "require_auth: path={} auth_configured={}",
+        request.uri().path(),
+        state.auth_token.is_some()
+    );
+    let Some(expected) = state.auth_token.as_deref() else {
+        return next.run(request).await;
+    };
+    let authorized = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|token| token == expected)
+        .unwrap_or(false);
+    if authorized {
+        next.run(request).await
+    } else {
+        log::warn!(
+            "require_auth: rejecting unauthenticated write request to {}",
+            request.uri().path()
+        );
+        (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
+    }
 }
 
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
