@@ -876,7 +876,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             host: "0.0.0.0".to_string(),
-            port: 8080,
+            port: 8181,
         }
     }
 }
@@ -977,7 +977,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.server.host, "0.0.0.0");
-        assert_eq!(config.server.port, 8080);
+        assert_eq!(config.server.port, 8181);
         assert_eq!(config.transcriber.url, "http://localhost:8090");
         assert_eq!(config.groq.model, "whisper-large-v3");
         assert_eq!(config.llm.provider, "claude");
@@ -1168,7 +1168,7 @@ log-level: debug
         let yaml = r#"
 server:
   host: "0.0.0.0"
-  port: 8080
+  port: 8181
 "#;
         let config: Config = serde_yaml::from_str(yaml).expect("should parse");
         assert!(config.telegram.is_none());
