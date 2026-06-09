@@ -512,13 +512,6 @@ pub fn default_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Map a non-stage eyre error from a generic catch-all branch to FetchFailed
-/// by default; callers that have richer context should construct
-/// `PipelineError` directly with the right stage.
-pub fn default_catchall_stage() -> FailureStage {
-    FailureStage::FetchFailed
-}
-
 /// Convert an open Connection's path-typed error message into something the
 /// caller can attach as context. Useful for the audit verb that wants a
 /// path-aware error message without re-opening the DB.

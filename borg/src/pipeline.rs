@@ -24,7 +24,6 @@ use vault::receipts::FailureStage;
 use vault::schema::CORTEX_PRESERVE_KEYS;
 
 pub mod atomic;
-pub mod error;
 mod inflight;
 pub mod permits;
 use atomic::{apply_cortex_fields, apply_ingested_date, apply_original_date, write_atomic};
@@ -638,7 +637,7 @@ async fn process_url_inner(
     // 2026-06-05T08:27:25-07:00). Unconditional on every publish (original
     // ingest AND reingest) so views can sort/window by when borg did the work
     // rather than when the content was originally learned. The precise form
-    // lets the borg-dashboard.base sort chronologically; `date:` remains the
+    // lets the borg-ledger.base view sort chronologically; `date:` remains the
     // original content date.
     let log_timestamp = now.format("%Y-%m-%dT%H:%M:%S%:z").to_string();
     final_str = apply_ingested_date(&final_str, &log_timestamp);

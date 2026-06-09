@@ -230,6 +230,12 @@ logging:
   file: ~/logs/oracle.log
 ```
 
+> **Superseded (2026-06-09, codebase-review-remediation):** the config root moved
+> to `~/.config/sb/oracle.yml`, and the `db-path` field was **removed** - the
+> oracle DB path is now fixed at `~/.local/share/oracle/oracle.db` and owned by
+> `vault::paths::oracle_db_path()`, the single source of truth shared by oracle
+> (reader) and cortex (the embeddings writer). It is no longer configurable.
+
 Config resolution: CLI `--config` flag > `~/.config/oracle/oracle.yml` > `./oracle.yml` > built-in defaults.
 
 ### Implementation Plan

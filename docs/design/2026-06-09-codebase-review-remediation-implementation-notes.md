@@ -156,3 +156,48 @@ questions made while executing `2026-06-09-codebase-review-remediation.md`.
 
 ### Open questions
 - None.
+
+## Post-audit follow-up (Codex implementation audit, 2026-06-09)
+
+A Codex read-only audit (full-repo access, unlike the sandbox-jailed Gemini run)
+confirmed all seven invariant checks (auth-before-intake, secret-reference token,
+extension wiring, cold-note exclusion, typed failure-stage, 1500 ceiling, oracle
+db path) but surfaced two classes of real gaps the original execution missed.
+Both were fixed in the follow-up commit.
+
+### Phase 1 residual UTF-8 panic sites (the material miss)
+The original Phase 1 grep only matched numeric `[..N]` byte slices, so
+**variable-indexed** byte slices survived - the same daemon-crash class Phase 1
+was meant to eliminate "across all production truncation sites". Fixed:
+- `vault/src/fabric.rs::truncate_input` - `input[..max_chars]` behind a `.len()`
+  guard, in the live Fabric path -> routed through `vault::text::truncate`
+  (preserving the `max_chars == 0` "no limit" sentinel).
+- `borg/src/fabric.rs::{split_with_overlap, find_break_point}` - byte-arithmetic
+  chunk offsets -> snapped to `floor_char_boundary` before every slice.
+- `distillers/src/video.rs` and `distillers/src/voicenote.rs` transcript chunkers
+  - the `find_boundary` fallback returned a raw byte index -> snap with
+  `floor_char_boundary`, with a `ceil_char_boundary` guard so a single codepoint
+  wider than `target_chars` still makes progress (no infinite loop).
+- `vault/src/hygiene.rs::sanitize_filename` - `&slug[..MAX_FILENAME_LEN]` where
+  `sanitize_slug` keeps non-ASCII alphanumerics -> snapped to `floor_char_boundary`.
+  Added a regression test (`sanitize_filename_does_not_panic_on_multibyte_at_cut`).
+
+### Phase 5 residual stale references
+The doc named specific sites; these stragglers remained:
+- `vault/src/ledger.rs` - the ledger-file header template **emitted**
+  `See also: [[borg-dashboard]]` (retired) -> repointed to `[[borg-ledger]]`.
+- `borg/src/lib.rs`, `borg/src/backfill.rs`, `borg/src/pipeline.rs` - comments
+  said `borg-dashboard.base`; the live view is `borg-ledger.base` -> corrected.
+- `borg/src/pipeline/permits.rs` - stale "ledger XOR DLQ" / "orphan DLQ rows"
+  comments -> reworded to the receipts `crashed`-promotion model.
+- `docs/design/2026-03-21-oracle-mcp.md` - added a "Superseded" note that the
+  `db-path` field was removed and the path is now fixed in `vault::paths`.
+
+### Dead `PipelineError` removed
+Codex flagged `pipeline/error.rs` and `receipts.rs::default_catchall_stage` as
+contradictions (their comments claimed `PipelineError` was the active classifier;
+Phase 6 had replaced it with `IngestResult.failure_stage`). Both were entirely
+unused. Rather than correct lying comments on dead code, the dead `PipelineError`
+module (`borg/src/pipeline/error.rs` + its tests) and `default_catchall_stage`
+were removed (rkvr-archived), per the "dead code must be removed" convention.
+This resolves the Phase 6 open question (remove vs. keep) in favour of remove.

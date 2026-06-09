@@ -26,8 +26,9 @@
 //!
 //! A process-wide [`ActiveTraceGuard`] tracks every trace currently inside
 //! `process_content` (queued for a permit OR running). The watchdog consults
-//! that set via [`is_trace_active`] before declaring an intake row an orphan,
-//! preserving the `ledger XOR DLQ` invariant from the intake-log design.
+//! that set via [`is_trace_active`] before promoting a still-`received`
+//! receipts row to `crashed`, so a trace merely waiting on a permit is not
+//! mistaken for a lost input.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -147,7 +148,8 @@ fn lock(set: &Mutex<HashSet<String>>) -> MutexGuard<'_, HashSet<String>> {
 }
 
 /// True if `trace_id` is currently inside `process_content` (queued or
-/// running). Used by `watchdog::run_once` to suppress false orphan DLQ rows.
+/// running). Used by `watchdog::run_once` to suppress false `crashed`
+/// promotions of receipts rows still legitimately in flight.
 pub fn is_trace_active(trace_id: &str) -> bool {
     lock(active_traces()).contains(trace_id)
 }

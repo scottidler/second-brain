@@ -14,8 +14,8 @@
 //!   a datetime are left untouched.
 //!
 //! Writing every value as an offset datetime keeps the `ingested` column a
-//! single type so `borg-dashboard.base` / `borg-ledger.base` sort lexically =
-//! chronologically without relying on Bases' mixed date/datetime inference.
+//! single type so `borg-ledger.base` sorts lexically = chronologically without
+//! relying on Bases' mixed date/datetime inference.
 
 use crate::config::Config;
 use crate::pipeline::atomic::{apply_ingested_date, write_atomic};

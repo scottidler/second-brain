@@ -234,7 +234,9 @@ fn split_with_overlap(text: &str, chunk_size: usize, overlap: usize) -> Vec<Stri
     let mut start = 0;
 
     while start < text.len() {
-        let end = (start + chunk_size).min(text.len());
+        // Snap the cut to a char boundary; a raw byte cut panicked when it
+        // landed inside a multi-byte codepoint.
+        let end = text.floor_char_boundary((start + chunk_size).min(text.len()));
 
         // Try to find a clean break point near the end
         let actual_end = if end < text.len() {
@@ -250,7 +252,7 @@ fn split_with_overlap(text: &str, chunk_size: usize, overlap: usize) -> Vec<Stri
         }
 
         // Next chunk starts `overlap` chars before the end of this one
-        start = actual_end.saturating_sub(overlap);
+        start = text.floor_char_boundary(actual_end.saturating_sub(overlap));
     }
 
     chunks
@@ -259,6 +261,10 @@ fn split_with_overlap(text: &str, chunk_size: usize, overlap: usize) -> Vec<Stri
 /// Find a clean break point (paragraph or sentence boundary) in the range [search_start, end].
 /// Falls back to `end` if no good break point is found.
 fn find_break_point(text: &str, search_start: usize, end: usize) -> usize {
+    // Both bounds must sit on char boundaries before slicing; callers pass
+    // byte-arithmetic offsets that may land mid-codepoint.
+    let search_start = text.floor_char_boundary(search_start);
+    let end = text.floor_char_boundary(end);
     let region = &text[search_start..end];
 
     // Prefer paragraph breaks

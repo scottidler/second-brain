@@ -116,8 +116,10 @@ pub fn sanitize_filename(title: &str) -> String {
         return slug;
     }
 
-    // Truncate to max length, breaking at a hyphen boundary if possible
-    let truncated = &slug[..MAX_FILENAME_LEN];
+    // Truncate to max length, breaking at a hyphen boundary if possible.
+    // sanitize_slug keeps non-ASCII alphanumerics, so snap to a char boundary
+    // first - a raw `&slug[..MAX_FILENAME_LEN]` byte cut panicked mid-codepoint.
+    let truncated = &slug[..slug.floor_char_boundary(MAX_FILENAME_LEN)];
     if let Some(pos) = truncated.rfind('-')
         && pos > MAX_FILENAME_LEN / 2
     {
@@ -129,6 +131,20 @@ pub fn sanitize_filename(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_filename_does_not_panic_on_multibyte_at_cut() {
+        // sanitize_slug keeps non-ASCII alphanumerics, so a long title of
+        // multi-byte chars must not panic when truncated at the byte limit.
+        let title = "ñ".repeat(200);
+        let out = sanitize_filename(&title);
+        assert!(out.chars().count() <= MAX_FILENAME_LEN);
+        assert!(out.chars().all(|c| c == 'ñ' || c == '-'));
+
+        // A cut that would land mid-codepoint at exactly MAX_FILENAME_LEN bytes.
+        let mixed = format!("{}ñ{}", "a".repeat(MAX_FILENAME_LEN - 1), "b".repeat(50));
+        let _ = sanitize_filename(&mixed); // must not panic
+    }
 
     #[test]
     fn test_normalize_domain_valid_passthrough() {

@@ -34,7 +34,7 @@ tags:
 
 All URLs ingested by obsidian-borg. This file is machine-maintained - do not edit the table manually.
 
-See also: [[borg-dashboard]]
+See also: [[borg-ledger]]
 
 | Date | Time | Method | Status | Note | Source | Domain | Trace |
 |------|------|--------|--------|------|--------|--------|-------|

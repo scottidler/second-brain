@@ -210,8 +210,8 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
         log::warn!("Failed to ensure Borg Ledger exists: {e:#}");
     }
     // borg-dashboard.md (Dataview) was retired in favour of the live-updating
-    // borg-dashboard.base; its `WHERE ingested = date(today)` queries break now
-    // that `ingested:` is a datetime. The ledger stays as the dedup datastore.
+    // borg-ledger.base view; its `WHERE ingested = date(today)` queries broke
+    // once `ingested:` became a datetime. The ledger stays as the dedup datastore.
 
     let config = Arc::new(config);
     let mut tasks = tokio::task::JoinSet::new();

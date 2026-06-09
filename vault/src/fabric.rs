@@ -124,16 +124,19 @@ pub fn extract_json(text: &str) -> String {
 }
 
 fn truncate_input(input: &str, max_chars: usize) -> String {
-    if max_chars == 0 || input.len() <= max_chars {
+    // max_chars == 0 means "no limit" here (distinct from the helper, where 0
+    // truncates to empty), so short-circuit before delegating.
+    let char_count = input.chars().count();
+    if max_chars == 0 || char_count <= max_chars {
         input.to_string()
     } else {
         log::warn!(
-            "Truncating input from {} to {} chars ({} chars lost)",
-            input.len(),
-            max_chars,
-            input.len() - max_chars
+            "Truncating input from {char_count} to {max_chars} chars ({} chars lost)",
+            char_count - max_chars
         );
-        input[..max_chars].to_string()
+        // Character-accurate, never splits a codepoint (the old `input[..max_chars]`
+        // byte slice panicked on multi-byte content straddling the cut).
+        crate::text::truncate(input, max_chars).to_string()
     }
 }
 

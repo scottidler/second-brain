@@ -371,17 +371,18 @@ pub fn chunk_transcript(transcript: &str, target_tokens: usize) -> Vec<String> {
     if target_chars == 0 || transcript.is_empty() {
         return Vec::new();
     }
-    let bytes = transcript.as_bytes();
-    let len = bytes.len();
+    let len = transcript.len();
     let mut chunks: Vec<String> = Vec::new();
     let mut start: usize = 0;
     while start < len {
-        let mut end = (start + target_chars).min(len);
-        if end < len {
-            end = find_boundary(transcript, start, end);
-        }
+        let raw_end = (start + target_chars).min(len);
+        let found = if raw_end < len { find_boundary(transcript, start, raw_end) } else { raw_end };
+        // Snap to a char boundary: find_boundary's ASCII matches are safe, but
+        // its fallback returns the raw byte index, which can split a codepoint
+        // (the old `transcript[start..end]` byte slice then panicked).
+        let mut end = transcript.floor_char_boundary(found);
         if end <= start {
-            end = (start + target_chars).min(len);
+            end = transcript.ceil_char_boundary((start + 1).min(len));
         }
         chunks.push(transcript[start..end].to_string());
         start = end;
