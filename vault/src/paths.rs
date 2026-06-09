@@ -245,6 +245,20 @@ pub fn borg_signal_bootstrap_marker() -> PathBuf {
         .join("signal-bootstrap.json")
 }
 
+/// The single source of truth for the oracle SQLite DB path. Both oracle
+/// (the reader / FTS5+vector indexer) and cortex (the sole embeddings
+/// writer) resolve here so the two crates can never desync on the file
+/// they open.
+///
+/// `~/.local/share/oracle/oracle.db` on Linux. Panics only when
+/// `dirs::data_local_dir()` returns `None` (see [`borg_signal_state_dir`]).
+pub fn oracle_db_path() -> PathBuf {
+    dirs::data_local_dir()
+        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("oracle")
+        .join("oracle.db")
+}
+
 /// Resolve the vault root with explicit precedence: CLI > config > marker-gated CWD.
 ///
 /// Returns an error rather than silently picking up an arbitrary working directory.

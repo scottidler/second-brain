@@ -26,10 +26,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Re
     log::info!("starting classify command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
 
-    let db_path = dirs::data_local_dir()
-        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
-        .join("oracle")
-        .join("oracle.db");
+    let db_path = config.oracle_db_path();
     let search_index = SearchIndex::open(&db_path).ok();
     if let Some(ref idx) = search_index
         && let Err(e) = idx.index_vault(vault_root)

@@ -1,6 +1,10 @@
 # oracle config - knowledge retrieval MCP server
 # Installed by `sb bootstrap` to ~/.config/sb/oracle.yml if absent.
 # Full schema: see oracle/src/config.rs in the second-brain workspace.
+#
+# Note: the SQLite DB path is NOT configurable here. It is fixed at
+# ~/.local/share/oracle/oracle.db and owned by vault::paths::oracle_db_path,
+# so oracle (reader) and cortex (the embeddings writer) can never desync.
 
 # Vault root. Set root-path to your Obsidian vault, or leave it commented out and
 # launch oracle from a directory containing a .obsidian/ subdirectory. With root-path

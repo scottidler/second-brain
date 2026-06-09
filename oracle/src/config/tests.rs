@@ -47,7 +47,7 @@ fn empty_config_loads_eval_best_default() {
 /// gets the full default pipeline (the field is `#[serde(default)]`).
 #[test]
 fn config_without_retrieval_block_defaults_pipeline() {
-    let yaml = "db-path: /tmp/x.db\n";
+    let yaml = "inbound-recompute-interval-secs: 600\n";
     let cfg: Config = serde_yaml::from_str(yaml).expect("loads");
     assert!(cfg.retrieval.methods.vector.enabled);
     assert!(!cfg.retrieval.methods.bm25.enabled);

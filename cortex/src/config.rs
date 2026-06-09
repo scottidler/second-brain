@@ -768,10 +768,9 @@ impl Config {
     /// Path to oracle's search database. Cortex's embed loop reads from
     /// and writes to the same DB file oracle's indexer maintains, so
     /// both processes see the same notes + embeddings on every query.
+    /// Resolved via `vault::paths::oracle_db_path` so cortex and oracle
+    /// share one source of truth and can never desync.
     pub fn oracle_db_path(&self) -> PathBuf {
-        dirs::data_local_dir()
-            .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
-            .join("oracle")
-            .join("oracle.db")
+        vault::paths::oracle_db_path()
     }
 }

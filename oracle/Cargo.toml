@@ -20,7 +20,6 @@ serde_yaml = { workspace = true }
 clap = { workspace = true }
 eyre = { workspace = true }
 dirs = { workspace = true }
-shellexpand = { workspace = true }
 chrono = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

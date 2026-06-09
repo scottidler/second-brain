@@ -12,10 +12,6 @@ pub struct Config {
     #[serde(default)]
     pub vault: VaultConfig,
 
-    /// Path to the SQLite database
-    #[serde(default = "default_db_path", rename = "db-path")]
-    pub db_path: String,
-
     /// Logging configuration
     #[serde(default)]
     pub logging: LogConfig,
@@ -401,10 +397,6 @@ fn default_ignore_dirs() -> Vec<String> {
     vec![".git".into(), ".obsidian".into(), "templates".into()]
 }
 
-fn default_db_path() -> String {
-    "~/.local/share/oracle/oracle.db".to_string()
-}
-
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -446,9 +438,12 @@ impl Config {
         vault::paths::resolve_vault_root(None, self.vault.root_path.as_deref())
     }
 
+    /// Resolve oracle's SQLite DB path via the shared source of truth in
+    /// `vault::paths`. The path is fixed and owned by `vault::paths`; it is
+    /// not configurable, so cortex (the embeddings writer) and oracle (the
+    /// reader) can never desync on the file they open.
     pub fn db_path(&self) -> PathBuf {
-        let expanded = shellexpand::tilde(&self.db_path);
-        PathBuf::from(expanded.as_ref())
+        vault::paths::oracle_db_path()
     }
 }
 
