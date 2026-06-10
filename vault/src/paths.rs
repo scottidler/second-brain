@@ -254,6 +254,21 @@ pub fn borg_signal_bootstrap_marker() -> PathBuf {
         .join("signal-bootstrap.json")
 }
 
+/// cortex's embed/graph file-lock path, under the `sb/cortex/` data
+/// namespace. The lock serializes the embed and graph passes (they share
+/// it). Lives under `sb/cortex/` like borg's data, NOT the legacy
+/// `~/.local/share/cortex/` (outside the `sb/` namespace). The lock is
+/// ephemeral, so relocating it needs no migration.
+///
+/// `~/.local/share/sb/cortex/embed.lock` on Linux. Panics only when
+/// `dirs::data_local_dir()` returns `None` (see [`borg_signal_state_dir`]).
+pub fn cortex_lock_path() -> PathBuf {
+    dirs::data_local_dir()
+        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("sb/cortex")
+        .join("embed.lock")
+}
+
 /// The single source of truth for the oracle SQLite DB path. Both oracle
 /// (the reader / FTS5+vector indexer) and cortex (the sole embeddings
 /// writer) resolve here so the two crates can never desync on the file

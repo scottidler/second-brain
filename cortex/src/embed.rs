@@ -721,10 +721,9 @@ impl std::fmt::Display for EmbedLockHeld {
 impl std::error::Error for EmbedLockHeld {}
 
 fn lock_path() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
-        .join("cortex")
-        .join("embed.lock")
+    // Under the sb/ data namespace via vault::paths (was the raw
+    // ~/.local/share/cortex/embed.lock, outside sb/).
+    vault::paths::cortex_lock_path()
 }
 
 /// RAII guard that releases the file lock on drop.

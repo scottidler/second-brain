@@ -26,13 +26,12 @@ pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Re
     log::info!("starting classify command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
 
+    // Open the oracle index READ-ONLY for Tier-2 similar-note context. We do
+    // NOT call `index_vault` here: cortex must never write oracle's `notes`
+    // table (one-way data flow; oracle's VaultWatcher owns index refresh).
+    // Writing it made cortex+oracle concurrent cross-process writers.
     let db_path = config.oracle_db_path();
     let search_index = SearchIndex::open(&db_path).ok();
-    if let Some(ref idx) = search_index
-        && let Err(e) = idx.index_vault(vault_root)
-    {
-        log::warn!("failed to refresh search index: {e}");
-    }
     let search_ref = search_index.as_ref();
 
     if opts.apply {
@@ -73,7 +72,11 @@ impl Default for ClassifyConfig {
     fn default() -> Self {
         Self {
             confidence_threshold: 0.7,
-            fabric_pattern: "cortex_classify".to_string(),
+            // The installed pattern file is `obsidian-classify.md`
+            // (`resolve_pattern` appends `.md`). The old `cortex_classify`
+            // default matched no file, so Tier-2 LLM classification was
+            // silently dead on the live system.
+            fabric_pattern: "obsidian-classify".to_string(),
             fabric_timeout_secs: 30,
             max_input_tokens: 8000,
             similar_notes_limit: 5,
@@ -388,10 +391,21 @@ pub fn apply_classify(
         // Catch-up: enrich domainless notes in notes/ in place
         if already_in_notes && !is_reclassify {
             let abs_path = vault_root.join(&note.path);
-            let content = std::fs::read_to_string(&abs_path)?;
+            // Per-note errors WARN and skip rather than `?`-aborting the run
+            // (a note deleted between scan and apply is routine on Syncthing).
+            let content = match std::fs::read_to_string(&abs_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("skipping catch-up classify for {}: {e}", note.path.display());
+                    continue;
+                }
+            };
             let fields = build_enrichment_fields(&result);
-            if let Some(new_content) = insert_frontmatter_fields(&content, &fields) {
-                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
+            if let Some(new_content) = insert_frontmatter_fields(&content, &fields)
+                && let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes())
+            {
+                log::warn!("skipping catch-up classify for {}: {e}", note.path.display());
+                continue;
             }
 
             report.add(Violation {
@@ -418,10 +432,19 @@ pub fn apply_classify(
         // For reclassify: update domain in place, no file move
         if is_reclassify {
             let abs_path = vault_root.join(&note.path);
-            let content = std::fs::read_to_string(&abs_path)?;
+            let content = match std::fs::read_to_string(&abs_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("skipping reclassify for {}: {e}", note.path.display());
+                    continue;
+                }
+            };
             let fields = build_enrichment_fields(&result);
-            if let Some(new_content) = insert_frontmatter_fields(&content, &fields) {
-                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
+            if let Some(new_content) = insert_frontmatter_fields(&content, &fields)
+                && let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes())
+            {
+                log::warn!("skipping reclassify for {}: {e}", note.path.display());
+                continue;
             }
 
             report.add(Violation {
@@ -451,10 +474,19 @@ pub fn apply_classify(
         ensure_origin(&mut enrichment_fields, note);
         let enrichment_fields = enrichment_fields;
         let abs_path = vault_root.join(&note.path);
-        let content = std::fs::read_to_string(&abs_path)?;
+        let content = match std::fs::read_to_string(&abs_path) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("skipping promote for {}: {e}", note.path.display());
+                continue;
+            }
+        };
 
-        if let Some(new_content) = insert_frontmatter_fields(&content, &enrichment_fields) {
-            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
+        if let Some(new_content) = insert_frontmatter_fields(&content, &enrichment_fields)
+            && let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes())
+        {
+            log::warn!("skipping promote for {}: {e}", note.path.display());
+            continue;
         }
 
         // Move from inbox/ to notes/
@@ -468,15 +500,33 @@ pub fn apply_classify(
         let dest_abs = resolve_collision(&dest_abs, source_url);
         let dest_relative = dest_abs.strip_prefix(vault_root).unwrap_or(&dest_abs).to_path_buf();
 
-        if let Some(parent) = dest_abs.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         // copy+delete instead of rename: rename() emits MOVED_TO which Dataview
         // doesn't re-index; copy produces a CREATE event that triggers indexing.
-        std::fs::copy(&abs_path, &dest_abs)?;
-        std::fs::remove_file(&abs_path)?;
+        // Per-note errors WARN and skip rather than `?`-aborting the run.
+        let move_result = dest_abs
+            .parent()
+            .map(std::fs::create_dir_all)
+            .unwrap_or(Ok(()))
+            .and_then(|()| std::fs::copy(&abs_path, &dest_abs).map(|_| ()))
+            .and_then(|()| std::fs::remove_file(&abs_path));
+        if let Err(e) = move_result {
+            log::warn!("skipping promote move for {}: {e}", note.path.display());
+            continue;
+        }
 
-        moves.push((note.path.clone(), dest_relative.clone()));
+        // Only redirect wikilinks for a plain inbox->notes move (same stem). A
+        // suffix-collision move (foo.md -> foo-2.md) is a DIFFERENT note from
+        // the [[foo]] that other notes link to, so rewriting [[foo]] ->
+        // [[foo-2]] would point them at the wrong note.
+        if note.path.file_stem() == dest_relative.file_stem() {
+            moves.push((note.path.clone(), dest_relative.clone()));
+        } else {
+            log::info!(
+                "suffix-collision move {} -> {}: skipping wikilink rewrite",
+                note.path.display(),
+                dest_relative.display()
+            );
+        }
 
         report.add(Violation {
             path: note.path.clone(),
@@ -876,8 +926,10 @@ fn existing_note_has_source(path: &Path, source_url: &str) -> bool {
     let mut reader = std::io::BufReader::new(file);
     let n = reader.read(&mut buf).unwrap_or(0);
     let header = String::from_utf8_lossy(&buf[..n]);
-    let needle = format!("source: \"{source_url}\"");
-    header.contains(&needle)
+    // Match BOTH the quoted and unquoted frontmatter forms - notes written
+    // without quotes (`source: https://...`) were previously never recognized
+    // as reingest replacements, so they got a spurious `-2` suffix.
+    header.contains(&format!("source: \"{source_url}\"")) || header.contains(&format!("source: {source_url}"))
 }
 
 /// Update wikilinks across vault after file moves

@@ -278,7 +278,11 @@ pub fn apply_frontmatter(
 
             let abs_path = vault_root.join(&note.path);
             let new_content = format!("{new_fm}{}", note.raw);
-            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
+            // Per-note errors WARN and skip rather than `?`-aborting the run.
+            if let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes()) {
+                log::warn!("skipping frontmatter insert for {}: {e}", note.path.display());
+                continue;
+            }
             log::info!("inserted frontmatter block: {} (slug={})", note.path.display(), slug);
             fixed_count += 1;
         } else {
@@ -308,7 +312,10 @@ pub fn apply_frontmatter(
             }
 
             if modified {
-                vault::note::write_atomic(&abs_path, content.as_bytes())?;
+                if let Err(e) = vault::note::write_atomic(&abs_path, content.as_bytes()) {
+                    log::warn!("skipping frontmatter fixes for {}: {e}", note.path.display());
+                    continue;
+                }
                 log::info!("applied frontmatter fixes: {}", note.path.display());
                 fixed_count += 1;
             }

@@ -95,6 +95,7 @@ pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationC
     }
 
     let mut move_count = 0;
+    let mut applied: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     // Execute moves
     for planned in &all_moves {
@@ -103,6 +104,17 @@ pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationC
 
         if let Some(parent) = abs_to.parent() {
             std::fs::create_dir_all(parent).context(format!("failed to create directory {}", parent.display()))?;
+        }
+
+        // Never clobber: a real file at the destination (routine on a
+        // Syncthing'd vault) would be silently destroyed by `fs::rename`.
+        if abs_to.exists() {
+            log::warn!(
+                "skipping migrate {} -> {}: destination already exists (would clobber)",
+                planned.from.display(),
+                planned.to.display()
+            );
+            continue;
         }
 
         std::fs::rename(&abs_from, &abs_to).context(format!(
@@ -120,12 +132,12 @@ pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationC
         }
 
         log::info!("migrated file: {} -> {}", planned.from.display(), planned.to.display());
+        applied.push((planned.from.clone(), planned.to.clone()));
         move_count += 1;
     }
 
-    // Batch update wikilinks for all moves
-    let renames: Vec<(PathBuf, PathBuf)> = all_moves.iter().map(|m| (m.from.clone(), m.to.clone())).collect();
-    crate::naming::update_wikilinks_batch(vault_root, notes, &renames)?;
+    // Batch update wikilinks for the moves that actually landed.
+    crate::naming::update_wikilinks_batch(vault_root, notes, &applied)?;
 
     Ok(total_count + move_count)
 }

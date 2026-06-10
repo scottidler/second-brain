@@ -99,7 +99,7 @@ pub fn apply_autotag(
     all_notes: &[Note],
     config: &AutoTagConfig,
     fabric: &FabricConfig,
-) -> eyre::Result<usize> {
+) -> eyre::Result<Vec<String>> {
     log::debug!(
         "autotag::apply_autotag: vault_root={} notes={} all_notes={}",
         vault_root.display(),
@@ -108,19 +108,21 @@ pub fn apply_autotag(
     );
     let report = lint_autotag(notes, all_notes, config);
 
-    let applied_count: usize = report
+    // Real changed-path list (not just a count) for the daemon's oscillation
+    // fingerprint. Each parallel task yields the changed path or None.
+    let applied: Vec<String> = report
         .violations
         .par_iter()
-        .map(|violation| -> eyre::Result<usize> {
+        .map(|violation| -> eyre::Result<Option<String>> {
             let Some(Fix::SetCortexFields { fields }) = &violation.fix else {
-                return Ok(0);
+                return Ok(None);
             };
             let abs_path = vault_root.join(&violation.path);
             let content = std::fs::read_to_string(&abs_path)?;
 
             // Check if already set
             if content.contains("cortex-tagged:") {
-                return Ok(0);
+                return Ok(None);
             }
 
             let yaml_fields: Vec<(String, serde_yaml::Value)> = fields
@@ -131,13 +133,16 @@ pub fn apply_autotag(
             if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &yaml_fields) {
                 vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                 log::info!("wrote suggested tags: {}", violation.path.display());
-                Ok(1)
+                Ok(Some(violation.path.to_string_lossy().to_string()))
             } else {
-                Ok(0)
+                Ok(None)
             }
         })
-        .try_reduce(|| 0usize, |a, b| Ok(a + b))?;
-    let mut fixed_count = applied_count;
+        .collect::<eyre::Result<Vec<Option<String>>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut changed = applied;
 
     // If Fabric is available and a pattern is configured, enhance suggestions
     if let Some(ref pattern) = config.fabric_pattern
@@ -176,7 +181,7 @@ pub fn apply_autotag(
                         if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &fields) {
                             vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                             log::info!("wrote fabric-enhanced tags: {}", note.path.display());
-                            fixed_count += 1;
+                            changed.push(note.path.to_string_lossy().to_string());
                         }
                     }
                 }
@@ -187,7 +192,7 @@ pub fn apply_autotag(
         }
     }
 
-    Ok(fixed_count)
+    Ok(changed)
 }
 
 /// Build canonical tag set from config or auto-derive from vault.
@@ -386,8 +391,8 @@ mod tests {
         let config = default_config();
 
         let fabric = FabricConfig::default();
-        let count = apply_autotag(v.root(), &notes, &notes, &config, &fabric).expect("apply");
-        assert!(count > 0);
+        let changed = apply_autotag(v.root(), &notes, &notes, &config, &fabric).expect("apply");
+        assert!(!changed.is_empty());
 
         let content = v.read("tag-me.md");
         assert!(content.contains("cortex-suggested-tags:"));

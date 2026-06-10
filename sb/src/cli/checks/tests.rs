@@ -181,8 +181,17 @@ mod drift {
         crate::cli::bootstrap::extract_canonical_assets(false).expect("extract");
 
         let findings = pattern_findings();
-        assert_eq!(findings.len(), 1, "single Ok finding when all match");
-        assert_eq!(findings[0].severity, Severity::Ok);
+        // All findings Ok: the patterns-match Ok plus the configured classify
+        // pattern resolving (obsidian-classify.md is one of the installed
+        // patterns, so the default cortex config's classify pattern resolves).
+        assert!(
+            findings.iter().all(|f| f.severity == Severity::Ok),
+            "all findings must be Ok when patterns match and classify resolves: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.message.contains("patterns match binary")),
+            "expected the patterns-match Ok: {findings:?}"
+        );
     }
 
     #[test]

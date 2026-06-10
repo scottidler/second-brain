@@ -147,7 +147,7 @@ pub fn lint_quality(notes: &[Note], config: &QualityConfig) -> Report {
 /// `write_atomic` paths does not gate cortex writes. Error propagation uses
 /// `par_iter().try_reduce(...)` so a single write failure still aborts the apply with the same
 /// `Result<usize>` semantics as the sequential implementation.
-pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) -> eyre::Result<usize> {
+pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) -> eyre::Result<Vec<String>> {
     log::debug!(
         "quality::apply_quality: vault_root={} notes={}",
         vault_root.display(),
@@ -157,13 +157,15 @@ pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) 
 
     let flagged_paths: HashSet<&Path> = report.violations.iter().map(|v| v.path.as_path()).collect();
 
-    // Apply: write quality fields to flagged notes (parallel).
-    let applied_count: usize = report
+    // Apply: write quality fields to flagged notes (parallel). Each task yields
+    // the changed vault-relative path (or None) so callers get the real changed
+    // file list, not just a count (the daemon's oscillation fingerprint).
+    let applied: Vec<String> = report
         .violations
         .par_iter()
-        .map(|violation| -> eyre::Result<usize> {
+        .map(|violation| -> eyre::Result<Option<String>> {
             let Some(Fix::SetCortexFields { fields }) = &violation.fix else {
-                return Ok(0);
+                return Ok(None);
             };
             let abs_path = vault_root.join(&violation.path);
             let content = std::fs::read_to_string(&abs_path)?;
@@ -172,7 +174,7 @@ pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) 
                 .iter()
                 .all(|(key, val)| content.contains(&format!("{key}: {val}")));
             if already_set {
-                return Ok(0);
+                return Ok(None);
             }
 
             let yaml_fields: Vec<(String, serde_yaml::Value)> = fields
@@ -183,25 +185,28 @@ pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) 
             if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &yaml_fields) {
                 vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                 log::info!("wrote quality fields: {}", violation.path.display());
-                Ok(1)
+                Ok(Some(violation.path.to_string_lossy().to_string()))
             } else {
-                Ok(0)
+                Ok(None)
             }
         })
-        .try_reduce(|| 0usize, |a, b| Ok(a + b))?;
+        .collect::<eyre::Result<Vec<Option<String>>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     // Clear: remove quality fields from notes no longer flagged (parallel).
     let cortex_keys = vec!["cortex-quality".to_string(), "cortex-quality-issues".to_string()];
-    let cleared_count: usize = notes
+    let cleared: Vec<String> = notes
         .par_iter()
-        .map(|note| -> eyre::Result<usize> {
+        .map(|note| -> eyre::Result<Option<String>> {
             if flagged_paths.contains(note.path.as_path()) {
-                return Ok(0);
+                return Ok(None);
             }
             let has_cortex_fields = note.frontmatter.extra.contains_key("cortex-quality")
                 || note.frontmatter.extra.contains_key("cortex-quality-issues");
             if !has_cortex_fields {
-                return Ok(0);
+                return Ok(None);
             }
 
             let abs_path = vault_root.join(&note.path);
@@ -209,14 +214,19 @@ pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) 
             if let Some(new_content) = crate::scope::remove_frontmatter_fields(&content, &cortex_keys) {
                 vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                 log::info!("cleared stale quality fields: {}", note.path.display());
-                Ok(1)
+                Ok(Some(note.path.to_string_lossy().to_string()))
             } else {
-                Ok(0)
+                Ok(None)
             }
         })
-        .try_reduce(|| 0usize, |a, b| Ok(a + b))?;
+        .collect::<eyre::Result<Vec<Option<String>>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
-    Ok(applied_count + cleared_count)
+    let mut changed = applied;
+    changed.extend(cleared);
+    Ok(changed)
 }
 
 /// Build a set of note stems/paths that are referenced by at least one wikilink.
@@ -472,8 +482,8 @@ mod tests {
         let notes = v.scan();
         let config = default_config();
 
-        let count = apply_quality(v.root(), &notes, &config).expect("apply");
-        assert!(count > 0, "should have applied quality fields to some notes");
+        let changed = apply_quality(v.root(), &notes, &config).expect("apply");
+        assert!(!changed.is_empty(), "should have applied quality fields to some notes");
 
         // bare-note.md has no frontmatter at all, so it won't get fields written
         // but partial-frontmatter.md has a stub body and should be flagged

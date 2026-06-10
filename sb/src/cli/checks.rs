@@ -365,6 +365,25 @@ fn pattern_findings() -> Vec<Finding> {
     if drift == 0 && missing == 0 {
         findings.push(Finding::ok(format!("{total} patterns match binary")));
     }
+
+    // The cortex classify Tier-2 pattern is referenced BY NAME in cortex.yml
+    // (`actions.classify.fabric-pattern`) and resolved at runtime. A name that
+    // doesn't resolve to a file silently disables Tier-2 LLM classification
+    // (this exact bug shipped: the old default `cortex_classify` matched no
+    // file). Verify the configured name resolves to an installed pattern.
+    if let Ok(cfg) = cortex::config::Config::load(None) {
+        let name = &cfg.actions.classify.fabric_pattern;
+        let resolved = installed_dir.join(name);
+        let resolved_md = installed_dir.join(format!("{name}.md"));
+        if resolved.exists() || resolved_md.exists() {
+            findings.push(Finding::ok(format!("classify pattern '{name}' resolves")));
+        } else {
+            findings.push(Finding::error(
+                format!("classify pattern '{name}' resolves to no file in {}", installed_dir.display()),
+                "set actions.classify.fabric-pattern in cortex.yml to an installed pattern (e.g. obsidian-classify), or sb bootstrap",
+            ));
+        }
+    }
     findings
 }
 

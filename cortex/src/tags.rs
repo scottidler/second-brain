@@ -105,19 +105,33 @@ pub fn apply_tags(vault_root: &Path, notes: &[Note], config: &TagsConfig) -> eyr
             }
         }
 
-        // Deduplicate tags after normalization
-        new_tags.sort();
-        new_tags.dedup();
-        if new_tags.len() != tags.len() {
+        // Deduplicate after normalization, PRESERVING the user's first-seen
+        // order. The old sort+dedup reordered the whole tag list on any fix.
+        let before_dedup = new_tags.len();
+        let mut seen = std::collections::HashSet::new();
+        new_tags.retain(|t| seen.insert(t.clone()));
+        if new_tags.len() != before_dedup {
             changed = true;
         }
 
         if changed {
             let abs_path = vault_root.join(&note.path);
-            let content = std::fs::read_to_string(&abs_path)?;
+            // Per-note errors WARN and skip rather than `?`-aborting the whole
+            // run: a note deleted between scan and apply is routine on a
+            // Syncthing'd vault.
+            let content = match std::fs::read_to_string(&abs_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("skipping tag fix for {}: {e}", note.path.display());
+                    continue;
+                }
+            };
 
             if let Some(new_content) = replace_tags_in_frontmatter(&content, &new_tags) {
-                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
+                if let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes()) {
+                    log::warn!("skipping tag fix for {}: {e}", note.path.display());
+                    continue;
+                }
                 log::info!("updated tags: {}", note.path.display());
                 fixed_count += 1;
             }

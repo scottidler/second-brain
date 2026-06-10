@@ -397,9 +397,12 @@ impl Default for TagsConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct SweepConfig {
-    pub canonical_path: String,
-    pub mapping_path: String,
-    pub proposals_path: String,
+    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
+    pub canonical_path: PathBuf,
+    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
+    pub mapping_path: PathBuf,
+    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
+    pub proposals_path: PathBuf,
     pub sweep_interval: String,
     pub proposal_threshold: usize,
     pub cold: ColdConfig,
@@ -408,9 +411,9 @@ pub struct SweepConfig {
 impl Default for SweepConfig {
     fn default() -> Self {
         Self {
-            canonical_path: vault::paths::canonical_tags().display().to_string(),
-            mapping_path: vault::paths::tag_mapping().display().to_string(),
-            proposals_path: vault::paths::tag_proposals().display().to_string(),
+            canonical_path: vault::paths::canonical_tags(),
+            mapping_path: vault::paths::tag_mapping(),
+            proposals_path: vault::paths::tag_proposals(),
             sweep_interval: "1h".to_string(),
             proposal_threshold: 3,
             cold: ColdConfig::default(),
@@ -551,7 +554,9 @@ impl Default for IntelConfig {
             batch_weekly: Some("weekly_digest".to_string()),
             max_input_tokens: 50000,
             fabric_timeout_secs: 120,
-            model: Some("claude-opus-4-20250514".to_string()),
+            // None = fall back to the shared `llm.model`. A hardcoded pin here
+            // silently overrode `llm.model` for the digest call.
+            model: None,
             max_output_tokens: 1024,
             llm_timeout_secs: 120,
         }
@@ -682,8 +687,11 @@ pub struct DaemonAction {
 }
 
 impl DaemonConfig {
-    /// Get the list of enabled action names.
-    pub fn enabled_actions(&self) -> Vec<&str> {
+    /// All CONFIGURED action names (every key under `daemon.actions`),
+    /// regardless of each action's `enable` flag. Use `is_enabled(name)` to
+    /// test whether a specific action is actually on. (Was misnamed
+    /// `enabled_actions`, which implied it filtered by `enable` - it never did.)
+    pub fn configured_actions(&self) -> Vec<&str> {
         self.actions.keys().map(|s| s.as_str()).collect()
     }
 

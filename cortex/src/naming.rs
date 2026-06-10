@@ -143,7 +143,11 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
         return Ok(renames);
     }
 
-    // Execute renames
+    // Execute renames. Skip (never clobber) when the destination already
+    // exists: on a Syncthing'd vault a real file could occupy the normalized
+    // name, and `fs::rename` would silently destroy it. Only actually-applied
+    // renames feed the wikilink rewrite and the returned set.
+    let mut applied = Vec::new();
     for (from, to) in &renames {
         let abs_from = vault_root.join(from);
         let abs_to = vault_root.join(to);
@@ -152,14 +156,24 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
             std::fs::create_dir_all(parent)?;
         }
 
+        if abs_to.exists() {
+            log::warn!(
+                "skipping rename {} -> {}: destination already exists (would clobber)",
+                from.display(),
+                to.display()
+            );
+            continue;
+        }
+
         std::fs::rename(&abs_from, &abs_to)?;
         log::info!("renamed file: {} -> {}", from.display(), to.display());
+        applied.push((from.clone(), to.clone()));
     }
 
-    // Batch update all wikilinks across the vault
-    update_wikilinks_batch(vault_root, notes, &renames)?;
+    // Batch update all wikilinks across the vault for the renames that landed.
+    update_wikilinks_batch(vault_root, notes, &applied)?;
 
-    Ok(renames)
+    Ok(applied)
 }
 
 /// Update wikilinks in all vault files for a batch of renames.

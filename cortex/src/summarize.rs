@@ -13,8 +13,7 @@
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use eyre::{Context, Result, eyre};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,17 +78,17 @@ pub async fn backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 's
     log::info!("summarize::backfill: scanned {} notes", notes.len());
 
     let checkpoint_path = checkpoint_path(vault_root, config);
-    let resume_after = if opts.resume { load_checkpoint(&checkpoint_path) } else { None };
-    if let Some(ref last) = resume_after {
-        log::info!(
-            "summarize::backfill: resume from checkpoint last_path={}",
-            last.display()
-        );
-    } else {
+    let completed = if opts.resume { load_checkpoint(&checkpoint_path) } else { HashSet::new() };
+    if completed.is_empty() {
         log::info!("summarize::backfill: starting fresh (no checkpoint or --no-resume)");
+    } else {
+        log::info!(
+            "summarize::backfill: resume - excluding {} already-distilled note(s)",
+            completed.len()
+        );
     }
 
-    let candidates: Vec<Note> = filter_notes(&notes, opts, resume_after.as_deref());
+    let candidates: Vec<Note> = filter_notes(&notes, opts, &completed);
     log::info!(
         "summarize::backfill: {} note(s) qualify after filters (since={:?} domain={:?} extractor={:?})",
         candidates.len(),
@@ -377,18 +376,17 @@ fn kind_from_url(url: &str) -> Option<DistillKind> {
 /// Apply `--since` and `--domain` to the scanned notes; drop notes that
 /// fall before the resume-checkpoint path. The result is a freshly-owned
 /// vector so the spawned tasks can move each note independently.
-pub fn filter_notes(notes: &[Note], opts: &SummarizeOpts, resume_after: Option<&Path>) -> Vec<Note> {
+pub fn filter_notes(notes: &[Note], opts: &SummarizeOpts, completed: &HashSet<PathBuf>) -> Vec<Note> {
     let cutoff = opts.since.as_deref().and_then(parse_since);
     let domain = opts.domain.as_deref();
-    let mut past_resume = resume_after.is_none();
     let mut out = Vec::new();
     for note in notes {
-        if !past_resume {
-            if let Some(checkpoint) = resume_after
-                && note.path == checkpoint
-            {
-                past_resume = true;
-            }
+        // Resume: exclude notes already distilled in a prior run (set
+        // membership, order-independent). Notes that failed or were in-flight
+        // last run are NOT in the set, so they are retried - unlike the old
+        // scan-order "skip up to the checkpoint path" which stranded them and
+        // no-op'd entirely if the checkpoint note had been moved.
+        if completed.contains(&note.path) {
             continue;
         }
         // Backfill targets only borg-INGESTED notes. Authored frontmatter -
@@ -465,16 +463,6 @@ fn parse_yyyy_mm_dd(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct Checkpoint {
-    /// Vault-relative path of the last successfully-rewritten note.
-    last_completed: Option<PathBuf>,
-    /// Free-form metadata so future fields can be added without breaking
-    /// older state files.
-    #[serde(default)]
-    extra: BTreeMap<String, serde_json::Value>,
-}
-
 /// Resolve the absolute path of the resume checkpoint file inside the
 /// vault's `state.cache-dir` (default `.cortex/<filename>`).
 pub fn checkpoint_path(vault_root: &Path, config: &Config) -> PathBuf {
@@ -482,24 +470,43 @@ pub fn checkpoint_path(vault_root: &Path, config: &Config) -> PathBuf {
     cache_dir.join(&config.backfill.checkpoint_file)
 }
 
-fn load_checkpoint(path: &Path) -> Option<PathBuf> {
-    let bytes = std::fs::read(path).ok()?;
-    let parsed: Checkpoint = serde_json::from_slice(&bytes).ok()?;
-    parsed.last_completed
+/// Load the SET of already-distilled vault-relative paths (one per line). A
+/// missing file is an empty set (fresh run); an unreadable file warns and
+/// starts fresh rather than silently no-op'ing.
+fn load_checkpoint(path: &Path) -> HashSet<PathBuf> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => contents
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+        Err(e) => {
+            log::warn!(
+                "summarize::backfill: checkpoint {} unreadable ({e}); starting fresh",
+                path.display()
+            );
+            HashSet::new()
+        }
+    }
 }
 
-fn save_checkpoint(path: &Path, last: &Path) -> Result<()> {
+/// Append one completed path to the checkpoint. Append-only (not read-modify-
+/// write) so the concurrent per-note tasks don't race over the whole file; the
+/// load step dedups via the set. One short `writeln!` per completion is
+/// effectively atomic on local filesystems.
+fn save_checkpoint(path: &Path, completed: &Path) -> Result<()> {
+    use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create checkpoint dir {}", parent.display()))?;
     }
-    let cp = Checkpoint {
-        last_completed: Some(last.to_path_buf()),
-        extra: BTreeMap::new(),
-    };
-    let json = serde_json::to_vec_pretty(&cp).context("serialize checkpoint")?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open checkpoint {}", path.display()))?;
+    writeln!(file, "{}", completed.display()).with_context(|| format!("append checkpoint {}", path.display()))?;
     Ok(())
 }
 

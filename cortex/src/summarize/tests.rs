@@ -462,8 +462,11 @@ async fn backfill_writes_checkpoint_after_each_completed_note() {
 
     let cp = checkpoint_path(v.root(), &cfg);
     assert!(cp.exists(), "checkpoint must be persisted at {}", cp.display());
-    let last = load_checkpoint(&cp).expect("checkpoint readable");
-    assert_eq!(last, PathBuf::from("one.md"));
+    let completed = load_checkpoint(&cp);
+    assert!(
+        completed.contains(&PathBuf::from("one.md")),
+        "completed set must contain the distilled note, got {completed:?}"
+    );
 }
 
 #[tokio::test]

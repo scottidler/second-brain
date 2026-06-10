@@ -66,7 +66,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<Sweep
     let notes = scan_vault(vault_root, &config.vault)?;
 
     let migrate_count = if opts.migrate {
-        Some(migrate(vault_root, &notes, &config.sweep, opts.dry_run)?)
+        Some(migrate(vault_root, &notes, &config.sweep, opts.dry_run)?.len())
     } else {
         None
     };
@@ -75,7 +75,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<Sweep
         let proposals = scan_proposals(&notes, &config.sweep)?;
         let path = if !proposals.is_empty() && !opts.dry_run {
             write_proposals(&config.sweep, proposals.clone())?;
-            Some(config.sweep.proposals_path.clone())
+            Some(config.sweep.proposals_path.display().to_string())
         } else {
             None
         };
@@ -131,16 +131,16 @@ pub struct ProposalsFile {
 ///
 /// Rewrites each note's tags using the canonical mapping.
 /// Returns the number of notes modified.
-pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run: bool) -> Result<usize> {
+pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run: bool) -> Result<Vec<String>> {
     crate::startup::validate_canonical_assets()?;
-    let canonical_file =
-        CanonicalTagsFile::load(Path::new(&config.canonical_path)).wrap_err("failed to load canonical tags")?;
-    let mapping =
-        canonical::load_tag_mapping(Path::new(&config.mapping_path)).wrap_err("failed to load tag mapping")?;
+    let canonical_file = CanonicalTagsFile::load(&config.canonical_path).wrap_err("failed to load canonical tags")?;
+    let mapping = canonical::load_tag_mapping(&config.mapping_path).wrap_err("failed to load tag mapping")?;
     let canonical_set = canonical_file.all_tags();
     let max_per_note = canonical_file.max_per_note;
 
-    let mut modified_count = 0;
+    // Real changed-path list (would-rewrite in dry-run, rewritten otherwise) so
+    // the daemon's oscillation fingerprint compares consecutive sweeps by file.
+    let mut modified = Vec::new();
 
     for note in notes {
         let tags = note.frontmatter.tags.clone().unwrap_or_default();
@@ -171,20 +171,18 @@ pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run:
                     new_tags.len()
                 );
             }
-            modified_count += 1;
+            modified.push(note.path.to_string_lossy().to_string());
         }
     }
 
-    Ok(modified_count)
+    Ok(modified)
 }
 
 /// Scan notes for non-canonical tags and generate proposals.
 pub fn scan_proposals(notes: &[Note], config: &SweepConfig) -> Result<Vec<Proposal>> {
     crate::startup::validate_canonical_assets()?;
-    let canonical_file =
-        CanonicalTagsFile::load(Path::new(&config.canonical_path)).wrap_err("failed to load canonical tags")?;
-    let mapping =
-        canonical::load_tag_mapping(Path::new(&config.mapping_path)).wrap_err("failed to load tag mapping")?;
+    let canonical_file = CanonicalTagsFile::load(&config.canonical_path).wrap_err("failed to load canonical tags")?;
+    let mapping = canonical::load_tag_mapping(&config.mapping_path).wrap_err("failed to load tag mapping")?;
     let canonical_set = canonical_file.all_tags();
 
     // Count non-canonical tags across all notes
@@ -223,8 +221,10 @@ pub fn scan_proposals(notes: &[Note], config: &SweepConfig) -> Result<Vec<Propos
 
 /// Write proposals to the proposals file, merging with existing.
 pub fn write_proposals(config: &SweepConfig, new_proposals: Vec<Proposal>) -> Result<()> {
-    let path = shellexpand::tilde(&config.proposals_path).to_string();
-    let mut existing = load_proposals(&path).unwrap_or(ProposalsFile { proposals: Vec::new() });
+    // proposals_path is a PathBuf already tilde-expanded at config-load time
+    // (deserialize_tilde_pathbuf), so no shellexpand here.
+    let path = &config.proposals_path;
+    let mut existing = load_proposals(path).unwrap_or(ProposalsFile { proposals: Vec::new() });
 
     // Merge: update frequency for existing tags, add new ones
     for proposal in new_proposals {
@@ -237,11 +237,11 @@ pub fn write_proposals(config: &SweepConfig, new_proposals: Vec<Proposal>) -> Re
     }
 
     let yaml = serde_yaml::to_string(&existing).wrap_err("failed to serialize proposals")?;
-    std::fs::write(&path, yaml).wrap_err("failed to write proposals file")?;
+    std::fs::write(path, yaml).wrap_err("failed to write proposals file")?;
     Ok(())
 }
 
-fn load_proposals(path: &str) -> Result<ProposalsFile> {
+fn load_proposals(path: &Path) -> Result<ProposalsFile> {
     let content = std::fs::read_to_string(path).wrap_err("failed to read proposals file")?;
     let file: ProposalsFile = serde_yaml::from_str(&content).wrap_err("failed to parse proposals YAML")?;
     Ok(file)
@@ -455,9 +455,9 @@ mod tests {
         std::fs::write(&proposals_path, "proposals: []\n").expect("write proposals");
 
         SweepConfig {
-            canonical_path: canonical_path.to_string_lossy().to_string(),
-            mapping_path: mapping_path.to_string_lossy().to_string(),
-            proposals_path: proposals_path.to_string_lossy().to_string(),
+            canonical_path,
+            mapping_path,
+            proposals_path,
             sweep_interval: "1h".to_string(),
             proposal_threshold: 2,
             cold: crate::config::ColdConfig::default(),

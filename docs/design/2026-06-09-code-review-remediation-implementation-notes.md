@@ -635,3 +635,94 @@ content.
 
 ### Open questions
 - None.
+
+## Phase 11: Cortex governance correctness
+
+`otto ci` exit 0 (check incl. clippy+fmt, and test). All 16 items landed.
+
+### Design decisions
+- **classify drops index_vault write** (`classify::run`): the oracle index is
+  opened READ-ONLY for Tier-2 context; the `idx.index_vault(vault_root)` refresh
+  is gone (one-way data flow - oracle's watcher owns index refresh; cortex must
+  never write oracle's `notes` table).
+- **classify Tier-2 pattern default** fixed from the non-existent
+  `cortex_classify` to `obsidian-classify` (the installed file; `resolve_pattern`
+  appends `.md`). Tier-2 LLM classification was silently dead.
+- **fs::rename never clobbers** (`naming::run`, `migrate::apply`): both skip +
+  WARN when the destination exists (would destroy a real file on a Syncthing'd
+  vault) and feed only actually-applied renames to the wikilink rewrite.
+- **summarize --resume = completed-path SET** (`summarize`): checkpoint is now a
+  newline-delimited set of distilled paths (append-only, concurrency-tolerant),
+  and `filter_notes` EXCLUDES that set instead of skipping scan-order-up-to-a-
+  single-path. Failed/in-flight notes are retried; a moved checkpoint note no
+  longer silently no-ops the whole run; an unreadable checkpoint warns + starts
+  fresh.
+- **per-note `?` -> WARN+continue** in every apply path the doc named
+  (`classify::apply_classify` catch-up/reclassify/promote, `tags::apply_tags`,
+  `scope::apply_scope`, `frontmatter::apply_frontmatter` x2,
+  `duplicates::apply_duplicates` x2). A note deleted between scan and apply
+  (routine on Syncthing) no longer aborts the run.
+- **linking O(notes x titles) hoist**: the per-note lowercased body + offset map
+  is now built ONCE per note (`LoweredBody::new`) and reused by every candidate
+  term, instead of rebuilt inside `find_mention` on every (note, term) pair. The
+  daemon runs `lint_linking` every sweep.
+- **daemon cycle detection** now records REAL changed-file lists (the apply
+  functions return `Vec<String>` of changed paths; classify/lint/link record
+  their report's affected paths) and COMPARES consecutive fingerprints: a sweep
+  is "oscillating" only when it produces the identical non-empty fingerprint two
+  sweeps running, not merely "a fix was applied once" (the old `["__applied__"]`
+  placeholder froze periodic sweeps after any single fix). A real watcher edit
+  clears the latch.
+- **`enabled_actions` -> `configured_actions`** (`DaemonConfig`): renamed + doc
+  fixed (it returns ALL configured actions regardless of `enable`; use
+  `is_enabled`). Note: a pre-existing free fn in `daemon.rs` is also named
+  `configured_actions` (runs the actions) - distinct namespace (method vs free
+  fn), no collision.
+- **tags dedup preserves first-seen order** (`tags::apply_tags`): replaced
+  sort+dedup (which reordered the user's tag list on any fix) with an
+  order-preserving `retain` + `HashSet`.
+- **scope non-scalar values via serde_yaml** (`scope::insert_frontmatter_fields`):
+  sequences/maps now serialize as valid YAML instead of `format!("{:?}")` (a Rust
+  Debug repr). SCALARS (String/Bool/Number) still emit RAW - cortex stores some
+  fields as inline-array-shaped STRINGS (`cortex-quality-issues: [no-outbound-links]`)
+  that readers expect verbatim; routing those through serde_yaml would quote them.
+- **sweep config paths tilde-expanded**: `SweepConfig.canonical_path` /
+  `mapping_path` / `proposals_path` are now `PathBuf` with
+  `deserialize_tilde_pathbuf` (was `String` + raw `Path::new` / `shellexpand`).
+- **cortex lock under sb/ namespace**: new `vault::paths::cortex_lock_path()`
+  -> `~/.local/share/sb/cortex/embed.lock` (was `~/.local/share/cortex/`,
+  outside `sb/`). The systemd-unit `dirs::config_dir()` calls are left as-is -
+  they correctly target the standard `~/.config/systemd/user/` (matches borg's
+  raw approach; not an sb-data path).
+- **intel scheduled once**: `install_systemd_service` no longer writes the
+  cortex-daily/cortex-weekly timers (the in-daemon tokio scheduler already runs
+  daily/weekly intel; installing timers too ran intel TWICE). `uninstall` still
+  removes any timers a prior install left.
+- **classify suffix-collision wikilinks**: a `foo.md -> foo-2.md` collision move
+  is excluded from the wikilink rewrite set (rewriting `[[foo]] -> [[foo-2]]`
+  would redirect links meant for the OTHER note). `existing_note_has_source`
+  now matches both quoted and unquoted `source:` frontmatter forms.
+- **IntelConfig.model default None** -> falls back to the shared `llm.model`
+  (was a hardcoded `claude-opus-4-20250514` that silently overrode it).
+- **daemon --stop prints the instruction**: returns outcome lines (systemctl /
+  pkill) instead of a log-only no-op the user never saw.
+- **doctor configured-pattern check**: `pattern_findings` now verifies the
+  cortex classify pattern name from cortex.yml resolves to an installed file
+  (the bug class that left Tier-2 dead).
+
+### Deviations
+- **Item 12 (cortex_lock_path) - systemd dirs:: left raw**: the doc listed
+  daemon.rs `dirs::` calls under this item, but those resolve the standard
+  systemd user-unit dir (`~/.config/systemd/user/`), not an sb-data path, and
+  borg resolves the same dir raw. Only the embed lock (the genuine
+  outside-`sb/` violation) was relocated.
+
+### Tradeoffs
+- **apply functions return `Vec<String>` (changed paths), not `usize`**: needed
+  for the daemon's real-file-list fingerprint. `cortex::lib` discards the return
+  (only `?` for errors), so the ripple was just the daemon arms + tests (`.len()`).
+- **daemon free fn + method both named `configured_actions`**: kept per the
+  doc's explicit method rename; they don't collide (method vs free fn).
+
+### Open questions
+- None.

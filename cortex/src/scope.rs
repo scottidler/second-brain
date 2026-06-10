@@ -59,10 +59,21 @@ pub fn apply_scope(vault_root: &Path, notes: &[Note], config: &ScopeConfig) -> e
         }
 
         let abs_path = vault_root.join(&note.path);
-        let content = std::fs::read_to_string(&abs_path)?;
+        // Per-note errors WARN and skip, never `?`-abort the whole run (a note
+        // deleted between scan and apply is routine on a Syncthing'd vault).
+        let content = match std::fs::read_to_string(&abs_path) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("skipping scope fix for {}: {e}", note.path.display());
+                continue;
+            }
+        };
 
         if let Some(new_content) = insert_frontmatter_fields(&content, &fields_to_set) {
-            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
+            if let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes()) {
+                log::warn!("skipping scope fix for {}: {e}", note.path.display());
+                continue;
+            }
             log::info!("applied scope fields: {}", note.path.display());
             fixed_count += 1;
         }
@@ -157,13 +168,33 @@ pub fn insert_frontmatter_fields(content: &str, fields: &[(String, serde_yaml::V
         // continuation lines (list bullets, indented sub-fields).
         remove_entry(&mut new_lines, key);
 
-        let value_str = match value {
-            serde_yaml::Value::String(s) => s.clone(),
-            serde_yaml::Value::Bool(b) => b.to_string(),
-            serde_yaml::Value::Number(n) => n.to_string(),
-            other => format!("{other:?}"),
-        };
-        new_lines.push(format!("{key}: {value_str}"));
+        // Scalars are emitted RAW (no added quoting): cortex stores some fields
+        // as strings that must render unquoted - e.g. `cortex-quality-issues`
+        // holds the literal `[no-outbound-links]` (an inline-array-shaped
+        // string the readers expect verbatim). Routing those through serde_yaml
+        // would quote them (`'[...]'`) and break the convention. NON-scalar
+        // values (sequences/maps) ARE serialized via serde_yaml - the old code
+        // fell back to `format!("{other:?}")`, writing a Rust Debug repr
+        // (`Sequence([String("a")])`) that is not parseable YAML.
+        match value {
+            serde_yaml::Value::String(s) => new_lines.push(format!("{key}: {s}")),
+            serde_yaml::Value::Bool(b) => new_lines.push(format!("{key}: {b}")),
+            serde_yaml::Value::Number(n) => new_lines.push(format!("{key}: {n}")),
+            other => {
+                let mut map = serde_yaml::Mapping::new();
+                map.insert(serde_yaml::Value::String(key.clone()), other.clone());
+                match serde_yaml::to_string(&serde_yaml::Value::Mapping(map)) {
+                    Ok(yaml) => {
+                        for line in yaml.trim_end_matches('\n').lines() {
+                            new_lines.push(line.to_string());
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("scope: skipping unserializable frontmatter field {key}: {e}");
+                    }
+                }
+            }
+        }
     }
 
     let offset = content.len() - trimmed.len();

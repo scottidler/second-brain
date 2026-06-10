@@ -171,9 +171,11 @@ pub fn lint_duplicates(notes: &[Note], config: &DuplicatesConfig) -> Report {
 
 /// Apply duplicate surfacing: write cortex-duplicate fields to frontmatter.
 /// Also clears stale duplicate fields from notes no longer flagged.
-pub fn apply_duplicates(vault_root: &Path, notes: &[Note], config: &DuplicatesConfig) -> eyre::Result<usize> {
+pub fn apply_duplicates(vault_root: &Path, notes: &[Note], config: &DuplicatesConfig) -> eyre::Result<Vec<String>> {
     let report = lint_duplicates(notes, config);
-    let mut fixed_count = 0;
+    // Real changed-path list (not just a count) so the daemon's oscillation
+    // fingerprint can compare consecutive sweeps by file.
+    let mut changed = Vec::new();
 
     // Collect paths that ARE duplicates in this run
     let duplicate_paths: std::collections::HashSet<&Path> =
@@ -183,7 +185,14 @@ pub fn apply_duplicates(vault_root: &Path, notes: &[Note], config: &DuplicatesCo
     for violation in &report.violations {
         if let Some(Fix::SetCortexFields { fields }) = &violation.fix {
             let abs_path = vault_root.join(&violation.path);
-            let content = std::fs::read_to_string(&abs_path)?;
+            // Per-note errors WARN and skip rather than `?`-aborting the run.
+            let content = match std::fs::read_to_string(&abs_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("skipping duplicate fields for {}: {e}", violation.path.display());
+                    continue;
+                }
+            };
 
             // Check if fields already set correctly
             let already_set = fields
@@ -199,9 +208,12 @@ pub fn apply_duplicates(vault_root: &Path, notes: &[Note], config: &DuplicatesCo
                 .collect();
 
             if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &yaml_fields) {
-                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
+                if let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes()) {
+                    log::warn!("skipping duplicate fields for {}: {e}", violation.path.display());
+                    continue;
+                }
                 log::info!("wrote duplicate fields: {}", violation.path.display());
-                fixed_count += 1;
+                changed.push(violation.path.to_string_lossy().to_string());
             }
         }
     }
@@ -221,15 +233,25 @@ pub fn apply_duplicates(vault_root: &Path, notes: &[Note], config: &DuplicatesCo
         }
 
         let abs_path = vault_root.join(&note.path);
-        let content = std::fs::read_to_string(&abs_path)?;
+        // Per-note errors WARN and skip rather than `?`-aborting the run.
+        let content = match std::fs::read_to_string(&abs_path) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("skipping stale-duplicate clear for {}: {e}", note.path.display());
+                continue;
+            }
+        };
         if let Some(new_content) = crate::scope::remove_frontmatter_fields(&content, &cortex_keys) {
-            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
+            if let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes()) {
+                log::warn!("skipping stale-duplicate clear for {}: {e}", note.path.display());
+                continue;
+            }
             log::info!("cleared stale duplicate fields: {}", note.path.display());
-            fixed_count += 1;
+            changed.push(note.path.to_string_lossy().to_string());
         }
     }
 
-    Ok(fixed_count)
+    Ok(changed)
 }
 
 /// Simple non-cryptographic hash for body content comparison.
@@ -452,8 +474,8 @@ mod tests {
         let notes = v.scan();
         let config = v.config().actions.duplicates;
 
-        let count = apply_duplicates(v.root(), &notes, &config).expect("apply");
-        assert!(count > 0, "should have applied duplicate fields");
+        let changed = apply_duplicates(v.root(), &notes, &config).expect("apply");
+        assert!(!changed.is_empty(), "should have applied duplicate fields");
 
         let content_a = v.read("duplicate-a.md");
         let content_b = v.read("duplicate-b.md");
@@ -484,8 +506,8 @@ mod tests {
         let notes = v.scan();
         let config = v.config().actions.duplicates;
 
-        let count = apply_duplicates(v.root(), &notes, &config).expect("apply");
-        assert!(count > 0);
+        let changed = apply_duplicates(v.root(), &notes, &config).expect("apply");
+        assert!(!changed.is_empty());
 
         let content = v.read("formerly-duplicate.md");
         assert!(
