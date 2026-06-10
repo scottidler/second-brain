@@ -169,6 +169,12 @@ impl EventHandler for Handler {
                     Ok(bytes) => bytes.to_vec(),
                     Err(e) => {
                         log::error!("Discord: failed to read attachment bytes: {e}");
+                        intake_log::record_failure_at_door(
+                            IngestMethod::Discord,
+                            &trace_id,
+                            FailureStage::FetchFailed,
+                            &format!("attachment read failed: {e}"),
+                        );
                         let _ = msg
                             .channel_id
                             .say(&ctx.http, format!("Failed to download attachment: {e}"))
@@ -178,6 +184,12 @@ impl EventHandler for Handler {
                 },
                 Err(e) => {
                     log::error!("Discord: failed to download attachment: {e}");
+                    intake_log::record_failure_at_door(
+                        IngestMethod::Discord,
+                        &trace_id,
+                        FailureStage::FetchFailed,
+                        &format!("attachment download failed: {e}"),
+                    );
                     let _ = msg
                         .channel_id
                         .say(&ctx.http, format!("Failed to download attachment: {e}"))
@@ -241,6 +253,16 @@ impl EventHandler for Handler {
                         "Discord: unsupported attachment type '{}' (content_type: {})",
                         att_filename,
                         att_content_type.as_deref().unwrap_or("unknown")
+                    );
+                    intake_log::record_failure_at_door(
+                        IngestMethod::Discord,
+                        &trace_id,
+                        FailureStage::IntakeRejected,
+                        &format!(
+                            "unsupported attachment type: {} (content_type: {})",
+                            att_filename,
+                            att_content_type.as_deref().unwrap_or("unknown")
+                        ),
                     );
                     let _ = msg
                         .channel_id

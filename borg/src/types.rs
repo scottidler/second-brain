@@ -308,6 +308,13 @@ pub struct IngestResult {
     /// terminal write then defaults to `FetchFailed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_stage: Option<vault::receipts::FailureStage>,
+    /// True when the published note came from a distill FALLBACK (the
+    /// distiller degraded gracefully instead of producing a clean structured
+    /// artifact). Recorded on the receipts success row so `sb borg log
+    /// --degraded` can surface these; replaces the retired halt-on-hard-distill
+    /// policy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub degraded: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

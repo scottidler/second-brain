@@ -93,92 +93,100 @@ pub async fn process_content(
     let _general_permit = permits::GENERAL_PERMITS.acquire().await;
     log::debug!("process_content[{trace_id}]: general permit acquired");
 
-    if let Err(err) = crate::stages::raw::stage_0_init(config, &content, method, &trace_id) {
-        let reason = format!("{err:#}");
-        log::warn!("[{trace_id}] Stage-0 rejected: {reason}");
-        return IngestResult {
-            status: IngestStatus::Failed { reason },
-            trace_id: Some(trace_id),
-            method: Some(method),
-            failure_stage: Some(FailureStage::IntakeRejected),
-            ..Default::default()
-        };
-    }
+    // Stage-0 rejection must flow through the SAME terminal-write chokepoint
+    // as every other outcome (below). Returning early here left the receipts
+    // row stuck in `received`, which the watchdog then mislabeled `crashed`
+    // ~31 min later with the wrong stage. So set the failure result and fall
+    // through instead of early-returning.
+    let stage0 = crate::stages::raw::stage_0_init(config, &content, method, &trace_id);
+
     // Every handler runs under the pipeline hard timeout. `process_url`
     // applies its own equivalent timeout internally; the non-URL handlers
     // previously awaited unbounded, so a wedged handler (e.g. a no-timeout
     // vision reqwest::Client, a blocked ffmpeg) held its GENERAL permit
     // forever, and the watchdog's active-trace exclusion skipped it - enough
     // wedged traces silently deadlocked all ingest.
-    let mut result = match content {
-        ContentKind::Url(url) => process_url(&url, tags, method, force, config, &trace_id).await,
-        ContentKind::Image { data, filename } => {
-            with_hard_timeout(
-                process_image(&data, &filename, tags, method, force, config, &trace_id),
-                config,
-                &trace_id,
-                method,
-                "image",
-            )
-            .await
+    let mut result = if let Err(err) = stage0 {
+        let reason = format!("{err:#}");
+        log::warn!("[{trace_id}] Stage-0 rejected: {reason}");
+        IngestResult {
+            status: IngestStatus::Failed { reason },
+            trace_id: Some(trace_id.clone()),
+            method: Some(method),
+            failure_stage: Some(FailureStage::IntakeRejected),
+            ..Default::default()
         }
-        ContentKind::Pdf { data, filename } => {
-            with_hard_timeout(
-                process_document_file(
-                    &data,
-                    &filename,
-                    tags,
-                    method,
-                    force,
+    } else {
+        match content {
+            ContentKind::Url(url) => process_url(&url, tags, method, force, config, &trace_id).await,
+            ContentKind::Image { data, filename } => {
+                with_hard_timeout(
+                    process_image(&data, &filename, tags, method, force, config, &trace_id),
                     config,
-                    DocumentKind::Pdf,
                     &trace_id,
-                ),
-                config,
-                &trace_id,
-                method,
-                "pdf",
-            )
-            .await
-        }
-        ContentKind::Audio { data, filename } => {
-            with_hard_timeout(
-                process_audio(&data, &filename, tags, method, force, config, &trace_id),
-                config,
-                &trace_id,
-                method,
-                "audio",
-            )
-            .await
-        }
-        ContentKind::Text(text) => {
-            with_hard_timeout(
-                process_text(&text, tags, method, force, config, &trace_id),
-                config,
-                &trace_id,
-                method,
-                "text",
-            )
-            .await
-        }
-        ContentKind::Document { data, filename } => {
-            with_hard_timeout(
-                process_document_file(
-                    &data,
-                    &filename,
-                    tags,
                     method,
-                    force,
+                    "image",
+                )
+                .await
+            }
+            ContentKind::Pdf { data, filename } => {
+                with_hard_timeout(
+                    process_document_file(
+                        &data,
+                        &filename,
+                        tags,
+                        method,
+                        force,
+                        config,
+                        DocumentKind::Pdf,
+                        &trace_id,
+                    ),
                     config,
-                    DocumentKind::Document,
                     &trace_id,
-                ),
-                config,
-                &trace_id,
-                method,
-                "document",
-            )
-            .await
+                    method,
+                    "pdf",
+                )
+                .await
+            }
+            ContentKind::Audio { data, filename } => {
+                with_hard_timeout(
+                    process_audio(&data, &filename, tags, method, force, config, &trace_id),
+                    config,
+                    &trace_id,
+                    method,
+                    "audio",
+                )
+                .await
+            }
+            ContentKind::Text(text) => {
+                with_hard_timeout(
+                    process_text(&text, tags, method, force, config, &trace_id),
+                    config,
+                    &trace_id,
+                    method,
+                    "text",
+                )
+                .await
+            }
+            ContentKind::Document { data, filename } => {
+                with_hard_timeout(
+                    process_document_file(
+                        &data,
+                        &filename,
+                        tags,
+                        method,
+                        force,
+                        config,
+                        DocumentKind::Document,
+                        &trace_id,
+                    ),
+                    config,
+                    &trace_id,
+                    method,
+                    "document",
+                )
+                .await
+            }
         }
     };
     result.trace_id = Some(trace_id.clone());
@@ -207,7 +215,7 @@ fn record_terminal_to_receipts(trace_id: &str, result: &IngestResult) {
     match &result.status {
         IngestStatus::Completed | IngestStatus::Duplicate { .. } => {
             let note_path = result.note_path.as_deref().unwrap_or("");
-            if let Err(e) = receipts::mark_succeeded(&conn, trace_id, note_path) {
+            if let Err(e) = receipts::mark_succeeded(&conn, trace_id, note_path, result.degraded) {
                 log::error!("receipts: mark_succeeded trace={trace_id} failed: {e:#}");
             }
         }
@@ -308,6 +316,7 @@ pub async fn process_url(
             trace_id: None,
             obsidian_url: None,
             failure_stage: Some(stage),
+            degraded: false,
         }
     };
 
@@ -814,6 +823,9 @@ async fn process_url_inner(
         trace_id: None,
         obsidian_url,
         failure_stage: None,
+        // Degraded when the L2 distiller fell back instead of producing a
+        // clean structured artifact (queryable via `sb borg log --degraded`).
+        degraded: distilled.meta.validation.fallback_reason.is_some(),
     })
 }
 

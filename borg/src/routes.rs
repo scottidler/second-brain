@@ -1,10 +1,10 @@
 use axum::Json;
-use axum::extract::{Multipart, Request, State};
+use axum::extract::{Multipart, Path, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::assets;
@@ -166,6 +166,57 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
         canonical_url: Some(url),
         ..Default::default()
     })
+}
+
+/// Terminal-state view of one receipts row, returned by `GET /trace/{id}`.
+/// Replay/reingest poll this endpoint for a trace's terminal state because
+/// the receipts DB is per-host on the daemon - a client host (laptop) POSTs
+/// to the daemon and owns no receipts DB, so it cannot read the row directly.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TraceStateResponse {
+    pub found: bool,
+    pub trace_id: String,
+    /// `received` / `succeeded` / `failed` (a crashed row is `failed` with
+    /// `failure_stage = "crashed"`).
+    pub status: Option<String>,
+    pub failure_stage: Option<String>,
+    pub note_path: Option<String>,
+}
+
+/// `GET /trace/{trace_id}` - read a single receipts row's terminal state.
+/// Auth-gated like the write routes.
+pub async fn trace_state(State(_state): State<AppState>, Path(trace_id): Path<String>) -> Response {
+    log::debug!("trace_state: trace_id={trace_id}");
+    let lookup = crate::receipts::open_default().and_then(|conn| crate::receipts::get(&conn, &trace_id));
+    match lookup {
+        Ok(Some(r)) => Json(TraceStateResponse {
+            found: true,
+            trace_id: r.trace_id,
+            status: Some(r.status),
+            failure_stage: r.failure_stage,
+            note_path: r.note_path,
+        })
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(TraceStateResponse {
+                found: false,
+                trace_id,
+                status: None,
+                failure_stage: None,
+                note_path: None,
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            log::error!("trace_state: receipts lookup failed for {trace_id}: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("receipts lookup failed: {e}"),
+            )
+                .into_response()
+        }
+    }
 }
 
 pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest>) -> Json<IngestResult> {

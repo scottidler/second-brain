@@ -141,8 +141,10 @@ fn record_failure_at_door_to(
     reason: &str,
 ) -> Result<()> {
     // Cold-path values (kind=Text, raw_input=reason) apply only if no row
-    // exists yet; INSERT OR IGNORE never clobbers a prior capture's data.
-    receipts::record_received(conn, trace_id, method.into(), ReceiptKind::Text, reason)
+    // exists yet; INSERT OR IGNORE never clobbers a prior capture's data. A
+    // no-op (row already present from the door capture) is the NORMAL case
+    // here, so use the expecting-existing variant to log it at DEBUG, not WARN.
+    receipts::record_received_expecting_existing(conn, trace_id, method.into(), ReceiptKind::Text, reason)
         .with_context(|| format!("upsert received row for failure trace={trace_id}"))?;
     receipts::mark_failed(conn, trace_id, stage, reason)
         .with_context(|| format!("mark_failed trace={trace_id} stage={stage}"))?;

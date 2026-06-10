@@ -94,6 +94,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ingest", post(routes::ingest))
         .route("/ingest/file", post(routes::ingest_multipart))
         .route("/note", post(routes::note))
+        // Replay/reingest poll this for a trace's terminal state (the receipts
+        // DB is per-host on the daemon; client hosts can't read it directly).
+        // Auth-gated alongside the write routes.
+        .route("/trace/{trace_id}", get(routes::trace_state))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             routes::require_auth,
@@ -787,8 +791,18 @@ pub async fn reingest(
         let client = reqwest::Client::new();
         let status = match client.post(&endpoint).json(&body).send().await {
             Ok(response) => {
-                let result: types::IngestResult =
+                let mut result: types::IngestResult =
                     response.json().await.context("Failed to parse response from daemon")?;
+                // The daemon answers `Queued`; poll `/trace/{id}` for the real
+                // terminal state so reingest reports accurate counts and paces
+                // one entry at a time.
+                if matches!(result.status, types::IngestStatus::Queued)
+                    && let Some(tid) = result.trace_id.clone()
+                {
+                    result = replay::poll_trace_terminal(&config, host, port, &tid)
+                        .await
+                        .unwrap_or(result);
+                }
                 match result.status {
                     types::IngestStatus::Completed => {
                         let title = result.title.unwrap_or_else(|| "Untitled".to_string());

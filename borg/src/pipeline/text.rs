@@ -64,6 +64,9 @@ pub(crate) async fn process_text(
                 },
                 method: Some(method),
                 elapsed_secs: Some(elapsed.as_secs_f64()),
+                // Non-URL handler: text content is in hand, so a terminal
+                // error is a publish failure, not a fetch.
+                failure_stage: Some(vault::receipts::FailureStage::PublishFailed),
                 ..Default::default()
             }
         }
@@ -191,6 +194,7 @@ pub(crate) async fn process_text_inner(
         trace_id: None,
         obsidian_url,
         failure_stage: None,
+        degraded: distilled.meta.validation.fallback_reason.is_some(),
     })
 }
 
@@ -363,6 +367,7 @@ pub(crate) async fn process_vocab(
         trace_id: None,
         obsidian_url,
         failure_stage: None,
+        degraded: distilled.meta.validation.fallback_reason.is_some(),
     })
 }
 
@@ -765,6 +770,7 @@ pub(crate) async fn process_code_snippet(
         trace_id: None,
         obsidian_url,
         failure_stage: None,
+        degraded: false,
     })
 }
 

@@ -217,10 +217,28 @@ pub async fn run(
                 let chat_id = message.chat.id;
                 let chat_id_override = Some(chat_id.0);
 
-                // ── Durable intake: BEFORE the allowed-chat filter, BEFORE
-                // dispatch. The trace_id generated here is reused by every
-                // downstream branch.
                 let trace_id = trace::generate(IngestMethod::Telegram);
+
+                // Refuse disallowed chats PRE-intake: a refused chat is not a
+                // dropped input, mirroring the HTTP 401 path. This records a
+                // `failed`/intake-rejected receipts row but writes NO raw-input
+                // sidecar - the sidecar lives in the Syncthing'd vault and
+                // disallowed chats would otherwise accumulate junk there
+                // forever.
+                if !chat_allowed(&allowed, message.chat.id.0) {
+                    log::info!("telegram: rejecting disallowed chat {chat_id} (trace={trace_id})");
+                    intake_log::record_failure_at_door(
+                        IngestMethod::Telegram,
+                        &trace_id,
+                        FailureStage::IntakeRejected,
+                        &format!("chat {chat_id} not in allowed-chat-ids"),
+                    );
+                    return Ok::<(), teloxide::RequestError>(());
+                }
+
+                // ── Durable intake (sidecar + receipts) for ALLOWED chats,
+                // BEFORE dispatch. The trace_id is reused by every downstream
+                // branch.
                 let (kind, preview) = classify_telegram_message(&message);
                 if let Err(e) = intake_log::record_received_with_sidecar(
                     &config,
@@ -234,17 +252,6 @@ pub async fn run(
                     let _ = bot
                         .send_message(chat_id, format!("[{trace_id}] borg failed to record your input: {e}"))
                         .await;
-                    return Ok::<(), teloxide::RequestError>(());
-                }
-
-                if !chat_allowed(&allowed, message.chat.id.0) {
-                    log::info!("telegram: rejecting disallowed chat {chat_id} (trace={trace_id})");
-                    intake_log::record_failure_at_door(
-                        IngestMethod::Telegram,
-                        &trace_id,
-                        FailureStage::IntakeRejected,
-                        &format!("chat {chat_id} not in allowed-chat-ids"),
-                    );
                     return Ok::<(), teloxide::RequestError>(());
                 }
 
@@ -292,6 +299,12 @@ pub async fn run(
                         Ok(d) => d,
                         Err(e) => {
                             log::error!("Failed to download photo: {e}");
+                            intake_log::record_failure_at_door(
+                                IngestMethod::Telegram,
+                                &trace_id,
+                                FailureStage::FetchFailed,
+                                &format!("photo download failed: {e}"),
+                            );
                             bot.send_message(chat_id, format!("Failed to download photo: {e}"))
                                 .await?;
                             return Ok(());
@@ -349,6 +362,12 @@ pub async fn run(
                         Ok(d) => d,
                         Err(e) => {
                             log::error!("Failed to download voice note: {e}");
+                            intake_log::record_failure_at_door(
+                                IngestMethod::Telegram,
+                                &trace_id,
+                                FailureStage::FetchFailed,
+                                &format!("voice download failed: {e}"),
+                            );
                             bot.send_message(chat_id, format!("Failed to download voice note: {e}"))
                                 .await?;
                             return Ok(());
@@ -407,6 +426,12 @@ pub async fn run(
                         Ok(d) => d,
                         Err(e) => {
                             log::error!("Failed to download audio file: {e}");
+                            intake_log::record_failure_at_door(
+                                IngestMethod::Telegram,
+                                &trace_id,
+                                FailureStage::FetchFailed,
+                                &format!("audio download failed: {e}"),
+                            );
                             bot.send_message(chat_id, format!("Failed to download audio: {e}"))
                                 .await?;
                             return Ok(());
@@ -467,6 +492,12 @@ pub async fn run(
                         Ok(d) => d,
                         Err(e) => {
                             log::error!("Failed to download document: {e}");
+                            intake_log::record_failure_at_door(
+                                IngestMethod::Telegram,
+                                &trace_id,
+                                FailureStage::FetchFailed,
+                                &format!("document download failed: {e}"),
+                            );
                             bot.send_message(chat_id, format!("Failed to download document: {e}"))
                                 .await?;
                             return Ok(());
@@ -524,6 +555,16 @@ pub async fn run(
                                 "Telegram: unsupported document type '{}' (MIME: {})",
                                 doc_filename,
                                 mime_str.as_deref().unwrap_or("unknown")
+                            );
+                            intake_log::record_failure_at_door(
+                                IngestMethod::Telegram,
+                                &trace_id,
+                                FailureStage::IntakeRejected,
+                                &format!(
+                                    "unsupported document type: {} (MIME: {})",
+                                    doc_filename,
+                                    mime_str.as_deref().unwrap_or("unknown")
+                                ),
                             );
                             bot.send_message(
                                 chat_id,

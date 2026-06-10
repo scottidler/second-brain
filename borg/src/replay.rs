@@ -240,6 +240,14 @@ fn emit_result_event(
     }
 }
 
+/// Grace added to the pipeline hard timeout before replay gives up polling a
+/// trace's terminal state - a trace cannot legitimately stay non-terminal past
+/// `hard_timeout + watchdog grace`, so polling beyond that means the daemon
+/// crashed; stop rather than hang replay forever.
+const POLL_GRACE_SECS: u64 = 90;
+/// Interval between `/trace/{id}` polls.
+const POLL_INTERVAL_SECS: u64 = 2;
+
 async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result<IngestResult> {
     let host = &config.hotkey.host;
     let port = config.hotkey.port;
@@ -258,7 +266,72 @@ async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result
         .await
         .with_context(|| format!("reingest HTTP call to {endpoint}"))?;
     let result: IngestResult = response.json().await.context("parse daemon response")?;
-    Ok(result)
+
+    // The daemon dispatches the pipeline in the background and answers
+    // `Queued` immediately. Poll `/trace/{id}` for the terminal state so the
+    // caller gets real success/failure counts AND so replay paces one entry
+    // at a time (the documented sequential pacing - without the poll it
+    // silently became enqueue-everything).
+    match (&result.status, result.trace_id.as_deref()) {
+        (IngestStatus::Queued, Some(trace_id)) => poll_trace_terminal(config, host, port, trace_id).await,
+        _ => Ok(result),
+    }
+}
+
+/// Poll `GET /trace/{trace_id}` until the receipts row reaches a terminal
+/// state, or the polling ceiling (`hard_timeout + POLL_GRACE_SECS`) elapses.
+/// Shared by replay (`reingest_via_daemon`) and `crate::reingest`.
+pub(crate) async fn poll_trace_terminal(
+    config: &Config,
+    host: &str,
+    port: u16,
+    trace_id: &str,
+) -> Result<IngestResult> {
+    let endpoint = format!("http://{host}:{port}/trace/{trace_id}");
+    let client = reqwest::Client::new();
+    let ceiling = std::time::Duration::from_secs(config.pipeline.hard_timeout_secs + POLL_GRACE_SECS);
+    let interval = std::time::Duration::from_secs(POLL_INTERVAL_SECS);
+    let start = std::time::Instant::now();
+    loop {
+        match client.get(&endpoint).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let body: crate::routes::TraceStateResponse = resp.json().await.context("parse /trace response")?;
+                match body.status.as_deref() {
+                    Some("succeeded") => {
+                        return Ok(IngestResult {
+                            status: IngestStatus::Completed,
+                            note_path: body.note_path,
+                            trace_id: Some(trace_id.to_string()),
+                            ..Default::default()
+                        });
+                    }
+                    Some("failed") => {
+                        let reason = body.failure_stage.unwrap_or_else(|| "failed".to_string());
+                        return Ok(IngestResult {
+                            status: IngestStatus::Failed { reason },
+                            trace_id: Some(trace_id.to_string()),
+                            ..Default::default()
+                        });
+                    }
+                    // Still `received`; keep polling.
+                    _ => {}
+                }
+            }
+            Ok(resp) => log::warn!("poll /trace/{trace_id}: HTTP {}", resp.status()),
+            Err(e) => log::warn!("poll /trace/{trace_id} failed: {e}"),
+        }
+        if start.elapsed() > ceiling {
+            log::error!("poll /trace/{trace_id}: terminal state not reached within ceiling; daemon may have crashed");
+            return Ok(IngestResult {
+                status: IngestStatus::Failed {
+                    reason: "trace did not reach a terminal state within the polling ceiling".to_string(),
+                },
+                trace_id: Some(trace_id.to_string()),
+                ..Default::default()
+            });
+        }
+        tokio::time::sleep(interval).await;
+    }
 }
 
 async fn replay_trace_top(

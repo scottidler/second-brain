@@ -447,6 +447,11 @@ pub(crate) async fn process_image(
                 },
                 method: Some(method),
                 elapsed_secs: Some(elapsed.as_secs_f64()),
+                // Non-URL handler: the content is already in hand, so a
+                // terminal error is a processing/publish failure, never a
+                // fetch. Classify as PublishFailed instead of inheriting the
+                // global FetchFailed default.
+                failure_stage: Some(vault::receipts::FailureStage::PublishFailed),
                 ..Default::default()
             }
         }
@@ -657,6 +662,7 @@ pub(crate) async fn process_image_inner(
         trace_id: None,
         obsidian_url,
         failure_stage: None,
+        degraded: distilled.meta.validation.fallback_reason.is_some(),
     })
 }
 
@@ -696,6 +702,9 @@ pub(crate) async fn process_audio(
                 },
                 method: Some(method),
                 elapsed_secs: Some(elapsed.as_secs_f64()),
+                // Non-URL handler: content is in hand, so a terminal error is
+                // a processing/publish failure, not a fetch.
+                failure_stage: Some(vault::receipts::FailureStage::PublishFailed),
                 ..Default::default()
             }
         }
@@ -893,6 +902,7 @@ pub(crate) async fn process_audio_inner(
         trace_id: None,
         obsidian_url,
         failure_stage: None,
+        degraded: distilled.meta.validation.fallback_reason.is_some(),
     })
 }
 
@@ -929,6 +939,9 @@ pub(crate) async fn process_document_file(
                 },
                 method: Some(method),
                 elapsed_secs: Some(elapsed.as_secs_f64()),
+                // Non-URL handler: content is in hand, so a terminal error is
+                // a processing/publish failure, not a fetch.
+                failure_stage: Some(vault::receipts::FailureStage::PublishFailed),
                 ..Default::default()
             }
         }
@@ -1119,5 +1132,6 @@ pub(crate) async fn process_document_file_inner(
         trace_id: None,
         obsidian_url,
         failure_stage: None,
+        degraded: false,
     })
 }

@@ -31,7 +31,13 @@ CREATE TABLE IF NOT EXISTS receipts (
                       'crashed'
                     )),
   failure_reason  TEXT,
-  replay_of       TEXT
+  replay_of       TEXT,
+  -- 1 when the note was published from a distill FALLBACK (the distiller
+  -- could not produce a clean structured artifact and degraded gracefully
+  -- rather than halting). Queryable via `sb borg log --degraded`. This
+  -- formally retires the old "hard distill failures halt and route to DLQ"
+  -- policy: degraded publishes are the documented behavior, now visible.
+  degraded        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_receipts_status ON receipts(status);

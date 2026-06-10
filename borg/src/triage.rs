@@ -50,6 +50,8 @@ pub struct ReceiptLogFilter {
     pub stage: Option<String>,
     pub since: Option<String>,
     pub source: Option<String>,
+    /// When true, restrict to degraded (distill-fallback) publishes.
+    pub degraded: bool,
     pub limit: usize,
 }
 
@@ -86,6 +88,7 @@ pub fn receipts_log(filter: ReceiptLogFilter) -> Result<Vec<crate::receipts::Rec
         stage,
         since,
         source_like: filter.source,
+        degraded: filter.degraded.then_some(true),
         limit: Some(filter.limit),
     };
     receipts::query(&conn, &receipts_filter)

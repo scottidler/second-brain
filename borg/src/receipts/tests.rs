@@ -60,12 +60,64 @@ fn record_received_is_idempotent_on_trace_id() {
 fn mark_succeeded_promotes_received_to_succeeded() {
     let conn = fresh();
     record_received(&conn, "tr-s1", Method::Cli, ReceiptKind::Url, "u").expect("ins");
-    let updated = mark_succeeded(&conn, "tr-s1", "inbox/foo.md").expect("mark");
+    let updated = mark_succeeded(&conn, "tr-s1", "inbox/foo.md", false).expect("mark");
     assert!(updated);
     let r = get(&conn, "tr-s1").expect("get").expect("row");
     assert_eq!(r.status, "succeeded");
     assert_eq!(r.note_path.as_deref(), Some("inbox/foo.md"));
     assert!(r.terminal_at.is_some());
+    assert!(!r.degraded, "non-degraded publish defaults degraded=false");
+}
+
+#[test]
+fn mark_succeeded_records_degraded_and_query_filters_on_it() {
+    let conn = fresh();
+    record_received(&conn, "clean", Method::Cli, ReceiptKind::Url, "u").expect("ins");
+    record_received(&conn, "deg", Method::Cli, ReceiptKind::Url, "u").expect("ins");
+    mark_succeeded(&conn, "clean", "inbox/clean.md", false).expect("mark clean");
+    mark_succeeded(&conn, "deg", "inbox/deg.md", true).expect("mark degraded");
+
+    assert!(!get(&conn, "clean").expect("get").expect("row").degraded);
+    assert!(get(&conn, "deg").expect("get").expect("row").degraded);
+
+    // `sb borg log --degraded` => Filter { degraded: Some(true) }.
+    let degraded_only = query(
+        &conn,
+        &Filter {
+            degraded: Some(true),
+            ..Default::default()
+        },
+    )
+    .expect("query degraded");
+    assert_eq!(degraded_only.len(), 1);
+    assert_eq!(degraded_only[0].trace_id, "deg");
+}
+
+#[test]
+fn migration_adds_degraded_column_to_pre_v2_db() {
+    // Simulate a v1 DB: a `receipts` table WITHOUT the `degraded` column.
+    let conn = Connection::open_in_memory().expect("open");
+    conn.execute_batch(
+        "CREATE TABLE receipts (
+            trace_id TEXT NOT NULL PRIMARY KEY,
+            received_at TEXT NOT NULL,
+            method TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            raw_input TEXT NOT NULL,
+            status TEXT NOT NULL,
+            terminal_at TEXT, note_path TEXT, failure_stage TEXT,
+            failure_reason TEXT, replay_of TEXT
+        );",
+    )
+    .expect("create v1 table");
+    assert!(!has_column(&conn, "receipts", "degraded").expect("probe"));
+    run_migrations(&conn).expect("migrate");
+    assert!(
+        has_column(&conn, "receipts", "degraded").expect("probe"),
+        "v2 migration must add the degraded column"
+    );
+    // Idempotent: a second run does not error.
+    run_migrations(&conn).expect("migrate again");
 }
 
 #[test]
@@ -73,7 +125,7 @@ fn mark_succeeded_is_noop_on_already_terminal_row() {
     let conn = fresh();
     record_received(&conn, "tr-s2", Method::Cli, ReceiptKind::Url, "u").expect("ins");
     mark_failed(&conn, "tr-s2", FailureStage::FetchFailed, "yt-dlp").expect("first transition wins");
-    let updated = mark_succeeded(&conn, "tr-s2", "inbox/foo.md").expect("mark");
+    let updated = mark_succeeded(&conn, "tr-s2", "inbox/foo.md", false).expect("mark");
     assert!(!updated, "succeeded should be a no-op once row is failed");
     let r = get(&conn, "tr-s2").expect("get").expect("row");
     assert_eq!(r.status, "failed", "failed status is absorbing");
@@ -151,9 +203,9 @@ fn record_replay_carries_replay_of() {
 }
 
 #[test]
-fn promote_stale_to_crashed_moves_only_past_deadline_rows() {
+fn list_stale_selects_only_past_deadline_rows() {
     let conn = fresh();
-    // Fresh row, recent: should NOT be promoted with deadline=10s.
+    // Fresh row, recent: should NOT be selected as stale.
     record_received(&conn, "fresh", Method::Http, ReceiptKind::Url, "u").expect("fresh");
     // Synthesize an old row by patching received_at to far in the past.
     record_received(&conn, "old", Method::Http, ReceiptKind::Url, "u").expect("old");
@@ -162,8 +214,13 @@ fn promote_stale_to_crashed_moves_only_past_deadline_rows() {
         [],
     )
     .expect("backdate");
-    let promoted = promote_stale_to_crashed(&conn, 60).expect("promote");
-    assert_eq!(promoted, 1, "only the old row should be promoted");
+    // The watchdog selects stale candidates, then promotes each survivor
+    // individually (the mass promote_stale_to_crashed was deleted as dead).
+    let stale = list_stale(&conn, 60).expect("list_stale");
+    assert_eq!(stale.len(), 1, "only the old row is stale");
+    assert_eq!(stale[0].0, "old");
+    let promoted = promote_single_to_crashed(&conn, "old", 60).expect("promote");
+    assert!(promoted);
     let fresh_row = get(&conn, "fresh").expect("get").expect("row");
     assert_eq!(fresh_row.status, "received");
     let old_row = get(&conn, "old").expect("get").expect("row");
@@ -176,7 +233,7 @@ fn promote_single_to_crashed_status_guard() {
     let conn = fresh();
     record_received(&conn, "tr-race", Method::Http, ReceiptKind::Url, "u").expect("ins");
     // Simulate the pipeline winning the race first.
-    mark_succeeded(&conn, "tr-race", "inbox/race.md").expect("succ");
+    mark_succeeded(&conn, "tr-race", "inbox/race.md", false).expect("succ");
     // Watchdog tries to crash it now -> no-op.
     let crashed = promote_single_to_crashed(&conn, "tr-race", 60).expect("promote");
     assert!(!crashed);
@@ -208,7 +265,7 @@ fn query_filters_by_status() {
     record_received(&conn, "a", Method::Http, ReceiptKind::Url, "u").expect("ins");
     record_received(&conn, "b", Method::Http, ReceiptKind::Url, "u").expect("ins");
     record_received(&conn, "c", Method::Http, ReceiptKind::Url, "u").expect("ins");
-    mark_succeeded(&conn, "a", "n1.md").expect("succ a");
+    mark_succeeded(&conn, "a", "n1.md", false).expect("succ a");
     mark_failed(&conn, "b", FailureStage::FetchFailed, "boom").expect("fail b");
     let succ = query(
         &conn,
@@ -415,8 +472,8 @@ fn watchdog_crash_promotion_is_queryable_by_stage_crashed() {
         [],
     )
     .expect("backdate");
-    let promoted = promote_stale_to_crashed(&conn, 60).expect("promote");
-    assert_eq!(promoted, 1);
+    let promoted = promote_single_to_crashed(&conn, "stale", 60).expect("promote");
+    assert!(promoted);
     let crashed = query(
         &conn,
         &Filter {
@@ -467,7 +524,7 @@ fn count_by_status_groups_correctly() {
     record_received(&conn, "r2", Method::Http, ReceiptKind::Url, "u").expect("ins");
     record_received(&conn, "s", Method::Http, ReceiptKind::Url, "u").expect("ins");
     record_received(&conn, "f", Method::Http, ReceiptKind::Url, "u").expect("ins");
-    mark_succeeded(&conn, "s", "n.md").expect("s");
+    mark_succeeded(&conn, "s", "n.md", false).expect("s");
     mark_failed(&conn, "f", FailureStage::FetchFailed, "x").expect("f");
     let (recv, succ, fail) = count_by_status(&conn).expect("count");
     assert_eq!((recv, succ, fail), (2, 1, 1));

@@ -59,7 +59,7 @@ fn run_once_conn_skips_fresh_rows() {
 fn run_once_conn_skips_terminal_rows() {
     let conn = receipts::open_memory().unwrap();
     receipts::record_received(&conn, "done", Method::Http, ReceiptKind::Url, "u").unwrap();
-    receipts::mark_succeeded(&conn, "done", "inbox/n.md").unwrap();
+    receipts::mark_succeeded(&conn, "done", "inbox/n.md", false).unwrap();
     backdate(&conn, "done");
 
     let promoted = run_once_conn(&conn, 60, &|_| false).unwrap();

@@ -180,6 +180,9 @@ pub struct LogCliArgs {
     /// SQL LIKE pattern matched against raw_input (e.g. `%youtube.com%`).
     #[arg(long)]
     pub source: Option<String>,
+    /// Show only degraded publishes (notes written from a distill fallback).
+    #[arg(long)]
+    pub degraded: bool,
     /// Cap the number of rows returned.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
@@ -346,6 +349,7 @@ impl BorgCli {
                         stage: args.stage,
                         since: args.since,
                         source: args.source,
+                        degraded: args.degraded,
                         limit: args.limit,
                     };
                     let rows = borg::triage::receipts_log(filter)?;

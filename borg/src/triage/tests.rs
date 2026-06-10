@@ -11,7 +11,7 @@ fn audit_health_stats_conn_counts_by_status_and_window() {
     receipts::record_received(&conn, "r1", Method::Http, ReceiptKind::Url, "u").unwrap();
     receipts::record_received(&conn, "r2", Method::Http, ReceiptKind::Url, "u").unwrap();
     receipts::record_received(&conn, "s1", Method::Http, ReceiptKind::Url, "u").unwrap();
-    receipts::mark_succeeded(&conn, "s1", "n.md").unwrap();
+    receipts::mark_succeeded(&conn, "s1", "n.md", false).unwrap();
     receipts::record_received(&conn, "f1", Method::Http, ReceiptKind::Url, "u").unwrap();
     receipts::mark_failed(&conn, "f1", FailureStage::FetchFailed, "x").unwrap();
     receipts::record_received(&conn, "x1", Method::Http, ReceiptKind::Url, "u").unwrap();

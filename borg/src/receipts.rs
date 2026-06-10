@@ -3,8 +3,9 @@
 //! Every front door (`routes.rs`, `telegram.rs`, `discord.rs`, `ntfy.rs`,
 //! CLI) calls [`record_received`] synchronously before any pipeline work
 //! runs. The pipeline's terminal sites call [`mark_succeeded`] or
-//! [`mark_failed`]. The watchdog calls [`promote_stale_to_crashed`] for any
-//! row still `received` past the deadline.
+//! [`mark_failed`]. The watchdog SELECTs stale rows via [`list_stale`],
+//! filters them through the active-permit set, then calls
+//! [`promote_single_to_crashed`] for each survivor.
 //!
 //! State machine:
 //!
@@ -38,7 +39,7 @@ pub const POOL_SIZE: u32 = 8;
 
 /// Schema version recorded in the `schema_version` table. Bump when the
 /// schema changes.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA_SQL: &str = include_str!("receipts/schema.sql");
 
@@ -62,6 +63,8 @@ pub struct Receipt {
     pub failure_stage: Option<String>,
     pub failure_reason: Option<String>,
     pub replay_of: Option<String>,
+    /// True when the note was published from a distill fallback (degraded).
+    pub degraded: bool,
 }
 
 /// Filter for [`query`]. Empty filter means "all rows".
@@ -74,6 +77,8 @@ pub struct Filter {
     pub since: Option<String>,
     /// SQL LIKE pattern matched against `raw_input`.
     pub source_like: Option<String>,
+    /// When `Some(true)`, keep only degraded (distill-fallback) publishes.
+    pub degraded: Option<bool>,
     /// Maximum number of rows to return; `None` means no limit.
     pub limit: Option<usize>,
 }
@@ -162,8 +167,36 @@ pub fn build_pool_at(path: &Path) -> Result<Pool<SqliteConnectionManager>> {
     Ok(pool)
 }
 
+/// Whether `table` already has a column named `column`. Used to make
+/// ADD-COLUMN migrations idempotent (a fresh DB created from the baseline
+/// schema already has the column; an old DB does not).
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .context("prepare table_info")?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("query table_info")?;
+    for n in names {
+        if n.context("read table_info row")? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_SQL).context("schema batch")?;
+    // v2: add the `degraded` column to pre-existing DBs. A fresh DB already
+    // has it (baseline schema); old rows default to 0. Idempotent via the
+    // column probe, so re-running open() is safe.
+    if !has_column(conn, "receipts", "degraded")? {
+        conn.execute(
+            "ALTER TABLE receipts ADD COLUMN degraded INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .context("add degraded column")?;
+    }
     // MAX() over an empty table returns one row whose value is NULL, which
     // rusqlite cannot decode straight into i64; bind through Option to read
     // it cleanly.
@@ -236,12 +269,38 @@ pub fn record_received(
     kind: ReceiptKind,
     raw_input: &str,
 ) -> Result<()> {
+    record_received_flagged(conn, trace_id, method, kind, raw_input, false)
+}
+
+/// Like [`record_received`] but the caller already EXPECTS a row to exist
+/// (e.g. the failure-at-door upsert, where the door capture ran first). A
+/// no-op insert (`rows == 0`) is then normal and logs at DEBUG instead of
+/// WARN - the WARN was spamming on every door rejection.
+pub fn record_received_expecting_existing(
+    conn: &Connection,
+    trace_id: &str,
+    method: Method,
+    kind: ReceiptKind,
+    raw_input: &str,
+) -> Result<()> {
+    record_received_flagged(conn, trace_id, method, kind, raw_input, true)
+}
+
+fn record_received_flagged(
+    conn: &Connection,
+    trace_id: &str,
+    method: Method,
+    kind: ReceiptKind,
+    raw_input: &str,
+    expected_existing: bool,
+) -> Result<()> {
     log::debug!(
-        "receipts::record_received: trace={} method={} kind={} raw_len={}",
+        "receipts::record_received: trace={} method={} kind={} raw_len={} expected_existing={}",
         trace_id,
         method,
         kind,
-        raw_input.len()
+        raw_input.len(),
+        expected_existing
     );
     let rows = conn
         .execute(
@@ -252,7 +311,11 @@ pub fn record_received(
         )
         .with_context(|| format!("Failed to record received trace_id={trace_id}"))?;
     if rows == 0 {
-        log::warn!("receipts::record_received: trace_id={trace_id} already present, no-op");
+        if expected_existing {
+            log::debug!("receipts::record_received: trace_id={trace_id} already present (expected), no-op");
+        } else {
+            log::warn!("receipts::record_received: trace_id={trace_id} already present, no-op");
+        }
     }
     Ok(())
 }
@@ -293,13 +356,13 @@ pub fn record_replay(
 /// Promote a `received` row to `succeeded`. The `WHERE status='received'`
 /// guard makes this a no-op if the row has already moved to a terminal
 /// state (e.g. the watchdog beat the pipeline to it).
-pub fn mark_succeeded(conn: &Connection, trace_id: &str, note_path: &str) -> Result<bool> {
-    log::debug!("receipts::mark_succeeded: trace={trace_id} note_path={note_path}");
+pub fn mark_succeeded(conn: &Connection, trace_id: &str, note_path: &str, degraded: bool) -> Result<bool> {
+    log::debug!("receipts::mark_succeeded: trace={trace_id} note_path={note_path} degraded={degraded}");
     let rows = conn
         .execute(
-            "UPDATE receipts SET status='succeeded', terminal_at=?, note_path=? \
+            "UPDATE receipts SET status='succeeded', terminal_at=?, note_path=?, degraded=? \
              WHERE trace_id=? AND status='received'",
-            params![now_iso8601(), note_path, trace_id],
+            params![now_iso8601(), note_path, degraded as i64, trace_id],
         )
         .with_context(|| format!("Failed to mark succeeded trace_id={trace_id}"))?;
     if rows == 0 {
@@ -325,33 +388,6 @@ pub fn mark_failed(conn: &Connection, trace_id: &str, stage: FailureStage, reaso
         log::warn!("receipts::mark_failed: trace_id={trace_id} not in 'received' state (already terminal)");
     }
     Ok(rows > 0)
-}
-
-/// Watchdog entry point: in a single UPDATE, promote every row that has
-/// been `received` for longer than `deadline_secs` to `failed` with stage
-/// `crashed`. Returns the number of rows promoted.
-///
-/// **Important:** this entry point does NOT filter through
-/// `permits::is_trace_active`. The caller (the watchdog tick) is expected
-/// to SELECT candidate trace_ids first, filter them in-memory, then call
-/// [`promote_single_to_crashed`] for each survivor. Calling this method
-/// directly will mass-promote permit-queued traces that are not yet
-/// crashed.
-pub fn promote_stale_to_crashed(conn: &Connection, deadline_secs: u64) -> Result<usize> {
-    log::debug!("receipts::promote_stale_to_crashed: deadline_secs={deadline_secs}");
-    let now = Utc::now();
-    let cutoff = now - chrono::Duration::seconds(deadline_secs as i64);
-    let cutoff_iso = cutoff.format(TIMESTAMP_FMT).to_string();
-    let reason = format!("no terminal event within {deadline_secs}s");
-    let rows = conn
-        .execute(
-            "UPDATE receipts SET status='failed', failure_stage='crashed', \
-             failure_reason=?, terminal_at=? \
-             WHERE status='received' AND received_at < ?",
-            params![reason, now_iso8601(), cutoff_iso],
-        )
-        .context("Failed to promote stale receipts to crashed")?;
-    Ok(rows)
 }
 
 /// SELECT the trace_ids that are candidates for crashed-promotion: status
@@ -400,7 +436,7 @@ pub fn get(conn: &Connection, trace_id: &str) -> Result<Option<Receipt>> {
     let mut stmt = conn
         .prepare(
             "SELECT trace_id, received_at, method, kind, raw_input, status, \
-                    terminal_at, note_path, failure_stage, failure_reason, replay_of \
+                    terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded \
              FROM receipts WHERE trace_id=?",
         )
         .context("prepare get")?;
@@ -416,7 +452,7 @@ pub fn get(conn: &Connection, trace_id: &str) -> Result<Option<Receipt>> {
 pub fn query(conn: &Connection, filter: &Filter) -> Result<Vec<Receipt>> {
     let mut sql = String::from(
         "SELECT trace_id, received_at, method, kind, raw_input, status, \
-                terminal_at, note_path, failure_stage, failure_reason, replay_of \
+                terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded \
          FROM receipts WHERE 1=1",
     );
     let mut bound: Vec<rusqlite::types::Value> = Vec::new();
@@ -439,6 +475,10 @@ pub fn query(conn: &Connection, filter: &Filter) -> Result<Vec<Receipt>> {
     if let Some(pat) = &filter.source_like {
         sql.push_str(" AND raw_input LIKE ?");
         bound.push(pat.clone().into());
+    }
+    if let Some(degraded) = filter.degraded {
+        sql.push_str(" AND degraded=?");
+        bound.push((degraded as i64).into());
     }
     sql.push_str(" ORDER BY received_at DESC");
     if let Some(limit) = filter.limit {
@@ -469,6 +509,7 @@ fn row_to_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<Receipt> {
         failure_stage: row.get(8)?,
         failure_reason: row.get(9)?,
         replay_of: row.get(10)?,
+        degraded: row.get::<_, i64>(11)? != 0,
     })
 }
 
