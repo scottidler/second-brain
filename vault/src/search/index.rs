@@ -235,6 +235,70 @@ impl super::SearchIndex {
         }
     }
 
+    /// Incrementally reindex only the given (absolute) paths - the watcher's
+    /// change set - instead of walking the whole vault. Each existing file is
+    /// parsed and `index_one`'d (mtime-gated, same as the full walk); a path
+    /// whose file no longer exists has its `notes` row deleted (mirroring
+    /// `remove_stale_notes`, which only touches the `notes` table). A parse
+    /// failure on one path is logged and skipped so it can't abort the batch.
+    pub fn index_changed(&self, vault_root: &Path, changed_paths: &[PathBuf]) -> Result<IndexStats> {
+        let mut inserted = 0u64;
+        let mut updated = 0u64;
+        let mut unchanged = 0u64;
+        let mut removed = 0u64;
+        let mut scanned = 0u64;
+
+        for abs_path in changed_paths {
+            if !abs_path.exists() {
+                let relative = abs_path.strip_prefix(vault_root).unwrap_or(abs_path);
+                let path_str = relative.to_string_lossy();
+                removed += self
+                    .conn
+                    .execute("DELETE FROM notes WHERE path = ?1", params![path_str.as_ref()])?
+                    as u64;
+                continue;
+            }
+
+            let note = match crate::note::parse_note(vault_root, abs_path) {
+                Ok(n) => n,
+                Err(e) => {
+                    log::warn!("index_changed: failed to parse {}: {e}", abs_path.display());
+                    continue;
+                }
+            };
+            scanned += 1;
+
+            let mtime = std::fs::metadata(abs_path)
+                .and_then(|m| m.modified())
+                .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+                .unwrap_or(0) as i64;
+
+            let path_str = note.path.to_string_lossy();
+            let existing_mtime: Option<i64> = optional_row(self.conn.query_row(
+                "SELECT modified_at FROM notes WHERE path = ?1",
+                params![path_str.as_ref()],
+                |row| row.get(0),
+            ))?;
+            if existing_mtime == Some(mtime) {
+                unchanged += 1;
+                continue;
+            }
+
+            match self.index_one(&note, mtime)? {
+                IndexAction::Inserted => inserted += 1,
+                IndexAction::Updated => updated += 1,
+            }
+        }
+
+        Ok(IndexStats {
+            total_scanned: scanned,
+            inserted,
+            updated,
+            unchanged,
+            removed,
+        })
+    }
+
     pub(crate) fn remove_stale_notes(&self, current_paths: &[String]) -> Result<u64> {
         let mut stmt = self.conn.prepare("SELECT path FROM notes")?;
         let db_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?.filter_map(warn_row).collect();

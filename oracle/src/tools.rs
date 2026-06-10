@@ -15,8 +15,8 @@ use vault::schema::{Domain, NoteType, Status};
 ///   terms, and "I know I saved that word" queries.
 /// - `vector`: pure semantic search via fastembed + brute-force cosine
 ///   over `note_embeddings`. Best for conceptual recall.
-/// - `hybrid`: BM25 and vector fused via reciprocal rank fusion (the
-///   default; recovers both behaviors).
+/// - `hybrid`: BM25 and vector fused via reciprocal rank fusion (recovers
+///   both behaviors).
 /// - `graph`: seed via hybrid, then expand one hop along the materialized
 ///   `edges` graph and re-fuse the seed list with the graph-expanded list.
 ///   Surfaces neighbors that no single query term would reach.
@@ -34,8 +34,11 @@ pub enum SearchMode {
 
 /// Search the vault's ingested knowledge.
 ///
-/// Phase A6 added the `mode` parameter; omitting it defaults to
-/// hybrid retrieval (BM25 ∪ vector fused via RRF).
+/// `mode` is an explicit single-path override. Omitting it (the common case)
+/// runs the operator-configured retrieval pipeline from `oracle.yml`
+/// (`retrieval:`) — vector-first by default, which eval scored highest
+/// (nDCG@10 0.876 vs 0.799 for equal-weight hybrid). Pass `mode` only to force
+/// one legacy path.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct KnowledgeSearchRequest {
     /// The search query (full-text search across titles, bodies, tags, and summaries)
@@ -64,9 +67,10 @@ pub struct KnowledgeSearchRequest {
     #[schemars(description = "Maximum number of results to return (default: 10)")]
     pub limit: Option<u32>,
 
-    /// Retrieval mode. Default: hybrid.
+    /// Retrieval mode. Explicit single-path override; omit to run the
+    /// operator-configured pipeline (vector-first by default).
     #[schemars(
-        description = "Retrieval mode: bm25 (FTS5 keyword search), vector (semantic cosine over embeddings), hybrid (BM25 + vector fused via RRF; default), graph (hybrid seed expanded one hop along the edge graph), or graph-hybrid (bm25 + vector + graph fused)."
+        description = "Retrieval mode override: bm25 (FTS5 keyword search), vector (semantic cosine over embeddings), hybrid (BM25 + vector fused via RRF), graph (hybrid seed expanded one hop along the edge graph), or graph-hybrid (bm25 + vector + graph fused). Omit to run the operator-configured pipeline (vector-first by default, eval-best)."
     )]
     pub mode: Option<SearchMode>,
 
@@ -170,6 +174,10 @@ pub struct IngestHistoryRequest {
     /// Only entries before this date (YYYY-MM-DD)
     #[schemars(description = "Only entries before this date (YYYY-MM-DD)")]
     pub before: Option<String>,
+
+    /// Maximum number of (most-recent) rows to return
+    #[schemars(description = "Maximum number of most-recent rows to return (default: 50)")]
+    pub limit: Option<u32>,
 }
 
 /// Query the borg receipts log for failure history.
@@ -275,6 +283,17 @@ pub struct RecentActivityRequest {
 }
 
 /// Wikilink graph traversal for a note - outbound and inbound links.
+/// Which link direction(s) `find_links` traverses. A schema enum so a typo
+/// (`"outbund"`) fails deserialization with the valid options rather than
+/// silently matching neither branch and returning an empty result.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkDirection {
+    Outbound,
+    Inbound,
+    Both,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FindLinksRequest {
     /// Note path to inspect
@@ -283,7 +302,7 @@ pub struct FindLinksRequest {
 
     /// Direction: "outbound", "inbound", or "both"
     #[schemars(description = "Link direction: outbound, inbound, or both (default: both)")]
-    pub direction: Option<String>,
+    pub direction: Option<LinkDirection>,
 
     /// Detail level for inbound notes
     #[schemars(description = "Detail level for inbound note results. Default: metadata")]
@@ -344,12 +363,33 @@ pub struct InboxStatusRequest {
     pub limit: Option<u32>,
 }
 
+/// Cortex quality level for `quality_report`. A schema enum so a typo fails
+/// deserialization with the valid options rather than silently matching no
+/// rows in `notes_by_quality`.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum QualityLevel {
+    Low,
+    Medium,
+    High,
+}
+
+impl QualityLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QualityLevel::Low => "low",
+            QualityLevel::Medium => "medium",
+            QualityLevel::High => "high",
+        }
+    }
+}
+
 /// Notes by quality score and common issues.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct QualityReportRequest {
     /// Filter by quality level: "low", "medium", "high"
     #[schemars(description = "Filter by quality level: low, medium, high. Omit for distribution overview.")]
-    pub quality: Option<String>,
+    pub quality: Option<QualityLevel>,
 
     /// How much content to return per note
     #[schemars(description = "Detail level for returned notes. Default: tldr")]

@@ -580,3 +580,30 @@ async fn run_pipeline_no_methods_enabled_returns_empty() {
         "no methods enabled must yield zero results: {v}"
     );
 }
+
+/// Parity guard: every tool advertised by the router (`list_tools`) must have a
+/// matching arm in the hand-written `dispatch()` mirror. Dispatching with a
+/// `null` argument fails deserialization for every KNOWN tool (a struct can't
+/// be built from null) before its body runs - so a known tool yields a
+/// `"{name}: ..."` deser error, while a tool missing from `dispatch()` yields
+/// `"unknown tool: ..."`. Asserting no router tool produces "unknown tool"
+/// catches a tool added to the router but forgotten in the dispatch match.
+#[tokio::test]
+async fn every_router_tool_has_a_dispatch_arm() {
+    let db = SearchIndex::open_memory().expect("open db");
+    let server = OracleMcpServer::new(Config::default(), db);
+
+    let tools = OracleMcpServer::list_tools();
+    assert!(!tools.is_empty(), "router advertised no tools");
+
+    for tool in &tools {
+        let name = tool.name.as_ref();
+        if let Err(e) = server.dispatch(name, serde_json::Value::Null).await {
+            assert!(
+                !e.message.contains("unknown tool"),
+                "router tool {name:?} has no dispatch() arm: {}",
+                e.message
+            );
+        }
+    }
+}

@@ -2,7 +2,6 @@
 
 use crate::config::Config;
 use crate::tools::*;
-use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
@@ -23,6 +22,10 @@ const MAX_EXPAND_HOPS: u8 = 2;
 /// Per-hop decay applied to expansion scores so distant neighbors rank lower.
 /// 0.5 ≈ one effective hop. Feeds the graph rank list (an ordering into RRF).
 const GRAPH_HOP_DECAY: f32 = 0.5;
+/// `find_similar` over-fetch multiplier: when a post-filter (domain / self
+/// exclusion) is active, fetch this many times `limit` candidates so filtering
+/// can't shrink the result below `limit` (or to zero when matches exist).
+const FIND_SIMILAR_OVERFETCH: usize = 5;
 /// Char budget for the candidate text sent to the cross-encoder reranker. The
 /// tokenizer truncates to 512 tokens anyway; this bounds memory before that.
 const RERANK_TEXT_MAX_CHARS: usize = 2000;
@@ -32,19 +35,22 @@ const RERANK_TEXT_MAX_CHARS: usize = 2000;
 pub struct OracleMcpServer {
     config: Config,
     db: std::sync::Arc<Mutex<SearchIndex>>,
-    #[allow(dead_code)]
-    tool_router: ToolRouter<Self>,
 }
 
 impl OracleMcpServer {
     pub fn new(config: Config, db: SearchIndex) -> Self {
         info!("Creating OracleMcpServer");
-        let tool_router = Self::tool_router();
-        debug!("Tool router created with {} tools", tool_router.list_all().len());
+        // `#[tool_handler]` resolves the router via `Self::tool_router()` (the
+        // associated fn the `#[tool_router]` macro generates), not a stored
+        // field - so no `tool_router` field is kept. Log the count for parity
+        // with startup diagnostics.
+        debug!(
+            "Tool router created with {} tools",
+            Self::tool_router().list_all().len()
+        );
         Self {
             config,
             db: std::sync::Arc::new(Mutex::new(db)),
-            tool_router,
         }
     }
 
@@ -170,6 +176,13 @@ impl OracleMcpServer {
         McpError::internal_error(e.to_string(), None)
     }
 
+    /// Caller-fault error (bad argument value), distinct from `err`'s
+    /// server-fault `internal_error`. An empty query is the caller's mistake.
+    fn invalid(e: impl std::fmt::Display) -> McpError {
+        warn!("Tool invalid params: {}", e);
+        McpError::invalid_params(e.to_string(), None)
+    }
+
     /// Look up `NoteRow`s for an ordered list of paths. Preserves order
     /// (callers pass an RRF-ranked list) and silently skips paths that
     /// no longer resolve (a note may have been deleted between embed
@@ -268,12 +281,12 @@ impl OracleMcpServer {
 impl OracleMcpServer {
     /// Search the vault's ingested knowledge.
     #[tool(
-        description = "Search the vault's ingested knowledge. Modes: bm25 (FTS5 keyword search), vector (semantic, brute-force cosine over embeddings), or hybrid (BM25 + vector fused via RRF; default). Filter by domain, note type, or status. Control content verbosity with the detail parameter: metadata, tldr, summary, full."
+        description = "Search the vault's ingested knowledge. Omit mode (the common case) to run the operator-configured pipeline (vector-first by default, eval-best). Mode overrides force a single path: bm25 (FTS5 keyword search), vector (semantic, brute-force cosine over embeddings), or hybrid (BM25 + vector fused via RRF). Filter by domain, note type, or status. Control content verbosity with the detail parameter: metadata, tldr, summary, full."
     )]
     async fn knowledge_search(&self, params: Parameters<KnowledgeSearchRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
         if req.query.trim().is_empty() {
-            return Err(Self::err("query is empty"));
+            return Err(Self::invalid("query is empty"));
         }
         let detail_level = req.detail.unwrap_or(DetailLevel::Summary);
         let limit = req.limit.unwrap_or(10);
@@ -451,8 +464,15 @@ impl OracleMcpServer {
 
         let entries = ledger::query_entries(&ledger_path, &filter).map_err(Self::err)?;
 
+        // The ledger is chronological (oldest first), so the most-recent
+        // `limit` rows are the tail. Bound the response: the full ledger can be
+        // many thousand rows and would otherwise land in one MCP payload.
+        let limit = req.limit.unwrap_or(50) as usize;
+        let skip = entries.len().saturating_sub(limit);
+
         let results: Vec<serde_json::Value> = entries
             .iter()
+            .skip(skip)
             .map(|e| {
                 json!({
                     "date": e.date,
@@ -670,7 +690,19 @@ impl OracleMcpServer {
             }
         };
 
-        let mut notes = db.find_similar(&content, limit as usize).map_err(Self::err)?;
+        // Over-fetch a candidate pool BEFORE the post-filters so a selective
+        // domain filter or the self-note exclusion cannot shrink the result
+        // below `limit` (the previous fetch-exactly-`limit` could return 0 with
+        // matches present). With no post-filter active the pool is exactly `limit`.
+        let filtering = req.domain.is_some() || req.path.is_some();
+        let fetch = if filtering {
+            (limit as usize)
+                .saturating_mul(FIND_SIMILAR_OVERFETCH)
+                .saturating_add(1)
+        } else {
+            limit as usize
+        };
+        let mut notes = db.find_similar(&content, fetch).map_err(Self::err)?;
 
         // Filter by domain if requested
         if let Some(ref domain) = req.domain {
@@ -682,6 +714,9 @@ impl OracleMcpServer {
         if let Some(ref path) = req.path {
             notes.retain(|n| n.path != *path);
         }
+
+        // Truncate the over-fetched pool back down to the requested limit.
+        notes.truncate(limit as usize);
 
         let results: Vec<serde_json::Value> = notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
 
@@ -726,7 +761,7 @@ impl OracleMcpServer {
     async fn find_links(&self, params: Parameters<FindLinksRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
         let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
-        let direction = req.direction.as_deref().unwrap_or("both");
+        let direction = req.direction.unwrap_or(LinkDirection::Both);
 
         let db = self.db.lock().map_err(Self::err)?;
 
@@ -747,7 +782,7 @@ impl OracleMcpServer {
             "note": { "path": path, "title": title },
         });
 
-        if direction == "outbound" || direction == "both" {
+        if matches!(direction, LinkDirection::Outbound | LinkDirection::Both) {
             let outbound = db.find_outbound_links(&req.path).map_err(Self::err)?;
             let outbound_json: Vec<serde_json::Value> = outbound
                 .iter()
@@ -762,7 +797,7 @@ impl OracleMcpServer {
             result["outbound"] = json!(outbound_json);
         }
 
-        if direction == "inbound" || direction == "both" {
+        if matches!(direction, LinkDirection::Inbound | LinkDirection::Both) {
             let inbound = db.find_inbound_links(&req.path).map_err(Self::err)?;
             let inbound_json: Vec<serde_json::Value> =
                 inbound.iter().map(|n| Self::format_note(n, &detail_level)).collect();
@@ -902,7 +937,7 @@ impl OracleMcpServer {
         let distribution = db.quality_distribution().map_err(Self::err)?;
 
         let results = if let Some(quality) = req.quality {
-            let notes = db.notes_by_quality(&quality, req.limit).map_err(Self::err)?;
+            let notes = db.notes_by_quality(quality.as_str(), req.limit).map_err(Self::err)?;
             notes.iter().map(|n| Self::format_note(n, &detail_level)).collect()
         } else {
             vec![]
@@ -981,8 +1016,9 @@ impl ServerHandler for OracleMcpServer {
         info.instructions = Some(
             "Oracle - knowledge retrieval MCP for a second-brain Obsidian vault. \
              Search ingested knowledge by domain, type, or full-text query. knowledge_search \
-             defaults to hybrid mode (BM25 + vector embeddings fused via RRF); pass mode=bm25 \
-             for pure keyword search or mode=vector for pure semantic similarity. \
+             with no mode runs the operator-configured pipeline (vector-first by default, \
+             eval-best); pass mode=bm25 for pure keyword search, mode=vector for pure semantic \
+             similarity, or mode=hybrid to force BM25 + vector fused via RRF. \
              Control content verbosity with the 'detail' parameter: \
              metadata (fields only), tldr (one-liner), summary (summary section), full (complete body). \
              Use vault_overview for the big picture, domain_brief for domain-specific intelligence, \

@@ -4,7 +4,6 @@
 //! rubric version — so any of those changing invalidates only the affected
 //! rows (Architect review findings #1/#2).
 
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use eyre::{Context, Result};
@@ -14,12 +13,23 @@ use rusqlite::{Connection, params};
 /// the score semantics change, to invalidate all prior judgments.
 pub const RUBRIC_VERSION: &str = "v1";
 
-/// Stable, process-independent hash of a string, hex-encoded. Uses
-/// `DefaultHasher` (fixed keys, deterministic across runs — unlike `RandomState`).
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+/// Stable, process- AND toolchain-independent hash of a string, hex-encoded.
+///
+/// FNV-1a (64-bit), pinned by the constants above. `std`'s `DefaultHasher` was
+/// previously used here, but its algorithm is explicitly NOT guaranteed stable
+/// across Rust releases — a toolchain bump would silently change every hash and
+/// invalidate the entire judgment cache (re-buying every LLM judgment). FNV-1a
+/// is a fixed spec, so the cache survives toolchain upgrades.
 pub fn stable_hash(s: &str) -> String {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    format!("{:016x}", h.finish())
+    let mut h = FNV_OFFSET_BASIS;
+    for byte in s.as_bytes() {
+        h ^= *byte as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    format!("{h:016x}")
 }
 
 /// The full identity of a cached judgment.

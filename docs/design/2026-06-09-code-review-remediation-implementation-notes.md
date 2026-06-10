@@ -553,3 +553,85 @@ a second pass. `otto ci` exit 0 (check incl. clippy+fmt, and test).
 
 ### Open questions (second pass)
 - None.
+
+## Phase 10: Oracle correctness & MCP surface
+
+`otto ci` exit 0 (check incl. clippy+fmt, and test). The design doc's line
+numbers were stale (server.rs was decomposed in Phase 8); sites were located by
+content.
+
+### Design decisions
+- **Default-mode messaging (4+ sites)**: fixed every "default is hybrid" claim
+  (`tools.rs` SearchMode/KnowledgeSearchRequest docs + `mode` schemars,
+  `server.rs` knowledge_search `#[tool]` description + `get_info` instructions)
+  to say: omitting `mode` runs the operator-configured pipeline (vector-first,
+  eval-best); `mode` is an explicit single-path override. Stale "Phase A6"
+  comment removed.
+- **`ingest_history` limit**: added `limit: Option<u32>` (default 50). The
+  ledger is chronological ascending, so the handler returns the most-recent
+  `limit` rows (`skip(len - limit)`), bounding the MCP payload.
+- **`pipeline_graph_paths` hop clamp**: `cfg.methods.graph.hops.min(MAX_EXPAND_HOPS)`
+  so a misconfigured `retrieval.methods.graph.hops` can't bypass the same cap
+  the per-call graph modes already honor.
+- **Single-method fusion weight**: `run_pipeline` now always routes through
+  `reciprocal_rank_fusion_weighted` (dropped the `lists.len()==1` passthrough).
+  RRF preserves a lone positive-weight list's order exactly, but a 0.0-weight
+  method now correctly contributes nothing whether enabled alone or with others.
+- **Empty query → `invalid_params`**: added a `Self::invalid` helper
+  (`invalid_params`, caller-fault) distinct from `Self::err` (`internal_error`);
+  knowledge_search's empty-query guard uses it.
+- **`direction`/`quality` schema enums**: new `LinkDirection` (find_links) and
+  `QualityLevel` (quality_report) enums (kebab-case `JsonSchema`); a typo now
+  fails deserialization with the valid options instead of silently matching no
+  branch / no rows.
+- **`find_similar` over-fetch**: when a domain/self post-filter is active, fetch
+  `limit * FIND_SIMILAR_OVERFETCH (5) + 1` candidates, filter, then truncate to
+  `limit` - so filtering can't return 0 with matches present.
+- **Watcher reindex**: poisoned-mutex branch now logs (mirrors inbound
+  recompute) instead of silently stopping forever; and reindex goes through the
+  new `SearchIndex::index_changed(vault_root, changed_paths)` (parse + index_one
+  per changed path, delete row for vanished paths) instead of a full vault walk
+  under the lock.
+- **Eval cache FNV-1a**: `eval::cache::stable_hash` replaced `DefaultHasher`
+  (unstable across toolchains) with pinned FNV-1a 64-bit, so a rustc bump no
+  longer silently invalidates the whole judgment cache.
+- **dispatch() parity guard**: new test `every_router_tool_has_a_dispatch_arm`
+  dispatches every `list_tools()` name with `null` args (fails deserialization
+  before the body runs) and asserts none yields "unknown tool".
+- **Rerank injectable**: extracted `rerank_within_budget(db, cfg, query, fused,
+  &dyn Reranker) -> RerankOutcome` (pure over the injected reranker + DB);
+  `maybe_rerank` loads the candle reranker and owns the process-global
+  `RERANK_DISABLED` latch (set on the `Disable` outcome). Four unit tests with
+  `MockReranker` / a sleeping mock cover head-tail split, the two fail-open
+  short-circuits, and the over-budget Disable branch.
+- **Rerank latency projection**: `project_batch_ms(per_pair_ms, n)` is now LINEAR
+  in `n` (dropped the `threads` param and the `ceil(n/threads)` waves model).
+  The candle cross-encoder runs ONE batched forward over all `n` docs that
+  already saturates every core, so dividing by threads under-projected by up to
+  `threads`x; `per_pair_ms * n` is the honest upper bound.
+- **LogTracer bridge**: `sb::logger::init_tracing_to_file` now calls
+  `tracing_log::LogTracer::init()` before installing the subscriber, so vault's
+  `log::*` records (watcher/index warnings) are no longer dropped under
+  `sb oracle serve` (tracing-only). Added the `tracing-log` dep to sb.
+- **`eval_cache_path` fallback**: the relative `PathBuf::from("eval-cache.db")`
+  fallback (writes under CWD - the banned class) is replaced by
+  `vault::paths::oracle_eval_cache_path()` (data dir, panics on no-data-dir like
+  `oracle_db_path`).
+- **Dead `#[allow(dead_code)]`s**: `OracleMcpServer.tool_router` field was
+  genuinely vestigial - rmcp's `#[tool_handler]` resolves the router via
+  `Self::tool_router()` (the associated fn), not a stored field (confirmed in
+  rmcp-macros 1.6.0 docs), so the field is removed entirely rather than the
+  allow kept. `vault::watcher::VaultWatcher.watcher` renamed to `_watcher` (the
+  drop-guard carve-out: held only for its Drop teardown).
+
+### Deviations
+- None.
+
+### Tradeoffs
+- **`index_changed` deletes only the `notes` row** for a vanished path, matching
+  `remove_stale_notes` (the full-walk path) - embeddings/edges cleanup stays
+  owned elsewhere (cortex). Keeping parity with the existing behavior rather
+  than expanding deletion scope here.
+
+### Open questions
+- None.

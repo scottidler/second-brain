@@ -14,6 +14,16 @@ use rmcp::ErrorData as McpError;
 use tracing::{debug, warn};
 use vault::search::{NoteRow, Reranker, SearchIndex};
 
+/// Outcome of the testable rerank core (`rerank_within_budget`). `Disable`
+/// tells the caller to latch rerank off for the rest of the process (probe
+/// failure / over-budget); `FailOpen` keeps the fused order for this query only
+/// (too few candidates / no resolvable text); `Reordered` is the reranked list.
+enum RerankOutcome {
+    Reordered(Vec<String>),
+    FailOpen(Vec<String>),
+    Disable(Vec<String>),
+}
+
 impl OracleMcpServer {
     fn bm25_paths(
         &self,
@@ -339,18 +349,18 @@ impl OracleMcpServer {
             .max(vault::search::K_RRF_INPUT as usize)
             .max(if cfg.rerank.enabled { cfg.rerank.input_k as usize } else { 0 });
 
-        // Stage 3 - fuse. A single enabled method passes through in its own
-        // order; more than one fuses via weighted RRF (a zero-weight list
-        // contributes nothing, so a demoted retriever stays out of the result).
-        let fused_paths: Vec<String> = if lists.len() == 1 {
-            lists[0].0.iter().take(candidate_limit).cloned().collect()
-        } else {
-            let weighted: Vec<(&[String], f32)> = lists.iter().map(|(p, w)| (p.as_slice(), *w)).collect();
+        // Stage 3 - fuse. Always via weighted RRF, including the single-method
+        // case: RRF preserves a lone positive-weight list's order exactly, but a
+        // zero-weight list contributes nothing, so a demoted retriever stays out
+        // of the result whether it is enabled alone or alongside others. The old
+        // single-method passthrough ignored the weight and returned a 0.0-weight
+        // method at full strength - inconsistent with the multi-method path.
+        let weighted: Vec<(&[String], f32)> = lists.iter().map(|(p, w)| (p.as_slice(), *w)).collect();
+        let fused_paths: Vec<String> =
             vault::search::reciprocal_rank_fusion_weighted(&weighted, cfg.fusion.k, candidate_limit)
                 .into_iter()
                 .map(|h| h.note_path)
-                .collect()
-        };
+                .collect();
 
         // Stage 4 - rerank (cross-encoder): reorder the top `input_k` fused
         // candidates, latency-budgeted with a fail-open probe.
@@ -429,7 +439,9 @@ impl OracleMcpServer {
             domain,
             note_type,
             status,
-            cfg.methods.graph.hops,
+            // Honor the same hard cap as the per-call graph modes: a misconfigured
+            // `retrieval.methods.graph.hops` must not bypass the traversal-cost bound.
+            cfg.methods.graph.hops.min(super::MAX_EXPAND_HOPS),
             Some(&cfg.methods.graph.edge_kinds),
             cfg.methods.graph.min_edge_weight,
             cfg.methods.graph.hop_decay,
@@ -461,9 +473,46 @@ impl OracleMcpServer {
         if RERANK_DISABLED.load(Ordering::Relaxed) {
             return Ok(fused_paths);
         }
+
+        // Load the production cross-encoder. Injected into the testable core
+        // below so the head/tail split, probe, and budget branch are unit-
+        // testable with `MockReranker` without the candle loader.
+        let reranker = match vault::search::get_or_load_reranker(&cfg.model) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    "rerank disabled for this process: failed to load model {}: {e}",
+                    cfg.model
+                );
+                RERANK_DISABLED.store(true, Ordering::Relaxed);
+                return Ok(fused_paths);
+            }
+        };
+
+        match Self::rerank_within_budget(db, cfg, query, fused_paths, reranker.as_ref())? {
+            RerankOutcome::Reordered(paths) => Ok(paths),
+            RerankOutcome::FailOpen(paths) => Ok(paths),
+            RerankOutcome::Disable(paths) => {
+                RERANK_DISABLED.store(true, Ordering::Relaxed);
+                Ok(paths)
+            }
+        }
+    }
+
+    /// The rerank stage, pure over an injected [`Reranker`] and the DB - no
+    /// candle loader, no process-global latch. Returns the reordered list plus
+    /// whether the caller should latch rerank off for the process (probe
+    /// failure / over-budget). Unit-tested with `MockReranker`.
+    fn rerank_within_budget(
+        db: &SearchIndex,
+        cfg: &RerankConfig,
+        query: &str,
+        fused_paths: Vec<String>,
+        reranker: &dyn Reranker,
+    ) -> Result<RerankOutcome, McpError> {
         let input_k = cfg.input_k as usize;
         if fused_paths.len() <= 1 || input_k == 0 {
-            return Ok(fused_paths);
+            return Ok(RerankOutcome::FailOpen(fused_paths));
         }
 
         // Head (reranked) / tail (kept in fused order). Cloned up front so the
@@ -482,48 +531,33 @@ impl OracleMcpServer {
             }
         }
         if items.is_empty() {
-            return Ok(fused_paths);
+            return Ok(RerankOutcome::FailOpen(fused_paths));
         }
-
-        let reranker = match vault::search::get_or_load_reranker(&cfg.model) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(
-                    "rerank disabled for this process: failed to load model {}: {e}",
-                    cfg.model
-                );
-                RERANK_DISABLED.store(true, Ordering::Relaxed);
-                return Ok(fused_paths);
-            }
-        };
 
         // Warmup probe: time one pair, project the full batch over the threads.
         let probe_doc = [items[0].1.as_str()];
         let start = std::time::Instant::now();
         if let Err(e) = reranker.score(query, &probe_doc) {
             warn!("rerank disabled for this process: probe scoring failed: {e}");
-            RERANK_DISABLED.store(true, Ordering::Relaxed);
-            return Ok(fused_paths);
+            return Ok(RerankOutcome::Disable(fused_paths));
         }
         let per_pair_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        let projected = vault::search::project_batch_ms(per_pair_ms, items.len(), threads);
+        let projected = vault::search::project_batch_ms(per_pair_ms, items.len());
         if projected > cfg.latency_budget_ms as f64 {
             warn!(
                 "rerank disabled for this process: projected {projected:.0} ms for {} pairs \
-                 ({per_pair_ms:.0} ms/pair, {threads} threads) exceeds budget {} ms; \
+                 ({per_pair_ms:.0} ms/pair, one batched forward) exceeds budget {} ms; \
                  falling back to fused order",
                 items.len(),
                 cfg.latency_budget_ms
             );
-            RERANK_DISABLED.store(true, Ordering::Relaxed);
-            return Ok(fused_paths);
+            return Ok(RerankOutcome::Disable(fused_paths));
         }
 
         // Within budget: rerank the head, then append the untouched tail.
-        let mut out = vault::search::rerank_paths(reranker.as_ref(), query, &items).map_err(Self::err)?;
+        let mut out = vault::search::rerank_paths(reranker, query, &items).map_err(Self::err)?;
         out.extend(tail_paths);
-        Ok(out)
+        Ok(RerankOutcome::Reordered(out))
     }
 
     /// True when the note at `path` matches the (optional) schema filters.
@@ -544,3 +578,6 @@ impl OracleMcpServer {
         Ok(ok)
     }
 }
+
+#[cfg(test)]
+mod tests;

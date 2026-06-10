@@ -268,6 +268,17 @@ pub fn oracle_db_path() -> PathBuf {
         .join("oracle.db")
 }
 
+/// `sb oracle eval`'s judgment-cache path, beside the oracle DB in the data
+/// dir. Used as the fallback when the configured DB path has no parent; never
+/// a relative `eval-cache.db` (which would write under CWD). Panics only when
+/// `dirs::data_local_dir()` returns `None`, same as [`oracle_db_path`].
+pub fn oracle_eval_cache_path() -> PathBuf {
+    dirs::data_local_dir()
+        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("oracle")
+        .join("eval-cache.db")
+}
+
 /// Resolve the vault root with explicit precedence: CLI > config > marker-gated CWD.
 ///
 /// Returns an error rather than silently picking up an arbitrary working directory.

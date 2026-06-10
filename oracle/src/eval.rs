@@ -122,11 +122,14 @@ fn mode_labels() -> Vec<String> {
 
 /// Judgment cache colocated with the oracle index DB (per-host).
 fn eval_cache_path(config: &Config) -> PathBuf {
-    config
-        .db_path()
-        .parent()
-        .map(|p| p.join("eval-cache.db"))
-        .unwrap_or_else(|| PathBuf::from("eval-cache.db"))
+    // Beside the configured DB. The fallback when the DB path has no parent is
+    // the data-dir path, NEVER a relative `eval-cache.db` (the banned class
+    // that writes under CWD).
+    let db = config.db_path();
+    match db.parent() {
+        Some(parent) => parent.join("eval-cache.db"),
+        None => vault::paths::oracle_eval_cache_path(),
+    }
 }
 
 /// One row of the `--emit-calibration` sheet the user fills with `human` scores.

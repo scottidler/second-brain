@@ -56,9 +56,10 @@ pub struct VaultChange {
 /// duration of watching - dropping it stops the notify watcher and the
 /// debounce task exits when its input channel closes.
 pub struct VaultWatcher {
-    // Held for ownership - dropping stops the filesystem watcher.
-    #[allow(dead_code)]
-    watcher: RecommendedWatcher,
+    // Held for ownership - dropping stops the filesystem watcher. The `_`
+    // prefix is the drop-guard carve-out: never read by name, kept alive so
+    // its Drop tears down the notify watcher when VaultWatcher is dropped.
+    _watcher: RecommendedWatcher,
 }
 
 impl VaultWatcher {
@@ -110,7 +111,7 @@ impl VaultWatcher {
         let debounce_duration = Duration::from_secs(config.debounce_secs);
         tokio::spawn(debounce_loop(raw_rx, out_tx, ignore_dirs, debounce_duration));
 
-        Ok((Self { watcher }, out_rx))
+        Ok((Self { _watcher: watcher }, out_rx))
     }
 }
 

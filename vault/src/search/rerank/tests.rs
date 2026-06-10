@@ -40,23 +40,21 @@ fn rerank_paths_ties_break_by_path() {
     assert_eq!(ranked, vec!["notes/a.md".to_string(), "notes/b.md".to_string()]);
 }
 
-/// The latency-budget projection: pairs run in `ceil(n/threads)` waves, so the
-/// projected cost scales with waves, not raw count. This is what oracle's
-/// warmup probe compares against `latency-budget-ms` to decide fail-open.
+/// The latency-budget projection is LINEAR in `n` (no thread division): the
+/// candle cross-encoder runs one batched forward over all `n` docs and that
+/// single pass already saturates every core, so the one-doc probe also used
+/// all cores. This is what oracle's warmup probe compares against
+/// `latency-budget-ms` to decide fail-open.
 #[test]
-fn project_batch_ms_accounts_for_parallel_waves() {
-    // 50 pairs, 200 ms/pair, 32 threads => 2 waves => ~400 ms (well under a
-    // 1500 ms budget): the stage would run.
-    let ms = project_batch_ms(200.0, 50, 32);
-    assert!((ms - 400.0).abs() < 1e-6, "got {ms}");
-
-    // Single-threaded, the same batch is 50 waves => 10_000 ms: the probe trips
-    // and the stage fails open.
-    let serial = project_batch_ms(200.0, 50, 1);
-    assert!((serial - 10_000.0).abs() < 1e-6, "got {serial}");
+fn project_batch_ms_is_linear_in_count() {
+    // 50 pairs, 200 ms/pair => 10_000 ms (over a 1500 ms budget): the probe
+    // trips and the stage fails open. The old ceil(n/threads) model would have
+    // under-projected this to ~400 ms on a 32-thread box and run it anyway.
+    let ms = project_batch_ms(200.0, 50);
+    assert!((ms - 10_000.0).abs() < 1e-6, "got {ms}");
 
     // Zero candidates cost nothing.
-    assert_eq!(project_batch_ms(200.0, 0, 8), 0.0);
-    // Thread count of 0 is treated as 1 (no divide-by-zero).
-    assert_eq!(project_batch_ms(10.0, 4, 0), 40.0);
+    assert_eq!(project_batch_ms(200.0, 0), 0.0);
+    // A small batch within a generous budget.
+    assert_eq!(project_batch_ms(10.0, 4), 40.0);
 }

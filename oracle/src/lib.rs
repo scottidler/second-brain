@@ -57,16 +57,22 @@ pub async fn serve(config: Config) -> Result<()> {
                     let _keep = watcher;
                     while let Some(change) = rx.recv().await {
                         tracing::info!("vault changed ({} files), reindexing", change.changed_paths.len());
-                        if let Ok(db) = db_handle.lock() {
-                            match db.index_vault(&vault_root) {
+                        match db_handle.lock() {
+                            Ok(db) => match db.index_changed(&vault_root, &change.changed_paths) {
                                 Ok(stats) => tracing::info!(
-                                    "reindex: {} updated, {} inserted, {} unchanged",
+                                    "reindex: {} updated, {} inserted, {} unchanged, {} removed",
                                     stats.updated,
                                     stats.inserted,
-                                    stats.unchanged
+                                    stats.unchanged,
+                                    stats.removed
                                 ),
                                 Err(e) => tracing::warn!("reindex failed: {e}"),
-                            }
+                            },
+                            // A poisoned mutex meant the watcher loop silently
+                            // stopped reindexing forever with no signal. Log it
+                            // (mirrors the inbound-recompute path) so the dead
+                            // index is at least diagnosable.
+                            Err(e) => tracing::warn!("reindex: db mutex poisoned: {e}; skipping this change batch"),
                         }
                     }
                 });

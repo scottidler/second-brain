@@ -14,7 +14,7 @@ use regex::Regex;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Busy-timeout for every SQLite connection opened through `SearchIndex`.

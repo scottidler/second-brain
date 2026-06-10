@@ -64,15 +64,17 @@ pub fn rerank_paths(reranker: &dyn Reranker, query: &str, items: &[(String, Stri
 }
 
 /// Project the wall-clock cost (ms) of reranking `n` pairs from a measured
-/// per-pair cost and the available parallelism: pairs run in `ceil(n/threads)`
-/// waves. Pure, so the latency-budget decision is unit-testable without timing.
-pub fn project_batch_ms(per_pair_ms: f64, n: usize, threads: usize) -> f64 {
-    if n == 0 {
-        return 0.0;
-    }
-    let threads = threads.max(1);
-    let waves = n.div_ceil(threads) as f64;
-    per_pair_ms * waves
+/// per-pair (one-doc) cost: linear in `n`.
+///
+/// NO thread division. The candle cross-encoder runs ONE batched forward pass
+/// over all `n` docs, and that single forward already saturates every core - so
+/// the one-doc warmup probe also already used all cores. Dividing the batch by
+/// `threads` (the old model) assumed embarrassingly-parallel independent pairs,
+/// which is false here: the probe could pass while the real batch blew the
+/// budget by up to `threads`x. `per_pair_ms * n` is the honest upper bound.
+/// Pure, so the latency-budget decision stays unit-testable without timing.
+pub fn project_batch_ms(per_pair_ms: f64, n: usize) -> f64 {
+    per_pair_ms * n as f64
 }
 
 /// Deterministic test reranker: scores by lexical token overlap between query
