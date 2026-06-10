@@ -39,11 +39,13 @@ pub struct Distilled {
     /// Extractor metadata for debugging and replay.
     pub meta: DistilledMeta,
 
-    /// Raw extracted text the distiller received as input. Preserved for
-    /// kinds whose published note is the only persistent source (Image,
-    /// VoiceNote, Idea, Vocabulary) so the verbatim content is searchable
-    /// in Obsidian months later. URL kinds (Article, Repo, Video, Thread)
-    /// leave this `None` because the origin URL is the recoverable archive.
+    /// Raw extracted text the distiller received as input. Preserved for kinds
+    /// whose published note is the only persistent source (Image, VoiceNote,
+    /// Idea, Vocabulary) so the verbatim content is searchable in Obsidian
+    /// months later, AND — as of Phase B2 — for Video and Thread, whose
+    /// transcripts power chunked semantic recall (regression-guarded; do not
+    /// revert to `None`). Article and Repo still leave this `None`: the fetched
+    /// markdown / origin URL is the recoverable archive.
     ///
     /// Rendered by `distillers::render` as a `## Transcript` body section
     /// when `Some`. Indexed via the existing FTS5 `body` column (no new

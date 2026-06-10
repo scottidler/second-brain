@@ -26,6 +26,7 @@ Each command exposes `run(vault_root, config, opts)` returning typed reports/out
 - **Daemon wraps rayon work in `tokio::task::block_in_place`** (sweeps, migrations, linking, intel) so the async watcher/timers/embed ticks aren't starved.
 - **Schema source of truth is `vault::schema`**; tag vocabulary is `canonical-tags.yml`, max **7 tags/note** (`canonical::filter_and_cap`).
 - **`embedding_config` pins model + dim** (`index.set_active_embedding`) so cortex and oracle never drift on the embedding backend.
+- **HTTP stack split is deliberate, not drift:** cortex uses blocking `ureq` for its one synchronous LLM POST (`llm::complete`); borg uses async `reqwest`. cortex's LLM call sits inside a synchronous sweep/intel loop (already `block_in_place`-wrapped), so a blocking client is the lighter, simpler fit — no tokio reactor needed for a single request. Don't "unify" them on `reqwest`.
 
 ## Patterns
 

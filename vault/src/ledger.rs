@@ -144,6 +144,10 @@ fn col_idx(col_count: usize) -> Option<ColIdx> {
 
 /// Check if canonical URL exists in log with a completed status. Returns the date if found.
 pub fn check_duplicate(ledger_path: &Path, canonical_url: &str) -> Result<Option<String>> {
+    log::debug!(
+        "ledger::check_duplicate: canonical_url={canonical_url} ledger={}",
+        ledger_path.display()
+    );
     if !ledger_path.exists() {
         return Ok(None);
     }
@@ -407,6 +411,13 @@ pub fn parse_completed_entries(ledger_path: &Path) -> Result<Vec<ParsedLedgerRow
 
 /// Insert a row at the top of the Borg Ledger table (newest first).
 pub fn append_entry(ledger_path: &Path, entry: &LedgerEntry) -> Result<()> {
+    log::debug!(
+        "ledger::append_entry: date={} method={:?} filename={:?} ledger={}",
+        entry.date,
+        entry.method,
+        entry.filename,
+        ledger_path.display()
+    );
     ensure_ledger_exists(ledger_path)?;
 
     let file = OpenOptions::new()

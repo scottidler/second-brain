@@ -326,6 +326,12 @@ impl EventHandler for Handler {
 }
 
 pub async fn run(token: String, dc_config: DiscordConfig, config: Arc<Config>, desktop: Option<Desktop>) -> Result<()> {
+    log::debug!(
+        "discord::run: host={:?} channel_id={:?} desktop={}",
+        dc_config.host,
+        dc_config.channel_id,
+        desktop.is_some()
+    );
     let mut backoff = ExponentialBackoff::new();
 
     loop {

@@ -10,6 +10,9 @@ impl super::SearchIndex {
         status: Option<&str>,
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
+        log::debug!(
+            "search::search: query={query} domain={domain:?} note_type={note_type:?} status={status:?} limit={limit:?}"
+        );
         let limit = limit.unwrap_or(20);
 
         let mut sql = String::from(
@@ -74,6 +77,9 @@ impl super::SearchIndex {
         before: Option<&str>,
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
+        log::debug!(
+            "search::list_notes: domain={domain:?} note_type={note_type:?} status={status:?} after={after:?} before={before:?} limit={limit:?}"
+        );
         let limit = limit.unwrap_or(50);
         let mut sql = String::from(
             "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary

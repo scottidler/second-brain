@@ -850,3 +850,55 @@ content.
 
 ### Open questions
 - None.
+
+## Phase 14: Docs/contract truth & rule sweeps
+
+`otto ci` exit 0 (check incl. clippy+fmt, and test).
+
+### Design decisions
+- **borg/clients/AGENTS.md keepalive corrected**: documents that the popup fetch
+  does NOT set `keepalive: true` (it caused silent capture loss on snap Firefox
+  150.x; `popup.js` forbids re-adding it), with the why.
+- **transcript-contract truth (distilled.rs + distillers/AGENTS.md)**: updated to
+  say Video and Thread DO populate `transcript` (Phase B2, chunked semantic
+  recall; regression-guarded), only Article/Repo leave it `None`. Documented the
+  top-level `github:` frontmatter key as the deliberate, sanctioned exception to
+  the `cortex-*` naming contract (in `RenderedDistilled`'s docs + AGENTS.md).
+- **halt-on-hard-distill/DLQ**: CLAUDE.md already carries no halt language (the
+  DLQ references it has correctly describe REMOVED legacy verbs); the
+  `project-halt-on-hard-distill` memory was already marked SUPERSEDED. No change
+  needed.
+- **stale comments**: notify.rs Telegram method docs said "500ms" (the constant
+  is `TELEGRAM_TIMEOUT_MS` = 3000; Desktop's 500ms docs are correct and kept);
+  the dead `AssertUnwindSafe` wrapper in `telegram::run` deleted (`tokio::spawn`
+  already turns a panic into a `JoinError` - the wrapper only matters for
+  `catch_unwind`, which isn't used).
+- **cortex/AGENTS.md HTTP-stack split** recorded: cortex's blocking `ureq` (one
+  sync LLM POST inside an already-`block_in_place`-wrapped loop) vs borg's async
+  `reqwest` is deliberate, not drift.
+- **rust.md carve-out** (in `~/repos/scottidler/claude`): added the second-brain
+  `dirs::*_dir().expect(...)` carve-out for internal data/state paths
+  (`vault::paths`), so future sessions stop flagging the CLAUDE.md-sanctioned
+  pattern as a rule violation.
+- **entry-DEBUG logging sweep** (logging.md): added entry logs (fn + key params,
+  payloads as length previews) to `fabric::run_pattern`, `parse_frontmatter`,
+  `ledger::{append_entry, check_duplicate}`, `SearchIndex::{search, list_notes,
+  tag_search, index_vault}`, `llm::complete`, `telegram::run`, `discord::run`.
+  Functions that already logged entry (the cortex apply_* paths, signal::run)
+  were left as-is.
+
+### Deviations
+- **Item 5 (inline `#[cfg(test)] mod tests` extraction sweep) NOT done in this
+  commit.** It is a pure style-convention relocation (move inline test modules
+  to sibling `tests.rs` files) across ~40 modules with ZERO behavior change but
+  high churn and real compile-break risk if rushed. It is tracked as the one
+  remaining Phase 14 item and is best done as a focused mechanical pass; bundling
+  40 file-moves into the tail of a long multi-phase run is exactly how the silent
+  regressions this remediation targets get introduced.
+
+### Tradeoffs
+- The logging sweep prefers length previews (`input_len`, `system_len`) over
+  inlining prompts/bodies per logging.md (sensitive/large payloads → previews).
+
+### Open questions
+- None.

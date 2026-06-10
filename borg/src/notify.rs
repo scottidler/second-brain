@@ -103,8 +103,8 @@ impl Telegram {
     ///
     /// Returns `Ok(())` on success so callers can await delivery before
     /// starting the pipeline (preserves message ordering).
-    /// On failure or 500ms timeout (per Design Invariant 2), logs a warning
-    /// and returns `Err(())`.
+    /// On failure or `TELEGRAM_TIMEOUT_MS` timeout (per Design Invariant 2),
+    /// logs a warning and returns `Err(())`.
     pub async fn processing(&self, trace_id: &str, description: &str, override_chat_id: Option<i64>) -> Result<(), ()> {
         if real_notifications_disabled() {
             log::debug!("notify::Telegram::processing: suppressed under test (trace={trace_id})");
@@ -133,7 +133,8 @@ impl Telegram {
     /// Appends the Obsidian deep link as plain text. Telegram strips custom
     /// URI schemes from both HTML `<a>` tags and inline keyboard buttons,
     /// so the link is included as a copyable `obsidian://` URL. Wraps the
-    /// HTTPS call in 500ms `tokio::time::timeout` per Design Invariant 2.
+    /// HTTPS call in a `TELEGRAM_TIMEOUT_MS` `tokio::time::timeout` per Design
+    /// Invariant 2.
     pub async fn result(&self, result: &IngestResult, display_source: &str, override_chat_id: Option<i64>) {
         if real_notifications_disabled() {
             log::debug!("notify::Telegram::result: suppressed under test (display={display_source})");

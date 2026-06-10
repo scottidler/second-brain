@@ -60,6 +60,10 @@ pub fn run_pattern(
     max_chars: usize,
     timeout_secs: u64,
 ) -> Result<String> {
+    log::debug!(
+        "fabric::run_pattern: pattern={pattern} binary={binary} model={model} max_chars={max_chars} timeout_secs={timeout_secs} input_len={}",
+        input.len()
+    );
     let mut cmd = Command::new(resolve_binary(binary));
     cmd.args(["-p", &resolve_pattern(pattern)]);
     if !model.is_empty() {

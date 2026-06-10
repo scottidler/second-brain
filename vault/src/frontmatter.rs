@@ -282,6 +282,7 @@ pub fn split_raw(raw: &str) -> Option<(&str, &str)> {
 
 /// Split raw markdown into frontmatter and body.
 pub fn parse_frontmatter(raw: &str) -> Result<(Frontmatter, String)> {
+    log::debug!("parse_frontmatter: raw_len={}", raw.len());
     let Some((yaml_str, body)) = split_raw(raw) else {
         return Ok((Frontmatter::default(), raw.to_string()));
     };

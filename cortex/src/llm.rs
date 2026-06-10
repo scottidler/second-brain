@@ -22,6 +22,11 @@ pub fn complete(
     timeout_secs: u64,
     api_key_env: &str,
 ) -> Result<String> {
+    log::debug!(
+        "llm::complete: model={model} max_tokens={max_tokens} timeout_secs={timeout_secs} system_len={} user_len={}",
+        system.len(),
+        user.len()
+    );
     let api_key =
         std::env::var(api_key_env).with_context(|| format!("environment variable {api_key_env} is not set"))?;
 

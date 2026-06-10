@@ -206,6 +206,13 @@ pub async fn run(
     telegram: Option<notify::Telegram>,
     desktop: Option<notify::Desktop>,
 ) -> Result<()> {
+    log::debug!(
+        "telegram::run: host={:?} allowed_chats={} telegram_sink={} desktop_sink={}",
+        tg_config.host,
+        tg_config.allowed_chat_ids.len(),
+        telegram.is_some(),
+        desktop.is_some()
+    );
     let mut backoff = ExponentialBackoff::new();
 
     loop {
@@ -613,14 +620,17 @@ pub async fn run(
             }
         });
 
-        // Catch panics from dispatch (teloxide panics on network errors during init)
-        let result = std::panic::AssertUnwindSafe(async {
+        // Catch panics from dispatch (teloxide panics on network errors during
+        // init): `tokio::task::spawn` already turns a panic into a `JoinError`
+        // (the `Err` arm below). The old `AssertUnwindSafe` wrapper was dead -
+        // it's only meaningful for `catch_unwind`, which is not used here.
+        let result = async {
             Dispatcher::builder(bot, handler)
                 .enable_ctrlc_handler()
                 .build()
                 .dispatch()
                 .await;
-        });
+        };
 
         match tokio::task::spawn(result).await {
             Ok(()) => {

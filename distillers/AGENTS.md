@@ -21,21 +21,21 @@ Per-kind Stage-2 processors that take a Stage-1 transcript (markitdown / VTT / t
 - **links** — outbound URLs discovered in source (distinct from the source URL).
 - **kind_specific** — `Option<KindPayload>`: `RepoPayload` (stars/language/last_commit/topics/install), `VideoPayload` (channel/duration/published_at), `ThreadPayload` (author/post_count/platform).
 - **meta** — `DistilledMeta` (extractor id, model, tokens, produced_at, validation).
-- **transcript** — `Option<String>`; set only for non-URL kinds (Image/VoiceNote/Idea/Vocabulary) so content stays searchable; URL kinds leave it `None` (the URL is the archive).
+- **transcript** — `Option<String>`; set for Image/VoiceNote/Idea/Vocabulary (the note is the only persistent source) AND, as of Phase B2, for Video/Thread (the transcript powers chunked semantic recall — regression-guarded, do NOT revert). Article/Repo leave it `None` (the fetched markdown / origin URL is the archive).
 
 ## Contracts & Invariants
 
 - **`Dispatch` is object-safe** (`dyn Dispatch`) so test setups can hold `&dyn Dispatch`.
 - **Extractor ids are stable + versioned** (e.g. `distill-idea-v2`) for forensics/replay.
 - **Bounds enforced post-distill:** `validate::enforce_bounds` caps `MAX_SUMMARY_CHARS` (2000); records truncations in validation meta.
-- **Transcript only for non-URL kinds** — keeps diffs quiet for URL kinds.
+- **Transcript: set for Image/VoiceNote/Idea/Vocabulary + Video/Thread (Phase B2); `None` for Article/Repo.**
 - **Fabric calls respect `max_chars` + `timeout_secs`**, falling back to passthrough on timeout/error.
 
 ## Rendering
 
 `render()` produces:
 - **body_markdown** — Summary / Claims (with anchors) / Links / Transcript (if present) sections.
-- **frontmatter_additions** — `BTreeMap` (alphabetical → stable diffs): `distilled: true`, `distilled-extractor`, `cortex-*` payload keys.
+- **frontmatter_additions** — `BTreeMap` (alphabetical → stable diffs): `distilled: true`, `distilled-extractor`, `cortex-*` payload keys. **Deliberate exception to the `cortex-*` contract:** the top-level `github:` sequence (owner/repo slugs from a video description) is emitted bare, not `cortex-github` — it's a first-class vault field for Dataview, the one sanctioned non-`cortex-*` addition.
 
 ## Patterns
 
@@ -45,7 +45,7 @@ Per-kind Stage-2 processors that take a Stage-1 transcript (markitdown / VTT / t
 
 - Don't serialize `Distilled` straight to the vault — go through `render()`.
 - Don't drop validation meta (`fallback_reason`, bounds truncations) — it's load-bearing for forensics.
-- Don't set `transcript` for URL kinds (Article/Repo/Video/Thread).
+- Don't set `transcript` for Article/Repo (their fetched source is the archive). Video/Thread DO set it (Phase B2, chunked recall).
 
 ## Module Map
 

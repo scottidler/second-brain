@@ -18,6 +18,13 @@ pub struct RenderedDistilled {
     /// Frontmatter keys produced by the Distilled. Includes the `distilled`
     /// control flag, the extractor id, and per-kind `cortex-*` metadata.
     /// Insertion order is alphabetical (BTreeMap) for stable diffs.
+    ///
+    /// DELIBERATE EXCEPTION to the `cortex-*` naming contract: the top-level
+    /// `github:` key (a YAML sequence of `owner/repo` slugs harvested from a
+    /// video description) is emitted bare, NOT as `cortex-github`. It is a
+    /// first-class vault field consumed by Dataview/queries as `github`, not a
+    /// cortex-managed metadata field. This is the one sanctioned non-`cortex-*`
+    /// addition; everything else stays prefixed.
     pub frontmatter_additions: BTreeMap<String, serde_yaml::Value>,
 }
 

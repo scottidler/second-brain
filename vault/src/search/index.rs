@@ -4,6 +4,7 @@ impl super::SearchIndex {
     /// Index the vault, only updating notes whose mtime has changed.
     /// Parses frontmatter fields through vault enums for normalization.
     pub fn index_vault(&self, vault_root: &Path) -> Result<IndexStats> {
+        log::debug!("search::index_vault: vault_root={}", vault_root.display());
         let scan_config = ScanConfig::default();
         let notes = scan_vault(vault_root, &scan_config)?;
 

@@ -271,6 +271,7 @@ impl super::SearchIndex {
 
     /// Find notes matching a specific tag, optionally filtered by domain
     pub fn tag_search(&self, tag: &str, domain: Option<&str>, limit: Option<u32>) -> Result<Vec<NoteRow>> {
+        log::debug!("search::tag_search: tag={tag} domain={domain:?} limit={limit:?}");
         let limit = limit.unwrap_or(20);
 
         // Tags are stored as JSON arrays, use Rust-side filtering
