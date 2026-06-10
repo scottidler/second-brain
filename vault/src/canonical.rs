@@ -51,21 +51,22 @@ pub fn is_concatenated_word(tag: &str, canonical_set: &HashSet<String>) -> bool 
         return false;
     }
 
-    // Build substring dictionary from canonical tags (strip hyphens)
-    let substrs: Vec<String> = canonical_set
+    // Build substring dictionary from canonical tags (strip hyphens), sorted
+    // longest-first so the longest substrings match first. (Built from the
+    // `canonical_set` parameter, so it can't be a module `LazyLock`; the
+    // redundant clone the old code made before sorting is dropped.)
+    let mut substrs: Vec<String> = canonical_set
         .iter()
         .map(|t| t.replace('-', ""))
         .filter(|s| s.len() >= 2) // skip very short ones to avoid false matches
         .collect();
+    substrs.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     // Count non-overlapping substring matches
     let mut matches = 0;
     let mut remaining = tag.to_string();
-    // Sort by length descending to match longest substrings first
-    let mut sorted_substrs = substrs.clone();
-    sorted_substrs.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
-    for substr in &sorted_substrs {
+    for substr in &substrs {
         if remaining.contains(substr.as_str()) {
             remaining = remaining.replacen(substr.as_str(), "", 1);
             matches += 1;
@@ -154,20 +155,28 @@ pub fn filter_and_cap(
         }
     }
 
-    // Combine in priority order, dedup
+    // Combine in priority order, dedup (keep the highest-priority occurrence
+    // of each tag). Tag the tier so the sort below is WITHIN-tier only: a plain
+    // `result.sort()` reorders the whole list alphabetically, so `truncate`
+    // would keep the alphabetically-first tags instead of the highest-priority
+    // ones - destroying the documented mapping > exact > segment priority.
     let mut seen = HashSet::new();
-    let mut result = Vec::new();
-
-    for tag in mapping_hits.into_iter().chain(exact_hits).chain(segment_hits) {
+    let mut tiered: Vec<(u8, String)> = Vec::new();
+    for (tier, tag) in mapping_hits
+        .into_iter()
+        .map(|t| (0u8, t))
+        .chain(exact_hits.into_iter().map(|t| (1u8, t)))
+        .chain(segment_hits.into_iter().map(|t| (2u8, t)))
+    {
         if seen.insert(tag.clone()) {
-            result.push(tag);
+            tiered.push((tier, tag));
         }
     }
 
-    // Sort within each priority tier for determinism
-    result.sort();
-    result.truncate(max_per_note);
-    result
+    // (tier, tag): tiers stay ordered, within-tier is alphabetical (deterministic).
+    tiered.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    tiered.truncate(max_per_note);
+    tiered.into_iter().map(|(_, tag)| tag).collect()
 }
 
 #[cfg(test)]

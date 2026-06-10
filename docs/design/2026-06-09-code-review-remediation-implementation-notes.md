@@ -726,3 +726,70 @@ content.
 
 ### Open questions
 - None.
+
+## Phase 12: Vault polish
+
+`otto ci` exit 0 (check incl. clippy+fmt, and test). All 13 items addressed.
+
+### Design decisions
+- **filter_and_cap tier-aware sort** (`canonical`): tags now carry a tier index
+  (0 mapping / 1 exact / 2 segment); sort is `(tier, tag)` so the cap keeps the
+  highest-priority tags. A plain `result.sort()` reordered alphabetically and
+  truncated the wrong ones, destroying mapping > exact > segment priority.
+- **detail.rs deterministic first-H2** (`parse_sections`/`extract_summary`):
+  added an `order: Vec<String>` (first-seen document order) so the "first H2"
+  fallback is deterministic (HashMap value order was nondeterministic →
+  summary/embedding churn). Also skips `#`/`##` inside fenced code blocks and
+  merges duplicate H2 names instead of clobbering. Regression tests added.
+- **per-call rebuilds → LazyLock**: `search::WIKILINK_RE` (was ~2.3k recompiles
+  per reindex), `search::STOP_WORDS`, `distillers::idea::LINK_RE`. The
+  `canonical::is_concatenated_word` substring dictionary is built from a
+  `canonical_set` PARAMETER (can't be a module static), so only its redundant
+  pre-sort clone was removed.
+- **O(n·m) → HashSet**: `remove_stale_notes` builds a `HashSet<&str>` of current
+  paths (was ~5M string compares per reindex); the watcher debounce loop dedups
+  via a `seen: HashSet<PathBuf>` alongside `pending` (was quadratic
+  `pending.contains` during Syncthing bulk syncs).
+- **index_vault single transaction**: the whole upsert + stale-removal pass runs
+  inside `BEGIN IMMEDIATE` … `COMMIT` (rollback on error) - was ~2.3k autocommits
+  and readers could see a half-built index. `scan_vault` (pure I/O) stays outside.
+- **frontmatter non-string keys** route through `scalar_to_string` (e.g. `2023:`
+  → `"2023"`, not the Debug `"Number(2023)"`); they then flow through the field
+  match into `extra`.
+- **frontmatter delimiter is a full line** (`split_raw`): the closing `---` is
+  matched only when the rest of its line is blank, so a `---` inside a multi-line
+  YAML value no longer truncates the frontmatter. Rejects `----`/`---foo` too.
+- **expand_graph frontier dedup at push time** (`search::graph`): a per-hop
+  `next_set: HashSet` prevents the same node entering the next frontier multiple
+  times (visited was only updated after the hop → multiplicative expansion in
+  dense regions).
+- **FTS5 VACUUM prohibition documented** next to `ensure_fts5_schema` (the
+  `content_rowid=rowid` link breaks if VACUUM renumbers rowids; schema change
+  not warranted yet).
+- **fabric env test** now holds a `static ENV_LOCK: Mutex<()>` for its
+  `XDG_CONFIG_HOME` mutation window (per the rust.md env-test pattern). Uses
+  poison-tolerant `lock().unwrap_or_else(PoisonError::into_inner)` (the crate
+  denies `unwrap_used` even in tests).
+- **trace.rs uniqueness doc** corrected: the 24-bit ID is a low-collision label
+  (birthday bound ~4,800 IDs/prefix), NOT a uniqueness guarantee; the receipts DB
+  keys on the full string and a rare collision only conflates log rows.
+
+### Deviations
+- **Item 12 (drop `Note.raw`) - audit says KEEP**. The doc framed it as "drop
+  IF unused"; the audit found `raw` IS used by `cortex::frontmatter` - line 44
+  (lint: distinguishes "no frontmatter block" from "malformed `---` block",
+  needs the original bytes, runs per-note in the hot lint sweep) and lines
+  280/291 (apply: reconstruct content). Dropping it would either add a per-note
+  file read to the hot lint path (a runtime regression) or require a `Note`
+  struct change rippling through ~20 constructors. Kept; the bounded, transient
+  scan-time memory cost is the lesser evil. (The desk OOM history was embed
+  activation spikes, since capped - not Note scans.)
+
+### Tradeoffs
+- **expand_graph keeps every `reaches` entry** (only the frontier is deduped):
+  a node reached from multiple seeds still records one GraphReach per origin -
+  that's load-bearing provenance for scoring, distinct from the frontier-
+  expansion waste the item targeted.
+
+### Open questions
+- None.

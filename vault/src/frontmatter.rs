@@ -61,11 +61,20 @@ impl Frontmatter {
         for (key, val) in mapping {
             let key_str = match &key {
                 serde_yaml::Value::String(s) => s.clone(),
-                _ => {
-                    let s = format!("{key:?}");
-                    extra.insert(s, val);
-                    continue;
-                }
+                // Non-string scalar keys (e.g. `2023:`) route through
+                // scalar_to_string so they land as `"2023"`, not the Rust Debug
+                // repr `"Number(2023)"`. They then flow through the field match
+                // below (none will match a known field, so they reach `extra`).
+                other => match scalar_to_string(other.clone()) {
+                    Some(s) => s,
+                    None => {
+                        // Non-scalar key (sequence/map/null) - extremely unusual;
+                        // keep a stable repr so it round-trips into `extra`.
+                        let s = format!("{other:?}");
+                        extra.insert(s, val);
+                        continue;
+                    }
+                },
             };
 
             match key_str.as_str() {
@@ -250,7 +259,22 @@ pub fn split_raw(raw: &str) -> Option<(&str, &str)> {
         return None;
     }
     let after_opening = trimmed[3..].trim_start_matches(['\r', '\n']);
-    let end_pos = after_opening.find("\n---")?;
+    // The closing delimiter must be a FULL `---` line. A bare `find("\n---")`
+    // matched `---` inside a multi-line YAML value (e.g. a block scalar that
+    // happens to contain a `---` line), truncating the frontmatter mid-value.
+    // Accept a match only when the rest of that line is blank (EOF, `\n`, or
+    // trailing whitespace) - which also rejects `----`/`---foo`.
+    let mut search_from = 0;
+    let end_pos = loop {
+        let rel = after_opening[search_from..].find("\n---")?;
+        let pos = search_from + rel; // index of the '\n' before "---"
+        let after = pos + 4; // index just past "---"
+        let line_rest = after_opening[after..].split('\n').next().unwrap_or("");
+        if line_rest.trim().is_empty() {
+            break pos;
+        }
+        search_from = pos + 1; // false match (e.g. "---" inside a value); keep scanning
+    };
     let yaml = &after_opening[..end_pos];
     let body = &after_opening[end_pos + 4..];
     Some((yaml, body))

@@ -7,46 +7,65 @@ impl super::SearchIndex {
         let scan_config = ScanConfig::default();
         let notes = scan_vault(vault_root, &scan_config)?;
 
-        let mut inserted = 0u64;
-        let mut updated = 0u64;
-        let mut unchanged = 0u64;
+        // Wrap the whole pass (all upserts + stale removal) in ONE transaction.
+        // Previously each `index_one` autocommitted (~2.3k commits per reindex)
+        // and a concurrent reader could observe a half-built index. On any error
+        // the work rolls back atomically. (`scan_vault` above is pure I/O and
+        // stays outside the write transaction.)
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<IndexStats> {
+            let mut inserted = 0u64;
+            let mut updated = 0u64;
+            let mut unchanged = 0u64;
 
-        for note in &notes {
-            let abs_path = vault_root.join(&note.path);
-            let mtime = std::fs::metadata(&abs_path)
-                .and_then(|m| m.modified())
-                .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
-                .unwrap_or(0) as i64;
+            for note in &notes {
+                let abs_path = vault_root.join(&note.path);
+                let mtime = std::fs::metadata(&abs_path)
+                    .and_then(|m| m.modified())
+                    .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+                    .unwrap_or(0) as i64;
 
-            let path_str = note.path.to_string_lossy();
+                let path_str = note.path.to_string_lossy();
 
-            let existing_mtime: Option<i64> = optional_row(self.conn.query_row(
-                "SELECT modified_at FROM notes WHERE path = ?1",
-                params![path_str.as_ref()],
-                |row| row.get(0),
-            ))?;
+                let existing_mtime: Option<i64> = optional_row(self.conn.query_row(
+                    "SELECT modified_at FROM notes WHERE path = ?1",
+                    params![path_str.as_ref()],
+                    |row| row.get(0),
+                ))?;
 
-            if existing_mtime == Some(mtime) {
-                unchanged += 1;
-                continue;
+                if existing_mtime == Some(mtime) {
+                    unchanged += 1;
+                    continue;
+                }
+
+                match self.index_one(note, mtime)? {
+                    IndexAction::Inserted => inserted += 1,
+                    IndexAction::Updated => updated += 1,
+                }
             }
 
-            match self.index_one(note, mtime)? {
-                IndexAction::Inserted => inserted += 1,
-                IndexAction::Updated => updated += 1,
+            let all_paths: Vec<String> = notes.iter().map(|n| n.path.to_string_lossy().to_string()).collect();
+            let removed = self.remove_stale_notes(&all_paths)?;
+
+            Ok(IndexStats {
+                total_scanned: notes.len() as u64,
+                inserted,
+                updated,
+                unchanged,
+                removed,
+            })
+        })();
+
+        match result {
+            Ok(stats) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(stats)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
             }
         }
-
-        let all_paths: Vec<String> = notes.iter().map(|n| n.path.to_string_lossy().to_string()).collect();
-        let removed = self.remove_stale_notes(&all_paths)?;
-
-        Ok(IndexStats {
-            total_scanned: notes.len() as u64,
-            inserted,
-            updated,
-            unchanged,
-            removed,
-        })
     }
 
     /// Index a single note from its vault file. Single SQLite writer for the
@@ -303,9 +322,12 @@ impl super::SearchIndex {
         let mut stmt = self.conn.prepare("SELECT path FROM notes")?;
         let db_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?.filter_map(warn_row).collect();
 
+        // O(1) membership instead of a linear `current_paths.contains` per DB row
+        // (was ~5M string compares on a full-vault reindex).
+        let current: std::collections::HashSet<&str> = current_paths.iter().map(String::as_str).collect();
         let mut removed = 0u64;
         for path in &db_paths {
-            if !current_paths.contains(path) {
+            if !current.contains(path.as_str()) {
                 self.conn.execute("DELETE FROM notes WHERE path = ?1", params![path])?;
                 removed += 1;
             }

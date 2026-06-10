@@ -12,9 +12,14 @@ use async_trait::async_trait;
 use chrono::Utc;
 use eyre::Result;
 use regex::Regex;
+use std::sync::LazyLock;
 use vault::distilled::{Distilled, DistilledMeta, Link, ValidationMeta};
 
 use crate::{DistillExtractor, DistillInputs};
+
+/// URL extraction regex, compiled once (was recompiled on every
+/// `extract_links` call).
+static LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://[^\s)\]]+").expect("link regex compiles"));
 
 const ID: &str = "distill-idea-v2";
 
@@ -68,7 +73,7 @@ impl DistillExtractor for IdeaDistiller {
 }
 
 fn extract_links(text: &str) -> Vec<Link> {
-    let re = Regex::new(r"https?://[^\s)\]]+").expect("link regex compiles");
+    let re = &*LINK_RE;
     re.find_iter(text)
         .map(|m| Link {
             url: m.as_str().to_string(),

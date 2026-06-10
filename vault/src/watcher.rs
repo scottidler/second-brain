@@ -7,6 +7,7 @@
 
 use eyre::{Context, Result};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -124,6 +125,10 @@ async fn debounce_loop(
     debounce_duration: Duration,
 ) {
     let mut pending: Vec<PathBuf> = Vec::new();
+    // O(1) dedup membership alongside `pending` (preserves insertion order). A
+    // linear `pending.contains` went quadratic during Syncthing bulk syncs that
+    // dump thousands of events into one debounce window.
+    let mut seen: HashSet<PathBuf> = HashSet::new();
 
     // Debounce timer: starts inert (far future), reset when events arrive
     let debounce = tokio::time::sleep(INERT_DEBOUNCE);
@@ -141,10 +146,10 @@ async fn debounce_loop(
                     continue;
                 }
 
-                // Collect .md file paths from this event
+                // Collect .md file paths from this event (O(1) dedup via `seen`)
                 for path in &event.paths {
                     if path.extension().and_then(|e| e.to_str()) == Some("md")
-                        && !pending.contains(path)
+                        && seen.insert(path.clone())
                     {
                         pending.push(path.clone());
                     }
@@ -161,6 +166,7 @@ async fn debounce_loop(
                 let change = VaultChange {
                     changed_paths: std::mem::take(&mut pending),
                 };
+                seen.clear();
                 if out_tx.send(change).is_err() {
                     // Consumer dropped - exit
                     break;

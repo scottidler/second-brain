@@ -13,9 +13,31 @@ use eyre::{Result, WrapErr};
 use regex::Regex;
 use rusqlite::{Connection, params};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
+
+/// Wikilink extraction regex, compiled once (was recompiled ~2.3k times per
+/// reindex pass - once per note in `extract_wikilinks`).
+static WIKILINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[\[([^\]|#]+)(?:[|#][^\]]+)?\]\]").expect("wikilink regex"));
+
+/// English stop-word set for FTS5 term extraction, built once (was rebuilt on
+/// every `extract_search_terms` call).
+static STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "it",
+        "this", "that", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will",
+        "would", "could", "should", "may", "might", "can", "shall", "not", "no", "nor", "so", "if", "then", "than",
+        "too", "very", "just", "about", "up", "out", "into", "over", "after", "before", "between", "through", "during",
+        "without", "again", "further", "once", "here", "there", "when", "where", "why", "how", "all", "each", "every",
+        "both", "few", "more", "most", "other", "some", "such", "only", "own", "same", "also", "as", "its", "you",
+        "your", "we", "our", "they", "their", "what", "which", "who", "whom",
+    ]
+    .into_iter()
+    .collect()
+});
 
 /// Busy-timeout for every SQLite connection opened through `SearchIndex`.
 ///
@@ -284,17 +306,7 @@ impl SearchIndex {
 /// Extract significant search terms from content for FTS5 similarity queries.
 /// Filters out common English stop words and short tokens.
 fn extract_search_terms(content: &str, max_terms: usize) -> Vec<String> {
-    let stop_words: std::collections::HashSet<&str> = [
-        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "it",
-        "this", "that", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will",
-        "would", "could", "should", "may", "might", "can", "shall", "not", "no", "nor", "so", "if", "then", "than",
-        "too", "very", "just", "about", "up", "out", "into", "over", "after", "before", "between", "through", "during",
-        "without", "again", "further", "once", "here", "there", "when", "where", "why", "how", "all", "each", "every",
-        "both", "few", "more", "most", "other", "some", "such", "only", "own", "same", "also", "as", "its", "you",
-        "your", "we", "our", "they", "their", "what", "which", "who", "whom",
-    ]
-    .into_iter()
-    .collect();
+    let stop_words = &*STOP_WORDS;
 
     let mut word_counts: HashMap<String, usize> = HashMap::new();
 
@@ -319,7 +331,7 @@ fn extract_search_terms(content: &str, max_terms: usize) -> Vec<String> {
 /// parser oracle's link tools use (single source of wikilink-extraction
 /// truth).
 pub fn extract_wikilinks(body: &str) -> Vec<String> {
-    let re = Regex::new(r"\[\[([^\]|#]+)(?:[|#][^\]]+)?\]\]").expect("wikilink regex");
+    let re = &*WIKILINK_RE;
     let mut targets = Vec::new();
     let mut in_code_block = false;
 

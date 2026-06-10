@@ -202,6 +202,13 @@ impl super::SearchIndex {
     /// Ensure the FTS5 virtual table includes the `claims` column and that the
     /// trio of triggers populating it from `notes` is in place. Rebuilds the
     /// FTS5 table when the existing schema lacks `claims`.
+    /// NEVER `VACUUM` this database. The FTS5 table is `content=notes,
+    /// content_rowid=rowid`: it links to the `notes` content table by the
+    /// implicit SQLite `rowid`. `VACUUM` may RENUMBER rowids, silently
+    /// dissociating every FTS row from its note (search returns wrong/zero
+    /// results with no error). If reclaiming space ever becomes necessary,
+    /// rebuild the index from the vault (`index_vault`) instead of VACUUMing,
+    /// or migrate the schema to an explicit stable key first.
     fn ensure_fts5_schema(&self) -> Result<()> {
         if !self.fts_has_claims_column()? {
             // Migration path. Triggers attach to the `notes` content table -

@@ -521,6 +521,12 @@ impl SearchIndex {
 
         for hop in 1..=hops {
             let mut next: Vec<(String, String, f32)> = Vec::new();
+            // Dedup the frontier AT PUSH TIME within this hop: a node reachable
+            // from several current-frontier nodes was previously pushed once per
+            // reaching edge (visited was only updated AFTER the hop), so the next
+            // hop expanded it multiple times - multiplicative waste in dense
+            // regions. The first reach wins its frontier slot (and its weight).
+            let mut next_set: HashSet<String> = HashSet::new();
             for (node, origin, acc) in &frontier {
                 let neighbors = self.edge_neighbors(node, edge_kinds, min_weight)?;
                 for (neighbor, kind, weight, predicate) in neighbors {
@@ -536,7 +542,7 @@ impl SearchIndex {
                         kind,
                         predicate,
                     });
-                    if !visited.contains(&neighbor) {
+                    if !visited.contains(&neighbor) && next_set.insert(neighbor.clone()) {
                         next.push((neighbor.clone(), origin.clone(), path_weight));
                     }
                 }

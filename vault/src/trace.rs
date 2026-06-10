@@ -2,16 +2,23 @@ use crate::schema::Method;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Process-lifetime counter to guarantee uniqueness even for
-/// ingests arriving in the same nanosecond (e.g. batch CLI import).
+/// Process-lifetime counter that decorrelates ingests arriving in the same
+/// nanosecond (e.g. batch CLI import) - it does NOT guarantee global uniqueness
+/// (see below).
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Generate a trace ID with a method-specific prefix.
 ///
 /// Format: `{prefix}-{6 hex chars}`
 ///
-/// Uniqueness: mixes nanosecond timestamp, process ID, and an atomic
-/// counter. No external dependencies (no `rand` crate needed).
+/// Collision profile: the ID is the lower 24 bits of a mix of nanosecond
+/// timestamp, PID, and an atomic counter - a 16,777,216-value space. This is
+/// NOT a uniqueness guarantee: by the birthday bound, collisions become likely
+/// around ~4,800 IDs sharing a prefix. It is a low-collision, dependency-free
+/// (no `rand`) label, adequate because the receipts DB keys on the full trace
+/// string and a rare collision only conflates two ingests in the log, not in
+/// the vault. If true uniqueness is ever required, widen the field or add a
+/// UUID dependency.
 pub fn generate(method: Method) -> String {
     let prefix = method_prefix(method);
     let nanos = SystemTime::now()

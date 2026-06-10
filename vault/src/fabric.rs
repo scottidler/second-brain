@@ -229,6 +229,12 @@ fn truncate_input(input: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes every env-var-mutating test in this file so they can't race
+    /// each other's `XDG_CONFIG_HOME` reads/writes (cargo runs tests in parallel
+    /// by default). Per the `rust.md` env-test pattern.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn fabric_error_timeout_is_downcastable_through_eyre() {
@@ -337,10 +343,10 @@ mod tests {
         // Write a fake pattern file at the canonical patterns_dir() location
         // (under a tempdir-pointed XDG_CONFIG_HOME) and assert the resolver
         // joins it correctly.
+        // Hold ENV_LOCK for the whole env-mutation window so no parallel test
+        // observes our XDG_CONFIG_HOME override.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
-        // SAFETY: env var mutation; serialized via #[serial_test::serial] or run
-        // with RUST_TEST_THREADS=1 if the surrounding test file grows parallel-unsafe tests.
-        // This single test only sets, reads, then unsets, so a brief mutation window is fine.
         let original = std::env::var_os("XDG_CONFIG_HOME");
         // SAFETY: env mutation is intentional for testing path resolution.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", tmp.path()) };
