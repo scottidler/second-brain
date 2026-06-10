@@ -16,4 +16,10 @@ fn main() {
     println!("cargo:rustc-env=GIT_DESCRIBE={}", git_describe);
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/");
+    // After `git pack-refs`, loose refs move into packed-refs; without watching
+    // it the embedded GIT_DESCRIBE goes stale (a new tag wouldn't trigger a
+    // rebuild). The path is relative to this crate dir; the workspace .git is a
+    // parent, so reference it explicitly.
+    println!("cargo:rerun-if-changed=.git/packed-refs");
+    println!("cargo:rerun-if-changed=../.git/packed-refs");
 }

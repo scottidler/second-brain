@@ -793,3 +793,60 @@ content.
 
 ### Open questions
 - None.
+
+## Phase 13: sb CLI compliance & scripts
+
+`otto ci` exit 0 (check incl. clippy+fmt, and test). All items addressed.
+
+### Design decisions
+- **`--tags` num_args** (borg ingest/note): `value_delimiter = ','` → `num_args = 0..`
+  (space-separated, per the CLI rule; matches `audit --fix`).
+- **cortex enum flags `ignore_case`**: `--format`/`--scan` accept any case
+  (`--format JSON` failed before).
+- **daemon CWD fallback restricted** (cortex): only status/stop/uninstall get the
+  `.` fallback; `--start`/`--install`/default propagate a missing-root error (they
+  watch / bake the root, so `.` would be wrong).
+- **logger fabricated fallback removed**: `log_path` uses `.expect(...)` not
+  `unwrap_or(PathBuf::from("."))` (the banned class).
+- **dead `--dry-run` on `borg migrate` deleted** (`--apply` is the gate).
+- **stale help fixed**: borg subcommand summary drops `dlq`/`intake`; the log
+  `--status` help lists `crashed`; cortex/borg `DaemonArgs` + `HotkeyArgs` flags
+  gained doc comments (rendered blank before); audit-summary total + Kinds list
+  now include `github-creator-missing` (the sixth kind was dropped from the
+  total).
+- **log-level precedence un-inverted**: `sub.or(root)` (subsystem flag overrides
+  the global root flag, as `cli.rs` documents); was `root.or(sub)`.
+- **`sb doctor signal` → `sb doctor`** (the subcommand-scoped form doesn't exist).
+- **`--queries` repo-relative default documented** in help.
+- **typed exit instead of `process::exit` in print helpers**: new
+  `error::SilentFailure`; `print_call_result` (oracle) and `print_ingest_outcome`
+  (borg) return it after printing, and `main` maps it to exit 1 - the one place
+  exit codes are decided (no `process::exit` deep in the call tree).
+- **dead `verbose` parameter removed end-to-end**: `borg::daemon`, `borg::serve`,
+  and the sb call sites.
+- **template-parse tests x3**: `serde_yaml::from_str::<Config>(TEMPLATE)` for
+  borg/cortex/oracle (byte-identity checks can't catch struct drift).
+- **`oracle.yml watcher.enable → enabled`** with a serde `alias = "enable"` (old
+  files still parse).
+- **`sb/build.rs` watches `.git/packed-refs`** (both crate-relative and `../`)
+  so `GIT_DESCRIBE` doesn't go stale after `git pack-refs`.
+- **bin/migrate-receipts**: `usage()` prints only the leading comment block (was
+  leaking every `# ` comment via `grep`); Steps 3+4 row counts go through a
+  `run_sql_count` helper that wraps the UPDATE in BEGIN/ROLLBACK under `--dry-run`
+  (they committed before); the `*ǵ04*` mojibake glob is now `*🔄*`;
+  `--exclude-dir` uses the basename `views` (an absolute path never matched);
+  `/usr/bin/tail` (the Rust `tail` shadows it).
+- **hotkey capture script**: `obsidian-borg ingest` → `sb borg ingest`, and the
+  failure branch moved inside `if RESULT=$(...); then` so `set -euo pipefail`
+  doesn't abort before the `Failed:` notification.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- **fabric-pattern count de-magic'd** rather than corrected to 17: the
+  checks.rs/.otto.yml comments now say "the bundled fabric patterns
+  (see bootstrap::PATTERNS)" so they can't drift again.
+
+### Open questions
+- None.

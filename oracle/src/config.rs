@@ -380,9 +380,11 @@ impl Default for LogConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WatcherConfig {
-    /// Whether to enable the file watcher for live reindexing
-    #[serde(default = "default_watcher_enable")]
-    pub enable: bool,
+    /// Whether to enable the file watcher for live reindexing. Named `enabled`
+    /// for consistency with the retrieval method flags; `enable` stays a serde
+    /// alias so existing oracle.yml files keep parsing.
+    #[serde(default = "default_watcher_enable", alias = "enable")]
+    pub enabled: bool,
 
     /// Seconds to wait after last event before reindexing
     #[serde(default = "default_debounce_secs", rename = "debounce-secs")]
@@ -396,7 +398,7 @@ pub struct WatcherConfig {
 impl Default for WatcherConfig {
     fn default() -> Self {
         Self {
-            enable: default_watcher_enable(),
+            enabled: default_watcher_enable(),
             debounce_secs: default_debounce_secs(),
             ignore: default_ignore_dirs(),
         }

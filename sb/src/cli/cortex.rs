@@ -112,7 +112,7 @@ impl From<ClassifyArgs> for opts::ClassifyOpts {
 pub struct LintArgs {
     #[arg(long)]
     pub apply: bool,
-    #[arg(long, value_enum, default_value_t = opts::LintFormat::Human)]
+    #[arg(long, value_enum, ignore_case = true, default_value_t = opts::LintFormat::Human)]
     pub format: opts::LintFormat,
     #[arg(long)]
     pub rule: Vec<String>,
@@ -134,7 +134,7 @@ impl From<LintArgs> for opts::LintOpts {
 pub struct LinkArgs {
     #[arg(long)]
     pub apply: bool,
-    #[arg(long, value_enum, default_value_t = opts::ScanScope::All)]
+    #[arg(long, value_enum, ignore_case = true, default_value_t = opts::ScanScope::All)]
     pub scan: opts::ScanScope,
 }
 impl From<LinkArgs> for opts::LinkOpts {
@@ -192,14 +192,19 @@ impl From<StateArgs> for opts::StateOpts {
 
 #[derive(Args)]
 pub struct DaemonArgs {
+    /// Write the systemd user unit for the cortex daemon
     #[arg(long)]
     pub install: bool,
+    /// Remove the systemd user unit
     #[arg(long)]
     pub uninstall: bool,
+    /// Run the daemon in the foreground (the no-flag default)
     #[arg(long)]
     pub start: bool,
+    /// Print how to stop the running daemon
     #[arg(long)]
     pub stop: bool,
+    /// Show the daemon's systemd status
     #[arg(long)]
     pub status: bool,
 }
@@ -362,14 +367,17 @@ impl From<SummarizeArgs> for opts::SummarizeOpts {
 impl CortexCli {
     pub async fn run(self) -> Result<()> {
         let config = cortex::config::Config::load(self.config.as_ref()).context("failed to load configuration")?;
-        // Resolve the vault root lazily-ish: status/install/uninstall verbs don't
-        // touch the vault, so a missing root_path shouldn't block them.
-        let vault_root = if matches!(&self.command, Command::Daemon(_)) {
-            config
+        // Resolve the vault root lazily-ish: only the daemon verbs that DON'T
+        // touch the vault (status/stop/uninstall) get the CWD fallback. `--start`
+        // watches the vault and `--install` bakes the root into the systemd unit
+        // - both must fail loudly on a missing root rather than silently using
+        // `.` (which would watch / bake CWD). The no-flag default is `--start`,
+        // so it propagates too.
+        let vault_root = match &self.command {
+            Command::Daemon(d) if d.status || d.stop || d.uninstall => config
                 .vault_root(self.vault.as_ref())
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        } else {
-            config.vault_root(self.vault.as_ref())?
+                .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            _ => config.vault_root(self.vault.as_ref())?,
         };
         log::debug!("cortex starting (version={})", env!("GIT_DESCRIBE"));
         log::debug!("resolved vault root: {}", vault_root.display());

@@ -146,3 +146,26 @@ fn extract_force_preserves_templates() {
     let after = std::fs::read_to_string(&borg_path).expect("read");
     assert_eq!(after, edited, "--force must NOT overwrite per-host templates");
 }
+
+// Template-parse guards: the shipped `.example` templates must deserialize as
+// the typed subsystem Config, not just be byte-identical to themselves. A
+// struct field rename/removal that the byte-identity checks can't see would
+// break a fresh `sb bootstrap` at first daemon start; these catch it at test
+// time.
+
+#[test]
+fn borg_template_parses_as_typed_config() {
+    serde_yaml::from_str::<borg::config::Config>(BORG_TEMPLATE)
+        .expect("borg.yml.example must parse as borg::config::Config");
+}
+
+#[test]
+fn cortex_template_parses_as_typed_config() {
+    serde_yaml::from_str::<cortex::config::Config>(CORTEX_TEMPLATE)
+        .expect("cortex.yml.example must parse as cortex::config::Config");
+}
+
+#[test]
+fn oracle_template_parses_as_typed_config() {
+    serde_yaml::from_str::<oracle::Config>(ORACLE_TEMPLATE).expect("oracle.yml.example must parse as oracle::Config");
+}

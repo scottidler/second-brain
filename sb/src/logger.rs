@@ -164,15 +164,21 @@ fn name_and_level(cli: &Cli, cli_cfg: &CliConfig) -> (String, String) {
 /// the logger initializer and after_help text builders that want to
 /// show the path in `--help` output.
 pub fn log_path(name: &str) -> PathBuf {
+    // `.expect` (not a fabricated `.` fallback): `data_local_dir()` only returns
+    // None when both $HOME and $XDG_DATA_HOME are unset, an environment where
+    // nothing in sb works. A `.` fallback would scatter log files under CWD.
     dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
         .join("sb")
         .join(format!("{name}.log"))
 }
 
-/// Resolution order: CLI flag (root or sub) > `--verbose` > `cli.yml::logging.level` > "info".
+/// Resolution order (highest precedence first): subsystem `--log-level`, then
+/// root `--log-level`, then `--verbose`, then `cli.yml::logging.level`, then
+/// `"info"`. The per-subsystem flag overrides the global root flag (as `cli.rs`
+/// documents); the code previously did `root.or(sub)`, inverting that.
 fn resolve_level(root: Option<&str>, sub: Option<&str>, cli_yaml: Option<&str>, verbose: bool) -> String {
-    if let Some(v) = root.or(sub) {
+    if let Some(v) = sub.or(root) {
         return v.to_string();
     }
     if verbose {

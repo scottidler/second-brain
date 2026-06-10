@@ -39,10 +39,11 @@ if [[ -z "$URL" || ! "$URL" =~ ^https?:// ]]; then
     exit 1
 fi
 
-RESULT=$(obsidian-borg ingest "$URL" 2>&1)
-EXIT_CODE=$?
-
-if [[ $EXIT_CODE -eq 0 ]]; then
+# `sb borg ingest` (the `obsidian-borg` binary was retired by the 2026-05-19
+# unified-sb refactor). Under `set -euo pipefail` a failing command substitution
+# aborts the script before any `EXIT_CODE=$?` line could run, so the failure
+# branch must live inside the `if`'s condition rather than after it.
+if RESULT=$(sb borg ingest "$URL" 2>&1); then
     notify_msg "$RESULT"
 else
     notify_msg "Failed: $RESULT" "critical"

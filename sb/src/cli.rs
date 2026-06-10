@@ -31,7 +31,7 @@ pub struct Cli {
 
 #[derive(clap::Subcommand)]
 pub enum Cmd {
-    /// Ingestion daemon (URLs, notes, hotkey, dlq, intake, audit, daemon, ...)
+    /// Ingestion daemon (URLs, notes, hotkey, log, audit, replay, daemon, ...)
     Borg(borg::BorgCli),
     /// Vault governance (lint, link, classify, sweep, embed, summarize, daemon, ...)
     Cortex(cortex::CortexCli),

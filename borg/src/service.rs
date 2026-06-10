@@ -39,7 +39,7 @@ pub(crate) struct UninstallOutcome {
 /// Dispatch the non-start daemon flags (install/uninstall/reinstall/stop/restart/status).
 /// `--start` is handled separately by sb via `serve_init` + `ServerHandle::wait` so the
 /// startup banner can be formatted from typed data.
-pub async fn daemon(config: Config, _verbose: bool, opts: opts::DaemonOpts) -> Result<DaemonOutcome> {
+pub async fn daemon(config: Config, opts: opts::DaemonOpts) -> Result<DaemonOutcome> {
     use crate::opts::DaemonOpts;
 
     match opts {

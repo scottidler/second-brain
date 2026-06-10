@@ -19,5 +19,12 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     logger::init_for(&cli)?;
-    cli.cmd.run().await
+    // A command that already printed its own failure returns `SilentFailure`;
+    // map it to exit code 1 here (the one place exit codes are decided) instead
+    // of `std::process::exit` deep in a print helper.
+    match cli.cmd.run().await {
+        Ok(()) => Ok(()),
+        Err(e) if e.downcast_ref::<error::SilentFailure>().is_some() => std::process::exit(1),
+        Err(e) => Err(e),
+    }
 }

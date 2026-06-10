@@ -264,7 +264,7 @@ async fn register_systemd_units() -> Result<()> {
         restart: false,
         status: false,
     };
-    let borg_outcome = borg::daemon(borg_config, false, borg_install)
+    let borg_outcome = borg::daemon(borg_config, borg_install)
         .await
         .context("borg daemon --install")?;
     match &borg_outcome {

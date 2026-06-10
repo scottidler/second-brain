@@ -25,7 +25,10 @@ PRUNE_LEGACY=0
 FORCE=0
 
 usage() {
-    grep -E '^# ' "$0" | sed 's/^# \{0,1\}//'
+    # Print ONLY the leading comment block (skip the shebang, stop at the first
+    # non-comment line) so implementation comments deeper in the script don't
+    # leak into --help, which a plain `grep '^# '` did.
+    awk 'NR==1 && /^#!/ {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
     exit 1
 }
 
@@ -58,8 +61,10 @@ ORPHANS_MD="$VAULT_ROOT/system/views/borg-orphans.md"
 # === --prune-legacy branch ===========================================================
 if [[ $PRUNE_LEGACY -eq 1 ]]; then
     echo "Scanning vault for [[borg-intake]] / [[borg-dlq]] / [[borg-dlq-archive]] / [[borg-orphans]] backlinks..."
+    # grep --exclude-dir matches the directory BASENAME, not a path; an absolute
+    # path here never excluded anything. Match the basename `views`.
     backlink_hits=$(grep -RIn --include='*.md' \
-        --exclude-dir="$VAULT_ROOT/system/views" \
+        --exclude-dir=views \
         -E '\[\[borg-(intake|dlq|dlq-archive|orphans)' \
         "$VAULT_ROOT" 2>/dev/null || true)
     if [[ -n "$backlink_hits" ]]; then
@@ -103,6 +108,19 @@ run_sql() {
         sqlite3 "$RECEIPTS_DB" "BEGIN; $1; ROLLBACK;"
     else
         sqlite3 "$RECEIPTS_DB" "$1"
+    fi
+}
+
+# Run a mutating statement (ending in `;`) and echo its affected-row count.
+# Under --dry-run the write is rolled back, but `SELECT changes()` runs BEFORE
+# the ROLLBACK so it still reports what WOULD change. Steps 3+4 used a bare
+# `sqlite3 ... "$sql; SELECT changes();"` that COMMITTED even under --dry-run.
+# (`/usr/bin/tail`: a Rust `tail` with incompatible flags shadows it on PATH.)
+run_sql_count() {
+    if [[ $DRY_RUN -eq 1 ]]; then
+        sqlite3 "$RECEIPTS_DB" "BEGIN; $1 SELECT changes(); ROLLBACK;" 2>/dev/null | /usr/bin/tail -1
+    else
+        sqlite3 "$RECEIPTS_DB" "$1 SELECT changes();" 2>/dev/null | /usr/bin/tail -1
     fi
 }
 
@@ -175,7 +193,7 @@ if [[ -f "$LEDGER_MD" ]]; then
         note_path=${note_path//\'/\'\'}
         trace=${trace//\'/\'\'}
         case "$status" in
-            *✅*|✅|*ǵ04*|🔄)
+            *✅*|✅|*🔄*|🔄)
                 sql="UPDATE receipts SET status='succeeded', terminal_at='${date}T${time}:00Z', note_path='$note_path' WHERE trace_id='$trace' AND status='received';"
                 run_sql "$sql"
                 LEDGER_SUCC=$((LEDGER_SUCC + 1))
@@ -216,7 +234,7 @@ for src in "$DLQ_MD" "$DLQ_ARCHIVE_MD"; do
         # mostly IntakeReject / WatchdogOrphan. Transition to failed with the
         # mapped stage.
         sql_a="UPDATE receipts SET status='failed', failure_stage='$fstage', failure_reason='$reason', terminal_at='${date}T${time}:00Z' WHERE trace_id='$trace' AND status='received';"
-        rows_a=$(sqlite3 "$RECEIPTS_DB" "$sql_a; SELECT changes();" 2>/dev/null | tail -1)
+        rows_a=$(run_sql_count "$sql_a")
         if [[ "${rows_a:-0}" -gt 0 ]]; then
             DLQ_ONLY=$((DLQ_ONLY + 1))
             continue
@@ -224,7 +242,7 @@ for src in "$DLQ_MD" "$DLQ_ARCHIVE_MD"; do
         # Case B: ledger had ❌ for this trace (Step 2 set failure_stage='crashed').
         # Refine to the DLQ row's specific stage.
         sql_b="UPDATE receipts SET failure_stage='$fstage', failure_reason='$reason' WHERE trace_id='$trace' AND status='failed' AND failure_stage='crashed';"
-        rows_b=$(sqlite3 "$RECEIPTS_DB" "$sql_b; SELECT changes();" 2>/dev/null | tail -1)
+        rows_b=$(run_sql_count "$sql_b")
         if [[ "${rows_b:-0}" -gt 0 ]]; then
             DLQ_REFINED=$((DLQ_REFINED + 1))
         fi

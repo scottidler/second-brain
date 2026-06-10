@@ -43,7 +43,7 @@ pub async fn serve(config: Config) -> Result<()> {
     tracing::info!("Starting MCP server on stdio transport");
     let server = server::OracleMcpServer::new(config.clone(), db);
 
-    if config.watcher.enable {
+    if config.watcher.enabled {
         let watcher_config = WatcherConfig {
             debounce_secs: config.watcher.debounce_secs,
             ignore_dirs: config.watcher.ignore.clone(),

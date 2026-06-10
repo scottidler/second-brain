@@ -230,7 +230,7 @@ tasks:
         install -m 0755 "target/release/$bin" "$HOME/.cargo/bin/$bin"
       done
 
-      # Sync every canonical asset (shared YAMLs + 14 fabric patterns) to
+      # Sync every canonical asset (shared YAMLs + the bundled fabric patterns) to
       # ~/.config/sb/ via the same `sb bootstrap` code path a public consumer
       # uses. --force refreshes shared YAMLs + patterns from the binary's
       # embedded copies (per-host templates stay write-if-missing).

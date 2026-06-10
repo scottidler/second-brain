@@ -37,7 +37,7 @@ pub enum Command {
         clipboard: bool,
         #[arg(long)]
         file: Option<PathBuf>,
-        #[arg(short, long, value_delimiter = ',')]
+        #[arg(short, long, num_args = 0..)]
         tags: Option<Vec<String>>,
         #[arg(long)]
         force: bool,
@@ -47,17 +47,16 @@ pub enum Command {
         text: Option<String>,
         #[arg(long)]
         clipboard: bool,
-        #[arg(short, long, value_delimiter = ',')]
+        #[arg(short, long, num_args = 0..)]
         tags: Option<Vec<String>>,
     },
     /// Install/uninstall a keyboard shortcut to ingest URLs from clipboard
     Hotkey(HotkeyArgs),
     /// Manage the Firefox browser extension (generate, validate, sign, install)
     Extension(extension::ExtensionCli),
-    /// Migrate vault frontmatter to current schema
+    /// Migrate vault frontmatter to current schema. Without `--apply` this is a
+    /// dry run (reports what would change); `--apply` is the gate that writes.
     Migrate {
-        #[arg(long)]
-        dry_run: bool,
         #[arg(long)]
         apply: bool,
     },
@@ -107,14 +106,19 @@ pub enum Command {
 
 #[derive(Args)]
 pub struct HotkeyArgs {
+    /// Install the desktop hotkey that ingests the clipboard URL
     #[arg(long)]
     pub install: bool,
+    /// Remove the installed hotkey
     #[arg(long)]
     pub uninstall: bool,
+    /// Daemon host the hotkey POSTs the captured URL to
     #[arg(long, default_value = "localhost")]
     pub host: String,
+    /// Daemon port the hotkey POSTs to
     #[arg(long, default_value_t = 8181)]
     pub port: u16,
+    /// Key binding to register (desktop-environment syntax)
     #[arg(long, default_value = "<Ctrl><Shift>b")]
     pub key: String,
 }
@@ -132,18 +136,25 @@ impl From<HotkeyArgs> for opts::HotkeyOpts {
 
 #[derive(Args)]
 pub struct DaemonArgs {
+    /// Write the systemd user unit for the borg daemon
     #[arg(long)]
     pub install: bool,
+    /// Remove the systemd user unit
     #[arg(long)]
     pub uninstall: bool,
+    /// Uninstall then install the systemd user unit
     #[arg(long)]
     pub reinstall: bool,
+    /// Run the daemon in the foreground (the no-flag default)
     #[arg(long)]
     pub start: bool,
+    /// Stop the running daemon
     #[arg(long)]
     pub stop: bool,
+    /// Restart the running daemon
     #[arg(long)]
     pub restart: bool,
+    /// Show the daemon's systemd status
     #[arg(long)]
     pub status: bool,
 }
@@ -163,7 +174,7 @@ impl From<DaemonArgs> for opts::DaemonOpts {
 
 #[derive(Args)]
 pub struct LogCliArgs {
-    /// Filter by receipt status (received | succeeded | failed).
+    /// Filter by receipt status (received | succeeded | failed | crashed).
     #[arg(long)]
     pub status: Option<String>,
     /// Filter by method (http | telegram | discord | ntfy | cli | clipboard).
@@ -248,8 +259,6 @@ impl BorgCli {
         borg::startup::init_permits(&config).context("Failed to initialize pipeline permits")?;
         borg::startup::log_ffmpeg_thread_caps(&config);
 
-        let verbose = false; // root --verbose moved to sb level; not surfaced here
-
         match self.command {
             None => {
                 use clap::CommandFactory;
@@ -265,7 +274,7 @@ impl BorgCli {
                     print_server_banner(&startup);
                     handle.wait().await
                 } else {
-                    let outcome = borg::daemon(config, verbose, opts).await?;
+                    let outcome = borg::daemon(config, opts).await?;
                     print_daemon_outcome(&outcome);
                     Ok(())
                 }
@@ -321,7 +330,7 @@ impl BorgCli {
                 Ok(())
             }
             Some(Command::Extension(cli)) => extension::run(cli, config),
-            Some(Command::Migrate { dry_run: _, apply }) => {
+            Some(Command::Migrate { apply }) => {
                 let report = borg::migrate::run(&config, apply).await?;
                 print_migrate_report(&report);
                 Ok(())
@@ -744,10 +753,11 @@ fn print_audit_summary(report: &borg::audit::AuditReport, fix: bool) {
     }
 
     if !fix {
-        let total = mistype_count + blocked_count + raw_title_count + duplicate_count + orphan_count;
+        let total =
+            mistype_count + blocked_count + raw_title_count + duplicate_count + orphan_count + github_creator_count;
         println!();
         println!("Run with --fix to address all {total} finding(s), or --fix <kinds...> to target specific classes.");
-        println!("  Kinds: mistype | orphan-replace | blocked | raw-title | duplicate");
+        println!("  Kinds: mistype | orphan-replace | blocked | raw-title | duplicate | github-creator-missing");
     }
 }
 
@@ -886,7 +896,8 @@ fn print_ingest_outcome(outcome: &borg::IngestOutcome) -> Result<()> {
         }
         borg::IngestOutcome::Failed { reason } => {
             eprintln!("Error: {reason}");
-            std::process::exit(1);
+            // Already printed; signal exit-1 to main via the typed marker.
+            return Err(crate::error::SilentFailure.into());
         }
     }
     Ok(())

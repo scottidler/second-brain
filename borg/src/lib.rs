@@ -463,7 +463,7 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
 /// Thin wrapper preserved for internal callers (daemon::run with --start).
 /// New sb code paths should use `serve_init` + `ServerHandle::wait` to get
 /// the typed startup banner instead.
-pub async fn serve(config: Config, version: String, _verbose: bool) -> Result<()> {
+pub async fn serve(config: Config, version: String) -> Result<()> {
     let (_startup, handle) = serve_init(config, version).await?;
     handle.wait().await
 }

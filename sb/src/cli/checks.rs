@@ -332,7 +332,8 @@ fn signal_rs_cli_findings() -> Vec<Finding> {
     }
 }
 
-/// Drift detection for the 14 fabric patterns. Mismatch is Warn here
+/// Drift detection for the bundled fabric patterns (see `bootstrap::PATTERNS`).
+/// Mismatch is Warn here
 /// (not Info): patterns are version-sensitive LLM prompts, so drift from
 /// binary usually means "the binary moved forward but the operator
 /// didn't refresh." `sb bootstrap --force` is the explicit fix.
@@ -846,7 +847,7 @@ fn signal_findings_for(sg: &SignalConfig) -> Vec<Finding> {
         )),
         Ok(borg::SignalProbe::StatusFailed(msg)) => findings.push(Finding::warn(
             format!("status() failed (open succeeded): {msg}"),
-            "transient; re-run `sb doctor signal` after the network stabilises",
+            "transient; re-run `sb doctor` after the network stabilises",
         )),
         Err(e) => findings.push(Finding::error(
             format!("signal probe runtime failed: {e}"),

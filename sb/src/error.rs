@@ -14,6 +14,22 @@ use std::panic::Location;
 
 use eyre::EyreHandler;
 
+/// A failure that has ALREADY been reported to the user - the command printed
+/// its own error / `found:false` / `Failed:` output. `main` maps it to process
+/// exit code 1 WITHOUT the eyre handler printing anything further. This lets
+/// print helpers return a typed failure instead of calling `std::process::exit`
+/// deep in the call tree (which bypasses Drop / flushing and is untestable).
+#[derive(Debug)]
+pub struct SilentFailure;
+
+impl fmt::Display for SilentFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "command reported failure")
+    }
+}
+
+impl Error for SilentFailure {}
+
 /// Install our custom handler. Call once, before any `eyre::Report` is constructed
 /// (so before `Cli::parse()` results are unwrapped).
 ///

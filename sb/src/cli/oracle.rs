@@ -42,7 +42,10 @@ pub enum Commands {
 
 #[derive(Args)]
 pub struct EvalArgs {
-    /// Path to the eval query set
+    /// Path to the eval query set. The default is REPO-RELATIVE
+    /// (`config/eval/queries.yml`): `sb oracle eval` is a developer command
+    /// meant to run from the second-brain repo root. Pass an absolute path to
+    /// run it elsewhere.
     #[arg(long, default_value = "config/eval/queries.yml")]
     pub queries: PathBuf,
     /// Pool/metric depth (e.g. nDCG@K)
@@ -256,7 +259,8 @@ fn print_call_result(result: &rmcp::model::CallToolResult) -> Result<()> {
     }
 
     if failure {
-        std::process::exit(1);
+        // Already printed above; signal exit-1 to main via the typed marker.
+        return Err(crate::error::SilentFailure.into());
     }
     Ok(())
 }
