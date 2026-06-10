@@ -2,7 +2,6 @@ use crate::backoff::ExponentialBackoff;
 use crate::config::Config;
 use crate::intake::{self as intake_log, Kind as IntakeKind};
 use crate::notify::{Desktop, Telegram};
-use crate::pipeline;
 use crate::router::extract_url_from_text;
 use crate::trace;
 use crate::types::{ContentKind, IngestMethod};
@@ -179,32 +178,22 @@ pub async fn run(
                     let desk = desktop.clone();
                     let trace_for_spawn = trace_id.clone();
                     tokio::spawn(async move {
-                        let prior = if let Some(d) = &desk {
-                            d.processing(&trace_for_spawn, "Processing...").await
-                        } else {
-                            None
-                        };
-                        if let Some(t) = &tg {
-                            let _ = t.processing(&trace_for_spawn, "Processing...", None).await;
-                        }
                         let display_source = url.clone();
-                        let content = ContentKind::Url(url.clone());
-                        let result = pipeline::process_content(
-                            content,
+                        let result = crate::dispatch::dispatch_ingest(
+                            ContentKind::Url(url.clone()),
                             tags,
                             IngestMethod::Ntfy,
                             force,
                             &cfg,
-                            Some(trace_for_spawn),
+                            trace_for_spawn,
+                            &display_source,
+                            "Processing...",
+                            desk,
+                            tg,
+                            None,
                         )
                         .await;
                         log::info!("ntfy: pipeline result for {url}: {:?}", result.status);
-                        if let Some(t) = tg {
-                            t.result(&result, &display_source, None).await;
-                        }
-                        if let Some(d) = desk {
-                            d.result(&result, &display_source, prior).await;
-                        }
                     });
                 }
                 ParsedMessage::Text(text) => {
@@ -215,31 +204,21 @@ pub async fn run(
                     let display = vault::text::truncate_with_ellipsis(&text, 50);
                     let trace_for_spawn = trace_id.clone();
                     tokio::spawn(async move {
-                        let prior = if let Some(d) = &desk {
-                            d.processing(&trace_for_spawn, "Processing text...").await
-                        } else {
-                            None
-                        };
-                        if let Some(t) = &tg {
-                            let _ = t.processing(&trace_for_spawn, "Processing text...", None).await;
-                        }
-                        let content = ContentKind::Text(text);
-                        let result = pipeline::process_content(
-                            content,
+                        let result = crate::dispatch::dispatch_ingest(
+                            ContentKind::Text(text),
                             vec![],
                             IngestMethod::Ntfy,
                             false,
                             &cfg,
-                            Some(trace_for_spawn),
+                            trace_for_spawn,
+                            &display,
+                            "Processing text...",
+                            desk,
+                            tg,
+                            None,
                         )
                         .await;
                         log::info!("ntfy: text capture result: {:?}", result.status);
-                        if let Some(t) = tg {
-                            t.result(&result, &display, None).await;
-                        }
-                        if let Some(d) = desk {
-                            d.result(&result, &display, prior).await;
-                        }
                     });
                 }
             }

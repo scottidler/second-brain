@@ -101,11 +101,6 @@ pub(crate) async fn process_text_inner(
     }
 
     // General text: classify via LLM, then create a note
-    let tz = config.frontmatter.timezone_tz();
-    let now = chrono::Utc::now().with_timezone(&tz);
-    let log_date = now.format("%Y-%m-%d").to_string();
-    let log_time = now.format("%H:%M").to_string();
-
     let use_fabric = fabric::is_available(&config.fabric);
 
     // Generate title from text (first line or LLM-generated)
@@ -164,37 +159,16 @@ pub(crate) async fn process_text_inner(
 
     log::info!("[{trace_id}] Wrote text note: {}", note_path.display());
 
-    // Log to ledger
-    let ledger_file = ledger::ledger_path()?;
-    let source_display = format!("[text: {}]", vault::text::truncate_with_ellipsis(text, 50));
-    ledger::append_entry(
-        &ledger_file,
-        &LedgerEntry {
-            date: log_date,
-            time: log_time,
-            method,
-            filename: extract_filename(&note_path),
-            source: source_display,
-            domain: None,
-            trace_id: Some(trace_id.to_string()),
-        },
-    )?;
-
-    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
-
-    Ok(IngestResult {
-        status: IngestStatus::Completed,
-        note_path: Some(note_path.to_string_lossy().to_string()),
-        title: Some(title),
-        tags: all_tags,
-        elapsed_secs: None,
-        method: Some(method),
-        canonical_url: None,
-        trace_id: None,
-        obsidian_url,
-        failure_stage: None,
-        degraded: distilled.meta.validation.fallback_reason.is_some(),
-    })
+    publish_note(
+        config,
+        &note_path,
+        method,
+        format!("[text: {}]", vault::text::truncate_with_ellipsis(text, 50)),
+        title,
+        all_tags,
+        trace_id,
+        distilled.meta.validation.fallback_reason.is_some(),
+    )
 }
 
 pub(crate) async fn process_vocab(
@@ -206,11 +180,6 @@ pub(crate) async fn process_vocab(
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
-    let tz = config.frontmatter.timezone_tz();
-    let now = chrono::Utc::now().with_timezone(&tz);
-    let log_date = now.format("%Y-%m-%d").to_string();
-    let log_time = now.format("%H:%M").to_string();
-
     let use_fabric = fabric::is_available(&config.fabric);
 
     let (title, content_type, body) = match pattern {
@@ -334,36 +303,16 @@ pub(crate) async fn process_vocab(
 
     log::info!("[{trace_id}] Wrote vocab note: {}", note_path.display());
 
-    // Log to ledger
-    let ledger_file = ledger::ledger_path()?;
-    ledger::append_entry(
-        &ledger_file,
-        &LedgerEntry {
-            date: log_date,
-            time: log_time,
-            method,
-            filename: extract_filename(&note_path),
-            source: format!("[{}]", text.trim()),
-            domain: None,
-            trace_id: Some(trace_id.to_string()),
-        },
-    )?;
-
-    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
-
-    Ok(IngestResult {
-        status: IngestStatus::Completed,
-        note_path: Some(note_path.to_string_lossy().to_string()),
-        title: Some(title),
-        tags: all_tags,
-        elapsed_secs: None,
-        method: Some(method),
-        canonical_url: None,
-        trace_id: None,
-        obsidian_url,
-        failure_stage: None,
-        degraded: distilled.meta.validation.fallback_reason.is_some(),
-    })
+    publish_note(
+        config,
+        &note_path,
+        method,
+        format!("[{}]", text.trim()),
+        title,
+        all_tags,
+        trace_id,
+        distilled.meta.validation.fallback_reason.is_some(),
+    )
 }
 
 /// Generate a title from text input.
@@ -677,11 +626,6 @@ pub(crate) async fn process_code_snippet(
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
-    let tz = config.frontmatter.timezone_tz();
-    let now = chrono::Utc::now().with_timezone(&tz);
-    let log_date = now.format("%Y-%m-%d").to_string();
-    let log_time = now.format("%H:%M").to_string();
-
     let use_fabric = fabric::is_available(&config.fabric);
 
     let title = generate_code_title(text, language, use_fabric, config).await;
@@ -736,37 +680,16 @@ pub(crate) async fn process_code_snippet(
         language
     );
 
-    // Log to ledger
-    let ledger_file = ledger::ledger_path()?;
-    let source_display = format!("[code: {}]", if language.is_empty() { "unknown" } else { language });
-    ledger::append_entry(
-        &ledger_file,
-        &LedgerEntry {
-            date: log_date,
-            time: log_time,
-            method,
-            filename: extract_filename(&note_path),
-            source: source_display,
-            domain: None,
-            trace_id: Some(trace_id.to_string()),
-        },
-    )?;
-
-    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
-
-    Ok(IngestResult {
-        status: IngestStatus::Completed,
-        note_path: Some(note_path.to_string_lossy().to_string()),
-        title: Some(title),
-        tags: all_tags,
-        elapsed_secs: None,
-        method: Some(method),
-        canonical_url: None,
-        trace_id: None,
-        obsidian_url,
-        failure_stage: None,
-        degraded: false,
-    })
+    publish_note(
+        config,
+        &note_path,
+        method,
+        format!("[code: {}]", if language.is_empty() { "unknown" } else { language }),
+        title,
+        all_tags,
+        trace_id,
+        false,
+    )
 }
 
 /// Detect language of a word (simple heuristic, can be enhanced with LLM).

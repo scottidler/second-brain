@@ -732,6 +732,67 @@ pub fn bootstrap_recorded(account: &str, device_id: u32) -> bool {
     bootstrap::bootstrap_done(&vault::paths::borg_signal_bootstrap_marker(), account, device_id)
 }
 
+/// Outcome of [`probe_signal`] - the linked/unlinked/error state of a Signal
+/// state directory, for `sb doctor` to render. Keeping the `signal-rs` open +
+/// status calls here means sb's doctor needs no `signal-rs` dependency.
+pub enum SignalProbe {
+    Linked {
+        account: String,
+        device_id: u32,
+        linked_devices: usize,
+        /// Whether a successful cold-start bootstrap self-send has been
+        /// recorded for this identity. `false` while linked means Note-to-Self
+        /// ingest is not yet established (the phone has no sync session to us).
+        /// See docs/design/2026-05-28-signal-cold-start-bootstrap.md.
+        bootstrapped: bool,
+    },
+    NotLinked,
+    PartiallyLinked,
+    Deauthorized,
+    OpenFailed(String),
+    StatusFailed(String),
+}
+
+/// Live `Client::open` + `status()` probe of a Signal state directory, for
+/// `sb doctor`.
+///
+/// `signal-rs`'s futures are `!Send`, so this needs a current-thread runtime
+/// plus a `LocalSet`; both live on a spawned OS thread (the caller's `sb
+/// doctor` runs inside a multi-thread tokio runtime where neither a nested
+/// runtime nor a `LocalSet` can be built directly).
+pub fn probe_signal(state_dir: &Path) -> Result<SignalProbe, String> {
+    let dir = state_dir.to_path_buf();
+    std::thread::spawn(move || -> Result<SignalProbe, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build current-thread runtime: {e}"))?;
+        let local = tokio::task::LocalSet::new();
+        Ok(rt.block_on(local.run_until(async move {
+            match Client::open(&dir).await {
+                Ok(client) => match client.status().await {
+                    Ok(status) => {
+                        let bootstrapped = bootstrap_recorded(&status.account_number, status.device_id);
+                        SignalProbe::Linked {
+                            account: status.account_number,
+                            device_id: status.device_id,
+                            linked_devices: status.linked_devices.len(),
+                            bootstrapped,
+                        }
+                    }
+                    Err(e) => SignalProbe::StatusFailed(e.to_string()),
+                },
+                Err(OpenError::NotLinked) => SignalProbe::NotLinked,
+                Err(OpenError::PartiallyLinked) => SignalProbe::PartiallyLinked,
+                Err(OpenError::Deauthorized) => SignalProbe::Deauthorized,
+                Err(e) => SignalProbe::OpenFailed(e.to_string()),
+            }
+        })))
+    })
+    .join()
+    .map_err(|_| "signal probe thread panicked".to_string())?
+}
+
 /// Cold-start self-ping. If this identity has not recorded a successful
 /// bootstrap send, send one Note-to-Self so the phone establishes its outbound
 /// sync session to us, then latch on success. Suppressed under the same gate as

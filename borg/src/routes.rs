@@ -10,7 +10,6 @@ use crate::AppState;
 use crate::assets;
 use crate::health::HealthResponse;
 use crate::intake::{self as intake_log, Kind as IntakeKind};
-use crate::pipeline;
 use crate::trace;
 use crate::types::{ContentKind, IngestMethod, IngestRequest, IngestResult, IngestStatus};
 use vault::receipts::FailureStage;
@@ -144,22 +143,20 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
     let task_trace = trace_id.clone();
     let task_url = url.clone();
     tokio::spawn(async move {
-        let prior = if let Some(d) = &desktop {
-            d.processing(&task_trace, "Processing...").await
-        } else {
-            None
-        };
-        if let Some(t) = &telegram {
-            let _ = t.processing(&task_trace, "Processing...", None).await;
-        }
-        let content = ContentKind::Url(task_url.clone());
-        let result = pipeline::process_content(content, tags, method, force, &config, Some(task_trace.clone())).await;
-        if let Some(t) = telegram {
-            t.result(&result, &task_url, None).await;
-        }
-        if let Some(d) = desktop {
-            d.result(&result, &task_url, prior).await;
-        }
+        let result = crate::dispatch::dispatch_ingest(
+            ContentKind::Url(task_url.clone()),
+            tags,
+            method,
+            force,
+            &config,
+            task_trace,
+            &task_url,
+            "Processing...",
+            desktop,
+            telegram,
+            None,
+        )
+        .await;
         match &result.status {
             IngestStatus::Failed { reason } => {
                 log::warn!("Ingest failed for {task_url}: {reason}");
@@ -267,30 +264,20 @@ pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest
     let task_display = display.clone();
     let task_text = request.text;
     tokio::spawn(async move {
-        let prior = if let Some(d) = &desktop {
-            d.processing(&task_trace, "Processing note...").await
-        } else {
-            None
-        };
-        if let Some(t) = &telegram {
-            let _ = t.processing(&task_trace, "Processing note...", None).await;
-        }
-        let content = ContentKind::Text(task_text);
-        let result = pipeline::process_content(
-            content,
+        let result = crate::dispatch::dispatch_ingest(
+            ContentKind::Text(task_text),
             tags,
             IngestMethod::Http,
             false,
             &config,
-            Some(task_trace.clone()),
+            task_trace,
+            &task_display,
+            "Processing note...",
+            desktop,
+            telegram,
+            None,
         )
         .await;
-        if let Some(t) = telegram {
-            t.result(&result, &task_display, None).await;
-        }
-        if let Some(d) = desktop {
-            d.result(&result, &task_display, prior).await;
-        }
         match &result.status {
             IngestStatus::Failed { reason } => log::warn!("Note capture failed: {reason}"),
             IngestStatus::Completed => log::info!("Note captured: {:?}", result.title),
@@ -474,29 +461,20 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
     let processing_text = format!("Processing file: {task_display}...");
     let display_source = format!("[file: {task_display}]");
     tokio::spawn(async move {
-        let prior = if let Some(d) = &desktop {
-            d.processing(&task_trace, &processing_text).await
-        } else {
-            None
-        };
-        if let Some(t) = &telegram {
-            let _ = t.processing(&task_trace, &processing_text, None).await;
-        }
-        let result = pipeline::process_content(
+        let result = crate::dispatch::dispatch_ingest(
             content,
             tags,
             IngestMethod::Http,
             force,
             &config,
-            Some(task_trace.clone()),
+            task_trace,
+            &display_source,
+            &processing_text,
+            desktop,
+            telegram,
+            None,
         )
         .await;
-        if let Some(t) = telegram {
-            t.result(&result, &display_source, None).await;
-        }
-        if let Some(d) = desktop {
-            d.result(&result, &display_source, prior).await;
-        }
         match &result.status {
             IngestStatus::Failed { reason } => {
                 log::warn!(

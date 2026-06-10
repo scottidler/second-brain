@@ -700,10 +700,9 @@ fn telegram_findings_for(tg: &TelegramConfig) -> Vec<Finding> {
                 "telegram.bot-token resolves ({} chars)",
                 token.len()
             )));
-            // Live get_me() probe is multi-thread tokio safe; run it in a
-            // throwaway runtime so we don't depend on the caller's runtime
-            // shape.
-            match telegram_probe_get_me(&token) {
+            // Live get_me() probe, run on an isolated thread inside borg so
+            // sb's doctor carries no teloxide dependency.
+            match borg::probe_telegram(&token) {
                 Ok(username) => findings.push(Finding::ok(format!("telegram.get_me() succeeded: @{username}"))),
                 Err(e) => findings.push(Finding::error(
                     format!("telegram.get_me() failed: {e}"),
@@ -730,30 +729,6 @@ fn telegram_findings_for(tg: &TelegramConfig) -> Vec<Finding> {
         ));
     }
     findings
-}
-
-fn telegram_probe_get_me(token: &str) -> Result<String, String> {
-    // `sb doctor` runs inside `#[tokio::main]`'s multi-thread runtime, so we
-    // cannot build a fresh runtime on the calling thread (panics with
-    // "Cannot start a runtime from within a runtime"). Spawn an isolated OS
-    // thread so the new runtime owns its own thread context, then join.
-    let token = token.to_string();
-    std::thread::spawn(move || -> Result<String, String> {
-        use teloxide::prelude::Requester;
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("build current-thread runtime: {e}"))?;
-        rt.block_on(async move {
-            let bot = teloxide::Bot::new(&token);
-            match bot.get_me().await {
-                Ok(me) => Ok(me.user.username.clone().unwrap_or_else(|| "<no-username>".to_string())),
-                Err(e) => Err(e.to_string()),
-            }
-        })
-    })
-    .join()
-    .map_err(|_| "telegram probe thread panicked".to_string())?
 }
 
 /// Signal doctor section. Host-gated like the supervisor (`is_local_host`):
@@ -805,11 +780,11 @@ fn signal_findings_for(sg: &SignalConfig) -> Vec<Finding> {
     // front beats a cryptic "command not found" later.
     findings.extend(signal_rs_cli_findings());
 
-    // Live open + status probe. signal-rs futures are !Send so run on a
-    // current-thread runtime + LocalSet inside an isolated OS thread (see
-    // signal_probe_status).
-    match signal_probe_status(&state_dir) {
-        Ok(SignalProbe::Linked {
+    // Live open + status probe, run on an isolated thread inside borg
+    // (signal-rs futures are !Send) so sb's doctor carries no signal-rs
+    // dependency.
+    match borg::probe_signal(&state_dir) {
+        Ok(borg::SignalProbe::Linked {
             account,
             device_id,
             linked_devices,
@@ -828,29 +803,29 @@ fn signal_findings_for(sg: &SignalConfig) -> Vec<Finding> {
                 ));
             }
         }
-        Ok(SignalProbe::NotLinked) => findings.push(Finding::error(
+        Ok(borg::SignalProbe::NotLinked) => findings.push(Finding::error(
             format!("state_dir {} is not linked", state_dir.display()),
             format!("signal-rs link --name borg --state-dir {}", state_dir.display()),
         )),
-        Ok(SignalProbe::PartiallyLinked) => findings.push(Finding::error(
+        Ok(borg::SignalProbe::PartiallyLinked) => findings.push(Finding::error(
             format!("state_dir {} is partially linked", state_dir.display()),
             format!(
                 "re-run signal-rs link --name borg --state-dir {} to resume",
                 state_dir.display()
             ),
         )),
-        Ok(SignalProbe::Deauthorized) => findings.push(Finding::error(
+        Ok(borg::SignalProbe::Deauthorized) => findings.push(Finding::error(
             format!("state_dir {} is deauthorized", state_dir.display()),
             format!(
                 "re-run signal-rs link --name borg --state-dir {} after re-authorizing on the primary phone",
                 state_dir.display()
             ),
         )),
-        Ok(SignalProbe::OpenFailed(msg)) => findings.push(Finding::error(
+        Ok(borg::SignalProbe::OpenFailed(msg)) => findings.push(Finding::error(
             format!("Client::open failed: {msg}"),
             "inspect the signal-rs state directory; corruption usually requires re-linking",
         )),
-        Ok(SignalProbe::StatusFailed(msg)) => findings.push(Finding::warn(
+        Ok(borg::SignalProbe::StatusFailed(msg)) => findings.push(Finding::warn(
             format!("status() failed (open succeeded): {msg}"),
             "transient; re-run `sb doctor signal` after the network stabilises",
         )),
@@ -878,65 +853,10 @@ fn state_dir_findings(state_dir: &Path) -> Vec<Finding> {
     findings
 }
 
-enum SignalProbe {
-    Linked {
-        account: String,
-        device_id: u32,
-        linked_devices: usize,
-        /// Whether a successful cold-start bootstrap self-send has been
-        /// recorded for this identity. `false` while linked means Note-to-Self
-        /// ingest is not yet established (the phone has no sync session to us).
-        /// See docs/design/2026-05-28-signal-cold-start-bootstrap.md.
-        bootstrapped: bool,
-    },
-    NotLinked,
-    PartiallyLinked,
-    Deauthorized,
-    OpenFailed(String),
-    StatusFailed(String),
-}
-
-fn signal_probe_status(state_dir: &Path) -> Result<SignalProbe, String> {
-    // See `telegram_probe_get_me` for the runtime-isolation rationale.
-    // signal-rs's futures are !Send, so we need a current-thread runtime plus
-    // a LocalSet; both live on the spawned OS thread.
-    let dir = state_dir.to_path_buf();
-    std::thread::spawn(move || -> Result<SignalProbe, String> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("build current-thread runtime: {e}"))?;
-        let local = tokio::task::LocalSet::new();
-        Ok(rt.block_on(local.run_until(async move {
-            use signal_rs::{Client, OpenError};
-            match Client::open(&dir).await {
-                Ok(client) => match client.status().await {
-                    Ok(status) => {
-                        let bootstrapped = borg::signal::bootstrap_recorded(&status.account_number, status.device_id);
-                        SignalProbe::Linked {
-                            account: status.account_number,
-                            device_id: status.device_id,
-                            linked_devices: status.linked_devices.len(),
-                            bootstrapped,
-                        }
-                    }
-                    Err(e) => SignalProbe::StatusFailed(e.to_string()),
-                },
-                Err(OpenError::NotLinked) => SignalProbe::NotLinked,
-                Err(OpenError::PartiallyLinked) => SignalProbe::PartiallyLinked,
-                Err(OpenError::Deauthorized) => SignalProbe::Deauthorized,
-                Err(e) => SignalProbe::OpenFailed(e.to_string()),
-            }
-        })))
-    })
-    .join()
-    .map_err(|_| "signal probe thread panicked".to_string())?
-}
-
+/// This machine's hostname for doctor host-parity messages, resolved through
+/// borg (the single hostname-reading site) so sb carries no `hostname` dep.
 fn current_hostname() -> String {
-    hostname::get()
-        .map(|h| h.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| String::new())
+    borg::config::current_hostname().unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -3,7 +3,6 @@ use crate::backoff::ExponentialBackoff;
 use crate::config::{Config, TelegramConfig};
 use crate::intake::{self as intake_log, Kind as IntakeKind};
 use crate::notify;
-use crate::pipeline;
 use crate::router::extract_url_from_text;
 use crate::trace;
 use crate::types::{ContentKind, IngestMethod};
@@ -15,6 +14,34 @@ use teloxide::prelude::*;
 use teloxide::requests::Requester;
 use teloxide::types::{AllowedUpdate, FileId};
 use vault::receipts::FailureStage;
+
+/// Live `get_me()` probe against the Telegram Bot API, for `sb doctor`.
+/// Returns the bot's `@username` on success or a stringified error.
+///
+/// `sb doctor` runs inside `#[tokio::main]`'s multi-thread runtime, so we
+/// cannot build a fresh runtime on the calling thread (panics with "Cannot
+/// start a runtime from within a runtime"). Spawn an isolated OS thread so the
+/// new runtime owns its own thread context, then join. Keeping the teloxide
+/// call here means sb's doctor needs no `teloxide` dependency of its own.
+pub fn probe_telegram(token: &str) -> Result<String, String> {
+    let token = token.to_string();
+    std::thread::spawn(move || -> Result<String, String> {
+        use teloxide::prelude::Requester;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build current-thread runtime: {e}"))?;
+        rt.block_on(async move {
+            let bot = teloxide::Bot::new(&token);
+            match bot.get_me().await {
+                Ok(me) => Ok(me.user.username.clone().unwrap_or_else(|| "<no-username>".to_string())),
+                Err(e) => Err(e.to_string()),
+            }
+        })
+    })
+    .join()
+    .map_err(|_| "telegram probe thread panicked".to_string())?
+}
 
 /// Whether a Telegram `chat_id` is permitted to ingest.
 ///
@@ -321,30 +348,21 @@ pub async fn run(
                     let tg = telegram.clone();
                     let desk = desktop.clone();
                     tokio::spawn(async move {
-                        let prior = if let Some(d) = &desk {
-                            d.processing(&trace_id, "Processing image...").await
-                        } else {
-                            None
-                        };
-                        if let Some(t) = &tg {
-                            let _ = t.processing(&trace_id, "Processing image...", chat_id_override).await;
-                        }
-                        let result = pipeline::process_content(
+                        let result = crate::dispatch::dispatch_ingest(
                             content,
                             extra_tags,
                             IngestMethod::Telegram,
                             false,
                             &config,
-                            Some(trace_id),
+                            trace_id,
+                            &display_source,
+                            "Processing image...",
+                            desk,
+                            tg,
+                            chat_id_override,
                         )
                         .await;
                         log::debug!("Pipeline result: {:?}", result.status);
-                        if let Some(t) = tg {
-                            t.result(&result, &display_source, chat_id_override).await;
-                        }
-                        if let Some(d) = desk {
-                            d.result(&result, &display_source, prior).await;
-                        }
                     });
 
                     return Ok(());
@@ -382,32 +400,21 @@ pub async fn run(
                     let tg = telegram.clone();
                     let desk = desktop.clone();
                     tokio::spawn(async move {
-                        let prior = if let Some(d) = &desk {
-                            d.processing(&trace_id, "Processing voice note...").await
-                        } else {
-                            None
-                        };
-                        if let Some(t) = &tg {
-                            let _ = t
-                                .processing(&trace_id, "Processing voice note...", chat_id_override)
-                                .await;
-                        }
-                        let result = pipeline::process_content(
+                        let result = crate::dispatch::dispatch_ingest(
                             content,
                             vec![],
                             IngestMethod::Telegram,
                             false,
                             &config,
-                            Some(trace_id),
+                            trace_id,
+                            &display_source,
+                            "Processing voice note...",
+                            desk,
+                            tg,
+                            chat_id_override,
                         )
                         .await;
                         log::debug!("Pipeline result: {:?}", result.status);
-                        if let Some(t) = tg {
-                            t.result(&result, &display_source, chat_id_override).await;
-                        }
-                        if let Some(d) = desk {
-                            d.result(&result, &display_source, prior).await;
-                        }
                     });
 
                     return Ok(());
@@ -448,30 +455,21 @@ pub async fn run(
                     let tg = telegram.clone();
                     let desk = desktop.clone();
                     tokio::spawn(async move {
-                        let prior = if let Some(d) = &desk {
-                            d.processing(&trace_id, "Processing audio...").await
-                        } else {
-                            None
-                        };
-                        if let Some(t) = &tg {
-                            let _ = t.processing(&trace_id, "Processing audio...", chat_id_override).await;
-                        }
-                        let result = pipeline::process_content(
+                        let result = crate::dispatch::dispatch_ingest(
                             content,
                             vec![],
                             IngestMethod::Telegram,
                             false,
                             &config,
-                            Some(trace_id),
+                            trace_id,
+                            &display_source,
+                            "Processing audio...",
+                            desk,
+                            tg,
+                            chat_id_override,
                         )
                         .await;
                         log::debug!("Pipeline result: {:?}", result.status);
-                        if let Some(t) = tg {
-                            t.result(&result, &display_source, chat_id_override).await;
-                        }
-                        if let Some(d) = desk {
-                            d.result(&result, &display_source, prior).await;
-                        }
                     });
 
                     return Ok(());
@@ -524,30 +522,21 @@ pub async fn run(
                             let tg = telegram.clone();
                             let desk = desktop.clone();
                             tokio::spawn(async move {
-                                let prior = if let Some(d) = &desk {
-                                    d.processing(&trace_id, &processing_text).await
-                                } else {
-                                    None
-                                };
-                                if let Some(t) = &tg {
-                                    let _ = t.processing(&trace_id, &processing_text, chat_id_override).await;
-                                }
-                                let result = pipeline::process_content(
+                                let result = crate::dispatch::dispatch_ingest(
                                     kind,
                                     extra_tags,
                                     IngestMethod::Telegram,
                                     false,
                                     &config,
-                                    Some(trace_id),
+                                    trace_id,
+                                    &display_source,
+                                    &processing_text,
+                                    desk,
+                                    tg,
+                                    chat_id_override,
                                 )
                                 .await;
                                 log::debug!("Pipeline result: {:?}", result.status);
-                                if let Some(t) = tg {
-                                    t.result(&result, &display_source, chat_id_override).await;
-                                }
-                                if let Some(d) = desk {
-                                    d.result(&result, &display_source, prior).await;
-                                }
                             });
                         }
                         None => {
@@ -603,30 +592,21 @@ pub async fn run(
                 let tg = telegram.clone();
                 let desk = desktop.clone();
                 tokio::spawn(async move {
-                    let prior = if let Some(d) = &desk {
-                        d.processing(&trace_id, "Processing...").await
-                    } else {
-                        None
-                    };
-                    if let Some(t) = &tg {
-                        let _ = t.processing(&trace_id, "Processing...", chat_id_override).await;
-                    }
-                    let result = pipeline::process_content(
+                    let result = crate::dispatch::dispatch_ingest(
                         content,
                         vec![],
                         IngestMethod::Telegram,
                         false,
                         &config,
-                        Some(trace_id),
+                        trace_id,
+                        &display_source,
+                        "Processing...",
+                        desk,
+                        tg,
+                        chat_id_override,
                     )
                     .await;
                     log::debug!("Pipeline result: {:?}", result.status);
-                    if let Some(t) = tg {
-                        t.result(&result, &display_source, chat_id_override).await;
-                    }
-                    if let Some(d) = desk {
-                        d.result(&result, &display_source, prior).await;
-                    }
                 });
 
                 Ok(())

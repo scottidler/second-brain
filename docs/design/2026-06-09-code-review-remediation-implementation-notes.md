@@ -493,3 +493,63 @@ questions encountered while executing
 
 ### Open questions
 - None.
+
+## Phase 9 (continued): item 7 epilogue, item 8, item 10 — DONE
+
+This supersedes the "Remaining" block above: all three deferred items landed in
+a second pass. `otto ci` exit 0 (check incl. clippy+fmt, and test).
+
+### Item 7 epilogue — DONE
+- `pipeline::publish::publish_note()` now owns the shared success epilogue: it
+  computes the tz-aware date/time, appends the ledger row, builds the obsidian
+  deep-link, and returns the `Completed` `IngestResult`. The 6 handlers
+  (`handlers.rs` image/audio/document, `text.rs` text/vocab/code) each collapse
+  from a ~30-line epilogue (+ a 4-line tz header at the top of the fn) to a
+  single `publish_note(...)` call passing only the per-site `source`, `title`,
+  `tags`, and `degraded`.
+
+### Item 8 — DONE
+- New `borg::dispatch::dispatch_ingest()` (in `borg/src/dispatch.rs`) owns the
+  processing-notify → `process_content` → result-notify block. All 10 spawned
+  dispatch sites (2 ntfy, 3 routes, 5 telegram — the design's "~8×") now call it
+  and keep only their own pre/post logging. Sinks stay trait-free per policy:
+  the helper takes the concrete `Option<Desktop>` / `Option<Telegram>` and fires
+  them side-by-side, exactly as before. Signal is not a dispatch-site sink today
+  (it is inbound-only), so the helper is desk+tg — scope unchanged.
+
+### Item 10 — DONE
+- `borg::probe_telegram(token)` (in `telegram.rs`) and `borg::probe_signal(state_dir)`
+  + `borg::SignalProbe` (in `signal.rs`) are the typed probes, re-exported at the
+  crate root. `borg::config::current_hostname()` is the single hostname-reading
+  helper (`is_local_host` now delegates to it). sb's doctor calls all three;
+  `teloxide`, `signal-rs`, and `hostname` are removed from `sb/Cargo.toml`
+  (`cargo tree -p sb` confirms they are gone from sb's direct deps). The
+  `signal_rs_cli_findings` check stays in sb — it shells out to the `signal-rs`
+  *binary* via `Command`, not the crate.
+
+### Design decisions (second pass)
+- **`publish_note` folds the tz computation in** — the design doc's epilogue
+  enumeration listed "tz", and the 4-line tz/now/log_date/log_time block was
+  copy-pasted 6× feeding only the ledger row. Folding it in moves the recorded
+  timestamp from handler-entry to publish-time (a sub-second-to-seconds shift,
+  and arguably more correct: the ledger records when the note landed). Verified
+  `now`/`log_date`/`log_time` were used nowhere but the ledger entry before
+  removing the headers.
+- **`dispatch_ingest` returns `IngestResult`; callers log after** — the per-site
+  result log (`log::debug!("Pipeline result…")` in telegram, the bespoke
+  `match &result.status` arms in routes/ntfy) stays at the call site, run on the
+  returned result. The only cosmetic change: in telegram/ntfy the single debug
+  line now fires after the result-sinks instead of between process and sinks.
+
+### Deviations (second pass)
+- None.
+
+### Tradeoffs (second pass)
+- **`probe_signal`/`SignalProbe` live in `signal.rs`, `probe_telegram` in
+  `telegram.rs`** (not a new `probe` module): each probe already needs that
+  module's `signal-rs`/`teloxide` imports and (for signal) `bootstrap_recorded`,
+  so colocating beats a new module that would re-import both. Crate-root
+  re-exports give the doc's `borg::probe_*` surface.
+
+### Open questions (second pass)
+- None.

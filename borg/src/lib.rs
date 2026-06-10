@@ -19,6 +19,7 @@ pub mod byline;
 pub mod config;
 pub mod description;
 pub mod discord;
+pub mod dispatch;
 pub mod error;
 pub mod extension;
 pub mod extraction;
@@ -78,6 +79,8 @@ use notify::{Desktop, Telegram};
 // re-exported so the public API (`borg::daemon`, `borg::DaemonOutcome`) is
 // unchanged for sb's CLI dispatch.
 pub use service::{DaemonOutcome, daemon};
+pub use signal::{SignalProbe, probe_signal};
+pub use telegram::probe_telegram;
 
 /// Shared application state for the HTTP server and daemon tasks.
 #[derive(Clone)]

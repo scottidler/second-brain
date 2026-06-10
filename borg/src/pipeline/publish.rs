@@ -18,6 +18,55 @@ pub(crate) fn extract_filename(note_path: &std::path::Path) -> Option<String> {
     note_path.file_name().map(|f| f.to_string_lossy().to_string())
 }
 
+/// Finalize a published note: stamp the success ledger row (timezone-aware
+/// date/time), build the obsidian deep-link, and assemble the `Completed`
+/// `IngestResult`. This is the shared epilogue every type handler runs after
+/// `write_atomic` lands the note in the vault — the per-handler parts are the
+/// `source` descriptor, `title`, `tags`, and `degraded` flag.
+pub(crate) fn publish_note(
+    config: &Config,
+    note_path: &Path,
+    method: IngestMethod,
+    source: String,
+    title: String,
+    tags: Vec<String>,
+    trace_id: &str,
+    degraded: bool,
+) -> Result<IngestResult> {
+    let tz = config.frontmatter.timezone_tz();
+    let now = chrono::Utc::now().with_timezone(&tz);
+
+    let ledger_file = ledger::ledger_path()?;
+    ledger::append_entry(
+        &ledger_file,
+        &LedgerEntry {
+            date: now.format("%Y-%m-%d").to_string(),
+            time: now.format("%H:%M").to_string(),
+            method,
+            filename: extract_filename(note_path),
+            source,
+            domain: None,
+            trace_id: Some(trace_id.to_string()),
+        },
+    )?;
+
+    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
+
+    Ok(IngestResult {
+        status: IngestStatus::Completed,
+        note_path: Some(note_path.to_string_lossy().to_string()),
+        title: Some(title),
+        tags,
+        elapsed_secs: None,
+        method: Some(method),
+        canonical_url: None,
+        trace_id: None,
+        obsidian_url,
+        failure_stage: None,
+        degraded,
+    })
+}
+
 /// Expand a vault root path (handling ~/) to an absolute PathBuf.
 pub fn expand_vault_root(path: &str) -> PathBuf {
     expand_tilde(path)

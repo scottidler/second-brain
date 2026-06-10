@@ -809,17 +809,24 @@ pub fn resolve_client_auth_token(server: &ServerConfig) -> Option<String> {
     }
 }
 
+/// Resolve this machine's hostname, or `None` when it cannot be read.
+/// The single hostname-reading site in borg: `is_local_host` host-gating and
+/// the `sb doctor` host-parity messages both go through here so no consumer
+/// needs the `hostname` crate directly.
+pub fn current_hostname() -> Option<String> {
+    match hostname::get() {
+        Ok(c) => Some(c.to_string_lossy().into_owned()),
+        Err(e) => {
+            log::error!("current_hostname: could not read hostname ({e})");
+            None
+        }
+    }
+}
+
 /// Check whether a service should run on this host.
 /// Returns true if `host` is None/empty (run everywhere) or matches the current hostname.
 pub fn is_local_host(host: &Option<String>) -> bool {
-    let current = match hostname::get() {
-        Ok(c) => Some(c.to_string_lossy().into_owned()),
-        Err(e) => {
-            log::error!("is_local_host: could not read hostname ({e}); failing closed for any host pin");
-            None
-        }
-    };
-    host_matches(host, current.as_deref())
+    host_matches(host, current_hostname().as_deref())
 }
 
 /// Pure matcher for [`is_local_host`]. `current` is the resolved hostname, or

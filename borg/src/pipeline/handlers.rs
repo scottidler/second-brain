@@ -454,11 +454,6 @@ pub(crate) async fn process_image_inner(
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
-    let tz = config.frontmatter.timezone_tz();
-    let now = chrono::Utc::now().with_timezone(&tz);
-    let log_date = now.format("%Y-%m-%d").to_string();
-    let log_time = now.format("%H:%M").to_string();
-
     // Store asset in vault
     let date_bucket = chrono::Utc::now().format("%Y-%m").to_string();
     let subdirectory = format!("images/{date_bucket}");
@@ -620,37 +615,16 @@ pub(crate) async fn process_image_inner(
     // Clean up temp file
     let _ = std::fs::remove_file(&temp_path);
 
-    // Log to ledger
-    let ledger_file = ledger::ledger_path()?;
-    let source_display = format!("[image: {filename}]");
-    ledger::append_entry(
-        &ledger_file,
-        &LedgerEntry {
-            date: log_date,
-            time: log_time,
-            method,
-            filename: extract_filename(&note_path),
-            source: source_display,
-            domain: None,
-            trace_id: Some(trace_id.to_string()),
-        },
-    )?;
-
-    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
-
-    Ok(IngestResult {
-        status: IngestStatus::Completed,
-        note_path: Some(note_path.to_string_lossy().to_string()),
-        title: Some(title),
-        tags: all_tags,
-        elapsed_secs: None,
-        method: Some(method),
-        canonical_url: None,
-        trace_id: None,
-        obsidian_url,
-        failure_stage: None,
-        degraded: distilled.meta.validation.fallback_reason.is_some(),
-    })
+    publish_note(
+        config,
+        &note_path,
+        method,
+        format!("[image: {filename}]"),
+        title,
+        all_tags,
+        trace_id,
+        distilled.meta.validation.fallback_reason.is_some(),
+    )
 }
 
 pub(crate) fn title_from_filename(filename: &str) -> String {
@@ -723,11 +697,6 @@ pub(crate) async fn process_audio_inner(
     log::debug!("process_audio_inner[{trace_id}]: acquiring heavy permit");
     let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
     log::debug!("process_audio_inner[{trace_id}]: heavy permit acquired");
-
-    let tz = config.frontmatter.timezone_tz();
-    let now = chrono::Utc::now().with_timezone(&tz);
-    let log_date = now.format("%Y-%m-%d").to_string();
-    let log_time = now.format("%H:%M").to_string();
 
     // Store asset in vault
     let date_bucket = chrono::Utc::now().format("%Y-%m").to_string();
@@ -860,37 +829,16 @@ pub(crate) async fn process_audio_inner(
 
     log::info!("[{trace_id}] Wrote audio note: {}", note_path.display());
 
-    // Log to ledger
-    let ledger_file = ledger::ledger_path()?;
-    let source_display = format!("[audio: {filename}]");
-    ledger::append_entry(
-        &ledger_file,
-        &LedgerEntry {
-            date: log_date,
-            time: log_time,
-            method,
-            filename: extract_filename(&note_path),
-            source: source_display,
-            domain: None,
-            trace_id: Some(trace_id.to_string()),
-        },
-    )?;
-
-    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
-
-    Ok(IngestResult {
-        status: IngestStatus::Completed,
-        note_path: Some(note_path.to_string_lossy().to_string()),
-        title: Some(title),
-        tags: all_tags,
-        elapsed_secs: None,
-        method: Some(method),
-        canonical_url: None,
-        trace_id: None,
-        obsidian_url,
-        failure_stage: None,
-        degraded: distilled.meta.validation.fallback_reason.is_some(),
-    })
+    publish_note(
+        config,
+        &note_path,
+        method,
+        format!("[audio: {filename}]"),
+        title,
+        all_tags,
+        trace_id,
+        distilled.meta.validation.fallback_reason.is_some(),
+    )
 }
 
 pub(crate) async fn process_document_file(
@@ -950,11 +898,6 @@ pub(crate) async fn process_document_file_inner(
     log::debug!("process_document_file_inner[{trace_id}]: acquiring heavy permit");
     let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
     log::debug!("process_document_file_inner[{trace_id}]: heavy permit acquired");
-
-    let tz = config.frontmatter.timezone_tz();
-    let now = chrono::Utc::now().with_timezone(&tz);
-    let log_date = now.format("%Y-%m-%d").to_string();
-    let log_time = now.format("%H:%M").to_string();
 
     // Store asset in vault
     let vault_root = config.vault_root()?;
@@ -1091,35 +1034,14 @@ pub(crate) async fn process_document_file_inner(
     // Clean up temp file
     let _ = std::fs::remove_file(&temp_path);
 
-    // Log to ledger
-    let ledger_file = ledger::ledger_path()?;
-    let source_display = format!("[{}: {filename}]", kind.label());
-    ledger::append_entry(
-        &ledger_file,
-        &LedgerEntry {
-            date: log_date,
-            time: log_time,
-            method,
-            filename: extract_filename(&note_path),
-            source: source_display,
-            domain: None,
-            trace_id: Some(trace_id.to_string()),
-        },
-    )?;
-
-    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
-
-    Ok(IngestResult {
-        status: IngestStatus::Completed,
-        note_path: Some(note_path.to_string_lossy().to_string()),
-        title: Some(title),
-        tags: all_tags,
-        elapsed_secs: None,
-        method: Some(method),
-        canonical_url: None,
-        trace_id: None,
-        obsidian_url,
-        failure_stage: None,
-        degraded: false,
-    })
+    publish_note(
+        config,
+        &note_path,
+        method,
+        format!("[{}: {filename}]", kind.label()),
+        title,
+        all_tags,
+        trace_id,
+        false,
+    )
 }
