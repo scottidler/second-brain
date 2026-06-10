@@ -4,7 +4,7 @@ use eyre::{Result, WrapErr};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Vault configuration. `root-path` is optional; the unified resolver
     /// (see `vault::paths::resolve_vault_root`) accepts a CLI override, this
@@ -39,6 +39,24 @@ pub struct Config {
     /// built-in default (vector-only, stub-exclude, no rerank/transform).
     #[serde(default)]
     pub retrieval: RetrievalConfig,
+}
+
+impl Default for Config {
+    /// Manual impl so `inbound_recompute_interval_secs` defaults to the serde
+    /// default fn, NOT u64's `0`. A derived `Default` yielded `0`, and
+    /// `tokio::time::interval(Duration::from_secs(0))` panics - in a
+    /// never-awaited JoinHandle - on any host with no `oracle.yml` (so
+    /// `Config::default()` is what loads). The manual impl keeps the derived
+    /// path and the empty-YAML deserialize path in agreement.
+    fn default() -> Self {
+        Self {
+            vault: VaultConfig::default(),
+            logging: LogConfig::default(),
+            watcher: WatcherConfig::default(),
+            inbound_recompute_interval_secs: default_inbound_recompute_interval_secs(),
+            retrieval: RetrievalConfig::default(),
+        }
+    }
 }
 
 /// The retrieval pipeline oracle composes when a query arrives with no

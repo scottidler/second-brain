@@ -159,55 +159,21 @@ fn normalize_tag(tag: &str) -> String {
         .join("-")
 }
 
-/// Replace the tags line in frontmatter YAML with new tags.
-/// Uses targeted string replacement to avoid full re-serialization.
+/// Replace the `tags` entry in frontmatter YAML with an inline list of
+/// `new_tags`, rewriting it to `tags: [a, b, ...]`.
+///
+/// Delegates to [`crate::scope::insert_frontmatter_fields`], whose
+/// continuation-aware `remove_entry` handles BOTH indented (`  - tag`) and
+/// column-0 block-sequence (`- tag`) list styles. The previous bespoke
+/// continuation logic only consumed indented bullets, so a column-0 block
+/// `tags:` list (present in real vault notes) had the new inline line
+/// inserted while the old `- tag` bullets were left orphaned as siblings of
+/// other keys - structurally invalid YAML that the cortex parser then read
+/// as defaults, silently dropping the note from subsequent scans. The daemon
+/// auto-applies sweep, so this corrupted notes unattended.
 pub fn replace_tags_in_frontmatter(content: &str, new_tags: &[String]) -> Option<String> {
-    // Find the frontmatter block
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return None;
-    }
-
-    let after_opening = &trimmed[3..];
-    let after_opening = after_opening.trim_start_matches(['\r', '\n']);
-    let end_pos = after_opening.find("\n---")?;
-    let fm_block = &after_opening[..end_pos];
-
-    // Find the tags line(s) in frontmatter
-    let lines: Vec<&str> = fm_block.lines().collect();
-    let mut new_lines: Vec<String> = Vec::new();
-    let mut in_tags = false;
-
-    for line in &lines {
-        if line.starts_with("tags:") {
-            in_tags = true;
-            // Replace with inline format
-            let tags_str: Vec<String> = new_tags.iter().map(|t| t.to_string()).collect();
-            new_lines.push(format!("tags: [{}]", tags_str.join(", ")));
-            // Check if it's inline already
-            if line.contains('[') {
-                in_tags = false;
-            }
-        } else if in_tags {
-            // Skip continuation lines (  - tag)
-            if line.starts_with("  -") || line.starts_with("  ") && line.trim().starts_with('-') {
-                continue;
-            } else {
-                in_tags = false;
-                new_lines.push(line.to_string());
-            }
-        } else {
-            new_lines.push(line.to_string());
-        }
-    }
-
-    let new_fm = new_lines.join("\n");
-    let offset = content.len() - trimmed.len();
-    let prefix = &content[..offset];
-    let fm_start = 3 + (after_opening.as_ptr() as usize - trimmed[3..].as_ptr() as usize);
-    let after_fm = &trimmed[fm_start + end_pos..];
-
-    Some(format!("{prefix}---\n{new_fm}{after_fm}"))
+    let inline = format!("[{}]", new_tags.join(", "));
+    crate::scope::insert_frontmatter_fields(content, &[("tags".to_string(), serde_yaml::Value::String(inline))])
 }
 
 #[cfg(test)]
@@ -299,5 +265,40 @@ mod tests {
         let result = result.expect("should have result");
         assert!(result.contains("tags: [new-tag, good]"));
         assert!(result.contains("title: Test"));
+    }
+
+    #[test]
+    fn replace_tags_on_column0_block_list_does_not_orphan_bullets() {
+        // Regression: a column-0 block-sequence `tags:` list got the inline
+        // replacement inserted while the `- tag` bullets were left orphaned.
+        let content = "---\ntitle: Test\ntags:\n- old-tag\n- bad\ndate: 2026-01-01\n---\nBody\n";
+        let new_tags = vec!["new-tag".to_string(), "good".to_string()];
+        let result = replace_tags_in_frontmatter(content, &new_tags).expect("rewrite");
+        let fm_block = result.split("\n---\n").next().expect("frontmatter");
+        for line in fm_block.lines() {
+            assert!(
+                !line.starts_with("- "),
+                "orphan column-0 bullet survived: {line:?}\nfull fm:\n{fm_block}"
+            );
+        }
+        assert!(result.contains("tags: [new-tag, good]"));
+        assert!(result.contains("title: Test"));
+        assert!(result.contains("date: 2026-01-01"));
+    }
+
+    #[test]
+    fn replace_tags_on_indented_block_list_does_not_orphan_bullets() {
+        let content = "---\ntitle: Test\ntags:\n  - old-tag\n  - bad\ndate: 2026-01-01\n---\nBody\n";
+        let new_tags = vec!["new-tag".to_string()];
+        let result = replace_tags_in_frontmatter(content, &new_tags).expect("rewrite");
+        let fm_block = result.split("\n---\n").next().expect("frontmatter");
+        for line in fm_block.lines() {
+            assert!(
+                !line.trim_start().starts_with("- "),
+                "orphan indented bullet survived: {line:?}\nfull fm:\n{fm_block}"
+            );
+        }
+        assert!(result.contains("tags: [new-tag]"));
+        assert!(result.contains("date: 2026-01-01"));
     }
 }

@@ -15,6 +15,17 @@ use teloxide::requests::Requester;
 use teloxide::types::{AllowedUpdate, FileId};
 use vault::receipts::FailureStage;
 
+/// Whether a Telegram `chat_id` is permitted to ingest.
+///
+/// Fail-closed: an EMPTY allowlist denies every chat, mirroring the Signal
+/// privacy gate. The previous `!allowed.is_empty() && allowed.contains(..)`
+/// guard was fail-OPEN - an empty `allowed-chat-ids` (the serde default)
+/// accepted every chat on earth. `sb doctor` warns when telegram is enabled
+/// with an empty allowlist so the deny-all is never a silent surprise.
+pub fn chat_allowed(allowed: &[i64], chat_id: i64) -> bool {
+    !allowed.is_empty() && allowed.contains(&chat_id)
+}
+
 /// Download a file from Telegram by its file_id.
 async fn download_telegram_file(bot: &Bot, file_id: &FileId) -> Result<Vec<u8>, teloxide::RequestError> {
     let file = bot.get_file(file_id.clone()).await?;
@@ -225,7 +236,7 @@ pub async fn run(
                     return Ok::<(), teloxide::RequestError>(());
                 }
 
-                if !allowed.is_empty() && !allowed.contains(&message.chat.id.0) {
+                if !chat_allowed(&allowed, message.chat.id.0) {
                     log::info!("telegram: rejecting disallowed chat {chat_id} (trace={trace_id})");
                     intake_log::record_failure_at_door(
                         IngestMethod::Telegram,
@@ -601,3 +612,6 @@ pub async fn run(
         backoff.wait().await;
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -181,3 +181,30 @@ async fn test_ingest_connection_refused() {
         "expected connection error message, got: {err}"
     );
 }
+
+#[tokio::test]
+async fn server_handle_wait_fails_fast_on_task_error() {
+    // Regression: ServerHandle::wait used to log a failed task and keep
+    // waiting on the survivors, so a transport/watcher task could die while
+    // the process stayed "up". wait() must abort the remaining tasks and
+    // propagate the first Err so Restart=always + sb doctor observe it.
+    let mut tasks: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
+    tasks.spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        Ok(())
+    });
+    tasks.spawn(async { Err(eyre::eyre!("transport died")) });
+
+    let handle = ServerHandle { tasks };
+    let result = handle.wait().await;
+    assert!(result.is_err(), "wait() must propagate a failed task");
+    assert!(format!("{:#}", result.expect_err("err")).contains("transport died"));
+}
+
+#[tokio::test]
+async fn server_handle_wait_returns_ok_when_all_clean() {
+    let mut tasks: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
+    tasks.spawn(async { Ok(()) });
+    let handle = ServerHandle { tasks };
+    assert!(handle.wait().await.is_ok());
+}

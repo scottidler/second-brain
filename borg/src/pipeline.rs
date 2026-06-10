@@ -104,38 +104,79 @@ pub async fn process_content(
             ..Default::default()
         };
     }
+    // Every handler runs under the pipeline hard timeout. `process_url`
+    // applies its own equivalent timeout internally; the non-URL handlers
+    // previously awaited unbounded, so a wedged handler (e.g. a no-timeout
+    // vision reqwest::Client, a blocked ffmpeg) held its GENERAL permit
+    // forever, and the watchdog's active-trace exclusion skipped it - enough
+    // wedged traces silently deadlocked all ingest.
     let mut result = match content {
         ContentKind::Url(url) => process_url(&url, tags, method, force, config, &trace_id).await,
         ContentKind::Image { data, filename } => {
-            process_image(&data, &filename, tags, method, force, config, &trace_id).await
+            with_hard_timeout(
+                process_image(&data, &filename, tags, method, force, config, &trace_id),
+                config,
+                &trace_id,
+                method,
+                "image",
+            )
+            .await
         }
         ContentKind::Pdf { data, filename } => {
-            process_document_file(
-                &data,
-                &filename,
-                tags,
-                method,
-                force,
+            with_hard_timeout(
+                process_document_file(
+                    &data,
+                    &filename,
+                    tags,
+                    method,
+                    force,
+                    config,
+                    DocumentKind::Pdf,
+                    &trace_id,
+                ),
                 config,
-                DocumentKind::Pdf,
                 &trace_id,
+                method,
+                "pdf",
             )
             .await
         }
         ContentKind::Audio { data, filename } => {
-            process_audio(&data, &filename, tags, method, force, config, &trace_id).await
-        }
-        ContentKind::Text(text) => process_text(&text, tags, method, force, config, &trace_id).await,
-        ContentKind::Document { data, filename } => {
-            process_document_file(
-                &data,
-                &filename,
-                tags,
-                method,
-                force,
+            with_hard_timeout(
+                process_audio(&data, &filename, tags, method, force, config, &trace_id),
                 config,
-                DocumentKind::Document,
                 &trace_id,
+                method,
+                "audio",
+            )
+            .await
+        }
+        ContentKind::Text(text) => {
+            with_hard_timeout(
+                process_text(&text, tags, method, force, config, &trace_id),
+                config,
+                &trace_id,
+                method,
+                "text",
+            )
+            .await
+        }
+        ContentKind::Document { data, filename } => {
+            with_hard_timeout(
+                process_document_file(
+                    &data,
+                    &filename,
+                    tags,
+                    method,
+                    force,
+                    config,
+                    DocumentKind::Document,
+                    &trace_id,
+                ),
+                config,
+                &trace_id,
+                method,
+                "document",
             )
             .await
         }
@@ -192,6 +233,46 @@ fn record_terminal_to_receipts(trace_id: &str, result: &IngestResult) {
 /// substring match on free-form reason text.
 fn terminal_failure_stage(result: &IngestResult) -> FailureStage {
     result.failure_stage.unwrap_or(FailureStage::FetchFailed)
+}
+
+/// Wrap a content handler in the pipeline hard timeout. The non-URL handlers
+/// return a terminal `IngestResult` directly (not a `Result`), so a timeout
+/// is converted into a `Failed`/`PipelineTimedOut` result here, mirroring the
+/// timeout arm `process_url` applies internally. Without this a wedged handler
+/// holds its GENERAL permit indefinitely and the watchdog skips it.
+async fn with_hard_timeout<F>(
+    fut: F,
+    config: &Config,
+    trace_id: &str,
+    method: IngestMethod,
+    label: &str,
+) -> IngestResult
+where
+    F: std::future::Future<Output = IngestResult>,
+{
+    log::debug!(
+        "with_hard_timeout[{trace_id}]: label={label} timeout={}s",
+        config.pipeline.hard_timeout_secs
+    );
+    let hard_timeout = std::time::Duration::from_secs(config.pipeline.hard_timeout_secs);
+    match tokio::time::timeout(hard_timeout, fut).await {
+        Ok(result) => result,
+        Err(_) => {
+            log::error!(
+                "[{trace_id}] {label} handler timed out after {}s",
+                config.pipeline.hard_timeout_secs
+            );
+            IngestResult {
+                status: IngestStatus::Failed {
+                    reason: "timeout".to_string(),
+                },
+                trace_id: Some(trace_id.to_string()),
+                method: Some(method),
+                failure_stage: Some(FailureStage::PipelineTimedOut),
+                ..Default::default()
+            }
+        }
+    }
 }
 
 pub async fn process_url(

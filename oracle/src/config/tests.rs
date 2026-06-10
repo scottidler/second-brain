@@ -169,3 +169,20 @@ retrieval:
     let err = serde_yaml::from_str::<Config>(yaml);
     assert!(err.is_err(), "unknown nested key must error: {err:?}");
 }
+
+/// Regression: a derived `Default` yielded `inbound_recompute_interval_secs =
+/// 0`, and `tokio::time::interval(0)` panics. The manual `impl Default` must
+/// agree with the empty-YAML deserialize path, and the value must be non-zero.
+#[test]
+fn default_matches_empty_yaml_and_is_nonzero() {
+    let from_default = Config::default();
+    let from_empty: Config = serde_yaml::from_str("{}").expect("empty yaml loads");
+    assert_eq!(
+        from_default.inbound_recompute_interval_secs, from_empty.inbound_recompute_interval_secs,
+        "Config::default() must agree with deserialize of `{{}}`"
+    );
+    assert!(
+        from_default.inbound_recompute_interval_secs > 0,
+        "interval must be non-zero or tokio::time::interval panics"
+    );
+}

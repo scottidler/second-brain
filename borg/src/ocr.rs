@@ -6,6 +6,13 @@ use std::time::Duration;
 
 use crate::config::{self, LlmConfig, VisionConfig};
 
+/// HTTP timeout for the Claude Vision API call. The dispatch-level pipeline
+/// hard timeout cancels the future, but the reqwest client had NO timeout of
+/// its own, so a stalled connection could hang up to the hard timeout with no
+/// tighter bound. This is the per-call backstop, matching the rest of borg's
+/// external-call timeout discipline.
+const VISION_HTTP_TIMEOUT_SECS: u64 = 120;
+
 /// Result of vision-based image description.
 pub struct VisionResult {
     pub description: String,
@@ -103,7 +110,10 @@ pub async fn vision_extract(
         }]
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(VISION_HTTP_TIMEOUT_SECS))
+        .build()
+        .context("Failed to build vision HTTP client")?;
     let resp = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", &api_key)

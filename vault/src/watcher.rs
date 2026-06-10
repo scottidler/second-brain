@@ -14,6 +14,12 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+/// Far-future offset used to park the debounce timer when no events are
+/// pending. `Duration::MAX` cannot be used: tokio computes `Instant::now() +
+/// duration` eagerly and `now + Duration::MAX` overflows and panics, killing
+/// the debounce task after its first emitted batch (empirically confirmed).
+const INERT_DEBOUNCE: Duration = Duration::from_secs(86400 * 365);
+
 /// Configuration for the vault file watcher.
 #[derive(Debug, Clone)]
 pub struct WatcherConfig {
@@ -119,7 +125,7 @@ async fn debounce_loop(
     let mut pending: Vec<PathBuf> = Vec::new();
 
     // Debounce timer: starts inert (far future), reset when events arrive
-    let debounce = tokio::time::sleep(Duration::MAX);
+    let debounce = tokio::time::sleep(INERT_DEBOUNCE);
     tokio::pin!(debounce);
 
     loop {
@@ -159,7 +165,7 @@ async fn debounce_loop(
                     break;
                 }
                 // Make debounce inert again
-                debounce.as_mut().reset(Instant::now() + Duration::MAX);
+                debounce.as_mut().reset(Instant::now() + INERT_DEBOUNCE);
             }
         }
     }
@@ -293,6 +299,56 @@ mod tests {
         assert!(path_strs.contains(&"test-two.md".to_string()));
 
         // Keep watcher alive for the duration of the test
+        drop(watcher);
+    }
+
+    #[tokio::test]
+    async fn test_vault_watcher_emits_two_batches() {
+        // Regression: the debounce task used to die after the FIRST batch
+        // because `reset(now + Duration::MAX)` overflowed and panicked. A
+        // healthy watcher must emit a SECOND batch for a later write.
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let vault_root = tmp.path();
+
+        let config = WatcherConfig {
+            debounce_secs: 1,
+            ignore_dirs: vec![],
+        };
+
+        let (watcher, mut rx) = VaultWatcher::start(vault_root, config, None).expect("failed to start watcher");
+
+        time::sleep(Duration::from_millis(100)).await;
+
+        // First batch.
+        fs::write(vault_root.join("first.md"), "# First").expect("write failed");
+        let first = time::timeout(Duration::from_secs(3), rx.recv()).await;
+        assert!(first.is_ok(), "should receive the first VaultChange");
+        let first = first.expect("timeout").expect("channel closed");
+        let first_names: Vec<String> = first
+            .changed_paths
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .collect();
+        assert!(first_names.contains(&"first.md".to_string()));
+
+        // Second batch - this is the one that used to never arrive.
+        time::sleep(Duration::from_millis(100)).await;
+        fs::write(vault_root.join("second.md"), "# Second").expect("write failed");
+        let second = time::timeout(Duration::from_secs(3), rx.recv()).await;
+        assert!(
+            second.is_ok(),
+            "should receive a SECOND VaultChange (debounce survived)"
+        );
+        let second = second.expect("timeout").expect("channel closed");
+        let second_names: Vec<String> = second
+            .changed_paths
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .collect();
+        assert!(second_names.contains(&"second.md".to_string()));
+
         drop(watcher);
     }
 

@@ -115,15 +115,15 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
     };
 
     let mut fm = format!(
-        "---\ntitle: \"{}\"\ndate: {date}\ningested: {date}\n",
-        escape_yaml_string(&note.title),
+        "---\ntitle: {}\ndate: {date}\ningested: {date}\n",
+        yaml_scalar(&note.title),
     );
 
     if let Some(source) = &note.source_url {
-        fm.push_str(&format!("source: \"{source}\"\n"));
+        fm.push_str(&format!("source: {}\n", yaml_scalar(source)));
     }
     if let Some(asset) = &note.asset_path {
-        fm.push_str(&format!("asset: \"{asset}\"\n"));
+        fm.push_str(&format!("asset: {}\n", yaml_scalar(asset)));
     }
     fm.push_str(&format!("type: {type_field}\n"));
     fm.push_str("origin: assisted\n");
@@ -153,7 +153,7 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
     if let Some(creator) = creator_for(&note.content_type).or_else(|| {
         (!frontmatter_config.default_creator.is_empty()).then(|| frontmatter_config.default_creator.clone())
     }) {
-        fm.push_str(&format!("creator: \"{}\"\n", escape_yaml_string(&creator)));
+        fm.push_str(&format!("creator: {}\n", yaml_scalar(&creator)));
     }
 
     match &note.content_type {
@@ -260,8 +260,19 @@ pub fn creator_for(ct: &ContentType) -> Option<String> {
     raw.filter(|s| !s.trim().is_empty())
 }
 
-fn escape_yaml_string(s: &str) -> String {
-    s.replace('"', "\\\"")
+/// Render a string as a YAML scalar safe for inline insertion into the
+/// hand-built frontmatter. Serializes through `serde_yaml` so backslashes,
+/// embedded newlines, colons, and quotes are all quoted/escaped correctly.
+/// The previous `escape_yaml_string` only escaped `"`, so a trailing `\` or
+/// an embedded newline in any LLM-derived value (`title`, `creator`,
+/// `cortex-repo-install`, ...) corrupted the entire frontmatter block
+/// (empirically confirmed). The returned string includes whatever quoting
+/// `serde_yaml` deems necessary and never carries a trailing newline.
+fn yaml_scalar(s: &str) -> String {
+    serde_yaml::to_string(&serde_yaml::Value::String(s.to_string()))
+        .unwrap_or_else(|_| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
+        .trim_end()
+        .to_string()
 }
 
 /// Serialize a single `serde_yaml::Value` for inline insertion into the
@@ -272,7 +283,7 @@ fn serialize_yaml_value(value: &serde_yaml::Value) -> String {
     match value {
         serde_yaml::Value::Bool(b) => b.to_string(),
         serde_yaml::Value::Number(n) => n.to_string(),
-        serde_yaml::Value::String(s) => format!("\"{}\"", escape_yaml_string(s)),
+        serde_yaml::Value::String(s) => yaml_scalar(s),
         serde_yaml::Value::Null => "null".to_string(),
         // Sequences and mappings: serialize, drop the leading newline that
         // `serde_yaml::to_string` emits for non-scalar values, and indent
@@ -337,8 +348,9 @@ mod tests {
         assert!(rendered.contains("## Claims\n\n- One claim."));
         // Frontmatter additions are spliced in.
         assert!(rendered.contains("distilled: true"));
-        assert!(rendered.contains("distilled-extractor: \"distill-article-v1\""));
-        assert!(rendered.contains("cortex-thread-platform: \"x\""));
+        // serde_yaml renders simple scalars bare (no quotes needed).
+        assert!(rendered.contains("distilled-extractor: distill-article-v1"));
+        assert!(rendered.contains("cortex-thread-platform: x"));
         // The legacy double-`## Summary` wrap is NOT applied on top of the
         // already-structured body.
         let count = rendered.matches("## Summary").count();
@@ -404,7 +416,7 @@ mod tests {
             ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
-        assert!(rendered.contains("title: \"Test Article\""));
+        assert!(rendered.contains("title: Test Article"));
         assert!(rendered.contains("type: article"));
         assert!(rendered.contains("origin: assisted"));
         assert!(rendered.contains("  - rust"));
@@ -438,7 +450,7 @@ mod tests {
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: youtube"));
         assert!(rendered.contains("method: telegram"));
-        assert!(rendered.contains("creator: \"TechChannel\""));
+        assert!(rendered.contains("creator: TechChannel"));
         assert!(rendered.contains("duration: 10"));
         assert!(rendered.contains("iframe"));
         assert!(rendered.contains("## Summary"));
@@ -468,7 +480,7 @@ mod tests {
         let rendered = render_note(&note, &config);
         assert!(rendered.contains("  - ai"));
         assert!(rendered.contains("  - obsidian-borg"));
-        assert!(rendered.contains("creator: \"Scott\""));
+        assert!(rendered.contains("creator: Scott"));
     }
 
     #[test]
@@ -583,7 +595,7 @@ mod tests {
         let rendered = render_note(&note, &test_config());
         assert!(rendered.contains("type: github"));
         // creator is resolved from the repo owner.
-        assert!(rendered.contains("creator: \"open-webui\""));
+        assert!(rendered.contains("creator: open-webui"));
     }
 
     #[test]
@@ -730,7 +742,7 @@ mod tests {
             ..NoteContent::default()
         };
         let rendered = render_note(&note, &test_config());
-        assert!(rendered.contains("creator: \"Jane Doe\""));
+        assert!(rendered.contains("creator: Jane Doe"));
     }
 
     #[test]
@@ -763,8 +775,8 @@ mod tests {
             "exactly one creator: line expected:\n{rendered}"
         );
         // The per-kind author (uploader) wins over default_creator.
-        assert!(rendered.contains("creator: \"TechChannel\""));
-        assert!(!rendered.contains("creator: \"Scott\""));
+        assert!(rendered.contains("creator: TechChannel"));
+        assert!(!rendered.contains("creator: Scott"));
     }
 
     #[test]
@@ -785,7 +797,8 @@ mod tests {
         };
         let rendered = render_note(&note, &config);
         assert_eq!(rendered.matches("creator:").count(), 1);
-        assert!(rendered.contains("creator: \"Scott\""));
+        // serde_yaml emits a simple scalar bare (no quotes needed).
+        assert!(rendered.contains("creator: Scott"));
     }
 
     #[test]
@@ -796,7 +809,52 @@ mod tests {
     }
 
     #[test]
-    fn test_escape_yaml_string() {
-        assert_eq!(escape_yaml_string("He said \"hello\""), "He said \\\"hello\\\"");
+    fn yaml_scalar_round_trips_nasty_inputs() {
+        // The old escape only handled `"`; a trailing `\`, embedded newline,
+        // or colon corrupted the frontmatter. Every scalar must round-trip
+        // back to the original string through serde_yaml.
+        for input in [
+            "He said \"hello\"",
+            "trailing backslash\\",
+            "embedded\nnewline",
+            "colon: in value",
+            "C:\\Windows\\path",
+            "quote\"and\\backslash",
+            "- leading dash",
+            "#hash start",
+            "",
+        ] {
+            let scalar = yaml_scalar(input);
+            let doc = format!("k: {scalar}");
+            let parsed: serde_yaml::Value =
+                serde_yaml::from_str(&doc).unwrap_or_else(|e| panic!("invalid YAML for {input:?}: {e}\n{doc}"));
+            let got = parsed.get("k").and_then(|v| v.as_str()).unwrap_or_default();
+            assert_eq!(got, input, "round-trip mismatch for {input:?} -> {scalar:?}");
+        }
+    }
+
+    #[test]
+    fn render_note_frontmatter_parses_with_nasty_title() {
+        let config = FrontmatterConfig {
+            default_tags: vec![],
+            default_creator: String::new(),
+            timezone: "UTC".to_string(),
+        };
+        let note = NoteContent {
+            title: "Weird: title with \"quotes\" and a trailing backslash\\".to_string(),
+            source_url: None,
+            tags: vec!["test".to_string()],
+            summary: "Body.".to_string(),
+            content_type: ContentType::Note,
+            ..NoteContent::default()
+        };
+        let rendered = render_note(&note, &config);
+        let fm = rendered
+            .strip_prefix("---\n")
+            .and_then(|r| r.split("\n---").next())
+            .expect("frontmatter block");
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(fm).unwrap_or_else(|e| panic!("frontmatter did not parse: {e}\n{fm}"));
+        assert_eq!(parsed.get("title").and_then(|v| v.as_str()), Some(note.title.as_str()));
     }
 }

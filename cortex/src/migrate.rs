@@ -333,14 +333,16 @@ fn apply_field_transforms(vault_root: &Path, notes: &[Note], migration: &Migrati
                 }
             }
 
-            // Apply drops
+            // Apply drops. Route through scope's continuation-aware
+            // `remove_entry` so a multi-line list/nested-map value (column-0
+            // `- bullet` or indented `  - bullet`) has its continuation lines
+            // removed too. A bare `retain` on `starts_with("{dk}:")` dropped
+            // only the header line and left the bullets orphaned - invalid
+            // YAML the parser then read as defaults.
             let original_len = lines.len();
-            lines.retain(|line| {
-                !migration
-                    .field_drops
-                    .iter()
-                    .any(|dk| line.starts_with(&format!("{dk}:")))
-            });
+            for dk in &migration.field_drops {
+                crate::scope::remove_entry(&mut lines, dk);
+            }
             if lines.len() != original_len {
                 changed = true;
             }
@@ -661,6 +663,39 @@ mod tests {
         assert!(!content.contains("day:"));
         assert!(!content.contains("time:"));
         assert!(content.contains("title: Drop Test"));
+    }
+
+    #[test]
+    fn field_drop_on_block_list_does_not_orphan_bullets() {
+        // Regression: dropping a key whose value is a multi-line block list
+        // used to remove only the header line, orphaning the `- bullet`
+        // continuation lines as invalid YAML siblings.
+        let v = TestVault::new();
+        v.add_note(
+            "drop-list-test.md",
+            "---\ntitle: Drop List\ndate: 2026-01-01\ntype: note\ncortex-quality-issues:\n- no-summary\n- no-links\ntags: []\n---\nBody.\n",
+        );
+        let notes = v.scan();
+
+        let migration = MigrationConfig {
+            name: "v2-drop-list".to_string(),
+            field_drops: vec!["cortex-quality-issues".to_string()],
+            ..Default::default()
+        };
+
+        let count = apply_field_transforms(v.root(), &notes, &migration).expect("apply");
+        assert!(count > 0);
+
+        let content = v.read("drop-list-test.md");
+        let fm_block = content.split("\n---").next().expect("frontmatter");
+        for line in fm_block.lines() {
+            assert!(
+                !line.starts_with("- "),
+                "orphan bullet survived: {line:?}\nfull fm:\n{fm_block}"
+            );
+        }
+        assert!(!content.contains("cortex-quality-issues"));
+        assert!(content.contains("title: Drop List"));
     }
 
     #[test]

@@ -143,17 +143,30 @@ pub struct ServerHandle {
 impl ServerHandle {
     /// Await any of the spawned tasks to exit. Under normal operation this
     /// blocks until ctrl-C / SIGTERM kills the daemon.
+    ///
+    /// Fail-fast: the first task that resolves to `Err` (or panics) aborts the
+    /// remaining tasks and propagates the error out, so `Restart=always` and
+    /// `sb doctor` actually observe the failure. Previously such errors were
+    /// logged and the supervisor kept waiting on the survivors - a transport
+    /// or watcher task could die while the process stayed "up", the
+    /// "worked-for-weeks-then-broke" silent-degradation class.
     pub async fn wait(mut self) -> Result<()> {
         while let Some(result) = self.tasks.join_next().await {
             match result {
                 Ok(Ok(())) => log::info!("a daemon task exited cleanly"),
-                Ok(Err(e)) => log::error!("a daemon task failed: {e:#}"),
+                Ok(Err(e)) => {
+                    log::error!("a daemon task failed: {e:#}");
+                    self.tasks.abort_all();
+                    return Err(e);
+                }
                 Err(e) => {
                     if e.is_panic() {
                         log::error!("a daemon task panicked: {e}");
                     } else {
                         log::error!("a daemon task was cancelled: {e}");
                     }
+                    self.tasks.abort_all();
+                    return Err(eyre::eyre!("daemon task did not complete: {e}"));
                 }
             }
         }

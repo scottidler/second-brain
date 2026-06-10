@@ -720,6 +720,15 @@ fn telegram_findings_for(tg: &TelegramConfig) -> Vec<Finding> {
             "set the env var (or file path) referenced by telegram.bot-token",
         )),
     }
+    // Empty allowlist is fail-closed (deny-all) as of the 2026-06-09
+    // remediation. Warn so the operator knows ingest will reject every chat
+    // rather than silently accepting everyone (the old fail-open behavior).
+    if tg.allowed_chat_ids.is_empty() {
+        findings.push(Finding::warn(
+            "telegram.allowed-chat-ids is empty: ALL chats are denied (fail-closed)",
+            "add your chat id(s) to telegram.allowed-chat-ids in borg.yml to enable ingest",
+        ));
+    }
     findings
 }
 

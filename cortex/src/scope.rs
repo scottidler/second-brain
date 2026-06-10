@@ -122,7 +122,7 @@ fn is_continuation(line: &str) -> bool {
 /// causing affected notes to be silently dropped from every subsequent
 /// vault scan. See [[project_frontmatter_orphan_corruption]] for the
 /// 2026-05-19 audit (342 affected notes).
-fn remove_entry(lines: &mut Vec<String>, key: &str) {
+pub(crate) fn remove_entry(lines: &mut Vec<String>, key: &str) {
     let mut i = 0;
     while i < lines.len() {
         if is_key_line(&lines[i], key) {
