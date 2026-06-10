@@ -1,7 +1,6 @@
 use eyre::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::process::Command as TokioCommand;
@@ -261,12 +260,19 @@ fn parse_vtt_timestamp(s: &str) -> Option<f64> {
 /// post-processor args come from `claude-video/scripts/whisper.py` (lifted
 /// per the design doc). `-ac 1` matters: stereo doubles the upload bytes
 /// while Whisper down-mixes anyway.
-pub fn extract_audio(url: &str, output_dir: &str, ffmpeg_threads: usize) -> Result<String> {
-    log::debug!("yt-dlp: extracting audio for {url} to {output_dir} (ffmpeg-threads={ffmpeg_threads})");
+pub async fn extract_audio(url: &str, output_dir: &str, ffmpeg_threads: usize, timeout_secs: u64) -> Result<String> {
+    log::debug!(
+        "yt-dlp: extracting audio for {url} to {output_dir} (ffmpeg-threads={ffmpeg_threads} timeout={timeout_secs}s)"
+    );
     let output_template = format!("{output_dir}/%(id)s.%(ext)s");
     let postprocessor_args = format!("ffmpeg:-threads {ffmpeg_threads} -vn -ac 1 -ar 16000 -b:a 64k");
 
-    let output = Command::new("yt-dlp")
+    // tokio::process + timeout + kill_on_drop: this is a full yt-dlp download
+    // (potentially large/slow) run from an async fn. A blocking
+    // std::process::Command::output() here could not be interrupted even by
+    // the pipeline hard timeout, since that only cancels the future, not a
+    // blocked OS thread.
+    let yt_dlp_fut = TokioCommand::new("yt-dlp")
         .args([
             "-x",
             "--audio-format",
@@ -279,8 +285,17 @@ pub fn extract_audio(url: &str, output_dir: &str, ffmpeg_threads: usize) -> Resu
             &output_template,
             url,
         ])
-        .output()
-        .context("Failed to run yt-dlp for audio extraction")?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("Failed to spawn yt-dlp for audio extraction")?
+        .wait_with_output();
+
+    let output = match tokio::time::timeout(Duration::from_secs(timeout_secs), yt_dlp_fut).await {
+        Ok(res) => res.context("Failed to run yt-dlp for audio extraction")?,
+        Err(_) => bail!("yt-dlp audio extraction timed out after {timeout_secs}s for {url}"),
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -368,12 +383,13 @@ pub fn frame_budget(duration_secs: f64, config: &YoutubeSlidesConfig) -> (u32, f
 /// Writes `<out_dir>/frame_NNNN.jpg` (1-indexed, 4-digit zero-padded) plus
 /// `<out_dir>/../frames.yml` sidecar listing each frame's source-video timestamp.
 /// The output directory is created if missing.
-pub fn extract_frames(
+pub async fn extract_frames(
     video_path: &Path,
     out_dir: &Path,
     duration_secs: f64,
     config: &YoutubeSlidesConfig,
     thread_args: &[String; 4],
+    timeout_secs: u64,
 ) -> Result<Vec<FrameRef>> {
     if !config.enabled {
         log::debug!("extract_frames: disabled by config; returning empty");
@@ -423,10 +439,23 @@ pub fn extract_frames(
         "vfr",
         &frames_arg,
     ];
-    let output = Command::new("ffmpeg")
+    // tokio::process + timeout + kill_on_drop: ffmpeg frame extraction runs
+    // from an async fn and can be slow on long videos; a blocking
+    // Command::output() here is uninterruptible even by the pipeline hard
+    // timeout (it only cancels the future, not a blocked thread).
+    let ffmpeg_fut = TokioCommand::new("ffmpeg")
         .args(argv)
-        .output()
-        .context("Failed to run ffmpeg - is it installed?")?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("Failed to spawn ffmpeg - is it installed?")?
+        .wait_with_output();
+
+    let output = match tokio::time::timeout(Duration::from_secs(timeout_secs), ffmpeg_fut).await {
+        Ok(res) => res.context("Failed to run ffmpeg")?,
+        Err(_) => bail!("ffmpeg frame extraction timed out after {timeout_secs}s"),
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -544,6 +573,7 @@ fn clean_vtt(vtt: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn test_clean_vtt_removes_headers() {
@@ -714,8 +744,8 @@ mod tests {
         assert_eq!(budget, 50);
     }
 
-    #[test]
-    fn test_extract_frames_disabled_returns_empty() {
+    #[tokio::test]
+    async fn test_extract_frames_disabled_returns_empty() {
         let cfg = YoutubeSlidesConfig {
             enabled: false,
             ..YoutubeSlidesConfig::default()
@@ -734,7 +764,9 @@ mod tests {
             30.0,
             &cfg,
             &thread_args,
+            600,
         )
+        .await
         .expect("disabled path should not error");
         assert!(frames.is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
@@ -743,8 +775,8 @@ mod tests {
     /// Synthesize a small test mp4 with `ffmpeg -f lavfi` and run frame extraction.
     /// Skipped if ffmpeg is not on PATH; serves as a smoke test that the filter
     /// chain is well-formed and the sidecar gets written.
-    #[test]
-    fn test_extract_frames_synthetic_video() {
+    #[tokio::test]
+    async fn test_extract_frames_synthetic_video() {
         if Command::new("ffmpeg").arg("-version").output().is_err() {
             eprintln!("ffmpeg not found; skipping test_extract_frames_synthetic_video");
             return;
@@ -786,7 +818,9 @@ mod tests {
             "-filter_threads".to_string(),
             "2".to_string(),
         ];
-        let frames = extract_frames(&video, &frames_dir, 10.0, &cfg, &thread_args).expect("extract_frames");
+        let frames = extract_frames(&video, &frames_dir, 10.0, &cfg, &thread_args, 600)
+            .await
+            .expect("extract_frames");
 
         assert!(
             !frames.is_empty(),

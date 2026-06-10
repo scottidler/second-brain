@@ -129,7 +129,9 @@ pub(crate) async fn process_youtube(url: &str, config: &Config, trace_id: &str) 
                     url,
                     &temp_dir.to_string_lossy(),
                     config.youtube.yt_dlp_postprocessor_threads(),
-                )?;
+                    config.pipeline.yt_dlp_timeout_secs,
+                )
+                .await?;
                 let audio_bytes = std::fs::read(&audio_path)?;
                 let _ = std::fs::remove_file(&audio_path);
 
@@ -293,7 +295,9 @@ pub(crate) async fn try_extract_slides(
         duration_secs,
         &config.youtube.slides,
         &config.youtube.ffmpeg_thread_args(),
-    )?;
+        config.pipeline.yt_dlp_timeout_secs,
+    )
+    .await?;
     if frames.is_empty() {
         log::info!("No frames extracted; skipping slide-aware path");
         return Ok(None);
@@ -968,11 +972,25 @@ pub(crate) async fn process_document_file_inner(
     let temp_path = temp_dir.join(filename);
     std::fs::write(&temp_path, data).context("Failed to write temp file")?;
 
-    // Extract text via markitdown
-    let extracted_text = extraction::extract_markdown(&temp_path).unwrap_or_else(|e| {
-        log::warn!("Text extraction failed for {filename}: {e:#}");
-        String::new()
-    });
+    // Extract text via markitdown. The extractor spawns a blocking
+    // subprocess and waits on it synchronously, so run it on a blocking
+    // thread rather than stalling a tokio worker.
+    let temp_for_extract = temp_path.clone();
+    let markitdown_timeout = config.pipeline.markitdown_timeout_secs;
+    let extracted_text =
+        match tokio::task::spawn_blocking(move || extraction::extract_markdown(&temp_for_extract, markitdown_timeout))
+            .await
+        {
+            Ok(Ok(text)) => text,
+            Ok(Err(e)) => {
+                log::warn!("Text extraction failed for {filename}: {e:#}");
+                String::new()
+            }
+            Err(e) => {
+                log::warn!("Text extraction task panicked for {filename}: {e}");
+                String::new()
+            }
+        };
 
     if !extracted_text.is_empty() {
         log::debug!("Extracted {} chars from {}", extracted_text.len(), filename);

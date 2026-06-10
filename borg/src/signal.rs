@@ -237,6 +237,10 @@ fn synthesized_filename(pointer: &AttachmentPointer) -> String {
 pub struct NoteToSelfRateGate {
     inner: Mutex<RateGateInner>,
     paused: AtomicBool,
+    /// Latch so the tripped-gate alert is sent to Note-to-Self exactly once.
+    /// Without it, every dropped envelope sent another outbound alert -
+    /// unbounded alert spam in exactly the flood the gate guards against.
+    alert_sent: AtomicBool,
     threshold: u32,
     window: Duration,
 }
@@ -252,9 +256,19 @@ impl NoteToSelfRateGate {
                 timestamps: VecDeque::new(),
             }),
             paused: AtomicBool::new(false),
+            alert_sent: AtomicBool::new(false),
             threshold,
             window: RATE_GATE_WINDOW,
         }
+    }
+
+    /// Claim the one-shot alert slot. Returns `true` exactly once (the first
+    /// caller after a trip); every later caller gets `false` so the outbound
+    /// Note-to-Self alert is sent once, not once per dropped envelope.
+    pub fn take_alert_slot(&self) -> bool {
+        self.alert_sent
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 
     /// Record a SelfSync arrival and return `true` if the gate is still
@@ -434,14 +448,19 @@ async fn dispatch_envelope(env: Envelope, ctx: DispatchEnv) -> Result<()> {
             "signal::dispatch_envelope: SelfSync envelope dropped by tripped rate gate (trace={trace_id} threshold={})",
             ctx.rate_gate.threshold()
         );
-        let alert = format!(
-            "intake-rate anomaly: Note-to-Self ingestion paused at >{}/hour; verify signal-rs has not regressed; restart the borg daemon after verifying",
-            ctx.rate_gate.threshold()
-        );
-        let _ = ctx
-            .notify_signal
-            .processing(&trace_id, &alert, Some(&Recipient::SelfSync))
-            .await;
+        // Send the outbound alert ONCE per trip (latched). Every subsequent
+        // dropped envelope only logs - otherwise the alert path itself floods
+        // Note-to-Self during exactly the flood the gate exists to stop.
+        if ctx.rate_gate.take_alert_slot() {
+            let alert = format!(
+                "intake-rate anomaly: Note-to-Self ingestion paused at >{}/hour; verify signal-rs has not regressed; restart the borg daemon after verifying",
+                ctx.rate_gate.threshold()
+            );
+            let _ = ctx
+                .notify_signal
+                .processing(&trace_id, &alert, Some(&Recipient::SelfSync))
+                .await;
+        }
         return Ok(());
     }
 
@@ -783,7 +802,6 @@ pub async fn run(
                     status.device_id,
                     status.linked_devices.len()
                 );
-                backoff.reset();
                 status
             }
             Err(e) => {
@@ -792,6 +810,7 @@ pub async fn run(
                 continue;
             }
         };
+        let connected_at = std::time::Instant::now();
 
         // Cold-start bootstrap: a freshly-linked device receives no
         // Note-to-Self until it has sent once (the phone builds its outbound
@@ -892,6 +911,9 @@ pub async fn run(
             // off rather than hot-looping.
             log::warn!("signal: select! exited without a typed disposition; treating as transient");
         }
+        // Reset only after a sustained-healthy run; an immediate post-handshake
+        // drop keeps the backoff growing instead of hot-looping at the base.
+        backoff.reset_if_healthy(connected_at);
         backoff.wait().await;
     }
 }

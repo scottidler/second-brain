@@ -642,7 +642,7 @@ async fn process_url_inner(
     let vault_root_resolved: PathBuf = config.vault_root()?;
     let rendered_distilled = distillers::render(&distilled);
     let (distilled_body, slide_paths) = if let Some(payload) = slide_payload.as_ref() {
-        match crate::slides::publish::publish_slides(
+        let published = match crate::slides::publish::publish_slides(
             &vault_root_resolved,
             &filename_stub,
             &payload.manifest,
@@ -662,7 +662,18 @@ async fn process_url_inner(
                 log::warn!("[{trace_id}] Slide publish failed: {e:#} - using rendered Distilled body");
                 (rendered_distilled.body_markdown.clone(), Vec::new())
             }
+        };
+        // publish_slides has copied the JPEGs it needs into the vault (or
+        // failed); the temp frames work dir (≤720p mp4 + every extracted
+        // frame, under /tmp/borg-youtube-frames/<id>) is now dead weight and
+        // was never cleaned up. Remove it so it can't accumulate unbounded.
+        if let Err(e) = std::fs::remove_dir_all(&payload.slides_source_root) {
+            log::debug!(
+                "[{trace_id}] could not remove slide work dir {}: {e}",
+                payload.slides_source_root.display()
+            );
         }
+        published
     } else {
         (rendered_distilled.body_markdown.clone(), Vec::new())
     };

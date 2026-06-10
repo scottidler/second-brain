@@ -27,7 +27,7 @@ pub struct VisionResult {
 /// bounded by `timeout_secs` via a poll-based internal timeout that kills the
 /// child process on elapsed.
 pub fn ocr_extract(image_path: &Path, timeout_secs: u64) -> Result<String> {
-    let mut child = Command::new("/usr/bin/tesseract")
+    let mut child = Command::new("tesseract")
         .args([
             image_path.to_str().unwrap_or_default(),
             "stdout",

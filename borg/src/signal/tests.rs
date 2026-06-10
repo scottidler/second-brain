@@ -250,6 +250,17 @@ fn rate_gate_stays_tripped_after_first_overflow() {
 }
 
 #[test]
+fn rate_gate_alert_slot_fires_exactly_once() {
+    // The outbound alert must be sent once per trip, not once per dropped
+    // envelope - otherwise the alert path floods Note-to-Self in exactly the
+    // flood the gate guards against.
+    let gate = NoteToSelfRateGate::new(1);
+    assert!(gate.take_alert_slot(), "first claim succeeds");
+    assert!(!gate.take_alert_slot(), "second claim is denied");
+    assert!(!gate.take_alert_slot(), "and stays denied");
+}
+
+#[test]
 fn rate_gate_reset_helper_reopens_for_tests() {
     let gate = NoteToSelfRateGate::new(1);
     assert!(gate.check_and_record());

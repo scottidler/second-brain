@@ -210,22 +210,31 @@ impl EventHandler for Handler {
                         .say(&ctx.http, format!("[{trace_id}] {processing_text}"))
                         .await;
 
-                    let result = pipeline::process_content(
-                        kind,
-                        vec![],
-                        IngestMethod::Discord,
-                        false,
-                        &self.config,
-                        Some(trace_id.clone()),
-                    )
-                    .await;
-                    let _ = msg
-                        .channel_id
-                        .say(&ctx.http, format_discord_reply(&result, &display_source))
+                    // Detach: run the pipeline off the serenity event loop so a
+                    // slow ingest can't stall the gateway heartbeat. Mirrors
+                    // telegram's spawned dispatch.
+                    let config = self.config.clone();
+                    let desktop = self.desktop.clone();
+                    let http = ctx.http.clone();
+                    let channel_id = msg.channel_id;
+                    let trace_id = trace_id.clone();
+                    tokio::spawn(async move {
+                        let result = pipeline::process_content(
+                            kind,
+                            vec![],
+                            IngestMethod::Discord,
+                            false,
+                            &config,
+                            Some(trace_id.clone()),
+                        )
                         .await;
-                    if let Some(d) = &self.desktop {
-                        d.result(&result, &display_source, prior).await;
-                    }
+                        let _ = channel_id
+                            .say(&http, format_discord_reply(&result, &display_source))
+                            .await;
+                        if let Some(d) = &desktop {
+                            d.result(&result, &display_source, prior).await;
+                        }
+                    });
                 }
                 None => {
                     log::warn!(
@@ -268,22 +277,29 @@ impl EventHandler for Handler {
             .channel_id
             .say(&ctx.http, format!("[{trace_id}] Processing..."))
             .await;
-        let result = pipeline::process_content(
-            content,
-            vec![],
-            IngestMethod::Discord,
-            false,
-            &self.config,
-            Some(trace_id.clone()),
-        )
-        .await;
-        let _ = msg
-            .channel_id
-            .say(&ctx.http, format_discord_reply(&result, &display_source))
+        // Detach: same rationale as the attachment path above.
+        let config = self.config.clone();
+        let desktop = self.desktop.clone();
+        let http = ctx.http.clone();
+        let channel_id = msg.channel_id;
+        let trace_id = trace_id.clone();
+        tokio::spawn(async move {
+            let result = pipeline::process_content(
+                content,
+                vec![],
+                IngestMethod::Discord,
+                false,
+                &config,
+                Some(trace_id.clone()),
+            )
             .await;
-        if let Some(d) = &self.desktop {
-            d.result(&result, &display_source, prior).await;
-        }
+            let _ = channel_id
+                .say(&http, format_discord_reply(&result, &display_source))
+                .await;
+            if let Some(d) = &desktop {
+                d.result(&result, &display_source, prior).await;
+            }
+        });
     }
 }
 
@@ -308,7 +324,7 @@ pub async fn run(token: String, dc_config: DiscordConfig, config: Arc<Config>, d
             }
         };
 
-        backoff.reset();
+        let connected_at = std::time::Instant::now();
 
         let mut client = client;
         if let Err(e) = client.start().await {
@@ -317,6 +333,9 @@ pub async fn run(token: String, dc_config: DiscordConfig, config: Arc<Config>, d
             log::warn!("discord: client exited, will restart");
         }
 
+        // Reset only after a sustained-healthy run; a fast drop keeps the
+        // backoff growing rather than hot-looping at the base delay.
+        backoff.reset_if_healthy(connected_at);
         backoff.wait().await;
     }
 }

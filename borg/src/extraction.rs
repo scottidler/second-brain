@@ -3,15 +3,13 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-/// Timeout for markitdown execution (30 seconds).
-const MARKITDOWN_TIMEOUT_SECS: u64 = 30;
-
 /// Extract markdown text from a file using markitdown.
 ///
 /// Returns the extracted markdown content, or an error if the tool
-/// is not found or extraction fails. Applies a 30-second timeout
-/// to prevent hangs on problematic files.
-pub fn extract_markdown(file_path: &Path) -> Result<String> {
+/// is not found or extraction fails. `timeout_secs` is the per-call bound
+/// (threaded from `pipeline.markitdown_timeout_secs`, default 60); the
+/// previous hardcoded 30s ignored that config knob.
+pub fn extract_markdown(file_path: &Path, timeout_secs: u64) -> Result<String> {
     // Bail early if file doesn't exist - avoids spawning a process that may hang
     if !file_path.exists() {
         eyre::bail!("File does not exist: {}", file_path.display());
@@ -25,7 +23,7 @@ pub fn extract_markdown(file_path: &Path) -> Result<String> {
         .context("markitdown not found - install with: pipx install markitdown")?;
 
     // Wait with timeout to prevent hangs
-    let timeout = Duration::from_secs(MARKITDOWN_TIMEOUT_SECS);
+    let timeout = Duration::from_secs(timeout_secs);
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
@@ -34,11 +32,7 @@ pub fn extract_markdown(file_path: &Path) -> Result<String> {
                 if start.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    eyre::bail!(
-                        "markitdown timed out after {}s for {}",
-                        MARKITDOWN_TIMEOUT_SECS,
-                        file_path.display()
-                    );
+                    eyre::bail!("markitdown timed out after {timeout_secs}s for {}", file_path.display());
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -82,7 +76,7 @@ mod tests {
     #[test]
     fn test_extract_markdown_nonexistent_file() {
         let path = Path::new("/tmp/obsidian-borg-test-nonexistent-file.pdf");
-        let result = extract_markdown(path);
+        let result = extract_markdown(path, 30);
         assert!(result.is_err());
         let err = format!("{}", result.expect_err("should fail"));
         assert!(err.contains("does not exist"), "got: {err}");

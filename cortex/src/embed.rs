@@ -190,21 +190,22 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
             if batch_stats.scanned == 0 {
                 break;
             }
-            // Termination guard against the all-skips-no-writes pattern:
-            // if a batch scanned rows but wrote nothing (every target was
-            // skipped because the file lacked the expected section), the
-            // next batch will return the same targets - infinite loop.
-            // Bail out so the loop cannot spin. The skipped notes will
-            // simply remain "stale" until either (a) cortex grows a
-            // skip-sentinel mechanism, or (b) the underlying notes gain
-            // the missing content.
-            if batch_stats.embedded == 0 && batch_stats.scanned == batch_stats.skipped_empty {
+            // Termination guard against ANY zero-progress batch: if a batch
+            // scanned rows but embedded none, the next batch re-selects the
+            // identical stale set and the loop spins forever. This covers
+            // both the all-skipped case (notes lacking the expected section)
+            // AND the all-failed case (a persistently failing `embed_batch` -
+            // e.g. a broken model or a poison input - which the previous
+            // `scanned == skipped_empty` condition did NOT catch). Stale rows
+            // remain pending until the underlying notes/model recover.
+            if batch_stats.embedded == 0 {
                 log::warn!(
-                    "cortex::embed: kind={:?} batch scanned={} all skipped; \
-                     halting to avoid an infinite loop. Stale rows remain pending \
-                     until the underlying notes gain the missing section.",
+                    "cortex::embed: kind={:?} batch scanned={} embedded=0 (skipped={} failed={}); \
+                     halting to avoid an infinite retry loop. Stale rows remain pending.",
                     kind,
                     batch_stats.scanned,
+                    batch_stats.skipped_empty,
+                    batch_stats.failed,
                 );
                 break;
             }
@@ -316,11 +317,16 @@ pub fn daemon_tick_with_model(vault_root: &Path, config: &Config, model: &dyn Em
             if batch_stats.scanned == 0 {
                 break;
             }
-            if batch_stats.embedded == 0 && batch_stats.scanned == batch_stats.skipped_empty {
+            // Break on ANY zero-progress batch (all-skipped OR all-failed),
+            // not only all-skipped: a persistently failing embed_batch
+            // otherwise re-selects the same stale set every iteration.
+            if batch_stats.embedded == 0 {
                 log::warn!(
-                    "cortex::embed::daemon_tick_with_model: kind={:?} batch scanned={} all skipped; halting to avoid an infinite loop.",
+                    "cortex::embed::daemon_tick_with_model: kind={:?} batch scanned={} embedded=0 (skipped={} failed={}); halting to avoid an infinite retry loop.",
                     kind,
                     batch_stats.scanned,
+                    batch_stats.skipped_empty,
+                    batch_stats.failed,
                 );
                 break;
             }
@@ -713,10 +719,9 @@ impl Drop for EmbedLock {
 }
 
 /// Convenience helper: how long the daemon should sleep between embed
-/// ticks. Falls back to [`DEFAULT_CADENCE_SECS`] when the config does
-/// not pin a value.
-pub fn daemon_cadence(_config: &Config) -> Duration {
-    Duration::from_secs(DEFAULT_CADENCE_SECS)
+/// ticks. Reads `embed.cadence-secs` (default [`DEFAULT_CADENCE_SECS`]).
+pub fn daemon_cadence(config: &Config) -> Duration {
+    Duration::from_secs(config.embed.cadence_secs)
 }
 
 #[cfg(test)]

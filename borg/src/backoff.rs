@@ -1,4 +1,11 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Minimum uptime before a transport connection counts as "healthy" enough to
+/// reset its restart backoff. A drop sooner than this is treated as a flap, so
+/// the backoff keeps growing instead of resetting on every handshake - the
+/// previous reset-on-connect hot-looped at the ~1s base delay whenever a
+/// failure fired immediately after the handshake.
+pub const HEALTHY_RUN_SECS: u64 = 60;
 
 pub struct ExponentialBackoff {
     attempt: u32,
@@ -23,6 +30,15 @@ impl ExponentialBackoff {
 
     pub fn reset(&mut self) {
         self.attempt = 0;
+    }
+
+    /// Reset the backoff only if the connection stayed up at least
+    /// `HEALTHY_RUN_SECS`. Call with the instant the connection became live;
+    /// a fast drop leaves the backoff growing rather than resetting.
+    pub fn reset_if_healthy(&mut self, connected_at: Instant) {
+        if connected_at.elapsed() >= Duration::from_secs(HEALTHY_RUN_SECS) {
+            self.reset();
+        }
     }
 
     pub async fn wait(&mut self) {
@@ -51,5 +67,23 @@ mod tests {
         backoff.attempt = 5;
         backoff.reset();
         assert_eq!(backoff.attempt, 0);
+    }
+
+    #[test]
+    fn reset_if_healthy_resets_only_after_threshold() {
+        let mut backoff = ExponentialBackoff::new();
+
+        // A connection that just started is NOT healthy yet - backoff grows.
+        backoff.attempt = 5;
+        backoff.reset_if_healthy(Instant::now());
+        assert_eq!(backoff.attempt, 5, "fast drop must not reset the backoff");
+
+        // A connection that has been up past the threshold resets.
+        backoff.attempt = 5;
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(HEALTHY_RUN_SECS + 1))
+            .expect("instant in range");
+        backoff.reset_if_healthy(long_ago);
+        assert_eq!(backoff.attempt, 0, "sustained-healthy run must reset the backoff");
     }
 }

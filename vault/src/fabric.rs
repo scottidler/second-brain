@@ -2,6 +2,9 @@ use eyre::{Context, Result, bail};
 use std::process::Command;
 use std::time::Duration;
 
+/// Captured output of a finished subprocess: `(exit status, stdout, stderr)`.
+pub type ProcessOutput = (std::process::ExitStatus, Vec<u8>, Vec<u8>);
+
 /// Map a bare pattern name (e.g. `distill-article`) to its absolute file path
 /// inside `vault::paths::patterns_dir()` (the unified `~/.config/sb/patterns/`).
 /// Tries the literal name first, then with `.md` appended. Path-like inputs
@@ -41,40 +44,90 @@ pub fn run_pattern(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let mut child = cmd.spawn().context("Failed to spawn fabric binary")?;
+    let child = cmd.spawn().context("Failed to spawn fabric binary")?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin
-            .write_all(truncate_input(input, max_chars).as_bytes())
-            .context("Failed to write to fabric stdin")?;
+    let input_bytes = truncate_input(input, max_chars).into_bytes();
+    match wait_with_timeout(child, input_bytes, Duration::from_secs(timeout_secs))? {
+        None => bail!("fabric -p {pattern} timed out after {timeout_secs}s"),
+        Some((status, stdout, stderr)) => {
+            if !status.success() {
+                let stderr = String::from_utf8_lossy(&stderr);
+                bail!("fabric -p {pattern} failed: {stderr}");
+            }
+            Ok(String::from_utf8_lossy(&stdout).trim().to_string())
+        }
     }
+}
 
-    let timeout = Duration::from_secs(timeout_secs);
+/// Drive a spawned child to completion with a wall-clock timeout, writing
+/// `input` to its stdin and fully draining stdout+stderr - each on its own
+/// thread.
+///
+/// This is the deadlock-safe subprocess primitive. A child that writes more
+/// than the OS pipe buffer (~64KB) to stdout BLOCKS until the parent reads;
+/// the previous `run_pattern` wrote all of stdin up front, then polled
+/// `try_wait` without reading stdout, so any pattern emitting more than a
+/// pipe-buffer of output deadlocked until the timeout killed it - misreported
+/// as a fabric timeout. Writing stdin from a thread also removes the
+/// unbounded blocking write on large inputs.
+///
+/// Returns `Ok(None)` when the timeout fired (the child has been killed and
+/// reaped); `Ok(Some((status, stdout, stderr)))` otherwise.
+pub fn wait_with_timeout(
+    mut child: std::process::Child,
+    input: Vec<u8>,
+    timeout: Duration,
+) -> Result<Option<ProcessOutput>> {
+    use std::io::{Read, Write};
+
+    // Feed stdin from a dedicated thread; dropping the handle closes the pipe
+    // (EOF for the child). A broken pipe (child died early) is non-fatal here.
+    let stdin_handle = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        })
+    });
+
+    // Drain stdout and stderr concurrently so neither can fill its pipe and
+    // wedge the child.
+    let stdout_handle = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut err| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = err.read_to_end(&mut buf);
+            buf
+        })
+    });
+
     let start = std::time::Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if start.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    bail!("fabric -p {pattern} timed out after {timeout_secs}s");
+                    return Ok(None);
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(e) => bail!("Failed to wait for fabric: {e}"),
+            Err(e) => bail!("Failed to wait for subprocess: {e}"),
         }
+    };
+
+    let stdout = stdout_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    let stderr = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    if let Some(h) = stdin_handle {
+        let _ = h.join();
     }
 
-    let output = child.wait_with_output().context("Failed to collect fabric output")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("fabric -p {pattern} failed: {stderr}");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(Some((status, stdout, stderr)))
 }
 
 /// Resolve the fabric binary path - if not absolute, try `which` to find it.
@@ -143,6 +196,49 @@ fn truncate_input(input: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wait_with_timeout_drains_large_stdout_without_deadlock() {
+        // Regression: emit far more than the ~64KB OS pipe buffer. The old
+        // poll-without-reading loop deadlocked the child against an unread
+        // pipe until the timeout killed it. The drain threads must collect
+        // all of it and return successfully well inside the timeout.
+        use std::process::{Command, Stdio};
+        let big = 500_000usize;
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg(format!("head -c {big} /dev/zero | tr '\\0' 'a'"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let Ok(child) = child else {
+            eprintln!("sh not available; skipping deadlock test");
+            return;
+        };
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(30)).expect("wait");
+        let (status, stdout, _stderr) = out.expect("must not time out on large output");
+        assert!(status.success());
+        assert_eq!(stdout.len(), big, "all stdout bytes must be drained");
+    }
+
+    #[test]
+    fn wait_with_timeout_kills_on_timeout() {
+        use std::process::{Command, Stdio};
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let Ok(child) = child else {
+            eprintln!("sh not available; skipping timeout test");
+            return;
+        };
+        let out = wait_with_timeout(child, Vec::new(), Duration::from_millis(300)).expect("wait");
+        assert!(out.is_none(), "a child exceeding the timeout returns None (killed)");
+    }
 
     #[test]
     fn test_extract_json_bare() {

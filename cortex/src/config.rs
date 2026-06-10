@@ -190,6 +190,10 @@ impl Default for GraphConfig {
 pub struct EmbedConfig {
     pub workers: usize,
     pub max_chunks_per_call: usize,
+    /// Daemon cadence (seconds) between embed ticks. CLAUDE.md documents the
+    /// embed cadence as configurable (default 10 min); the previous
+    /// `daemon_cadence` ignored its config argument and hardcoded the value.
+    pub cadence_secs: u64,
 }
 
 impl Default for EmbedConfig {
@@ -197,6 +201,7 @@ impl Default for EmbedConfig {
         Self {
             workers: 0,
             max_chunks_per_call: crate::embed::DEFAULT_MAX_CHUNKS_PER_CALL,
+            cadence_secs: crate::embed::DEFAULT_CADENCE_SECS,
         }
     }
 }

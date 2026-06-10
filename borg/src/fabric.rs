@@ -99,10 +99,23 @@ pub fn fetch_transcript(url: &str, fabric: &FabricConfig, pipeline: &PipelineCon
 /// complete in under a minute; an LLM pattern call genuinely can need
 /// several. Conflating them lets a hung scrape burn the LLM budget.
 pub async fn fetch_article(url: &str, fabric: &FabricConfig, pipeline: &PipelineConfig) -> Result<String> {
+    // The body is blocking (spawn + sync `wait_with_timeout` poll loop).
+    // Run it on a blocking thread so it never stalls a tokio worker - the
+    // previous direct call ran the 100ms-sleep poll loop on the async
+    // runtime. `fetch_transcript` is already wrapped at its call site; this
+    // brings `fetch_article` in line.
     let binary = vault::fabric::resolve_binary(&fabric.binary);
     let fabric_timeout = pipeline.fabric_url_timeout_secs;
+    let markitdown_timeout = pipeline.markitdown_timeout_secs;
+    let url = url.to_string();
+    tokio::task::spawn_blocking(move || fetch_article_blocking(&url, &binary, fabric_timeout, markitdown_timeout))
+        .await
+        .context("fetch_article blocking task panicked")?
+}
+
+fn fetch_article_blocking(url: &str, binary: &str, fabric_timeout: u64, markitdown_timeout: u64) -> Result<String> {
     log::debug!("fabric: fetching article for {url} (timeout={fabric_timeout}s)");
-    let mut child = Command::new(&binary)
+    let mut child = Command::new(binary)
         .args(["-u", url])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -119,7 +132,6 @@ pub async fn fetch_article(url: &str, fabric: &FabricConfig, pipeline: &Pipeline
         }
     }
 
-    let markitdown_timeout = pipeline.markitdown_timeout_secs;
     log::debug!("fabric -u failed, trying markitdown for {url} (timeout={markitdown_timeout}s)");
     if let Ok(mut markitdown) = Command::new("markitdown")
         .arg(url)

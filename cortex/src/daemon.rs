@@ -139,7 +139,21 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     // load-and-drop pattern leaked ~30 MB/tick of allocator scratch
     // (shakedown: 1.2 -> 2.8 GB over 50 min); the long-lived model
     // bounds it.
-    let embed_model = tokio::task::block_in_place(|| crate::embed::load_daemon_model(config))?;
+    // Degrade, do not crash-loop: if the embedding model fails to load, the
+    // embed tick is disabled for this process but every other governance
+    // action (lint/link/sweep/cold/graph/intel) still runs. The `?` here used
+    // to take the whole daemon down repeatedly on a model-load failure.
+    let embed_model: Option<Box<dyn vault::embedding::EmbeddingModel>> =
+        match tokio::task::block_in_place(|| crate::embed::load_daemon_model(config)) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                log::error!(
+                    "daemon: embedding model failed to load: {e:#}; embed tick DISABLED for this process \
+                     - every non-embed action still runs"
+                );
+                None
+            }
+        };
 
     // Doc 3 cold-note sweep tick. Default cadence is one week; the
     // report is a checklist for review, not a polling watchdog. The
@@ -264,7 +278,12 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 // (when there are stale rows); we don't want to starve
                 // the watcher or the scheduled-intel timers if the
                 // embedder is currently chewing on a batch.
-                match tokio::task::block_in_place(|| crate::embed::daemon_tick_with_model(vault_root, config, embed_model.as_ref())) {
+                let Some(model) = embed_model.as_deref() else {
+                    // Model failed to load at startup; embed tick is disabled
+                    // for this process. Other actions keep running.
+                    continue;
+                };
+                match tokio::task::block_in_place(|| crate::embed::daemon_tick_with_model(vault_root, config, model)) {
                     Ok(stats) if stats.scanned > 0 => {
                         log::info!(
                             "daemon embed tick: scanned={} embedded={} skipped_empty={} failed={}",
@@ -337,7 +356,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     Err(e) => log::error!("daemon cold sweep failed: {e}"),
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = shutdown_signal() => {
                 log::info!("received shutdown signal; shutting down daemon");
                 break;
             }
@@ -346,6 +365,33 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
 
     drop(watcher);
     Ok(())
+}
+
+/// Resolve when the daemon should shut down: Ctrl-C (SIGINT) or SIGTERM.
+/// systemd stops a unit with SIGTERM; the previous `ctrl_c()`-only arm
+/// ignored it, so the daemon was killed mid-write instead of breaking the
+/// loop and dropping the watcher cleanly.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            Err(e) => {
+                log::warn!("daemon: failed to install SIGTERM handler: {e}; relying on Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Run classify only - used during cycle detection since classify is inherently idempotent

@@ -9,6 +9,7 @@ use crate::trace;
 use crate::types::{ContentKind, IngestMethod};
 use eyre::Result;
 use std::sync::Arc;
+use std::time::Instant;
 use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::requests::Requester;
@@ -188,7 +189,6 @@ pub async fn run(
         match bot.get_me().await {
             Ok(me) => {
                 log::info!("telegram: connected as @{}", me.username());
-                backoff.reset();
             }
             Err(e) => {
                 log::error!("telegram: cannot reach API: {e}");
@@ -201,6 +201,7 @@ pub async fn run(
         // the dispatcher. Without this, the first getUpdates from dispatch()
         // races with a lingering long-poll and triggers TerminatedByOtherGetUpdates.
         claim_polling_session(&bot).await;
+        let connected_at = Instant::now();
 
         let tg_cfg = tg_config.clone();
         let cfg = config.clone();
@@ -609,6 +610,10 @@ pub async fn run(
             }
         }
 
+        // Only reset the backoff if the connection stayed up long enough to
+        // count as healthy; a fast post-handshake drop keeps the backoff
+        // growing instead of hot-looping at the base delay.
+        backoff.reset_if_healthy(connected_at);
         backoff.wait().await;
     }
 }
