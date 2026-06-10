@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{Config, FabricConfig, IntelConfig, LlmConfig};
 use crate::opts::IntelOpts;
 use crate::vault::{Note, scan_vault};
+use vault::schema::NoteType;
 
 /// Which intel artifact a single `run`/`generate` invocation produces.
 /// Daily and weekly are exclusive at the report level; if a caller wants
@@ -126,72 +127,6 @@ pub fn generate(
     })
 }
 
-/// Process new/unread notes with Fabric pattern.
-/// Sets cortex-insights in frontmatter and updates status to processed.
-pub fn process_new_notes(
-    vault_root: &Path,
-    notes: &[Note],
-    config: &IntelConfig,
-    fabric: &FabricConfig,
-) -> Result<usize> {
-    let pattern = match &config.on_new_note {
-        Some(p) => p.clone(),
-        None => return Ok(0),
-    };
-
-    if !crate::fabric::is_available(&fabric.binary) {
-        log::debug!("fabric not available, skipping new note processing");
-        return Ok(0);
-    }
-
-    let mut processed = 0;
-
-    for note in notes {
-        // Only process unread notes
-        if note.frontmatter.status.as_deref() != Some("unread") {
-            continue;
-        }
-
-        // Skip if already processed
-        if note.frontmatter.extra.contains_key("cortex-insights") {
-            continue;
-        }
-
-        // Skip empty bodies
-        if note.body.trim().is_empty() {
-            continue;
-        }
-
-        let input = crate::fabric::truncate_input(&note.body, config.max_input_tokens);
-        match crate::fabric::run_pattern(fabric, &pattern, input, config.fabric_timeout_secs) {
-            Ok(insights) => {
-                let abs_path = vault_root.join(&note.path);
-                let content = std::fs::read_to_string(&abs_path)?;
-
-                // Write cortex-insights and update status
-                let fields = vec![
-                    (
-                        "cortex-insights".to_string(),
-                        serde_yaml::Value::String(insights.trim().to_string()),
-                    ),
-                    ("status".to_string(), serde_yaml::Value::String("processed".to_string())),
-                ];
-
-                if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &fields) {
-                    std::fs::write(&abs_path, new_content)?;
-                    log::info!("processed new note with fabric: {}", note.path.display());
-                    processed += 1;
-                }
-            }
-            Err(e) => {
-                log::warn!("failed to process note with fabric: {}: {e}", note.path.display());
-            }
-        }
-    }
-
-    Ok(processed)
-}
-
 /// Wikilink target for a note.
 ///
 /// Intel digests/reviews live in `daily/` and `weekly/` subfolders and share
@@ -294,7 +229,8 @@ fn generate_daily_digest(
     // Build frontmatter + heading
     let mut digest = String::new();
     digest.push_str(&format!(
-        "---\ntitle: Daily Digest {today}\ndate: {today}\ntype: digest\ntags: [digest]\n---\n\n"
+        "---\ntitle: Daily Digest {today}\ndate: {today}\ntype: {}\ntags: [digest]\n---\n\n",
+        NoteType::Digest.as_str()
     ));
     digest.push_str(&format!("# Daily Digest - {today}\n\n"));
 
@@ -391,7 +327,8 @@ fn generate_weekly_review(
     // Generate review
     let mut review = String::new();
     review.push_str(&format!(
-        "---\ntitle: Weekly Review {week_str}\ndate: {today_str}\ntype: review\ntags: [review]\n---\n\n"
+        "---\ntitle: Weekly Review {week_str}\ndate: {today_str}\ntype: {}\ntags: [review]\n---\n\n",
+        NoteType::Review.as_str()
     ));
     review.push_str(&format!("# Weekly Review - Week of {week_str}\n\n"));
 
@@ -577,24 +514,6 @@ mod tests {
 
         let path = resolve_output_path(Path::new("/vault"), &config, &opts, "daily/2026-03-16.md");
         assert_eq!(path, PathBuf::from("/vault/notes/ai/daily/2026-03-16.md"));
-    }
-
-    #[test]
-    fn test_process_new_notes_skips_without_fabric() {
-        let v = TestVault::new();
-        v.add_note(
-            "unread-note.md",
-            "---\ntitle: Unread Note\ndate: 2026-03-18\ntype: note\ndomain: tech\norigin: assisted\nstatus: unread\ntags: []\n---\nSome content to process.\n",
-        );
-        let notes = v.scan();
-        let config = IntelConfig {
-            on_new_note: None, // Disabled
-            ..Default::default()
-        };
-
-        let fabric = FabricConfig::default();
-        let count = process_new_notes(v.root(), &notes, &config, &fabric).expect("process");
-        assert_eq!(count, 0, "should skip when on_new_note is None");
     }
 
     #[test]

@@ -792,7 +792,10 @@ fn build_enrichment_fields(result: &ClassifyResult) -> Vec<(String, serde_yaml::
             "domain".to_string(),
             serde_yaml::Value::String(result.domain.as_str().to_string()),
         ),
-        ("status".to_string(), serde_yaml::Value::String("unread".to_string())),
+        (
+            "status".to_string(),
+            serde_yaml::Value::String(vault::schema::Status::Unread.as_str().to_string()),
+        ),
         ("cortex-classified".to_string(), serde_yaml::Value::Bool(true)),
         (
             "cortex-classified-by".to_string(),
@@ -808,7 +811,10 @@ fn build_enrichment_fields(result: &ClassifyResult) -> Vec<(String, serde_yaml::
 /// Set origin: assisted if missing
 fn ensure_origin(fields: &mut Vec<(String, serde_yaml::Value)>, note: &Note) {
     if note.frontmatter.origin.is_none() {
-        fields.push(("origin".to_string(), serde_yaml::Value::String("assisted".to_string())));
+        fields.push((
+            "origin".to_string(),
+            serde_yaml::Value::String(vault::schema::Origin::Assisted.as_str().to_string()),
+        ));
     }
 }
 

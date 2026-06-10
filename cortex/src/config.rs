@@ -252,7 +252,7 @@ impl Default for FabricConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct SchemaConfig {
     pub domains: Vec<String>,
@@ -260,6 +260,25 @@ pub struct SchemaConfig {
     pub origins: Vec<String>,
     pub statuses: Vec<String>,
     pub methods: Vec<String>,
+}
+
+impl Default for SchemaConfig {
+    /// Built from the `vault::schema` enums (the single source of truth) so
+    /// the validation vocabulary can never drift from the real Domain /
+    /// NoteType / Origin / Status / Method variants. The previous derived
+    /// `Default` produced EMPTY vecs (validated nothing), and the historically
+    /// hand-typed defaults had already drifted (missing reddit/image/pdf/...).
+    /// Config still overrides these.
+    fn default() -> Self {
+        use vault::schema::{Domain, Method, NoteType, Origin, Status};
+        Self {
+            domains: Domain::all().iter().map(|d| d.as_str().to_string()).collect(),
+            types: NoteType::all().iter().map(|t| t.as_str().to_string()).collect(),
+            origins: Origin::all().iter().map(|o| o.as_str().to_string()).collect(),
+            statuses: Status::all().iter().map(|s| s.as_str().to_string()).collect(),
+            methods: Method::all().iter().map(|m| m.as_str().to_string()).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -779,3 +798,6 @@ impl Config {
         vault::paths::oracle_db_path()
     }
 }
+
+#[cfg(test)]
+mod tests;

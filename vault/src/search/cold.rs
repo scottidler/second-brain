@@ -19,7 +19,8 @@ impl super::SearchIndex {
         // Exclude `type: daily` notes and the `journal/` subtree (both: a daily
         // note misfiled outside journal/ is still excluded by type, and an
         // untyped note inside journal/ is still excluded by path).
-        let mut stmt = self.conn.prepare(
+        let daily = crate::schema::NoteType::Daily.as_str();
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT path, title, domain, date
              FROM notes
              WHERE search_hit_count = 0
@@ -29,11 +30,11 @@ impl super::SearchIndex {
                AND date != ''
                AND date IS NOT NULL
                AND date < ?1
-               AND (note_type IS NULL OR note_type != 'daily')
+               AND (note_type IS NULL OR note_type != '{daily}')
                AND path NOT LIKE 'journal/%'
              ORDER BY date ASC
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        ))?;
         let rows = stmt
             .query_map(params![q.before_date, q.limit as i64], |row| {
                 Ok(ColdNote {
@@ -53,8 +54,10 @@ impl super::SearchIndex {
     /// floor rescues notes from the report. Uses the identical age predicate
     /// as `cold_notes` so the two numbers describe the same population.
     pub fn count_pinned_excluded(&self, before_date: &str) -> Result<u64> {
+        let daily = crate::schema::NoteType::Daily.as_str();
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM notes
+            &format!(
+                "SELECT COUNT(*) FROM notes
              WHERE search_hit_count = 0
                AND last_accessed_at IS NULL
                AND inbound_link_count = 0
@@ -62,8 +65,9 @@ impl super::SearchIndex {
                AND date != ''
                AND date IS NOT NULL
                AND date < ?1
-               AND (note_type IS NULL OR note_type != 'daily')
-               AND path NOT LIKE 'journal/%'",
+               AND (note_type IS NULL OR note_type != '{daily}')
+               AND path NOT LIKE 'journal/%'"
+            ),
             params![before_date],
             |row| row.get(0),
         )?;

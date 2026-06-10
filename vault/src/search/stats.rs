@@ -194,13 +194,19 @@ impl super::SearchIndex {
                 })?;
 
         let unread: u64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM notes WHERE domain = ?1 AND status = 'unread'",
+            &format!(
+                "SELECT COUNT(*) FROM notes WHERE domain = ?1 AND status = '{}'",
+                crate::schema::Status::Unread.as_str()
+            ),
             params![domain],
             |row| row.get(0),
         )?;
 
         let starred: u64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM notes WHERE domain = ?1 AND status = 'starred'",
+            &format!(
+                "SELECT COUNT(*) FROM notes WHERE domain = ?1 AND status = '{}'",
+                crate::schema::Status::Starred.as_str()
+            ),
             params![domain],
             |row| row.get(0),
         )?;
@@ -615,7 +621,11 @@ impl super::SearchIndex {
                 })?;
 
         let unclassified: u64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM notes WHERE domain = '' AND note_type NOT IN ('daily', 'system')",
+            &format!(
+                "SELECT COUNT(*) FROM notes WHERE domain = '' AND note_type NOT IN ('{}', '{}')",
+                crate::schema::NoteType::Daily.as_str(),
+                crate::schema::NoteType::System.as_str()
+            ),
             [],
             |row| row.get(0),
         )?;

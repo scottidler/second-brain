@@ -99,7 +99,7 @@ fn record_received_with_sidecar_to(
     trace_id: &str,
 ) -> Result<()> {
     intake::write_raw_input(vault_root, trace_id, sidecar_bytes).context("Failed to write intake sidecar")?;
-    receipts::record_received(conn, trace_id, method.into(), receipt_kind(kind), preview)
+    receipts::record_received(conn, trace_id, method, receipt_kind(kind), preview)
         .with_context(|| format!("Failed to record receipts row trace={trace_id}"))?;
     log::info!(
         "intake: captured trace={trace_id} method={method} kind={kind} preview={}",
@@ -144,7 +144,7 @@ fn record_failure_at_door_to(
     // exists yet; INSERT OR IGNORE never clobbers a prior capture's data. A
     // no-op (row already present from the door capture) is the NORMAL case
     // here, so use the expecting-existing variant to log it at DEBUG, not WARN.
-    receipts::record_received_expecting_existing(conn, trace_id, method.into(), ReceiptKind::Text, reason)
+    receipts::record_received_expecting_existing(conn, trace_id, method, ReceiptKind::Text, reason)
         .with_context(|| format!("upsert received row for failure trace={trace_id}"))?;
     receipts::mark_failed(conn, trace_id, stage, reason)
         .with_context(|| format!("mark_failed trace={trace_id} stage={stage}"))?;

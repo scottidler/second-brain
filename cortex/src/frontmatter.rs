@@ -513,7 +513,15 @@ mod tests {
         let v = TestVault::new();
         let notes = v.scan();
         let config = v.config().actions.frontmatter;
-        let empty_schema = SchemaConfig::default();
+        // SchemaConfig::default() is now enum-derived (non-empty); construct a
+        // genuinely empty schema to exercise the skip-when-empty code path.
+        let empty_schema = SchemaConfig {
+            domains: vec![],
+            types: vec![],
+            origins: vec![],
+            statuses: vec![],
+            methods: vec![],
+        };
 
         let report = lint_frontmatter(&notes, &config, &empty_schema);
         // With empty schema, no enum violations should appear

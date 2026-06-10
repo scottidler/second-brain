@@ -42,9 +42,12 @@ pub fn lint_autotag(notes: &[Note], all_notes: &[Note], config: &AutoTagConfig) 
                 return None;
             }
 
-            // Only process freshly ingested notes
-            let dominated = matches!(note.frontmatter.status.as_deref(), Some("unread") | Some("processed"))
-                || matches!(note.frontmatter.origin.as_deref(), Some("assisted"));
+            // Only process freshly ingested notes. ("processed" is a legacy
+            // status with no enum variant - tolerated on read, not in schema.)
+            let status = note.frontmatter.status.as_deref();
+            let dominated = status == Some(vault::schema::Status::Unread.as_str())
+                || status == Some("processed")
+                || note.frontmatter.origin.as_deref() == Some(vault::schema::Origin::Assisted.as_str());
             if !dominated {
                 return None;
             }
@@ -144,7 +147,7 @@ pub fn apply_autotag(
             if note.frontmatter.extra.contains_key("cortex-tagged") {
                 continue;
             }
-            if note.frontmatter.status.as_deref() != Some("unread") {
+            if note.frontmatter.status.as_deref() != Some(vault::schema::Status::Unread.as_str()) {
                 continue;
             }
             if note.body.trim().is_empty() {

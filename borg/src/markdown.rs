@@ -99,20 +99,23 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         .collect::<Vec<_>>()
         .join("\n");
 
+    // Map each ContentType to a vault::schema::NoteType, then render via
+    // `as_str()` so the published `type:` can never drift from the schema.
     let type_field = match &note.content_type {
-        ContentType::YouTube { .. } => "youtube",
-        ContentType::Article { .. } => "article",
-        ContentType::GitHub { .. } => "github",
-        ContentType::Social => "social",
-        ContentType::Reddit => "reddit",
-        ContentType::Image { .. } => "image",
-        ContentType::Pdf { .. } => "pdf",
-        ContentType::Audio { .. } => "audio",
-        ContentType::Note => "note",
-        ContentType::VocabDefine { .. } | ContentType::VocabClarify { .. } => "vocab",
-        ContentType::Document { .. } => "document",
-        ContentType::Code { .. } => "code",
-    };
+        ContentType::YouTube { .. } => vault::schema::NoteType::Youtube,
+        ContentType::Article { .. } => vault::schema::NoteType::Article,
+        ContentType::GitHub { .. } => vault::schema::NoteType::Github,
+        ContentType::Social => vault::schema::NoteType::Social,
+        ContentType::Reddit => vault::schema::NoteType::Reddit,
+        ContentType::Image { .. } => vault::schema::NoteType::Image,
+        ContentType::Pdf { .. } => vault::schema::NoteType::Pdf,
+        ContentType::Audio { .. } => vault::schema::NoteType::Audio,
+        ContentType::Note => vault::schema::NoteType::Note,
+        ContentType::VocabDefine { .. } | ContentType::VocabClarify { .. } => vault::schema::NoteType::Vocab,
+        ContentType::Document { .. } => vault::schema::NoteType::Document,
+        ContentType::Code { .. } => vault::schema::NoteType::Code,
+    }
+    .as_str();
 
     let mut fm = format!(
         "---\ntitle: {}\ndate: {date}\ningested: {date}\n",

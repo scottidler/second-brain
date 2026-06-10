@@ -86,7 +86,7 @@ impl EntityExtractor for FabricExtractor<'_> {
 /// True when a note is ingested (`origin: assisted`) — the candidate set for
 /// vocabulary discovery per the ingested-only convention.
 fn is_ingested(note: &Note) -> bool {
-    matches!(note.frontmatter.origin.as_deref(), Some("assisted"))
+    note.frontmatter.origin.as_deref() == Some(vault::schema::Origin::Assisted.as_str())
 }
 
 /// Run discovery over `notes` using `extractor`, excluding any entity whose

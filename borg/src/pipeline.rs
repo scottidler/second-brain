@@ -798,7 +798,7 @@ async fn process_url_inner(
         &LedgerEntry {
             date: log_date,
             time: log_time,
-            method: method.into(),
+            method,
             filename: extract_filename(&note_path),
             source: canonical.clone(),
             domain: None,

@@ -65,7 +65,7 @@ fn failure_marks_existing_row_without_clobbering() {
     receipts::record_received(
         &conn,
         "tr-x",
-        IngestMethod::Telegram.into(),
+        IngestMethod::Telegram,
         ReceiptKind::Binary,
         "[photo: a.jpg]",
     )
@@ -121,14 +121,7 @@ fn failure_with_no_prior_row_still_lands_failed_row() {
 #[test]
 fn failure_preserves_fetch_failed_stage() {
     let conn = receipts::open_memory().unwrap();
-    receipts::record_received(
-        &conn,
-        "tr-sig",
-        IngestMethod::Signal.into(),
-        ReceiptKind::Binary,
-        "[fetch]",
-    )
-    .unwrap();
+    receipts::record_received(&conn, "tr-sig", IngestMethod::Signal, ReceiptKind::Binary, "[fetch]").unwrap();
 
     record_failure_at_door_to(
         &conn,

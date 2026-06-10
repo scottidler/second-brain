@@ -126,6 +126,10 @@ pub enum NoteType {
     /// `sb cortex hub`. Doubles as human-navigable knowledge and a
     /// machine-readable knowledge bundle (graph-augmented-memory Phase 3).
     Entity,
+    /// Periodic intel digest note produced by `cortex intel`.
+    Digest,
+    /// Review note produced by `cortex intel`.
+    Review,
 }
 
 impl NoteType {
@@ -153,6 +157,8 @@ impl NoteType {
             Self::Poem => "poem",
             Self::System => "system",
             Self::Entity => "entity",
+            Self::Digest => "digest",
+            Self::Review => "review",
         }
     }
 
@@ -180,6 +186,8 @@ impl NoteType {
             Self::Poem,
             Self::System,
             Self::Entity,
+            Self::Digest,
+            Self::Review,
         ]
     }
 
@@ -242,6 +250,8 @@ impl FromStr for NoteType {
             "poem" => Ok(Self::Poem),
             "system" => Ok(Self::System),
             "entity" => Ok(Self::Entity),
+            "digest" => Ok(Self::Digest),
+            "review" => Ok(Self::Review),
             _ => Err(format!("unknown note type: {s}")),
         }
     }
@@ -490,5 +500,15 @@ mod tests {
     #[test]
     fn test_unknown_note_type_errors() {
         assert!("blogpost".parse::<NoteType>().is_err());
+    }
+
+    #[test]
+    fn test_note_type_digest_review_variants() {
+        assert_eq!("digest".parse::<NoteType>(), Ok(NoteType::Digest));
+        assert_eq!("review".parse::<NoteType>(), Ok(NoteType::Review));
+        assert_eq!(NoteType::Digest.as_str(), "digest");
+        assert_eq!(NoteType::Review.as_str(), "review");
+        assert!(NoteType::all().contains(&NoteType::Digest));
+        assert!(NoteType::all().contains(&NoteType::Review));
     }
 }

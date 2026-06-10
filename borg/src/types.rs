@@ -206,45 +206,12 @@ pub struct RejectionRecord {
     pub retriable_after: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum IngestMethod {
-    Telegram,
-    Discord,
-    Http,
-    Clipboard,
-    Cli,
-    Ntfy,
-    Signal,
-}
-
-impl fmt::Display for IngestMethod {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Telegram => write!(f, "telegram"),
-            Self::Discord => write!(f, "discord"),
-            Self::Http => write!(f, "http"),
-            Self::Clipboard => write!(f, "clipboard"),
-            Self::Cli => write!(f, "cli"),
-            Self::Ntfy => write!(f, "ntfy"),
-            Self::Signal => write!(f, "signal"),
-        }
-    }
-}
-
-impl From<IngestMethod> for vault::schema::Method {
-    fn from(m: IngestMethod) -> Self {
-        match m {
-            IngestMethod::Telegram => Self::Telegram,
-            IngestMethod::Discord => Self::Discord,
-            IngestMethod::Http => Self::Http,
-            IngestMethod::Clipboard => Self::Clipboard,
-            IngestMethod::Cli => Self::Cli,
-            IngestMethod::Ntfy => Self::Ntfy,
-            IngestMethod::Signal => Self::Signal,
-        }
-    }
-}
+/// Borg's ingest method IS `vault::schema::Method` (schema-is-law). The old
+/// parallel `IngestMethod` enum existed only because borg didn't enable
+/// vault's `schemars` feature; now that it does (see Cargo.toml), the shadow
+/// is gone and this alias keeps every `IngestMethod::Telegram` call site
+/// working. `Method` additionally carries a `Manual` variant.
+pub use vault::schema::Method as IngestMethod;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TranscriptionRequest {

@@ -33,8 +33,16 @@ pub fn has_failed_fetch_signature(body: &str) -> bool {
     FAILED_FETCH_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
-/// Types excluded from quality scoring (system-generated notes).
-const EXCLUDED_TYPES: &[&str] = &["digest", "review", "daily", "system"];
+/// Types excluded from quality scoring (system-generated notes). Enum-derived
+/// so the list can never drift from the real `NoteType` strings.
+fn is_excluded_type(note_type: &str) -> bool {
+    use std::str::FromStr;
+    use vault::schema::NoteType;
+    matches!(
+        NoteType::from_str(note_type),
+        Ok(NoteType::Digest | NoteType::Review | NoteType::Daily | NoteType::System)
+    )
+}
 
 /// Quality level based on accumulated issues.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +94,7 @@ pub fn lint_quality(notes: &[Note], config: &QualityConfig) -> Report {
         .filter_map(|note| {
             // Skip system-generated note types
             if let Some(ref note_type) = note.frontmatter.note_type
-                && EXCLUDED_TYPES.contains(&note_type.as_str())
+                && is_excluded_type(note_type)
             {
                 return None;
             }

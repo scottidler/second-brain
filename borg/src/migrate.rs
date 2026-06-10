@@ -136,7 +136,7 @@ fn migrate_one_note(path: &Path, vault_root: &Path, apply: bool, config: &Config
         Some(LedgerEntry {
             date,
             time: "00:00".to_string(),
-            method: IngestMethod::Cli.into(),
+            method: IngestMethod::Cli,
             filename: rel_note_path.and_then(|p| p.rsplit('/').next().map(|s| s.to_string())),
             source: source.to_string(),
             domain: path

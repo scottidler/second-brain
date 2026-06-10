@@ -28,8 +28,9 @@ const DOMAIN_ALIASES: &[(&str, &str)] = &[
     ("\u{01f3b5} Music", "music"),
     ("\u{01f1ea}\u{01f1f8} Spanish", "spanish"),
     ("\u{2699}\u{fe0f} System", "system"),
-    ("\u{01f4e5} Inbox", "inbox"),
-    ("Inbox", "inbox"),
+    // No `Inbox -> "inbox"` rows: inbox is a vault LOCATION, not a Domain.
+    // `Domain::from_str("inbox")` rejects it, so mapping a domain to "inbox"
+    // only produced values the schema then refused.
 ];
 
 /// Normalize a domain value to the canonical format.

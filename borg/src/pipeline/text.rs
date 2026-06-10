@@ -173,7 +173,7 @@ pub(crate) async fn process_text_inner(
         &LedgerEntry {
             date: log_date,
             time: log_time,
-            method: method.into(),
+            method,
             filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
@@ -346,7 +346,7 @@ pub(crate) async fn process_vocab(
         &LedgerEntry {
             date: log_date,
             time: log_time,
-            method: method.into(),
+            method,
             filename: extract_filename(&note_path),
             source: format!("[{}]", text.trim()),
             domain: None,
@@ -750,7 +750,7 @@ pub(crate) async fn process_code_snippet(
         &LedgerEntry {
             date: log_date,
             time: log_time,
-            method: method.into(),
+            method,
             filename: extract_filename(&note_path),
             source: source_display,
             domain: None,

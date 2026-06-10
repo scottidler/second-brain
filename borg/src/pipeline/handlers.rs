@@ -642,7 +642,7 @@ pub(crate) async fn process_image_inner(
         &LedgerEntry {
             date: log_date,
             time: log_time,
-            method: method.into(),
+            method,
             filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
@@ -883,7 +883,7 @@ pub(crate) async fn process_audio_inner(
         &LedgerEntry {
             date: log_date,
             time: log_time,
-            method: method.into(),
+            method,
             filename: extract_filename(&note_path),
             source: source_display,
             domain: None,
@@ -1115,7 +1115,7 @@ pub(crate) async fn process_document_file_inner(
         &LedgerEntry {
             date: log_date,
             time: log_time,
-            method: method.into(),
+            method,
             filename: extract_filename(&note_path),
             source: source_display,
             domain: None,

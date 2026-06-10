@@ -338,14 +338,16 @@ pub fn infer_distill_kind(note: &Note) -> Option<DistillKind> {
 }
 
 fn kind_from_type(t: &str) -> Option<DistillKind> {
-    match t.to_ascii_lowercase().as_str() {
-        "article" => Some(DistillKind::Article),
-        "github" => Some(DistillKind::Repo),
-        "youtube" | "video" => Some(DistillKind::Video),
-        "social" | "reddit" => Some(DistillKind::Thread),
-        "image" | "pdf" | "document" => Some(DistillKind::Image),
-        "audio" => Some(DistillKind::VoiceNote),
-        "note" => Some(DistillKind::Idea),
+    use std::str::FromStr;
+    use vault::schema::NoteType;
+    match NoteType::from_str(t).ok()? {
+        NoteType::Article => Some(DistillKind::Article),
+        NoteType::Github => Some(DistillKind::Repo),
+        NoteType::Youtube | NoteType::Video => Some(DistillKind::Video),
+        NoteType::Social | NoteType::Reddit => Some(DistillKind::Thread),
+        NoteType::Image | NoteType::Pdf | NoteType::Document => Some(DistillKind::Image),
+        NoteType::Audio => Some(DistillKind::VoiceNote),
+        NoteType::Note => Some(DistillKind::Idea),
         _ => None,
     }
 }
@@ -395,7 +397,7 @@ pub fn filter_notes(notes: &[Note], opts: &SummarizeOpts, resume_after: Option<&
         // enter the candidate pool. Filtering here (instead of relying on
         // per-note skip-at-scan) keeps the candidate count honest and avoids
         // log noise from 142+ "unrecognised note type" skips per run.
-        if note.frontmatter.origin.as_deref() != Some("assisted") {
+        if note.frontmatter.origin.as_deref() != Some(vault::schema::Origin::Assisted.as_str()) {
             continue;
         }
         if let Some(cutoff) = cutoff
