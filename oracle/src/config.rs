@@ -425,29 +425,28 @@ fn default_inbound_recompute_interval_secs() -> u64 {
 
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let config_path = if let Some(p) = path { p.to_path_buf() } else { Self::find_config_file()? };
+        let config_path = if let Some(p) = path { p.to_path_buf() } else { Self::find_config_file() };
 
         if config_path.exists() {
+            tracing::info!("oracle: loading config from {}", config_path.display());
             let contents = std::fs::read_to_string(&config_path).wrap_err("Failed to read config file")?;
             let config: Config = serde_yaml::from_str(&contents).wrap_err("Failed to parse config file")?;
             Ok(config)
         } else {
+            tracing::info!(
+                "oracle: no config at {}; using built-in defaults",
+                config_path.display()
+            );
             Ok(Self::default())
         }
     }
 
-    fn find_config_file() -> Result<PathBuf> {
-        let primary = vault::paths::oracle_config();
-        if primary.exists() {
-            return Ok(primary);
-        }
-
-        let local = PathBuf::from("oracle.yml");
-        if local.exists() {
-            return Ok(local);
-        }
-
-        Ok(primary)
+    /// The single config location: `~/.config/sb/oracle.yml`. The previous
+    /// `./oracle.yml` CWD fallback was dropped - it let any project directory
+    /// the MCP server happened to launch from silently reconfigure retrieval
+    /// (the same "no silent CWD" rule the vault-root resolver follows).
+    fn find_config_file() -> PathBuf {
+        vault::paths::oracle_config()
     }
 
     /// Resolve the vault root via the unified resolver. Oracle has no CLI

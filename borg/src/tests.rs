@@ -208,3 +208,12 @@ async fn server_handle_wait_returns_ok_when_all_clean() {
     let handle = ServerHandle { tasks };
     assert!(handle.wait().await.is_ok());
 }
+
+#[test]
+fn constant_time_eq_matches_only_identical_bytes() {
+    use crate::routes::constant_time_eq;
+    assert!(constant_time_eq(b"secret-token", b"secret-token"));
+    assert!(!constant_time_eq(b"secret-token", b"secret-toker"));
+    assert!(!constant_time_eq(b"short", b"longer-token"));
+    assert!(constant_time_eq(b"", b""));
+}

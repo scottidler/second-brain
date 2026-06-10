@@ -56,6 +56,18 @@ telegram:
 #   bot-token: DISCORD_BOT_TOKEN
 #   channel-id: 0
 
+# ntfy — optional push-to-ingest input. SECURITY: ntfy's only access control
+# is the topic NAME, which travels in cleartext URLs and is trivially guessable
+# on public servers. Therefore borg IGNORES `force` from ntfy messages (a
+# force-overwrite must never be triggerable by someone who guesses the topic).
+# Use a long, RANDOM, reserved topic AND set ntfy.token (an access token for a
+# private/ACL-protected topic) - do NOT rely on the topic name alone.
+# ntfy:
+#   server: https://ntfy.sh
+#   topic: borg-<long-random-string>
+#   token: NTFY_TOKEN
+#   host: desk
+
 # Signal transport — peer to Telegram with end-to-end-encrypted envelope
 # routing. Bootstrap is out-of-band: stop borg, run
 #   signal-rs link --name borg --state-dir ~/.local/share/sb/borg/signal-state/

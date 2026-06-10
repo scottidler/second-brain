@@ -56,7 +56,14 @@ pub mod watchdog;
 pub mod youtube;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
+
+/// Maximum accepted multipart upload size. Sized to the largest supported
+/// attachment (audio/video documents); larger bodies are rejected with 413
+/// at the layer instead of axum's undocumented default 2 MB limit silently
+/// 413-ing legitimate uploads.
+const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 use eyre::{Context, Result};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -92,7 +99,10 @@ pub fn build_router(state: AppState) -> Router {
     // so a 401 never reaches intake (no receipt, no sidecar).
     let protected = Router::new()
         .route("/ingest", post(routes::ingest))
-        .route("/ingest/file", post(routes::ingest_multipart))
+        .route(
+            "/ingest/file",
+            post(routes::ingest_multipart).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
         .route("/note", post(routes::note))
         // Replay/reingest poll this for a trace's terminal state (the receipts
         // DB is per-host on the daemon; client hosts can't read it directly).
@@ -789,7 +799,11 @@ pub async fn reingest(
         });
 
         let client = reqwest::Client::new();
-        let status = match client.post(&endpoint).json(&body).send().await {
+        let mut req = client.post(&endpoint).json(&body);
+        if let Some(token) = config::resolve_client_auth_token(&config.server) {
+            req = req.bearer_auth(token);
+        }
+        let status = match req.send().await {
             Ok(response) => {
                 let mut result: types::IngestResult =
                     response.json().await.context("Failed to parse response from daemon")?;
@@ -859,12 +873,18 @@ pub async fn ingest(
     });
 
     let client = reqwest::Client::new();
+    // Send the write-route Bearer token when one is configured, so enabling
+    // server.auth-token doesn't 401 this first-party CLI path.
+    let mut req = client.post(&endpoint).json(&body);
+    if let Some(token) = config::resolve_client_auth_token(&config.server) {
+        req = req.bearer_auth(token);
+    }
     // The Error toast here is unconditional and load-bearing: when the HTTP
     // POST itself fails (daemon not running), the daemon by definition
     // cannot deliver the failure notification. The CLI may be wired to a
     // desktop hotkey where stderr is not visible. This is the symmetric
     // counterpart to the `fail()` / `catch (err)` path in popup.js.
-    let response = client.post(&endpoint).json(&body).send().await.map_err(|e| {
+    let response = req.send().await.map_err(|e| {
         let msg = if e.is_connect() {
             format!("cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?")
         } else {
@@ -967,12 +987,12 @@ struct UninstallOutcome {
 /// Dispatch the non-start daemon flags (install/uninstall/reinstall/stop/restart/status).
 /// `--start` is handled separately by sb via `serve_init` + `ServerHandle::wait` so the
 /// startup banner can be formatted from typed data.
-pub async fn daemon(_config: Config, _verbose: bool, opts: opts::DaemonOpts) -> Result<DaemonOutcome> {
+pub async fn daemon(config: Config, _verbose: bool, opts: opts::DaemonOpts) -> Result<DaemonOutcome> {
     use crate::opts::DaemonOpts;
 
     match opts {
         DaemonOpts { install: true, .. } => Ok(DaemonOutcome::Installed {
-            unit_path: install_service().await?,
+            unit_path: install_service(&config).await?,
         }),
         DaemonOpts { uninstall: true, .. } => {
             let outcome = uninstall_service().await?;
@@ -989,7 +1009,7 @@ pub async fn daemon(_config: Config, _verbose: bool, opts: opts::DaemonOpts) -> 
         DaemonOpts { reinstall: true, .. } => {
             let _ = uninstall_service().await;
             Ok(DaemonOutcome::Reinstalled {
-                unit_path: install_service().await?,
+                unit_path: install_service(&config).await?,
             })
         }
         DaemonOpts { stop: true, .. } => {
@@ -1010,12 +1030,12 @@ pub async fn daemon(_config: Config, _verbose: bool, opts: opts::DaemonOpts) -> 
     }
 }
 
-async fn install_service() -> Result<PathBuf> {
+async fn install_service(config: &Config) -> Result<PathBuf> {
     let exe_path = std::env::current_exe().context("Failed to detect binary path")?;
     let exe = exe_path.display().to_string();
 
     if cfg!(target_os = "linux") {
-        install_systemd(&exe).await
+        install_systemd(&exe, config).await
     } else if cfg!(target_os = "macos") {
         install_launchd(&exe).await
     } else {
@@ -1106,12 +1126,22 @@ async fn launchctl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-async fn install_systemd(exe_path: &str) -> Result<PathBuf> {
+async fn install_systemd(exe_path: &str, config: &Config) -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let unit_dir = home.join(".config/systemd/user");
     let unit_path = unit_dir.join("borg.service");
 
-    let vault_path = home.join("repos/scottidler/obsidian");
+    // Derive the vault path from config (was hardcoded). The borg-owned data
+    // dir (`~/.local/share/sb/borg`: receipts DB, signal-state, staged
+    // artifacts) MUST be in ReadWritePaths too - it only worked before because
+    // the user manager wasn't enforcing ProtectHome; the moment it does, every
+    // receipts/signal/stages write fails.
+    let vault_path = config
+        .vault_root()
+        .unwrap_or_else(|_| home.join("repos/scottidler/obsidian"));
+    let data_path = vault::receipts::receipts_dir()
+        .map(|d| d.parent().map(|p| p.to_path_buf()).unwrap_or(d))
+        .unwrap_or_else(|_| home.join(".local/share/sb"));
     let secrets_path = home.join("repos/scottidler/secrets/.secrets");
     let manifest_bin = home.join(".cargo/bin/manifest");
     let uid = std::process::Command::new("id")
@@ -1142,7 +1172,7 @@ WorkingDirectory={home}
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths={vault}
+ReadWritePaths={vault} {data}
 PrivateTmp=true
 
 [Install]
@@ -1150,6 +1180,7 @@ WantedBy=default.target
 "#,
         home = home.display(),
         vault = vault_path.display(),
+        data = data_path.display(),
         manifest = manifest_bin.display(),
         secrets = secrets_path.display(),
         env_file = env_file,

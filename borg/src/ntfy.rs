@@ -26,8 +26,10 @@ struct JsonBody {
     url: String,
     #[serde(default)]
     tags: Vec<String>,
-    #[serde(default)]
-    force: bool,
+    // NOTE: there is intentionally no `force` field. ntfy's only "auth" is the
+    // topic name (a shared secret at best); honoring `force: true` from the
+    // body would let anyone who guesses the topic force-overwrite vault notes.
+    // A `force` key in the JSON is silently ignored (no deny_unknown_fields).
 }
 
 #[derive(Debug, PartialEq)]
@@ -53,7 +55,8 @@ fn parse_message(message: &str) -> Option<ParsedMessage> {
         return Some(ParsedMessage::Url {
             url: body.url,
             tags: body.tags,
-            force: body.force,
+            // `force` is never honored from the ntfy channel (topic-only auth).
+            force: false,
         });
     }
 
@@ -292,13 +295,15 @@ mod tests {
 
     #[test]
     fn test_parse_json_body() {
+        // `force: true` in the body is IGNORED - ntfy's topic-only auth must
+        // not let a topic-guesser trigger a force-overwrite.
         let result = parse_message(r#"{"url": "https://example.com", "tags": ["ai", "rust"], "force": true}"#);
         assert_eq!(
             result,
             Some(ParsedMessage::Url {
                 url: "https://example.com".to_string(),
                 tags: vec!["ai".to_string(), "rust".to_string()],
-                force: true,
+                force: false,
             })
         );
     }

@@ -21,6 +21,20 @@ pub struct NoteRequest {
     pub tags: Option<Vec<String>>,
 }
 
+/// Constant-time byte comparison for the auth token. A length-check short
+/// circuit plus a byte-fold avoids leaking the matching prefix length through
+/// early-return timing the way `==` does.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Auth gate for the HTTP write routes (`/ingest`, `/ingest/file`, `/note`).
 ///
 /// When `state.auth_token` is `Some` (a token was configured and resolved at
@@ -47,7 +61,7 @@ pub async fn require_auth(State(state): State<AppState>, request: Request, next:
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|token| token == expected)
+        .map(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()))
         .unwrap_or(false);
     if authorized {
         next.run(request).await
@@ -316,12 +330,13 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
                 }
             }
             "tags" => {
+                // Repeated `tags` fields (one value each), NOT one
+                // comma-split field - matches the no-comma CLI list rule.
                 if let Ok(text) = field.text().await {
-                    tags = text
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
+                    let t = text.trim();
+                    if !t.is_empty() {
+                        tags.push(t.to_string());
+                    }
                 }
             }
             "force" => {
@@ -335,7 +350,10 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
         }
     }
 
-    let (intake_kind, intake_preview, intake_filename, intake_bytes) = match (&file_data, &decode_error) {
+    // The descriptor needs only the byte LENGTH, so this never clones the
+    // full upload (the previous `Some(bytes.clone())` cloned the entire
+    // payload only to discard it via `let _ =`).
+    let (intake_kind, intake_preview) = match (&file_data, &decode_error) {
         (Some((bytes, filename)), _) => {
             let kind = if assets::is_image_extension(filename) {
                 IntakeKind::Photo
@@ -349,25 +367,14 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
                 IntakeKind::Unknown
             };
             let preview = intake_log::binary_descriptor(kind, filename, bytes.len(), None);
-            (kind, preview, Some(filename.clone()), Some(bytes.clone()))
+            (kind, preview)
         }
-        (None, Some(err)) => (
-            IntakeKind::Unknown,
-            format!("[multipart decode failed: {err}]"),
-            None,
-            None,
-        ),
-        (None, None) => (
-            IntakeKind::Empty,
-            "[multipart upload missing file field]".to_string(),
-            None,
-            None,
-        ),
+        (None, Some(err)) => (IntakeKind::Unknown, format!("[multipart decode failed: {err}]")),
+        (None, None) => (IntakeKind::Empty, "[multipart upload missing file field]".to_string()),
     };
 
     // For multipart, the sidecar carries the descriptor (not the raw binary)
     // so `system/intake/` stays small regardless of upload size.
-    let _ = intake_bytes; // we only needed the bytes for descriptor sizing above
     if let Err(e) = intake_log::record_received_with_sidecar(
         &state.config,
         IngestMethod::Http,
@@ -419,8 +426,6 @@ pub async fn ingest_multipart(State(state): State<AppState>, mut multipart: Mult
         "Received multipart file upload: {filename} ({} bytes) (trace={trace_id})",
         data.len()
     );
-
-    let _ = intake_filename;
 
     let content = if assets::is_image_extension(&filename) {
         ContentKind::Image { data, filename }

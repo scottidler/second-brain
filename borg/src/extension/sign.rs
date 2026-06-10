@@ -54,13 +54,15 @@ pub fn run(repo_root: &Path, config: &Config, version: &str) -> Result<SignResul
         artifacts_dir.display()
     );
 
+    // Pass AMO credentials via env (WEB_EXT_API_KEY / WEB_EXT_API_SECRET)
+    // rather than `--api-key` / `--api-secret` argv: argv is world-readable in
+    // /proc/<pid>/cmdline while the (multi-minute) sign runs, leaking the
+    // secrets to any local user.
     let status = Command::new("web-ext")
+        .env("WEB_EXT_API_KEY", &jwt_issuer)
+        .env("WEB_EXT_API_SECRET", &jwt_secret)
         .args([
             "sign",
-            "--api-key",
-            &jwt_issuer,
-            "--api-secret",
-            &jwt_secret,
             "--channel",
             "unlisted",
             "--source-dir",
