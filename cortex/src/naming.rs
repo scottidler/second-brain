@@ -208,7 +208,7 @@ fn update_wikilinks_batch(vault_root: &Path, notes: &[Note], renames: &[(PathBuf
         }
 
         if new_content != content {
-            std::fs::write(&abs_path, &new_content)?;
+            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             log::info!("updated wikilinks: {}", note.path.display());
         }
     }

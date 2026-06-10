@@ -97,7 +97,7 @@ pub(crate) async fn process_text_inner(
 
     // Code snippet detection (after pattern matching / URL redirect, before general LLM classification)
     if let Some(language) = looks_like_code(text) {
-        return process_code_snippet(text, &language, tags, method, config, trace_id).await;
+        return process_code_snippet(text, &language, tags, method, force, config, trace_id).await;
     }
 
     // General text: classify via LLM, then create a note
@@ -160,8 +160,8 @@ pub(crate) async fn process_text_inner(
     let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
-    let note_path = dest_path.join(&filename);
-    std::fs::write(&note_path, &rendered).context("Failed to write note to vault")?;
+    let note_path = super::atomic::resolve_publish_path(&dest_path.join(&filename), force);
+    vault::note::write_atomic(&note_path, rendered.as_bytes()).context("Failed to write note to vault")?;
 
     log::info!("[{trace_id}] Wrote text note: {}", note_path.display());
 
@@ -203,7 +203,7 @@ pub(crate) async fn process_vocab(
     pattern: &TextPattern,
     tags: Vec<String>,
     method: IngestMethod,
-    _force: bool,
+    force: bool,
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
@@ -334,8 +334,8 @@ pub(crate) async fn process_vocab(
     let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
-    let note_path = dest_path.join(&filename);
-    std::fs::write(&note_path, &rendered).context("Failed to write note to vault")?;
+    let note_path = super::atomic::resolve_publish_path(&dest_path.join(&filename), force);
+    vault::note::write_atomic(&note_path, rendered.as_bytes()).context("Failed to write note to vault")?;
 
     log::info!("[{trace_id}] Wrote vocab note: {}", note_path.display());
 
@@ -678,6 +678,7 @@ pub(crate) async fn process_code_snippet(
     language: &str,
     tags: Vec<String>,
     method: IngestMethod,
+    force: bool,
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
@@ -732,8 +733,8 @@ pub(crate) async fn process_code_snippet(
     let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
-    let note_path = dest_path.join(&filename);
-    std::fs::write(&note_path, &rendered).context("Failed to write code note to vault")?;
+    let note_path = super::atomic::resolve_publish_path(&dest_path.join(&filename), force);
+    vault::note::write_atomic(&note_path, rendered.as_bytes()).context("Failed to write code note to vault")?;
 
     log::info!(
         "[{trace_id}] Wrote code snippet note: {} (language: {})",

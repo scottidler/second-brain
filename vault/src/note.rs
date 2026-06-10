@@ -1,4 +1,4 @@
-use eyre::{Context, Result};
+use eyre::{Context, ContextCompat, Result};
 use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -98,10 +98,73 @@ pub fn scan_vault(vault_root: &Path, scan_config: &ScanConfig) -> Result<Vec<Not
     Ok(notes)
 }
 
+/// Atomically write `bytes` to `dest`: write to a uniquely-named temp file in
+/// the destination's OWN directory, fsync it, rename it into place, then
+/// fsync the parent directory. A reader of `dest` therefore sees either the
+/// complete old file or the complete new file - never a torn write.
+///
+/// This is THE shared note-write primitive for the workspace. The vault is
+/// Syncthing'd; a non-atomic in-place `fs::write` can replicate a torn write
+/// to every machine. The temp file MUST live in the target's own directory
+/// (a cross-filesystem rename fails - `/tmp` is a different mount) and carry a
+/// unique name (cortex writes notes concurrently via rayon, so a fixed
+/// `.tmp` name would collide).
+pub fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let parent = dest.parent().context("destination has no parent directory")?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".sb-tmp-")
+        .tempfile_in(parent)
+        .with_context(|| format!("create temp in {}", parent.display()))?;
+    temp.write_all(bytes).context("write temp bytes")?;
+    temp.as_file().sync_all().context("fsync temp")?;
+    temp.persist(dest)
+        .map_err(|e| eyre::eyre!("persist temp -> {}: {e}", dest.display()))?;
+    // Best-effort fsync of the parent directory so the new dirent is durable
+    // across power loss.
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn write_atomic_writes_and_overwrites() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("note.md");
+        write_atomic(&path, b"first").expect("write");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "first");
+        write_atomic(&path, b"second").expect("overwrite");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "second");
+        // No leftover temp files in the directory.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .expect("readdir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".sb-tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "atomic write left a temp file behind");
+    }
+
+    #[test]
+    fn write_atomic_concurrent_writes_do_not_collide() {
+        // Unique temp names must let many rayon-parallel writers into the same
+        // directory without colliding on a fixed `.tmp` name.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        (0..64).into_par_iter().for_each(|i| {
+            let path = root.join(format!("note-{i}.md"));
+            write_atomic(&path, format!("body {i}").as_bytes()).expect("concurrent write");
+        });
+        for i in 0..64 {
+            let path = root.join(format!("note-{i}.md"));
+            assert_eq!(fs::read_to_string(&path).expect("read"), format!("body {i}"));
+        }
+    }
 
     fn setup_temp_vault() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("create temp dir");

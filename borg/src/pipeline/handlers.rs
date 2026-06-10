@@ -426,12 +426,12 @@ pub(crate) async fn process_image(
     filename: &str,
     tags: Vec<String>,
     method: IngestMethod,
-    _force: bool,
+    force: bool,
     config: &Config,
     trace_id: &str,
 ) -> IngestResult {
     let start = Instant::now();
-    match process_image_inner(data, filename, tags, method, config, trace_id).await {
+    match process_image_inner(data, filename, tags, method, force, config, trace_id).await {
         Ok(mut result) => {
             let elapsed = start.elapsed();
             log::info!("[{trace_id}] Image pipeline completed in {elapsed:.2?}");
@@ -463,6 +463,7 @@ pub(crate) async fn process_image_inner(
     filename: &str,
     tags: Vec<String>,
     method: IngestMethod,
+    force: bool,
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
@@ -625,8 +626,8 @@ pub(crate) async fn process_image_inner(
     let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
-    let note_path = dest_path.join(&note_filename);
-    std::fs::write(&note_path, &rendered).context("Failed to write image note to vault")?;
+    let note_path = super::atomic::resolve_publish_path(&dest_path.join(&note_filename), force);
+    vault::note::write_atomic(&note_path, rendered.as_bytes()).context("Failed to write image note to vault")?;
 
     log::info!("[{trace_id}] Wrote image note: {}", note_path.display());
 
@@ -681,12 +682,12 @@ pub(crate) async fn process_audio(
     filename: &str,
     tags: Vec<String>,
     method: IngestMethod,
-    _force: bool,
+    force: bool,
     config: &Config,
     trace_id: &str,
 ) -> IngestResult {
     let start = Instant::now();
-    match process_audio_inner(data, filename, tags, method, config, trace_id).await {
+    match process_audio_inner(data, filename, tags, method, force, config, trace_id).await {
         Ok(mut result) => {
             let elapsed = start.elapsed();
             log::info!("[{trace_id}] Audio pipeline completed in {elapsed:.2?}");
@@ -727,6 +728,7 @@ pub(crate) async fn process_audio_inner(
     filename: &str,
     tags: Vec<String>,
     method: IngestMethod,
+    force: bool,
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
@@ -868,8 +870,8 @@ pub(crate) async fn process_audio_inner(
     let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
-    let note_path = dest_path.join(&note_filename);
-    std::fs::write(&note_path, &rendered).context("Failed to write audio note to vault")?;
+    let note_path = super::atomic::resolve_publish_path(&dest_path.join(&note_filename), force);
+    vault::note::write_atomic(&note_path, rendered.as_bytes()).context("Failed to write audio note to vault")?;
 
     log::info!("[{trace_id}] Wrote audio note: {}", note_path.display());
 
@@ -911,13 +913,13 @@ pub(crate) async fn process_document_file(
     filename: &str,
     tags: Vec<String>,
     method: IngestMethod,
-    _force: bool,
+    force: bool,
     config: &Config,
     kind: DocumentKind,
     trace_id: &str,
 ) -> IngestResult {
     let start = Instant::now();
-    match process_document_file_inner(data, filename, tags, method, config, kind, trace_id).await {
+    match process_document_file_inner(data, filename, tags, method, force, config, kind, trace_id).await {
         Ok(mut result) => {
             let elapsed = start.elapsed();
             log::info!(
@@ -953,6 +955,7 @@ pub(crate) async fn process_document_file_inner(
     filename: &str,
     tags: Vec<String>,
     method: IngestMethod,
+    force: bool,
     config: &Config,
     kind: DocumentKind,
     trace_id: &str,
@@ -1095,8 +1098,9 @@ pub(crate) async fn process_document_file_inner(
     let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
-    let note_path = dest_path.join(&note_filename);
-    std::fs::write(&note_path, &rendered).context(format!("Failed to write {} note to vault", kind.label()))?;
+    let note_path = super::atomic::resolve_publish_path(&dest_path.join(&note_filename), force);
+    vault::note::write_atomic(&note_path, rendered.as_bytes())
+        .context(format!("Failed to write {} note to vault", kind.label()))?;
 
     log::info!("[{trace_id}] Wrote {} note: {}", kind.label(), note_path.display());
 

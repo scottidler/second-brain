@@ -126,7 +126,7 @@ pub fn apply_autotag(
                 .collect();
 
             if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &yaml_fields) {
-                std::fs::write(&abs_path, new_content)?;
+                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                 log::info!("wrote suggested tags: {}", violation.path.display());
                 Ok(1)
             } else {
@@ -171,7 +171,7 @@ pub fn apply_autotag(
                             ),
                         ];
                         if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &fields) {
-                            std::fs::write(&abs_path, new_content)?;
+                            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                             log::info!("wrote fabric-enhanced tags: {}", note.path.display());
                             fixed_count += 1;
                         }

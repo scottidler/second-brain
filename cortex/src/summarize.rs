@@ -279,9 +279,10 @@ pub fn rewrite_note_file(path: &Path, base_frontmatter: &Frontmatter, distilled:
     }
     let yaml = merged.to_yaml().context("serialize frontmatter")?;
     let content = format!("---\n{yaml}---\n{}", rendered.body_markdown);
-    let tmp = path.with_extension("md.tmp");
-    std::fs::write(&tmp, content.as_bytes()).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    // Shared atomic primitive (unique temp in the note's own dir + fsync +
+    // rename + parent fsync). The old `path.with_extension("md.tmp")` used a
+    // FIXED temp name, so rayon-parallel callers could collide on it.
+    vault::note::write_atomic(path, content.as_bytes())?;
     log::debug!(
         "summarize::rewrite_note_file: path={} extractor={}",
         path.display(),

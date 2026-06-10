@@ -173,7 +173,7 @@ pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) 
                 .collect();
 
             if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &yaml_fields) {
-                std::fs::write(&abs_path, new_content)?;
+                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                 log::info!("wrote quality fields: {}", violation.path.display());
                 Ok(1)
             } else {
@@ -199,7 +199,7 @@ pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) 
             let abs_path = vault_root.join(&note.path);
             let content = std::fs::read_to_string(&abs_path)?;
             if let Some(new_content) = crate::scope::remove_frontmatter_fields(&content, &cortex_keys) {
-                std::fs::write(&abs_path, new_content)?;
+                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                 log::info!("cleared stale quality fields: {}", note.path.display());
                 Ok(1)
             } else {

@@ -62,7 +62,7 @@ pub fn apply_scope(vault_root: &Path, notes: &[Note], config: &ScopeConfig) -> e
         let content = std::fs::read_to_string(&abs_path)?;
 
         if let Some(new_content) = insert_frontmatter_fields(&content, &fields_to_set) {
-            std::fs::write(&abs_path, new_content)?;
+            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             log::info!("applied scope fields: {}", note.path.display());
             fixed_count += 1;
         }

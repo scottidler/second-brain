@@ -115,7 +115,7 @@ pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationC
         if !planned.set_frontmatter.is_empty() {
             let content = std::fs::read_to_string(&abs_to)?;
             if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &planned.set_frontmatter) {
-                std::fs::write(&abs_to, new_content)?;
+                vault::note::write_atomic(&abs_to, new_content.as_bytes())?;
             }
         }
 
@@ -220,7 +220,7 @@ fn update_wikilinks_for_moves(vault_root: &Path, notes: &[Note], renames: &[(Pat
         }
 
         if new_content != content {
-            std::fs::write(&abs_path, &new_content)?;
+            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             log::info!("updated wikilinks after migration: {}", note.path.display());
         }
     }
@@ -349,7 +349,7 @@ fn apply_field_transforms(vault_root: &Path, notes: &[Note], migration: &Migrati
 
             if changed {
                 let new_content = format!("{before}---\n{}\n---{after}", lines.join("\n"));
-                std::fs::write(&abs_path, new_content)?;
+                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                 log::info!("applied field transforms: {}", note.path.display());
                 Ok(1)
             } else {
@@ -494,7 +494,7 @@ fn apply_value_transforms(vault_root: &Path, notes: &[Note], migration: &Migrati
 
             if changed {
                 let new_content = format!("{before}---\n{}\n---{after}", lines.join("\n"));
-                std::fs::write(&abs_path, new_content)?;
+                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                 log::info!("applied value transforms: {} ({})", note.path.display(), migration.name);
                 Ok(1)
             } else {

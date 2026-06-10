@@ -491,7 +491,7 @@ fn write_intel_output(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context(format!("failed to create directory {}", parent.display()))?;
     }
-    std::fs::write(path, content).context(format!("failed to write {}", path.display()))?;
+    vault::note::write_atomic(path, content.as_bytes()).context(format!("failed to write {}", path.display()))?;
     log::info!("wrote intel output: {}", path.display());
     Ok(())
 }

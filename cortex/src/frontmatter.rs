@@ -278,7 +278,7 @@ pub fn apply_frontmatter(
 
             let abs_path = vault_root.join(&note.path);
             let new_content = format!("{new_fm}{}", note.raw);
-            std::fs::write(&abs_path, new_content)?;
+            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             log::info!("inserted frontmatter block: {} (slug={})", note.path.display(), slug);
             fixed_count += 1;
         } else {
@@ -308,7 +308,7 @@ pub fn apply_frontmatter(
             }
 
             if modified {
-                std::fs::write(&abs_path, &content)?;
+                vault::note::write_atomic(&abs_path, content.as_bytes())?;
                 log::info!("applied frontmatter fixes: {}", note.path.display());
                 fixed_count += 1;
             }

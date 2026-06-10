@@ -391,7 +391,7 @@ pub fn apply_classify(
             let content = std::fs::read_to_string(&abs_path)?;
             let fields = build_enrichment_fields(&result);
             if let Some(new_content) = insert_frontmatter_fields(&content, &fields) {
-                std::fs::write(&abs_path, new_content)?;
+                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             }
 
             report.add(Violation {
@@ -421,7 +421,7 @@ pub fn apply_classify(
             let content = std::fs::read_to_string(&abs_path)?;
             let fields = build_enrichment_fields(&result);
             if let Some(new_content) = insert_frontmatter_fields(&content, &fields) {
-                std::fs::write(&abs_path, new_content)?;
+                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             }
 
             report.add(Violation {
@@ -454,7 +454,7 @@ pub fn apply_classify(
         let content = std::fs::read_to_string(&abs_path)?;
 
         if let Some(new_content) = insert_frontmatter_fields(&content, &enrichment_fields) {
-            std::fs::write(&abs_path, new_content)?;
+            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
         }
 
         // Move from inbox/ to notes/
@@ -820,7 +820,7 @@ fn mark_needs_review(vault_root: &Path, note: &Note) -> Result<()> {
     let fields = vec![("cortex-needs-review".to_string(), serde_yaml::Value::Bool(true))];
 
     if let Some(new_content) = insert_frontmatter_fields(&content, &fields) {
-        std::fs::write(&abs_path, new_content)?;
+        vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
     }
 
     Ok(())
@@ -914,7 +914,7 @@ fn update_wikilinks_for_moves(vault_root: &Path, notes: &[Note], renames: &[(Pat
         }
 
         if new_content != content {
-            std::fs::write(&abs_path, new_content)?;
+            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             log::debug!("updated wikilinks in {}", note.path.display());
         }
     }

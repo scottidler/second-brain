@@ -13,32 +13,37 @@
 //!    and writes it once via `write_atomic`. There is no window during
 //!    which the file on disk is missing the date or cortex fields.
 
-use eyre::{Context, ContextCompat, Result};
-use std::io::Write;
-use std::path::Path;
-use tempfile::Builder;
+use eyre::Result;
+use std::path::{Path, PathBuf};
 use vault::schema::CORTEX_PRESERVE_KEYS;
 
-/// Atomically write `bytes` to `dest`. Uses a sibling `.borg-tmp-<random>`
-/// file so a `SIGKILL` mid-write cannot leave the destination in a partial
-/// state. Same-FS rename guarantees atomicity at the filesystem level.
-pub fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = dest.parent().context("destination has no parent directory")?;
-    let mut temp = Builder::new()
-        .prefix(".borg-tmp-")
-        .tempfile_in(parent)
-        .with_context(|| format!("create temp in {}", parent.display()))?;
-    temp.write_all(bytes).context("write temp bytes")?;
-    temp.as_file().sync_all().context("fsync temp")?;
-    temp.persist(dest)
-        .map_err(|e| eyre::eyre!("persist temp -> {}: {e}", dest.display()))?;
-    // Best-effort fsync of the parent directory so the new dirent is durable
-    // across power loss. Not required to defeat the failure mode in this doc,
-    // but cheap insurance and standard practice for atomic-write helpers.
-    if let Ok(dir) = std::fs::File::open(parent) {
-        let _ = dir.sync_all();
+/// Resolve a non-URL publish destination, honoring `force`. When `force` is
+/// true (or the path is free) the destination is returned unchanged
+/// (overwrite). Otherwise it is uniquified with a `-2`, `-3`, ... suffix so a
+/// same-title note is not silently clobbered. Mirrors cortex's
+/// `classify::resolve_collision`, minus the reingest/source-URL case that
+/// non-URL content (images, audio, pasted text) has no concept of.
+pub fn resolve_publish_path(dest: &Path, force: bool) -> PathBuf {
+    if force || !dest.exists() {
+        return dest.to_path_buf();
     }
-    Ok(())
+    let stem = dest.file_stem().and_then(|s| s.to_str()).unwrap_or("note");
+    let ext = dest.extension().and_then(|e| e.to_str()).unwrap_or("md");
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    for i in 2..100 {
+        let candidate = parent.join(format!("{stem}-{i}.{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dest.to_path_buf()
+}
+
+/// Atomically write `bytes` to `dest`. Thin re-export of the shared
+/// [`vault::note::write_atomic`] primitive (tmp + fsync + rename + parent
+/// fsync) so borg and cortex converge on ONE atomic-write implementation.
+pub fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
+    vault::note::write_atomic(dest, bytes)
 }
 
 /// Replace the `date:` line in `rendered` with `new_date`. If no `date:` line
@@ -165,6 +170,22 @@ pub fn apply_cortex_fields(rendered: &str, fields: &[(String, String)]) -> Strin
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_publish_path_uniquifies_and_respects_force() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("title.md");
+        // Free path: returned unchanged.
+        assert_eq!(resolve_publish_path(&dest, false), dest);
+        // Existing path, not forcing: uniquified with -2.
+        std::fs::write(&dest, b"x").expect("seed");
+        assert_eq!(resolve_publish_path(&dest, false), dir.path().join("title-2.md"));
+        // Existing path, forcing: overwrite (unchanged).
+        assert_eq!(resolve_publish_path(&dest, true), dest);
+        // Two existing: skip to -3.
+        std::fs::write(dir.path().join("title-2.md"), b"x").expect("seed2");
+        assert_eq!(resolve_publish_path(&dest, false), dir.path().join("title-3.md"));
+    }
 
     #[test]
     fn test_write_atomic_creates_destination() {

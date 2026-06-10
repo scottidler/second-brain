@@ -117,7 +117,7 @@ pub fn apply_tags(vault_root: &Path, notes: &[Note], config: &TagsConfig) -> eyr
             let content = std::fs::read_to_string(&abs_path)?;
 
             if let Some(new_content) = replace_tags_in_frontmatter(&content, &new_tags) {
-                std::fs::write(&abs_path, new_content)?;
+                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                 log::info!("updated tags: {}", note.path.display());
                 fixed_count += 1;
             }

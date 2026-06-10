@@ -250,7 +250,7 @@ fn load_proposals(path: &str) -> Result<ProposalsFile> {
 fn rewrite_note_tags(path: &Path, new_tags: &[String]) -> Result<()> {
     let content = std::fs::read_to_string(path).wrap_err("failed to read note")?;
     if let Some(new_content) = replace_tags_in_frontmatter(&content, new_tags) {
-        std::fs::write(path, new_content).wrap_err("failed to write note")?;
+        vault::note::write_atomic(path, new_content.as_bytes()).wrap_err("failed to write note")?;
     }
     Ok(())
 }

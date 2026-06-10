@@ -274,7 +274,7 @@ pub fn apply_linking(vault_root: &Path, notes: &[Note], config: &LinkingConfig) 
         }
 
         if new_content != content {
-            std::fs::write(&abs_path, &new_content)?;
+            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             log::info!("inserted wikilinks: {}", path.display());
             fixed_count += 1;
         }

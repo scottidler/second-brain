@@ -199,7 +199,7 @@ pub fn apply_duplicates(vault_root: &Path, notes: &[Note], config: &DuplicatesCo
                 .collect();
 
             if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &yaml_fields) {
-                std::fs::write(&abs_path, new_content)?;
+                vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
                 log::info!("wrote duplicate fields: {}", violation.path.display());
                 fixed_count += 1;
             }
@@ -223,7 +223,7 @@ pub fn apply_duplicates(vault_root: &Path, notes: &[Note], config: &DuplicatesCo
         let abs_path = vault_root.join(&note.path);
         let content = std::fs::read_to_string(&abs_path)?;
         if let Some(new_content) = crate::scope::remove_frontmatter_fields(&content, &cortex_keys) {
-            std::fs::write(&abs_path, new_content)?;
+            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             log::info!("cleared stale duplicate fields: {}", note.path.display());
             fixed_count += 1;
         }
