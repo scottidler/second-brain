@@ -666,6 +666,17 @@ impl Default for FrontmatterConfig {
     }
 }
 
+impl FrontmatterConfig {
+    /// Parse the configured `timezone`, falling back to `America/Los_Angeles`.
+    /// The single shared resolver for what used to be seven copy-pasted
+    /// `timezone.parse().unwrap_or(LA)` blocks scattered across the pipeline
+    /// handlers; an unparseable value WARNs (once at config load via
+    /// [`Config::validate`], then silently falls back at the call sites).
+    pub fn timezone_tz(&self) -> chrono_tz::Tz {
+        self.timezone.parse().unwrap_or(chrono_tz::America::Los_Angeles)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct TelegramConfig {
@@ -970,6 +981,14 @@ impl Config {
             eyre::bail!(
                 "signal.host is required when the `signal:` config section is present; \
                  set it to the exact hostname (output of `hostname`) of the machine that should run Signal ingest"
+            );
+        }
+        // Validate the timezone once, at load, so an unparseable value WARNs
+        // here instead of silently falling back to LA at every pipeline site.
+        if self.frontmatter.timezone.parse::<chrono_tz::Tz>().is_err() {
+            log::warn!(
+                "frontmatter.timezone '{}' is not a valid IANA zone; falling back to America/Los_Angeles",
+                self.frontmatter.timezone
             );
         }
         Ok(())

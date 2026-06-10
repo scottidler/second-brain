@@ -251,8 +251,13 @@ pub fn parse_frontmatter(raw: &str) -> Result<(Frontmatter, String)> {
         let body_start = end_pos + 4;
         let body = after_opening[body_start..].trim_start_matches(['\r', '\n']).to_string();
 
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(yaml_str).unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        let value: serde_yaml::Value = match serde_yaml::from_str(yaml_str) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("parse_frontmatter: malformed YAML frontmatter, falling back to empty metadata: {e}");
+                serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+            }
+        };
         let frontmatter = Frontmatter::from_value(value)?;
 
         Ok((frontmatter, body))

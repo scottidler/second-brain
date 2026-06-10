@@ -51,7 +51,7 @@ links:
 #[tokio::test]
 async fn fabric_timeout_falls_back() {
     let fake = FakeFabric::new();
-    fake.set_error(PATTERN, "fabric -p distill-article timed out after 60s");
+    fake.set_timeout(PATTERN);
     let distiller = make_distiller(fake);
     let distilled = distiller
         .distill(DistillInputs {

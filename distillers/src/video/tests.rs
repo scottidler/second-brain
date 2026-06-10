@@ -185,7 +185,7 @@ links: []
 #[tokio::test]
 async fn fabric_timeout_falls_back() {
     let fake = FakeFabric::new();
-    fake.set_error(PATTERN_SHORT, "fabric -p distill-video timed out after 60s");
+    fake.set_timeout(PATTERN_SHORT);
     let distiller = make_distiller(fake);
     let distilled = distiller
         .distill(DistillInputs {

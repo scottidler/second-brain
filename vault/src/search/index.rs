@@ -20,14 +20,11 @@ impl super::SearchIndex {
 
             let path_str = note.path.to_string_lossy();
 
-            let existing_mtime: Option<i64> = self
-                .conn
-                .query_row(
-                    "SELECT modified_at FROM notes WHERE path = ?1",
-                    params![path_str.as_ref()],
-                    |row| row.get(0),
-                )
-                .ok();
+            let existing_mtime: Option<i64> = optional_row(self.conn.query_row(
+                "SELECT modified_at FROM notes WHERE path = ?1",
+                params![path_str.as_ref()],
+                |row| row.get(0),
+            ))?;
 
             if existing_mtime == Some(mtime) {
                 unchanged += 1;
@@ -240,7 +237,7 @@ impl super::SearchIndex {
 
     pub(crate) fn remove_stale_notes(&self, current_paths: &[String]) -> Result<u64> {
         let mut stmt = self.conn.prepare("SELECT path FROM notes")?;
-        let db_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?.filter_map(|r| r.ok()).collect();
+        let db_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?.filter_map(warn_row).collect();
 
         let mut removed = 0u64;
         for path in &db_paths {

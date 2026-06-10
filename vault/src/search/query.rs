@@ -44,7 +44,7 @@ impl super::SearchIndex {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params_refs.as_slice(), NoteRow::from_row)?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
 
         Ok(rows)
@@ -115,7 +115,7 @@ impl super::SearchIndex {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params_refs.as_slice(), NoteRow::from_row)?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
 
         Ok(rows)
@@ -123,16 +123,12 @@ impl super::SearchIndex {
 
     /// Get a single note by path
     pub fn get_note(&self, path: &str) -> Result<Option<NoteRow>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+        optional_row(self.conn.query_row(
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
                  FROM notes WHERE path = ?1",
-                params![path],
-                NoteRow::from_row,
-            )
-            .ok();
-        Ok(row)
+            params![path],
+            NoteRow::from_row,
+        ))
     }
 
     /// Read the Doc 3 signal triple for `path`: `(search_hit_count,
@@ -141,22 +137,18 @@ impl super::SearchIndex {
     /// state without joining on the full row (e.g. tests, future
     /// signal-aware tooling).
     pub fn note_signals(&self, path: &str) -> Result<Option<(i64, Option<i64>, i64)>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT search_hit_count, last_accessed_at, inbound_link_count
+        optional_row(self.conn.query_row(
+            "SELECT search_hit_count, last_accessed_at, inbound_link_count
                  FROM notes WHERE path = ?1",
-                params![path],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .ok();
-        Ok(row)
+            params![path],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        ))
     }
 
     /// Get recent notes across the vault, optionally filtered by domain and/or note type
@@ -216,7 +208,7 @@ impl super::SearchIndex {
         let pattern = format!("%[[{stem}%");
         let rows: Vec<NoteRow> = stmt
             .query_map(params![pattern], NoteRow::from_row)?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .filter(|note| {
                 // Verify with exact wikilink parsing
                 let links = extract_wikilinks(&note.body);
@@ -236,7 +228,7 @@ impl super::SearchIndex {
             "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
              FROM notes ORDER BY date DESC",
         )?;
-        let all_notes: Vec<NoteRow> = stmt.query_map([], NoteRow::from_row)?.filter_map(|r| r.ok()).collect();
+        let all_notes: Vec<NoteRow> = stmt.query_map([], NoteRow::from_row)?.filter_map(warn_row).collect();
 
         // Collect all wikilink targets across the vault
         let mut linked_stems: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -266,39 +258,31 @@ impl super::SearchIndex {
     /// Try to resolve a wikilink target to an actual note path in the index
     pub(crate) fn resolve_wikilink(&self, target: &str) -> Result<Option<String>> {
         // Try exact path match first
-        let row: Option<String> = self
-            .conn
-            .query_row("SELECT path FROM notes WHERE path = ?1", params![target], |row| {
-                row.get(0)
-            })
-            .ok();
+        let row: Option<String> = optional_row(self.conn.query_row(
+            "SELECT path FROM notes WHERE path = ?1",
+            params![target],
+            |row| row.get(0),
+        ))?;
         if row.is_some() {
             return Ok(row);
         }
 
         // Try matching by stem (filename without extension)
         let target_lower = target.to_lowercase();
-        let row: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT path FROM notes WHERE LOWER(path) LIKE ?1 LIMIT 1",
-                params![format!("%/{target_lower}.md")],
-                |row| row.get(0),
-            )
-            .ok();
+        let row: Option<String> = optional_row(self.conn.query_row(
+            "SELECT path FROM notes WHERE LOWER(path) LIKE ?1 LIMIT 1",
+            params![format!("%/{target_lower}.md")],
+            |row| row.get(0),
+        ))?;
         if row.is_some() {
             return Ok(row);
         }
 
         // Try matching just the stem anywhere
-        let row: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT path FROM notes WHERE LOWER(path) LIKE ?1 LIMIT 1",
-                params![format!("%{target_lower}%")],
-                |row| row.get(0),
-            )
-            .ok();
-        Ok(row)
+        optional_row(self.conn.query_row(
+            "SELECT path FROM notes WHERE LOWER(path) LIKE ?1 LIMIT 1",
+            params![format!("%{target_lower}%")],
+            |row| row.get(0),
+        ))
     }
 }

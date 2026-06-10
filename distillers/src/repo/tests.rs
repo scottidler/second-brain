@@ -65,7 +65,7 @@ install: "cargo install --path borg"
 #[tokio::test]
 async fn fabric_timeout_still_attaches_metadata() {
     let fake = FakeFabric::new();
-    fake.set_error(PATTERN, "fabric -p distill-repo timed out after 60s");
+    fake.set_timeout(PATTERN);
     let metadata = sample_metadata();
     let distiller = make_distiller(fake);
     let distilled = distiller

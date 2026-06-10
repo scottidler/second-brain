@@ -50,7 +50,7 @@ links:
 #[tokio::test]
 async fn fabric_timeout_falls_back_and_preserves_transcript() {
     let fake = FakeFabric::new();
-    fake.set_error(PATTERN, "fabric -p distill-image timed out after 60s");
+    fake.set_timeout(PATTERN);
     let distiller = make_distiller(fake);
     let transcript = "## Extracted Text\n\nA blurry receipt for groceries.";
     let distilled = distiller

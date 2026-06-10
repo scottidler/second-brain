@@ -467,11 +467,7 @@ pub(crate) async fn process_image_inner(
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
-    let tz: chrono_tz::Tz = config
-        .frontmatter
-        .timezone
-        .parse()
-        .unwrap_or(chrono_tz::America::Los_Angeles);
+    let tz = config.frontmatter.timezone_tz();
     let now = chrono::Utc::now().with_timezone(&tz);
     let log_date = now.format("%Y-%m-%d").to_string();
     let log_time = now.format("%H:%M").to_string();
@@ -598,8 +594,11 @@ pub(crate) async fn process_image_inner(
     } else {
         format!("Image file: {filename}")
     };
-    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&tag_source, &config.fabric).await {
-        all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+    if use_fabric {
+        match fabric::generate_tags(&tag_source, &config.fabric).await {
+            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
+            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
+        }
     }
     finalize_tags(&mut all_tags, config).await;
 
@@ -738,11 +737,7 @@ pub(crate) async fn process_audio_inner(
     let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
     log::debug!("process_audio_inner[{trace_id}]: heavy permit acquired");
 
-    let tz: chrono_tz::Tz = config
-        .frontmatter
-        .timezone
-        .parse()
-        .unwrap_or(chrono_tz::America::Los_Angeles);
+    let tz = config.frontmatter.timezone_tz();
     let now = chrono::Utc::now().with_timezone(&tz);
     let log_date = now.format("%Y-%m-%d").to_string();
     let log_time = now.format("%H:%M").to_string();
@@ -839,8 +834,11 @@ pub(crate) async fn process_audio_inner(
     } else {
         format!("Audio file: {filename}")
     };
-    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&tag_source, &config.fabric).await {
-        all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+    if use_fabric {
+        match fabric::generate_tags(&tag_source, &config.fabric).await {
+            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
+            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
+        }
     }
     finalize_tags(&mut all_tags, config).await;
 
@@ -966,11 +964,7 @@ pub(crate) async fn process_document_file_inner(
     let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
     log::debug!("process_document_file_inner[{trace_id}]: heavy permit acquired");
 
-    let tz: chrono_tz::Tz = config
-        .frontmatter
-        .timezone
-        .parse()
-        .unwrap_or(chrono_tz::America::Los_Angeles);
+    let tz = config.frontmatter.timezone_tz();
     let now = chrono::Utc::now().with_timezone(&tz);
     let log_date = now.format("%Y-%m-%d").to_string();
     let log_time = now.format("%H:%M").to_string();
@@ -1072,8 +1066,11 @@ pub(crate) async fn process_document_file_inner(
         format!("{} file: {filename}", kind.label())
     };
 
-    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&tag_source, &config.fabric).await {
-        all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+    if use_fabric {
+        match fabric::generate_tags(&tag_source, &config.fabric).await {
+            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
+            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
+        }
     }
     finalize_tags(&mut all_tags, config).await;
 

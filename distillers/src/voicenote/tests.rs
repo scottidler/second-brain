@@ -56,7 +56,7 @@ links: []
 #[tokio::test]
 async fn short_path_fabric_timeout_falls_back_and_preserves_transcript() {
     let fake = FakeFabric::new();
-    fake.set_error(PATTERN_SHORT, "fabric -p distill-voicenote timed out after 60s");
+    fake.set_timeout(PATTERN_SHORT);
     let distiller = make_distiller(fake);
     let transcript = "Just a short note about something.";
     let distilled = distiller

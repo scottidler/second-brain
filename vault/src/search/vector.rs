@@ -15,6 +15,7 @@
 //! max-pool aggregation across summary + transcript-chunk rows; the
 //! storage and API shapes here do not need to change for that work.
 
+use super::{optional_row, warn_row};
 use eyre::Result;
 use rusqlite::{TransactionBehavior, params};
 
@@ -264,16 +265,13 @@ impl SearchIndex {
         let active_model = self.active_embedding_model()?;
 
         // Read the source note's own summary vector.
-        let own: Option<Vec<u8>> = self
-            .conn
-            .query_row(
-                "SELECT embedding FROM note_embeddings
+        let own: Option<Vec<u8>> = optional_row(self.conn.query_row(
+            "SELECT embedding FROM note_embeddings
                  WHERE note_path = ?1 AND kind = ?2 AND model_version = ?3
                  ORDER BY chunk_index LIMIT 1",
-                params![note_path, EmbeddingKind::Summary.as_str(), active_model],
-                |row| row.get(0),
-            )
-            .ok();
+            params![note_path, EmbeddingKind::Summary.as_str(), active_model],
+            |row| row.get(0),
+        ))?;
         let Some(own_bytes) = own else {
             return Ok(vec![]);
         };
@@ -536,7 +534,7 @@ impl SearchIndex {
                     title: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 })
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }
@@ -564,15 +562,11 @@ impl SearchIndex {
     /// to the model (e.g. cortex's title+summary prefix) without reaching into
     /// the private `conn`.
     pub fn embedding_text(&self, note_path: &str, kind: EmbeddingKind) -> Result<Option<String>> {
-        let text: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT text FROM note_embeddings WHERE note_path = ?1 AND kind = ?2 AND chunk_index = 0",
-                params![note_path, kind.as_str()],
-                |row| row.get(0),
-            )
-            .ok();
-        Ok(text)
+        optional_row(self.conn.query_row(
+            "SELECT text FROM note_embeddings WHERE note_path = ?1 AND kind = ?2 AND chunk_index = 0",
+            params![note_path, kind.as_str()],
+            |row| row.get(0),
+        ))
     }
 
     /// Insert a minimal `notes` row for tests in other crates. Only
@@ -624,7 +618,7 @@ impl SearchIndex {
             .query_map(params![EmbeddingKind::Summary.as_str(), active_model], |row| {
                 row.get::<_, String>(0)
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }

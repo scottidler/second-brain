@@ -101,11 +101,7 @@ pub(crate) async fn process_text_inner(
     }
 
     // General text: classify via LLM, then create a note
-    let tz: chrono_tz::Tz = config
-        .frontmatter
-        .timezone
-        .parse()
-        .unwrap_or(chrono_tz::America::Los_Angeles);
+    let tz = config.frontmatter.timezone_tz();
     let now = chrono::Utc::now().with_timezone(&tz);
     let log_date = now.format("%Y-%m-%d").to_string();
     let log_time = now.format("%H:%M").to_string();
@@ -129,8 +125,11 @@ pub(crate) async fn process_text_inner(
 
     // Generate tags via Fabric (driven by the distilled summary so we send
     // less text over the wire than the raw input would).
-    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&distilled.summary, &config.fabric).await {
-        all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+    if use_fabric {
+        match fabric::generate_tags(&distilled.summary, &config.fabric).await {
+            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
+            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
+        }
     }
     finalize_tags(&mut all_tags, config).await;
 
@@ -207,11 +206,7 @@ pub(crate) async fn process_vocab(
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
-    let tz: chrono_tz::Tz = config
-        .frontmatter
-        .timezone
-        .parse()
-        .unwrap_or(chrono_tz::America::Los_Angeles);
+    let tz = config.frontmatter.timezone_tz();
     let now = chrono::Utc::now().with_timezone(&tz);
     let log_date = now.format("%Y-%m-%d").to_string();
     let log_time = now.format("%H:%M").to_string();
@@ -682,11 +677,7 @@ pub(crate) async fn process_code_snippet(
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
-    let tz: chrono_tz::Tz = config
-        .frontmatter
-        .timezone
-        .parse()
-        .unwrap_or(chrono_tz::America::Los_Angeles);
+    let tz = config.frontmatter.timezone_tz();
     let now = chrono::Utc::now().with_timezone(&tz);
     let log_date = now.format("%Y-%m-%d").to_string();
     let log_time = now.format("%H:%M").to_string();
@@ -702,8 +693,11 @@ pub(crate) async fn process_code_snippet(
     }
 
     // Generate additional tags via Fabric
-    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(text, &config.fabric).await {
-        all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+    if use_fabric {
+        match fabric::generate_tags(text, &config.fabric).await {
+            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
+            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
+        }
     }
     finalize_tags(&mut all_tags, config).await;
 

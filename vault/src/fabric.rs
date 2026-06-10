@@ -5,6 +5,31 @@ use std::time::Duration;
 /// Captured output of a finished subprocess: `(exit status, stdout, stderr)`.
 pub type ProcessOutput = (std::process::ExitStatus, Vec<u8>, Vec<u8>);
 
+/// Typed Fabric failure so callers can branch on a timeout WITHOUT matching the
+/// error message string. `run_pattern` surfaces these through `eyre::Report`
+/// (they remain downcastable), so the existing `eyre::Result` signature and all
+/// its callers are unchanged. The `Display` text is preserved verbatim from the
+/// old `bail!` messages for back-compat with anything still reading the string.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FabricError {
+    /// The pattern ran past its wall-clock budget; the child has been killed.
+    #[error("fabric -p {pattern} timed out after {timeout_secs}s")]
+    Timeout { pattern: String, timeout_secs: u64 },
+    /// The pattern exited non-zero; carries a stderr preview.
+    #[error("fabric -p {pattern} failed: {stderr}")]
+    Failed { pattern: String, stderr: String },
+}
+
+impl FabricError {
+    /// True when `err` is (or wraps) a Fabric timeout. Replaces the
+    /// `msg.contains("timed out")` string-matching at the distiller fallback
+    /// sites — a real `SQLITE_BUSY`-style "timed out" substring in some other
+    /// error can no longer masquerade as a fabric timeout.
+    pub fn is_timeout(err: &eyre::Report) -> bool {
+        matches!(err.downcast_ref::<FabricError>(), Some(FabricError::Timeout { .. }))
+    }
+}
+
 /// Map a bare pattern name (e.g. `distill-article`) to its absolute file path
 /// inside `vault::paths::patterns_dir()` (the unified `~/.config/sb/patterns/`).
 /// Tries the literal name first, then with `.md` appended. Path-like inputs
@@ -48,11 +73,19 @@ pub fn run_pattern(
 
     let input_bytes = truncate_input(input, max_chars).into_bytes();
     match wait_with_timeout(child, input_bytes, Duration::from_secs(timeout_secs))? {
-        None => bail!("fabric -p {pattern} timed out after {timeout_secs}s"),
+        None => Err(FabricError::Timeout {
+            pattern: pattern.to_string(),
+            timeout_secs,
+        }
+        .into()),
         Some((status, stdout, stderr)) => {
             if !status.success() {
-                let stderr = String::from_utf8_lossy(&stderr);
-                bail!("fabric -p {pattern} failed: {stderr}");
+                let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+                return Err(FabricError::Failed {
+                    pattern: pattern.to_string(),
+                    stderr,
+                }
+                .into());
             }
             Ok(String::from_utf8_lossy(&stdout).trim().to_string())
         }
@@ -196,6 +229,27 @@ fn truncate_input(input: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fabric_error_timeout_is_downcastable_through_eyre() {
+        let report: eyre::Report = FabricError::Timeout {
+            pattern: "distill-article".to_string(),
+            timeout_secs: 60,
+        }
+        .into();
+        assert!(FabricError::is_timeout(&report));
+        // A Failed (non-timeout) fabric error must NOT read as a timeout.
+        let failed: eyre::Report = FabricError::Failed {
+            pattern: "distill-article".to_string(),
+            stderr: "boom".to_string(),
+        }
+        .into();
+        assert!(!FabricError::is_timeout(&failed));
+        // An unrelated error (even one whose text says "timed out") must not
+        // masquerade as a typed fabric timeout.
+        let unrelated = eyre::eyre!("connection timed out");
+        assert!(!FabricError::is_timeout(&unrelated));
+    }
 
     #[test]
     fn wait_with_timeout_drains_large_stdout_without_deadlock() {

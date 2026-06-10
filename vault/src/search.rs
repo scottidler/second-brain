@@ -63,6 +63,32 @@ fn normalize_date(raw: &str) -> String {
     }
 }
 
+/// Map a single-row query result so a genuine "no rows" outcome becomes
+/// `Ok(None)`, while every other rusqlite error (notably `SQLITE_BUSY` under
+/// writer contention) propagates instead of being silently swallowed as a
+/// missing row. Replaces the `.ok()` conflation that made busy/locked reads
+/// look like absent notes (false missing notes, dropped edges, INSERT-on-PK).
+pub(crate) fn optional_row<T>(result: rusqlite::Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e).wrap_err("sqlite single-row query failed"),
+    }
+}
+
+/// Iterator adapter for `query_map` rows: yields each `Ok` row and emits a WARN
+/// (instead of dropping silently) for any `Err`. Replaces
+/// `filter_map(|r| r.ok())`, which hid per-row decode/IO failures.
+pub(crate) fn warn_row<T>(result: rusqlite::Result<T>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(e) => {
+            log::warn!("dropping unreadable sqlite row: {e}");
+            None
+        }
+    }
+}
+
 /// Extract a string value from the frontmatter extra map (for cortex-* fields)
 fn extract_cortex_string(extra: &HashMap<String, serde_yaml::Value>, key: &str) -> String {
     extra

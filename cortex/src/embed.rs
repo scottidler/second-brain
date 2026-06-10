@@ -293,7 +293,7 @@ pub fn daemon_tick_with_model(vault_root: &Path, config: &Config, model: &dyn Em
 
     let lock = match acquire_lock() {
         Ok(l) => l,
-        Err(e) if e.to_string().contains("embed lock") => {
+        Err(e) if e.downcast_ref::<EmbedLockHeld>().is_some() => {
             log::debug!("cortex::embed::daemon_tick_with_model: lock held; will retry next tick");
             return Ok(EmbedStats::default());
         }
@@ -695,10 +695,30 @@ pub fn acquire_lock() -> Result<EmbedLock> {
         .truncate(false)
         .open(&path)
         .wrap_err_with(|| format!("failed to open embed lock file at {}", path.display()))?;
+    // Surface a TYPED contention error (downcastable through eyre) so callers
+    // detect "lock held" via `EmbedLockHeld` instead of substring-matching the
+    // error message — a brittle test that any reworded wrap_err would break.
     file.try_lock_exclusive()
-        .wrap_err_with(|| format!("embed lock held by another process: {}", path.display()))?;
+        .map_err(|_| EmbedLockHeld { path: path.clone() })?;
     Ok(EmbedLock { _file: file })
 }
+
+/// The embed lock is held by another process/tick. A marker error (not a
+/// message substring) so the daemon's "skip this tick" branch is type-checked.
+/// Hand-rolled rather than pulling `thiserror` into cortex (which is otherwise
+/// eyre-only); it stays downcastable from `eyre::Report`.
+#[derive(Debug)]
+pub struct EmbedLockHeld {
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for EmbedLockHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "embed lock held by another process: {}", self.path.display())
+    }
+}
+
+impl std::error::Error for EmbedLockHeld {}
 
 fn lock_path() -> PathBuf {
     dirs::data_local_dir()

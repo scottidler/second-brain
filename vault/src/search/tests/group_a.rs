@@ -358,6 +358,17 @@ fn test_classify_stats() {
     assert_eq!(stats.pending_review, 1);
     assert_eq!(stats.inbox_count, 1);
     assert_eq!(stats.unclassified, 1);
+
+    // Domain filter is parameterized: a value with SQL-special characters must
+    // be treated as data (matching nothing here), never interpolated as SQL.
+    let filtered = index
+        .classify_stats(Some("tech' OR '1'='1"))
+        .expect("classify_stats with injection-shaped domain must not error");
+    assert_eq!(filtered.total_classified, 0);
+
+    // And a legitimate domain filter still narrows correctly.
+    let tech = index.classify_stats(Some("tech")).expect("classify_stats tech");
+    assert_eq!(tech.total_classified, 1);
 }
 
 #[test]

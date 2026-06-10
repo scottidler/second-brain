@@ -91,6 +91,9 @@ struct FakeInner {
 enum FakeResponse {
     Ok(String),
     Err(String),
+    /// Inject a real `vault::fabric::FabricError::Timeout` so distiller tests
+    /// exercise the typed-timeout detection path (not a string match).
+    Timeout,
 }
 
 impl FakeFabric {
@@ -115,6 +118,14 @@ impl FakeFabric {
             .insert(pattern.into(), FakeResponse::Err(message.into()));
     }
 
+    /// Queue a typed `FabricError::Timeout` for the next call matching
+    /// `pattern`, so a distiller's timeout-fallback path is driven by the same
+    /// typed error production emits (not a fragile message substring).
+    pub fn set_timeout(&self, pattern: impl Into<String>) {
+        let mut inner = self.inner.lock().expect("FakeFabric poisoned");
+        inner.responses.insert(pattern.into(), FakeResponse::Timeout);
+    }
+
     /// Inspect what callers asked for.
     pub fn calls(&self) -> Vec<FabricRequest> {
         let inner = self.inner.lock().expect("FakeFabric poisoned");
@@ -130,6 +141,11 @@ impl FabricCaller for FakeFabric {
         match inner.responses.get(&request.pattern) {
             Some(FakeResponse::Ok(body)) => Ok(body.clone()),
             Some(FakeResponse::Err(msg)) => Err(eyre::eyre!(msg.clone())),
+            Some(FakeResponse::Timeout) => Err(vault::fabric::FabricError::Timeout {
+                pattern: request.pattern.clone(),
+                timeout_secs: request.timeout_secs,
+            }
+            .into()),
             None => Err(eyre::eyre!(
                 "FakeFabric: no canned response for pattern {}",
                 request.pattern

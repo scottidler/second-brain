@@ -83,33 +83,37 @@ impl JudgmentCache {
         Ok(Self { conn })
     }
 
-    /// Fetch a cached judgment, or `None` if absent for this exact key.
+    /// Fetch a cached judgment, or `None` if absent for this exact key. A
+    /// genuine "no rows" outcome is a cache miss; every other rusqlite error
+    /// (locked/busy, decode failure) propagates instead of being silently
+    /// swallowed as a miss — which would re-buy the LLM judgment every run.
     pub fn get(&self, k: &CacheKey) -> Result<Option<CachedJudgment>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT score, truncated FROM eval_judgments
+        let result = self.conn.query_row(
+            "SELECT score, truncated FROM eval_judgments
                  WHERE query_id=?1 AND query_hash=?2 AND note_path=?3
                    AND content_hash=?4 AND judge_model=?5 AND rubric_version=?6",
-                params![
-                    k.query_id,
-                    k.query_hash,
-                    k.note_path,
-                    k.content_hash,
-                    k.judge_model,
-                    RUBRIC_VERSION
-                ],
-                |r| {
-                    let score: i64 = r.get(0)?;
-                    let truncated: i64 = r.get(1)?;
-                    Ok(CachedJudgment {
-                        score: score as u8,
-                        truncated: truncated != 0,
-                    })
-                },
-            )
-            .ok();
-        Ok(row)
+            params![
+                k.query_id,
+                k.query_hash,
+                k.note_path,
+                k.content_hash,
+                k.judge_model,
+                RUBRIC_VERSION
+            ],
+            |r| {
+                let score: i64 = r.get(0)?;
+                let truncated: i64 = r.get(1)?;
+                Ok(CachedJudgment {
+                    score: score as u8,
+                    truncated: truncated != 0,
+                })
+            },
+        );
+        match result {
+            Ok(judgment) => Ok(Some(judgment)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e).context("judgment cache lookup failed"),
+        }
     }
 
     /// Insert or replace a judgment.

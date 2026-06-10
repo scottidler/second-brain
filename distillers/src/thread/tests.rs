@@ -152,7 +152,7 @@ async fn unknown_platform_when_source_url_is_none() {
 #[tokio::test]
 async fn fabric_timeout_falls_back_with_platform_attached() {
     let fake = FakeFabric::new();
-    fake.set_error(PATTERN, "fabric -p distill-thread timed out after 60s");
+    fake.set_timeout(PATTERN);
     let distiller = make_distiller(fake);
     let distilled = distiller
         .distill(DistillInputs {

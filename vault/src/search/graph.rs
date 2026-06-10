@@ -14,7 +14,7 @@
 use eyre::Result;
 use rusqlite::params;
 
-use super::SearchIndex;
+use super::{SearchIndex, optional_row, warn_row};
 
 /// One edge to insert into the `edges` table. `src` and `dst` are
 /// vault-relative note paths. Every edge is *owned by its `src`*: the graph
@@ -196,13 +196,12 @@ impl SearchIndex {
 
     /// Read a `graph_state` value by key (`None` when unset).
     pub fn graph_state_get(&self, key: &str) -> Result<Option<String>> {
-        let v: Option<String> = self
-            .conn
-            .query_row("SELECT value FROM graph_state WHERE key = ?1", params![key], |row| {
-                row.get(0)
-            })
-            .ok();
-        Ok(v)
+        optional_row(
+            self.conn
+                .query_row("SELECT value FROM graph_state WHERE key = ?1", params![key], |row| {
+                    row.get(0)
+                }),
+        )
     }
 
     /// Write a `graph_state` value (upsert).
@@ -251,21 +250,17 @@ impl SearchIndex {
 
     /// Read one entity's `(kind, hub_path, ontotype)` by id (test helper).
     pub fn get_entity(&self, id: &str) -> Result<Option<EntityRow>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT kind, hub_path, ontotype FROM entities WHERE id = ?1",
-                params![id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .ok();
-        Ok(row)
+        optional_row(self.conn.query_row(
+            "SELECT kind, hub_path, ontotype FROM entities WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        ))
     }
 
     /// Insert a batch of edges inside a single bounded transaction.
@@ -338,7 +333,13 @@ impl SearchIndex {
         let mut out = Vec::new();
         for r in rows {
             let (path, tags_json, source, creator, domain, body, modified_at) = r?;
-            let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+            let tags: Vec<String> = match serde_json::from_str(&tags_json) {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!("graph_note_rows: unparseable tags JSON for {path}, treating as no tags: {e}");
+                    Vec::new()
+                }
+            };
             out.push(GraphNoteRow {
                 path,
                 tags,
@@ -365,7 +366,7 @@ impl SearchIndex {
         )?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }
@@ -438,7 +439,7 @@ impl SearchIndex {
                     src_note: r.get(3)?,
                 })
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }
@@ -462,7 +463,7 @@ impl SearchIndex {
         )?;
         let rows = stmt
             .query_map([], |r| r.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }

@@ -8130,6 +8130,7 @@ dependencies = [
  "serde_yaml",
  "shellexpand",
  "tempfile",
+ "thiserror 2.0.18",
  "tokenizers 0.23.1",
  "tokio",
  "walkdir",

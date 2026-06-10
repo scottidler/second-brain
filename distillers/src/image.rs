@@ -82,7 +82,11 @@ impl<F: FabricCaller + Clone> DistillExtractor for ImageDistiller<F> {
             Ok(text) => text,
             Err(err) => {
                 let msg = format!("{err}");
-                let reason = if msg.contains("timed out") { "fabric-timeout" } else { "fabric-error" };
+                let reason = if vault::fabric::FabricError::is_timeout(&err) {
+                    "fabric-timeout"
+                } else {
+                    "fabric-error"
+                };
                 log::warn!("ImageDistiller: fabric call failed: {msg}; using {reason} fallback");
                 let mut fb = fallback_distilled(ID, reason, inputs.transcript, None);
                 fb.transcript = Some(inputs.transcript.to_string());

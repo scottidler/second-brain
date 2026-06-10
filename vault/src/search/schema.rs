@@ -134,7 +134,7 @@ impl super::SearchIndex {
         let mut stmt = self.conn.prepare("PRAGMA table_info(notes)")?;
         let existing_columns: Vec<String> = stmt
             .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
 
         let governance_columns = [
@@ -163,7 +163,7 @@ impl super::SearchIndex {
         let mut stmt = self.conn.prepare("PRAGMA table_info(notes)")?;
         let existing_columns: Vec<String> = stmt
             .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
 
         let distilled_columns = [
@@ -240,7 +240,7 @@ impl super::SearchIndex {
         let mut stmt = self.conn.prepare("PRAGMA table_info(notes_fts)")?;
         let columns: Vec<String> = stmt
             .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(columns.iter().any(|c| c == "claims"))
     }

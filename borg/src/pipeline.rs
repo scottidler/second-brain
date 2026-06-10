@@ -368,11 +368,7 @@ async fn process_url_inner(
     }
 
     // Get timezone for log timestamps
-    let tz: chrono_tz::Tz = config
-        .frontmatter
-        .timezone
-        .parse()
-        .unwrap_or(chrono_tz::America::Los_Angeles);
+    let tz = config.frontmatter.timezone_tz();
     let now = chrono::Utc::now().with_timezone(&tz);
     let log_date = now.format("%Y-%m-%d").to_string();
     let log_time = now.format("%H:%M").to_string();
@@ -628,8 +624,11 @@ async fn process_url_inner(
 
     // Generate tags via Fabric (graceful failure). Now driven by the
     // concise Distilled summary rather than a long prose body.
-    if use_fabric && let Ok(fabric_tags) = fabric::generate_tags(&distilled.summary, &config.fabric).await {
-        all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+    if use_fabric {
+        match fabric::generate_tags(&distilled.summary, &config.fabric).await {
+            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
+            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
+        }
     }
     finalize_tags(&mut all_tags, config).await;
 

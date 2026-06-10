@@ -35,7 +35,7 @@ impl super::SearchIndex {
                     row.get::<_, i64>(2)?,
                 ))
             })?;
-            mapped.filter_map(|r| r.ok()).collect()
+            mapped.filter_map(warn_row).collect()
         };
 
         let mut counts: HashMap<String, u64> = HashMap::new();
@@ -162,7 +162,7 @@ impl super::SearchIndex {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }
@@ -218,7 +218,7 @@ impl super::SearchIndex {
             stmt.query_map(params![domain], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect()
         };
 
@@ -299,7 +299,7 @@ impl super::SearchIndex {
 
         let rows: Vec<NoteRow> = stmt
             .query_map(params_refs.as_slice(), NoteRow::from_row)?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .filter(|note| {
                 if let Ok(tags) = serde_json::from_str::<Vec<String>>(&note.tags) {
                     tags.iter().any(|t| {
@@ -388,7 +388,7 @@ impl super::SearchIndex {
         )?;
         let rows = stmt
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }
@@ -417,7 +417,7 @@ impl super::SearchIndex {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params_refs.as_slice(), NoteRow::from_row)?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }
@@ -464,7 +464,7 @@ impl super::SearchIndex {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params_refs.as_slice(), NoteRow::from_row)?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }
@@ -476,7 +476,7 @@ impl super::SearchIndex {
             "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
                  FROM notes WHERE path LIKE 'inbox/%' ORDER BY date DESC LIMIT {limit}"
         ))?;
-        let rows = stmt.query_map([], NoteRow::from_row)?.filter_map(|r| r.ok()).collect();
+        let rows = stmt.query_map([], NoteRow::from_row)?.filter_map(warn_row).collect();
         Ok(rows)
     }
 
@@ -487,7 +487,7 @@ impl super::SearchIndex {
             "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
                  FROM notes WHERE needs_review = 1 ORDER BY date DESC LIMIT {limit}"
         ))?;
-        let rows = stmt.query_map([], NoteRow::from_row)?.filter_map(|r| r.ok()).collect();
+        let rows = stmt.query_map([], NoteRow::from_row)?.filter_map(warn_row).collect();
         Ok(rows)
     }
 
@@ -498,7 +498,7 @@ impl super::SearchIndex {
         )?;
         let rows = stmt
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }
@@ -512,7 +512,7 @@ impl super::SearchIndex {
         ))?;
         let rows = stmt
             .query_map(params![quality.to_lowercase()], NoteRow::from_row)?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }
@@ -573,30 +573,36 @@ impl super::SearchIndex {
 
     /// Get classification pipeline statistics
     pub fn classify_stats(&self, domain: Option<&str>) -> Result<ClassifyStats> {
-        let domain_filter = domain.map(|d| format!(" AND domain = '{d}'")).unwrap_or_default();
-
+        // Parameterize the domain filter instead of interpolating it raw (this
+        // was the only unparameterized caller-supplied value in the crate). The
+        // `(?1 IS NULL OR domain = ?1)` idiom binds `Option<&str>` directly:
+        // `None` -> NULL -> the predicate is always true (unfiltered).
         let total_classified: u64 = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM notes WHERE classified = 1{domain_filter}"),
-            [],
+            "SELECT COUNT(*) FROM notes WHERE classified = 1 AND (?1 IS NULL OR domain = ?1)",
+            params![domain],
             |row| row.get(0),
         )?;
 
         let by_method = {
-            let mut stmt = self.conn.prepare(&format!(
-                "SELECT classified_by, COUNT(*) FROM notes WHERE classified = 1 AND classified_by != ''{domain_filter} GROUP BY classified_by ORDER BY COUNT(*) DESC"
-            ))?;
-            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
-                .filter_map(|r| r.ok())
-                .collect()
+            let mut stmt = self.conn.prepare(
+                "SELECT classified_by, COUNT(*) FROM notes WHERE classified = 1 AND classified_by != '' AND (?1 IS NULL OR domain = ?1) GROUP BY classified_by ORDER BY COUNT(*) DESC"
+            )?;
+            stmt.query_map(params![domain], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .filter_map(warn_row)
+            .collect()
         };
 
         let by_confidence = {
-            let mut stmt = self.conn.prepare(&format!(
-                "SELECT confidence, COUNT(*) FROM notes WHERE classified = 1 AND confidence != ''{domain_filter} GROUP BY confidence ORDER BY COUNT(*) DESC"
-            ))?;
-            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
-                .filter_map(|r| r.ok())
-                .collect()
+            let mut stmt = self.conn.prepare(
+                "SELECT confidence, COUNT(*) FROM notes WHERE classified = 1 AND confidence != '' AND (?1 IS NULL OR domain = ?1) GROUP BY confidence ORDER BY COUNT(*) DESC"
+            )?;
+            stmt.query_map(params![domain], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .filter_map(warn_row)
+            .collect()
         };
 
         let by_domain = {
@@ -604,13 +610,13 @@ impl super::SearchIndex {
                 "SELECT domain, COUNT(*) FROM notes WHERE classified = 1 AND domain != '' GROUP BY domain ORDER BY COUNT(*) DESC",
             )?;
             stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
-                .filter_map(|r| r.ok())
+                .filter_map(warn_row)
                 .collect()
         };
 
         let pending_review: u64 = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM notes WHERE needs_review = 1{domain_filter}"),
-            [],
+            "SELECT COUNT(*) FROM notes WHERE needs_review = 1 AND (?1 IS NULL OR domain = ?1)",
+            params![domain],
             |row| row.get(0),
         )?;
 

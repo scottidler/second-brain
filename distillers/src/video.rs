@@ -310,7 +310,7 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
             Ok(text) => Ok(text),
             Err(err) => {
                 let msg = format!("{err}");
-                let reason = if msg.contains("timed out") {
+                let reason = if vault::fabric::FabricError::is_timeout(&err) {
                     "fabric-timeout".to_string()
                 } else {
                     "fabric-error".to_string()

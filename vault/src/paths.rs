@@ -199,7 +199,16 @@ impl CliConfig {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        serde_yaml::from_str(&text).unwrap_or_default()
+        match serde_yaml::from_str(&text) {
+            Ok(config) => config,
+            Err(e) => {
+                log::warn!(
+                    "CliConfig::load: {} failed to parse, using defaults: {e}",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
     }
 }
 

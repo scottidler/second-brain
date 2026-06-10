@@ -360,11 +360,7 @@ fn load_received_at_map(tz: Tz) -> Result<HashMap<String, String>> {
 
 pub fn ingested(config: &Config, dry_run: bool) -> Result<BackfillReport> {
     let vault_root = config.vault_root()?;
-    let tz: Tz = config
-        .frontmatter
-        .timezone
-        .parse()
-        .unwrap_or(chrono_tz::America::Los_Angeles);
+    let tz: Tz = config.frontmatter.timezone_tz();
     // Receipts only go back to the staged-pipeline era; notes older than that
     // (or ingested before receipts existed) simply fall back to date-midnight.
     let receipts = load_received_at_map(tz).unwrap_or_else(|e| {

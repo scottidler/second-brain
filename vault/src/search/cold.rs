@@ -44,7 +44,7 @@ impl super::SearchIndex {
                     date: row.get::<_, String>(3).unwrap_or_default(),
                 })
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(warn_row)
             .collect();
         Ok(rows)
     }

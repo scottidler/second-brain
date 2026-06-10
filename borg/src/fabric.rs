@@ -122,30 +122,59 @@ fn fetch_article_blocking(url: &str, binary: &str, fabric_timeout: u64, markitdo
         .spawn()
         .context("Failed to spawn fabric")?;
 
-    if wait_with_timeout(&mut child, fabric_timeout, "fabric -u").is_ok()
-        && let Ok(output) = child.wait_with_output()
-        && output.status.success()
-    {
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !text.is_empty() {
-            return Ok(text);
+    if wait_with_timeout(&mut child, fabric_timeout, "fabric -u").is_ok() {
+        match child.wait_with_output() {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if text.is_empty() {
+                    log::warn!("fabric -u produced empty output for {url}");
+                } else {
+                    return Ok(text);
+                }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!(
+                    "fabric -u exited {} for {url}; stderr: {}",
+                    output.status,
+                    stderr.trim().chars().take(500).collect::<String>()
+                );
+            }
+            Err(e) => log::warn!("fabric -u wait_with_output failed for {url}: {e}"),
         }
     }
 
     log::debug!("fabric -u failed, trying markitdown for {url} (timeout={markitdown_timeout}s)");
-    if let Ok(mut markitdown) = Command::new("markitdown")
+    match Command::new("markitdown")
         .arg(url)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        && wait_with_timeout(&mut markitdown, markitdown_timeout, "markitdown").is_ok()
-        && let Ok(output) = markitdown.wait_with_output()
-        && output.status.success()
     {
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !text.is_empty() {
-            return Ok(text);
+        Ok(mut markitdown) => {
+            if wait_with_timeout(&mut markitdown, markitdown_timeout, "markitdown").is_ok() {
+                match markitdown.wait_with_output() {
+                    Ok(output) if output.status.success() => {
+                        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if text.is_empty() {
+                            log::warn!("markitdown produced empty output for {url}");
+                        } else {
+                            return Ok(text);
+                        }
+                    }
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        log::warn!(
+                            "markitdown exited {} for {url}; stderr: {}",
+                            output.status,
+                            stderr.trim().chars().take(500).collect::<String>()
+                        );
+                    }
+                    Err(e) => log::warn!("markitdown wait_with_output failed for {url}: {e}"),
+                }
+            }
         }
+        Err(e) => log::warn!("failed to spawn markitdown for {url}: {e}"),
     }
 
     // Last resort: jina.rs (caller handles this)
