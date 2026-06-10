@@ -116,13 +116,30 @@ impl<F: FabricCaller + Clone> DistillExtractor for VoiceNoteDistiller<F> {
 impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
     /// Single-call path for transcripts under the threshold.
     async fn distill_short(&self, transcript: &str) -> Result<Distilled> {
+        // Short-circuit an empty transcript before burning a Fabric call (the
+        // long path already guards via `chunks.is_empty()`).
+        if transcript.trim().is_empty() {
+            return Ok(fallback_distilled(
+                ID,
+                "empty-transcript",
+                transcript,
+                None,
+                &self.config.model,
+            ));
+        }
         let raw = match self.call_fabric(PATTERN_SHORT, transcript).await {
             Ok(r) => r,
-            Err((reason, _)) => return Ok(fallback_distilled(ID, &reason, transcript, None)),
+            Err((reason, _)) => return Ok(fallback_distilled(ID, &reason, transcript, None, &self.config.model)),
         };
         match parse_voicenote_yaml(&raw) {
             Ok(parsed) => Ok(build_distilled(parsed, transcript, &raw, &self.config.model)),
-            Err(_) => Ok(fallback_distilled(ID, "yaml-parse-error", transcript, Some(&raw))),
+            Err(_) => Ok(fallback_distilled(
+                ID,
+                "yaml-parse-error",
+                transcript,
+                Some(&raw),
+                &self.config.model,
+            )),
         }
     }
 
@@ -136,7 +153,13 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
             CHUNK_TOKEN_TARGET
         );
         if chunks.is_empty() {
-            return Ok(fallback_distilled(ID, "empty-transcript", transcript, None));
+            return Ok(fallback_distilled(
+                ID,
+                "empty-transcript",
+                transcript,
+                None,
+                &self.config.model,
+            ));
         }
 
         let concurrency = self.config.chunk_concurrency.max(1);
@@ -167,6 +190,7 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
         let mut chunk_summaries: Vec<String> = Vec::with_capacity(chunk_results.len());
         let mut combined_claims: Vec<Claim> = Vec::new();
         let mut combined_links: Vec<Link> = Vec::new();
+        let mut combined_tags: Vec<String> = Vec::new();
         let mut any_chunk_failed = false;
         let mut output_chars: usize = 0;
 
@@ -216,11 +240,30 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
                     label: l.label.filter(|s| !s.is_empty()),
                 })
             }));
+            // Union chunk tags (was dropped entirely). Deduped below;
+            // enforce_bounds caps at 7.
+            combined_tags.extend(
+                parsed
+                    .tags
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty()),
+            );
         }
+
+        let mut seen_tags = std::collections::HashSet::new();
+        combined_tags.retain(|t| seen_tags.insert(t.clone()));
 
         if chunk_summaries.is_empty() {
             log::warn!("VoiceNoteDistiller: all chunks failed; using map-reduce fallback");
-            return Ok(fallback_distilled(ID, "chunk-failures", transcript, None));
+            return Ok(fallback_distilled(
+                ID,
+                "chunk-failures",
+                transcript,
+                None,
+                &self.config.model,
+            ));
         }
 
         // Reduce step.
@@ -254,7 +297,7 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
         Ok(Distilled {
             summary,
             claims: combined_claims,
-            tags: Vec::new(),
+            tags: combined_tags,
             links: combined_links,
             kind_specific: None,
             meta: DistilledMeta {
@@ -303,7 +346,7 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
 fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str) -> Distilled {
     let summary = parsed.summary.unwrap_or_default().trim().to_string();
     if summary.is_empty() {
-        return fallback_distilled(ID, "missing-summary", transcript, Some(raw));
+        return fallback_distilled(ID, "missing-summary", transcript, Some(raw), model);
     }
     let claims: Vec<Claim> = parsed
         .claims

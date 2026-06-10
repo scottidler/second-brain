@@ -68,7 +68,9 @@ async fn fabric_timeout_falls_back() {
         distilled.meta.validation.fallback_reason.as_deref(),
         Some("fabric-timeout")
     );
-    assert_eq!(distilled.meta.model, "fabric-timeout");
+    // meta.model carries the real model (empty config -> "default"), NOT the
+    // failure reason - that lives in validation.fallback_reason above.
+    assert_eq!(distilled.meta.model, "default");
     assert!(distilled.summary.starts_with("[fabric-timeout]"));
     assert!(distilled.claims.is_empty());
 }

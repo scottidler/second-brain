@@ -84,6 +84,7 @@ pub fn fallback_distilled(
     reason: &str,
     transcript_snippet: &str,
     raw_output: Option<&str>,
+    model: &str,
 ) -> Distilled {
     let snippet: String = transcript_snippet.chars().take(280).collect();
     let summary = format!("[{reason}]\n\n{snippet}");
@@ -100,7 +101,9 @@ pub fn fallback_distilled(
         kind_specific: None,
         meta: DistilledMeta {
             extractor: extractor.to_string(),
-            model: reason.to_string(),
+            // The real model, NOT the failure reason (which lives in
+            // validation.fallback_reason below). Empty → "default".
+            model: if model.is_empty() { "default".to_string() } else { model.to_string() },
             input_tokens: 0,
             output_tokens: 0,
             produced_at: Utc::now().to_rfc3339(),

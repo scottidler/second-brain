@@ -362,3 +362,38 @@ fn render_omits_transcript_section_when_empty_string() {
     let body = render(&distilled).body_markdown;
     assert!(!body.contains("## Transcript"));
 }
+
+#[test]
+fn frontmatter_additions_escape_special_chars_on_serialize() {
+    // A frontmatter value harvested from upstream metadata can carry YAML
+    // structural characters (`:` `\n` `\`). render emits typed
+    // serde_yaml::Value::String values, so serializing the additions map must
+    // escape them and round-trip back to the exact same string - never break
+    // the published frontmatter or silently mangle the value.
+    let nasty = "Bad: value\nwith newline\\and backslash: 12:00";
+    let distilled = Distilled {
+        summary: "x".to_string(),
+        claims: Vec::new(),
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: Some(KindPayload::Video(VideoPayload {
+            channel: Some(nasty.to_string()),
+            duration_seconds: None,
+            published_at: None,
+            repos: Vec::new(),
+        })),
+        meta: base_meta("distill-video-v1"),
+        transcript: None,
+    };
+
+    let fm = render(&distilled).frontmatter_additions;
+    // Serialize the additions map exactly as the publish layer would, then
+    // re-parse and confirm the value survives byte-for-byte.
+    let yaml = serde_yaml::to_string(&fm).expect("serialize frontmatter additions");
+    let reparsed: std::collections::BTreeMap<String, serde_yaml::Value> =
+        serde_yaml::from_str(&yaml).expect("re-parse serialized frontmatter");
+    assert_eq!(
+        reparsed.get("cortex-video-channel"),
+        Some(&serde_yaml::Value::String(nasty.to_string()))
+    );
+}

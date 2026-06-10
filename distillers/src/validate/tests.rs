@@ -124,9 +124,12 @@ fn fallback_distilled_records_reason_and_raw_output() {
         "fabric-timeout",
         "snippet of the transcript",
         Some("raw fabric stdout"),
+        "claude-sonnet-test",
     );
     assert!(fb.summary.starts_with("[fabric-timeout]"));
-    assert_eq!(fb.meta.model, "fabric-timeout");
+    // model is the REAL model, NOT the failure reason (which lives in
+    // validation.fallback_reason).
+    assert_eq!(fb.meta.model, "claude-sonnet-test");
     assert_eq!(fb.meta.validation.fallback_reason.as_deref(), Some("fabric-timeout"));
     assert_eq!(fb.meta.validation.raw_output.as_deref(), Some("raw fabric stdout"));
     assert!(fb.claims.is_empty());
@@ -142,7 +145,7 @@ fn fallback_distilled_preserves_transcript_so_no_user_content_is_lost() {
     // backfill (2 untracked github notes overwritten with just a 280-char
     // snippet and no recovery path).
     let original = "The full legacy note body with multiple paragraphs.\n\nSecond paragraph contains more detail that must survive on yaml-parse-error.";
-    let fb = fallback_distilled("distill-article-v1", "yaml-parse-error", original, None);
+    let fb = fallback_distilled("distill-article-v1", "yaml-parse-error", original, None, "model-x");
     assert_eq!(fb.transcript.as_deref(), Some(original));
     // Summary still leads with the sentinel + 280-char snippet for triage.
     assert!(fb.summary.starts_with("[yaml-parse-error]"));
@@ -152,6 +155,6 @@ fn fallback_distilled_preserves_transcript_so_no_user_content_is_lost() {
 fn fallback_distilled_empty_transcript_stays_none() {
     // Empty input -> no transcript to preserve; render skips the `## Transcript`
     // section entirely. Prevents a stray empty-headed block on truly empty inputs.
-    let fb = fallback_distilled("distill-article-v1", "empty-transcript", "", None);
+    let fb = fallback_distilled("distill-article-v1", "empty-transcript", "", None, "model-x");
     assert_eq!(fb.transcript, None);
 }

@@ -48,6 +48,32 @@ links:
 }
 
 #[tokio::test]
+async fn fenced_yaml_response_is_stripped_and_parsed() {
+    // Consumer-level fence-strip regression: the LLM wraps its YAML in a
+    // ```yaml fence despite the prompt. The shared `strip_fences` (Phase 9
+    // consolidation) must run inside the image distiller so the body still
+    // parses cleanly rather than landing in a yaml-parse-error fallback.
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN,
+        "```yaml\nsummary: \"A fenced screenshot summary.\"\nclaims: []\ntags: []\nlinks: []\n```",
+    );
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: "## Extracted Text\n\nSome text.",
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+        })
+        .await
+        .expect("distill");
+    assert!(distilled.meta.validation.fallback_reason.is_none());
+    assert_eq!(distilled.summary, "A fenced screenshot summary.");
+}
+
+#[tokio::test]
 async fn fabric_timeout_falls_back_and_preserves_transcript() {
     let fake = FakeFabric::new();
     fake.set_timeout(PATTERN);

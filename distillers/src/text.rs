@@ -45,6 +45,20 @@ pub fn demote_headings(text: &str, levels: usize) -> String {
     out
 }
 
+/// Collapse internal line breaks (and the whitespace around them) into single
+/// spaces so multi-line text renders as a single markdown list item. A claim
+/// whose text spans lines would otherwise break the `- ` bullet structure when
+/// rendered under `## Claims`. Empty lines are dropped; the result is trimmed.
+///
+/// Example: `flatten_lines("first\n\nsecond")` returns `"first second"`.
+pub fn flatten_lines(text: &str) -> String {
+    text.split('\n')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// True when the trimmed line matches `^#+ ` (one or more hashes followed
 /// by a space and at least one more character). Excludes bare `###`,
 /// `#nospace`, and lines where the first non-space character is not `#`.

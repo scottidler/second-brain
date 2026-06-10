@@ -179,6 +179,93 @@ async fn long_path_all_chunks_fail_falls_back_with_transcript() {
     );
 }
 
+#[tokio::test]
+async fn long_path_partial_chunk_failure_keeps_surviving_claims() {
+    // One chunk call fails (sequence), the rest distill cleanly (steady). The
+    // result keeps the surviving claims and flags `partial-chunk-failure`.
+    let long_transcript = "This is a single sentence about an idea. ".repeat(1500);
+    assert!(approx_tokens(long_transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk discusses an idea.\"\nclaims:\n  - text: \"An idea is worth pursuing.\"\n    anchor: null\ntags: []\nlinks: []\n",
+    );
+    // First chunk call (whichever lands first) fails; the rest fall through to
+    // the steady Ok above.
+    fake.set_response_sequence(PATTERN_CHUNK, vec![Err("chunk boom".to_string())]);
+    fake.set_response(PATTERN_REDUCE, "summary: \"Overall the speaker outlined an idea.\"\n");
+    let distiller = short_config_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: &long_transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+        })
+        .await
+        .expect("distill");
+
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("partial-chunk-failure")
+    );
+    // Surviving chunks still contributed claims; the failure didn't nuke them.
+    assert!(!distilled.claims.is_empty());
+    assert!(distilled.summary.starts_with("Overall the speaker"));
+    assert_eq!(
+        distilled.transcript.as_deref().map(|s| s.len()),
+        Some(long_transcript.len())
+    );
+}
+
+#[tokio::test]
+async fn long_path_reduce_failure_falls_back_to_concatenated_summaries() {
+    // All chunks succeed but the reduce call fails; the final summary is the
+    // concatenation of per-chunk summaries (no fallback_reason, since no chunk
+    // failed).
+    let long_transcript = "This is a single sentence about an idea. ".repeat(1500);
+    assert!(approx_tokens(long_transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary text.\"\nclaims: []\ntags: []\nlinks: []\n",
+    );
+    fake.set_error(PATTERN_REDUCE, "reduce boom");
+    let distiller = short_config_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: &long_transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+        })
+        .await
+        .expect("distill");
+
+    assert_eq!(distilled.meta.validation.fallback_reason, None);
+    assert!(
+        distilled.summary.contains("Chunk summary text."),
+        "summary should fall back to concatenated chunk summaries: {:?}",
+        distilled.summary
+    );
+}
+
+#[test]
+fn chunk_transcript_handles_multibyte_without_panic() {
+    // Regression: find_boundary's fallback returns a raw byte index that can
+    // split a multi-byte codepoint; chunk_transcript floors to a char boundary
+    // before slicing. Each Japanese char is 3 bytes, so cuts land mid-codepoint
+    // without the fix.
+    let transcript = "日本語のテストです。これは文です。".repeat(5000);
+    let chunks = chunk_transcript(&transcript, CHUNK_TOKEN_TARGET);
+    assert!(chunks.len() > 1, "expected multiple chunks for long multibyte input");
+    assert_eq!(chunks.join("").len(), transcript.len());
+}
+
 #[test]
 fn chunk_transcript_splits_on_sentence_boundary() {
     let transcript = "First sentence. Second sentence. Third sentence. ".repeat(2000);

@@ -349,3 +349,6 @@ pub async fn generate_tags(content: &str, config: &FabricConfig) -> Result<Vec<S
 pub fn is_available(config: &FabricConfig) -> bool {
     vault::fabric::is_available(&config.binary)
 }
+
+#[cfg(test)]
+mod tests;

@@ -102,7 +102,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
                 };
                 log::warn!("RepoDistiller: fabric call failed: {msg}; using {reason} fallback");
                 return Ok(attach_metadata(
-                    fallback_distilled(ID, reason, inputs.transcript, None),
+                    fallback_distilled(ID, reason, inputs.transcript, None, &self.config.model),
                     inputs.repo_metadata,
                     None,
                 ));
@@ -115,7 +115,13 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
             Err(err) => {
                 log::warn!("RepoDistiller: yaml parse failed: {err}; using fallback");
                 return Ok(attach_metadata(
-                    fallback_distilled(ID, "yaml-parse-error", inputs.transcript, Some(yaml_body)),
+                    fallback_distilled(
+                        ID,
+                        "yaml-parse-error",
+                        inputs.transcript,
+                        Some(yaml_body),
+                        &self.config.model,
+                    ),
                     inputs.repo_metadata,
                     None,
                 ));
@@ -126,7 +132,13 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
         if summary.is_empty() {
             log::warn!("RepoDistiller: empty summary; using missing-summary fallback");
             return Ok(attach_metadata(
-                fallback_distilled(ID, "missing-summary", inputs.transcript, Some(yaml_body)),
+                fallback_distilled(
+                    ID,
+                    "missing-summary",
+                    inputs.transcript,
+                    Some(yaml_body),
+                    &self.config.model,
+                ),
                 inputs.repo_metadata,
                 None,
             ));

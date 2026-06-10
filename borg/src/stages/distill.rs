@@ -219,10 +219,9 @@ pub const DISTILLED_FILENAME: &str = "distilled.yml";
 /// Shared core for the simple single-call publish distillers (article, image,
 /// voicenote, idea, vocab): dispatch the kind, fall back on error, log the
 /// outcome, persist `distilled.yml`. The per-kind wrappers below supply the
-/// label / kind / fallback-id and whether the fallback should re-assert the
-/// transcript (article does not; the transcript-bearing kinds do). The
-/// map-reduce / payload-building distillers (video, repo, thread) keep bespoke
-/// bodies because they do more than this core.
+/// label / kind / fallback-id. The map-reduce / payload-building distillers
+/// (video, repo, thread) keep bespoke bodies because they do more than this
+/// core.
 #[allow(clippy::too_many_arguments)]
 async fn run_distiller(
     fabric: &FabricConfig,
@@ -234,7 +233,6 @@ async fn run_distiller(
     transcript: &str,
     source_url: Option<&str>,
     title: Option<&str>,
-    preserve_transcript_on_fallback: bool,
 ) -> Distilled {
     log::debug!(
         "{label}: trace={trace_id} kind={kind} transcript_len={} title_hint={title:?}",
@@ -246,11 +244,9 @@ async fn run_distiller(
         Ok(d) => d,
         Err(e) => {
             log::warn!("[{trace_id}] {label}: dispatch error: {e:#}; using fallback");
-            let mut fb = distillers::fallback_distilled(fallback_id, "dispatch-error", transcript, None);
-            if preserve_transcript_on_fallback {
-                fb.transcript = Some(transcript.to_string());
-            }
-            fb
+            // fallback_distilled already preserves the full transcript when
+            // non-empty, so the transcript-bearing kinds need no re-assert.
+            distillers::fallback_distilled(fallback_id, "dispatch-error", transcript, None, &fabric.model)
         }
     };
     let elapsed_ms = started.elapsed().as_millis();
@@ -293,7 +289,6 @@ pub async fn distill_for_publish_article(
         article_md,
         Some(url),
         None,
-        false,
     )
     .await
 }
@@ -320,7 +315,6 @@ pub async fn distill_for_publish_voicenote(
         transcript,
         None,
         title_hint,
-        true,
     )
     .await
 }
@@ -346,7 +340,6 @@ pub async fn distill_for_publish_image(
         transcript,
         None,
         title_hint,
-        true,
     )
     .await
 }
@@ -375,7 +368,6 @@ pub async fn distill_for_publish_idea(
         transcript,
         None,
         title_hint,
-        true,
     )
     .await
 }
@@ -405,7 +397,6 @@ pub async fn distill_for_publish_vocab(
         transcript,
         None,
         title_hint,
-        true,
     )
     .await
 }
@@ -425,7 +416,13 @@ pub async fn distill_for_publish_repo(
     log::debug!("distill_for_publish_repo: trace={trace_id} url={url}");
     let Some((owner, repo)) = crate::github::parse_repo_url(url) else {
         log::warn!("[{trace_id}] distill_for_publish_repo: url is not a github repo root: {url}; using fallback");
-        return distillers::fallback_distilled("distill-repo-v1", "not-a-repo-root", article_md_fallback, None);
+        return distillers::fallback_distilled(
+            "distill-repo-v1",
+            "not-a-repo-root",
+            article_md_fallback,
+            None,
+            &fabric.model,
+        );
     };
     let started = std::time::Instant::now();
     let fetch_result: RepoFetch = match GitHubFetcher::new().fetch_repo(&owner, &repo).await {
@@ -434,7 +431,13 @@ pub async fn distill_for_publish_repo(
             log::warn!(
                 "[{trace_id}] distill_for_publish_repo: github fetch failed: {e:#}; falling back to article_md path"
             );
-            return distillers::fallback_distilled("distill-repo-v1", "github-fetch-error", article_md_fallback, None);
+            return distillers::fallback_distilled(
+                "distill-repo-v1",
+                "github-fetch-error",
+                article_md_fallback,
+                None,
+                &fabric.model,
+            );
         }
     };
     if let Err(e) = persist_github_stage_0_1_if_staging(staging, trace_id, url, &fetch_result) {
@@ -455,7 +458,13 @@ pub async fn distill_for_publish_repo(
         Ok(d) => d,
         Err(e) => {
             log::warn!("[{trace_id}] distill_for_publish_repo: dispatch error: {e:#}; using fallback");
-            distillers::fallback_distilled("distill-repo-v1", "dispatch-error", &fetch_result.transcript, None)
+            distillers::fallback_distilled(
+                "distill-repo-v1",
+                "dispatch-error",
+                &fetch_result.transcript,
+                None,
+                &fabric.model,
+            )
         }
     };
     let elapsed_ms = started.elapsed().as_millis();
@@ -513,6 +522,7 @@ pub async fn distill_for_publish_video(
                 "yt-dlp-metadata-error",
                 transcript_fallback,
                 None,
+                &fabric.model,
             );
         }
     };
@@ -562,7 +572,7 @@ pub async fn distill_for_publish_video(
         Ok(d) => d,
         Err(e) => {
             log::warn!("[{trace_id}] distill_for_publish_video: dispatch error: {e:#}; using fallback");
-            distillers::fallback_distilled("distill-video-v1", "dispatch-error", &transcript, None)
+            distillers::fallback_distilled("distill-video-v1", "dispatch-error", &transcript, None, &fabric.model)
         }
     };
     let elapsed_ms = started.elapsed().as_millis();
@@ -622,7 +632,7 @@ pub async fn distill_for_publish_thread(
         Ok(d) => d,
         Err(e) => {
             log::warn!("[{trace_id}] distill_for_publish_thread: dispatch error: {e:#}; using fallback");
-            distillers::fallback_distilled("distill-thread-v1", "dispatch-error", thread_md, None)
+            distillers::fallback_distilled("distill-thread-v1", "dispatch-error", thread_md, None, &fabric.model)
         }
     };
     let elapsed_ms = started.elapsed().as_millis();

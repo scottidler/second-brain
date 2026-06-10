@@ -87,7 +87,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for ThreadDistiller<F> {
                 };
                 log::warn!("ThreadDistiller: fabric call failed: {msg}; using {reason} fallback");
                 return Ok(attach_platform(
-                    fallback_distilled(ID, reason, inputs.transcript, None),
+                    fallback_distilled(ID, reason, inputs.transcript, None, &self.config.model),
                     platform,
                     None,
                     0,
@@ -101,7 +101,13 @@ impl<F: FabricCaller + Clone> DistillExtractor for ThreadDistiller<F> {
             Err(err) => {
                 log::warn!("ThreadDistiller: yaml parse failed: {err}; using fallback");
                 return Ok(attach_platform(
-                    fallback_distilled(ID, "yaml-parse-error", inputs.transcript, Some(yaml_body)),
+                    fallback_distilled(
+                        ID,
+                        "yaml-parse-error",
+                        inputs.transcript,
+                        Some(yaml_body),
+                        &self.config.model,
+                    ),
                     platform,
                     None,
                     0,
@@ -113,7 +119,13 @@ impl<F: FabricCaller + Clone> DistillExtractor for ThreadDistiller<F> {
         if summary.is_empty() {
             log::warn!("ThreadDistiller: empty summary; using missing-summary fallback");
             return Ok(attach_platform(
-                fallback_distilled(ID, "missing-summary", inputs.transcript, Some(yaml_body)),
+                fallback_distilled(
+                    ID,
+                    "missing-summary",
+                    inputs.transcript,
+                    Some(yaml_body),
+                    &self.config.model,
+                ),
                 platform,
                 None,
                 0,

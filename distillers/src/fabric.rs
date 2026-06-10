@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use eyre::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 /// All the knobs a single Fabric invocation needs. Kept narrow so tests can
@@ -84,6 +84,10 @@ pub struct FakeFabric {
 #[derive(Debug, Default)]
 struct FakeInner {
     responses: HashMap<String, FakeResponse>,
+    /// Per-pattern FIFO queue of outcomes consumed before the steady
+    /// `responses` entry. Lets a test make some calls to the same pattern fail
+    /// and others succeed (e.g. one chunk fails, the rest distill cleanly).
+    sequences: HashMap<String, VecDeque<FakeResponse>>,
     calls: Vec<FabricRequest>,
 }
 
@@ -126,10 +130,47 @@ impl FakeFabric {
         inner.responses.insert(pattern.into(), FakeResponse::Timeout);
     }
 
+    /// Queue a FIFO sequence of per-call outcomes for `pattern`, consumed in
+    /// order before the steady `set_response` / `set_error` / `set_timeout`
+    /// entry. `Ok(body)` yields that YAML body; `Err(msg)` yields an eyre
+    /// error. Once the queue drains, calls fall through to the steady entry
+    /// (or the no-canned-response error). The `call` impl holds the lock for
+    /// the whole call, so concurrent (`buffer_unordered`) chunk calls drain the
+    /// queue deterministically regardless of completion order.
+    pub fn set_response_sequence(
+        &self,
+        pattern: impl Into<String>,
+        outcomes: Vec<std::result::Result<String, String>>,
+    ) {
+        let mut inner = self.inner.lock().expect("FakeFabric poisoned");
+        let queue = outcomes
+            .into_iter()
+            .map(|o| match o {
+                Ok(body) => FakeResponse::Ok(body),
+                Err(msg) => FakeResponse::Err(msg),
+            })
+            .collect();
+        inner.sequences.insert(pattern.into(), queue);
+    }
+
     /// Inspect what callers asked for.
     pub fn calls(&self) -> Vec<FabricRequest> {
         let inner = self.inner.lock().expect("FakeFabric poisoned");
         inner.calls.clone()
+    }
+}
+
+/// Resolve a single canned outcome into the `call` return value. Free fn so
+/// both the sequence path and the steady-response path share it.
+fn fake_response_to_result(response: &FakeResponse, request: &FabricRequest) -> Result<String> {
+    match response {
+        FakeResponse::Ok(body) => Ok(body.clone()),
+        FakeResponse::Err(msg) => Err(eyre::eyre!(msg.clone())),
+        FakeResponse::Timeout => Err(vault::fabric::FabricError::Timeout {
+            pattern: request.pattern.clone(),
+            timeout_secs: request.timeout_secs,
+        }
+        .into()),
     }
 }
 
@@ -138,14 +179,15 @@ impl FabricCaller for FakeFabric {
     async fn call(&self, request: FabricRequest) -> Result<String> {
         let mut inner = self.inner.lock().expect("FakeFabric poisoned");
         inner.calls.push(request.clone());
+        // A queued sequence (while non-empty) takes precedence so a test can
+        // fail some calls to a pattern and succeed others.
+        if let Some(queue) = inner.sequences.get_mut(&request.pattern)
+            && let Some(response) = queue.pop_front()
+        {
+            return fake_response_to_result(&response, &request);
+        }
         match inner.responses.get(&request.pattern) {
-            Some(FakeResponse::Ok(body)) => Ok(body.clone()),
-            Some(FakeResponse::Err(msg)) => Err(eyre::eyre!(msg.clone())),
-            Some(FakeResponse::Timeout) => Err(vault::fabric::FabricError::Timeout {
-                pattern: request.pattern.clone(),
-                timeout_secs: request.timeout_secs,
-            }
-            .into()),
+            Some(response) => fake_response_to_result(response, &request),
             None => Err(eyre::eyre!(
                 "FakeFabric: no canned response for pattern {}",
                 request.pattern

@@ -20,8 +20,8 @@ use eyre::Result;
 
 use crate::{
     ArticleConfig, ArticleDistiller, DistillExtractor, DistillInputs, FabricCaller, IdeaDistiller, ImageConfig,
-    ImageDistiller, PassthroughDistiller, RepoConfig, RepoDistiller, ThreadConfig, ThreadDistiller, VideoConfig,
-    VideoDistiller, VoiceNoteConfig, VoiceNoteDistiller,
+    ImageDistiller, RepoConfig, RepoDistiller, ThreadConfig, ThreadDistiller, VideoConfig, VideoDistiller,
+    VoiceNoteConfig, VoiceNoteDistiller,
 };
 
 /// Kinds the distillers crate knows how to produce a `Distilled` for.
@@ -60,7 +60,6 @@ impl DistillKind {
 #[derive(Debug, Clone)]
 pub struct Dispatcher<F: FabricCaller + Clone> {
     pub idea: IdeaDistiller,
-    pub passthrough: PassthroughDistiller,
     pub image: ImageDistiller<F>,
     pub voicenote: VoiceNoteDistiller<F>,
     pub article: ArticleDistiller<F>,
@@ -104,7 +103,6 @@ impl<F: FabricCaller + Clone> Dispatcher<F> {
         };
         Self {
             idea: IdeaDistiller,
-            passthrough: PassthroughDistiller,
             image: ImageDistiller::new(fabric.clone(), image_config),
             voicenote: VoiceNoteDistiller::new(fabric.clone(), voicenote_config),
             article: ArticleDistiller::new(fabric.clone(), article_config),
@@ -128,7 +126,6 @@ impl<F: FabricCaller + Clone> Dispatcher<F> {
     ) -> Self {
         Self {
             idea: IdeaDistiller,
-            passthrough: PassthroughDistiller,
             image: ImageDistiller::new(fabric.clone(), image_config),
             voicenote: VoiceNoteDistiller::new(fabric.clone(), voicenote_config),
             article: ArticleDistiller::new(fabric.clone(), article_config),
@@ -153,8 +150,9 @@ impl<F: FabricCaller + Clone> Dispatch for Dispatcher<F> {
             DistillKind::Image => self.image.distill(inputs).await,
             // Phase 9c-voicenote: VoiceNote now routes to its own Fabric-backed
             // distiller with map-reduce orchestration for long Groq transcripts.
-            // PassthroughDistiller has zero consumers from this point forward
-            // but stays in the crate as a stub.
+            // `PassthroughDistiller` has zero consumers from this point forward;
+            // the type stays in the crate as a stub but is no longer a field on
+            // the dispatcher (no kind routes to it).
             DistillKind::VoiceNote => self.voicenote.distill(inputs).await,
             DistillKind::Article => self.article.distill(inputs).await,
             DistillKind::Repo => self.repo.distill(inputs).await,

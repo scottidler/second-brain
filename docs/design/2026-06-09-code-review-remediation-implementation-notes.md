@@ -902,3 +902,100 @@ content.
 
 ### Open questions
 - None.
+
+## Phase 15: Distillers remainder & independent test gaps
+
+`otto ci` exit 0 (check incl. clippy+fmt, and test).
+
+### Design decisions
+- **Item 6 stragglers caught by the test build**: items 3-6 were implemented in
+  the prior session and `cargo build -p distillers -p borg` was green, but that
+  does not compile test code. Building the test profile surfaced one remaining
+  4-arg `fallback_distilled` *assertion* in `distillers/src/article/tests.rs`
+  (`fabric_timeout_falls_back`) that still asserted the OLD contract
+  (`meta.model == "fabric-timeout"`). Corrected to `meta.model == "default"`
+  (the real model; empty config → "default"), with the reason asserted via
+  `validation.fallback_reason`. A repo-wide grep confirmed no other stale
+  `meta.model`-equals-reason assertions remained.
+- **Item 7 (redundant transcript re-sets)**: deleted the three post-fallback
+  `fb.transcript = Some(...)` re-sets in `distillers/src/image.rs` (returning
+  the `fallback_distilled(...)` directly) and removed the now-dead
+  `preserve_transcript_on_fallback` parameter from
+  `borg::stages::distill::run_distiller` (plus the re-set block and the bool at
+  all 5 call sites). `fallback_distilled` already preserves the transcript
+  universally when non-empty (the 2026-05-18-backfill fix), so every re-set was
+  a no-op. The DELIBERATE defensive re-sets in `distillers/src/{video,voicenote}.rs`
+  `distill()` (after `enforce_bounds`/`attach_payload`) were left untouched per
+  their comments.
+- **Item 8 (render sanitization)**: `push_summary` now runs the summary through
+  `crate::text::demote_headings(_, 2)` (fallback summaries embed a raw transcript
+  snippet that can open with `#`/`##`); `push_claims` runs claim text through a
+  new `crate::text::flatten_lines` (collapses internal line breaks so a
+  multi-line claim can't break the `- ` bullet). `flatten_lines` lives in
+  `text.rs` alongside `demote_headings` with its own unit test.
+- **Item 9 (dead PassthroughDistiller field)**: dropped the `passthrough` field
+  from `Dispatcher` (and its import + both constructors). The
+  `PassthroughDistiller` *type* and its module/tests stay in the crate as a stub
+  (chosen over routing a kind to it — nothing has needed passthrough since
+  Phase 9c). Stale routing comment updated.
+- **Item 10 (github slug charset)**: replaced the `TRAILING_NOISE` char
+  enumeration with charset validation against GitHub's name set `[A-Za-z0-9._-]`
+  via `is_github_name_char` + `clean_segment` (trims trailing non-charset chars,
+  plus a trailing `.` which is a valid interior name char but never a real
+  trailing one). After trimming, a segment with an *interior* invalid char is
+  rejected outright. This catches the `: ; ! ?` the old list missed (`foo/bar!`
+  → `foo/bar`). Regression tests added for the sentence-terminator cases and
+  interior-invalid rejection.
+
+### Deviations
+- **Item 11 (oracle) — bullets 1 & 2 are architecturally model-bound; pinned at
+  the hermetic seam instead of via a model-loading test.** `run_pipeline`'s
+  vector retriever (and the graph retriever, which re-seeds from hybrid) call
+  `vault::embedding::embed_query`, which loads the real fastembed/candle model —
+  there is no DI seam to inject the *query* embedding (vault's own vector tests
+  hand-build query vectors and call `search_vector` directly, bypassing
+  `embed_query`; the existing oracle pipeline tests are all bm25-only for the
+  same reason). So "weighted multi-method fusion end-to-end through run_pipeline"
+  and "eval::retrieve with a real configured-pipeline run" cannot be hermetic
+  unit tests. Coverage was placed where it is deterministic and runs in
+  `otto ci`:
+  - The vector-vs-bm25 demotion *arithmetic* ("vector 1.0 dominates bm25 0.3")
+    is already pinned by `vault::search::vector::tests::weighted_rrf_higher_weight_dominates_ranking`
+    (the exact weights `run_pipeline` passes to `reciprocal_rank_fusion_weighted`).
+  - The run_pipeline → weighted-fusion *wiring* is now pinned hermetically:
+    `run_configured_pipeline_runs_the_configured_bm25_retriever` (the path
+    `eval::retrieve` records under CONFIGURED_LABEL, bm25@0.3 still contributes)
+    and `run_pipeline_drops_a_fully_demoted_zero_weight_method` (a 0.0-weight
+    sole method yields no results — the "demoted retriever stays out" behavior).
+  - **Graph seed-weighting/hop-decay IS hermetic** and got a full direct test of
+    `expand_to_graph_paths` (`expand_to_graph_paths_applies_seed_weight_and_hop_decay`):
+    edges + explicit seeds, asserting the `w_seed · edge_weight · hop_decay^(hop-1)`
+    ordering with no embeddings.
+  A model-loading `#[ignore]` integration test (candle-bounded.rs precedent) was
+  considered for the full vector/eval path but rejected: real-embedding
+  similarity is not deterministic enough for a crisp ordering assertion without
+  embedding near-duplicate text, and it would ship unverifiable-in-CI test code.
+- **Item 12 first bullet (`is_local_host` fail-closed) was already covered** by
+  the pre-existing `config::tests::host_matches_fails_closed_when_hostname_unreadable`
+  (it asserts the pin+unreadable→false fail-closed case, case-insensitive match,
+  and unpinned-runs-everywhere). No duplicate added. The genuinely-new bullet —
+  non-URL handler timeout-bounding — got `test_with_hard_timeout_bounds_a_wedged_non_url_handler`,
+  which drives the real `with_hard_timeout` wrapper (not just the abstract
+  `tokio::time::timeout` primitive the existing test covers) with a wedged future
+  and asserts a `Failed`/`PipelineTimedOut` result.
+
+### Tradeoffs
+- **`FakeFabric` gained `set_response_sequence`** (a per-pattern FIFO of
+  outcomes consumed before the steady response). This was the minimal additive
+  primitive needed for the partial-chunk-failure test (some chunk calls fail,
+  others succeed within one pattern). The `call` impl holds the mutex for the
+  whole call, so concurrent `buffer_unordered` chunk calls drain the queue
+  deterministically regardless of completion order.
+- **`with_hard_timeout` test uses a real 1s wait** (the `hard_timeout_secs`
+  floor) rather than `#[tokio::test(start_paused = true)]`: tokio's `full`
+  feature does not include `test-util`, so virtual-time auto-advance is
+  unavailable, and adding the feature for one test was heavier than a 1s wait
+  (consistent with the existing real-sleep tests in `pipeline/timeouts.rs`).
+
+### Open questions
+- None.

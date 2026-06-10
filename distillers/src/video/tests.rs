@@ -18,7 +18,7 @@ fn timestamped(lines: &[(&str, &str)]) -> String {
 fn attach_payload_attaches_for_repos_only_metadata() {
     // A video whose only metadata is a description repo link still gets a
     // Video payload (the guard now checks repos).
-    let mut distilled = crate::fallback_distilled(ID, "test", "transcript", None);
+    let mut distilled = crate::fallback_distilled(ID, "test", "transcript", None, "test-model");
     assert!(distilled.kind_specific.is_none());
     let metadata = VideoMetadata {
         channel: None,
@@ -36,7 +36,7 @@ fn attach_payload_attaches_for_repos_only_metadata() {
 
 #[test]
 fn attach_payload_skips_when_all_fields_empty() {
-    let mut distilled = crate::fallback_distilled(ID, "test", "transcript", None);
+    let mut distilled = crate::fallback_distilled(ID, "test", "transcript", None, "test-model");
     let metadata = VideoMetadata::default();
     attach_payload(&mut distilled, Some(&metadata));
     assert!(distilled.kind_specific.is_none());
@@ -273,6 +273,88 @@ links: []
         Some(transcript.as_str()),
         "distill_long must populate transcript for chunked semantic recall"
     );
+}
+
+#[tokio::test]
+async fn long_transcript_partial_chunk_failure_keeps_surviving_claims() {
+    // One chunk call fails (sequence), the rest distill cleanly (steady); the
+    // result keeps surviving claims and flags `partial-chunk-failure`.
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    assert!(approx_tokens(transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary.\"\nclaims:\n  - text: \"Chunk-level claim.\"\n    anchor: null\ntags: []\nlinks: []\n",
+    );
+    fake.set_response_sequence(PATTERN_CHUNK, vec![Err("chunk boom".to_string())]);
+    fake.set_response(PATTERN_REDUCE, "summary: \"Reduced full-video summary.\"\n");
+
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+        })
+        .await
+        .expect("distill");
+
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("partial-chunk-failure")
+    );
+    assert!(!distilled.claims.is_empty());
+    assert_eq!(distilled.summary, "Reduced full-video summary.");
+}
+
+#[tokio::test]
+async fn long_transcript_reduce_failure_falls_back_to_concatenated_summaries() {
+    // All chunks succeed but the reduce call fails; the final summary is the
+    // concatenation of per-chunk summaries with no fallback_reason set.
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    assert!(approx_tokens(transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary text.\"\nclaims: []\ntags: []\nlinks: []\n",
+    );
+    fake.set_error(PATTERN_REDUCE, "reduce boom");
+
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+        })
+        .await
+        .expect("distill");
+
+    assert_eq!(distilled.meta.validation.fallback_reason, None);
+    assert!(
+        distilled.summary.contains("Chunk summary text."),
+        "summary should fall back to concatenated chunk summaries: {:?}",
+        distilled.summary
+    );
+}
+
+#[test]
+fn chunk_transcript_handles_multibyte_without_panic() {
+    // Regression: find_boundary's fallback returns a raw byte index that can
+    // split a multi-byte codepoint; chunk_transcript floors to a char boundary
+    // before slicing.
+    let transcript = "日本語のテストです。これは文です。".repeat(5000);
+    let chunks = chunk_transcript(&transcript, CHUNK_TOKEN_TARGET);
+    assert!(chunks.len() > 1, "expected multiple chunks for long multibyte input");
+    assert_eq!(chunks.join("").len(), transcript.len());
 }
 
 #[tokio::test]

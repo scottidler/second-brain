@@ -134,7 +134,11 @@ fn push_summary(body: &mut String, summary: &str) {
         return;
     }
     body.push_str("## Summary\n\n");
-    body.push_str(trimmed);
+    // Fallback summaries lead with `[reason]` followed by a raw transcript
+    // snippet that can open with a markdown heading (`#` / `##`); demote any
+    // embedded headings so they stay subordinate to this `## Summary` L2
+    // heading rather than colliding with the note's section structure.
+    body.push_str(&crate::text::demote_headings(trimmed, 2));
     body.push_str("\n\n");
 }
 
@@ -145,7 +149,9 @@ fn push_claims(body: &mut String, claims: &[Claim]) {
     body.push_str("## Claims\n\n");
     for claim in claims {
         body.push_str("- ");
-        body.push_str(claim.text.trim());
+        // Flatten any internal line breaks: a multi-line claim would otherwise
+        // break the `- ` bullet into stray continuation lines.
+        body.push_str(&crate::text::flatten_lines(claim.text.trim()));
         if let Some(anchor) = &claim.anchor
             && !anchor.is_empty()
         {

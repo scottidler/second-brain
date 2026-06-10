@@ -133,9 +133,21 @@ const RESERVED_OWNERS: &[&str] = &[
     "sponsors-account",
 ];
 
-/// Trailing characters prose appends to a URL that are not part of the repo
-/// name (sentence punctuation, closers, and a stray path slash).
-const TRAILING_NOISE: &[char] = &['.', ',', ')', ']', '>', '"', '\'', '/'];
+/// True when `c` can appear in a GitHub owner or repo name. GitHub's repo
+/// name charset is `[A-Za-z0-9._-]`; owners are a stricter subset of it, so
+/// validating both against this set is sufficient to reject prose punctuation.
+fn is_github_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
+}
+
+/// Trim trailing prose punctuation from a captured path segment: any char
+/// outside GitHub's name charset (catches `: ; ! ? ) ] > " ' /` etc.), plus a
+/// trailing `.` (a sentence period - `.` is a valid *interior* name char as in
+/// `foo.js`, but never a real trailing one). Enumerating noise chars instead
+/// silently leaked `! ? : ;` into published slugs (e.g. `foo/bar!`).
+fn clean_segment(seg: &str) -> &str {
+    seg.trim_end_matches(|c: char| !is_github_name_char(c) || c == '.')
+}
 
 /// Matches a `github.com/<path>` candidate in free text. The required left
 /// boundary `(?:^|[^a-z0-9._-])` (start of text or any char that is not a host
@@ -188,18 +200,18 @@ fn slug_from_path(path: &str) -> Option<String> {
     // otherwise pollute the segment split.
     let path = path.split(['?', '#']).next().unwrap_or("");
     let mut segments = path.split('/');
-    let owner = segments.next()?.trim_end_matches(TRAILING_NOISE);
-    // Repo is the trailing meaningful segment: strip prose punctuation, then a
-    // `.git` suffix, then any punctuation the `.git` strip re-exposed.
-    let repo = segments
-        .next()?
-        .trim_end_matches(TRAILING_NOISE)
-        .trim_end_matches(".git")
-        .trim_end_matches(TRAILING_NOISE);
+    let owner = clean_segment(segments.next()?);
+    // Repo is the trailing meaningful segment: trim prose punctuation, strip a
+    // `.git` suffix, then trim again for any punctuation the `.git` strip
+    // re-exposed.
+    let repo = clean_segment(clean_segment(segments.next()?).trim_end_matches(".git"));
     if owner.is_empty() || repo.is_empty() {
         return None;
     }
-    if owner.contains([' ', '/']) || repo.contains([' ', '/']) {
+    // Reject any segment that still carries a char outside GitHub's name
+    // charset after trailing-trim (an *interior* invalid char, e.g. `fo!o`):
+    // that segment cannot name a real owner/repo.
+    if !owner.chars().all(is_github_name_char) || !repo.chars().all(is_github_name_char) {
         return None;
     }
     if RESERVED_OWNERS.contains(&owner.to_ascii_lowercase().as_str()) {

@@ -137,13 +137,30 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
 impl<F: FabricCaller + Clone> VideoDistiller<F> {
     /// Single-call path for transcripts under the threshold.
     async fn distill_short(&self, transcript: &str) -> Result<Distilled> {
+        // Short-circuit an empty transcript before burning a Fabric call (the
+        // long path already guards via `chunks.is_empty()`).
+        if transcript.trim().is_empty() {
+            return Ok(fallback_distilled(
+                ID,
+                "empty-transcript",
+                transcript,
+                None,
+                &self.config.model,
+            ));
+        }
         let raw = match self.call_fabric(PATTERN_SHORT, transcript).await {
             Ok(r) => r,
-            Err((reason, _)) => return Ok(fallback_distilled(ID, &reason, transcript, None)),
+            Err((reason, _)) => return Ok(fallback_distilled(ID, &reason, transcript, None, &self.config.model)),
         };
         match parse_video_yaml(&raw) {
             Ok(parsed) => Ok(build_distilled(parsed, transcript, &raw, &self.config.model)),
-            Err(_) => Ok(fallback_distilled(ID, "yaml-parse-error", transcript, Some(&raw))),
+            Err(_) => Ok(fallback_distilled(
+                ID,
+                "yaml-parse-error",
+                transcript,
+                Some(&raw),
+                &self.config.model,
+            )),
         }
     }
 
@@ -159,12 +176,21 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
             CHUNK_TOKEN_TARGET
         );
         if chunks.is_empty() {
-            return Ok(fallback_distilled(ID, "empty-transcript", transcript, None));
+            return Ok(fallback_distilled(
+                ID,
+                "empty-transcript",
+                transcript,
+                None,
+                &self.config.model,
+            ));
         }
 
         // Map step: parallelise chunk distillation, bounded by chunk_concurrency.
+        // Carry only (idx, result) out of the stream - the chunk text was moved
+        // into the request, so cloning it through the tuple just to `let _`-drop
+        // it later wasted ~32 KB per chunk (mirrors the voicenote twin).
         let concurrency = self.config.chunk_concurrency.max(1);
-        let chunk_results: Vec<(usize, String, Result<String>)> = stream::iter(chunks.iter().cloned().enumerate())
+        let chunk_results: Vec<(usize, Result<String>)> = stream::iter(chunks.iter().cloned().enumerate())
             .map(|(idx, chunk)| {
                 let fabric = self.fabric.clone();
                 let model = self.config.model.clone();
@@ -173,28 +199,29 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
                 async move {
                     let request = FabricRequest {
                         pattern: PATTERN_CHUNK.to_string(),
-                        input: chunk.clone(),
+                        input: chunk,
                         model,
                         max_chars,
                         timeout_secs,
                     };
                     let result = fabric.call(request).await;
-                    (idx, chunk, result)
+                    (idx, result)
                 }
             })
             .buffer_unordered(concurrency)
             .collect()
             .await;
         let mut chunk_results = chunk_results;
-        chunk_results.sort_by_key(|(idx, _, _)| *idx);
+        chunk_results.sort_by_key(|(idx, _)| *idx);
 
         let mut chunk_summaries: Vec<String> = Vec::with_capacity(chunk_results.len());
         let mut combined_claims: Vec<Claim> = Vec::new();
         let mut combined_links: Vec<Link> = Vec::new();
+        let mut combined_tags: Vec<String> = Vec::new();
         let mut any_chunk_failed = false;
         let mut output_chars: usize = 0;
 
-        for (_, chunk_text, result) in chunk_results {
+        for (_, result) in chunk_results {
             let raw = match result {
                 Ok(r) => r,
                 Err(err) => {
@@ -238,12 +265,31 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
                     label: l.label.filter(|s| !s.is_empty()),
                 })
             }));
-            let _ = chunk_text;
+            // Union chunk tags (was dropped entirely - long videos lost ALL
+            // distiller tags). Deduped below; enforce_bounds caps at 7.
+            combined_tags.extend(
+                parsed
+                    .tags
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty()),
+            );
         }
+
+        // Dedup tags, first-seen order.
+        let mut seen_tags = std::collections::HashSet::new();
+        combined_tags.retain(|t| seen_tags.insert(t.clone()));
 
         if chunk_summaries.is_empty() {
             log::warn!("VideoDistiller: all chunks failed; using map-reduce fallback");
-            return Ok(fallback_distilled(ID, "chunk-failures", transcript, None));
+            return Ok(fallback_distilled(
+                ID,
+                "chunk-failures",
+                transcript,
+                None,
+                &self.config.model,
+            ));
         }
 
         // Reduce step: combine chunk summaries via Fabric.
@@ -275,7 +321,7 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
         Ok(Distilled {
             summary,
             claims: combined_claims,
-            tags: Vec::new(),
+            tags: combined_tags,
             links: combined_links,
             kind_specific: None,
             meta: DistilledMeta {
@@ -325,7 +371,7 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
 fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str) -> Distilled {
     let summary = parsed.summary.unwrap_or_default().trim().to_string();
     if summary.is_empty() {
-        return fallback_distilled(ID, "missing-summary", transcript, Some(raw));
+        return fallback_distilled(ID, "missing-summary", transcript, Some(raw), model);
     }
     let claims: Vec<Claim> = parsed
         .claims

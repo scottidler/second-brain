@@ -88,9 +88,16 @@ impl<F: FabricCaller + Clone> DistillExtractor for ImageDistiller<F> {
                     "fabric-error"
                 };
                 log::warn!("ImageDistiller: fabric call failed: {msg}; using {reason} fallback");
-                let mut fb = fallback_distilled(ID, reason, inputs.transcript, None);
-                fb.transcript = Some(inputs.transcript.to_string());
-                return Ok(fb);
+                // fallback_distilled already preserves the full transcript
+                // (it sets `transcript = Some(snippet)` when non-empty); no
+                // post-fallback re-set needed.
+                return Ok(fallback_distilled(
+                    ID,
+                    reason,
+                    inputs.transcript,
+                    None,
+                    &self.config.model,
+                ));
             }
         };
 
@@ -99,18 +106,26 @@ impl<F: FabricCaller + Clone> DistillExtractor for ImageDistiller<F> {
             Ok(p) => p,
             Err(err) => {
                 log::warn!("ImageDistiller: yaml parse failed: {err}; using fallback");
-                let mut fb = fallback_distilled(ID, "yaml-parse-error", inputs.transcript, Some(yaml_body));
-                fb.transcript = Some(inputs.transcript.to_string());
-                return Ok(fb);
+                return Ok(fallback_distilled(
+                    ID,
+                    "yaml-parse-error",
+                    inputs.transcript,
+                    Some(yaml_body),
+                    &self.config.model,
+                ));
             }
         };
 
         let summary = parsed.summary.unwrap_or_default().trim().to_string();
         if summary.is_empty() {
             log::warn!("ImageDistiller: empty summary; using missing-summary fallback");
-            let mut fb = fallback_distilled(ID, "missing-summary", inputs.transcript, Some(yaml_body));
-            fb.transcript = Some(inputs.transcript.to_string());
-            return Ok(fb);
+            return Ok(fallback_distilled(
+                ID,
+                "missing-summary",
+                inputs.transcript,
+                Some(yaml_body),
+                &self.config.model,
+            ));
         }
 
         let claims: Vec<Claim> = parsed

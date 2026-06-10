@@ -80,7 +80,13 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
                     "fabric-error"
                 };
                 log::warn!("ArticleDistiller: fabric call failed: {msg}; using {reason} fallback");
-                return Ok(fallback_distilled(ID, reason, inputs.transcript, None));
+                return Ok(fallback_distilled(
+                    ID,
+                    reason,
+                    inputs.transcript,
+                    None,
+                    &self.config.model,
+                ));
             }
         };
 
@@ -94,6 +100,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
                     "yaml-parse-error",
                     inputs.transcript,
                     Some(yaml_body),
+                    &self.config.model,
                 ));
             }
         };
@@ -106,6 +113,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
                 "missing-summary",
                 inputs.transcript,
                 Some(yaml_body),
+                &self.config.model,
             ));
         }
 

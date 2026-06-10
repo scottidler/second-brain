@@ -209,6 +209,37 @@ fn extract_repo_slugs_strips_trailing_prose_punctuation() {
     );
 }
 
+/// Regression: the old `TRAILING_NOISE` char list missed `: ; ! ?`, so
+/// sentence punctuation leaked into published slugs (`"see github.com/foo/bar!"`
+/// -> `foo/bar!`). Charset validation against `[A-Za-z0-9._-]` trims them.
+#[test]
+fn extract_repo_slugs_strips_sentence_terminator_punctuation() {
+    assert_eq!(
+        extract_repo_slugs("see github.com/foo/bar!"),
+        vec!["foo/bar".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("really? github.com/foo/bar?"),
+        vec!["foo/bar".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("here: github.com/foo/bar:"),
+        vec!["foo/bar".to_string()]
+    );
+    assert_eq!(
+        extract_repo_slugs("first github.com/foo/bar; then"),
+        vec!["foo/bar".to_string()]
+    );
+}
+
+/// A segment carrying an *interior* char outside GitHub's name charset cannot
+/// name a real owner/repo and is rejected (not just trailing-trimmed).
+#[test]
+fn extract_repo_slugs_rejects_interior_invalid_chars() {
+    assert!(extract_repo_slugs("github.com/fo!o/bar").is_empty());
+    assert!(extract_repo_slugs("github.com/owner/ba:z").is_empty());
+}
+
 #[test]
 fn extract_repo_slugs_rejects_every_reserved_owner() {
     for owner in RESERVED_OWNERS {

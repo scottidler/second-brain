@@ -37,6 +37,30 @@ fn fenced_with_trailing_prose_strips_to_close() {
 }
 
 #[test]
+fn strips_fence_with_surrounding_whitespace() {
+    // Leading/trailing whitespace around the fence (LLMs add blank lines) is
+    // trimmed before the fence is detected.
+    let raw = "\n\n  ```yaml\nsummary: hi\n```  \n\n";
+    assert_eq!(strip_fences(raw), "summary: hi");
+}
+
+#[test]
+fn strips_fence_with_multiline_yaml_body() {
+    // A multi-line body inside the fence is returned intact (only the fence
+    // markers are removed), so every consumer's serde_yaml parse sees clean
+    // YAML.
+    let raw = "```yaml\nsummary: hi\nclaims:\n  - text: one\n  - text: two\n```";
+    assert_eq!(strip_fences(raw), "summary: hi\nclaims:\n  - text: one\n  - text: two");
+}
+
+#[test]
+fn preserves_colons_inside_unfenced_body() {
+    // Colons inside values must survive untouched (no fence present).
+    let raw = "summary: \"ratio is 3:1 at 12:00\"";
+    assert_eq!(strip_fences(raw), "summary: \"ratio is 3:1 at 12:00\"");
+}
+
+#[test]
 fn approx_tokens_uses_four_char_rule() {
     assert_eq!(approx_tokens(0), 0);
     assert_eq!(approx_tokens(4), 1);
