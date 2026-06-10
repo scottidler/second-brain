@@ -369,3 +369,39 @@ questions encountered while executing
 
 ### Open questions
 - None.
+
+## Phase 8: Bloat decomposition
+
+### Design decisions
+- `sb/src/cli/checks.rs` (1187 → 943): extracted the inline `mod tests` to
+  `sb/src/cli/checks/tests.rs` (the required item; the test mod was the headroom).
+- `borg/src/lib.rs` (1420 → 967): split along the doc's daemon-vs-cli seam.
+  The daemon dispatcher (`daemon` + `DaemonOutcome`) and ALL OS service-
+  management helpers (install/uninstall/stop/restart/status, systemctl,
+  launchctl, install_systemd/launchd, uninstall_systemd/launchd, the GNOME
+  hotkey install/uninstall + consts) moved to new `borg/src/service.rs`. lib.rs
+  keeps the HTTP server (`serve_init`/`build_router`), ingest entry points, and
+  `hotkey()` (which now calls `service::install_hotkey`/`uninstall_hotkey`).
+  `pub use service::{DaemonOutcome, daemon};` keeps the public API
+  (`borg::daemon`) byte-for-byte for sb's CLI dispatch. Moved helpers became
+  `pub(crate)`.
+
+### Deviations
+- For `borg/src/audit.rs` (1397 → 850) and `cortex/src/classify.rs` (1263 →
+  943), the doc suggested production seams ("audit kinds", "classify tiers"). I
+  instead extracted their inline `mod tests` (→ `audit/tests.rs`,
+  `classify/tests.rs`). Rationale: the goal of Phase 8 is headroom under the
+  1500 gate before Phases 9/11 edit these files; test extraction yields the
+  most headroom (548 / 321 lines) with the least regression risk, AND satisfies
+  the mandatory rust.md test-placement rule (which Phase 14 schedules for
+  classify anyway). The production code in both is cohesive; a kind/tier split
+  would be additional churn on files that are now well under 1000 lines.
+
+### Tradeoffs
+- lib.rs got the real production split (its tests were already extracted, so it
+  sat at 1420 production lines and a refactor in Phase 9 — the notify-sink dedup
+  — would have approached the gate). audit/classify got test extraction because
+  that alone cleared the headroom need.
+
+### Open questions
+- None.
