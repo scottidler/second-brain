@@ -235,35 +235,43 @@ impl Frontmatter {
     }
 }
 
+/// Split a raw note into its YAML frontmatter and body WITHOUT parsing the
+/// YAML. Returns `None` when there is no leading `---`-delimited block.
+///
+/// The returned frontmatter excludes both `---` delimiters and any leading
+/// newlines after the opener; the body is the RAW remainder after the closing
+/// `\n---` (callers trim it if they want — `parse_frontmatter` does). This is
+/// THE shared splitter — it replaced five ad-hoc copies across borg/cortex
+/// (`replay`, `migrate` ×2, `audit`, `backfill`) and backs `parse_frontmatter`,
+/// so the split semantics can never diverge again.
+pub fn split_raw(raw: &str) -> Option<(&str, &str)> {
+    let trimmed = raw.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    let after_opening = trimmed[3..].trim_start_matches(['\r', '\n']);
+    let end_pos = after_opening.find("\n---")?;
+    let yaml = &after_opening[..end_pos];
+    let body = &after_opening[end_pos + 4..];
+    Some((yaml, body))
+}
+
 /// Split raw markdown into frontmatter and body.
 pub fn parse_frontmatter(raw: &str) -> Result<(Frontmatter, String)> {
-    let trimmed = raw.trim_start();
-
-    if !trimmed.starts_with("---") {
+    let Some((yaml_str, body)) = split_raw(raw) else {
         return Ok((Frontmatter::default(), raw.to_string()));
-    }
+    };
+    let body = body.trim_start_matches(['\r', '\n']);
 
-    let after_opening = &trimmed[3..];
-    let after_opening = after_opening.trim_start_matches(['\r', '\n']);
-
-    if let Some(end_pos) = after_opening.find("\n---") {
-        let yaml_str = &after_opening[..end_pos];
-        let body_start = end_pos + 4;
-        let body = after_opening[body_start..].trim_start_matches(['\r', '\n']).to_string();
-
-        let value: serde_yaml::Value = match serde_yaml::from_str(yaml_str) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("parse_frontmatter: malformed YAML frontmatter, falling back to empty metadata: {e}");
-                serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-            }
-        };
-        let frontmatter = Frontmatter::from_value(value)?;
-
-        Ok((frontmatter, body))
-    } else {
-        Ok((Frontmatter::default(), raw.to_string()))
-    }
+    let value: serde_yaml::Value = match serde_yaml::from_str(yaml_str) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("parse_frontmatter: malformed YAML frontmatter, falling back to empty metadata: {e}");
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        }
+    };
+    let frontmatter = Frontmatter::from_value(value)?;
+    Ok((frontmatter, body.to_string()))
 }
 
 #[cfg(test)]

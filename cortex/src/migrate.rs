@@ -125,7 +125,7 @@ pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationC
 
     // Batch update wikilinks for all moves
     let renames: Vec<(PathBuf, PathBuf)> = all_moves.iter().map(|m| (m.from.clone(), m.to.clone())).collect();
-    update_wikilinks_for_moves(vault_root, notes, &renames)?;
+    crate::naming::update_wikilinks_batch(vault_root, notes, &renames)?;
 
     Ok(total_count + move_count)
 }
@@ -177,57 +177,6 @@ fn plan_migration(notes: &[Note], migration: &MigrationConfig) -> Vec<PlannedMov
 }
 
 /// Update wikilinks across the vault after file moves.
-fn update_wikilinks_for_moves(vault_root: &Path, notes: &[Note], renames: &[(PathBuf, PathBuf)]) -> Result<()> {
-    if renames.is_empty() {
-        return Ok(());
-    }
-
-    let rename_map: Vec<(String, String)> = renames
-        .iter()
-        .filter_map(|(from, to)| {
-            let old_stem = from.file_stem()?.to_str()?.to_string();
-            let new_stem = to.file_stem()?.to_str()?.to_string();
-            // Only update if the stem actually changed
-            if old_stem != new_stem { Some((old_stem, new_stem)) } else { None }
-        })
-        .collect();
-
-    if rename_map.is_empty() {
-        return Ok(());
-    }
-
-    // Use the same batch approach as naming
-    let moved_paths: std::collections::HashSet<&PathBuf> = renames.iter().map(|(from, _)| from).collect();
-
-    for note in notes {
-        if moved_paths.contains(&note.path) {
-            continue;
-        }
-
-        let abs_path = vault_root.join(&note.path);
-        let content = match std::fs::read_to_string(&abs_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let mut new_content = content.clone();
-
-        for (old_stem, new_stem) in &rename_map {
-            let pattern = format!(r"\[\[(?i){}\]\]", regex::escape(old_stem));
-            if let Ok(re) = regex::Regex::new(&pattern) {
-                new_content = re.replace_all(&new_content, format!("[[{new_stem}]]")).to_string();
-            }
-        }
-
-        if new_content != content {
-            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
-            log::info!("updated wikilinks after migration: {}", note.path.display());
-        }
-    }
-
-    Ok(())
-}
-
 /// Report what field transforms would be applied (dry-run).
 ///
 /// Parallel over `notes`: each note can emit multiple violations (one per matching rename/drop),
@@ -362,21 +311,11 @@ fn apply_field_transforms(vault_root: &Path, notes: &[Note], migration: &Migrati
 /// Extract the frontmatter block from file content.
 /// Returns (frontmatter_text, content_before_opening_delim, content_after_closing_delim).
 fn extract_frontmatter_block(content: &str) -> Option<(&str, &str, &str)> {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return None;
-    }
-
-    let before_offset = content.len() - trimmed.len();
+    // (fm_block, after) come from the shared splitter; `before` is the leading
+    // whitespace the splitter trims off (almost always empty).
+    let (fm_block, after) = vault::frontmatter::split_raw(content)?;
+    let before_offset = content.len() - content.trim_start().len();
     let before = &content[..before_offset];
-
-    let after_opening = &trimmed[3..];
-    let after_opening = after_opening.trim_start_matches(['\r', '\n']);
-
-    let end_pos = after_opening.find("\n---")?;
-    let fm_block = &after_opening[..end_pos];
-    let after = &after_opening[end_pos + 4..]; // skip \n---
-
     Some((fm_block, before, after))
 }
 

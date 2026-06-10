@@ -152,13 +152,9 @@ pub(crate) async fn process_youtube(url: &str, config: &Config, trace_id: &str) 
     // segment slides, and (when the proposed shape is non-text-only) run
     // the slide-aware Fabric pattern instead of the flat summarizer.
     let mut slide_payload: Option<SlidePayload> = None;
-    let mut slide_summary: Option<String> = None;
     if config.youtube.slides.enabled {
         match try_extract_slides(url, &transcript, metadata.duration_secs, config).await {
             Ok(Some((manifest, summary, slides_source_root))) => {
-                if !summary.body.trim().is_empty() {
-                    slide_summary = Some(summary.body.clone());
-                }
                 slide_payload = Some(SlidePayload {
                     manifest,
                     summary,
@@ -192,15 +188,6 @@ pub(crate) async fn process_youtube(url: &str, config: &Config, trace_id: &str) 
         Some(metadata.title.as_str()),
     )
     .await;
-    if slide_summary.is_some() {
-        log::debug!("[{trace_id}] process_youtube: slide-aware body will override Distilled body at publish time");
-    }
-    // Suppress the unused-warning until the slide-aware body integration
-    // settles. The slide path produces its own structured body via
-    // publish_slides; we keep `slide_summary` reachable for callers that
-    // want it without forcing them through publish_slides.
-    let _ = slide_summary;
-    let _ = use_fabric;
 
     let content_type = ContentType::YouTube {
         uploader: metadata.uploader,

@@ -97,7 +97,10 @@ pub enum EvalOutcome {
     CalibrationSheet(PathBuf),
 }
 
-fn mode_label(m: SearchMode) -> &'static str {
+/// The canonical `SearchMode` → wire label. Single source of truth shared by
+/// the eval report and the `knowledge_search` MCP response (a `None` mode there
+/// maps to `"configured"` at the call site).
+pub(crate) fn mode_label(m: SearchMode) -> &'static str {
     match m {
         SearchMode::Bm25 => "bm25",
         SearchMode::Vector => "vector",

@@ -216,24 +216,41 @@ pub const DISTILLED_FILENAME: &str = "distilled.yml";
 /// On any error (dispatch failure, etc.) returns a `fallback_distilled`
 /// with the appropriate reason tag so the caller always gets a usable
 /// payload - publish never blocks on distillation.
-pub async fn distill_for_publish_article(
+/// Shared core for the simple single-call publish distillers (article, image,
+/// voicenote, idea, vocab): dispatch the kind, fall back on error, log the
+/// outcome, persist `distilled.yml`. The per-kind wrappers below supply the
+/// label / kind / fallback-id and whether the fallback should re-assert the
+/// transcript (article does not; the transcript-bearing kinds do). The
+/// map-reduce / payload-building distillers (video, repo, thread) keep bespoke
+/// bodies because they do more than this core.
+#[allow(clippy::too_many_arguments)]
+async fn run_distiller(
     fabric: &FabricConfig,
     staging: &StagingConfig,
     trace_id: &str,
-    url: &str,
-    article_md: &str,
+    label: &str,
+    kind: IngestKind,
+    fallback_id: &str,
+    transcript: &str,
+    source_url: Option<&str>,
+    title: Option<&str>,
+    preserve_transcript_on_fallback: bool,
 ) -> Distilled {
     log::debug!(
-        "distill_for_publish_article: trace={trace_id} url={url} transcript_len={}",
-        article_md.len()
+        "{label}: trace={trace_id} kind={kind} transcript_len={} title_hint={title:?}",
+        transcript.len()
     );
     let stage = DistillStage::from_fabric_config(fabric);
     let started = std::time::Instant::now();
-    let distilled = match stage.distill(IngestKind::ArticleUrl, article_md, Some(url), None).await {
+    let distilled = match stage.distill(kind, transcript, source_url, title).await {
         Ok(d) => d,
         Err(e) => {
-            log::warn!("[{trace_id}] distill_for_publish_article: dispatch error: {e:#}; using fallback");
-            distillers::fallback_distilled("distill-article-v1", "dispatch-error", article_md, None)
+            log::warn!("[{trace_id}] {label}: dispatch error: {e:#}; using fallback");
+            let mut fb = distillers::fallback_distilled(fallback_id, "dispatch-error", transcript, None);
+            if preserve_transcript_on_fallback {
+                fb.transcript = Some(transcript.to_string());
+            }
+            fb
         }
     };
     let elapsed_ms = started.elapsed().as_millis();
@@ -244,7 +261,7 @@ pub async fn distill_for_publish_article(
         .clone()
         .unwrap_or_else(|| "none".to_string());
     log::info!(
-        "[{trace_id}] distill_for_publish_article: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
+        "[{trace_id}] {label}: kind={kind} extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
         distilled.meta.extractor,
         distilled.meta.model,
         distilled.claims.len(),
@@ -253,11 +270,32 @@ pub async fn distill_for_publish_article(
         fallback,
         elapsed_ms,
     );
-
     if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
-        log::warn!("[{trace_id}] distill_for_publish_article: persist distilled.yml failed: {e:#}");
+        log::warn!("[{trace_id}] {label}: persist distilled.yml failed: {e:#}");
     }
     distilled
+}
+
+pub async fn distill_for_publish_article(
+    fabric: &FabricConfig,
+    staging: &StagingConfig,
+    trace_id: &str,
+    url: &str,
+    article_md: &str,
+) -> Distilled {
+    run_distiller(
+        fabric,
+        staging,
+        trace_id,
+        "distill_for_publish_article",
+        IngestKind::ArticleUrl,
+        "distill-article-v1",
+        article_md,
+        Some(url),
+        None,
+        false,
+    )
+    .await
 }
 
 /// Phase 9c-voicenote cutover: run the VoiceNote distiller against a Groq ASR
@@ -272,42 +310,19 @@ pub async fn distill_for_publish_voicenote(
     transcript: &str,
     title_hint: Option<&str>,
 ) -> Distilled {
-    log::debug!(
-        "distill_for_publish_voicenote: trace={trace_id} transcript_len={} title_hint={title_hint:?}",
-        transcript.len()
-    );
-    let stage = DistillStage::from_fabric_config(fabric);
-    let started = std::time::Instant::now();
-    let distilled = match stage.distill(IngestKind::VoiceNote, transcript, None, title_hint).await {
-        Ok(d) => d,
-        Err(e) => {
-            log::warn!("[{trace_id}] distill_for_publish_voicenote: dispatch error: {e:#}; using fallback");
-            let mut fb = distillers::fallback_distilled("distill-voicenote-v1", "dispatch-error", transcript, None);
-            fb.transcript = Some(transcript.to_string());
-            fb
-        }
-    };
-    let elapsed_ms = started.elapsed().as_millis();
-    let fallback = distilled
-        .meta
-        .validation
-        .fallback_reason
-        .clone()
-        .unwrap_or_else(|| "none".to_string());
-    log::info!(
-        "[{trace_id}] distill_for_publish_voicenote: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
-        distilled.meta.extractor,
-        distilled.meta.model,
-        distilled.claims.len(),
-        distilled.tags.len(),
-        distilled.links.len(),
-        fallback,
-        elapsed_ms,
-    );
-    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
-        log::warn!("[{trace_id}] distill_for_publish_voicenote: persist distilled.yml failed: {e:#}");
-    }
-    distilled
+    run_distiller(
+        fabric,
+        staging,
+        trace_id,
+        "distill_for_publish_voicenote",
+        IngestKind::VoiceNote,
+        "distill-voicenote-v1",
+        transcript,
+        None,
+        title_hint,
+        true,
+    )
+    .await
 }
 
 /// Phase 9c-image cutover: run the Image distiller against the Vision+OCR
@@ -321,42 +336,19 @@ pub async fn distill_for_publish_image(
     transcript: &str,
     title_hint: Option<&str>,
 ) -> Distilled {
-    log::debug!(
-        "distill_for_publish_image: trace={trace_id} transcript_len={} title_hint={title_hint:?}",
-        transcript.len()
-    );
-    let stage = DistillStage::from_fabric_config(fabric);
-    let started = std::time::Instant::now();
-    let distilled = match stage.distill(IngestKind::Image, transcript, None, title_hint).await {
-        Ok(d) => d,
-        Err(e) => {
-            log::warn!("[{trace_id}] distill_for_publish_image: dispatch error: {e:#}; using fallback");
-            let mut fb = distillers::fallback_distilled("distill-image-v1", "dispatch-error", transcript, None);
-            fb.transcript = Some(transcript.to_string());
-            fb
-        }
-    };
-    let elapsed_ms = started.elapsed().as_millis();
-    let fallback = distilled
-        .meta
-        .validation
-        .fallback_reason
-        .clone()
-        .unwrap_or_else(|| "none".to_string());
-    log::info!(
-        "[{trace_id}] distill_for_publish_image: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
-        distilled.meta.extractor,
-        distilled.meta.model,
-        distilled.claims.len(),
-        distilled.tags.len(),
-        distilled.links.len(),
-        fallback,
-        elapsed_ms,
-    );
-    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
-        log::warn!("[{trace_id}] distill_for_publish_image: persist distilled.yml failed: {e:#}");
-    }
-    distilled
+    run_distiller(
+        fabric,
+        staging,
+        trace_id,
+        "distill_for_publish_image",
+        IngestKind::Image,
+        "distill-image-v1",
+        transcript,
+        None,
+        title_hint,
+        true,
+    )
+    .await
 }
 
 /// Phase 9c-hotfix cutover: run the Idea distiller against a free-form text
@@ -371,45 +363,21 @@ pub async fn distill_for_publish_idea(
     transcript: &str,
     title_hint: Option<&str>,
 ) -> Distilled {
-    log::debug!(
-        "distill_for_publish_idea: trace={trace_id} transcript_len={} title_hint={title_hint:?}",
-        transcript.len()
-    );
-    let stage = DistillStage::from_fabric_config(fabric);
-    let started = std::time::Instant::now();
-    let distilled = match stage.distill(IngestKind::Idea, transcript, None, title_hint).await {
-        Ok(d) => d,
-        Err(e) => {
-            log::warn!("[{trace_id}] distill_for_publish_idea: dispatch error: {e:#}; using fallback");
-            // IdeaDistiller emits distill-idea-v2 on success after the 9c-hotfix
-            // cap deletion; the fallback path mirrors that ID. Preserve the
-            // transcript so the published note still carries verbatim text.
-            let mut fb = distillers::fallback_distilled("distill-idea-v2", "dispatch-error", transcript, None);
-            fb.transcript = Some(transcript.to_string());
-            fb
-        }
-    };
-    let elapsed_ms = started.elapsed().as_millis();
-    let fallback = distilled
-        .meta
-        .validation
-        .fallback_reason
-        .clone()
-        .unwrap_or_else(|| "none".to_string());
-    log::info!(
-        "[{trace_id}] distill_for_publish_idea: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
-        distilled.meta.extractor,
-        distilled.meta.model,
-        distilled.claims.len(),
-        distilled.tags.len(),
-        distilled.links.len(),
-        fallback,
-        elapsed_ms,
-    );
-    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
-        log::warn!("[{trace_id}] distill_for_publish_idea: persist distilled.yml failed: {e:#}");
-    }
-    distilled
+    // IdeaDistiller emits distill-idea-v2 on success after the 9c-hotfix cap
+    // deletion; the fallback path mirrors that ID and preserves the transcript.
+    run_distiller(
+        fabric,
+        staging,
+        trace_id,
+        "distill_for_publish_idea",
+        IngestKind::Idea,
+        "distill-idea-v2",
+        transcript,
+        None,
+        title_hint,
+        true,
+    )
+    .await
 }
 
 /// Phase 9c-hotfix cutover: run the Vocabulary kind through the distiller
@@ -425,42 +393,21 @@ pub async fn distill_for_publish_vocab(
     transcript: &str,
     title_hint: Option<&str>,
 ) -> Distilled {
-    log::debug!(
-        "distill_for_publish_vocab: trace={trace_id} kind={kind} transcript_len={} title_hint={title_hint:?}",
-        transcript.len()
-    );
-    let stage = DistillStage::from_fabric_config(fabric);
-    let started = std::time::Instant::now();
-    let distilled = match stage.distill(kind, transcript, None, title_hint).await {
-        Ok(d) => d,
-        Err(e) => {
-            log::warn!("[{trace_id}] distill_for_publish_vocab: dispatch error: {e:#}; using fallback");
-            let mut fb = distillers::fallback_distilled("distill-idea-v2", "dispatch-error", transcript, None);
-            fb.transcript = Some(transcript.to_string());
-            fb
-        }
-    };
-    let elapsed_ms = started.elapsed().as_millis();
-    let fallback = distilled
-        .meta
-        .validation
-        .fallback_reason
-        .clone()
-        .unwrap_or_else(|| "none".to_string());
-    log::info!(
-        "[{trace_id}] distill_for_publish_vocab: kind={kind} extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
-        distilled.meta.extractor,
-        distilled.meta.model,
-        distilled.claims.len(),
-        distilled.tags.len(),
-        distilled.links.len(),
-        fallback,
-        elapsed_ms,
-    );
-    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
-        log::warn!("[{trace_id}] distill_for_publish_vocab: persist distilled.yml failed: {e:#}");
-    }
-    distilled
+    // Vocab routes to IdeaDistiller (distill-idea-v2); `kind` carries EN vs ES
+    // through to translation. The shared core logs `kind=` so it stays visible.
+    run_distiller(
+        fabric,
+        staging,
+        trace_id,
+        "distill_for_publish_vocab",
+        kind,
+        "distill-idea-v2",
+        transcript,
+        None,
+        title_hint,
+        true,
+    )
+    .await
 }
 
 /// Post-Phase-6 cutover: fetch the github repo's README + metadata via the

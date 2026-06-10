@@ -29,6 +29,7 @@ use vault::distilled::Distilled;
 
 pub use article::{ArticleConfig, ArticleDistiller};
 pub use dispatcher::{Dispatch, Dispatcher, DistillKind};
+pub mod parse;
 pub use fabric::{FabricCaller, FabricRequest, FabricShell, FakeFabric};
 pub use idea::IdeaDistiller;
 pub use image::{ImageConfig, ImageDistiller};

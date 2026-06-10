@@ -12,7 +12,6 @@ clap = { workspace = true }
 colored = { workspace = true }
 croner = "3.0.1"
 dirs = { workspace = true }
-env_logger = { workspace = true }
 eyre = { workspace = true }
 fs2 = { workspace = true }
 glob = "0.3"
@@ -25,11 +24,13 @@ shellexpand = { workspace = true }
 tokio = { workspace = true }
 ureq = { version = "3.2.0", features = ["json"] }
 walkdir = { workspace = true }
-which = "8.0.2"
 rayon.workspace = true
 distillers = { path = "../distillers" }
-url = "2.5.8"
+url = { workspace = true }
 
 [dev-dependencies]
-serial_test = "3.4.0"
-tempfile = "3.27"
+serial_test = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -8,6 +8,7 @@
 //! markitdown) - no dedicated JSON fetcher yet; the rendered markdown
 //! is sufficient input for this distiller in shadow mode.
 
+use crate::parse::{PatternClaim, PatternLink, approx_tokens, strip_fences};
 use async_trait::async_trait;
 use chrono::Utc;
 use eyre::Result;
@@ -155,8 +156,8 @@ impl<F: FabricCaller + Clone> DistillExtractor for ThreadDistiller<F> {
             log::warn!("ThreadDistiller: empty claims for transcript with {word_count} words (possible pattern drift)");
         }
 
-        let input_tokens = approx_tokens(inputs.transcript.len());
-        let output_tokens = approx_tokens(raw.len());
+        let input_tokens = approx_tokens(inputs.transcript.len()) as u32;
+        let output_tokens = approx_tokens(raw.len()) as u32;
 
         let distilled = Distilled {
             summary,
@@ -245,38 +246,6 @@ struct PatternYaml {
     author: Option<String>,
     #[serde(default, rename = "post-count")]
     post_count: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct PatternClaim {
-    text: String,
-    #[serde(default)]
-    anchor: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct PatternLink {
-    url: String,
-    #[serde(default)]
-    label: Option<String>,
-}
-
-fn strip_fences(raw: &str) -> &str {
-    let trimmed = raw.trim();
-    let without_open = trimmed
-        .strip_prefix("```yaml")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .unwrap_or(trimmed);
-    let stripped = without_open.trim_start_matches('\n');
-    if let Some(close) = stripped.rfind("```") {
-        stripped[..close].trim_end()
-    } else {
-        stripped
-    }
-}
-
-fn approx_tokens(chars: usize) -> u32 {
-    (chars / 4) as u32
 }
 
 #[cfg(test)]

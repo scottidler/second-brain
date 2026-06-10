@@ -240,15 +240,8 @@ fn collect_md_recursive(current: &Path, root: &Path, skip_folders: &[String], fi
 }
 
 fn split_frontmatter(content: &str) -> Option<(String, String)> {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return None;
-    }
-    let after_first = &trimmed[3..];
-    let end_pos = after_first.find("\n---")?;
-    let fm = after_first[..end_pos].trim().to_string();
-    let body = after_first[end_pos + 4..].to_string();
-    Some((fm, body))
+    let (fm, body) = vault::frontmatter::split_raw(content)?;
+    Some((fm.trim().to_string(), body.to_string()))
 }
 
 fn render_frontmatter(fm: &HashMap<String, serde_yaml::Value>, body: &str) -> String {

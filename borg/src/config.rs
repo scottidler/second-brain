@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const APP_NAME: &str = "borg";
+pub(crate) const APP_NAME: &str = "borg";
 
 /// Load configuration with fallback chain:
 /// 1. Explicit path (if provided)
@@ -782,7 +782,7 @@ impl Default for DesktopConfig {
             enabled: false,
             host: None,
             timeout_ms: 5000,
-            appname: "borg".to_string(),
+            appname: APP_NAME.to_string(),
         }
     }
 }

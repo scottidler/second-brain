@@ -51,10 +51,11 @@ impl Queries {
                 bail!("duplicate query id in {}: {}", path.display(), q.id);
             }
             for (note, score) in q.calibration.iter().flatten() {
-                if *score > 3 {
+                if *score > super::judge::MAX_SCORE {
                     bail!(
-                        "calibration score for {note} in query {} is {score}; must be 0..3",
-                        q.id
+                        "calibration score for {note} in query {} is {score}; must be 0..{}",
+                        q.id,
+                        super::judge::MAX_SCORE
                     );
                 }
             }

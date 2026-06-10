@@ -94,13 +94,7 @@ fn walk(current: &Path, root: &Path, skip_folders: &[String], out: &mut Vec<Path
 }
 
 fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return None;
-    }
-    let after = &trimmed[3..];
-    let end = after.find("\n---")?;
-    let fm = &after[..end];
+    let (fm, _body) = vault::frontmatter::split_raw(content)?;
     for line in fm.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix(&format!("{field}:")) {

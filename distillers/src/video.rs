@@ -13,11 +13,11 @@
 //! of range strips the anchor (claim text retained, anchor cleared)
 //! and increments `meta.validation.anchors_stripped`.
 
+use crate::parse::{PatternYaml, ReduceYaml, approx_tokens, find_boundary, strip_fences};
 use async_trait::async_trait;
 use chrono::Utc;
 use eyre::Result;
 use futures::stream::{self, StreamExt};
-use serde::{Deserialize, Serialize};
 use vault::distilled::{Claim, Distilled, DistilledMeta, KindPayload, Link, ValidationMeta, VideoPayload};
 
 use crate::{
@@ -482,32 +482,6 @@ pub fn chunk_transcript(transcript: &str, target_tokens: usize) -> Vec<String> {
     chunks
 }
 
-/// Find a sentence boundary at or before `end`, walking backwards from `end`
-/// until we hit `.`, `!`, `?`, or `\n` followed by whitespace. Falls back
-/// to `end` (hard cut) when no boundary is found within the lookback.
-fn find_boundary(transcript: &str, start: usize, end: usize) -> usize {
-    let bytes = transcript.as_bytes();
-    let lookback = end.saturating_sub(start).min(2048);
-    let floor = end.saturating_sub(lookback);
-    let mut i = end;
-    while i > floor {
-        i -= 1;
-        let b = bytes[i];
-        if b == b'\n' {
-            return i + 1;
-        }
-        if (b == b'.' || b == b'!' || b == b'?') && i + 1 < bytes.len() && bytes[i + 1].is_ascii_whitespace() {
-            return i + 1;
-        }
-    }
-    end
-}
-
-/// Approximate token count from char count (4 chars/token rule of thumb).
-pub fn approx_tokens(chars: usize) -> usize {
-    chars / CHARS_PER_TOKEN
-}
-
 fn parse_video_yaml(raw: &str) -> Result<PatternYaml> {
     let yaml_body = strip_fences(raw);
     let parsed: PatternYaml = serde_yaml::from_str(yaml_body)?;
@@ -518,52 +492,6 @@ fn parse_reduce_yaml(raw: &str) -> Result<ReduceYaml> {
     let yaml_body = strip_fences(raw);
     let parsed: ReduceYaml = serde_yaml::from_str(yaml_body)?;
     Ok(parsed)
-}
-
-fn strip_fences(raw: &str) -> &str {
-    let trimmed = raw.trim();
-    let without_open = trimmed
-        .strip_prefix("```yaml")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .unwrap_or(trimmed);
-    let stripped = without_open.trim_start_matches('\n');
-    if let Some(close) = stripped.rfind("```") {
-        stripped[..close].trim_end()
-    } else {
-        stripped
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct PatternYaml {
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default)]
-    claims: Option<Vec<PatternClaim>>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-    #[serde(default)]
-    links: Option<Vec<PatternLink>>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct PatternClaim {
-    text: String,
-    #[serde(default)]
-    anchor: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct PatternLink {
-    url: String,
-    #[serde(default)]
-    label: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ReduceYaml {
-    #[serde(default)]
-    summary: Option<String>,
 }
 
 #[cfg(test)]

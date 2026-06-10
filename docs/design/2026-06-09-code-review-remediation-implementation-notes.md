@@ -405,3 +405,91 @@ questions encountered while executing
 
 ### Open questions
 - None.
+
+## Phase 9: Cross-crate dedup & dependency hygiene
+
+### Design decisions
+- **distillers::parse** (new module): the six `strip_fences` copies collapsed
+  into one with the truncation BUG FIXED — a closing fence is now stripped only
+  when an opening fence was actually present, so unfenced output containing an
+  embedded ``` is no longer truncated. Also consolidated `approx_tokens`
+  (returns `usize`; the four u32-meta call sites cast at the boundary),
+  `PatternClaim`/`PatternLink` (identical everywhere), a shared `PatternYaml`
+  (article/image/video/voicenote — repo and thread keep their own with
+  kind-specific fields, reusing the leaf structs), plus `find_boundary` and
+  `ReduceYaml` (byte-identical between video/voicenote). Six fence + token
+  regression tests in `parse/tests.rs`.
+- **vault::frontmatter::split_raw**: one splitter replacing five ad-hoc copies
+  (`borg::replay`, `borg::migrate`, `borg::audit`, `borg::backfill`,
+  `cortex::migrate`). `parse_frontmatter` now delegates to it. Body is returned
+  raw (untrimmed) so round-tripping callers preserve their blank line;
+  `parse_frontmatter` trims as before.
+- **truncate_input**: the byte-identical cortex copy in `fabric.rs` is now a
+  re-export of `llm::truncate_input`.
+- **update_wikilinks_for_moves**: classify + migrate now delegate to
+  `naming::update_wikilinks_batch` (the robust case-insensitive, alias-aware,
+  atomic-write superset); the two weaker copies deleted.
+- **ledger** (`append_entry`): rows built via `table::format_row` (escapes `|`
+  and newlines per cell — a `|` in a source URL no longer shatters the row);
+  the exclusive lock is now taken BEFORE the header check + append (closes the
+  TOCTOU where a concurrent appender raced the unlocked header repair).
+- **Desktop sink**: `lib::send_notification` reuses `config::APP_NAME` (now
+  `pub(crate)`); its 5000 ms DISPLAY timeout is a named const, kept distinct
+  from `notify::Desktop`'s 500 ms D-Bus call-timeout (different semantics).
+- **Dependency hygiene**: hoisted rmcp, rusqlite, schemars, serial_test,
+  tempfile, thiserror, tracing-subscriber, url, teloxide to
+  `[workspace.dependencies]` (resolving the thiserror 2.0/2.0.18 and
+  schemars 1.2/1.2.1 skews); each crate now `{ workspace = true }`. Removed
+  unused deps (borg colored+env_logger, cortex env_logger+which, sb tracing).
+  Added `[workspace.lints.rust]` (dead_code/unused_variables = deny, mirroring
+  the crate-root denies; clippy::unwrap_used stays per-crate so tests keep
+  unwrap) with `lints.workspace = true` per crate, and deliberate
+  `[profile.dev.package."*"] opt-level = 2` + `[profile.release] lto = "thin"`
+  for the candle/libsignal/aws-lc build weight.
+- Deleted the test-only `markdown::sanitize_filename` wrapper (vault::hygiene
+  already tests the real fn); single `eval::mode_label` (server.rs delegates,
+  `None` → "configured"); `queries.rs` uses `judge::MAX_SCORE`; deleted the dead
+  `slide_summary`/`use_fabric` bindings + unused clone in `process_youtube`;
+  fixed the stale "mirrors the cortex pattern" comment in `borg::fabric`.
+
+### Deviations
+- **build_distilled / call_fabric NOT shared (video↔voicenote)**: per the Risk
+  table's "diff the copies first to surface intentional divergence" mitigation,
+  I diffed them — `build_distilled` genuinely differs (video keeps claim
+  timestamp anchors; voicenote drops them; warn thresholds 500 vs 200 words),
+  and `call_fabric` is a `&self` method differing only in its log label. Kept
+  per-kind; only the byte-identical `find_boundary`/`ReduceYaml` were shared.
+- **ledger reader parse_table migration NOT done**: `check_duplicate` /
+  `find_completed` / `query_entries` / `parse_completed_entries` retain
+  positional `col_idx` because it decodes TWO layouts (legacy 9-field +
+  current 8-field) that single-header named-column `table::parse_table` cannot
+  express for legacy rows. The load-bearing correctness fixes (escape, TOCTOU)
+  landed; migrating the dual-layout readers would risk dropping legacy-row
+  reads on this ingest-state-of-record file. Documented rather than forced.
+
+### Item 7 (run_distiller) — DONE
+- The five simple `distill_for_publish_*` clones (article, voicenote, image,
+  idea, vocab) collapsed into one private `run_distiller` core; each is now a
+  thin wrapper. A `preserve_transcript_on_fallback` flag keeps behavior exact
+  (article does NOT re-assert transcript on fallback; the four transcript-
+  bearing kinds do). The bespoke video/repo/thread distillers keep their own
+  bodies (map-reduce / payload building — more than the shared core). distill.rs
+  806 → 753 lines; 716 borg lib tests pass unchanged.
+
+### Remaining (item 7 epilogue, items 8, 10)
+- **Item 7 (epilogue half)**: extract a `publish_note()` helper for the 6×
+  copy-pasted handler epilogue (tz, ledger entry, obsidian URL, IngestResult).
+- **Item 8**: extract the ~8× processing→pipeline→result dispatch block in
+  telegram/ntfy/routes into a helper.
+- **Item 10**: expose `borg::probe_telegram()`/`probe_signal()` typed probes;
+  rewire sb's doctor; drop teloxide/signal-rs/hostname from `sb/Cargo.toml`.
+  (Risk: relocates the `!Send` signal probe into a load-bearing operator
+  surface.)
+
+### Tradeoffs
+- Hoisting `teloxide` to the workspace even though sb's copy is slated for
+  removal (item 10): borg keeps it, so the workspace entry is correct
+  regardless; sb's line is dropped when item 10 lands.
+
+### Open questions
+- None.

@@ -504,7 +504,7 @@ pub fn apply_classify(
     // Update wikilinks across vault for moved files
     if !moves.is_empty() {
         let all_notes = crate::vault::scan_vault(vault_root, &crate::config::VaultConfig::default())?;
-        update_wikilinks_for_moves(vault_root, &all_notes, &moves)?;
+        crate::naming::update_wikilinks_batch(vault_root, &all_notes, &moves)?;
     }
 
     // Caller (sb) formats the report; classify::run returns it directly.
@@ -881,53 +881,6 @@ fn existing_note_has_source(path: &Path, source_url: &str) -> bool {
 }
 
 /// Update wikilinks across vault after file moves
-fn update_wikilinks_for_moves(vault_root: &Path, notes: &[Note], renames: &[(PathBuf, PathBuf)]) -> Result<()> {
-    if renames.is_empty() {
-        return Ok(());
-    }
-
-    let rename_map: Vec<(String, String)> = renames
-        .iter()
-        .filter_map(|(from, to)| {
-            let old_stem = from.file_stem()?.to_str()?.to_string();
-            let new_stem = to.file_stem()?.to_str()?.to_string();
-            if old_stem == new_stem {
-                None // Same filename, no wikilink update needed
-            } else {
-                Some((old_stem, new_stem))
-            }
-        })
-        .collect();
-
-    if rename_map.is_empty() {
-        return Ok(());
-    }
-
-    for note in notes {
-        let abs_path = vault_root.join(&note.path);
-        let content = std::fs::read_to_string(&abs_path)?;
-        let mut new_content = content.clone();
-
-        for (old_stem, new_stem) in &rename_map {
-            // Replace [[old_stem]] with [[new_stem]] and [[old_stem|alias]] with [[new_stem|alias]]
-            let old_link = format!("[[{old_stem}]]");
-            let new_link = format!("[[{new_stem}]]");
-            new_content = new_content.replace(&old_link, &new_link);
-
-            let old_alias_prefix = format!("[[{old_stem}|");
-            let new_alias_prefix = format!("[[{new_stem}|");
-            new_content = new_content.replace(&old_alias_prefix, &new_alias_prefix);
-        }
-
-        if new_content != content {
-            vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
-            log::debug!("updated wikilinks in {}", note.path.display());
-        }
-    }
-
-    Ok(())
-}
-
 /// Trait needed for Domain::from_str since vault uses custom FromStr
 trait FromStrExt: Sized {
     fn from_str(s: &str) -> Result<Self, String>;

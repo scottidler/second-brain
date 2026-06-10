@@ -11,9 +11,7 @@ axum = { version = "0.8.8", features = ["multipart"] }
 chrono = { workspace = true }
 chrono-tz = "0.10"
 clap = { workspace = true }
-colored = { workspace = true }
 dirs = { workspace = true }
-env_logger = { workspace = true }
 eyre = { workspace = true }
 fs2 = { workspace = true }
 log = { workspace = true }
@@ -24,12 +22,12 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = "0.10"
 shellexpand = { workspace = true }
-thiserror = "2.0.18"
-teloxide = { version = "0.17", default-features = false, features = ["macros", "ctrlc_handler", "rustls", "rustls-native-roots"] }
+thiserror = { workspace = true }
+teloxide = { workspace = true }
 tokio = { workspace = true }
 tower = "0.5.3"
 tower-http = { version = "0.6.8", features = ["cors"] }
-url = "2.5.8"
+url = { workspace = true }
 urlencoding = "2.1"
 arboard = "3"
 notify-rust = "4"
@@ -41,11 +39,11 @@ async-trait = "0.1.89"
 image_hasher = "3.1.1"
 image = "0.25.10"
 rayon = { workspace = true }
-tempfile = "3.27.0"
-rusqlite = { version = "0.34", features = ["bundled"] }
+tempfile = { workspace = true }
+rusqlite = { workspace = true }
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.27.0"
-schemars = "1.2.1"
+schemars = { workspace = true }
 signal-rs = { git = "https://github.com/scottidler/signal-rs", tag = "v0.2.1", version = "0.2.1" }
 humantime = "2.3.0"
 
@@ -56,3 +54,6 @@ features = ["client", "gateway", "model", "rustls_backend"]
 
 [dev-dependencies]
 filetime = "0.2.27"
+
+[lints]
+workspace = true

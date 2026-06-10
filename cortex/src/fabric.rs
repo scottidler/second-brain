@@ -43,16 +43,9 @@ pub fn is_available(binary: &str) -> bool {
     vault::fabric::is_available(binary)
 }
 
-/// Truncate input text to approximately max_tokens (estimated at ~4 chars per token).
-pub fn truncate_input(input: &str, max_tokens: usize) -> &str {
-    let max_chars = max_tokens * 4;
-    if input.len() <= max_chars {
-        input
-    } else {
-        let end = input.floor_char_boundary(max_chars);
-        &input[..end]
-    }
-}
+// `truncate_input` lives in `crate::llm` (single source of truth); re-exported
+// here so the many `crate::fabric::truncate_input` call sites stay valid.
+pub use crate::llm::truncate_input;
 
 #[cfg(test)]
 mod tests {
@@ -61,18 +54,5 @@ mod tests {
     #[test]
     fn test_is_available_returns_bool() {
         let _ = is_available("fabric");
-    }
-
-    #[test]
-    fn test_truncate_input_short() {
-        let input = "hello world";
-        assert_eq!(truncate_input(input, 50000), "hello world");
-    }
-
-    #[test]
-    fn test_truncate_input_long() {
-        let input = "a".repeat(300_000);
-        let result = truncate_input(&input, 50000);
-        assert!(result.len() <= 200_000);
     }
 }

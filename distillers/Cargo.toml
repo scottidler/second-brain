@@ -16,10 +16,13 @@ serde = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
 futures = "0.3.32"
-url = "2.5.8"
+url = { workspace = true }
 
 [dev-dependencies]
 # Tests round-trip rendered markdown through the vault::search body parsers,
 # which are feature-gated behind `search`. Production builds of distillers do
 # NOT enable this feature, so rusqlite stays out of the borg dependency tree.
 vault = { path = "../vault", features = ["search"] }
+
+[lints]
+workspace = true

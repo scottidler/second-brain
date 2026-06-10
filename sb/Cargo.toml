@@ -18,13 +18,12 @@ eyre = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing = "0.1"
+tracing-subscriber = { workspace = true }
 dirs = { workspace = true }
 shellexpand = { workspace = true }
 colored = { workspace = true }
 serde_json = { workspace = true }
-rmcp = { version = "1.3.0", features = ["server", "macros"] }
+rmcp = { workspace = true }
 serde_yaml.workspace = true
 serde.workspace = true
 teloxide = { version = "0.17.0", default-features = false, features = ["macros", "ctrlc_handler", "rustls", "rustls-native-roots"] }
@@ -34,5 +33,8 @@ terminal_size = "0.4.4"
 chrono.workspace = true
 
 [dev-dependencies]
-serial_test = "3.4.0"
-tempfile = "3.27.0"
+serial_test = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

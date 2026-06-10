@@ -4,10 +4,10 @@
 //! `Distilled`, enforces bounds, and falls back on timeout / non-zero exit /
 //! parse failure. The pattern is the prompt; the parser is here.
 
+use crate::parse::{PatternYaml, approx_tokens, strip_fences};
 use async_trait::async_trait;
 use chrono::Utc;
 use eyre::Result;
-use serde::{Deserialize, Serialize};
 use vault::distilled::{Claim, Distilled, DistilledMeta, Link, ValidationMeta};
 
 use crate::{
@@ -149,8 +149,8 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
 
         // Token counts for `meta`. Fabric's output doesn't surface these
         // directly; we report char-based approximations rather than lie.
-        let input_tokens = approx_tokens(inputs.transcript.len());
-        let output_tokens = approx_tokens(raw.len());
+        let input_tokens = approx_tokens(inputs.transcript.len()) as u32;
+        let output_tokens = approx_tokens(raw.len()) as u32;
 
         let distilled = Distilled {
             summary,
@@ -187,55 +187,6 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
         bounded.tags.iter_mut().for_each(|t| *t = t.to_lowercase());
         Ok(bounded)
     }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct PatternYaml {
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default)]
-    claims: Option<Vec<PatternClaim>>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-    #[serde(default)]
-    links: Option<Vec<PatternLink>>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct PatternClaim {
-    text: String,
-    #[serde(default)]
-    anchor: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct PatternLink {
-    url: String,
-    #[serde(default)]
-    label: Option<String>,
-}
-
-/// Strip a leading ```yaml ... ``` (or bare ``` ... ```) fence if the LLM
-/// added one despite the prompt asking it not to. We don't try to repair
-/// otherwise-malformed YAML.
-fn strip_fences(raw: &str) -> &str {
-    let trimmed = raw.trim();
-    let without_open = trimmed
-        .strip_prefix("```yaml")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .unwrap_or(trimmed);
-    let stripped = without_open.trim_start_matches('\n');
-    if let Some(close) = stripped.rfind("```") {
-        stripped[..close].trim_end()
-    } else {
-        stripped
-    }
-}
-
-/// Rough character-to-token approximation. ~4 chars per token is a common
-/// rule of thumb for English prose; good enough for budget reporting.
-fn approx_tokens(chars: usize) -> u32 {
-    (chars / 4) as u32
 }
 
 #[cfg(test)]

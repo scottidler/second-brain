@@ -328,14 +328,7 @@ impl OracleMcpServer {
             }
         })?;
 
-        let mode_label = match req.mode {
-            Some(SearchMode::Bm25) => "bm25",
-            Some(SearchMode::Vector) => "vector",
-            Some(SearchMode::Hybrid) => "hybrid",
-            Some(SearchMode::Graph) => "graph",
-            Some(SearchMode::GraphHybrid) => "graph-hybrid",
-            None => "configured",
-        };
+        let mode_label = req.mode.map(crate::eval::mode_label).unwrap_or("configured");
 
         let results: Vec<serde_json::Value> = notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
 

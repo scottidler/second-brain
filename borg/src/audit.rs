@@ -765,13 +765,7 @@ fn read_note_title(path: &Path) -> Option<String> {
 
 /// Extract a simple string field from YAML frontmatter.
 fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return None;
-    }
-    let after_first = &trimmed[3..];
-    let end_pos = after_first.find("\n---")?;
-    let fm = &after_first[..end_pos];
+    let (fm, _body) = vault::frontmatter::split_raw(content)?;
 
     for line in fm.lines() {
         let line = line.trim();

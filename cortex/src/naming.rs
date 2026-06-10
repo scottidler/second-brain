@@ -163,8 +163,15 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
 }
 
 /// Update wikilinks in all vault files for a batch of renames.
-/// Single pass through all files.
-fn update_wikilinks_batch(vault_root: &Path, notes: &[Note], renames: &[(PathBuf, PathBuf)]) -> eyre::Result<()> {
+/// Single pass through all files. THE shared wikilink-rewrite for renames —
+/// case-insensitive, handles `[[link]]` and `[[link|alias]]`, skips renamed
+/// files, writes atomically. classify and migrate both delegate here (Phase 9
+/// consolidation; replaced two weaker copies).
+pub(crate) fn update_wikilinks_batch(
+    vault_root: &Path,
+    notes: &[Note],
+    renames: &[(PathBuf, PathBuf)],
+) -> eyre::Result<()> {
     if renames.is_empty() {
         return Ok(());
     }

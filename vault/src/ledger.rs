@@ -408,15 +408,19 @@ pub fn parse_completed_entries(ledger_path: &Path) -> Result<Vec<ParsedLedgerRow
 /// Insert a row at the top of the Borg Ledger table (newest first).
 pub fn append_entry(ledger_path: &Path, entry: &LedgerEntry) -> Result<()> {
     ensure_ledger_exists(ledger_path)?;
-    ensure_header_matches(ledger_path)?;
 
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .open(ledger_path)
         .context("Failed to open Borg Ledger for writing")?;
+    // Take the exclusive lock BEFORE the header check + append. Previously the
+    // header repair ran unlocked, so a concurrent appender could slip a row in
+    // between the header check and our write (TOCTOU). Both now happen under the
+    // one lock.
     file.lock_exclusive()
         .context("Failed to acquire exclusive lock on Borg Ledger")?;
+    ensure_header_matches(ledger_path)?;
 
     let note_display = entry
         .filename
@@ -428,10 +432,19 @@ pub fn append_entry(ledger_path: &Path, entry: &LedgerEntry) -> Result<()> {
     let domain_display = entry.domain.as_deref().unwrap_or("-");
     let trace_display = entry.trace_id.as_deref().unwrap_or("-");
 
-    let row = format!(
-        "| {} | {} | {} | {} | {} | {} | {} | {} |",
-        entry.date, entry.time, entry.method, SUCCESS_GLYPH, note_display, entry.source, domain_display, trace_display,
-    );
+    // Build the row via `table::format_row`, which escapes `|` and collapses
+    // newlines per cell — a `|` in a source URL no longer shatters the row.
+    let method = entry.method.to_string();
+    let row = crate::table::format_row(&[
+        ("Date", &entry.date),
+        ("Time", &entry.time),
+        ("Method", &method),
+        ("Status", SUCCESS_GLYPH),
+        ("Note", &note_display),
+        ("Source", &entry.source),
+        ("Domain", domain_display),
+        ("Trace", trace_display),
+    ]);
 
     let content = fs::read_to_string(ledger_path).context("Failed to read Borg Ledger")?;
     let mut lines: Vec<&str> = content.lines().collect();

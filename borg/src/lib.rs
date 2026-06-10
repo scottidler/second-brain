@@ -913,16 +913,21 @@ pub async fn ingest(
     })
 }
 
+/// Display duration for the synchronous hotkey-path toast. Distinct from
+/// `notify::Desktop`'s D-Bus call-timeout (a wedge-detection bound) — this is
+/// how long the toast stays on screen, so it is intentionally longer.
+const HOTKEY_NOTIFY_DISPLAY_MS: u32 = 5000;
+
 fn send_notification(summary: &str, body: &str) {
     if notify::real_notifications_disabled() {
         log::debug!("send_notification: suppressed under test (summary={summary:?})");
         return;
     }
     let _ = notify_rust::Notification::new()
-        .appname("borg")
+        .appname(config::APP_NAME)
         .summary(&format!("obsidian-borg: {summary}"))
         .body(body)
-        .timeout(notify_rust::Timeout::Milliseconds(5000))
+        .timeout(notify_rust::Timeout::Milliseconds(HOTKEY_NOTIFY_DISPLAY_MS))
         .show();
 }
 

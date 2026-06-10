@@ -307,10 +307,6 @@ fn serialize_yaml_value(value: &serde_yaml::Value) -> String {
     }
 }
 
-pub fn sanitize_filename(title: &str) -> String {
-    crate::hygiene::sanitize_filename(title)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,13 +798,6 @@ mod tests {
         assert_eq!(rendered.matches("creator:").count(), 1);
         // serde_yaml emits a simple scalar bare (no quotes needed).
         assert!(rendered.contains("creator: Scott"));
-    }
-
-    #[test]
-    fn test_sanitize_filename() {
-        assert_eq!(sanitize_filename("Hello World!"), "hello-world");
-        assert_eq!(sanitize_filename("Test: A/B \"quotes\""), "test-a-b-quotes");
-        assert_eq!(sanitize_filename("normal-file_name"), "normal-file-name");
     }
 
     #[test]

@@ -7,8 +7,11 @@ use crate::config::{FabricConfig, PipelineConfig};
 
 /// Wait for a child process with a per-call timeout. Kills the child on
 /// elapsed and returns an error. Caller still owns the `Child`; on success
-/// they call `wait_with_output()` to collect output. Mirrors the cortex
-/// pattern at `cortex/src/fabric.rs`.
+/// they call `wait_with_output()` to collect output.
+///
+/// This is the URL-fetch variant (own-the-`Child`, drain via
+/// `wait_with_output`); the deadlock-safe stdin/stdout-draining primitive for
+/// pattern invocations is `vault::fabric::wait_with_timeout`.
 fn wait_with_timeout(child: &mut Child, timeout_secs: u64, label: &str) -> Result<()> {
     let timeout = Duration::from_secs(timeout_secs);
     let start = Instant::now();

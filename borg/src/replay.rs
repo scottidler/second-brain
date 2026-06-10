@@ -84,9 +84,7 @@ pub fn read_source_from_note(note_path: &Path) -> Result<String> {
 }
 
 fn extract_frontmatter(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix("---\n")?;
-    let end = rest.find("\n---")?;
-    Some(&rest[..end])
+    vault::frontmatter::split_raw(text).map(|(fm, _body)| fm)
 }
 
 /// Outcome of a `borg replay` run. The actual per-trace results stream
