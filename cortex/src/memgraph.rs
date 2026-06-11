@@ -76,7 +76,7 @@ fn parse_triple(line: &str) -> Option<Triple> {
 
 /// True when a note is ingested (`origin: assisted`).
 fn is_ingested(note: &Note) -> bool {
-    matches!(note.frontmatter.origin.as_deref(), Some("assisted"))
+    note.frontmatter.origin.as_deref() == Some(vault::schema::Origin::Assisted.as_str())
 }
 
 /// The hub note path for an entity surface form (`entities/<slug>.md`).

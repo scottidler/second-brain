@@ -162,7 +162,7 @@ fn classify_for_backfill(
     // signal and catches those that the bare origin gate would skip.
     let origin = extract_frontmatter_field(&content, "origin");
     let has_source = extract_frontmatter_field(&content, "source").is_some();
-    if origin.as_deref() != Some("assisted") && !has_source {
+    if origin.as_deref() != Some(vault::schema::Origin::Assisted.as_str()) && !has_source {
         return BackfillDecision::SkippedAuthored;
     }
 
