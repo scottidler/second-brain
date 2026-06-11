@@ -500,13 +500,27 @@ fn in_html_tag_or_comment(text: &str, pos: usize) -> bool {
     }
 }
 
+/// True if `pos` sits inside an existing `[[wikilink]]`: the last `[[` before
+/// `pos` is not yet closed by a `]]`. Linking a term that appears inside another
+/// link's target OR its display text builds a broken NESTED wikilink, so this is
+/// off-limits. The `]]`-is-None case (no prior close, e.g. a match in the very
+/// first link's display) is the hole the old `(Some, Some)` guard missed.
+fn in_wikilink(text: &str, pos: usize) -> bool {
+    let before = &text[..pos];
+    match (before.rfind("[["), before.rfind("]]")) {
+        (Some(o), c) => c.is_none_or(|c| o > c),
+        (None, _) => false,
+    }
+}
+
 /// True if the byte range `[start, end)` in `text` sits inside a Markdown/HTML
 /// structural construct where a wikilink must never be inserted. `text` is
 /// whatever slice the caller scans (the post-frontmatter body for both call
 /// sites), and the offsets are into THAT slice - detection and mutation must
 /// pass matching slice+offsets so the two never disagree.
 fn inside_structure(text: &str, start: usize, end: usize) -> bool {
-    in_code_context(text, start)
+    in_wikilink(text, start)
+        || in_code_context(text, start)
         || in_html_tag_or_comment(text, start)
         || in_math(text, start)
         || in_url_token(text, start, end)

@@ -364,3 +364,47 @@ fn guard_idempotent_on_already_linked_prose() {
     // Re-running over a note whose only mention is already a wikilink is a no-op.
     assert_blocked("I use [[rust]] daily", "rust", "rust");
 }
+
+#[test]
+fn guard_blocks_match_inside_existing_wikilink_display() {
+    // "offense" inside the DISPLAY text of an existing wikilink (no prior `]]`)
+    // must NOT be linked - that builds a broken nested wikilink. This is the
+    // exact shape the live daemon was still creating.
+    assert_blocked(
+        "Join [[the-spread-offense|the Spread Offense]] today",
+        "offense",
+        "offense",
+    );
+}
+
+#[test]
+fn guard_blocks_match_inside_existing_wikilink_target() {
+    // "offense" inside the TARGET slug of an existing wikilink must NOT be linked.
+    assert_blocked("Join [[the-spread-offense|the Group]] today", "offense", "offense");
+}
+
+#[test]
+fn guard_blocks_nested_inside_piped_display() {
+    // The real regression form: linking "claude" inside an existing piped link.
+    assert_blocked("Using [[claude-code|Claude Code]] daily", "claude", "claude");
+}
+
+#[test]
+fn guard_links_clean_prose_occurrence_after_one_inside_a_wikilink() {
+    // Iterate-to-clean: the surface appears inside an existing wikilink AND later
+    // in clean prose -> link only the clean prose occurrence.
+    let out = insert_first_wikilink(
+        "see [[the-spread-offense|the Spread Offense]] then plain offense here",
+        "offense",
+        "offense",
+    )
+    .expect("link");
+    assert!(
+        out.contains("[[the-spread-offense|the Spread Offense]]"),
+        "existing link intact: {out}"
+    );
+    assert!(
+        out.contains("plain [[offense]] here"),
+        "clean prose occurrence linked: {out}"
+    );
+}
