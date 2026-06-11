@@ -99,3 +99,31 @@ missed:
   earlier 1207 is the newly-covered nested-prose/embed + indented-URL repairs. The
   only prose-context changes in the manifest are genuine bare-path URLs
   (`linkedin.com/in/...`, a quoted `youtube.com/watch?v=test`).
+
+## Phase 3: Deploy + verify
+
+### Design decisions
+- Ran on `desk` (the daemon host). Stopped cortex AND borg via `systemctl --user
+  stop` (not `sb cortex daemon --stop`, which is a no-op), verified both inactive,
+  `otto install`ed the guarded `sb`, applied `bin/repair-url-wikilinks --apply
+  --force`, then restarted both daemons on the new binary.
+- Verified completeness by an idempotent re-run (0 files changed) + an independent
+  grep for residual `http...[[` patterns.
+
+### Deviations
+- **Did NOT git-commit the obsidian vault repair.** The vault worktree is
+  perpetually dirty from daemon churn (hundreds of unrelated M files), so a
+  sweeping commit would mix the repair with daemon noise, and committing the
+  user's vault is their call (no-unauthorized-git-state-changes). The repair is
+  applied to disk and Syncthing propagates it; whether/when to commit the vault
+  is left to the user.
+
+### Result / residuals (left by design, surfaced for manual review)
+- Apply: 1235 files / 2124 lines repaired. Idempotent re-run: 0.
+- 4 residual `http...[[` matches remain, all correct:
+  - 3 corrupted URLs inside ```bash fenced blocks (curl/git-clone examples) -
+    PROTECTED by the code-span policy; fix by hand if copy-pasteable commands matter.
+  - 1 malformed unbalanced `[[Python` (no closing `]]`) - left for manual review.
+
+### Open questions
+- Prose-domain linking and `entities/` target curation remain open (see design doc).

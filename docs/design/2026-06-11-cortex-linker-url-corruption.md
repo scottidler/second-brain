@@ -2,8 +2,9 @@
 
 **Author:** Scott Idler
 **Date:** 2026-06-11
-**Status:** In Review
+**Status:** Implemented
 **Review Passes Completed:** 5/5
+**Shipped in:** v0.8.69 + the structure-aware-linker fix (commits 59babcf, 7f753b8, d495fee)
 
 ## Summary
 
