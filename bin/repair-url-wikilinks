@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+# Repair URLs the cortex link sweep corrupted by inserting wikilinks INSIDE
+# structural spans (URLs, autolinks, markdown link destinations, HTML tags).
+# The sweep rewrote e.g. youtube.com -> [[youtube-com|youtube.com]] inside an
+# iframe src, breaking the embed. This de-links wikilinks that sit in a
+# structural span, INNERMOST-first so nested forms collapse losslessly, and
+# leaves prose/code-span wikilinks untouched.
+#
+# Span-based, NOT line-based: a line may mix a corrupted URL with legitimate
+# wikilinks; only the ones inside a URL/destination/tag span are repaired.
+#
+# DRY-RUN IS THE DEFAULT. The destructive write requires --apply, which refuses
+# to run while cortex.service is active or the vault worktree is dirty (the
+# vault is usually dirty from daemon churn; pass --force to override after
+# reviewing the dry-run manifest).
+#
+# Usage:
+#   bin/repair-url-wikilinks                 # dry-run: print the change manifest
+#   bin/repair-url-wikilinks --apply         # write (refuses if cortex active / tree dirty)
+#   bin/repair-url-wikilinks --apply --force # write even with a dirty worktree
+#   bin/repair-url-wikilinks --selftest      # run the Suite B test matrix
+#   VAULT_ROOT=/path bin/repair-url-wikilinks
+#
+# Before --apply:  systemctl --user stop cortex   (verify: systemctl --user is-active cortex)
+
+set -euo pipefail
+
+VAULT_ROOT="${VAULT_ROOT:-$HOME/repos/scottidler/obsidian}"
+APPLY=0
+FORCE=0
+SELFTEST=0
+
+usage() {
+    awk 'NR==1 && /^#!/ {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
+    exit 1
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --apply)    APPLY=1 ;;
+        --force)    FORCE=1 ;;
+        --selftest) SELFTEST=1 ;;
+        -h|--help)  usage ;;
+        *)          echo "unknown arg: $arg" >&2; usage ;;
+    esac
+done
+
+PYTHON_TRANSFORM=$(cat <<'PYEOF'
+import sys, os, re, tempfile
+
+MODE = sys.argv[1]                     # 'dryrun' | 'apply' | 'selftest'
+VAULT = sys.argv[2] if len(sys.argv) > 2 else ''
+
+BOUNDARY = set(' \t\r\n"\'<>()`')
+INNER = re.compile(r'\[\[[^\[\]]+\]\]')  # an INNERMOST wikilink (no brackets inside)
+DOMAINISH = re.compile(r'[a-z0-9-]+\.[a-z]{2,}', re.I)  # has a dot+TLD (a real domain)
+
+def in_url_token(line, s, e):
+    ts = s
+    while ts > 0 and line[ts - 1] not in BOUNDARY:
+        ts -= 1
+    te = e
+    while te < len(line) and line[te] not in BOUNDARY:
+        te += 1
+    token = line[ts:te]
+    if '://' in token or token.lower().startswith('www.'):
+        return True
+    ci = token.find(':')
+    if ci > 0 and token[0].isalpha() and all(c.isalnum() or c in '+.-' for c in token[:ci]):
+        return True
+    # Bare-path glue: a '/' or a '?<query>' immediately after the span makes it
+    # a URL, but ONLY when the span's own de-linked text is domain-like (dot+TLD).
+    # The '?' must be followed by query content (\S) - a bare '?' is a prose
+    # question ("the other youtu.be?"), not a URL query. Without these guards a
+    # legitimate prose wikilink would be destroyed.
+    rest = line[e:]
+    if DOMAINISH.search(delink_span(line[s:e])) and (rest[:1] == '/' or re.match(r'\?\S', rest)):
+        return True
+    return False
+
+def in_inline_code(line, s):
+    # Odd backtick count before `s` on the line -> inside an inline code span.
+    return line[:s].count('`') % 2 == 1
+
+def in_inline_math(line, s):
+    return line[:s].count('$') % 2 == 1
+
+def in_link_dest(line, s):
+    before = line[:s]
+    op = before.rfind('](')
+    cp = before.rfind(')')
+    return op != -1 and (cp == -1 or cp < op)
+
+def in_html_tag(line, s):
+    before = line[:s]
+    co = before.rfind('<!--')
+    if co != -1 and '-->' not in before[co:]:
+        return True
+    lt = before.rfind('<')
+    gt = before.rfind('>')
+    return lt != -1 and (gt == -1 or gt < lt)
+
+def in_structural(line, s, e):
+    # PROTECT code/math: a wikilink inside a code/math span is authored content
+    # (a filename list, a tree diagram, an example), never a corrupted URL -
+    # leave it untouched even if it otherwise looks URL-ish.
+    if in_inline_code(line, s) or in_inline_math(line, s):
+        return False
+    # Otherwise repair only URL / destination / HTML-tag spans.
+    return in_url_token(line, s, e) or in_link_dest(line, s) or in_html_tag(line, s)
+
+def delink(inner):
+    return inner.split('|', 1)[1] if '|' in inner else inner
+
+def top_level_spans(line):
+    """Byte spans of OUTERMOST [[...]] wikilinks, accounting for nesting. An
+    unbalanced [[ (no matching ]]) yields no span and is left untouched."""
+    spans = []
+    i, n = 0, len(line)
+    while i < n - 1:
+        if line[i] == '[' and line[i + 1] == '[':
+            depth, j = 1, i + 2
+            while j < n - 1 and depth > 0:
+                if line[j] == '[' and line[j + 1] == '[':
+                    depth += 1; j += 2
+                elif line[j] == ']' and line[j + 1] == ']':
+                    depth -= 1; j += 2
+                else:
+                    j += 1
+            if depth == 0:
+                spans.append((i, j)); i = j; continue
+        i += 1
+    return spans
+
+def delink_span(span_text):
+    """Collapse every wikilink in a span, innermost-first - lossless for nests:
+    [[a-[[b]]-c]] -> [[a-b-c]] -> a-b-c."""
+    while True:
+        m = INNER.search(span_text)
+        if not m:
+            break
+        span_text = span_text[:m.start()] + delink(m.group()[2:-2]) + span_text[m.end():]
+    return span_text
+
+def repair_line(line):
+    # Decide structural-ness at the OUTERMOST span (so the URL signal on the
+    # outer link governs the whole nest), then fully de-link structural spans
+    # and leave prose/code spans untouched.
+    spans = top_level_spans(line)
+    if not spans:
+        return line, False
+    out, last, changed = [], 0, False
+    for (s, e) in spans:
+        out.append(line[last:s])
+        if in_structural(line, s, e):
+            out.append(delink_span(line[s:e]))
+            changed = True
+        else:
+            out.append(line[s:e])
+        last = e
+    out.append(line[last:])
+    return ''.join(out), changed
+
+def selftest():
+    cases = [
+        # (id, input, expected) - must-repair
+        ('B-R1', 'https://www.[[youtube-com|youtube.com]]/embed/abc', 'https://www.youtube.com/embed/abc'),
+        ('B-R2', '[t](https://[[github-com|github.com]]/x)', '[t](https://github.com/x)'),
+        ('B-R3', 'https://[[foo-com|foo.com]]/r?u=http://[[bar-com|bar.com]]', 'https://foo.com/r?u=http://bar.com'),
+        ('B-R4', '<iframe src="https://www.[[youtube-com|youtube.com]]/embed/abc">', '<iframe src="https://www.youtube.com/embed/abc">'),
+        ('B-R5', '[[youtube-com|youtube.com]]/watch?v=x', 'youtube.com/watch?v=x'),
+        ('B-R6', 'https://[[american-[[football]]-academy]].com/x', 'https://american-football-academy.com/x'),
+        ('B-R7', '[[blog-[[langchain]]-com|blog.langchain.com]]/x', 'blog.langchain.com/x'),
+        ('B-R8', 'https://[[american-football-academy]].com', 'https://american-football-academy.com'),
+        ('B-R9', 'see https://[[github-com|github.com]]/x on [[2026-06-10]]', 'see https://github.com/x on [[2026-06-10]]'),
+        # must-preserve
+        ('B-P1', 'See [[some-note|Some Note]] for details', 'See [[some-note|Some Note]] for details'),
+        ('B-P2', 'I use [[rust]] here', 'I use [[rust]] here'),
+        ('B-P3', 'tutorial: `[[youtube-com|youtube.com]]`', 'tutorial: `[[youtube-com|youtube.com]]`'),
+        ('B-P4', 'I use [[github-com|github.com]] daily', 'I use [[github-com|github.com]] daily'),
+        ('B-Pprose', 'see [[note]]. Next sentence.', 'see [[note]]. Next sentence.'),
+        # inline-code path/filename wikilinks (authored in a design doc) - preserve
+        ('B-P5', 'see `System/[[agents|Agents]]/` here', 'see `System/[[agents|Agents]]/` here'),
+        ('B-P6', 'file `[[dragonlance|Dragonlance]].md` here', 'file `[[dragonlance|Dragonlance]].md` here'),
+        # prose .md filename reference (TLD heuristic removed) - preserve
+        ('B-P7', 'the [[readme]].md file', 'the [[readme]].md file'),
+        # prose wikilink followed by '?' (a question) - NOT a URL query - preserve
+        ('B-P8', '# How To Build Wiki In [[obsidian|Obsidian]]?', '# How To Build Wiki In [[obsidian|Obsidian]]?'),
+        # prose wikilink followed by '/' but not domain-like - preserve
+        ('B-P9', 'see [[note]]/subpage detail', 'see [[note]]/subpage detail'),
+        # domain-like wikilink ending a prose QUESTION (bare ?) - preserve
+        ('B-P10', 'one is youtube.com and the other [[youtu-be|youtu.be]]?', 'one is youtube.com and the other [[youtu-be|youtu.be]]?'),
+        # domain-like wikilink with a real ?query - repair
+        ('B-R11', '[[youtube-com|youtube.com]]?v=test', 'youtube.com?v=test'),
+        # unresolvable / malformed -> leave untouched
+        ('B-R10', 'https://[[broken/x no close', 'https://[[broken/x no close'),
+    ]
+    failed = 0
+    for cid, inp, exp in cases:
+        got, _ = repair_line(inp)
+        status = 'ok' if got == exp else 'FAIL'
+        if got != exp:
+            failed += 1
+            print(f'{status} {cid}\n  in:  {inp!r}\n  got: {got!r}\n  exp: {exp!r}')
+        else:
+            print(f'{status} {cid}')
+    print(f'\n{len(cases) - failed}/{len(cases)} passed')
+    sys.exit(1 if failed else 0)
+
+def iter_md(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ('.git', '.obsidian', '.trash')]
+        for fn in filenames:
+            if fn.endswith('.md'):
+                yield os.path.join(dirpath, fn)
+
+def write_atomic(path, data):
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix='.repair-', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+def run(apply):
+    files_changed = 0
+    total_repairs = 0
+    for path in iter_md(VAULT):
+        try:
+            with open(path, encoding='utf-8') as f:
+                lines = f.readlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        rel = os.path.relpath(path, VAULT)
+        new_lines = []
+        file_changed = False
+        in_fence = False
+        in_math_block = False
+        for n, line in enumerate(lines, 1):
+            # Protect block-level code/math: a fenced block, a $$ math block, or
+            # an indented (4-space/tab) code line is authored content, not a URL.
+            if line.lstrip().startswith('```'):
+                in_fence = not in_fence
+                new_lines.append(line)
+                continue
+            if in_fence:
+                new_lines.append(line)
+                continue
+            if line.strip() == '$$':
+                in_math_block = not in_math_block
+                new_lines.append(line)
+                continue
+            if in_math_block or line.startswith('    ') or line.startswith('\t'):
+                new_lines.append(line)
+                continue
+            repaired, changed = repair_line(line)
+            if changed:
+                file_changed = True
+                total_repairs += 1
+                print(f'{rel}:{n}\n  - {line.rstrip()}\n  + {repaired.rstrip()}')
+            new_lines.append(repaired)
+        if file_changed:
+            files_changed += 1
+            if apply:
+                write_atomic(path, ''.join(new_lines))
+    mode = 'APPLIED' if apply else 'DRY-RUN (no files written; pass --apply to write)'
+    print(f'\n=== {mode} ===')
+    print(f'files changed: {files_changed}')
+    print(f'lines repaired: {total_repairs}')
+
+if MODE == 'selftest':
+    selftest()
+elif MODE == 'apply':
+    run(apply=True)
+else:
+    run(apply=False)
+PYEOF
+)
+
+if [[ "$SELFTEST" == "1" ]]; then
+    exec python3 - selftest <<<"$PYTHON_TRANSFORM"
+fi
+
+if [[ ! -d "$VAULT_ROOT" ]]; then
+    echo "ERROR: vault root not found: $VAULT_ROOT" >&2
+    exit 1
+fi
+
+if [[ "$APPLY" == "1" ]]; then
+    # Refuse to write while cortex is sweeping - it would re-corrupt the repair.
+    if systemctl --user is-active --quiet cortex.service 2>/dev/null; then
+        echo "ERROR: cortex.service is active. Stop it on EVERY mesh node first:" >&2
+        echo "  systemctl --user stop cortex" >&2
+        echo "  systemctl --user is-active cortex   # expect: inactive/failed" >&2
+        exit 1
+    fi
+    # Refuse on a dirty worktree unless forced - the vault is usually dirty from
+    # daemon churn, so review the dry-run manifest first, then --force.
+    if [[ -n "$(git -C "$VAULT_ROOT" status --porcelain 2>/dev/null)" && "$FORCE" != "1" ]]; then
+        echo "ERROR: $VAULT_ROOT has a dirty worktree." >&2
+        echo "  Review the dry-run manifest, then re-run with --force to apply:" >&2
+        echo "  bin/repair-url-wikilinks --apply --force" >&2
+        exit 1
+    fi
+    python3 - apply "$VAULT_ROOT" <<<"$PYTHON_TRANSFORM"
+else
+    python3 - dryrun "$VAULT_ROOT" <<<"$PYTHON_TRANSFORM"
+fi
