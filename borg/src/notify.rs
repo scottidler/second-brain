@@ -37,6 +37,12 @@ const DESKTOP_TIMEOUT_MS: u64 = 500;
 const TELEGRAM_TIMEOUT_MS: u64 = 3000;
 const SIGNAL_TIMEOUT_MS: u64 = 3000;
 
+/// Display timeout for the desktop "processing" placeholder. It is
+/// deliberately `Never` (not the configured `timeout_ms`): the placeholder
+/// must outlive the whole pipeline so `Desktop::result` can replace it in
+/// place by id. The configured `timeout_ms` governs the TERMINAL toast only.
+const PLACEHOLDER_TIMEOUT: Timeout = Timeout::Never;
+
 /// Hard gate against test-suite leakage into the user's real notification
 /// systems (desktop libnotify, Telegram, Signal). On 2026-05-24 the
 /// `test_ingest_connection_refused` unit test shipped a real "cannot reach
@@ -234,13 +240,19 @@ impl Desktop {
         }
         let body = format!("[{trace_id}] {description}");
         let appname = self.appname.clone();
-        let timeout = self.timeout;
+        // The placeholder must outlive the entire pipeline (tens of seconds to
+        // minutes) so `result()` can replace it in place by id. A finite
+        // display timeout lets the daemon expire it mid-pipeline and free the
+        // id, which breaks the replace with `Invalid notification ID` on every
+        // ingest longer than the timeout (i.e. essentially every video).
+        // `cfg.timeout_ms` governs the TERMINAL toast only (see `Desktop::show`);
+        // the placeholder persists until it is replaced.
         let future = async move {
             Notification::new()
                 .appname(&appname)
                 .summary("obsidian-borg")
                 .body(&body)
-                .timeout(timeout)
+                .timeout(PLACEHOLDER_TIMEOUT)
                 .show_async()
                 .await
         };
@@ -269,11 +281,13 @@ impl Desktop {
     /// call inside `timeout(async { ... })` has no await points and blocks
     /// the worker until D-Bus replies.
     ///
-    /// Fallback: if the id-based replace fails (notification daemon expired
-    /// the prior popup once the pipeline ran longer than its display
-    /// timeout - typical for 80s+ video transcription), retry once with a
-    /// fresh notification. The user sees a separate terminal popup rather
-    /// than nothing.
+    /// The placeholder is shown with `Timeout::Never` (see [`Self::processing`])
+    /// so its id stays valid for the whole pipeline and this replace normally
+    /// succeeds. The fallback remains for the genuine edge cases that still
+    /// invalidate the id: the user manually dismissed the placeholder, the
+    /// notification daemon restarted, or a prior orphaned popup was GC'd. On
+    /// any of those the id-based replace fails and we retry once with a fresh
+    /// notification so the user sees a terminal popup rather than nothing.
     pub async fn result(&self, result: &IngestResult, display_source: &str, prior: Option<NotificationHandle>) {
         let body = format_desktop_body(result, display_source);
         let prior_id = prior.as_ref().map(|h| h.id());
@@ -322,10 +336,21 @@ impl Desktop {
         match tokio::time::timeout(Duration::from_millis(DESKTOP_TIMEOUT_MS), future).await {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(e)) => {
-                log::warn!("notify: failed to send {label}: {e}");
+                // A replace attempt (`prior_id.is_some()`) failing is routine
+                // control flow: the caller falls back to a fresh popup, so the
+                // user still gets a notification. Log it at debug. A failure
+                // WITHOUT a prior id is the fresh/terminal popup itself failing
+                // - the real safety net - so that stays at WARN.
+                if prior_id.is_some() {
+                    log::debug!("notify: {label} failed, falling back to fresh popup: {e}");
+                } else {
+                    log::warn!("notify: failed to send {label}: {e}");
+                }
                 Err(())
             }
             Err(_) => {
+                // A D-Bus timeout is the wedge-detection signal the 500 ms
+                // bound exists for; keep it at WARN regardless of path.
                 log::warn!("notify: {label} timed out after {DESKTOP_TIMEOUT_MS}ms");
                 Err(())
             }

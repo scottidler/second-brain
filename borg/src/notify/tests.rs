@@ -136,6 +136,25 @@ fn test_desktop_new_enabled_returns_some() {
     assert_eq!(n.timeout, Timeout::Milliseconds(5000));
 }
 
+/// The "processing" placeholder must NEVER expire on its own: it has to
+/// outlive the whole pipeline so `result()` can replace it in place by id.
+/// A finite placeholder timeout (the old bug: it reused `cfg.timeout_ms`)
+/// lets the daemon free the id mid-pipeline, breaking the replace with
+/// `Invalid notification ID` on every ingest longer than the timeout. The
+/// terminal toast keeps the configured finite timeout - the two must differ.
+#[test]
+fn test_placeholder_timeout_never_expires_and_differs_from_terminal() {
+    let cfg = DesktopConfig {
+        enabled: true,
+        host: None,
+        timeout_ms: 5000,
+        appname: "borg".to_string(),
+    };
+    let n = Desktop::new(&cfg).expect("enabled config builds notifier");
+    assert_eq!(PLACEHOLDER_TIMEOUT, Timeout::Never);
+    assert_ne!(PLACEHOLDER_TIMEOUT, n.timeout);
+}
+
 /// Body must byte-match `format_reply` when no `obsidian_url` is set.
 /// Locks in the cross-channel rendering parity invariant from the design doc.
 #[test]
