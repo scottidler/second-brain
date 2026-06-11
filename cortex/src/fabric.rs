@@ -48,11 +48,4 @@ pub fn is_available(binary: &str) -> bool {
 pub use crate::llm::truncate_input;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_available_returns_bool() {
-        let _ = is_available("fabric");
-    }
-}
+mod tests;
