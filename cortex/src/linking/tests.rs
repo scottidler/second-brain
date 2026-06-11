@@ -225,3 +225,142 @@ fn load_glossary_missing_file_is_empty() {
     assert!(g.concepts.is_empty());
     assert!(g.aliases.is_empty());
 }
+
+// --- Suite A: structure-aware guard (inside_structure) ---
+//
+// The mutation point is `insert_first_wikilink`; a `None` result means the only
+// occurrence of the surface was structural and was correctly skipped. These
+// pin the "never corrupt a URL/HTML/code/math/link span again" contract.
+
+/// Assert the surface is NOT wrapped (every occurrence is structural).
+fn assert_blocked(content: &str, target: &str, surface: &str) {
+    assert_eq!(
+        insert_first_wikilink(content, target, surface),
+        None,
+        "should NOT link {surface:?} inside structure: {content:?}"
+    );
+}
+
+#[test]
+fn guard_blocks_iframe_src() {
+    assert_blocked(
+        r#"<iframe width="854" height="480" src="https://www.youtube.com/embed/abcdefghijk"></iframe>"#,
+        "youtube-com",
+        "youtube.com",
+    );
+}
+
+#[test]
+fn guard_blocks_markdown_image_embed() {
+    assert_blocked(
+        "![](https://www.youtube.com/watch?v=abcdefghijk)",
+        "youtube-com",
+        "youtube.com",
+    );
+}
+
+#[test]
+fn guard_blocks_markdown_link_destination() {
+    assert_blocked("[docs](https://github.com/torvalds/linux)", "github-com", "github.com");
+}
+
+#[test]
+fn guard_blocks_autolink() {
+    assert_blocked("see <https://youtube.com/x> here", "youtube-com", "youtube.com");
+}
+
+#[test]
+fn guard_blocks_bare_scheme_url() {
+    assert_blocked(
+        "prose then https://youtube.com/watch?v=x end",
+        "youtube-com",
+        "youtube.com",
+    );
+}
+
+#[test]
+fn guard_blocks_bare_path_no_scheme() {
+    // No scheme, no www - caught by the trailing "/" of a bare path.
+    assert_blocked("youtube.com/watch?v=x", "youtube-com", "youtube.com");
+    assert_blocked("see github.com/torvalds for code", "github-com", "github.com");
+}
+
+#[test]
+fn guard_blocks_mailto_scheme() {
+    assert_blocked("contact mailto:hi@youtube.com today", "youtube-com", "youtube.com");
+}
+
+#[test]
+fn guard_blocks_reference_style_definition() {
+    assert_blocked("[ref]: https://youtube.com/x", "youtube-com", "youtube.com");
+}
+
+#[test]
+fn guard_blocks_inline_code() {
+    assert_blocked("the host `youtube.com` is special", "youtube-com", "youtube.com");
+}
+
+#[test]
+fn guard_blocks_fenced_code() {
+    assert_blocked("```\nyoutube.com\n```", "youtube-com", "youtube.com");
+}
+
+#[test]
+fn guard_blocks_indented_code() {
+    assert_blocked("    github.com is here", "github-com", "github.com");
+}
+
+#[test]
+fn guard_blocks_inline_math() {
+    assert_blocked("the value $rust = 1$ holds", "rust", "rust");
+}
+
+#[test]
+fn guard_blocks_html_attribute() {
+    assert_blocked(r#"<a href="https://github.com">x</a>"#, "github-com", "github.com");
+}
+
+#[test]
+fn guard_blocks_html_comment() {
+    assert_blocked("<!-- youtube.com note -->", "youtube-com", "youtube.com");
+}
+
+#[test]
+fn guard_allows_plain_prose_mention() {
+    let out = insert_first_wikilink("I prefer rust for systems work", "rust", "rust").expect("link");
+    assert_eq!(out, "I prefer [[rust]] for systems work");
+}
+
+#[test]
+fn guard_iterate_to_clean_skips_url_links_prose() {
+    // First occurrence is in a URL (skip), second is prose (link).
+    let out =
+        insert_first_wikilink("https://example.com/rust then later I use rust daily", "rust", "rust").expect("link");
+    assert!(
+        out.contains("https://example.com/rust then"),
+        "URL occurrence untouched: {out}"
+    );
+    assert!(out.contains("I use [[rust]] daily"), "prose occurrence linked: {out}");
+}
+
+#[test]
+fn guard_does_not_misfire_on_non_link_brackets_and_parens() {
+    // `] (` is NOT a markdown link `](`; the prose `rust` must still link and
+    // the `[1, 2]` array must be untouched.
+    let out = insert_first_wikilink("array [1, 2] (rust is great)", "rust", "rust").expect("link");
+    assert!(out.contains("[1, 2]"), "array untouched: {out}");
+    assert!(out.contains("[[rust]]"), "prose rust linked: {out}");
+}
+
+#[test]
+fn guard_no_panic_on_multibyte_before_url() {
+    // Length-changing chars before a structural URL must not panic, and the
+    // URL domain must not be linked.
+    assert_blocked("café — https://youtube.com/x", "youtube-com", "youtube.com");
+}
+
+#[test]
+fn guard_idempotent_on_already_linked_prose() {
+    // Re-running over a note whose only mention is already a wikilink is a no-op.
+    assert_blocked("I use [[rust]] daily", "rust", "rust");
+}

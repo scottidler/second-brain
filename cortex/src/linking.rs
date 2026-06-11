@@ -344,7 +344,12 @@ impl<'a> LoweredBody<'a> {
                 continue;
             }
 
-            if let Some(lpos) = self.body_lower.find(&term_lower) {
+            // Iterate every occurrence and return the first CLEAN one (not
+            // inside an existing wikilink, not mid-word, not inside a
+            // structural construct). Single-find would stop at a structural
+            // hit and either suppress the term or - via the independent mutation
+            // path - corrupt it.
+            for (lpos, _) in self.body_lower.match_indices(&term_lower) {
                 let pos = self.to_body(lpos);
                 let after_pos = self.to_body(lpos + term_lower.len());
 
@@ -353,11 +358,9 @@ impl<'a> LoweredBody<'a> {
                 if let (Some(open), Some(close)) = (before_slice.rfind("[["), before_slice.rfind("]]"))
                     && open > close
                 {
-                    log::debug!("skipping mention inside existing wikilink: {term}");
                     continue;
                 }
                 if before_slice.ends_with("[[") {
-                    log::debug!("skipping mention inside existing wikilink: {term}");
                     continue;
                 }
 
@@ -366,6 +369,13 @@ impl<'a> LoweredBody<'a> {
                 let after_char = body[after_pos..].chars().next().unwrap_or(' ');
 
                 if before_char.is_ascii_alphanumeric() || after_char.is_ascii_alphanumeric() {
+                    continue;
+                }
+
+                // Skip matches inside structural constructs (URLs, HTML tags,
+                // code, math, link destinations) - linking syntax corrupts it.
+                if inside_structure(body, pos, after_pos) {
+                    log::trace!("skipping mention inside structural span: {term}");
                     continue;
                 }
 
@@ -383,11 +393,131 @@ impl<'a> LoweredBody<'a> {
     }
 }
 
-/// Insert a wikilink at the first mention of `surface` in content, pointing at
-/// `target`. Only searches the body (after frontmatter) to avoid corrupting
-/// YAML fields. Emits a piped link `[[target|matched]]` when the matched text
-/// differs from `target` (an alias surface form, or a title whose stem
-/// differs); a plain `[[matched]]` otherwise.
+/// Characters that bound a "token" for URL detection: whitespace plus the
+/// delimiters that wrap URLs in Markdown/HTML (quotes, angle brackets, parens,
+/// backticks). The maximal run of non-boundary chars around a match is the
+/// token tested for URL-ness.
+fn is_token_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '(' | ')' | '`')
+}
+
+/// Byte bounds `(line_start, line_end)` of the line containing `pos`.
+fn line_bounds(text: &str, pos: usize) -> (usize, usize) {
+    let line_start = text[..pos].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[pos..].find('\n').map_or(text.len(), |i| pos + i);
+    (line_start, line_end)
+}
+
+/// True if `[start, end)` sits inside a URL token: the surrounding non-boundary
+/// run contains `://`, starts `www.`, carries a `scheme:` prefix (mailto:, …),
+/// or the match is immediately followed by `/` or `?` (a bare path).
+fn in_url_token(text: &str, start: usize, end: usize) -> bool {
+    let mut tok_start = start;
+    while tok_start > 0 {
+        let prev = text[..tok_start].chars().next_back().expect("non-empty prefix");
+        if is_token_boundary(prev) {
+            break;
+        }
+        tok_start -= prev.len_utf8();
+    }
+    let mut tok_end = end;
+    while tok_end < text.len() {
+        let next = text[tok_end..].chars().next().expect("non-empty suffix");
+        if is_token_boundary(next) {
+            break;
+        }
+        tok_end += next.len_utf8();
+    }
+    let token = &text[tok_start..tok_end];
+    if token.contains("://") || token.to_ascii_lowercase().starts_with("www.") {
+        return true;
+    }
+    if let Some(colon) = token.find(':') {
+        let scheme = &token[..colon];
+        if !scheme.is_empty()
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+        {
+            return true;
+        }
+    }
+    matches!(text[end..].chars().next(), Some('/') | Some('?'))
+}
+
+/// True if `pos` sits inside a Markdown link/image destination or title:
+/// after a `](` with no closing `)` yet on the same line.
+fn in_link_destination(text: &str, pos: usize) -> bool {
+    let (ls, _) = line_bounds(text, pos);
+    let before = &text[ls..pos];
+    match (before.rfind("]("), before.rfind(')')) {
+        (Some(open), close) => close.is_none_or(|c| c < open),
+        (None, _) => false,
+    }
+}
+
+/// True if `pos` sits inside code: a fenced block (odd count of ``` fences
+/// above), an indented (4-space / tab) code line, or an inline `` `code` ``
+/// span (odd backtick count before `pos` on the line).
+fn in_code_context(text: &str, pos: usize) -> bool {
+    let (ls, _) = line_bounds(text, pos);
+    let fences = text[..ls].lines().filter(|l| l.trim_start().starts_with("```")).count();
+    if fences % 2 == 1 {
+        return true;
+    }
+    let line = &text[ls..];
+    if line.starts_with("    ") || line.starts_with('\t') {
+        return true;
+    }
+    text[ls..pos].matches('`').count() % 2 == 1
+}
+
+/// True if `pos` sits inside math: a `$$` block (odd count of `$$`-only lines
+/// above) or an inline `$…$` span (odd `$` count before `pos` on the line).
+fn in_math(text: &str, pos: usize) -> bool {
+    let (ls, _) = line_bounds(text, pos);
+    let blocks = text[..ls].lines().filter(|l| l.trim() == "$$").count();
+    if blocks % 2 == 1 {
+        return true;
+    }
+    text[ls..pos].matches('$').count() % 2 == 1
+}
+
+/// True if `pos` sits inside an HTML tag/attribute, an autolink `<…>`, or an
+/// HTML comment `<!-- … -->`, scoped to the current line.
+fn in_html_tag_or_comment(text: &str, pos: usize) -> bool {
+    let (ls, _) = line_bounds(text, pos);
+    let before = &text[ls..pos];
+    if let Some(c_open) = before.rfind("<!--")
+        && !before[c_open..].contains("-->")
+    {
+        return true;
+    }
+    match (before.rfind('<'), before.rfind('>')) {
+        (Some(lt), gt) => gt.is_none_or(|g| g < lt),
+        (None, _) => false,
+    }
+}
+
+/// True if the byte range `[start, end)` in `text` sits inside a Markdown/HTML
+/// structural construct where a wikilink must never be inserted. `text` is
+/// whatever slice the caller scans (the post-frontmatter body for both call
+/// sites), and the offsets are into THAT slice - detection and mutation must
+/// pass matching slice+offsets so the two never disagree.
+fn inside_structure(text: &str, start: usize, end: usize) -> bool {
+    in_code_context(text, start)
+        || in_html_tag_or_comment(text, start)
+        || in_math(text, start)
+        || in_url_token(text, start, end)
+        || in_link_destination(text, start)
+}
+
+/// Insert a wikilink at the first CLEAN mention of `surface` in content,
+/// pointing at `target`. Only searches the body (after frontmatter) to avoid
+/// corrupting YAML fields. Emits a piped link `[[target|matched]]` when the
+/// matched text differs from `target` (an alias surface form, or a title whose
+/// stem differs); a plain `[[matched]]` otherwise.
 fn insert_first_wikilink(content: &str, target: &str, surface: &str) -> Option<String> {
     // Find the end of frontmatter so we only search the body
     let body_start = if let Some(after_open) = content.strip_prefix("---") {
@@ -403,19 +533,28 @@ fn insert_first_wikilink(content: &str, target: &str, surface: &str) -> Option<S
     let pattern = format!(r"(?i)\b{}\b", regex::escape(surface));
     let re = Regex::new(&pattern).ok()?;
 
-    // Only replace the first occurrence in the body
-    if let Some(mat) = re.find(body) {
+    // Wrap the FIRST occurrence that is neither inside an existing wikilink nor
+    // inside a structural construct. Detection (`find_mention`) and mutation
+    // (here) locate matches independently, so the structural guard MUST be
+    // applied here too - this is the load-bearing point that actually prevents
+    // URL / HTML / code corruption. `inside_structure` is given the `body`
+    // slice + body-relative offsets (NOT the content-absolute ones).
+    for mat in re.find_iter(body) {
         let abs_start = body_start + mat.start();
         let abs_end = body_start + mat.end();
 
         let before = &content[..abs_start];
-        let matched = &content[abs_start..abs_end];
 
-        // Don't insert if already inside a wikilink
+        // Don't insert if already inside a wikilink.
         if before.ends_with("[[") || content[abs_end..].starts_with("]]") {
-            return None;
+            continue;
+        }
+        // Don't insert inside a structural span.
+        if inside_structure(body, mat.start(), mat.end()) {
+            continue;
         }
 
+        let matched = &content[abs_start..abs_end];
         let after = &content[abs_end..];
         // Plain link only when the matched text is exactly the slug; otherwise
         // pipe so the canonical slug is the link target while the prose wording
@@ -425,10 +564,9 @@ fn insert_first_wikilink(content: &str, target: &str, surface: &str) -> Option<S
         } else {
             format!("[[{target}|{matched}]]")
         };
-        Some(format!("{before}{link}{after}"))
-    } else {
-        None
+        return Some(format!("{before}{link}{after}"));
     }
+    None
 }
 
 #[cfg(test)]
