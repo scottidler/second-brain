@@ -275,46 +275,63 @@ impl Desktop {
     /// created. Wraps the D-Bus call in 500 ms timeout per the Design
     /// Invariant.
     ///
-    /// Note: uses `.id(prior.id()) + show_async()` rather than
-    /// `prior.update()` because `NotificationHandle::update` is synchronous
-    /// in notify-rust v4, which would defeat the timeout wrapper - a sync
-    /// call inside `timeout(async { ... })` has no await points and blocks
-    /// the worker until D-Bus replies.
-    ///
-    /// The placeholder is shown with `Timeout::Never` (see [`Self::processing`])
-    /// so its id stays valid for the whole pipeline and this replace normally
-    /// succeeds. The fallback remains for the genuine edge cases that still
-    /// invalidate the id: the user manually dismissed the placeholder, the
-    /// notification daemon restarted, or a prior orphaned popup was GC'd. On
-    /// any of those the id-based replace fails and we retry once with a fresh
-    /// notification so the user sees a terminal popup rather than nothing.
+    /// The placeholder (shown with `Timeout::Never`, see [`Self::processing`])
+    /// is updated IN PLACE via [`NotificationHandle::update`], which re-sends
+    /// over the placeholder's ORIGINAL D-Bus connection. That connection
+    /// identity is load-bearing: GNOME rejects a `replaces_id` arriving on a
+    /// different connection than the one that created it with
+    /// `InvalidArgs: Invalid notification ID`. The previous approach (a fresh
+    /// `Notification` + `.id()` + `show_async()`, which opens a NEW connection)
+    /// therefore failed the replace on every ingest - reproduced against
+    /// notify-rust 4.17 + GNOME; see
+    /// `docs/design/2026-06-10-desktop-notification-replace-timeout.md`.
+    /// `update()` is synchronous (`zbus::block_on`), so it runs on the blocking
+    /// pool under the same 500 ms backstop. We restore the finite terminal
+    /// timeout first so the "done" toast auto-dismisses (the placeholder's was
+    /// `Never`). If the update fails (daemon restart, user dismissed the
+    /// placeholder) we fall back to a fresh popup so the user still sees a
+    /// terminal result.
     pub async fn result(&self, result: &IngestResult, display_source: &str, prior: Option<NotificationHandle>) {
         let body = format_desktop_body(result, display_source);
-        let prior_id = prior.as_ref().map(|h| h.id());
 
-        if prior_id.is_some()
-            && self
-                .show(&body, prior_id, "desktop result popup (replace)")
-                .await
-                .is_err()
-        {
-            // Prior popup expired (daemon GC'd the id). Fall back to a fresh popup
-            // so the user still gets a terminal notification.
-            log::info!("notify: desktop result popup falling back to fresh notification");
-            let _ = self.show(&body, None, "desktop result popup (fresh)").await;
+        if let Some(mut handle) = prior {
+            if real_notifications_disabled() {
+                log::debug!("notify::Desktop::result: in-place update suppressed under test");
+                return;
+            }
+            let body_for_update = body.clone();
+            let terminal_timeout = self.timeout;
+            let updated = tokio::time::timeout(
+                Duration::from_millis(DESKTOP_TIMEOUT_MS),
+                tokio::task::spawn_blocking(move || {
+                    // Mutate the original notification (via DerefMut) and
+                    // re-send over its own connection. Restore the finite
+                    // timeout so the terminal toast dismisses rather than
+                    // persisting like the `Never` placeholder.
+                    handle.body(&body_for_update);
+                    handle.timeout(terminal_timeout);
+                    handle.update()
+                }),
+            )
+            .await;
+            if matches!(updated, Ok(Ok(Ok(())))) {
+                return;
+            }
+            log::debug!("notify: in-place update failed, falling back to fresh result popup");
+            let _ = self.show(&body, "desktop result popup (fresh)").await;
             return;
         }
 
-        if prior_id.is_none() {
-            let _ = self.show(&body, None, "desktop result popup").await;
-        }
+        let _ = self.show(&body, "desktop result popup").await;
     }
 
-    /// Show a notification, optionally with a prior id for replace-in-place.
-    /// Wraps the D-Bus call in the 500ms desktop timeout. Returns `Ok(())`
-    /// on success, `Err(())` on any failure path (D-Bus error or timeout)
-    /// with a `warn!` already logged - `label` distinguishes log lines.
-    async fn show(&self, body: &str, prior_id: Option<u32>, label: &'static str) -> Result<(), ()> {
+    /// Show a fresh result/terminal popup. Wraps the D-Bus call in the 500 ms
+    /// desktop timeout. Returns `Ok(())` on success, `Err(())` on any failure
+    /// (D-Bus error or timeout) with a `warn!` already logged; `label`
+    /// distinguishes log lines. In-place replacement of the placeholder is done
+    /// in [`Self::result`] via `update()`, never here - this only ever creates
+    /// a new notification, so any failure is a genuine WARN.
+    async fn show(&self, body: &str, label: &'static str) -> Result<(), ()> {
         if real_notifications_disabled() {
             log::debug!("notify::Desktop::show: suppressed under test ({label})");
             return Ok(());
@@ -323,34 +340,21 @@ impl Desktop {
         let timeout = self.timeout;
         let body = body.to_string();
         let future = async move {
-            let mut n = Notification::new();
-            n.appname(&appname)
+            Notification::new()
+                .appname(&appname)
                 .summary("obsidian-borg")
                 .body(&body)
-                .timeout(timeout);
-            if let Some(id) = prior_id {
-                n.id(id);
-            }
-            n.show_async().await
+                .timeout(timeout)
+                .show_async()
+                .await
         };
         match tokio::time::timeout(Duration::from_millis(DESKTOP_TIMEOUT_MS), future).await {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(e)) => {
-                // A replace attempt (`prior_id.is_some()`) failing is routine
-                // control flow: the caller falls back to a fresh popup, so the
-                // user still gets a notification. Log it at debug. A failure
-                // WITHOUT a prior id is the fresh/terminal popup itself failing
-                // - the real safety net - so that stays at WARN.
-                if prior_id.is_some() {
-                    log::debug!("notify: {label} failed, falling back to fresh popup: {e}");
-                } else {
-                    log::warn!("notify: failed to send {label}: {e}");
-                }
+                log::warn!("notify: failed to send {label}: {e}");
                 Err(())
             }
             Err(_) => {
-                // A D-Bus timeout is the wedge-detection signal the 500 ms
-                // bound exists for; keep it at WARN regardless of path.
                 log::warn!("notify: {label} timed out after {DESKTOP_TIMEOUT_MS}ms");
                 Err(())
             }

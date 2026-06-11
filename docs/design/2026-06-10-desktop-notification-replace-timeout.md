@@ -89,6 +89,38 @@ orphan-on-crash cleanup is judged worth the config coupling. Reject fixed
 numbers: 300s is disproven and 600s is a thin bet against a queue-driven tail.
 Demote the WARN regardless.
 
+## Root-cause correction (post-ship, 2026-06-10)
+
+The `Timeout::Never` fix shipped in v0.8.68 did NOT fix the replace - the next
+ingest still logged `Invalid notification ID`. The reviewers and this memo had
+the root cause wrong: it is **not** the daemon expiring the placeholder by
+timeout. Empirical findings on the actual host (GNOME Shell 50.1,
+notify-rust 4.17.0, zbus backend):
+
+- GNOME via `gdbus` never returns `InvalidArgs` for a stale/closed/65s-old id -
+  it replaces in place or creates new. So GNOME's id-expiry policy is not the
+  cause.
+- A minimal notify-rust repro reproduced it deterministically:
+  - **WAY-A** (borg's hand-rolled replace: fresh `Notification` + `.id(prior)` +
+    `show_async()`) -> `InvalidArgs: Invalid notification ID`.
+  - **WAY-B** (documented `NotificationHandle::update()`) -> OK, including after
+    a 65s hold matching a real pipeline.
+
+**Actual root cause:** GNOME ties a notification id's replaceability to the
+**originating D-Bus connection**. notify-rust's `show_async()` opens a fresh
+`zbus::Connection::session()` on every call, so the hand-rolled replace sent
+`replaces_id` from a different connection than the one that created the id ->
+rejected. `update()` re-sends over `self.connection` (the original), so it is
+accepted. `Timeout::Never` is a necessary precondition (the placeholder must
+still exist), but the replace mechanism was the bug.
+
+**Actual fix (this change):** `result()` updates the held handle in place via
+`update()` (run on the blocking pool, since it is synchronous, under the same
+500 ms backstop), restoring the finite terminal timeout first so the "done"
+toast dismisses. `show()` is simplified to fresh-popup-only (its failures are
+genuine WARNs again). The fresh popup remains the fallback when no prior handle
+exists or the update fails.
+
 ## Decision (reviewed by /architect + /staff-engineer, 2026-06-10)
 
 **Chosen: Option 1.** The placeholder is shown with `Timeout::Never`
