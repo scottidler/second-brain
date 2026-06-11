@@ -4,7 +4,7 @@
 **Date:** 2026-06-11
 **Status:** Implemented
 **Review Passes Completed:** 5/5
-**Shipped in:** v0.8.69 + the structure-aware-linker fix (commits 59babcf, 7f753b8, d495fee)
+**Shipped in:** structure-aware-linker fix (commits 59babcf, 7f753b8, d495fee, 5de457c) atop v0.8.69
 
 ## Summary
 

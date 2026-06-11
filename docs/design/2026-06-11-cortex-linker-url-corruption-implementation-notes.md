@@ -127,3 +127,24 @@ missed:
 
 ### Open questions
 - Prose-domain linking and `entities/` target curation remain open (see design doc).
+
+## Phase 3 (post-deploy): nested-wikilink gap found by live verification
+
+After deploying the URL guard and re-cleaning, the migration dry-run went 0 -> 40
+within ~12 min: the guarded daemon was STILL creating **nested wikilinks in prose**
+(`[[the-spread-[[offense]]|the Spread Offense]]`, `[[claude-code|[[claude|Claude]] Code]]`).
+
+### Deviation / fix
+- The existing-wikilink guard `if let (Some, Some) = (rfind("[["), rfind("]]"))`
+  failed to skip a match inside a link's display text when no prior `]]` existed
+  (the first link on the line) -> the term got linked, building a broken nested
+  link. Added `in_wikilink(text, pos)` (None-safe: last `[[` not yet closed) to
+  `inside_structure`, fixing detection AND mutation. Commit 5de457c.
+- Redeployed, re-cleaned 40 files (76 lines), restarted daemons. Post-sweep live
+  check: fixed daemon creates ZERO new corruption of any class.
+
+### Lesson
+- The URL fix was verified live (background sweep check) BEFORE this was noticed.
+  Verifying with the full migration dry-run (not just the URL-shape grep) is what
+  surfaced the nested-creation gap. The corruption-count delta over a sweep window
+  is the real "is the daemon still corrupting?" test.
