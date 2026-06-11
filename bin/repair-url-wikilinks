@@ -144,19 +144,28 @@ def delink_span(span_text):
 
 def repair_line(line):
     # Decide structural-ness at the OUTERMOST span (so the URL signal on the
-    # outer link governs the whole nest), then fully de-link structural spans
-    # and leave prose/code spans untouched.
+    # outer link governs the whole nest). Three outcomes per top-level span:
+    #   - structural (URL/dest/tag): fully de-link to plain text.
+    #   - nested in prose/embed: nesting is ALWAYS corruption (Obsidian can't
+    #     render a nested wikilink), so collapse the INNER links but keep the
+    #     outermost link intact -> the legit link/embed survives, un-nested.
+    #   - plain prose wikilink: leave untouched.
     spans = top_level_spans(line)
     if not spans:
         return line, False
     out, last, changed = [], 0, False
     for (s, e) in spans:
         out.append(line[last:s])
+        span = line[s:e]
         if in_structural(line, s, e):
-            out.append(delink_span(line[s:e]))
+            out.append(delink_span(span))
             changed = True
+        elif '[[' in span[2:-2]:
+            fixed = '[[' + delink_span(span[2:-2]) + ']]'
+            out.append(fixed)
+            changed = changed or fixed != span
         else:
-            out.append(line[s:e])
+            out.append(span)
         last = e
     out.append(line[last:])
     return ''.join(out), changed
@@ -194,6 +203,32 @@ def selftest():
         ('B-R11', '[[youtube-com|youtube.com]]?v=test', 'youtube.com?v=test'),
         # unresolvable / malformed -> leave untouched
         ('B-R10', 'https://[[broken/x no close', 'https://[[broken/x no close'),
+
+        # ---- REAL vault-harvested shapes (inputs lifted verbatim from notes) ----
+        # repair: URL / destination / tag
+        ('H-iframe', '<iframe width="854" height="480" src="https://www.[[youtube-com|youtube.com]]/embed/0CGp6nHiYZg" frameborder="0" allowfullscreen></iframe>',
+                      '<iframe width="854" height="480" src="https://www.youtube.com/embed/0CGp6nHiYZg" frameborder="0" allowfullscreen></iframe>'),
+        ('H-watch', '- https://www.[[youtube-com|youtube.com]]/watch?v=5fe3rP92hjY', '- https://www.youtube.com/watch?v=5fe3rP92hjY'),
+        ('H-youtu-be', '- https://[[youtu-be|youtu.be]]/7cOAayWzYDY', '- https://youtu.be/7cOAayWzYDY'),
+        ('H-md-dest', '- [Gas Town GitHub repository](https://[[github-com|github.com]]/steveyegge/gastown)', '- [Gas Town GitHub repository](https://github.com/steveyegge/gastown)'),
+        ('H-md-dest-keep-text', '- [[[anthropic|Anthropic]] Skills documentation](https://docs.[[anthropic-com|anthropic.com]]/)', '- [[[anthropic|Anthropic]] Skills documentation](https://docs.anthropic.com/)'),
+        ('H-nonpiped-url', 'https://[[american-football-academy]].com/?el=YT', 'https://american-football-academy.com/?el=YT'),
+        ('H-query-nonpiped', '> Prompt Pack: https://natesnewsletter.substack.com/p/ai-[[agents]]-better-communicator?r=1z4sm5', '> Prompt Pack: https://natesnewsletter.substack.com/p/ai-agents-better-communicator?r=1z4sm5'),
+        ('H-www-path', 'happens: www.youtube.com/[[lastweektonight]]', 'happens: www.youtube.com/lastweektonight'),
+        ('H-www-piped', 'Visit- www.[[robu-in|robu.in]]', 'Visit- www.robu.in'),
+        ('H-url-nested', 'https://[[american-[[football]]-academy]].com/?el=YT', 'https://american-football-academy.com/?el=YT'),
+        ('H-img-tag', '<img src="https://opengraph.githubassets.com/abc/[[okta-awscli]]/okta-awscli" width="854" />', '<img src="https://opengraph.githubassets.com/abc/okta-awscli/okta-awscli" width="854" />'),
+        ('H-indented-url', '    * Nix GitHub Action  https://[[github-com|github.com]]/cachix/install-nix-action', '    * Nix GitHub Action  https://github.com/cachix/install-nix-action'),
+        # repair: nested wikilink in prose / embed (flatten inner, keep outer link)
+        ('H-nested-prose', "[[atavus-[[football]]|Atavus Football]]'s Scott Lawyer talks tackling.", "[[atavus-football|Atavus Football]]'s Scott Lawyer talks tackling."),
+        ('H-nested-embed', '![[elite-context-engineering-with-[[claude-code]]-slide-001.jpg]]', '![[elite-context-engineering-with-claude-code-slide-001.jpg]]'),
+        ('H-nested-display', '[[claude-code-sandbox-breaks-sccache|[[claude-code|Claude Code]] Sandbox Breaks sccache]]', '[[claude-code-sandbox-breaks-sccache|Claude Code Sandbox Breaks sccache]]'),
+        # preserve: prose / code (real lines)
+        ('H-prose-piped', '[[anthropic|Anthropic]] LLM API ^t_llm', '[[anthropic|Anthropic]] LLM API ^t_llm'),
+        ('H-prose-plain', '- [[borg-ledger]] - all ingested URLs, newest first (live Base view)', '- [[borg-ledger]] - all ingested URLs, newest first (live Base view)'),
+        ('H-inline-code', '4. Create `[[wikilinks]]` to related existing notes where appropriate', '4. Create `[[wikilinks]]` to related existing notes where appropriate'),
+        ('H-inline-code-md', '- `[[dragonlance-chronicles-in-spanish|Dragonlance Chronicles in Spanish]].md`', '- `[[dragonlance-chronicles-in-spanish|Dragonlance Chronicles in Spanish]].md`'),
+        ('H-inline-math', "DNS for a $26 [[raspberry-pi|Raspberry Pi]], caught devices", "DNS for a $26 [[raspberry-pi|Raspberry Pi]], caught devices"),
     ]
     failed = 0
     for cid, inp, exp in cases:
@@ -206,6 +241,76 @@ def selftest():
             print(f'{status} {cid}')
     print(f'\n{len(cases) - failed}/{len(cases)} passed')
     sys.exit(1 if failed else 0)
+
+def classify(line, s, e, blockctx):
+    """A coarse shape tag for a wikilink span, for harvesting real samples."""
+    if blockctx:
+        base = 'block-' + blockctx
+    elif in_inline_code(line, s):
+        base = 'inline-code'
+    elif in_inline_math(line, s):
+        base = 'inline-math'
+    elif in_link_dest(line, s):
+        base = 'md-dest'
+    elif in_html_tag(line, s):
+        base = 'html'
+    elif in_url_token(line, s, e):
+        run = line[max(0, line.rfind(' ', 0, s) + 1):e]
+        if '://' in run:
+            base = 'url-scheme'
+        elif run.lower().lstrip('[').startswith('www.'):
+            base = 'url-www'
+        else:
+            base = 'url-barepath'
+    else:
+        base = 'prose'
+    span = line[s:e]
+    mods = []
+    if '[[' in span[2:-2]:
+        mods.append('nested')
+    if '|' in span:
+        mods.append('piped')
+    return base + (':' + '+'.join(mods) if mods else '')
+
+def harvest():
+    samples = {}
+    counts = {}
+    for path in iter_md(VAULT):
+        try:
+            with open(path, encoding='utf-8') as f:
+                lines = f.readlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        in_fence = in_math = False
+        for line in lines:
+            if line.lstrip().startswith('```'):
+                in_fence = not in_fence
+                blockctx = 'fenced'
+            elif in_fence:
+                blockctx = 'fenced'
+            elif line.strip() == '$$':
+                in_math = not in_math
+                blockctx = 'mathblock'
+            elif in_math:
+                blockctx = 'mathblock'
+            elif line.startswith('    ') or line.startswith('\t'):
+                blockctx = 'indented'
+            else:
+                blockctx = None
+            if '[[' not in line:
+                continue
+            for (s, e) in top_level_spans(line):
+                shape = classify(line, s, e, blockctx)
+                counts[shape] = counts.get(shape, 0) + 1
+                samples.setdefault(shape, [])
+                if len(samples[shape]) < 3 and line.strip() not in samples[shape]:
+                    samples[shape].append(line.strip())
+    for shape in sorted(counts, key=lambda k: -counts[k]):
+        print(f'\n### {shape}  (count={counts[shape]})')
+        for ex in samples[shape]:
+            repaired, changed = repair_line(ex + '\n')
+            tag = 'REPAIR' if changed else 'keep'
+            print(f'  [{tag}] {ex[:200]}')
 
 def iter_md(root):
     for dirpath, dirnames, filenames in os.walk(root):
@@ -256,7 +361,7 @@ def run(apply):
                 in_math_block = not in_math_block
                 new_lines.append(line)
                 continue
-            if in_math_block or line.startswith('    ') or line.startswith('\t'):
+            if in_math_block:
                 new_lines.append(line)
                 continue
             repaired, changed = repair_line(line)
@@ -274,7 +379,9 @@ def run(apply):
     print(f'files changed: {files_changed}')
     print(f'lines repaired: {total_repairs}')
 
-if MODE == 'selftest':
+if MODE == 'harvest':
+    harvest()
+elif MODE == 'selftest':
     selftest()
 elif MODE == 'apply':
     run(apply=True)
@@ -285,6 +392,10 @@ PYEOF
 
 if [[ "$SELFTEST" == "1" ]]; then
     exec python3 - selftest <<<"$PYTHON_TRANSFORM"
+fi
+
+if [[ "${HARVEST:-0}" == "1" ]]; then
+    exec python3 - harvest "$VAULT_ROOT" <<<"$PYTHON_TRANSFORM"
 fi
 
 if [[ ! -d "$VAULT_ROOT" ]]; then
