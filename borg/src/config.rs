@@ -8,6 +8,18 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const APP_NAME: &str = "borg";
 
+mod desktop;
+mod discord;
+mod ntfy;
+mod signal;
+mod telegram;
+
+pub use desktop::DesktopConfig;
+pub use discord::DiscordConfig;
+pub use ntfy::NtfyConfig;
+pub use signal::SignalConfig;
+pub use telegram::TelegramConfig;
+
 /// Load configuration with fallback chain:
 /// 1. Explicit path (if provided)
 /// 2. ~/.config/sb/borg.yml
@@ -674,116 +686,6 @@ impl FrontmatterConfig {
     /// [`Config::validate`], then silently falls back at the call sites).
     pub fn timezone_tz(&self) -> chrono_tz::Tz {
         self.timezone.parse().unwrap_or(chrono_tz::America::Los_Angeles)
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct TelegramConfig {
-    #[serde(alias = "bot_token_env", alias = "bot_token")]
-    pub bot_token: String,
-    #[serde(default, alias = "allowed_chat_ids")]
-    pub allowed_chat_ids: Vec<i64>,
-    /// Default chat ID for cross-method notifications.
-    /// If not set, falls back to first allowed_chat_ids entry.
-    #[serde(default, alias = "notification_chat_id")]
-    pub notification_chat_id: Option<i64>,
-    /// If set, only run the Telegram poller on the host with this hostname.
-    #[serde(default)]
-    pub host: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct DiscordConfig {
-    #[serde(alias = "bot_token_env", alias = "bot_token")]
-    pub bot_token: String,
-    #[serde(alias = "channel_id")]
-    pub channel_id: u64,
-    /// If set, only run the Discord bot on the host with this hostname.
-    #[serde(default)]
-    pub host: Option<String>,
-}
-
-/// Signal transport configuration. The presence of this section enables Signal
-/// ingest (mirrors `telegram`, `discord`, `ntfy`). `host` is mandatory because
-/// Signal-Server fans out Note-to-Self envelopes to every linked device and has
-/// no polling-lock equivalent to Telegram's `TerminatedByOtherGetUpdates` -
-/// leaving `host` unset on a multi-machine install would silently double-ingest.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct SignalConfig {
-    /// ACI UUIDs (string form) allowed to send borg peer DMs.
-    /// Note-to-Self is structural and never gated by this list.
-    #[serde(default)]
-    pub allowed_senders: Vec<String>,
-
-    /// Default reply target for cross-method notifications (e.g. an ntfy
-    /// ingest acknowledged via Signal). `None` = `SelfSync`; `Some(<ACI UUID>)`
-    /// = peer.
-    #[serde(default)]
-    pub notification_recipient: Option<String>,
-
-    /// Pin Signal ingest to a specific hostname. Mandatory when the `signal:`
-    /// block is present; config-load fails if missing or empty.
-    pub host: String,
-
-    /// Maximum accepted Note-to-Self envelopes per hour before the rate gate
-    /// trips and pauses ingest until the daemon is restarted. Backstops an
-    /// upstream `signal-rs` regression in the wire-ACI to `Recipient::SelfSync`
-    /// mapping. Peer DMs are not counted.
-    #[serde(default = "default_signal_rate_threshold")]
-    pub notetoself_rate_threshold_per_hour: u32,
-}
-
-fn default_signal_rate_threshold() -> u32 {
-    100
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct NtfyConfig {
-    pub topic: String,
-    #[serde(default = "default_ntfy_server")]
-    pub server: String,
-    pub token: Option<String>,
-    /// If set, only run the ntfy subscriber on the host with this hostname.
-    #[serde(default)]
-    pub host: Option<String>,
-}
-
-fn default_ntfy_server() -> String {
-    "https://ntfy.sh".to_string()
-}
-
-/// Config for the desktop notification sink (a sibling of the Telegram sink).
-/// The sink shells out to the user session D-Bus via `notify-rust`. Default
-/// `enabled: false` keeps headless borg hosts silent; new machines pick up
-/// `enabled: true` via the `sb bootstrap` template.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, rename_all = "kebab-case")]
-pub struct DesktopConfig {
-    /// If false, no DesktopNotifier is constructed and the daemon stays silent
-    /// on the desktop. Telegram is unaffected.
-    pub enabled: bool,
-    /// If set, only construct the notifier on the host with this hostname.
-    /// Mirrors the telegram/discord/ntfy host gating so a headless host does
-    /// not fight a non-existent D-Bus session.
-    pub host: Option<String>,
-    /// Toast lifetime hint passed to the notification daemon, in milliseconds.
-    pub timeout_ms: u32,
-    /// Application name shown by the notification daemon.
-    pub appname: String,
-}
-
-impl Default for DesktopConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            host: None,
-            timeout_ms: 5000,
-            appname: APP_NAME.to_string(),
-        }
     }
 }
 
