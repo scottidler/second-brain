@@ -164,11 +164,11 @@ fn name_and_level(cli: &Cli, cli_cfg: &CliConfig) -> (String, String) {
 /// the logger initializer and after_help text builders that want to
 /// show the path in `--help` output.
 pub fn log_path(name: &str) -> PathBuf {
-    // `.expect` (not a fabricated `.` fallback): `data_local_dir()` only returns
+    // `.expect` (not a fabricated `.` fallback): `xdg_data_dir()` only returns
     // None when both $HOME and $XDG_DATA_HOME are unset, an environment where
     // nothing in sb works. A `.` fallback would scatter log files under CWD.
-    dirs::data_local_dir()
-        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+    vault::paths::xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
         .join("sb")
         .join(format!("{name}.log"))
 }

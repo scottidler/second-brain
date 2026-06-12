@@ -717,8 +717,8 @@ fn configured_actions(
 /// should print (paths written, follow-up systemctl commands).
 fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<String>> {
     let mut lines = Vec::new();
-    let service_dir = dirs::config_dir()
-        .expect("dirs::config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
+    let service_dir = vault::paths::xdg_config_dir()
+        .expect("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
         .join("systemd")
         .join("user");
 
@@ -785,8 +785,8 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<Str
 /// Uninstall the systemd user service and timer units. Returns the lines sb
 /// should print.
 fn uninstall_systemd_service() -> Result<Vec<String>> {
-    let service_dir = dirs::config_dir()
-        .expect("dirs::config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
+    let service_dir = vault::paths::xdg_config_dir()
+        .expect("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
         .join("systemd")
         .join("user");
 
@@ -821,8 +821,8 @@ fn uninstall_systemd_service() -> Result<Vec<String>> {
 /// Show daemon status by shelling out to `systemctl --user status cortex --no-pager`,
 /// mirroring borg's `--status` pattern. Returns the lines sb should print.
 fn show_status() -> Result<Vec<String>> {
-    let service_path = dirs::config_dir()
-        .expect("dirs::config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
+    let service_path = vault::paths::xdg_config_dir()
+        .expect("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
         .join("systemd")
         .join("user")
         .join("cortex.service");

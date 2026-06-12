@@ -170,23 +170,23 @@ impl FromStr for ReceiptStatus {
     }
 }
 
-/// Subdirectory under `dirs::data_local_dir()` that owns borg's data files.
+/// Subdirectory under `crate::paths::xdg_data_dir()` that owns borg's data files.
 pub const SB_BORG_DATA_DIR: &str = "sb/borg";
 
 /// Resolve the platform-native path to `~/.local/share/sb/borg/receipts.db`
 /// (or macOS equivalent). The directory may not exist yet; the caller is
 /// responsible for `create_dir_all` before opening the DB.
 pub fn receipts_db_path() -> Result<PathBuf> {
-    let data = dirs::data_local_dir()
-        .ok_or_else(|| eyre!("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)"))?;
+    let data = crate::paths::xdg_data_dir()
+        .ok_or_else(|| eyre!("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)"))?;
     Ok(data.join(SB_BORG_DATA_DIR).join("receipts.db"))
 }
 
 /// Resolve the directory containing the receipts DB. Useful for the bootstrap
 /// step that has to `create_dir_all` before any open call.
 pub fn receipts_dir() -> Result<PathBuf> {
-    let data = dirs::data_local_dir()
-        .ok_or_else(|| eyre!("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)"))?;
+    let data = crate::paths::xdg_data_dir()
+        .ok_or_else(|| eyre!("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)"))?;
     Ok(data.join(SB_BORG_DATA_DIR))
 }
 

@@ -26,8 +26,34 @@ use std::path::{Path, PathBuf};
 use eyre::{Result, eyre};
 use serde::{Deserialize, Deserializer};
 
-/// Subdirectory under `dirs::config_dir()` that owns every sb config file.
+/// Subdirectory under `xdg_config_dir()` that owns every sb config file.
 pub const SB_DIR: &str = "sb";
+
+/// XDG config dir, honoring `$XDG_CONFIG_HOME` and falling back to `$HOME/.config`.
+/// We deliberately do NOT use `dirs::config_dir()`: it honors `$XDG_CONFIG_HOME` only on
+/// Linux; on macOS it returns `~/Library/Application Support`, ignoring the env var.
+pub fn xdg_config_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
+        let path = PathBuf::from(dir);
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".config"))
+}
+
+/// XDG data dir, honoring `$XDG_DATA_HOME` and falling back to `$HOME/.local/share`.
+/// Same rationale as `xdg_config_dir`: `dirs::data_local_dir()` returns `~/Library/...`
+/// on macOS, ignoring `$XDG_DATA_HOME`. This resolves to the XDG layout on every platform.
+pub fn xdg_data_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
+        let path = PathBuf::from(dir);
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".local").join("share"))
+}
 
 /// Expand a leading `~` or `~/` in a user-supplied path to `$HOME`.
 ///
@@ -56,14 +82,14 @@ where
     Ok(expand_tilde(raw))
 }
 
-/// `~/.config/sb/` (or platform equivalent via `dirs`).
+/// `~/.config/sb/` (XDG on every platform via [`xdg_config_dir`]).
 ///
-/// Panics only if `dirs::config_dir()` returns `None`, which on Linux
+/// Panics only if `xdg_config_dir()` returns `None`, which
 /// means both `$HOME` and `$XDG_CONFIG_HOME` are unset - a broken
 /// environment where nothing else in sb would work either.
 pub fn config_root() -> PathBuf {
-    dirs::config_dir()
-        .expect("dirs::config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
+    xdg_config_dir()
+        .expect("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
         .join(SB_DIR)
 }
 
@@ -212,7 +238,7 @@ impl CliConfig {
     }
 }
 
-/// Subdirectory under `dirs::data_local_dir()` that owns borg's
+/// Subdirectory under `xdg_data_dir()` that owns borg's
 /// signal-rs linked-device state (Double Ratchet sessions, prekeys,
 /// identity). One canonical path per borg installation; the operator
 /// does NOT pick it. `signal-rs link --state-dir <path>` matches this
@@ -221,19 +247,19 @@ pub const SB_BORG_SIGNAL_STATE_DIR: &str = "sb/borg/signal-state";
 
 /// `~/.local/share/sb/borg/signal-state/` on Linux,
 /// `~/Library/Application Support/sb/borg/signal-state/` on macOS.
-/// Resolved at runtime via `dirs::data_local_dir()`.
+/// Resolved at runtime via `xdg_data_dir()`.
 ///
 /// Named `borg_signal_state_dir` (not `signal_state_dir`) so the
 /// borg-scoped ownership is obvious in call sites — matches the
 /// `SB_BORG_DATA_DIR` / `receipts_db_path` convention in
 /// `vault::receipts`.
 ///
-/// Panics only when `dirs::data_local_dir()` returns `None`, which
+/// Panics only when `xdg_data_dir()` returns `None`, which
 /// requires both `$HOME` and `$XDG_DATA_HOME` to be unset - a broken
 /// environment where the rest of borg would also fail.
 pub fn borg_signal_state_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
         .join(SB_BORG_SIGNAL_STATE_DIR)
 }
 
@@ -245,11 +271,11 @@ pub fn borg_signal_state_dir() -> PathBuf {
 /// `store.db` signal-rs manages there.
 ///
 /// `~/.local/share/sb/borg/signal-bootstrap.json` on Linux. Panics only
-/// when `dirs::data_local_dir()` returns `None` (see
+/// when `xdg_data_dir()` returns `None` (see
 /// [`borg_signal_state_dir`]).
 pub fn borg_signal_bootstrap_marker() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
         .join("sb/borg")
         .join("signal-bootstrap.json")
 }
@@ -261,10 +287,10 @@ pub fn borg_signal_bootstrap_marker() -> PathBuf {
 /// ephemeral, so relocating it needs no migration.
 ///
 /// `~/.local/share/sb/cortex/embed.lock` on Linux. Panics only when
-/// `dirs::data_local_dir()` returns `None` (see [`borg_signal_state_dir`]).
+/// `xdg_data_dir()` returns `None` (see [`borg_signal_state_dir`]).
 pub fn cortex_lock_path() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
         .join("sb/cortex")
         .join("embed.lock")
 }
@@ -275,10 +301,10 @@ pub fn cortex_lock_path() -> PathBuf {
 /// they open.
 ///
 /// `~/.local/share/oracle/oracle.db` on Linux. Panics only when
-/// `dirs::data_local_dir()` returns `None` (see [`borg_signal_state_dir`]).
+/// `xdg_data_dir()` returns `None` (see [`borg_signal_state_dir`]).
 pub fn oracle_db_path() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
         .join("oracle")
         .join("oracle.db")
 }
@@ -286,10 +312,10 @@ pub fn oracle_db_path() -> PathBuf {
 /// `sb oracle eval`'s judgment-cache path, beside the oracle DB in the data
 /// dir. Used as the fallback when the configured DB path has no parent; never
 /// a relative `eval-cache.db` (which would write under CWD). Panics only when
-/// `dirs::data_local_dir()` returns `None`, same as [`oracle_db_path`].
+/// `xdg_data_dir()` returns `None`, same as [`oracle_db_path`].
 pub fn oracle_eval_cache_path() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
         .join("oracle")
         .join("eval-cache.db")
 }

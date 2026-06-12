@@ -520,8 +520,8 @@ pub struct StagingConfig {
 
 impl Default for StagingConfig {
     fn default() -> Self {
-        let root = dirs::data_local_dir()
-            .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+        let root = vault::paths::xdg_data_dir()
+            .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
             .join("sb")
             .join("borg")
             .join("stages");

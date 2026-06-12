@@ -29,7 +29,7 @@ pub struct Report {
 /// like a legacy layout. We do not check for specific files - the directories
 /// alone are evidence.
 pub fn legacy_detected() -> bool {
-    let Some(config_root) = dirs::config_dir() else {
+    let Some(config_root) = vault::paths::xdg_config_dir() else {
         return false;
     };
     LEGACY_DIRS.iter().any(|name| {
@@ -62,8 +62,8 @@ fn has_relevant_content(dir: &Path) -> bool {
 }
 
 pub fn migrate_legacy_layout() -> Result<Report> {
-    let Some(config_root) = dirs::config_dir() else {
-        eyre::bail!("dirs::config_dir() returned None");
+    let Some(config_root) = vault::paths::xdg_config_dir() else {
+        eyre::bail!("xdg_config_dir() returned None");
     };
     let sb_root = vault::paths::config_root();
     std::fs::create_dir_all(&sb_root).with_context(|| format!("create {}", sb_root.display()))?;

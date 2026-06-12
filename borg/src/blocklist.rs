@@ -126,8 +126,8 @@ impl Blocklist {
 
 /// Default filesystem path for the blocklist yaml.
 pub fn default_path() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("dirs::data_local_dir() returned None (set HOME or XDG_DATA_HOME)")
+    vault::paths::xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
         .join("borg")
         .join("blocked-domains.yml")
 }
