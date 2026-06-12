@@ -200,13 +200,14 @@ fn init_tracing_to_file(log_path: &std::path::Path, level: &str) -> Result<()> {
         .open(log_path)
         .context("Failed to open log file")?;
 
-    // Bridge the `log` facade into tracing BEFORE installing the subscriber.
-    // vault (and its deps) emit via `log::*`, not tracing; without this bridge
-    // every `log` record - the watcher reindex warnings, index parse warnings -
-    // is silently dropped under `sb oracle serve` (tracing-only, per rmcp).
-    // Ignore an AlreadyInitialized error so a second serve in-process is benign.
-    let _ = tracing_log::LogTracer::init();
-
+    // `tracing_subscriber::fmt().init()` already bridges the `log` facade into
+    // tracing: its `tracing-log` default feature is enabled (see Cargo.toml),
+    // so `init()` installs a `LogTracer` internally. vault (and its deps) emit
+    // via `log::*`, not tracing, and those records - watcher reindex warnings,
+    // index parse warnings - are captured by that built-in bridge. Do NOT call
+    // `tracing_log::LogTracer::init()` here as well: `init()` would then try to
+    // install a second `log` logger, hit `SetLoggerError`, and panic via its
+    // internal `.expect("Unable to install global subscriber")`.
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(file)

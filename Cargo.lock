@@ -6194,7 +6194,6 @@ dependencies = [
  "tempfile",
  "terminal_size",
  "tokio",
- "tracing-log",
  "tracing-subscriber",
  "vault",
 ]

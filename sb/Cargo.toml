@@ -28,7 +28,6 @@ serde_yaml.workspace = true
 serde.workspace = true
 terminal_size = "0.4.4"
 chrono.workspace = true
-tracing-log = "0.2.0"
 
 [dev-dependencies]
 serial_test = { workspace = true }
