@@ -4,6 +4,21 @@ use crate::config::ScopeConfig;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::vault::Note;
 
+/// True when a note is the user's own writing (`origin: authored`) - work
+/// notes, daily journals, `home.md`, MOCs, hand-written ideas - as opposed to
+/// borg-ingested (`origin: assisted`) or tool-generated (`origin: generated`).
+///
+/// Governance passes that MUTATE a note - quality scoring, duplicate
+/// surfacing, wikilink insertion - skip authored notes so the user's space is
+/// never auto-graded or auto-edited. This is a deliberate carve-OUT for human
+/// content, distinct from the ingested-only WHITELIST (`origin == assisted`)
+/// used by classify/autotag/distill/entities, which produce enrichment that
+/// only makes sense for ingested notes. The carve-out is a blacklist on
+/// purpose: generated notes (digests, entity hubs) still get governed.
+pub fn is_authored(note: &Note) -> bool {
+    note.frontmatter.origin.as_deref() == Some(vault::schema::Origin::Authored.as_str())
+}
+
 /// Run scope classification on all notes.
 pub fn lint_scope(notes: &[Note], config: &ScopeConfig) -> Report {
     let mut report = Report::default();

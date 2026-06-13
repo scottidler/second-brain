@@ -30,6 +30,42 @@ fn test_empty_body_flagged_critical() {
 }
 
 #[test]
+fn test_authored_notes_exempt_from_grading() {
+    // The user's own writing (origin: authored) must never be quality-graded,
+    // even an empty stub that would otherwise be flagged critical.
+    let notes = vec![
+        NoteBuilder::new("work/draft.md")
+            .title("Draft")
+            .note_type("note")
+            .origin("authored")
+            .body("")
+            .build(),
+        NoteBuilder::new("ingested.md")
+            .title("Ingested")
+            .note_type("note")
+            .origin("assisted")
+            .body("")
+            .build(),
+    ];
+
+    let report = lint_quality(&notes, &default_config());
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|v| v.path.to_string_lossy() == "work/draft.md"),
+        "authored notes must be exempt from quality grading"
+    );
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|v| v.path.to_string_lossy() == "ingested.md"),
+        "ingested notes must still be graded"
+    );
+}
+
+#[test]
 fn test_stub_body_flagged() {
     let notes = vec![
         NoteBuilder::new("stub.md")

@@ -40,7 +40,7 @@ impl TestVault {
         write(
             root,
             "rust-guide.md",
-            "---\ntitle: Rust Guide\ndate: 2026-03-10\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - rust\n  - programming\n---\nA guide to Rust programming.\n\nSee also the Python Guide for comparisons.\n",
+            "---\ntitle: Rust Guide\ndate: 2026-03-10\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - rust\n  - programming\n---\nA guide to Rust programming.\n\nSee also the Python Guide for comparisons.\n",
         );
         write(
             root,
@@ -50,7 +50,7 @@ impl TestVault {
         write(
             root,
             "daily-standup.md",
-            "---\ntitle: Daily Standup\ndate: 2026-03-16\ntype: meeting\ndomain: work\norigin: authored\ntags:\n  - sre\n  - tatari\n---\nDiscussed deployment pipeline.\n\nJohn Smith presented the new approach.\n",
+            "---\ntitle: Daily Standup\ndate: 2026-03-16\ntype: meeting\ndomain: work\norigin: assisted\ntags:\n  - sre\n  - tatari\n---\nDiscussed deployment pipeline.\n\nJohn Smith presented the new approach.\n",
         );
 
         // -- Bad filename (not lowercase-hyphenated) --
@@ -95,12 +95,12 @@ impl TestVault {
         write(
             root,
             "duplicate-a.md",
-            "---\ntitle: Duplicate A\ndate: 2026-03-14\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - rust\n---\nThis is the exact same body content for duplicate detection.\n",
+            "---\ntitle: Duplicate A\ndate: 2026-03-14\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - rust\n---\nThis is the exact same body content for duplicate detection.\n",
         );
         write(
             root,
             "duplicate-b.md",
-            "---\ntitle: Duplicate B\ndate: 2026-03-14\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - rust\n---\nThis is the exact same body content for duplicate detection.\n",
+            "---\ntitle: Duplicate B\ndate: 2026-03-14\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - rust\n---\nThis is the exact same body content for duplicate detection.\n",
         );
 
         // -- Scope: work note with granola source --

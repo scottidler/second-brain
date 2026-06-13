@@ -36,12 +36,13 @@ fn parse_exclude_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
 pub fn lint_duplicates(notes: &[Note], config: &DuplicatesConfig) -> Report {
     let mut report = Report::default();
 
-    // Filter out excluded paths
+    // Filter out excluded paths and the user's own authored notes (never
+    // duplicate-flag work notes / journals - that's the user's space).
     let exclude_patterns = parse_exclude_patterns(&config.exclude);
     let eligible: Vec<usize> = notes
         .iter()
         .enumerate()
-        .filter(|(_, n)| !matches_exclude(n, &exclude_patterns))
+        .filter(|(_, n)| !matches_exclude(n, &exclude_patterns) && !crate::scope::is_authored(n))
         .map(|(i, _)| i)
         .collect();
 

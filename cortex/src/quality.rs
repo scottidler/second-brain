@@ -99,6 +99,11 @@ pub fn lint_quality(notes: &[Note], config: &QualityConfig) -> Report {
                 return None;
             }
 
+            // Never grade the user's own writing (work notes, journals, home.md).
+            if crate::scope::is_authored(note) {
+                return None;
+            }
+
             let issues = assess_note(note, &inbound_targets, config);
             if issues.is_empty() {
                 return None;

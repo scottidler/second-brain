@@ -114,6 +114,11 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
     let scan_for: HashSet<&str> = config.scan_for.iter().map(|s| s.as_str()).collect();
 
     for note in notes {
+        // Never rewrite the body of the user's own authored notes - their
+        // prose is theirs to link by hand, not for the auto-linker to edit.
+        if crate::scope::is_authored(note) {
+            continue;
+        }
         let existing_links = extract_existing_links(&note.body);
         // Lowercase the body + build the offset map ONCE per note, reused by
         // every candidate term below (was rebuilt per (note, term) pair).
