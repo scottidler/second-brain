@@ -15,9 +15,11 @@ use vault::schema::Method;
 
 /// Live receipts health for `GET /health/audit` and the `sb doctor` borg
 /// check: lifetime status counts + the `crashed` subset, plus the last-24h
-/// failed / crashed counts. `crashed_24h` is the actionable silent-drop signal
-/// (a state the watchdog has definitively ruled on); lifetime `crashed` is
-/// informational only (monotonic).
+/// failed / crashed / degraded counts. `crashed_24h` is the actionable
+/// silent-drop signal (a state the watchdog has definitively ruled on);
+/// `degraded_24h` is the actionable silent-quality signal (notes that landed but
+/// via a distill fallback - they read as `succeeded`, so they hide in the
+/// status counts); lifetime `crashed` is informational only (monotonic).
 pub fn audit_health_stats() -> Result<crate::routes::AuditHealth> {
     let conn = receipts::open_default().context("open receipts DB")?;
     audit_health_stats_conn(&conn)
@@ -33,6 +35,7 @@ fn audit_health_stats_conn(conn: &Connection) -> Result<crate::routes::AuditHeal
     let since = receipts::hours_ago_iso(24);
     let failed_24h = receipts::count_failed_since(conn, &since)?;
     let crashed_24h = receipts::count_crashed_since(conn, &since)?;
+    let degraded_24h = receipts::count_degraded_since(conn, &since)?;
     Ok(crate::routes::AuditHealth {
         received: received as usize,
         succeeded: succeeded as usize,
@@ -40,6 +43,7 @@ fn audit_health_stats_conn(conn: &Connection) -> Result<crate::routes::AuditHeal
         crashed: crashed as usize,
         failed_24h: failed_24h as usize,
         crashed_24h: crashed_24h as usize,
+        degraded_24h: degraded_24h as usize,
     })
 }
 

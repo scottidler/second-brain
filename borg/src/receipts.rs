@@ -653,6 +653,22 @@ pub fn count_crashed_since(conn: &Connection, since_iso: &str) -> Result<i64> {
     .context("count_crashed_since")
 }
 
+/// Count notes published in a degraded state (a distill fallback, e.g. a fabric
+/// API error) at or after `since_iso`. A degraded publish still has
+/// `status='succeeded'` - the note landed - but `degraded=1` flags that
+/// distillation fell back, so the body is impoverished (no summary/claims). This
+/// is the silent-quality signal: it never shows up in failed/crashed counts.
+/// Compared against `terminal_at`. `since_iso` must be in [`TIMESTAMP_FMT`].
+pub fn count_degraded_since(conn: &Connection, since_iso: &str) -> Result<i64> {
+    log::debug!("receipts::count_degraded_since: since={since_iso}");
+    conn.query_row(
+        "SELECT COUNT(*) FROM receipts WHERE status='succeeded' AND degraded=1 AND terminal_at >= ?",
+        params![since_iso],
+        |row| row.get(0),
+    )
+    .context("count_degraded_since")
+}
+
 /// Format `now - hours` as a [`TIMESTAMP_FMT`] lower bound for the
 /// `*_since` counters.
 pub fn hours_ago_iso(hours: i64) -> String {

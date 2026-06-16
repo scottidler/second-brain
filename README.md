@@ -75,6 +75,10 @@ sb doctor   # every section should report green
 `sb status` shows live state; `sb doctor` adds severity-tagged findings
 with actionable fix commands (missing assets, missing external binaries,
 drift between installed copies and the binary's embedded source-of-truth).
+It also runs a **live fabric probe** (a real `summarize` call against the
+configured model) and Warns on `degraded_24h > 0` - so silent-quality
+failures, like a retired fabric `DEFAULT_MODEL` that publishes impoverished
+notes recorded as `succeeded`, surface as findings rather than hiding.
 
 ## Optional: Signal transport
 

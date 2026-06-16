@@ -85,6 +85,7 @@ pub struct AuditHealth {
     pub crashed: usize,
     pub failed_24h: usize,
     pub crashed_24h: usize,
+    pub degraded_24h: usize,
 }
 
 /// Live receipts health: lifetime status counts plus the last-24h failed /

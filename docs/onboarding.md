@@ -32,7 +32,10 @@ Install these before configuring anything. Grouped by what they unlock.
 - **Fabric** (Daniel Miessler's) - the distill engine. `sb doctor`
   hard-errors if it is missing. Needs its own config and an **LLM API key**
   (Anthropic/OpenAI) - this is the single biggest "it does not just work"
-  dependency. After install: `fabric -y --update-patterns`.
+  dependency. After install: `fabric -y --update-patterns`. `sb doctor` runs
+  a **live probe** (a real `summarize` call against the model configured in
+  `~/.config/fabric/.env`), so a stale `DEFAULT_MODEL`, a bad API key, or no
+  egress is caught as a Warn here rather than silently degrading every ingest.
 - **An Obsidian vault** - a directory containing a `.obsidian/` folder. This
   is where notes land. It can be empty to start.
 
@@ -165,6 +168,15 @@ Two things specific to Signal:
   interactive shell but the daemon's `PATH` may omit `~/go/bin`, silently
   breaking every distill. If ingest "succeeds" but produces empty/garbage
   notes, check the daemon's environment.
+- **Fabric's `DEFAULT_MODEL` can point at a retired model.** When a provider
+  retires a model, `~/.config/fabric/.env`'s `DEFAULT_MODEL` keeps naming it
+  and the live API returns `404 not_found_error` - even though `fabric
+  --listmodels` (a *static* list) still shows it. Borg then takes its
+  `fabric-error` fallback and publishes a **degraded** note that is recorded
+  `succeeded` - so the failure is silent in the status counts. Catch it with
+  the `sb doctor` fabric live probe and `degraded_24h` Warn; fix by setting
+  `DEFAULT_MODEL` to a current model and `sb borg replay <trace>` the affected
+  traces.
 - **`sb doctor` only checks Fabric, not the other binaries.** A green doctor
   does not prove `yt-dlp`/`ffmpeg`/`markitdown`/`tesseract` are installed -
   those only surface when you ingest that content type. Install them up front.

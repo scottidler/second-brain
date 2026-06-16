@@ -260,6 +260,9 @@ fn shared_config_findings() -> Vec<Finding> {
 }
 
 const FABRIC_INSTALL_HINT: &str = "go install github.com/danielmiessler/fabric/cmd/fabric@latest";
+/// Wall-clock bound for the live fabric probe. A real `summarize` on a 4-byte
+/// input returns in a couple of seconds; this is the network-hang ceiling.
+const FABRIC_PROBE_TIMEOUT_SECS: u64 = 30;
 const SIGNAL_RS_INSTALL_HINT: &str =
     "cargo install --git https://github.com/scottidler/signal-rs --bin signal-rs --tag v0.2.1";
 
@@ -270,6 +273,7 @@ fn external_binaries_findings() -> Vec<Finding> {
     let mut findings = Vec::new();
     findings.extend(fabric_cli_findings());
     findings.extend(fabric_default_patterns_findings());
+    findings.extend(fabric_live_probe_findings());
     if let Ok(config) = borg::config::load_config::<borg::config::Config>(None)
         && config.signal.is_some()
     {
@@ -315,6 +319,34 @@ fn fabric_default_patterns_findings() -> Vec<Finding> {
             format!("missing default fabric patterns: {}", missing.join(", ")),
             "fabric -y --update-patterns",
         )]
+    }
+}
+
+/// Live end-to-end fabric probe: run the `summarize` pattern on a trivial input
+/// through the exact `vault::fabric::run_pattern` path borg uses at publish
+/// time, with `model=""` so fabric resolves its own configured `DEFAULT_MODEL`.
+/// The install/pattern checks above are static (a present binary, a listed
+/// pattern); only a live call catches the failure that silently degrades every
+/// ingest - a retired/misconfigured model (`404 not_found_error`), a bad API
+/// key, or no egress to the provider. `fabric -l` lists models the live API will
+/// 404 on, so the static list cannot substitute for this. Warn (not error) on
+/// failure: a transient network blip should not turn doctor red, and the
+/// degraded-count check is the companion signal for actual impact.
+fn fabric_live_probe_findings() -> Vec<Finding> {
+    // Skip when the binary is absent - fabric_cli_findings already errored, and
+    // a probe would just restate it.
+    if !vault::fabric::is_available("fabric") {
+        return Vec::new();
+    }
+    match vault::fabric::run_pattern("summarize", "ping", "fabric", "", 0, FABRIC_PROBE_TIMEOUT_SECS) {
+        Ok(_) => vec![Finding::ok(
+            "fabric live probe (summarize) succeeded against the configured model".to_string(),
+        )],
+        Err(e) => vec![Finding::warn(
+            format!("fabric live probe failed: {e}"),
+            "check DEFAULT_MODEL in ~/.config/fabric/.env against a live `fabric --listmodels` probe (the static list can name retired models), the API key, and provider egress"
+                .to_string(),
+        )],
     }
 }
 
@@ -524,6 +556,20 @@ fn borg_findings() -> Vec<Finding> {
             }
             if h.failed_24h > 0 {
                 findings.push(Finding::info(format!("{} failure(s) in the last 24h", h.failed_24h)));
+            }
+            // The silent-quality signal: notes that landed but via a distill
+            // fallback (e.g. a fabric API error). They read as `succeeded`, so
+            // they never show up in the failed/crashed counts above - this is
+            // the one place doctor makes degraded ingestion loud.
+            if h.degraded_24h > 0 {
+                findings.push(Finding::warn(
+                    format!(
+                        "{} note(s) published degraded in the last 24h (distill fallback - impoverished body)",
+                        h.degraded_24h
+                    ),
+                    "sb borg log --degraded --since 24h, then `sb borg replay <trace>` once the cause is fixed"
+                        .to_string(),
+                ));
             }
         }
         Err(e) => findings.push(Finding::warn(
