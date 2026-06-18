@@ -109,6 +109,6 @@ sb cortex embed --prefetch-model
 
 `otto deploy` builds the single `sb` bin, installs it to `~/.cargo/bin/`, syncs the fabric patterns and canonical tags to `~/.config/sb/`, and restarts any borg/cortex systemd units that already exist. Systemd unit content is owned by `sb borg daemon --install` and `sb cortex daemon --install` - run those on a fresh machine to write the units; the deploy task only restarts.
 
-oracle is an MCP server launched on demand via `.mcp.json` -> `sb oracle serve`. No restart needed.
+oracle is an MCP server launched on demand via `.mcp.json` -> `sb oracle serve`. No restart needed. Project-scoped (vault-specific). The `gslides` MCP (`mcp__gslides__*`, vault-note -> Google Slides decks) is also available but user-scoped/global, defined in `~/.claude.json` via the `mcp-servers` step in `scottidler/claude/manifest.yml`.
 
 For first-time setup on a new machine: `sb bootstrap` drops starter config files into `~/.config/sb/` and prefetches the fastembed cache. On machines with the legacy `~/.config/{borg,cortex,obsidian-cortex,oracle,second-brain}` layout, `sb bootstrap` auto-detects and migrates them.

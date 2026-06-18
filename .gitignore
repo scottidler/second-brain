@@ -13,9 +13,6 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
-# Local MCP config (use global ~/.mcp.json instead)
-.mcp.json
-
 # fastembed-downloaded ONNX model cache (legacy backend artifacts)
 .fastembed_cache/
 
