@@ -55,3 +55,29 @@ Append-only record of how the implementation interprets or diverges from
 - None blocking. The doc's open questions (flag naming beyond
   `duplicate-quarantine`, mixed-type groups, re-sourcing the 19) remain product
   decisions, unchanged by this implementation.
+
+## Post-audit acknowledgments (Architect / agy, Implementation Audit)
+
+The Architect audit confirmed the load-bearing safety is watertight and raised
+four completeness/acknowledgment findings (no correctness bugs). Acknowledged:
+
+- **D2 narrowed to `source:` only — ledger-entry identity dropped (intentional).**
+  The spec offered "same `source:` value, OR same ledger entry" as the identity
+  proof. `quarantine_eligible` (`audit.rs`) implements `source:` only. Reason: the
+  borg ledger records ingested URLs, not authored notes, so a ledger-entry check
+  adds nothing for the case this design exists to protect (authored notes sharing
+  a batch label) and would couple audit's dedup to ledger parsing for no gain.
+  `source:` identity + byte-identical normalized bodies is the proof. Revisit only
+  if a real same-content/different-source-but-same-ledger case appears.
+- **D1 `--fix duplicate` silently became report-only — no deprecation shim (accepted).**
+  The spec asked to define backward-compat for callers passing `--fix duplicate`
+  expecting a move. None was added: this is a single-operator tool, the behavior
+  change IS the intended safety fix, and the destructive path still exists under
+  the explicit `--fix duplicate-quarantine`. No shim/warning was deemed worth the
+  surface area. Flagged here rather than left implicit.
+- **Group sizes now logged.** `build_dup_index` logs `dup_group_sizes=[...]`
+  alongside the group count (was count-only). Fixed.
+- **Phase 4 `==19` gate — left as-is (deliberate).** `bin/recover-pais-migration`
+  hard-gates `moved == found` and warns when `found != 19` rather than hard-failing
+  on a count other than 19. This is more robust (don't refuse to recover 18 if one
+  was already handled), so the spec's literal "== 19" was not adopted.

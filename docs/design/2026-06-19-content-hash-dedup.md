@@ -418,7 +418,14 @@ field-ownership entirely; revisit if a persistent tag is needed.
   four factual fixes (OrphanReplace does not use the source index; mtime-kept-stub
   hedged; `systemctl restart borg` rollout removed; "SHA collision" → "same input
   → same hash"); observability logging spec added.
-- **Architect (Gemini/Antigravity)** — pending; to be run separately.
+- **Architect (Antigravity/agy, Implementation Audit)** — completed 2026-06-19.
+  Verdict: load-bearing safety watertight (empty-body guard, `quarantine_eligible`
+  byte-compare + `source:` identity, `split_raw` reuse, UTF-8-safe normalization,
+  blanket-`--fix` cannot quarantine). Four completeness/acknowledgment findings, no
+  correctness bugs: D2 narrowed to `source:` only (ledger-entry dropped), D1
+  `--fix duplicate` silently report-only (no shim), group sizes not logged, Phase 4
+  not hard-gated on 19. All four addressed or accepted-with-rationale in the
+  implementation notes; group-sizes logging fixed in code.
 
 ## References
 - `borg/src/audit.rs` — duplicate detection (`build_note_index` :726, duplicate

@@ -846,12 +846,16 @@ fn build_dup_index(vault_root: &Path, skip_folders: &[String]) -> Result<HashMap
     for (fingerprint, path) in pairs {
         index.entry(fingerprint).or_default().push(path);
     }
+    // Sizes of the candidate-duplicate groups (>1 note); sorted for stable logs.
+    let mut dup_group_sizes: Vec<usize> = index.values().map(Vec::len).filter(|&n| n > 1).collect();
+    dup_group_sizes.sort_unstable();
     log::debug!(
-        "audit::build_dup_index: scanned={} fingerprinted={} skipped_short_or_empty={} groups={}",
+        "audit::build_dup_index: scanned={} fingerprinted={} skipped_short_or_empty={} groups={} dup_group_sizes={:?}",
         scanned,
         fingerprinted,
         scanned.saturating_sub(fingerprinted),
-        index.len()
+        index.len(),
+        dup_group_sizes
     );
 
     Ok(index)
