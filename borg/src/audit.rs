@@ -6,7 +6,6 @@ use clap::ValueEnum;
 use eyre::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 /// The kind of an audit finding. Single source of truth for the finding
 /// classes — `AuditFinding` (data-carrying) and the CLI parser both project
@@ -27,9 +26,16 @@ pub enum FindingKind {
     /// Note title is the literal source URL (title extraction failed).
     /// Fix: `rkvr rmrf` the note + drop its `✅` row.
     RawTitle,
-    /// Multiple notes share the same `source:` value. Fix: keep newest
-    /// by mtime, move the rest to `system/quarantine/<source-key>/`.
+    /// Two or more notes share a byte-identical NORMALIZED body. Grouping is on
+    /// content, never the `source:` string (a shared batch label must not
+    /// collapse distinct notes -- docs/design/2026-06-19-content-hash-dedup.md).
+    /// REPORT-ONLY: `--fix duplicate` and blanket `--fix` move nothing.
     Duplicate,
+    /// Opt-in destructive selector: quarantine content-duplicate groups that pass
+    /// the second proof (identical normalized bodies AND a shared non-empty
+    /// `source:`). Keeps the lexicographically-first note, moves the rest to
+    /// `system/quarantine/<source-key>/`. NEVER triggered by blanket `--fix`.
+    DuplicateQuarantine,
     /// A note whose `source:` is a github.com repo root has an empty
     /// `creator:`. Fix: set `creator:` to the repo owner parsed from the URL
     /// (no network). Never overwrites a non-empty creator.
@@ -63,7 +69,8 @@ pub enum AuditFinding {
         note_path: Option<PathBuf>,
     },
     Duplicate {
-        source: String,
+        /// Hex SHA-256 of the shared normalized body (the grouping key).
+        fingerprint: String,
         note_paths: Vec<PathBuf>,
     },
     GithubCreatorMissing {
@@ -104,8 +111,16 @@ impl std::fmt::Display for AuditFinding {
             AuditFinding::RawTitle { source, title, .. } => {
                 write!(f, "[RAW-TITLE] {source} -> title is raw URL: \"{title}\"")
             }
-            AuditFinding::Duplicate { source, note_paths } => {
-                write!(f, "[DUPLICATE] {source} -> {} notes found", note_paths.len())
+            AuditFinding::Duplicate {
+                fingerprint,
+                note_paths,
+            } => {
+                let short: String = fingerprint.chars().take(12).collect();
+                write!(
+                    f,
+                    "[DUPLICATE] {} notes share identical content (fp {short})",
+                    note_paths.len()
+                )
             }
             AuditFinding::OrphanReplace { source, replaced_date } => {
                 write!(
@@ -174,6 +189,18 @@ pub enum AuditEvent {
         source: String,
         kept: PathBuf,
         quarantined: Vec<PathBuf>,
+    },
+    /// A content-duplicate candidate group was found and REPORTED only (the
+    /// default; no files moved). Quarantine requires `--fix duplicate-quarantine`.
+    DuplicateReported {
+        count: usize,
+    },
+    /// A quarantine was requested for a group but the second proof (design D2)
+    /// failed (normalized bodies or `source:` identity differ), so the group was
+    /// reported, not moved.
+    DuplicateNotEligible {
+        count: usize,
+        reason: String,
     },
     /// `rkvr` was needed but missing or failed.
     RkvrUnavailable {
@@ -337,11 +364,16 @@ pub fn scan(config: &Config) -> Result<AuditReport> {
         }
     }
 
-    // 4. Duplicate notes (multiple notes with same source URL)
-    for (source, paths) in &note_index {
+    // 4. Content-duplicate groups: notes whose NORMALIZED body hashes identically.
+    //    Grouping is on content, never on the `source:` string -- a shared batch
+    //    label like "pais-migration" must NOT collapse distinct notes
+    //    (docs/design/2026-06-19-content-hash-dedup.md). This finding REPORTS a
+    //    candidate group; destructive quarantine is opt-in and second-proofed.
+    let dup_index = build_dup_index(&vault_root, &config.migration.skip_folders)?;
+    for (fingerprint, paths) in &dup_index {
         if paths.len() > 1 {
             findings.push(AuditFinding::Duplicate {
-                source: source.clone(),
+                fingerprint: fingerprint.clone(),
                 note_paths: paths.clone(),
             });
         }
@@ -395,7 +427,20 @@ pub fn apply_fixes(report: &AuditReport, kinds: &[FindingKind], mut progress: im
         report.vault_root.display(),
     );
 
-    let want = |finding: &AuditFinding| -> bool { kinds.is_empty() || kinds.contains(&finding.kind()) };
+    // Destructive duplicate quarantine is opt-in ONLY: it never runs under a
+    // blanket `--fix` (empty kinds), only when `duplicate-quarantine` is named.
+    let quarantine_requested = kinds.contains(&FindingKind::DuplicateQuarantine);
+    let want = |finding: &AuditFinding| -> bool {
+        match finding {
+            // A Duplicate finding is actionable under blanket `--fix` (report
+            // only), `--fix duplicate` (report only), or `--fix
+            // duplicate-quarantine` (the destructive opt-in).
+            AuditFinding::Duplicate { .. } => {
+                kinds.is_empty() || kinds.contains(&FindingKind::Duplicate) || quarantine_requested
+            }
+            other => kinds.is_empty() || kinds.contains(&other.kind()),
+        }
+    };
 
     let fixable: Vec<&AuditFinding> = report.findings.iter().filter(|f| want(f)).collect();
 
@@ -430,8 +475,16 @@ pub fn apply_fixes(report: &AuditReport, kinds: &[FindingKind], mut progress: im
             } => {
                 fixed += apply_fix_delete_and_drop(report, source, path, &mut progress);
             }
-            AuditFinding::Duplicate { source, note_paths } => {
-                fixed += apply_fix_duplicate(report, source, note_paths, &mut progress);
+            AuditFinding::Duplicate { note_paths, .. } => {
+                if quarantine_requested {
+                    fixed += apply_fix_duplicate(report, note_paths, &mut progress);
+                } else {
+                    // Default (design D0/D1): body-identity is authority to REPORT
+                    // a candidate group, not to remove a note. Move nothing.
+                    progress(&AuditEvent::DuplicateReported {
+                        count: note_paths.len(),
+                    });
+                }
             }
             AuditFinding::GithubCreatorMissing { owner, note_path, .. } => {
                 fixed += apply_fix_github_creator(report, note_path, owner, &mut progress);
@@ -604,32 +657,43 @@ fn apply_fix_delete_and_drop(
     }
 }
 
-fn apply_fix_duplicate(
-    report: &AuditReport,
-    source: &str,
-    note_paths: &[PathBuf],
-    progress: &mut impl FnMut(&AuditEvent),
-) -> usize {
+fn apply_fix_duplicate(report: &AuditReport, note_paths: &[PathBuf], progress: &mut impl FnMut(&AuditEvent)) -> usize {
     if note_paths.len() < 2 {
         return 0;
     }
-    let mut with_mtime: Vec<(PathBuf, SystemTime)> = note_paths
-        .iter()
-        .filter_map(|p| std::fs::metadata(p).ok()?.modified().ok().map(|t| (p.clone(), t)))
-        .collect();
-    if with_mtime.len() < 2 {
-        // Need at least two readable mtimes to pick a winner; punt.
+    // Second proof before any destructive move (design D2): body-hash grouping is
+    // authority to REPORT, not to remove. Require byte-identical normalized
+    // bodies AND a shared `source:` identity, or report-and-skip.
+    if !quarantine_eligible(note_paths) {
+        log::warn!(
+            "audit::apply_fix_duplicate: group of {} failed second proof (body or source identity mismatch); reporting, not moving",
+            note_paths.len()
+        );
+        progress(&AuditEvent::DuplicateNotEligible {
+            count: note_paths.len(),
+            reason: "normalized bodies or source identity differ".to_string(),
+        });
         return 0;
     }
-    with_mtime.sort_by_key(|b| std::cmp::Reverse(b.1));
-    let (keep, _) = with_mtime.first().cloned().expect("len >= 2 verified above");
-    let losers: Vec<PathBuf> = with_mtime.into_iter().skip(1).map(|(p, _)| p).collect();
+    // Deterministic keep: lexicographically-first path. Bodies are byte-identical
+    // (verified above), so the choice is arbitrary-but-stable, never mtime (the
+    // mtime tiebreak previously preserved an empty stub over real notes).
+    let mut sorted: Vec<PathBuf> = note_paths.to_vec();
+    sorted.sort();
+    let keep = sorted.first().cloned().expect("len >= 2 verified above");
+    let losers: Vec<PathBuf> = sorted.into_iter().skip(1).collect();
+
+    // Eligibility guarantees every note shares this source; use it for the key.
+    let source = std::fs::read_to_string(&keep)
+        .ok()
+        .and_then(|c| extract_frontmatter_field(&c, "source"))
+        .unwrap_or_else(|| "duplicate".to_string());
 
     let quarantine_root = report
         .vault_root
         .join("system")
         .join("quarantine")
-        .join(quarantine_key(source));
+        .join(quarantine_key(&source));
 
     let mut moved: Vec<PathBuf> = Vec::with_capacity(losers.len());
     for loser in &losers {
@@ -657,7 +721,7 @@ fn apply_fix_duplicate(
         return 0;
     }
     progress(&AuditEvent::Quarantined {
-        source: source.to_string(),
+        source,
         kept: keep,
         quarantined: moved,
     });
@@ -714,6 +778,111 @@ fn drop_ledger_row(ledger_path: &Path, source: &str, status_glyph: &str, date_fi
     }
     file.unlock().ok();
     Ok(dropped)
+}
+
+/// Minimum normalized-body length (chars) for a note to be dedup-eligible.
+/// Empty and trivially-short bodies (stubs, redirects, one-line placeholders)
+/// are never grouped: an empty body hashes the same as every other empty body
+/// ("same input -> same hash", NOT a SHA-256 collision), which would manufacture
+/// a fresh false-positive class. See docs/design/2026-06-19-content-hash-dedup.md.
+const MIN_DUP_BODY_LEN: usize = 32;
+
+/// Normalize a note body for content comparison. Line-oriented; never indexes
+/// into a `&str` by byte (UTF-8 safety -- a multibyte char must not panic the
+/// pass). Normalizes CRLF/CR to LF, strips trailing whitespace on each line, and
+/// removes leading/trailing blank lines. Internal blank runs are preserved.
+fn normalize_body(body: &str) -> String {
+    let unified = body.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = unified.lines().map(str::trim_end).collect();
+    let Some(start) = lines.iter().position(|l| !l.is_empty()) else {
+        return String::new();
+    };
+    let end = lines.iter().rposition(|l| !l.is_empty()).unwrap_or(start);
+    lines.get(start..=end).unwrap_or(&[]).join("\n")
+}
+
+/// Content fingerprint of a note body: hex SHA-256 of the normalized body, or
+/// `None` if the normalized body is empty or shorter than `MIN_DUP_BODY_LEN`.
+/// SHA-256 (via the `sha2` crate already in Cargo.toml) is stable across
+/// toolchains -- never `DefaultHasher`.
+fn content_fingerprint(body: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let norm = normalize_body(body);
+    if norm.chars().count() < MIN_DUP_BODY_LEN {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(norm.as_bytes());
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+/// Build an index mapping a normalized-body content fingerprint -> note paths.
+/// Notes with an empty / too-short normalized body produce no fingerprint and
+/// are excluded. Reuses `vault::frontmatter::split_raw` (THE shared splitter) to
+/// separate frontmatter from body -- no second splitter is introduced.
+fn build_dup_index(vault_root: &Path, skip_folders: &[String]) -> Result<HashMap<String, Vec<PathBuf>>> {
+    use rayon::prelude::*;
+
+    log::debug!(
+        "audit::build_dup_index: vault_root={} skip_folders={:?}",
+        vault_root.display(),
+        skip_folders
+    );
+    let md_files = collect_md_files(vault_root, skip_folders)?;
+    let scanned = md_files.len();
+
+    let pairs: Vec<(String, PathBuf)> = md_files
+        .par_iter()
+        .filter_map(|path| {
+            let content = std::fs::read_to_string(path).ok()?;
+            let body = vault::frontmatter::split_raw(&content).map_or(content.as_str(), |(_, b)| b);
+            let fingerprint = content_fingerprint(body)?;
+            Some((fingerprint, path.clone()))
+        })
+        .collect();
+
+    let fingerprinted = pairs.len();
+    let mut index: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for (fingerprint, path) in pairs {
+        index.entry(fingerprint).or_default().push(path);
+    }
+    log::debug!(
+        "audit::build_dup_index: scanned={} fingerprinted={} skipped_short_or_empty={} groups={}",
+        scanned,
+        fingerprinted,
+        scanned.saturating_sub(fingerprinted),
+        index.len()
+    );
+
+    Ok(index)
+}
+
+/// Second proof before any destructive quarantine (design D2): every note in the
+/// group must have a byte-identical NORMALIZED body (re-checked here, because the
+/// realistic risk is normalization drift / a coding mistake, not a SHA-256
+/// collision) AND share a non-empty `source:` identity. A group that fails this
+/// is reported, never moved. Any unreadable note fails the proof (fail-closed).
+fn quarantine_eligible(paths: &[PathBuf]) -> bool {
+    let mut bodies: Vec<String> = Vec::with_capacity(paths.len());
+    let mut sources: Vec<Option<String>> = Vec::with_capacity(paths.len());
+    for path in paths {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let body = vault::frontmatter::split_raw(&content).map_or(content.as_str(), |(_, b)| b);
+        bodies.push(normalize_body(body));
+        sources.push(extract_frontmatter_field(&content, "source"));
+    }
+    let Some(first_body) = bodies.first() else {
+        return false;
+    };
+    if !bodies.iter().all(|b| b == first_body) {
+        return false;
+    }
+    match sources.first() {
+        Some(Some(first_source)) => sources.iter().all(|s| s.as_deref() == Some(first_source.as_str())),
+        _ => false,
+    }
 }
 
 /// Build an index mapping source URL -> list of note file paths in the vault.

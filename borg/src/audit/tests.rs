@@ -67,7 +67,7 @@ fn test_audit_finding_display_raw_title() {
 #[test]
 fn test_audit_finding_display_duplicate() {
     let finding = AuditFinding::Duplicate {
-        source: "https://example.com".to_string(),
+        fingerprint: "abcdef0123456789".to_string(),
         note_paths: vec![PathBuf::from("/a.md"), PathBuf::from("/b.md")],
     };
     let display = format!("{finding}");
@@ -287,11 +287,17 @@ fn write_note(root: &Path, rel: &str, source: &str, title: &str) -> PathBuf {
     path
 }
 
-fn set_mtime(path: &Path, seconds_since_epoch: u64) {
-    let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds_since_epoch);
-    std::fs::File::open(path)
-        .and_then(|f| f.set_modified(t))
-        .expect("set_modified");
+fn write_note_body(root: &Path, rel: &str, source: &str, title: &str, body: &str) -> PathBuf {
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir note parent");
+    }
+    std::fs::write(
+        &path,
+        format!("---\ntitle: \"{title}\"\nsource: {source}\ntype: article\n---\n\n{body}\n"),
+    )
+    .expect("write note");
+    path
 }
 
 fn collect_events<F>(report: &AuditReport, kinds: &[FindingKind], f: F) -> Vec<String>
@@ -432,17 +438,14 @@ fn apply_fix_raw_title_removes_note_and_drops_row() {
 }
 
 #[test]
-fn apply_fix_duplicate_keeps_newest_quarantines_rest() {
+fn fix_duplicate_quarantine_moves_eligible_group_keeping_first() {
     let (_tmp, root) = make_vault();
     let src = "https://example.com/dup";
+    let body = "Eligible identical body, same source, long enough to fingerprint here.";
 
-    let oldest = write_note(&root, "inbox/dup-a.md", src, "A");
-    let middle = write_note(&root, "inbox/dup-b.md", src, "B");
-    let newest = write_note(&root, "inbox/dup-c.md", src, "C");
-    set_mtime(&oldest, 1_000_000);
-    set_mtime(&middle, 2_000_000);
-    set_mtime(&newest, 3_000_000);
-
+    let a = write_note_body(&root, "inbox/dup-a.md", src, "A", body);
+    let b = write_note_body(&root, "inbox/dup-b.md", src, "B", body);
+    let c = write_note_body(&root, "inbox/dup-c.md", src, "C", body);
     let ledger_path = write_ledger(&root, "");
 
     let report = AuditReport {
@@ -451,29 +454,203 @@ fn apply_fix_duplicate_keeps_newest_quarantines_rest() {
         entries_scanned: 0,
         no_ledger: false,
         findings: vec![AuditFinding::Duplicate {
-            source: src.to_string(),
-            note_paths: vec![oldest.clone(), middle.clone(), newest.clone()],
+            fingerprint: "fp".into(),
+            // deliberately unsorted: keep must be lexicographically-first, not input-first.
+            note_paths: vec![c.clone(), a.clone(), b.clone()],
         }],
         fixed_count: 0,
     };
 
-    let lines = collect_events(&report, &[FindingKind::Duplicate], |fixed| assert_eq!(fixed, 1));
+    let lines = collect_events(&report, &[FindingKind::DuplicateQuarantine], |fixed| {
+        assert_eq!(fixed, 1)
+    });
     assert!(
         lines.iter().any(|l| l.contains("Quarantined")),
         "expected Quarantined event in {lines:?}"
     );
 
-    assert!(newest.exists(), "newest should be kept in place");
-    assert!(!oldest.exists(), "oldest should be moved out");
-    assert!(!middle.exists(), "middle should be moved out");
+    assert!(a.exists(), "lexicographically-first note should be kept");
+    assert!(!b.exists(), "dup-b should be moved out");
+    assert!(!c.exists(), "dup-c should be moved out");
 
     let key = quarantine_key(src);
     let quarantine_root = root.join("system").join("quarantine").join(&key);
-    assert!(
-        quarantine_root.join("inbox").join("dup-a.md").exists(),
-        "oldest should be at quarantine/{key}/inbox/dup-a.md"
-    );
     assert!(quarantine_root.join("inbox").join("dup-b.md").exists());
+    assert!(quarantine_root.join("inbox").join("dup-c.md").exists());
+}
+
+#[test]
+fn fix_duplicate_is_report_only_by_default() {
+    let (_tmp, root) = make_vault();
+    let body = "Identical body content, long enough to fingerprint and group here.";
+    let a = write_note_body(&root, "inbox/a.md", "https://example.com/x", "A", body);
+    let b = write_note_body(&root, "inbox/b.md", "https://example.com/x", "B", body);
+    let ledger_path = write_ledger(&root, "");
+
+    let report = AuditReport {
+        ledger_path,
+        vault_root: root.clone(),
+        entries_scanned: 0,
+        no_ledger: false,
+        findings: vec![AuditFinding::Duplicate {
+            fingerprint: "fp".into(),
+            note_paths: vec![a.clone(), b.clone()],
+        }],
+        fixed_count: 0,
+    };
+
+    let lines = collect_events(&report, &[FindingKind::Duplicate], |fixed| assert_eq!(fixed, 0));
+    assert!(
+        lines.iter().any(|l| l.contains("DuplicateReported")),
+        "expected report-only event in {lines:?}"
+    );
+    assert!(a.exists() && b.exists(), "report-only must move nothing");
+}
+
+#[test]
+fn blanket_fix_never_quarantines_duplicates() {
+    let (_tmp, root) = make_vault();
+    let body = "Identical body content, long enough to fingerprint and group here.";
+    let a = write_note_body(&root, "inbox/a.md", "https://example.com/x", "A", body);
+    let b = write_note_body(&root, "inbox/b.md", "https://example.com/x", "B", body);
+    let ledger_path = write_ledger(&root, "");
+
+    let report = AuditReport {
+        ledger_path,
+        vault_root: root.clone(),
+        entries_scanned: 0,
+        no_ledger: false,
+        findings: vec![AuditFinding::Duplicate {
+            fingerprint: "fp".into(),
+            note_paths: vec![a.clone(), b.clone()],
+        }],
+        fixed_count: 0,
+    };
+
+    // Empty kinds == blanket `--fix`: must report, never quarantine.
+    let lines = collect_events(&report, &[], |fixed| assert_eq!(fixed, 0));
+    assert!(lines.iter().any(|l| l.contains("DuplicateReported")));
+    assert!(a.exists() && b.exists(), "blanket --fix must not quarantine");
+}
+
+#[test]
+fn fix_duplicate_quarantine_skips_when_sources_differ() {
+    let (_tmp, root) = make_vault();
+    let body = "Identical body but DIFFERENT sources, long enough to fingerprint here.";
+    let a = write_note_body(&root, "inbox/a.md", "https://example.com/a", "A", body);
+    let b = write_note_body(&root, "inbox/b.md", "https://example.com/b", "B", body);
+    let ledger_path = write_ledger(&root, "");
+
+    let report = AuditReport {
+        ledger_path,
+        vault_root: root.clone(),
+        entries_scanned: 0,
+        no_ledger: false,
+        findings: vec![AuditFinding::Duplicate {
+            fingerprint: "fp".into(),
+            note_paths: vec![a.clone(), b.clone()],
+        }],
+        fixed_count: 0,
+    };
+
+    let lines = collect_events(&report, &[FindingKind::DuplicateQuarantine], |fixed| {
+        assert_eq!(fixed, 0)
+    });
+    assert!(
+        lines.iter().any(|l| l.contains("DuplicateNotEligible")),
+        "expected not-eligible event in {lines:?}"
+    );
+    assert!(a.exists() && b.exists(), "must not move when the second proof fails");
+}
+
+#[test]
+fn normalize_body_strips_trailing_ws_and_edge_blanks() {
+    // Trailing whitespace per line and leading/trailing blank LINES are stripped;
+    // LEADING whitespace on a line is preserved (markdown indentation is semantic).
+    assert_eq!(
+        normalize_body("\n\n  hello world   \n\ntrailing  \n\n\n"),
+        "  hello world\n\ntrailing"
+    );
+}
+
+#[test]
+fn normalize_body_unifies_line_endings() {
+    assert_eq!(normalize_body("a\r\nb\rc"), "a\nb\nc");
+}
+
+#[test]
+fn normalize_body_multibyte_does_not_panic() {
+    // em-dash + accented chars: the line scan must be char-safe, never byte-indexed.
+    // (Trailing ws stripped; leading indentation preserved.)
+    assert_eq!(normalize_body("café — résumé\n  naïve  \n"), "café — résumé\n  naïve");
+}
+
+#[test]
+fn content_fingerprint_identical_after_normalization() {
+    let body = "The quick brown fox jumps over the lazy dog repeatedly today.";
+    let a = content_fingerprint(&format!("{body}  \n")).expect("fp a");
+    let b = content_fingerprint(&format!("\n\n{body}\n")).expect("fp b");
+    assert_eq!(a, b, "whitespace-only differences must hash identically");
+}
+
+#[test]
+fn content_fingerprint_distinct_bodies_differ() {
+    let a = content_fingerprint("The quick brown fox jumps over the lazy dog now.").expect("fp a");
+    let b = content_fingerprint("An entirely different sentence of sufficient length here.").expect("fp b");
+    assert_ne!(a, b);
+}
+
+#[test]
+fn content_fingerprint_short_or_empty_is_none() {
+    assert_eq!(content_fingerprint(""), None);
+    assert_eq!(content_fingerprint("   \n\n  "), None);
+    assert_eq!(content_fingerprint("# Body"), None, "below MIN_DUP_BODY_LEN");
+}
+
+#[test]
+fn build_dup_index_does_not_group_distinct_bodies_sharing_source() {
+    // The pais-migration regression: many DISTINCT notes, one shared source label.
+    let (_tmp, root) = make_vault();
+    write_note_body(
+        &root,
+        "notes/a.md",
+        "pais-migration",
+        "A",
+        "Alpha note body that is long enough to fingerprint distinctly here.",
+    );
+    write_note_body(
+        &root,
+        "notes/b.md",
+        "pais-migration",
+        "B",
+        "Beta note body that is also long enough but entirely different text.",
+    );
+    write_note_body(
+        &root,
+        "notes/c.md",
+        "pais-migration",
+        "C",
+        "Gamma note body, again long enough and clearly distinct from the rest.",
+    );
+
+    let index = build_dup_index(&root, &["system".to_string()]).expect("build_dup_index");
+    assert!(
+        index.values().all(|paths| paths.len() == 1),
+        "distinct bodies sharing a source must never group: {index:?}"
+    );
+}
+
+#[test]
+fn build_dup_index_groups_identical_bodies() {
+    let (_tmp, root) = make_vault();
+    let body = "Exactly the same body content, long enough to clear the min length.";
+    write_note_body(&root, "notes/x.md", "https://example.com/x", "X", body);
+    write_note_body(&root, "notes/y.md", "https://example.com/x", "Y", body);
+
+    let index = build_dup_index(&root, &["system".to_string()]).expect("build_dup_index");
+    let groups: Vec<_> = index.values().filter(|p| p.len() > 1).collect();
+    assert_eq!(groups.len(), 1, "identical bodies must form exactly one group");
+    assert_eq!(groups.first().map(|g| g.len()), Some(2));
 }
 
 #[test]

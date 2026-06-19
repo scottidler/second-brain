@@ -685,6 +685,14 @@ fn print_audit_event(event: &borg::audit::AuditEvent) {
                 println!("    moved: {}", q.display());
             }
         }
+        AuditEvent::DuplicateReported { count } => {
+            println!(
+                "  {count} notes share identical content (report only; run --fix duplicate-quarantine to quarantine)"
+            );
+        }
+        AuditEvent::DuplicateNotEligible { count, reason } => {
+            println!("  {count} notes hash alike but failed the quarantine second-proof ({reason}); not moved");
+        }
         AuditEvent::RkvrUnavailable { path, error } => {
             eprintln!("  rkvr unavailable for {}: {error}", path.display());
         }
