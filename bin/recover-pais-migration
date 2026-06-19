@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+#
+# recover-pais-migration - restore the 19 notes that borg `audit --fix duplicate`
+# wrongly quarantined under system/quarantine/pais-migration/notes/.
+#
+# Root cause (see docs/design/2026-06-19-content-hash-dedup.md): the old
+# duplicate heuristic grouped notes by their `source:` string. All 20
+# pais-migration notes shared the batch label `source: "pais-migration"`, so 19
+# distinct notes were quarantined as "duplicates" of an mtime-newest stub. The
+# new content-hash heuristic (commit eb7728e) makes this impossible going
+# forward; this script repairs the existing damage.
+#
+# SAFETY:
+#   - Refuses to run unless the vault working tree is CLEAN (the vault is
+#     Syncthing'd + git-tracked; a dirty tree makes the rollback ambiguous).
+#   - Refuses to clobber an existing notes/<name>.md target.
+#   - Uses `git mv` so the moves are a single reviewable, revertable changeset.
+#   - Does NOT delete or modify the empty `rule-of-five.md` stub; it only reports
+#     its state for a human decision.
+#
+# ROLLBACK (before you commit in the vault):
+#   git -C "<vault>" restore --staged notes/ system/quarantine/   # unstage
+#   git -C "<vault>" checkout -- notes/ system/quarantine/        # discard moves
+#   ...or, if already committed: git -C "<vault>" revert <commit>
+#
+# Run ONCE, on the daemon host. The vault is Syncthing'd, so the restored notes
+# propagate to every other host automatically - do NOT re-run per host.
+#
+# Usage: bin/recover-pais-migration <vault-root>
+
+set -euo pipefail
+
+readonly QUARANTINE_REL="system/quarantine/pais-migration/notes"
+readonly TARGET_REL="notes"
+readonly EXPECTED_COUNT=19
+readonly STUB_REL="notes/rule-of-five.md"
+
+die() {
+    echo "error: $*" >&2
+    exit 1
+}
+
+main() {
+    [ $# -eq 1 ] || die "usage: $(basename "$0") <vault-root>"
+    local vault
+    vault=$(cd "$1" 2>/dev/null && pwd) || die "vault root not found: $1"
+
+    [ -d "$vault/.git" ] || die "not a git repo (no .git): $vault"
+    local quarantine="$vault/$QUARANTINE_REL"
+    [ -d "$quarantine" ] || die "quarantine dir not found: $quarantine"
+
+    # 1. Clean-tree precondition. A dirty vault makes rollback ambiguous; bail.
+    if [ -n "$(git -C "$vault" status --porcelain)" ]; then
+        die "vault working tree is DIRTY; commit or stash first, then re-run.
+     (recovery rewrites paths under git; a clean baseline is what makes the
+      rollback commands in this script's header safe)"
+    fi
+
+    # 2. Enumerate quarantined notes.
+    local notes=()
+    while IFS= read -r -d '' f; do
+        notes+=("$f")
+    done < <(find "$quarantine" -maxdepth 1 -type f -name '*.md' -print0 | sort -z)
+
+    local found=${#notes[@]}
+    echo "found $found quarantined note(s) under $QUARANTINE_REL"
+    [ "$found" -gt 0 ] || die "nothing to recover"
+    if [ "$found" -ne "$EXPECTED_COUNT" ]; then
+        echo "warning: expected $EXPECTED_COUNT, found $found - proceeding with what's present" >&2
+    fi
+
+    # 3. Pre-flight clobber check (fail BEFORE moving anything).
+    local name target
+    for f in "${notes[@]}"; do
+        name=$(basename "$f")
+        target="$vault/$TARGET_REL/$name"
+        [ -e "$target" ] && die "target already exists, refusing to clobber: $TARGET_REL/$name"
+    done
+
+    # 4. Move each note back via git mv.
+    local moved=0
+    for f in "${notes[@]}"; do
+        name=$(basename "$f")
+        git -C "$vault" mv "$QUARANTINE_REL/$name" "$TARGET_REL/$name"
+        echo "  restored: $TARGET_REL/$name"
+        moved=$((moved + 1))
+    done
+
+    # 5. Verify by count (not exit code).
+    echo "moved $moved of $found"
+    [ "$moved" -eq "$found" ] || die "move count mismatch: moved $moved, expected $found"
+
+    # 6. Assess the empty stub - report only, never auto-delete.
+    if [ -f "$vault/$STUB_REL" ]; then
+        local sz
+        sz=$(wc -c <"$vault/$STUB_REL" | tr -d ' ')
+        echo
+        echo "note: $STUB_REL exists (${sz} bytes). If it is the empty dedup 'winner'"
+        echo "      stub, decide manually: rkvr rmrf it, restore from history, or keep"
+        echo "      as a redirect. This script does not touch it."
+    fi
+
+    echo
+    echo "done. Review with: git -C \"$vault\" status   then commit in the vault."
+    echo "Rollback (pre-commit): git -C \"$vault\" checkout -- $TARGET_REL/ $QUARANTINE_REL/"
+}
+
+main "$@"
