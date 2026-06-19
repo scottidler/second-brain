@@ -21,6 +21,7 @@ borg owns durable capture, multi-channel ingest, and the staged pipeline that pu
 4. **Test notifications are disabled** when `notify::real_notifications_disabled()` is true (tripped by `cfg!(test)`, nextest, `CARGO_TARGET_TMPDIR`, or `BORG_DISABLE_DESKTOP_NOTIFY`). No test path leaks a real toast/message.
 5. **`IngestRequest` is additive-only** (`types.rs`). Required: `url`. Optional: `tags`, `priority`, `force`, `method`. Never remove/rename a field — clients (extension, bookmarklet, hotkey) depend on it; a required-field addition needs a coordinated extension re-sign in the same PR.
 6. **Signal privacy gate is load-bearing** (`signal.rs::accepted_envelope`): accepts only Note-to-Self sync and allowlisted-peer DMs, behind a fail-closed rate gate.
+7. **Audit duplicate detection is content-hash, never `source:`-string** (`audit.rs`). `build_dup_index` groups notes by the SHA-256 of their normalized body; the `source:` field does NOT decide duplication (a shared batch label like `pais-migration` must never collapse distinct notes). Empty/short bodies (< `MIN_DUP_BODY_LEN`) never group. Body-identity is authority to REPORT only: `--fix duplicate` and blanket `--fix` move nothing. Destructive quarantine is the explicit `--fix duplicate-quarantine` opt-in, gated by `quarantine_eligible` (identical normalized bodies AND a shared non-empty `source:`), keeping the lexicographically-first note. See `docs/design/2026-06-19-content-hash-dedup.md`.
 
 ## Patterns
 
