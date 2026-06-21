@@ -328,7 +328,7 @@ impl OracleMcpServer {
 impl OracleMcpServer {
     /// Search the vault's ingested knowledge.
     #[tool(
-        description = "Search the vault's ingested knowledge. Omit mode (the common case) to run the operator-configured pipeline (vector-first by default, eval-best). Mode overrides force a single path: bm25 (FTS5 keyword search), vector (semantic, brute-force cosine over embeddings), or hybrid (BM25 + vector fused via RRF). Filter by domain, note type, or status. Control content verbosity with the detail parameter: metadata, tldr, summary, full."
+        description = "Search the vault's ingested knowledge. Omit mode (the common case) to run the operator-configured pipeline (vector-first by default, eval-best). Mode overrides force a single path: bm25 (FTS5 keyword search), vector (semantic, brute-force cosine over embeddings), or hybrid (BM25 + vector fused via RRF). Filter by domain, note type, or status. Control content verbosity with the detail parameter: metadata, tldr, summary, full. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn knowledge_search(&self, params: Parameters<KnowledgeSearchRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -401,7 +401,7 @@ impl OracleMcpServer {
 
     /// Read a specific note by its vault-relative path
     #[tool(
-        description = "Read a specific note by its vault-relative path. Returns the note at the requested detail level: metadata, tldr, summary, or full."
+        description = "Read a specific note by its vault-relative path. Returns the note at the requested detail level: metadata, tldr, summary, or full. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn note_read(&self, params: Parameters<NoteReadRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -430,7 +430,7 @@ impl OracleMcpServer {
 
     /// List notes with optional filters
     #[tool(
-        description = "List notes with optional filters by domain, note type, status, or date range. Unlike knowledge_search, this does not require a search query - use it to browse by category."
+        description = "List notes with optional filters by domain, note type, status, or date range. Unlike knowledge_search, this does not require a search query - use it to browse by category. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn list_notes(&self, params: Parameters<ListNotesRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -469,7 +469,7 @@ impl OracleMcpServer {
 
     /// Get a briefing on a specific knowledge domain
     #[tool(
-        description = "Get a briefing on a specific knowledge domain - total notes, unread count, starred count, type breakdown, and recent notes."
+        description = "Get a briefing on a specific knowledge domain - total notes, unread count, starred count, type breakdown, and recent notes. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn domain_brief(&self, params: Parameters<DomainBriefRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -661,7 +661,7 @@ impl OracleMcpServer {
 
     /// Search notes by tag or list all tags
     #[tool(
-        description = "Search notes by tag, or list all tags with counts when no tag is specified. Supports exact match and prefix match (append * to tag). Filter by domain."
+        description = "Search notes by tag, or list all tags with counts when no tag is specified. Supports exact match and prefix match (append * to tag). Filter by domain. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn tag_search(&self, params: Parameters<TagSearchRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -708,7 +708,7 @@ impl OracleMcpServer {
 
     /// Find notes similar to given content or another note
     #[tool(
-        description = "Find notes similar to given text content or another note. Provide either content text or a note path. Uses FTS5 term extraction for similarity matching."
+        description = "Find notes similar to given text content or another note. Provide either content text or a note path. Uses FTS5 term extraction for similarity matching. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn find_similar(&self, params: Parameters<FindSimilarRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -775,7 +775,7 @@ impl OracleMcpServer {
 
     /// Get recent vault activity across domains
     #[tool(
-        description = "Cross-domain timeline of recent vault activity. Shows notes added or modified in the last N days. Filter by domain or note type."
+        description = "Cross-domain timeline of recent vault activity. Shows notes added or modified in the last N days. Filter by domain or note type. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn recent_activity(&self, params: Parameters<RecentActivityRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -803,7 +803,7 @@ impl OracleMcpServer {
 
     /// Wikilink graph traversal for a note
     #[tool(
-        description = "Traverse the wikilink graph for a note. Shows outbound links (what this note links to), inbound links (what links to this note), and whether the note is an orphan."
+        description = "Traverse the wikilink graph for a note. Shows outbound links (what this note links to), inbound links (what links to this note), and whether the note is an orphan. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn find_links(&self, params: Parameters<FindLinksRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -857,7 +857,7 @@ impl OracleMcpServer {
 
     /// Browse notes by creator/channel
     #[tool(
-        description = "Browse notes by creator or channel. When creator is provided, returns matching notes. When omitted, lists all creators with counts."
+        description = "Browse notes by creator or channel. When creator is provided, returns matching notes. When omitted, lists all creators with counts. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn creator_browse(&self, params: Parameters<CreatorBrowseRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -902,7 +902,7 @@ impl OracleMcpServer {
 
     /// Browse notes by source URL domain
     #[tool(
-        description = "Browse notes by source URL domain. When host is provided, returns matching notes. When omitted, lists all source domains with counts."
+        description = "Browse notes by source URL domain. When host is provided, returns matching notes. When omitted, lists all source domains with counts. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn source_browse(&self, params: Parameters<SourceBrowseRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -947,7 +947,7 @@ impl OracleMcpServer {
 
     /// View inbox contents and classification pipeline health
     #[tool(
-        description = "View inbox contents, notes needing review, and classification pipeline health. Shows inbox count, review candidates, and classified notes."
+        description = "View inbox contents, notes needing review, and classification pipeline health. Shows inbox count, review candidates, and classified notes. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn inbox_status(&self, params: Parameters<InboxStatusRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -974,7 +974,7 @@ impl OracleMcpServer {
 
     /// Notes by quality score and common issues
     #[tool(
-        description = "View note quality distribution and browse notes by quality level. Shows quality score distribution and notes filtered by quality."
+        description = "View note quality distribution and browse notes by quality level. Shows quality score distribution and notes filtered by quality. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn quality_report(&self, params: Parameters<QualityReportRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -1069,7 +1069,12 @@ impl ServerHandler for OracleMcpServer {
              Control content verbosity with the 'detail' parameter: \
              metadata (fields only), tldr (one-liner), summary (summary section), full (complete body). \
              Use vault_overview for the big picture, domain_brief for domain-specific intelligence, \
-             and knowledge_search for targeted queries."
+             and knowledge_search for targeted queries. \
+             Returned notes include a `trace` block: when `trace.available` is true, `trace.ref` is a \
+             borg staged-source handle for the verbatim captured source (e.g. a full transcript), and \
+             `trace.within-window` indicates the retention policy says it is still worth trying. Prefer \
+             that staged source over the lossy summary when exact wording matters. Oracle only advertises \
+             the handle; it does not return, search, fetch, or verify staged-source content."
                 .to_string(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();

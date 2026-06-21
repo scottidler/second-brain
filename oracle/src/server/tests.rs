@@ -608,6 +608,80 @@ async fn every_router_tool_has_a_dispatch_arm() {
     }
 }
 
+/// Trace-advertisement guard: every note-returning tool's description must
+/// advertise the staged-source `trace` block (so the consuming LLM learns the
+/// handle exists), and every non-note tool's description must NOT (the marker
+/// would be misleading on a tool that never returns a note). The marker is the
+/// literal substring "`trace` block". A coverage check forces every advertised
+/// tool into exactly one bucket, so a newly-added tool can't silently dodge it.
+#[test]
+fn note_returning_tools_advertise_trace_block() {
+    const MARKER: &str = "`trace` block";
+
+    // Tools whose results include NoteRow(s); format_note folds the trace block
+    // into every one, so each must advertise it.
+    const NOTE_TOOLS: &[&str] = &[
+        "knowledge_search",
+        "note_read",
+        "list_notes",
+        "domain_brief",
+        "tag_search",
+        "find_similar",
+        "recent_activity",
+        "find_links",
+        "creator_browse",
+        "source_browse",
+        "inbox_status",
+        "quality_report",
+    ];
+    // Tools that never return notes; the marker must be absent.
+    const NON_NOTE_TOOLS: &[&str] = &[
+        "vault_overview",
+        "ingest_history",
+        "failure_history",
+        "schema_info",
+        "reindex",
+        "duplicate_groups",
+        "classify_status",
+    ];
+
+    let tools = OracleMcpServer::list_tools();
+    let desc = |name: &str| -> String {
+        tools
+            .iter()
+            .find(|t| t.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("tool {name:?} not advertised by list_tools()"))
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .to_string()
+    };
+
+    // Coverage guard: the two buckets together must name every advertised tool.
+    let classified: std::collections::HashSet<&str> = NOTE_TOOLS.iter().chain(NON_NOTE_TOOLS).copied().collect();
+    for tool in &tools {
+        assert!(
+            classified.contains(tool.name.as_ref()),
+            "tool {:?} is unclassified - add it to NOTE_TOOLS or NON_NOTE_TOOLS \
+             in note_returning_tools_advertise_trace_block",
+            tool.name.as_ref()
+        );
+    }
+
+    for name in NOTE_TOOLS {
+        assert!(
+            desc(name).contains(MARKER),
+            "note-returning tool {name:?} must advertise the trace block in its description"
+        );
+    }
+    for name in NON_NOTE_TOOLS {
+        assert!(
+            !desc(name).contains(MARKER),
+            "non-note tool {name:?} unexpectedly advertises the trace block"
+        );
+    }
+}
+
 // --- Phase 2: trace block (staged-source availability) -----------------------
 
 /// Build a NoteRow carrying just the fields the trace block reads. Other
