@@ -134,6 +134,73 @@ pub fn apply_ingested_date(rendered: &str, ingested_date: &str) -> String {
     out
 }
 
+/// Insert-or-replace the `trace-expires:` frontmatter line. Positioned after
+/// the `ingested:` line (falling back to `date:`, then the opening `---`) so
+/// the staged-source trio (`trace`/`ingested`/`trace-expires`) sits together.
+/// Like `apply_ingested_date`, this INSERTS when missing, so legacy notes that
+/// predate the stamp gain one on backfill. Returns the input unchanged when no
+/// `---` frontmatter is present.
+pub fn apply_trace_expires(rendered: &str, trace_expires: &str) -> String {
+    insert_or_replace_field(rendered, "trace-expires", trace_expires, &["ingested:", "date:"])
+}
+
+/// Insert-or-replace a single `key: value` line in the frontmatter. If `key`
+/// is already present it is replaced in place; otherwise the line is inserted
+/// directly after the first matching `anchors` line (tried in order, matched by
+/// prefix), falling back to just after the opening `---`. Returns the input
+/// unchanged when there is no `---` frontmatter at all.
+fn insert_or_replace_field(rendered: &str, key: &str, value: &str, anchors: &[&str]) -> String {
+    let key_prefix = format!("{key}:");
+    let trailing_newline = rendered.ends_with('\n');
+    let lines: Vec<&str> = rendered.lines().collect();
+
+    // Replace in place if the key already exists.
+    let mut out = String::with_capacity(rendered.len() + 32);
+    let mut found = false;
+    for line in &lines {
+        if line.starts_with(&key_prefix) {
+            out.push_str(&format!("{key}: {value}"));
+            found = true;
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if found {
+        if !trailing_newline && out.ends_with('\n') {
+            out.pop();
+        }
+        return out;
+    }
+
+    // Not present: insert after the first matching anchor, else after `---`.
+    let mut new_lines: Vec<String> = lines.iter().map(|l| (*l).to_string()).collect();
+    let anchor_idx = anchors
+        .iter()
+        .find_map(|a| new_lines.iter().position(|l| l.starts_with(a)));
+    let insertion_idx = match anchor_idx {
+        Some(i) => i + 1,
+        None => match new_lines.iter().position(|l| l.trim() == "---") {
+            Some(i) => i + 1,
+            None => {
+                // No frontmatter at all - return input unchanged.
+                let mut result = rendered.to_string();
+                if !trailing_newline && result.ends_with('\n') {
+                    result.pop();
+                }
+                return result;
+            }
+        },
+    };
+    new_lines.insert(insertion_idx, format!("{key}: {value}"));
+    let joined = new_lines.join("\n");
+    let mut result = format!("{joined}\n");
+    if !trailing_newline {
+        result.pop();
+    }
+    result
+}
+
 /// Apply (insert or replace) the given cortex-managed frontmatter fields
 /// in `rendered`. Returns `rendered` unchanged when no `---` frontmatter
 /// is present. Pure-string form of the previous `patch_cortex_fields`

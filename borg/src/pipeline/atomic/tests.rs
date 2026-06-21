@@ -229,3 +229,48 @@ fn test_reingest_failure_before_publish_preserves_old_note() {
         "old note must survive a mid-pipeline failure unchanged"
     );
 }
+
+#[test]
+fn test_apply_trace_expires_inserts_after_ingested() {
+    let input = "---\ntitle: X\ndate: 2026-06-20\ningested: 2026-06-20T20:40:27-07:00\ntrace: ht-95aa4e\n---\nbody\n";
+    let out = apply_trace_expires(input, "2026-08-19");
+    assert!(out.contains("trace-expires: 2026-08-19"), "got: {out}");
+    // Positioned directly after `ingested:` (the trio sits together).
+    let ing_pos = out.find("ingested:").expect("ingested present");
+    let exp_pos = out.find("trace-expires:").expect("trace-expires present");
+    assert!(exp_pos > ing_pos, "trace-expires should follow ingested");
+    // Must not collide with the `trace:` line.
+    assert!(out.contains("trace: ht-95aa4e"), "trace handle preserved: {out}");
+}
+
+#[test]
+fn test_apply_trace_expires_replaces_existing() {
+    let input = "---\ntitle: X\ningested: 2026-06-20\ntrace-expires: 2026-01-01\n---\nbody\n";
+    let out = apply_trace_expires(input, "2026-08-19");
+    assert!(out.contains("trace-expires: 2026-08-19"));
+    assert!(
+        !out.contains("trace-expires: 2026-01-01"),
+        "stale value must be gone: {out}"
+    );
+}
+
+#[test]
+fn test_apply_trace_expires_falls_back_to_date_then_open() {
+    // No ingested line: insert after date.
+    let after_date = apply_trace_expires("---\ntitle: X\ndate: 2026-06-20\n---\nbody\n", "2026-08-19");
+    let date_pos = after_date.find("date:").expect("date present");
+    let exp_pos = after_date.find("trace-expires:").expect("expires present");
+    assert!(exp_pos > date_pos, "should follow date when no ingested: {after_date}");
+
+    // Neither ingested nor date: insert right after the opening ---.
+    let after_open = apply_trace_expires("---\ntitle: X\n---\nbody\n", "2026-08-19");
+    let title_pos = after_open.find("title: X").expect("title present");
+    let exp_pos = after_open.find("trace-expires:").expect("expires present");
+    assert!(exp_pos < title_pos, "should sit just after opening ---: {after_open}");
+}
+
+#[test]
+fn test_apply_trace_expires_noop_without_frontmatter() {
+    let input = "no frontmatter";
+    assert_eq!(apply_trace_expires(input, "2026-08-19"), input);
+}

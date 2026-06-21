@@ -88,7 +88,7 @@ fn backfill_on_counter_values_match_known_fixture() {
     let recent_path = root.join("e-recent.md");
     std::fs::write(&recent_path, "---\norigin: assisted\ndate: 2026-04-05\n---\nbody\n").expect("write recent");
 
-    let report = backfill_on(root, &[], &HashMap::new(), Los_Angeles, true).expect("backfill_on dry_run");
+    let report = backfill_on(root, &[], &HashMap::new(), Los_Angeles, 60, true).expect("backfill_on dry_run");
 
     assert_eq!(report.scanned, 5, "scanned should count every md file");
     assert_eq!(report.would_backfill, 1, "exactly one note is eligible to backfill");
@@ -109,7 +109,7 @@ fn backfill_on_counter_values_match_known_fixture() {
 #[test]
 fn backfill_ingested_dry_run_empty_vault_smoke() {
     let dir = tempdir().expect("tempdir");
-    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, true).expect("dry-run on empty vault");
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, 60, true).expect("dry-run on empty vault");
     assert_eq!(report.scanned, 0);
     assert_eq!(report.would_backfill, 0);
     assert_eq!(report.backfilled, 0);
@@ -164,7 +164,7 @@ fn backfill_upgrades_date_only_to_precise_from_receipts() {
     let mut receipts = HashMap::new();
     receipts.insert("ht-ea9e2a".to_string(), "2026-06-05T08:27:25-07:00".to_string());
 
-    let report = backfill_on(dir.path(), &[], &receipts, Los_Angeles, false).expect("backfill");
+    let report = backfill_on(dir.path(), &[], &receipts, Los_Angeles, 60, false).expect("backfill");
     assert_eq!(report.backfilled, 1, "the date-only note is upgraded");
     assert_eq!(report.precise, 1, "the upgrade is sourced from a receipt");
 
@@ -189,7 +189,7 @@ fn backfill_date_fallback_is_homogenized_midnight() {
         "---\norigin: assisted\ndate: 2026-04-01\ntrace: ht-orphan\n---\nbody\n",
     );
 
-    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, false).expect("backfill");
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, 60, false).expect("backfill");
     assert_eq!(report.backfilled, 1);
     assert_eq!(report.precise, 0, "no receipt -> not a precise backfill");
 
@@ -211,7 +211,7 @@ fn backfill_covers_source_bearing_note_with_mislabeled_origin() {
         "---\norigin: authored\ndate: 2026-04-01\nsource: \"https://youtu.be/x\"\n---\nbody\n",
     );
 
-    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, false).expect("backfill");
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, 60, false).expect("backfill");
     assert_eq!(
         report.backfilled, 1,
         "source-bearing note is backfilled despite origin: authored"
@@ -236,7 +236,7 @@ fn backfill_homogenizes_existing_date_only_ingested_without_receipt() {
         "---\norigin: assisted\ndate: 2026-04-10\ningested: 2026-04-03\ntrace: ht-orphan\n---\nbody\n",
     );
 
-    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, false).expect("backfill");
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, 60, false).expect("backfill");
     assert_eq!(report.backfilled, 1, "date-only ingested is homogenized");
     assert_eq!(report.precise, 0);
 
@@ -252,16 +252,132 @@ fn backfill_homogenizes_existing_date_only_ingested_without_receipt() {
 fn backfill_idempotent_when_value_already_matches() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("note.md");
-    // Already carries exactly the precise value the receipt would produce.
+    // Already carries exactly the precise value the receipt would produce AND
+    // the matching trace-expires (ingested 2026-06-05 + 60d = 2026-08-04), so
+    // the note is fully settled on BOTH fields.
     write_old(
         &path,
-        "---\norigin: assisted\ndate: 2026-06-04\ningested: 2026-06-05T08:27:25-07:00\ntrace: ht-ea9e2a\n---\nbody\n",
+        "---\norigin: assisted\ndate: 2026-06-04\ningested: 2026-06-05T08:27:25-07:00\ntrace-expires: 2026-08-04\ntrace: ht-ea9e2a\n---\nbody\n",
     );
 
     let mut receipts = HashMap::new();
     receipts.insert("ht-ea9e2a".to_string(), "2026-06-05T08:27:25-07:00".to_string());
 
-    let report = backfill_on(dir.path(), &[], &receipts, Los_Angeles, false).expect("backfill");
-    assert_eq!(report.backfilled, 0, "no rewrite when the value is unchanged");
+    let report = backfill_on(dir.path(), &[], &receipts, Los_Angeles, 60, false).expect("backfill");
+    assert_eq!(report.backfilled, 0, "no rewrite when both fields are unchanged");
     assert_eq!(report.skipped_already_had, 1);
+}
+
+// --- Phase 4: trace-expires backfill -----------------------------------------
+
+#[test]
+fn backfill_stamps_trace_expires_on_note_with_datetime_ingested() {
+    // The key skip-logic change: a note whose `ingested:` is already a
+    // homogeneous datetime (so ingested needs no rewrite) but is missing
+    // `trace-expires` must STILL be stamped. The naive "skip if ingested is a
+    // datetime" predicate would have wrongly skipped it.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("note.md");
+    write_old(
+        &path,
+        "---\norigin: assisted\ndate: 2026-06-20\ningested: 2026-06-20T20:40:27-07:00\ntrace: ht-95aa4e\n---\nbody\n",
+    );
+
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, 60, false).expect("backfill");
+    assert_eq!(report.backfilled, 1, "datetime-ingested note still gets trace-expires");
+
+    let updated = std::fs::read_to_string(&path).expect("read back");
+    // 2026-06-20 + 60d = 2026-08-19 (the design's worked example).
+    assert!(updated.contains("trace-expires: 2026-08-19"), "got: {updated}");
+    // ingested is left exactly as it was - it was already homogeneous.
+    assert!(
+        updated.contains("ingested: 2026-06-20T20:40:27-07:00"),
+        "got: {updated}"
+    );
+}
+
+#[test]
+fn backfill_leaves_traceless_note_without_trace_expires() {
+    // A note with no `trace:` carries no staged source, so it must never gain a
+    // `trace-expires:` (it surfaces `available: false` in oracle).
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("note.md");
+    write_old(
+        &path,
+        "---\norigin: assisted\ndate: 2026-06-20\ningested: 2026-06-20T00:00:00-07:00\n---\nbody\n",
+    );
+
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, 60, false).expect("backfill");
+    assert_eq!(
+        report.backfilled, 0,
+        "no trace -> nothing to stamp, ingested already settled"
+    );
+
+    let updated = std::fs::read_to_string(&path).expect("read back");
+    assert!(
+        !updated.contains("trace-expires"),
+        "traceless note must not get trace-expires: {updated}"
+    );
+}
+
+#[test]
+fn backfill_dry_run_does_not_write_trace_expires() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("note.md");
+    let original =
+        "---\norigin: assisted\ndate: 2026-06-20\ningested: 2026-06-20T20:40:27-07:00\ntrace: ht-95aa4e\n---\nbody\n";
+    write_old(&path, original);
+
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, 60, true).expect("dry run");
+    assert_eq!(report.would_backfill, 1, "dry-run reports the eligible note");
+    assert_eq!(report.backfilled, 0, "dry-run writes nothing");
+
+    let after = std::fs::read_to_string(&path).expect("read back");
+    assert_eq!(after, original, "dry-run must leave the file byte-identical");
+}
+
+#[test]
+fn backfill_receipts_unavailable_still_stamps_from_midnight_fallback() {
+    // No `ingested:` and no receipt: ingested is promoted to date-midnight and
+    // trace-expires is computed from that same date (best-effort, precise=false)
+    // rather than left absent - which the design reserves for "no trace data".
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("note.md");
+    write_old(
+        &path,
+        "---\norigin: assisted\ndate: 2026-06-20\ntrace: ht-95aa4e\n---\nbody\n",
+    );
+
+    let report = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, 60, false).expect("backfill");
+    assert_eq!(report.backfilled, 1);
+    assert_eq!(report.precise, 0, "midnight fallback is not a precise backfill");
+
+    let updated = std::fs::read_to_string(&path).expect("read back");
+    assert!(
+        updated.contains("ingested: 2026-06-20T00:00:00-07:00"),
+        "got: {updated}"
+    );
+    assert!(updated.contains("trace-expires: 2026-08-19"), "got: {updated}");
+}
+
+#[test]
+fn backfill_trace_expires_is_idempotent_across_runs() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("note.md");
+    write_old(
+        &path,
+        "---\norigin: assisted\ndate: 2026-06-20\ningested: 2026-06-20T20:40:27-07:00\ntrace: ht-95aa4e\n---\nbody\n",
+    );
+
+    let first = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, 60, false).expect("first run");
+    assert_eq!(first.backfilled, 1, "first run stamps trace-expires");
+
+    // write_atomic refreshed the mtime; re-backdate the now-stamped content so
+    // the second run isn't skipped as recently-modified.
+    let stamped = std::fs::read_to_string(&path).expect("read back");
+    write_old(&path, &stamped);
+
+    let second = backfill_on(dir.path(), &[], &HashMap::new(), Los_Angeles, 60, false).expect("second run");
+    assert_eq!(second.backfilled, 0, "second run is a no-op");
+    assert_eq!(second.skipped_already_had, 1);
 }

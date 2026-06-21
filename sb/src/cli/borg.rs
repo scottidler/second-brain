@@ -97,7 +97,9 @@ pub enum Command {
     },
     /// Manage the Gate-0 domain blocklist
     Blocklist(BlocklistCliArgs),
-    /// Backfill the `ingested:` frontmatter field on assisted notes
+    /// Backfill the `ingested:` and `trace-expires:` frontmatter fields on
+    /// assisted notes (homogenizes ingested; stamps the retention expiry on
+    /// every note that carries a `trace:`).
     BackfillIngested {
         #[arg(long)]
         dry_run: bool,

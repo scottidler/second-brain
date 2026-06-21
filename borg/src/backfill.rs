@@ -18,8 +18,9 @@
 //! relying on Bases' mixed date/datetime inference.
 
 use crate::config::Config;
-use crate::pipeline::atomic::{apply_ingested_date, write_atomic};
+use crate::pipeline::atomic::{apply_ingested_date, apply_trace_expires, write_atomic};
 use crate::receipts;
+use crate::retention;
 use chrono::{NaiveDate, TimeZone};
 use chrono_tz::Tz;
 use eyre::{Context, Result};
@@ -58,12 +59,16 @@ enum BackfillDecision {
     SkippedNoDate,
     ReadFailed,
     MtimeError,
-    /// Note is eligible for backfill. `value` is the timestamp to splice into the
-    /// `ingested:` field; `precise` is true when it came from a receipts match.
+    /// Note is eligible for backfill. `ingested` is `Some` when the `ingested:`
+    /// field needs to be written/homogenized; `trace_expires` is `Some` when the
+    /// note carries a `trace:` and its `trace-expires:` is missing or stale.
+    /// At least one is `Some`. `precise` is true when the ingested value came
+    /// from a receipts match.
     Apply {
         path: PathBuf,
         content: String,
-        value: String,
+        ingested: Option<String>,
+        trace_expires: Option<String>,
         precise: bool,
     },
 }
@@ -146,6 +151,7 @@ fn classify_for_backfill(
     min_age: Duration,
     receipts: &HashMap<String, String>,
     tz: Tz,
+    retention_days: u32,
 ) -> BackfillDecision {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -166,45 +172,60 @@ fn classify_for_backfill(
         return BackfillDecision::SkippedAuthored;
     }
 
-    let existing = extract_frontmatter_field(&content, "ingested");
-    let precise = extract_frontmatter_field(&content, "trace")
-        .as_deref()
-        .and_then(|t| receipts.get(t))
-        .cloned();
+    let existing_ingested = extract_frontmatter_field(&content, "ingested");
+    let trace = extract_frontmatter_field(&content, "trace").filter(|t| !t.is_empty());
+    let existing_expires = extract_frontmatter_field(&content, "trace-expires");
 
-    let (value, is_precise) = match precise {
-        Some(p) => (p, true),
+    // --- Target `ingested` (the existing homogenization, decoupled from any
+    // early skip so we can still stamp trace-expires on already-homogeneous
+    // notes). `None` means "no rewrite of ingested" - either it's already a
+    // datetime, or there is no date basis to promote.
+    let precise_ts = trace.as_deref().and_then(|t| receipts.get(t)).cloned();
+    let (target_ingested, is_precise): (Option<String>, bool) = match precise_ts {
+        Some(p) => (Some(p), true),
         None => {
-            // No receipt to source precision from. Pick the date basis to
-            // promote to local midnight so the column stays a single type:
-            //   - already a datetime (has 'T'): leave it, it's homogeneous;
-            //   - date-only `ingested:`: homogenize THAT value (preserves its
-            //     "when borg processed" meaning, just adds T00:00:00);
-            //   - no `ingested:` at all: promote the content `date:`.
-            let basis = match existing.as_deref() {
-                Some(v) if v.contains('T') => return BackfillDecision::SkippedAlreadyPresent,
-                Some(v) => v.to_string(),
-                None => match extract_frontmatter_field(&content, "date") {
-                    Some(d) => d,
-                    None => {
-                        log::debug!("backfill-ingested: skipping {} (no date: field)", path.display());
-                        return BackfillDecision::SkippedNoDate;
-                    }
-                },
+            let basis: Option<String> = match existing_ingested.as_deref() {
+                // Already a homogeneous datetime: leave ingested as-is.
+                Some(v) if v.contains('T') => None,
+                // Date-only ingested: homogenize that value in place.
+                Some(v) => Some(v.to_string()),
+                // No ingested: promote the content `date:`.
+                None => extract_frontmatter_field(&content, "date"),
             };
-            let Some(midnight) = local_date_midnight(&basis, tz) else {
-                log::debug!(
-                    "backfill-ingested: skipping {} (unparseable date: {basis})",
-                    path.display()
-                );
-                return BackfillDecision::SkippedNoDate;
-            };
-            (midnight, false)
+            (basis.and_then(|b| local_date_midnight(&b, tz)), false)
         }
     };
+    let write_ingested = match &target_ingested {
+        Some(v) => existing_ingested.as_deref() != Some(v.as_str()),
+        None => false,
+    };
 
-    // Idempotent: a re-run that would write the identical value is a no-op.
-    if existing.as_deref() == Some(value.as_str()) {
+    // --- Target `trace-expires` (only when the note has a `trace:`). Compute
+    // it from the EFFECTIVE ingested date - the value ingested will hold after
+    // this run - parsing whichever ingested form is present. Receipts being
+    // unavailable does NOT skip: the midnight fallback still yields an ingested
+    // date, so trace-expires is best-effort (precise=false) rather than absent
+    // (which the design reserves for "no trace data").
+    let effective_ingested = target_ingested.clone().or_else(|| existing_ingested.clone());
+    let target_expires: Option<String> = match (&trace, effective_ingested.as_deref()) {
+        (Some(_), Some(ing)) => {
+            retention::parse_ingested_date(ing).map(|d| retention::trace_expires_for(d, retention_days))
+        }
+        _ => None,
+    };
+    let write_expires = match &target_expires {
+        Some(v) => existing_expires.as_deref() != Some(v.as_str()),
+        None => false,
+    };
+
+    if !write_ingested && !write_expires {
+        // Nothing to do. Preserve the "no date basis" signal for notes that
+        // genuinely carry no ingestable date; everything else is "already
+        // settled" (idempotent re-run).
+        if existing_ingested.is_none() && target_ingested.is_none() && existing_expires.is_none() {
+            log::debug!("backfill-ingested: skipping {} (no date: field)", path.display());
+            return BackfillDecision::SkippedNoDate;
+        }
         return BackfillDecision::SkippedAlreadyPresent;
     }
 
@@ -220,8 +241,9 @@ fn classify_for_backfill(
         Ok(false) => BackfillDecision::Apply {
             path: path.to_path_buf(),
             content,
-            value,
-            precise: is_precise,
+            ingested: if write_ingested { target_ingested } else { None },
+            trace_expires: if write_expires { target_expires } else { None },
+            precise: is_precise && write_ingested,
         },
         Err(e) => {
             log::warn!("backfill-ingested: mtime check failed for {}: {e}", path.display());
@@ -239,10 +261,11 @@ pub(crate) fn backfill_on(
     skip_folders: &[String],
     receipts: &HashMap<String, String>,
     tz: Tz,
+    retention_days: u32,
     dry_run: bool,
 ) -> Result<BackfillReport> {
     log::debug!(
-        "backfill::backfill_on: vault={} receipts={} dry_run={dry_run}",
+        "backfill::backfill_on: vault={} receipts={} retention_days={retention_days} dry_run={dry_run}",
         vault_root.display(),
         receipts.len()
     );
@@ -260,7 +283,7 @@ pub(crate) fn backfill_on(
 
     let to_apply: Vec<BackfillDecision> = md_files
         .par_iter()
-        .map(|path| classify_for_backfill(path, min_age, receipts, tz))
+        .map(|path| classify_for_backfill(path, min_age, receipts, tz, retention_days))
         .filter_map(|decision| match decision {
             BackfillDecision::SkippedAuthored => {
                 skipped_origin.fetch_add(1, Ordering::Relaxed);
@@ -290,7 +313,8 @@ pub(crate) fn backfill_on(
         let BackfillDecision::Apply {
             path,
             content,
-            value,
+            ingested,
+            trace_expires,
             precise: is_precise,
         } = decision
         else {
@@ -302,21 +326,33 @@ pub(crate) fn backfill_on(
         }
 
         if dry_run {
-            log::info!("backfill-ingested: WOULD set ingested={value} on {}", path.display());
+            log::info!(
+                "backfill-ingested: WOULD set ingested={ingested:?} trace-expires={trace_expires:?} on {}",
+                path.display()
+            );
             would_backfill += 1;
             continue;
         }
 
-        let updated = apply_ingested_date(&content, &value);
+        let mut updated = content.clone();
+        if let Some(ref iv) = ingested {
+            updated = apply_ingested_date(&updated, iv);
+        }
+        if let Some(ref ev) = trace_expires {
+            updated = apply_trace_expires(&updated, ev);
+        }
         if updated == content {
             log::warn!(
-                "backfill-ingested: apply_ingested_date produced no change for {}",
+                "backfill-ingested: field application produced no change for {}",
                 path.display()
             );
             continue;
         }
         write_atomic(&path, updated.as_bytes()).with_context(|| format!("write {}", path.display()))?;
-        log::info!("backfill-ingested: set ingested={value} on {}", path.display());
+        log::info!(
+            "backfill-ingested: set ingested={ingested:?} trace-expires={trace_expires:?} on {}",
+            path.display()
+        );
         backfilled += 1;
     }
 
@@ -365,7 +401,14 @@ pub fn ingested(config: &Config, dry_run: bool) -> Result<BackfillReport> {
         "backfill-ingested: {} succeeded receipts available for precise timestamps",
         receipts.len()
     );
-    backfill_on(&vault_root, &config.migration.skip_folders, &receipts, tz, dry_run)
+    backfill_on(
+        &vault_root,
+        &config.migration.skip_folders,
+        &receipts,
+        tz,
+        config.staging.retention_days,
+        dry_run,
+    )
 }
 
 #[cfg(test)]
