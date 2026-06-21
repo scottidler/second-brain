@@ -3,12 +3,35 @@
 //! traces (those with a `rejection.yml` sidecar) keep a longer window so
 //! the operator has extra time to investigate.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::config::{Config, StagingLayout};
+
+/// Parse a frontmatter `ingested:` value to a calendar date, accepting BOTH
+/// shapes that exist in the vault today: the bare `%Y-%m-%d` written by the
+/// fresh-publish path, and the full offset datetime (RFC 3339, e.g.
+/// `2026-06-20T20:40:27-07:00`) written by the URL pipeline and
+/// `backfill-ingested`. Returns `None` for anything that parses as neither.
+pub fn parse_ingested_date(ingested: &str) -> Option<NaiveDate> {
+    let trimmed = ingested.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.date_naive());
+    }
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").ok()
+}
+
+/// Compute the absolute policy expiry date for a staged trace:
+/// `ingested_date + retention_days`, formatted back to `%Y-%m-%d`. This is the
+/// single source of the `trace-expires` value, stamped by borg at publish
+/// (Phase 3) and by `backfill-ingested` for legacy notes (Phase 4).
+pub fn trace_expires_for(ingested: NaiveDate, retention_days: u32) -> String {
+    (ingested + Duration::days(i64::from(retention_days)))
+        .format("%Y-%m-%d")
+        .to_string()
+}
 
 #[derive(Debug, Clone)]
 pub struct SweepResult {

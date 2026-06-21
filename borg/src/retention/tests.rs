@@ -123,3 +123,46 @@ fn status_reports_counts_and_bytes() {
     assert_eq!(report.rejected, 1);
     assert!(report.total_bytes > 0);
 }
+
+// --- Phase 3/4: ingested-date parsing + trace-expires math -------------------
+
+#[test]
+fn parse_ingested_date_accepts_bare_date() {
+    let d = parse_ingested_date("2026-06-20").expect("bare date parses");
+    assert_eq!(d, NaiveDate::from_ymd_opt(2026, 6, 20).unwrap());
+}
+
+#[test]
+fn parse_ingested_date_accepts_offset_datetime() {
+    // The URL pipeline / backfill form.
+    let d = parse_ingested_date("2026-06-20T20:40:27-07:00").expect("offset datetime parses");
+    assert_eq!(d, NaiveDate::from_ymd_opt(2026, 6, 20).unwrap());
+}
+
+#[test]
+fn parse_ingested_date_rejects_garbage() {
+    assert!(parse_ingested_date("not-a-date").is_none());
+    assert!(parse_ingested_date("").is_none());
+}
+
+#[test]
+fn trace_expires_for_matches_design_example() {
+    // The design's worked example: 2026-06-20 + 60 days = 2026-08-19.
+    let ingested = NaiveDate::from_ymd_opt(2026, 6, 20).unwrap();
+    assert_eq!(trace_expires_for(ingested, 60), "2026-08-19");
+}
+
+#[test]
+fn trace_expires_for_crosses_year_boundary() {
+    let ingested = NaiveDate::from_ymd_opt(2026, 12, 20).unwrap();
+    assert_eq!(trace_expires_for(ingested, 60), "2027-02-18");
+}
+
+#[test]
+fn trace_expires_from_either_ingested_format_is_identical() {
+    // Whether ingested arrives bare or as an offset datetime, the stamped
+    // expiry is the same calendar date.
+    let bare = parse_ingested_date("2026-06-20").unwrap();
+    let offset = parse_ingested_date("2026-06-20T20:40:27-07:00").unwrap();
+    assert_eq!(trace_expires_for(bare, 60), trace_expires_for(offset, 60));
+}

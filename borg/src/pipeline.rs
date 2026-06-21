@@ -9,6 +9,7 @@ use crate::ledger::{self, LedgerEntry};
 use crate::markdown::{self, ContentType, NoteContent};
 use crate::ocr;
 use crate::receipts;
+use crate::retention;
 use crate::router;
 use crate::trace;
 use crate::transcription::TranscriptionClient;
@@ -699,7 +700,19 @@ async fn process_url_inner(
         trace_id: Some(trace_id.to_string()),
         slides: slide_paths.clone(),
         distilled_body: Some(distilled_body),
-        frontmatter_additions: rendered_distilled.frontmatter_additions,
+        frontmatter_additions: {
+            // Stamp the absolute retention expiry alongside `trace`/`ingested`.
+            // borg owns `retention_days`, so the number is resolved once here at
+            // its single source of truth and frozen as a date. The note's
+            // `ingested` instant is `now` (written below at publish), so the
+            // expiry is `now`'s calendar date + retention_days. We inject via
+            // `frontmatter_additions` rather than passing StagingConfig into the
+            // renderer, keeping render_note's narrow FrontmatterConfig boundary.
+            let mut additions = rendered_distilled.frontmatter_additions;
+            let expires = retention::trace_expires_for(now.date_naive(), config.staging.retention_days);
+            additions.insert("trace-expires".to_string(), serde_yaml::Value::String(expires));
+            additions
+        },
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);

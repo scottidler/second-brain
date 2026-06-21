@@ -538,3 +538,37 @@ fn render_note_frontmatter_parses_with_nasty_title() {
         serde_yaml::from_str(fm).unwrap_or_else(|e| panic!("frontmatter did not parse: {e}\n{fm}"));
     assert_eq!(parsed.get("title").and_then(|v| v.as_str()), Some(note.title.as_str()));
 }
+
+#[test]
+fn render_note_emits_trace_expires_from_frontmatter_additions() {
+    // Phase 3: the pipeline injects `trace-expires` via frontmatter_additions;
+    // render_note must splice it into the YAML alongside `trace`/`ingested`.
+    let mut additions = BTreeMap::new();
+    additions.insert(
+        "trace-expires".to_string(),
+        serde_yaml::Value::String("2026-08-19".to_string()),
+    );
+    let note = NoteContent {
+        title: "T".to_string(),
+        source_url: Some("https://example.com/a".to_string()),
+        summary: "S.".to_string(),
+        content_type: ContentType::Article { author: None },
+        trace_id: Some("ht-95aa4e".to_string()),
+        frontmatter_additions: additions,
+        ..Default::default()
+    };
+    let rendered = render_note(&note, &test_config());
+    assert!(
+        rendered.contains("trace: ht-95aa4e"),
+        "missing trace handle:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("trace-expires: 2026-08-19"),
+        "missing trace-expires:\n{rendered}"
+    );
+    // And it round-trips back through the shared frontmatter parser as a named
+    // field (the Phase-1 promotion), proving the stamp is consumable.
+    let (fm, _) = vault::frontmatter::parse_frontmatter(&rendered).expect("parse");
+    assert_eq!(fm.trace_expires.as_deref(), Some("2026-08-19"));
+    assert_eq!(fm.trace.as_deref(), Some("ht-95aa4e"));
+}
