@@ -225,6 +225,52 @@ impl OracleMcpServer {
         Ok(())
     }
 
+    /// Build the `trace` block advertising staged-source availability.
+    ///
+    /// Pure echo + a calendar-date comparison; never reads borg config or the
+    /// filesystem. Shapes (per the design's API section):
+    /// - no trace handle: `{ "available": false }` (other keys omitted)
+    /// - trace, no expires: `available:true`, ref/ingested, expires omitted,
+    ///   `within-window: null`
+    /// - trace + parseable expires: full block, `within-window` = today <= expires
+    /// - trace + unparseable expires: expires omitted, `within-window: null`,
+    ///   and a single `warn!` (never fails the response)
+    fn trace_block(note: &NoteRow) -> serde_json::Value {
+        if note.trace.is_empty() {
+            return json!({ "available": false });
+        }
+
+        let mut block = serde_json::Map::new();
+        block.insert("available".to_string(), json!(true));
+        block.insert("ref".to_string(), json!(note.trace));
+        if !note.ingested.is_empty() {
+            block.insert("ingested".to_string(), json!(note.ingested));
+        }
+
+        // `within-window`: null when no/unparseable expiry, else today <= expires
+        // on UTC calendar dates (matches the ledger's UTC-date convention).
+        let within_window = if note.trace_expires.is_empty() {
+            None
+        } else {
+            match chrono::NaiveDate::parse_from_str(&note.trace_expires, "%Y-%m-%d") {
+                Ok(expires) => {
+                    block.insert("expires".to_string(), json!(note.trace_expires));
+                    Some(chrono::Utc::now().date_naive() <= expires)
+                }
+                Err(e) => {
+                    warn!(
+                        "trace-expires '{}' on {} is unparseable, reporting within-window=null: {e}",
+                        note.trace_expires, note.path
+                    );
+                    None
+                }
+            }
+        };
+        block.insert("within-window".to_string(), json!(within_window));
+
+        serde_json::Value::Object(block)
+    }
+
     /// Format a NoteRow according to the requested detail level
     fn format_note(note: &NoteRow, detail_level: &DetailLevel) -> serde_json::Value {
         let metadata = json!({
@@ -238,6 +284,7 @@ impl OracleMcpServer {
             "tags": serde_json::from_str::<Vec<String>>(&note.tags).unwrap_or_default(),
             "source": note.source,
             "creator": note.creator,
+            "trace": Self::trace_block(note),
         });
 
         match detail_level {

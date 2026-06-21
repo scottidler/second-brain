@@ -607,3 +607,103 @@ async fn every_router_tool_has_a_dispatch_arm() {
         }
     }
 }
+
+// --- Phase 2: trace block (staged-source availability) -----------------------
+
+/// Build a NoteRow carrying just the fields the trace block reads. Other
+/// columns get inert placeholders.
+fn trace_note_row(trace: &str, ingested: &str, trace_expires: &str) -> NoteRow {
+    NoteRow {
+        path: "notes/x.md".to_string(),
+        title: "X".to_string(),
+        domain: "ai".to_string(),
+        note_type: "article".to_string(),
+        origin: "assisted".to_string(),
+        status: String::new(),
+        date: "2026-01-01".to_string(),
+        tags: "[]".to_string(),
+        source: String::new(),
+        creator: String::new(),
+        body: "Body one. Body two.".to_string(),
+        summary: "A summary.".to_string(),
+        trace: trace.to_string(),
+        ingested: ingested.to_string(),
+        trace_expires: trace_expires.to_string(),
+    }
+}
+
+#[test]
+fn trace_block_absent_reports_unavailable_only() {
+    let row = trace_note_row("", "", "");
+    let block = OracleMcpServer::trace_block(&row);
+    assert_eq!(block, json!({ "available": false }));
+}
+
+#[test]
+fn trace_block_full_when_expiry_in_future() {
+    let row = trace_note_row("ht-95aa4e", "2026-06-20T20:40:27-07:00", "2999-12-31");
+    let block = OracleMcpServer::trace_block(&row);
+    assert_eq!(block["available"], json!(true));
+    assert_eq!(block["ref"], json!("ht-95aa4e"));
+    assert_eq!(block["ingested"], json!("2026-06-20T20:40:27-07:00"));
+    assert_eq!(block["expires"], json!("2999-12-31"));
+    assert_eq!(block["within-window"], json!(true));
+}
+
+#[test]
+fn trace_block_expired_is_outside_window() {
+    let row = trace_note_row("ht-old", "2000-01-01", "2000-03-01");
+    let block = OracleMcpServer::trace_block(&row);
+    assert_eq!(block["available"], json!(true));
+    assert_eq!(block["within-window"], json!(false));
+}
+
+#[test]
+fn trace_block_today_equals_expires_is_within_window() {
+    // today <= expires, so the boundary day is still in-window.
+    let today = chrono::Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    let row = trace_note_row("ht-today", "2026-01-01", &today);
+    let block = OracleMcpServer::trace_block(&row);
+    assert_eq!(block["within-window"], json!(true));
+}
+
+#[test]
+fn trace_block_missing_expires_is_null_window() {
+    let row = trace_note_row("ht-legacy", "2026-01-01", "");
+    let block = OracleMcpServer::trace_block(&row);
+    assert_eq!(block["available"], json!(true));
+    assert_eq!(block["ref"], json!("ht-legacy"));
+    assert_eq!(block["ingested"], json!("2026-01-01"));
+    assert!(block.get("expires").is_none(), "expires must be omitted when absent");
+    assert_eq!(block["within-window"], json!(null));
+}
+
+#[test]
+fn trace_block_unparseable_expires_is_null_window() {
+    let row = trace_note_row("ht-bad", "2026-01-01", "not-a-date");
+    let block = OracleMcpServer::trace_block(&row);
+    assert_eq!(block["available"], json!(true));
+    assert!(
+        block.get("expires").is_none(),
+        "expires must be omitted when unparseable"
+    );
+    assert_eq!(block["within-window"], json!(null));
+}
+
+#[test]
+fn format_note_carries_trace_block_at_every_level() {
+    let row = trace_note_row("ht-95aa4e", "2026-06-20", "2999-12-31");
+    for level in [
+        DetailLevel::Metadata,
+        DetailLevel::Tldr,
+        DetailLevel::Summary,
+        DetailLevel::Full,
+    ] {
+        let out = OracleMcpServer::format_note(&row, &level);
+        assert_eq!(
+            out["trace"]["ref"],
+            json!("ht-95aa4e"),
+            "trace block missing at {level:?}"
+        );
+    }
+}
