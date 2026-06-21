@@ -134,6 +134,65 @@ fn scalar_sequence_yields_none() {
 }
 
 #[test]
+fn trace_fields_parse_into_named_fields() {
+    let raw =
+        "---\ntitle: T\ntrace: ht-95aa4e\ningested: 2026-06-20T20:40:27-07:00\ntrace-expires: 2026-08-19\n---\nBody.";
+    let (fm, _) = parse_frontmatter(raw).expect("parse");
+    assert_eq!(fm.trace.as_deref(), Some("ht-95aa4e"));
+    assert_eq!(fm.ingested.as_deref(), Some("2026-06-20T20:40:27-07:00"));
+    assert_eq!(fm.trace_expires.as_deref(), Some("2026-08-19"));
+    // None of the three should leak into the extra catch-all.
+    assert!(!fm.extra.contains_key("trace"));
+    assert!(!fm.extra.contains_key("ingested"));
+    assert!(!fm.extra.contains_key("trace-expires"));
+}
+
+#[test]
+fn trace_only_note_leaves_other_fields_none() {
+    let raw = "---\ntitle: T\ntrace: ht-abc123\n---\nBody.";
+    let (fm, _) = parse_frontmatter(raw).expect("parse");
+    assert_eq!(fm.trace.as_deref(), Some("ht-abc123"));
+    assert!(fm.ingested.is_none());
+    assert!(fm.trace_expires.is_none());
+}
+
+#[test]
+fn note_without_trace_has_all_none() {
+    let raw = "---\ntitle: Manual note\n---\nBody.";
+    let (fm, _) = parse_frontmatter(raw).expect("parse");
+    assert!(fm.trace.is_none());
+    assert!(fm.ingested.is_none());
+    assert!(fm.trace_expires.is_none());
+}
+
+#[test]
+fn trace_fields_survive_rewrite_roundtrip() {
+    // The data-loss trap: once promoted out of `extra`, the three keys only
+    // survive a `to_yaml()` rewrite if they are emitted in the named block.
+    // This asserts a full parse -> to_yaml -> reparse cycle preserves them.
+    let raw =
+        "---\ntitle: T\ntrace: ht-95aa4e\ningested: 2026-06-20T20:40:27-07:00\ntrace-expires: 2026-08-19\n---\nBody.";
+    let (fm, _) = parse_frontmatter(raw).expect("parse");
+
+    let emitted = fm.to_yaml().expect("to_yaml");
+    assert!(emitted.contains("trace: ht-95aa4e"), "yaml dropped trace: {emitted}");
+    assert!(
+        emitted.contains("ingested: 2026-06-20T20:40:27-07:00"),
+        "yaml dropped ingested: {emitted}"
+    );
+    assert!(
+        emitted.contains("trace-expires: 2026-08-19"),
+        "yaml dropped trace-expires: {emitted}"
+    );
+
+    let raw2 = format!("---\n{emitted}---\n");
+    let (fm2, _) = parse_frontmatter(&raw2).expect("reparse");
+    assert_eq!(fm2.trace.as_deref(), Some("ht-95aa4e"));
+    assert_eq!(fm2.ingested.as_deref(), Some("2026-06-20T20:40:27-07:00"));
+    assert_eq!(fm2.trace_expires.as_deref(), Some("2026-08-19"));
+}
+
+#[test]
 fn scalar_string_passes_through() {
     let raw = "---\ndate: 2023-01-13\ntitle: Hello\n---\nBody.";
     let (fm, _) = parse_frontmatter(raw).expect("parse");

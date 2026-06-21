@@ -34,6 +34,16 @@ pub struct Frontmatter {
     /// as 0; a typo in the user's frontmatter is silently treated as
     /// "not pinned" rather than breaking reindex.
     pub pinned: Option<bool>,
+    /// borg staged-trace handle (e.g. `ht-95aa4e`). Promoted out of `extra`
+    /// so oracle can advertise that a verbatim staged source still exists
+    /// without re-fetching it. `None` for manual / pre-borg notes.
+    pub trace: Option<String>,
+    /// Retention-clock start (ISO-8601 instant or bare `%Y-%m-%d`). Distinct
+    /// from `date:`, which preserves the original content date across reingest.
+    pub ingested: Option<String>,
+    /// Absolute policy expiry (`YYYY-MM-DD`), stamped by borg at publish from
+    /// `ingested + retention-days`. Oracle echoes it; it never recomputes it.
+    pub trace_expires: Option<String>,
     pub extra: HashMap<String, serde_yaml::Value>,
 }
 
@@ -56,6 +66,9 @@ impl Frontmatter {
         let mut source = None;
         let mut creator = None;
         let mut pinned: Option<bool> = None;
+        let mut trace = None;
+        let mut ingested = None;
+        let mut trace_expires = None;
         let mut extra = HashMap::new();
 
         for (key, val) in mapping {
@@ -114,6 +127,15 @@ impl Frontmatter {
                 "creator" => {
                     creator = scalar_to_string(val);
                 }
+                "trace" => {
+                    trace = scalar_to_string(val);
+                }
+                "ingested" => {
+                    ingested = scalar_to_string(val);
+                }
+                "trace-expires" => {
+                    trace_expires = scalar_to_string(val);
+                }
                 "pinned" => {
                     // Strict bool-only: a typo (`pinned: "yes"`, `pinned: 1`)
                     // resolves to None / indexed as 0 rather than breaking
@@ -142,6 +164,9 @@ impl Frontmatter {
             source,
             creator,
             pinned,
+            trace,
+            ingested,
+            trace_expires,
             extra,
         })
     }
@@ -207,6 +232,28 @@ impl Frontmatter {
                 serde_yaml::Value::String(creator.clone()),
             );
         }
+        // Promoted borg join keys. These MUST be emitted explicitly: once
+        // promoted out of `extra` they no longer ride the `extra` loop below,
+        // so any rewrite path (e.g. `cortex summarize --backfill`) that
+        // round-trips a note through `to_yaml()` would silently strip them.
+        if let Some(ref trace) = self.trace {
+            mapping.insert(
+                serde_yaml::Value::String("trace".to_string()),
+                serde_yaml::Value::String(trace.clone()),
+            );
+        }
+        if let Some(ref ingested) = self.ingested {
+            mapping.insert(
+                serde_yaml::Value::String("ingested".to_string()),
+                serde_yaml::Value::String(ingested.clone()),
+            );
+        }
+        if let Some(ref trace_expires) = self.trace_expires {
+            mapping.insert(
+                serde_yaml::Value::String("trace-expires".to_string()),
+                serde_yaml::Value::String(trace_expires.clone()),
+            );
+        }
         if let Some(pinned) = self.pinned {
             mapping.insert(
                 serde_yaml::Value::String("pinned".to_string()),
@@ -240,6 +287,9 @@ impl Frontmatter {
             && self.source.is_none()
             && self.creator.is_none()
             && self.pinned.is_none()
+            && self.trace.is_none()
+            && self.ingested.is_none()
+            && self.trace_expires.is_none()
             && self.extra.is_empty()
     }
 }

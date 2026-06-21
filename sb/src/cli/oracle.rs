@@ -18,7 +18,13 @@ pub enum Commands {
     Serve,
 
     /// Index the vault into SQLite (or reindex changed files)
-    Index,
+    Index {
+        /// Reindex every note, ignoring the mtime gate. Use after a schema
+        /// change adds columns (e.g. the trace block) so existing rows are
+        /// repopulated instead of staying at the column default.
+        #[arg(long)]
+        force: bool,
+    },
 
     /// Show vault statistics
     Stats,
@@ -82,11 +88,11 @@ impl OracleCli {
         let config = oracle::Config::load(self.config.as_deref()).context("Failed to load configuration")?;
         match self.command {
             Commands::Serve => oracle::serve(config).await,
-            Commands::Index => {
+            Commands::Index { force } => {
                 let vault_root = config.vault_root()?;
                 println!("Indexing vault: {}", vault_root.display());
                 println!("Database: {}", config.db_path().display());
-                let stats = oracle::index(&config)?;
+                let stats = oracle::index(&config, force)?;
                 println!();
                 println!("Scanned:   {}", stats.total_scanned);
                 println!("Inserted:  {}", stats.inserted);

@@ -382,6 +382,12 @@ pub struct NoteRow {
     pub creator: String,
     pub body: String,
     pub summary: String,
+    /// borg staged-trace handle, or `""` when absent.
+    pub trace: String,
+    /// Retention-clock start (ISO-8601 or bare date), or `""` when absent.
+    pub ingested: String,
+    /// Absolute policy expiry (`YYYY-MM-DD`), or `""` when not yet stamped.
+    pub trace_expires: String,
 }
 
 impl NoteRow {
@@ -399,6 +405,9 @@ impl NoteRow {
             creator: row.get(9)?,
             body: row.get(10)?,
             summary: row.get(11)?,
+            trace: row.get(12)?,
+            ingested: row.get(13)?,
+            trace_expires: row.get(14)?,
         })
     }
 }

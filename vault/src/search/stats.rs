@@ -276,7 +276,7 @@ impl super::SearchIndex {
 
         // Tags are stored as JSON arrays, use Rust-side filtering
         let mut sql = String::from(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
              FROM notes WHERE tags != ''",
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
@@ -398,7 +398,7 @@ impl super::SearchIndex {
     pub fn notes_by_creator(&self, creator: &str, domain: Option<&str>, limit: Option<u32>) -> Result<Vec<NoteRow>> {
         let limit = limit.unwrap_or(20);
         let mut sql = String::from(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
              FROM notes WHERE LOWER(creator) LIKE ?1",
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
@@ -445,7 +445,7 @@ impl super::SearchIndex {
     pub fn notes_by_source_domain(&self, host: &str, domain: Option<&str>, limit: Option<u32>) -> Result<Vec<NoteRow>> {
         let limit = limit.unwrap_or(20);
         let mut sql = String::from(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
              FROM notes WHERE source LIKE ?1",
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
@@ -474,7 +474,7 @@ impl super::SearchIndex {
     pub fn inbox_notes(&self, limit: Option<u32>) -> Result<Vec<NoteRow>> {
         let limit = limit.unwrap_or(50);
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
                  FROM notes WHERE path LIKE 'inbox/%' ORDER BY date DESC LIMIT {limit}"
         ))?;
         let rows = stmt.query_map([], NoteRow::from_row)?.filter_map(warn_row).collect();
@@ -485,7 +485,7 @@ impl super::SearchIndex {
     pub fn notes_needing_review(&self, limit: Option<u32>) -> Result<Vec<NoteRow>> {
         let limit = limit.unwrap_or(50);
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
                  FROM notes WHERE needs_review = 1 ORDER BY date DESC LIMIT {limit}"
         ))?;
         let rows = stmt.query_map([], NoteRow::from_row)?.filter_map(warn_row).collect();
@@ -508,7 +508,7 @@ impl super::SearchIndex {
     pub fn notes_by_quality(&self, quality: &str, limit: Option<u32>) -> Result<Vec<NoteRow>> {
         let limit = limit.unwrap_or(20);
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
                  FROM notes WHERE LOWER(quality) = ?1 ORDER BY date DESC LIMIT {limit}"
         ))?;
         let rows = stmt

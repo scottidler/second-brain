@@ -4,7 +4,18 @@ impl super::SearchIndex {
     /// Index the vault, only updating notes whose mtime has changed.
     /// Parses frontmatter fields through vault enums for normalization.
     pub fn index_vault(&self, vault_root: &Path) -> Result<IndexStats> {
-        log::debug!("search::index_vault: vault_root={}", vault_root.display());
+        self.index_vault_force(vault_root, false)
+    }
+
+    /// Index the vault. When `force` is true the mtime gate is bypassed and
+    /// every note is re-`index_one`'d unconditionally. This is the deploy-time
+    /// repopulation path for additive columns (e.g. the `trace` block): adding
+    /// a column with a default does NOT backfill existing rows, and the normal
+    /// mtime gate would skip every unchanged note, leaving them at the column
+    /// default until each note's mtime happens to change. A forced pass fixes
+    /// the whole back-catalogue in one run.
+    pub fn index_vault_force(&self, vault_root: &Path, force: bool) -> Result<IndexStats> {
+        log::debug!("search::index_vault: vault_root={} force={force}", vault_root.display());
         let scan_config = ScanConfig::default();
         let notes = scan_vault(vault_root, &scan_config)?;
 
@@ -34,7 +45,7 @@ impl super::SearchIndex {
                     |row| row.get(0),
                 ))?;
 
-                if existing_mtime == Some(mtime) {
+                if !force && existing_mtime == Some(mtime) {
                     unchanged += 1;
                     continue;
                 }
@@ -135,6 +146,11 @@ impl super::SearchIndex {
         let date = normalize_date(fm.date.as_deref().unwrap_or(""));
         let source = fm.source.as_deref().unwrap_or("");
         let creator = fm.creator.as_deref().unwrap_or("");
+        // Promoted borg join keys. Vault-derived (the user/borg writes them in
+        // frontmatter), so they ride the same UPDATE/INSERT path as the rest.
+        let trace = fm.trace.as_deref().unwrap_or("");
+        let ingested = fm.ingested.as_deref().unwrap_or("");
+        let trace_expires = fm.trace_expires.as_deref().unwrap_or("");
 
         // `pinned` is vault-derived: the user edits `pinned: true` in their
         // note's frontmatter. None or false -> 0; true -> 1. The flip-test
@@ -160,7 +176,8 @@ impl super::SearchIndex {
                     cortex_video_published_at = ?26,
                     cortex_thread_platform = ?27, cortex_thread_post_count = ?28,
                     cortex_thread_author = ?29,
-                    pinned = ?30
+                    pinned = ?30,
+                    trace = ?31, ingested = ?32, trace_expires = ?33
                  WHERE path = ?1",
                 params![
                     path_str.as_ref(),
@@ -193,6 +210,9 @@ impl super::SearchIndex {
                     thread_post_count,
                     thread_author,
                     pinned_value,
+                    trace,
+                    ingested,
+                    trace_expires,
                 ],
             )?;
             Ok(IndexAction::Updated)
@@ -210,13 +230,15 @@ impl super::SearchIndex {
                     cortex_thread_platform, cortex_thread_post_count,
                     cortex_thread_author,
                     search_hit_count, last_accessed_at, inbound_link_count,
-                    pinned
+                    pinned,
+                    trace, ingested, trace_expires
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                     ?15, ?16, ?17, ?18, ?19, ?20,
                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29,
                     0, NULL, 0,
-                    ?30
+                    ?30,
+                    ?31, ?32, ?33
                 )",
                 params![
                     path_str.as_ref(),
@@ -249,6 +271,9 @@ impl super::SearchIndex {
                     thread_post_count,
                     thread_author,
                     pinned_value,
+                    trace,
+                    ingested,
+                    trace_expires,
                 ],
             )?;
             Ok(IndexAction::Inserted)

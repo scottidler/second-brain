@@ -16,7 +16,7 @@ impl super::SearchIndex {
         let limit = limit.unwrap_or(20);
 
         let mut sql = String::from(
-            "SELECT n.path, n.title, n.domain, n.note_type, n.origin, n.status, n.date, n.tags, n.source, n.creator, n.body, n.summary
+            "SELECT n.path, n.title, n.domain, n.note_type, n.origin, n.status, n.date, n.tags, n.source, n.creator, n.body, n.summary, n.trace, n.ingested, n.trace_expires
              FROM notes n
              JOIN notes_fts f ON n.rowid = f.rowid
              WHERE notes_fts MATCH ?1",
@@ -82,7 +82,7 @@ impl super::SearchIndex {
         );
         let limit = limit.unwrap_or(50);
         let mut sql = String::from(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
              FROM notes WHERE 1=1",
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
@@ -130,7 +130,7 @@ impl super::SearchIndex {
     /// Get a single note by path
     pub fn get_note(&self, path: &str) -> Result<Option<NoteRow>> {
         optional_row(self.conn.query_row(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
                  FROM notes WHERE path = ?1",
             params![path],
             NoteRow::from_row,
@@ -207,7 +207,7 @@ impl super::SearchIndex {
         let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or(path);
 
         let mut stmt = self.conn.prepare(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
              FROM notes WHERE body LIKE ?1",
         )?;
 
@@ -231,7 +231,7 @@ impl super::SearchIndex {
 
         // Get all notes
         let mut stmt = self.conn.prepare(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary
+            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
              FROM notes ORDER BY date DESC",
         )?;
         let all_notes: Vec<NoteRow> = stmt.query_map([], NoteRow::from_row)?.filter_map(warn_row).collect();

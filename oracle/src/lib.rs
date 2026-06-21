@@ -122,10 +122,13 @@ pub async fn serve(config: Config) -> Result<()> {
 }
 
 /// Reindex the vault and return the IndexStats. Caller formats the report.
-pub fn index(config: &Config) -> Result<vault::search::IndexStats> {
+/// When `force` is true the mtime gate is bypassed so every note is rewritten
+/// (needed to backfill additive columns across the whole back-catalogue).
+pub fn index(config: &Config, force: bool) -> Result<vault::search::IndexStats> {
     let db = SearchIndex::open(&config.db_path()).context("Failed to open database")?;
     let vault_root = config.vault_root().context("Failed to resolve vault root")?;
-    db.index_vault(&vault_root).context("Failed to index vault")
+    db.index_vault_force(&vault_root, force)
+        .context("Failed to index vault")
 }
 
 /// Dispatch a single MCP tool call (no transport). Caller formats `result.content`.

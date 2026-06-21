@@ -302,6 +302,12 @@ fn clone_frontmatter(fm: &Frontmatter) -> Frontmatter {
         source: fm.source.clone(),
         creator: fm.creator.clone(),
         pinned: fm.pinned,
+        // Promoted borg join keys MUST be carried through this rewrite path,
+        // or `summarize --backfill` would strip them from every note it
+        // touches (the to_yaml() data-loss trap, in clone form).
+        trace: fm.trace.clone(),
+        ingested: fm.ingested.clone(),
+        trace_expires: fm.trace_expires.clone(),
         extra: fm.extra.clone(),
     }
 }

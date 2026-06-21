@@ -2,6 +2,7 @@ use super::*;
 
 mod group_a;
 mod group_b;
+mod trace;
 
 /// Helper: insert a test note directly into the DB
 fn insert_test_note(index: &SearchIndex, path: &str, title: &str, domain: &str, tags: &[&str], body: &str) {

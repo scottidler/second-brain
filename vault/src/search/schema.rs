@@ -38,7 +38,10 @@ impl super::SearchIndex {
                 search_hit_count INTEGER DEFAULT 0,
                 last_accessed_at INTEGER,
                 inbound_link_count INTEGER DEFAULT 0,
-                pinned INTEGER DEFAULT 0
+                pinned INTEGER DEFAULT 0,
+                trace TEXT DEFAULT '',
+                ingested TEXT DEFAULT '',
+                trace_expires TEXT DEFAULT ''
             );
 
             CREATE INDEX IF NOT EXISTS idx_notes_domain ON notes(domain);
@@ -58,6 +61,7 @@ impl super::SearchIndex {
         // existing schemas may be missing.
         self.ensure_governance_columns()?;
         self.ensure_distilled_columns()?;
+        self.ensure_trace_columns()?;
 
         // FTS5 cannot ALTER, so we detect old (no-claims) schemas and rebuild.
         // Triggers attach to `notes`, not `notes_fts`, so they must be dropped
@@ -195,6 +199,39 @@ impl super::SearchIndex {
         // index addition.
         self.conn
             .execute_batch("CREATE INDEX IF NOT EXISTS idx_notes_modified_at ON notes(modified_at);")?;
+
+        Ok(())
+    }
+
+    /// Add the borg staged-source columns to existing DBs. These carry the
+    /// frontmatter join keys (`trace`, `ingested`, `trace-expires`) so oracle
+    /// can advertise that a verbatim staged source still exists.
+    ///
+    /// Matches the established `ensure_distilled_columns` pattern verbatim:
+    /// PRAGMA `table_info` probe then individual `ALTER TABLE ADD COLUMN`, with
+    /// NO wrapping transaction and NO `set_version`. A single idempotent
+    /// `ALTER ADD COLUMN` cannot half-apply, so the Rust DDL-transaction rule
+    /// does not bite, and there is no version infra in `vault/src/search/` to
+    /// hang a version on.
+    fn ensure_trace_columns(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(notes)")?;
+        let existing_columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(warn_row)
+            .collect();
+
+        let trace_columns = [
+            ("trace", "TEXT DEFAULT ''"),
+            ("ingested", "TEXT DEFAULT ''"),
+            ("trace_expires", "TEXT DEFAULT ''"),
+        ];
+
+        for (col, col_type) in trace_columns {
+            if !existing_columns.contains(&col.to_string()) {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE notes ADD COLUMN {col} {col_type};"))?;
+            }
+        }
 
         Ok(())
     }
