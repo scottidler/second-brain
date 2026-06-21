@@ -286,6 +286,33 @@ as "fall back to the summary or re-fetch."
 - Tests: backfill stamps notes that already have a datetime `ingested`; idempotency;
   notes missing `trace` skipped; dry-run writes nothing; receipts-unavailable path.
 
+#### Phase 5: advertise the trace block to the consuming LLM
+**Model:** opus
+- Phases 1-4 put a `trace` block in every note-returning response, but nothing told
+  the consuming LLM the capability exists or what the handle is for, so a model got
+  the data with no cue to use it. Add a concise capability sentence to (a) the server
+  instructions surfaced via `ServerHandler::get_info` and (b) the `description` of
+  every note-returning tool: `knowledge_search`, `note_read`, `list_notes`,
+  `domain_brief`, `tag_search`, `find_similar`, `recent_activity`, `find_links`,
+  `creator_browse`, `source_browse`, `inbox_status`, `quality_report`. The seven
+  non-note tools (`vault_overview`, `ingest_history`, `failure_history`,
+  `schema_info`, `reindex`, `duplicate_groups`, `classify_status`) are left unmarked,
+  since the marker would be misleading where no note is returned.
+- Handle-only, broad framing: advertise that the `trace` block carries a handle to
+  the verbatim staged source (transcripts called out as the richest case) and that
+  the caller should prefer that source over the lossy summary when exact wording
+  matters. No filesystem path in the text (keeps oracle decoupled from borg's storage
+  layout); state explicitly that oracle advertises the handle only and never returns,
+  searches, fetches, or verifies staged-source content.
+- No new `fetch_trace`/`read_transcript` tool and no `outputSchema` change — this is
+  description text only, riding the block Phase 2 already emits.
+- Tests: a `list_tools()` regression guard asserting the marker (`` `trace` block ``)
+  is present on every note-returning tool and absent on every non-note tool, plus a
+  coverage check forcing every advertised tool into exactly one bucket so a
+  newly-added tool cannot silently dodge the guard.
+- The MCP `reindex` tool stays mtime-gated (CLI `index --force` is the back-catalogue
+  populate path); documented here, not changed.
+
 ## Alternatives Considered
 
 ### Alternative 1: Oracle reads `borg.yml` retention-days and computes expiry at read time

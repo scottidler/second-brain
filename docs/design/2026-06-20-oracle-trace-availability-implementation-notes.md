@@ -135,3 +135,30 @@ from `2026-06-20-oracle-trace-availability.md`. One section per phase.
 
 ### Open questions
 - None.
+
+## Phase 5: advertise the trace block to the consuming LLM
+
+### Design decisions
+- The capability sentence was added to `get_info` server instructions and to the
+  12 note-returning `#[tool(description = ...)]` strings in
+  `oracle/src/server.rs`. The load-bearing marker substring is `` `trace` block ``.
+- Wording calls out transcripts explicitly ("e.g. a full transcript") per the
+  decided framing, while staying generic enough to cover any staged source
+  (matches the design's "transcripts being the richest case" goal).
+- The regression guard (`note_returning_tools_advertise_trace_block` in
+  `oracle/src/server/tests.rs`) lists the 12 note tools and 7 non-note tools
+  explicitly, then a coverage assertion fails if `list_tools()` advertises any
+  tool absent from both buckets, so a future tool must be classified.
+
+### Deviations
+- None from the decided approach (handle-only, broad, transcripts called out).
+
+### Tradeoffs
+- Inlined the same sentence in each of the 12 descriptions rather than factoring
+  a shared `const`: the rmcp `#[tool(description = ...)]` macro wants a string
+  literal, and a `concat!` would obscure the human-readable text the macro
+  emits. The regression test pins all 12 in sync, so duplication can't drift.
+
+### Open questions
+- None. The generic-vs-transcript framing question is resolved: transcripts are
+  called out as the motivating case.
