@@ -30,7 +30,11 @@ fn test_format_telegram_reply_with_obsidian_url() {
     };
     let reply = format_telegram_reply(&result, "https://example.com");
     assert!(reply.contains("Saved: Test Article"));
-    assert!(reply.contains("obsidian://search?vault=obsidian&amp;query=test-article"));
+    assert!(reply.contains("Open in Obsidian"), "should contain clickable link text");
+    assert!(
+        reply.contains("scottidler.github.io/ob/"),
+        "should route through HTTPS redirect"
+    );
 }
 
 #[test]
@@ -58,7 +62,11 @@ fn test_format_telegram_reply_escapes_html_in_title() {
     let reply = format_telegram_reply(&result, "https://example.com");
     assert!(reply.contains("&lt;html&gt;"));
     assert!(reply.contains("&amp;"));
-    assert!(reply.contains("obsidian://search?vault=obsidian&amp;query=test"));
+    assert!(reply.contains("Open in Obsidian"), "should contain clickable link text");
+    assert!(
+        reply.contains("scottidler.github.io/ob/"),
+        "should route through HTTPS redirect"
+    );
 }
 
 #[test]
