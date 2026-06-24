@@ -168,16 +168,33 @@ pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// GitHub Pages redirect base URL. The `ob` repo hosts a static page that
+/// reads a `?url=` query parameter and does `window.location.href = url`,
+/// bouncing the browser into the `obsidian://` URI scheme. This makes the
+/// link clickable in Telegram and Signal (which strip non-HTTPS schemes).
+const OB_REDIRECT_BASE: &str = "https://scottidler.github.io/ob/";
+
+/// Wrap an `obsidian://` deep link in the GitHub Pages HTTPS redirect so
+/// messaging apps (Telegram, Signal) render it as a tappable link.
+fn wrap_obsidian_redirect(obsidian_url: &str) -> String {
+    let encoded = urlencoding::encode(obsidian_url);
+    format!("{OB_REDIRECT_BASE}?url={encoded}")
+}
+
 /// Format an `IngestResult` as an HTML Telegram message.
 ///
-/// Appends the Obsidian deep link as plain text when available. Telegram
-/// strips custom URI schemes from both `<a>` tags and inline keyboard
-/// buttons, so we include it as a copyable URL.
+/// Appends the Obsidian deep link as a clickable HTTPS redirect. Telegram
+/// strips custom URI schemes from `<a>` tags, so we route through a GitHub
+/// Pages redirect (`scottidler.github.io/ob/`) that bounces to the
+/// `obsidian://` URI on the user's device.
 pub fn format_telegram_reply(result: &IngestResult, display_source: &str) -> String {
     let base = format_reply(result, display_source);
     let escaped = html_escape(&base);
     match &result.obsidian_url {
-        Some(url) => format!("{escaped}\n{}", html_escape(url)),
+        Some(url) => {
+            let redirect = wrap_obsidian_redirect(url);
+            format!("{escaped}\n<a href=\"{redirect}\">📓 Open in Obsidian</a>")
+        }
         None => escaped,
     }
 }
@@ -484,7 +501,10 @@ impl Signal {
 fn format_signal_body(result: &IngestResult, display_source: &str, dropped_count: Option<usize>) -> String {
     let base = format_reply(result, display_source);
     let with_link = match &result.obsidian_url {
-        Some(url) => format!("{base}\n{url}"),
+        Some(url) => {
+            let redirect = wrap_obsidian_redirect(url);
+            format!("{base}\n📓 {redirect}")
+        }
         None => base,
     };
     match dropped_count {
