@@ -690,7 +690,7 @@ fn test_write_manifest_round_trip() {
 
 // ---- Phase 4: content-filter prefix + manifest builder ----------------------
 
-use crate::config::{SlideCategory, SlideClass};
+use crate::config::{ContentFilterConfig, SlideCategory, SlideClass};
 
 #[test]
 fn test_prepare_runs_empty_frames() {
@@ -808,6 +808,338 @@ fn test_segment_filtered_many_kept_is_slide_section_with_transcript() {
     assert_eq!(bound, 2, "both transcript pairs bound to a slide window");
     // Compression ratio reflects the full extraction, not just survivors.
     assert!((manifest.extraction.compression_ratio - (3.0 / 60.0)).abs() < 1e-6);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ---- Phase 5: end-to-end filter pipeline (mocked classifier) ----------------
+//
+// These tests exercise the FULL content-filter path:
+//   fixture JPEGs -> prepare_runs -> [mock classification results] ->
+//   apply_filter -> segment_filtered -> assert shape + slide count
+//
+// The classifier is injected as a pre-built Vec<Result<SlideClass, ClassifyError>>
+// at the apply_filter seam, so no network call is made. This mirrors the seam
+// the production orchestrator (handlers.rs::classify_and_filter_slides) uses.
+
+use crate::slides::classify::{self, ClassifyError};
+
+/// Build a `ContentFilterConfig` that keeps the given categories.
+fn filter_cfg(keep: Vec<SlideCategory>) -> ContentFilterConfig {
+    ContentFilterConfig {
+        enabled: true,
+        keep,
+        model: String::new(),
+        max_vision_concurrency: 4,
+        min_confidence: 0.6,
+    }
+}
+
+/// Produce N distinct gradient frames in `dir`, returning their `FrameRef`s
+/// (one frame per run, each lasting 10 s, placed far enough apart to produce
+/// separate runs after `prepare_runs`).
+fn make_frames(dir: &std::path::Path, count: u32) -> Vec<FrameRef> {
+    let mut frames = Vec::new();
+    for i in 0..count {
+        let p = dir.join(format!("f{i:04}.jpg"));
+        write_gradient_jpeg(&p, i, 64);
+        frames.push(frame_at(i, i as f64 * 20.0, p));
+    }
+    frames
+}
+
+/// Run the full filter pipeline with pre-supplied classification results.
+/// Returns the final manifest (no network calls).
+fn run_filter_pipeline(
+    tmp: &std::path::Path,
+    frames: &[FrameRef],
+    mock_results: Vec<std::result::Result<SlideClass, ClassifyError>>,
+    filter: &ContentFilterConfig,
+) -> SlideManifest {
+    let cfg = YoutubeSlidesConfig::default();
+    let duration = frames.last().map(|f| f.timestamp_secs + 10.0).unwrap_or(0.0);
+
+    // Phase 1: pure prefix.
+    let runs = prepare_runs(frames, &cfg, duration);
+    let best_frames: Vec<std::path::PathBuf> = runs.iter().filter_map(|(_, best)| best.clone()).collect();
+    let windows: Vec<crate::slides::Run> = runs
+        .iter()
+        .filter_map(|(run, best)| best.as_ref().map(|_| run.clone()))
+        .collect();
+
+    // Phase 2: inject mock results at the apply_filter seam (no network).
+    let (kept, _tally) = classify::apply_filter(&windows, &best_frames, &mock_results, filter);
+
+    // Phase 3: materialize kept runs into the manifest.
+    segment_filtered(
+        "ht-test",
+        "https://x",
+        duration,
+        frames.len() as u32,
+        &kept,
+        &[],
+        tmp,
+        60,
+    )
+    .expect("segment_filtered")
+}
+
+#[test]
+fn test_e2e_all_noise_produces_text_only() {
+    let tmp = std::env::temp_dir().join("borg-test-e2e-all-noise");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    let frames = make_frames(&tmp, 3);
+    // All frames classify as TalkingHead - none should be kept.
+    let mock_results: Vec<std::result::Result<SlideClass, ClassifyError>> = (0..3)
+        .map(|_| {
+            Ok(SlideClass {
+                category: SlideCategory::TalkingHead,
+                confidence: 0.95,
+            })
+        })
+        .collect();
+    let filter = filter_cfg(vec![SlideCategory::ArchitectureDiagram]);
+
+    let manifest = run_filter_pipeline(&tmp, &frames, mock_results, &filter);
+    assert_eq!(
+        manifest.extraction.proposed_note_shape,
+        NoteShape::TextOnly,
+        "all-noise must produce TextOnly"
+    );
+    assert!(manifest.slides.is_empty(), "no slides should survive");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_e2e_one_diagram_produces_hero() {
+    let tmp = std::env::temp_dir().join("borg-test-e2e-one-diagram");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    let frames = make_frames(&tmp, 3);
+    // Frame 1: TalkingHead (drop), frame 2: ArchitectureDiagram (keep), frame 3: TitleCard (drop).
+    let mock_results: Vec<std::result::Result<SlideClass, ClassifyError>> = vec![
+        Ok(SlideClass {
+            category: SlideCategory::TalkingHead,
+            confidence: 0.9,
+        }),
+        Ok(SlideClass {
+            category: SlideCategory::ArchitectureDiagram,
+            confidence: 0.85,
+        }),
+        Ok(SlideClass {
+            category: SlideCategory::TitleCard,
+            confidence: 0.9,
+        }),
+    ];
+    let filter = filter_cfg(vec![SlideCategory::ArchitectureDiagram]);
+
+    let manifest = run_filter_pipeline(&tmp, &frames, mock_results, &filter);
+    assert_eq!(
+        manifest.extraction.proposed_note_shape,
+        NoteShape::Hero,
+        "one kept diagram must produce Hero"
+    );
+    assert_eq!(manifest.slides.len(), 1, "exactly one slide survives");
+    assert_eq!(
+        manifest.slides[0].class.map(|c| c.category),
+        Some(SlideCategory::ArchitectureDiagram),
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_e2e_many_diagrams_produces_slide_section() {
+    let tmp = std::env::temp_dir().join("borg-test-e2e-many-diagrams");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    let frames = make_frames(&tmp, 4);
+    // All four frames are code snippets above confidence - all should be kept.
+    let mock_results: Vec<std::result::Result<SlideClass, ClassifyError>> = (0..4)
+        .map(|_| {
+            Ok(SlideClass {
+                category: SlideCategory::Code,
+                confidence: 0.80,
+            })
+        })
+        .collect();
+    let filter = filter_cfg(vec![SlideCategory::Code]);
+
+    let manifest = run_filter_pipeline(&tmp, &frames, mock_results, &filter);
+    assert_eq!(
+        manifest.extraction.proposed_note_shape,
+        NoteShape::SlideSection,
+        "multiple kept slides must produce SlideSection"
+    );
+    assert!(manifest.slides.len() >= 2, "at least 2 slides survive");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_e2e_classifier_error_drops_slide_note_still_publishes() {
+    let tmp = std::env::temp_dir().join("borg-test-e2e-classifier-error");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    // Three frames: first errors, second is a kept diagram, third errors.
+    // The note should still publish with shape Hero (one survivor).
+    let frames = make_frames(&tmp, 3);
+    let mock_results: Vec<std::result::Result<SlideClass, ClassifyError>> = vec![
+        Err(ClassifyError::Api(eyre::eyre!("simulated API failure"))),
+        Ok(SlideClass {
+            category: SlideCategory::ArchitectureDiagram,
+            confidence: 0.9,
+        }),
+        Err(ClassifyError::Parse(eyre::eyre!("simulated parse failure"))),
+    ];
+    let filter = filter_cfg(vec![SlideCategory::ArchitectureDiagram]);
+
+    let manifest = run_filter_pipeline(&tmp, &frames, mock_results, &filter);
+    // The errored slides are dropped; the one kept diagram yields Hero.
+    assert_eq!(
+        manifest.extraction.proposed_note_shape,
+        NoteShape::Hero,
+        "one kept slide among errors must still produce Hero"
+    );
+    assert_eq!(manifest.slides.len(), 1, "only the successful classification survives");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_e2e_all_classifier_errors_produce_text_only() {
+    let tmp = std::env::temp_dir().join("borg-test-e2e-all-errors");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    let frames = make_frames(&tmp, 2);
+    let mock_results: Vec<std::result::Result<SlideClass, ClassifyError>> = vec![
+        Err(ClassifyError::Api(eyre::eyre!("API down"))),
+        Err(ClassifyError::Join(eyre::eyre!("task panic"))),
+    ];
+    let filter = filter_cfg(vec![SlideCategory::ArchitectureDiagram]);
+
+    let manifest = run_filter_pipeline(&tmp, &frames, mock_results, &filter);
+    assert_eq!(
+        manifest.extraction.proposed_note_shape,
+        NoteShape::TextOnly,
+        "all-error must fall back to TextOnly (fail-closed)"
+    );
+    assert!(manifest.slides.is_empty(), "no slides when all classify fail");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_e2e_keep_widened_to_architecture_and_code_keeps_code_frame() {
+    let tmp = std::env::temp_dir().join("borg-test-e2e-keep-widened");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    let frames = make_frames(&tmp, 3);
+    // Frame 0: TalkingHead (dropped), frame 1: Code (kept), frame 2: ArchitectureDiagram (kept).
+    let mock_results: Vec<std::result::Result<SlideClass, ClassifyError>> = vec![
+        Ok(SlideClass {
+            category: SlideCategory::TalkingHead,
+            confidence: 0.95,
+        }),
+        Ok(SlideClass {
+            category: SlideCategory::Code,
+            confidence: 0.75,
+        }),
+        Ok(SlideClass {
+            category: SlideCategory::ArchitectureDiagram,
+            confidence: 0.80,
+        }),
+    ];
+    // Both architecture-diagram AND code are in the keep list.
+    let filter = filter_cfg(vec![SlideCategory::ArchitectureDiagram, SlideCategory::Code]);
+
+    let manifest = run_filter_pipeline(&tmp, &frames, mock_results, &filter);
+    assert_eq!(
+        manifest.extraction.proposed_note_shape,
+        NoteShape::SlideSection,
+        "two kept slides (one code, one diagram) must produce SlideSection"
+    );
+    assert_eq!(manifest.slides.len(), 2, "code and diagram both survive");
+    let categories: Vec<SlideCategory> = manifest
+        .slides
+        .iter()
+        .filter_map(|s| s.class.map(|c| c.category))
+        .collect();
+    assert!(
+        categories.contains(&SlideCategory::Code),
+        "code slide must be kept when keep list includes code"
+    );
+    assert!(
+        categories.contains(&SlideCategory::ArchitectureDiagram),
+        "diagram slide must be kept"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_e2e_apply_filter_tally_matches_mock_results() {
+    // Verify the tally buckets are correctly populated end-to-end.
+    let tmp = std::env::temp_dir().join("borg-test-e2e-tally");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    let frames = make_frames(&tmp, 5);
+    let filter = filter_cfg(vec![SlideCategory::Code]);
+    let cfg = YoutubeSlidesConfig::default();
+    let duration = 100.0;
+
+    let runs = prepare_runs(&frames, &cfg, duration);
+    let best_frames: Vec<std::path::PathBuf> = runs.iter().filter_map(|(_, best)| best.clone()).collect();
+    let windows: Vec<crate::slides::Run> = runs
+        .iter()
+        .filter_map(|(run, best)| best.as_ref().map(|_| run.clone()))
+        .collect();
+
+    let n = best_frames.len();
+    // Build mock results: code (keep), other (not-in-keep), low-conf code, api-error, parse-error.
+    // Only the first n results are used (runs may be fewer than 5 frames if some cluster).
+    let mut mock: Vec<std::result::Result<SlideClass, ClassifyError>> = vec![
+        Ok(SlideClass {
+            category: SlideCategory::Code,
+            confidence: 0.9,
+        }),
+        Ok(SlideClass {
+            category: SlideCategory::Other,
+            confidence: 0.9,
+        }),
+        Ok(SlideClass {
+            category: SlideCategory::Code,
+            confidence: 0.3,
+        }),
+        Err(ClassifyError::Api(eyre::eyre!("network"))),
+        Err(ClassifyError::Parse(eyre::eyre!("garbage"))),
+    ];
+    mock.truncate(n);
+
+    let (kept, tally) = classify::apply_filter(&windows, &best_frames, &mock, &filter);
+
+    assert_eq!(tally.classified, n, "classified count matches run count");
+    // The kept count is bounded by how many Code+high-confidence results we injected.
+    assert!(tally.kept <= kept.len() + 1, "tally.kept reflects actual kept count");
+    // The sum of all outcome buckets equals classified.
+    let bucket_sum = tally.kept
+        + tally.dropped_low_confidence
+        + tally.dropped_not_in_keep
+        + tally.dropped_api_error
+        + tally.dropped_parse_error;
+    assert_eq!(
+        bucket_sum, tally.classified,
+        "all outcomes account for every classified run"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

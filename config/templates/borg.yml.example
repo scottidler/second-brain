@@ -107,15 +107,15 @@ desktop:
 #            infographic, chart, app-ui, webpage, talking-head, b-roll, title-card, other
 # Unknown category strings are a hard parse error at config load.
 #
-# youtube:
-#   slides:
-#     enabled: true
-#     content-filter:
-#       enabled: false          # flip to true in Phase 5 after validation
-#       keep: [architecture-diagram]
-#       model: ""               # empty = inherit llm.model
-#       max-vision-concurrency: 4
-#       min-confidence: 0.6
+youtube:
+  slides:
+    enabled: true
+    content-filter:
+      enabled: true
+      keep: [architecture-diagram]
+      model: ""               # empty = inherit llm.model
+      max-vision-concurrency: 4
+      min-confidence: 0.6
 
 # Log level: trace | debug | info | warn | error
 log-level: info

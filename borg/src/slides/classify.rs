@@ -19,6 +19,7 @@ use tokio::task::JoinSet;
 
 use crate::config::{ContentFilterConfig, LlmConfig, SlideCategory, SlideClass, VisionConfig};
 use crate::ocr;
+use crate::slides::{KeptRun, Run};
 
 /// Why a single classification did not yield a usable [`SlideClass`]. Carried as
 /// a typed value (never re-parsed from an error string, per the typed-seam rule)
@@ -282,6 +283,77 @@ impl ClassifyTally {
             KeepOutcome::DroppedParseError => self.dropped_parse_error += 1,
         }
     }
+}
+
+/// Apply the keep-filter to a batch of pre-supplied classification results,
+/// returning the kept runs and an observability tally. This is the pure
+/// orchestration step that sits between `classify_slides` (which calls the
+/// vision API) and `segment_filtered` (which materializes the survivors).
+///
+/// Accepting pre-supplied results makes this function directly testable without
+/// hitting the network: tests inject mock `Vec<Result<SlideClass, ClassifyError>>`
+/// in place of real vision API output. The handlers orchestrator calls this
+/// with the results from `classify_slides`, so there is exactly one
+/// implementation of the keep-filter logic and it is unit-tested.
+///
+/// `windows` and `best_frames` must be positionally aligned with `results`
+/// (same length, same index order) - they come from `prepare_runs`'s output
+/// after stripping runs whose `best_frame` is `None`.
+pub fn apply_filter(
+    windows: &[Run],
+    best_frames: &[PathBuf],
+    results: &[std::result::Result<SlideClass, ClassifyError>],
+    filter: &ContentFilterConfig,
+) -> (Vec<KeptRun>, ClassifyTally) {
+    debug_assert_eq!(
+        windows.len(),
+        best_frames.len(),
+        "apply_filter: windows and best_frames must be parallel slices"
+    );
+    debug_assert_eq!(
+        windows.len(),
+        results.len(),
+        "apply_filter: windows and results must be parallel slices"
+    );
+
+    log::debug!(
+        "apply_filter: runs={} keep={:?} min_confidence={}",
+        results.len(),
+        filter.keep,
+        filter.min_confidence,
+    );
+
+    let mut tally = ClassifyTally::default();
+    let mut kept: Vec<KeptRun> = Vec::new();
+
+    for (i, result) in results.iter().enumerate() {
+        let outcome = keep_outcome(result, filter);
+        tally.record(outcome);
+        log::trace!("apply_filter: run={i} outcome={outcome:?}");
+        if outcome == KeepOutcome::Keep
+            && let Ok(class) = result
+        {
+            kept.push(KeptRun {
+                best_frame: best_frames[i].clone(),
+                start: windows[i].start,
+                end: windows[i].end,
+                class: *class,
+            });
+        }
+    }
+
+    log::debug!(
+        "apply_filter: classified={} kept={} dropped-low-confidence={} \
+         dropped-not-in-keep={} dropped-api-error={} dropped-parse-error={}",
+        tally.classified,
+        tally.kept,
+        tally.dropped_low_confidence,
+        tally.dropped_not_in_keep,
+        tally.dropped_api_error,
+        tally.dropped_parse_error,
+    );
+
+    (kept, tally)
 }
 
 /// Parse the structured `CATEGORY:`/`CONFIDENCE:` reply, fail-closed.

@@ -383,8 +383,8 @@ async fn classify_and_filter_slides(
     work_dir: &Path,
     config: &Config,
 ) -> Result<crate::slides::SlideManifest> {
-    use crate::slides::classify::{self, ClassifyTally, KeepOutcome};
-    use crate::slides::{self, KeptRun};
+    use crate::slides;
+    use crate::slides::classify;
 
     let filter = &config.youtube.slides.content_filter;
     log::debug!(
@@ -411,25 +411,8 @@ async fn classify_and_filter_slides(
     // permit pool sized at startup from `content-filter.max-vision-concurrency`.
     let classes = classify::classify_slides(&best_frames, filter, &config.llm).await;
 
-    // Keep-filter + tally, in run order.
-    let mut tally = ClassifyTally::default();
-    let mut kept: Vec<KeptRun> = Vec::new();
-    for (i, result) in classes.iter().enumerate() {
-        let outcome = classify::keep_outcome(result, filter);
-        tally.record(outcome);
-        log::trace!("classify_and_filter_slides[{trace_id}]: run={i} outcome={outcome:?}",);
-        if outcome == KeepOutcome::Keep
-            && let Ok(class) = result
-        {
-            let window = &windows[i];
-            kept.push(KeptRun {
-                best_frame: best_frames[i].clone(),
-                start: window.start,
-                end: window.end,
-                class: *class,
-            });
-        }
-    }
+    // Keep-filter + tally via the pure `apply_filter` helper (also the test seam).
+    let (kept, tally) = classify::apply_filter(&windows, &best_frames, &classes, filter);
 
     // The observability tally - one structured line per ingest. `dropped-api-error`
     // is the degradation signal an operator watches.
