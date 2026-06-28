@@ -307,17 +307,38 @@ pub(crate) async fn try_extract_slides(
     };
     log::debug!("Parsed {} VTT cues for slide binding", transcript_pairs.len());
 
-    // 4. Segment + OCR + transcript bind.
-    let manifest = slides::segment_with_pairs(
-        &video_id,
-        url,
-        duration_secs,
-        &frames,
-        &transcript_pairs,
-        &work_dir,
-        &config.youtube.slides,
-        config.pipeline.ocr_timeout_secs,
-    )?;
+    // 4. Segment. Two paths:
+    //    - content-filter DISABLED: `segment_with_pairs` runs exactly as before
+    //      (cluster -> drop_transitions -> materialize -> OCR -> structural shape).
+    //    - content-filter ENABLED: pure prefix (cluster -> collapse_runs ->
+    //      per-run best_frame) -> classify the best frames -> keep-filter ->
+    //      materialize + OCR only the kept best frames -> shape_from_kept_count.
+    //      Transition-drop is skipped on this path: a true transition is a short
+    //      run that classifies title-card/other and is removed by the keep-filter.
+    let content_filter = &config.youtube.slides.content_filter;
+    let manifest = if content_filter.enabled {
+        classify_and_filter_slides(
+            &video_id,
+            url,
+            duration_secs,
+            &frames,
+            &transcript_pairs,
+            &work_dir,
+            config,
+        )
+        .await?
+    } else {
+        slides::segment_with_pairs(
+            &video_id,
+            url,
+            duration_secs,
+            &frames,
+            &transcript_pairs,
+            &work_dir,
+            &config.youtube.slides,
+            config.pipeline.ocr_timeout_secs,
+        )?
+    };
     let _ = slides::write_manifest(&manifest, &work_dir);
 
     if matches!(manifest.extraction.proposed_note_shape, NoteShape::TextOnly) {
@@ -328,11 +349,112 @@ pub(crate) async fn try_extract_slides(
         return Ok(None);
     }
 
-    // 5. Render pattern input + run new Fabric pattern.
+    // 5. Render pattern input + run new Fabric pattern. On the content-filter
+    //    path the manifest already holds only kept slides, so this is implicitly
+    //    "kept runs only" (the dead `![]()` links are irrelevant since no
+    //    dropped slide ever reaches the pattern).
     let pattern_input = slides::render_pattern_input(&manifest);
     let raw = fabric::run_pattern("obsidian-youtube-slides.md", &pattern_input, &config.fabric).await?;
     let summary = slides::parse_summary_output(&raw);
     Ok(Some((manifest, summary, work_dir)))
+}
+
+/// Content-filter Stage-1 path (vision-gated). Runs the pure prefix
+/// (`prepare_runs`: cluster -> collapse_runs -> per-run `best_frame`), classifies
+/// each run's best frame with one bounded vision call, applies the
+/// `keep` / `min-confidence` keep-filter, and materializes + OCRs only the kept
+/// best frames into the manifest via `segment_filtered`. The embedded image and
+/// its OCR text are therefore always the same frame.
+///
+/// Emits one structured tally per ingest: `{classified, kept-by-category,
+/// dropped-low-confidence, dropped-not-in-keep, dropped-api-error,
+/// dropped-parse-error}`. A nonzero `dropped-api-error` is the operator's
+/// "filtering degraded" signal (see borg/AGENTS.md `degraded_24h`), distinct
+/// from a legitimately image-free note (which classifies zero runs).
+///
+/// Fail-closed: any per-run classification failure drops that run; the note still
+/// publishes its surviving (or text-only) shape.
+async fn classify_and_filter_slides(
+    trace_id: &str,
+    url: &str,
+    duration_secs: f64,
+    frames: &[crate::youtube::FrameRef],
+    transcript_pairs: &[(f64, String)],
+    work_dir: &Path,
+    config: &Config,
+) -> Result<crate::slides::SlideManifest> {
+    use crate::slides::classify::{self, ClassifyTally, KeepOutcome};
+    use crate::slides::{self, KeptRun};
+
+    let filter = &config.youtube.slides.content_filter;
+    log::debug!(
+        "classify_and_filter_slides[{trace_id}]: frames={} keep={:?} min_confidence={} model={}",
+        frames.len(),
+        filter.keep,
+        filter.min_confidence,
+        if filter.model.is_empty() { "<inherit>" } else { filter.model.as_str() },
+    );
+
+    let frames_after_mpdecimate = frames.len() as u32;
+
+    // Pure prefix: frames -> runs + each run's best (most-complete) frame.
+    let runs = slides::prepare_runs(frames, &config.youtube.slides, duration_secs);
+    let best_frames: Vec<std::path::PathBuf> = runs.iter().filter_map(|(_, best)| best.clone()).collect();
+    // Keep the run windows aligned with the best frames we actually classify
+    // (a run with no resolvable best frame is skipped from classification).
+    let windows: Vec<slides::Run> = runs
+        .iter()
+        .filter_map(|(run, best)| best.as_ref().map(|_| run.clone()))
+        .collect();
+
+    // One bounded vision call per run; concurrency is gated by the process-wide
+    // permit pool sized at startup from `content-filter.max-vision-concurrency`.
+    let classes = classify::classify_slides(&best_frames, filter, &config.llm).await;
+
+    // Keep-filter + tally, in run order.
+    let mut tally = ClassifyTally::default();
+    let mut kept: Vec<KeptRun> = Vec::new();
+    for (i, result) in classes.iter().enumerate() {
+        let outcome = classify::keep_outcome(result, filter);
+        tally.record(outcome);
+        log::trace!("classify_and_filter_slides[{trace_id}]: run={i} outcome={outcome:?}",);
+        if outcome == KeepOutcome::Keep
+            && let Ok(class) = result
+        {
+            let window = &windows[i];
+            kept.push(KeptRun {
+                best_frame: best_frames[i].clone(),
+                start: window.start,
+                end: window.end,
+                class: *class,
+            });
+        }
+    }
+
+    // The observability tally - one structured line per ingest. `dropped-api-error`
+    // is the degradation signal an operator watches.
+    log::info!(
+        "slide-filter tally[{trace_id}]: classified={} kept={} \
+         dropped-low-confidence={} dropped-not-in-keep={} \
+         dropped-api-error={} dropped-parse-error={}",
+        tally.classified,
+        tally.kept,
+        tally.dropped_low_confidence,
+        tally.dropped_not_in_keep,
+        tally.dropped_api_error,
+        tally.dropped_parse_error,
+    );
+
+    slides::segment_filtered(
+        trace_id,
+        url,
+        duration_secs,
+        frames_after_mpdecimate,
+        &kept,
+        transcript_pairs,
+        work_dir,
+        config.pipeline.ocr_timeout_secs,
+    )
 }
 
 /// Returns `(title, article_md, byline)`. `fabric -u` exposes no HTML, so the

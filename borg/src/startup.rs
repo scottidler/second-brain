@@ -29,7 +29,19 @@ pub fn init_permits(cfg: &Config) -> Result<()> {
     permits::GENERAL_PERMITS.init(general);
     permits::HEAVY_PERMITS.init(heavy);
 
-    log::debug!("pipeline permits initialized: general={general} heavy={heavy}");
+    // Size the process-wide vision permit pool from the content-filter config.
+    // This is the single sanctioned init site (same place the pipeline permit
+    // pools are sized): it runs once per borg process - daemon and CLI alike,
+    // via `sb borg`'s `BorgCli::run` - before any path that can reach
+    // `pipeline::process_content`, and therefore before any vision call from
+    // `try_extract_slides` or the image-ingest `vision_extract` path. The pool's
+    // own `init_vision_permits` clamps `cap.max(1)`, so an over-eager `0` cannot
+    // wedge the gate; until this runs the pool is ungated by design.
+    let vision_cap = cfg.youtube.slides.content_filter.max_vision_concurrency;
+    log::debug!("init_permits: vision={vision_cap}");
+    crate::ocr::init_vision_permits(vision_cap);
+
+    log::debug!("pipeline permits initialized: general={general} heavy={heavy} vision={vision_cap}");
     Ok(())
 }
 

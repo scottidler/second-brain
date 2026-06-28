@@ -13,12 +13,46 @@
 //!
 //! See docs/design/2026-06-28-content-aware-slide-filtering.md.
 
-use eyre::{Context, Result, eyre};
+use eyre::{Result, eyre};
 use std::path::{Path, PathBuf};
 use tokio::task::JoinSet;
 
 use crate::config::{ContentFilterConfig, LlmConfig, SlideCategory, SlideClass, VisionConfig};
 use crate::ocr;
+
+/// Why a single classification did not yield a usable [`SlideClass`]. Carried as
+/// a typed value (never re-parsed from an error string, per the typed-seam rule)
+/// so the Phase 4 orchestrator can tally the *cause* of each drop. The two
+/// failure causes are kept distinct because they mean different operational
+/// things: an [`ClassifyError::Api`] (or [`ClassifyError::Read`]/[`ClassifyError::Join`])
+/// is a degradation signal an operator must investigate, while a
+/// [`ClassifyError::Parse`] is the model returning off-format text - a softer,
+/// expected-occasionally failure. All variants are fail-closed: the run is dropped.
+#[derive(Debug)]
+pub enum ClassifyError {
+    /// The frame file could not be read off disk.
+    Read(eyre::Report),
+    /// The vision API call itself failed (network, auth, 4xx/5xx, timeout).
+    /// A nonzero count here is the operator's "filtering degraded" signal.
+    Api(eyre::Report),
+    /// The API returned text but it did not parse into a `CATEGORY`/`CONFIDENCE`.
+    Parse(eyre::Report),
+    /// The classification task panicked or was cancelled before producing a result.
+    Join(eyre::Report),
+}
+
+impl std::fmt::Display for ClassifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClassifyError::Read(e) => write!(f, "read frame: {e:#}"),
+            ClassifyError::Api(e) => write!(f, "vision api: {e:#}"),
+            ClassifyError::Parse(e) => write!(f, "parse reply: {e:#}"),
+            ClassifyError::Join(e) => write!(f, "classification task: {e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for ClassifyError {}
 
 /// The closed-label taxonomy prompt sent with every classification call.
 ///
@@ -66,8 +100,12 @@ CONFIDENCE: <a number between 0.0 and 1.0>";
 ///
 /// **Fail-closed:** an unreadable file, an API error, or a malformed/ambiguous
 /// model reply all return `Err`; the caller drops the run.
-pub async fn classify_slide(frame: &Path, filter: &ContentFilterConfig, llm: &LlmConfig) -> Result<SlideClass> {
-    let bytes = std::fs::read(frame).with_context(|| format!("read frame {}", frame.display()))?;
+pub async fn classify_slide(
+    frame: &Path,
+    filter: &ContentFilterConfig,
+    llm: &LlmConfig,
+) -> std::result::Result<SlideClass, ClassifyError> {
+    let bytes = std::fs::read(frame).map_err(|e| ClassifyError::Read(eyre!("read frame {}: {e}", frame.display())))?;
     let mime = ocr::mime_from_extension(&frame.to_string_lossy());
 
     log::debug!(
@@ -87,14 +125,14 @@ pub async fn classify_slide(frame: &Path, filter: &ContentFilterConfig, llm: &Ll
 
     let raw = ocr::vision_classify(&bytes, &mime, &vision, llm, TAXONOMY_PROMPT)
         .await
-        .with_context(|| format!("vision_classify {}", frame.display()))?;
+        .map_err(|e| ClassifyError::Api(eyre!("vision_classify {}: {e:#}", frame.display())))?;
 
-    let class = parse_classification(&raw).with_context(|| {
-        format!(
-            "parse classification for {} (raw reply preview: {:?})",
+    let class = parse_classification(&raw).map_err(|e| {
+        ClassifyError::Parse(eyre!(
+            "parse classification for {} (raw reply preview: {:?}): {e}",
             frame.display(),
             preview(&raw)
-        )
+        ))
     })?;
 
     log::debug!(
@@ -120,10 +158,11 @@ pub async fn classify_slides(
     best_frames: &[PathBuf],
     filter: &ContentFilterConfig,
     llm: &LlmConfig,
-) -> Vec<Result<SlideClass>> {
+) -> Vec<std::result::Result<SlideClass, ClassifyError>> {
     log::debug!("classify_slides: runs={}", best_frames.len());
 
-    let mut set: JoinSet<(usize, Result<SlideClass>)> = JoinSet::new();
+    type ClassifyResult = std::result::Result<SlideClass, ClassifyError>;
+    let mut set: JoinSet<(usize, ClassifyResult)> = JoinSet::new();
     for (idx, frame) in best_frames.iter().enumerate() {
         let frame: PathBuf = frame.clone();
         let filter: ContentFilterConfig = filter.clone();
@@ -134,7 +173,7 @@ pub async fn classify_slides(
         });
     }
 
-    let mut results: Vec<Option<Result<SlideClass>>> = (0..best_frames.len()).map(|_| None).collect();
+    let mut results: Vec<Option<ClassifyResult>> = (0..best_frames.len()).map(|_| None).collect();
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((idx, res)) => results[idx] = Some(res),
@@ -143,15 +182,15 @@ pub async fn classify_slides(
                 // still-empty slot so the count stays consistent and the run drops.
                 log::warn!("classify_slides: classification task failed to join: {e}");
                 if let Some(slot) = results.iter_mut().find(|s| s.is_none()) {
-                    *slot = Some(Err(eyre!("classification task panicked: {e}")));
+                    *slot = Some(Err(ClassifyError::Join(eyre!("classification task panicked: {e}"))));
                 }
             }
         }
     }
 
-    let results: Vec<Result<SlideClass>> = results
+    let results: Vec<ClassifyResult> = results
         .into_iter()
-        .map(|slot| slot.unwrap_or_else(|| Err(eyre!("classification result missing"))))
+        .map(|slot| slot.unwrap_or_else(|| Err(ClassifyError::Join(eyre!("classification result missing")))))
         .collect();
 
     let ok = results.iter().filter(|r| r.is_ok()).count();
@@ -162,6 +201,87 @@ pub async fn classify_slides(
         results.len() - ok
     );
     results
+}
+
+/// The per-run keep/drop verdict, partitioning a classification result against
+/// the `content-filter` policy. Each variant maps one-to-one to a tally bucket
+/// in [`ClassifyTally`], so the orchestrator's observability line is derived
+/// directly from these and can never drift from the actual decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepOutcome {
+    /// Category is in `keep` and confidence is at/above `min-confidence` - embed.
+    Keep,
+    /// Confidence below `min-confidence` - dropped.
+    DroppedLowConfidence,
+    /// Category not listed in `keep` - dropped.
+    DroppedNotInKeep,
+    /// The vision API (or frame read / task join) failed - dropped, degradation signal.
+    DroppedApiError,
+    /// The API replied but the text was off-format - dropped.
+    DroppedParseError,
+}
+
+/// Decide whether one classified run is kept, and if not, why. Pure: no I/O, no
+/// network - the single source of truth for the keep-filter, unit-tested directly.
+///
+/// Order of checks matters for the tally: a failed classification is attributed
+/// to its failure *cause* (api vs parse) before any category/confidence test, so
+/// the degradation signal (`DroppedApiError`) is never masked as a policy drop.
+pub fn keep_outcome(
+    result: &std::result::Result<SlideClass, ClassifyError>,
+    filter: &ContentFilterConfig,
+) -> KeepOutcome {
+    match result {
+        Err(ClassifyError::Parse(_)) => KeepOutcome::DroppedParseError,
+        // Read / Api / Join all mean "the classifier could not speak" - they are
+        // the operator-facing degradation signal, distinct from the model
+        // legitimately returning off-format text.
+        Err(_) => KeepOutcome::DroppedApiError,
+        Ok(class) => {
+            if !filter.keep.contains(&class.category) {
+                KeepOutcome::DroppedNotInKeep
+            } else if class.confidence < filter.min_confidence {
+                KeepOutcome::DroppedLowConfidence
+            } else {
+                KeepOutcome::Keep
+            }
+        }
+    }
+}
+
+/// Per-ingest classification tally for the observability line. A nonzero
+/// `dropped_api_error` is the operator's "filtering degraded" signal - distinct
+/// from a legitimately image-free note (which classifies zero runs). Mirrors the
+/// `degraded_24h` philosophy in `borg/AGENTS.md`: a silent-quality drop must be
+/// counted, not hidden.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClassifyTally {
+    /// Total runs classified (the input count to the keep-filter).
+    pub classified: usize,
+    /// Runs kept (category in `keep`, confidence at/above `min-confidence`).
+    pub kept: usize,
+    /// Dropped: confidence below `min-confidence`.
+    pub dropped_low_confidence: usize,
+    /// Dropped: category not in `keep`.
+    pub dropped_not_in_keep: usize,
+    /// Dropped: vision API / frame-read / task-join failure (degradation signal).
+    pub dropped_api_error: usize,
+    /// Dropped: model reply did not parse.
+    pub dropped_parse_error: usize,
+}
+
+impl ClassifyTally {
+    /// Record one run's verdict.
+    pub fn record(&mut self, outcome: KeepOutcome) {
+        self.classified += 1;
+        match outcome {
+            KeepOutcome::Keep => self.kept += 1,
+            KeepOutcome::DroppedLowConfidence => self.dropped_low_confidence += 1,
+            KeepOutcome::DroppedNotInKeep => self.dropped_not_in_keep += 1,
+            KeepOutcome::DroppedApiError => self.dropped_api_error += 1,
+            KeepOutcome::DroppedParseError => self.dropped_parse_error += 1,
+        }
+    }
 }
 
 /// Parse the structured `CATEGORY:`/`CONFIDENCE:` reply, fail-closed.

@@ -687,3 +687,127 @@ fn test_write_manifest_round_trip() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ---- Phase 4: content-filter prefix + manifest builder ----------------------
+
+use crate::config::{SlideCategory, SlideClass};
+
+#[test]
+fn test_prepare_runs_empty_frames() {
+    let cfg = YoutubeSlidesConfig::default();
+    let runs = prepare_runs(&[], &cfg, 0.0);
+    assert!(runs.is_empty());
+}
+
+#[test]
+fn test_prepare_runs_yields_best_frame_per_run() {
+    let cfg = YoutubeSlidesConfig::default();
+    let tmp = std::env::temp_dir().join("borg-test-prepare-runs");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    // Two distinct content spans separated by a gap well above the run-merge
+    // threshold: 4 frames of gradient kind 0 (t=0..3), then a gap, then 4 frames
+    // of kind 1 (t=20..23). Each span should collapse to one run with a best frame.
+    let mut frames = Vec::new();
+    for i in 0..4u32 {
+        let p = tmp.join(format!("a_{i:04}.jpg"));
+        write_gradient_jpeg(&p, 0, 64);
+        frames.push(frame_at(i, i as f64, p));
+    }
+    for i in 0..4u32 {
+        let p = tmp.join(format!("b_{i:04}.jpg"));
+        write_gradient_jpeg(&p, 1, 64);
+        frames.push(frame_at(100 + i, 20.0 + i as f64, p));
+    }
+
+    let runs = prepare_runs(&frames, &cfg, 24.0);
+    assert_eq!(runs.len(), 2, "two distinct spans -> two runs");
+    for (run, best) in &runs {
+        assert!(best.is_some(), "each run resolves a best frame");
+        assert!(run.end >= run.start);
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+fn kept_run(best: PathBuf, start: f64, end: f64, category: SlideCategory) -> KeptRun {
+    KeptRun {
+        best_frame: best,
+        start,
+        end,
+        class: SlideClass {
+            category,
+            confidence: 0.9,
+        },
+    }
+}
+
+#[test]
+fn test_segment_filtered_zero_kept_is_text_only() {
+    let tmp = std::env::temp_dir().join("borg-test-segfilt-zero");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    let manifest = segment_filtered("ht-zero", "https://x", 60.0, 30, &[], &[], &tmp, 60).expect("segment_filtered");
+    assert_eq!(manifest.extraction.proposed_note_shape, NoteShape::TextOnly);
+    assert!(manifest.slides.is_empty());
+    assert_eq!(manifest.extraction.transitions_dropped, 0);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_segment_filtered_one_kept_is_hero() {
+    let tmp = std::env::temp_dir().join("borg-test-segfilt-one");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    let src = tmp.join("frame.jpg");
+    write_gradient_jpeg(&src, 0, 64);
+    let kept = vec![kept_run(src, 0.0, 12.0, SlideCategory::ArchitectureDiagram)];
+
+    let manifest = segment_filtered("ht-one", "https://x", 60.0, 30, &kept, &[], &tmp, 60).expect("segment_filtered");
+    assert_eq!(manifest.extraction.proposed_note_shape, NoteShape::Hero);
+    assert_eq!(manifest.slides.len(), 1);
+    assert_eq!(
+        manifest.slides[0].class.map(|c| c.category),
+        Some(SlideCategory::ArchitectureDiagram)
+    );
+    // The kept best frame is materialized into the slides dir.
+    assert!(tmp.join("slides").join("slide-001.jpg").exists());
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_segment_filtered_many_kept_is_slide_section_with_transcript() {
+    let tmp = std::env::temp_dir().join("borg-test-segfilt-many");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    let mut kept = Vec::new();
+    for i in 0..3u32 {
+        let src = tmp.join(format!("frame_{i}.jpg"));
+        write_gradient_jpeg(&src, i, 64);
+        kept.push(kept_run(
+            src,
+            i as f64 * 10.0,
+            i as f64 * 10.0 + 9.0,
+            SlideCategory::Code,
+        ));
+    }
+    let pairs = vec![(1.0, "first span".to_string()), (11.0, "second span".to_string())];
+
+    let manifest =
+        segment_filtered("ht-many", "https://x", 60.0, 60, &kept, &pairs, &tmp, 60).expect("segment_filtered");
+    assert_eq!(manifest.extraction.proposed_note_shape, NoteShape::SlideSection);
+    assert_eq!(manifest.slides.len(), 3);
+    // Transcript pairs bind into the slides whose window contains them.
+    let bound: usize = manifest.slides.iter().map(|s| s.transcript.len()).sum();
+    assert_eq!(bound, 2, "both transcript pairs bound to a slide window");
+    // Compression ratio reflects the full extraction, not just survivors.
+    assert!((manifest.extraction.compression_ratio - (3.0 / 60.0)).abs() < 1e-6);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

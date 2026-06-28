@@ -112,6 +112,110 @@ fn test_preview_truncates_and_flattens() {
     assert!(p.chars().count() <= 80, "preview is bounded");
 }
 
+// ---- Phase 4: keep-filter + tally -------------------------------------------
+
+use crate::config::{ContentFilterConfig, SlideClass};
+
+fn filter_keeping(keep: Vec<SlideCategory>, min_confidence: f32) -> ContentFilterConfig {
+    ContentFilterConfig {
+        enabled: true,
+        keep,
+        model: String::new(),
+        max_vision_concurrency: 4,
+        min_confidence,
+    }
+}
+
+fn ok(category: SlideCategory, confidence: f32) -> std::result::Result<SlideClass, ClassifyError> {
+    Ok(SlideClass { category, confidence })
+}
+
+#[test]
+fn test_keep_outcome_keep_in_category_above_confidence() {
+    let filter = filter_keeping(vec![SlideCategory::Code], 0.6);
+    let r = ok(SlideCategory::Code, 0.9);
+    assert_eq!(keep_outcome(&r, &filter), KeepOutcome::Keep);
+}
+
+#[test]
+fn test_keep_outcome_drops_below_confidence() {
+    let filter = filter_keeping(vec![SlideCategory::Code], 0.6);
+    let r = ok(SlideCategory::Code, 0.5);
+    assert_eq!(keep_outcome(&r, &filter), KeepOutcome::DroppedLowConfidence);
+}
+
+#[test]
+fn test_keep_outcome_drops_category_not_in_keep() {
+    let filter = filter_keeping(vec![SlideCategory::ArchitectureDiagram], 0.6);
+    let r = ok(SlideCategory::TalkingHead, 0.99);
+    assert_eq!(keep_outcome(&r, &filter), KeepOutcome::DroppedNotInKeep);
+}
+
+#[test]
+fn test_keep_outcome_confidence_at_threshold_is_kept() {
+    let filter = filter_keeping(vec![SlideCategory::Code], 0.6);
+    let r = ok(SlideCategory::Code, 0.6);
+    assert_eq!(keep_outcome(&r, &filter), KeepOutcome::Keep);
+}
+
+#[test]
+fn test_keep_outcome_api_error_is_degradation_signal() {
+    let filter = filter_keeping(vec![SlideCategory::Code], 0.6);
+    let r: std::result::Result<SlideClass, ClassifyError> = Err(ClassifyError::Api(eyre!("503")));
+    assert_eq!(keep_outcome(&r, &filter), KeepOutcome::DroppedApiError);
+    let r: std::result::Result<SlideClass, ClassifyError> = Err(ClassifyError::Read(eyre!("no file")));
+    assert_eq!(keep_outcome(&r, &filter), KeepOutcome::DroppedApiError);
+    let r: std::result::Result<SlideClass, ClassifyError> = Err(ClassifyError::Join(eyre!("panic")));
+    assert_eq!(keep_outcome(&r, &filter), KeepOutcome::DroppedApiError);
+}
+
+#[test]
+fn test_keep_outcome_parse_error_is_distinct() {
+    let filter = filter_keeping(vec![SlideCategory::Code], 0.6);
+    let r: std::result::Result<SlideClass, ClassifyError> = Err(ClassifyError::Parse(eyre!("off-format")));
+    assert_eq!(keep_outcome(&r, &filter), KeepOutcome::DroppedParseError);
+}
+
+#[test]
+fn test_tally_records_each_bucket() {
+    let filter = filter_keeping(vec![SlideCategory::Code, SlideCategory::ArchitectureDiagram], 0.6);
+    let results: Vec<std::result::Result<SlideClass, ClassifyError>> = vec![
+        ok(SlideCategory::Code, 0.9),                // keep
+        ok(SlideCategory::ArchitectureDiagram, 0.7), // keep
+        ok(SlideCategory::Code, 0.3),                // low confidence
+        ok(SlideCategory::TalkingHead, 0.99),        // not in keep
+        Err(ClassifyError::Api(eyre!("boom"))),      // api error
+        Err(ClassifyError::Parse(eyre!("garbage"))), // parse error
+    ];
+    let mut tally = ClassifyTally::default();
+    for r in &results {
+        tally.record(keep_outcome(r, &filter));
+    }
+    assert_eq!(tally.classified, 6);
+    assert_eq!(tally.kept, 2);
+    assert_eq!(tally.dropped_low_confidence, 1);
+    assert_eq!(tally.dropped_not_in_keep, 1);
+    assert_eq!(tally.dropped_api_error, 1);
+    assert_eq!(tally.dropped_parse_error, 1);
+}
+
+#[test]
+fn test_tally_all_other_keeps_nothing() {
+    let filter = filter_keeping(vec![SlideCategory::ArchitectureDiagram], 0.6);
+    let results: Vec<std::result::Result<SlideClass, ClassifyError>> = vec![
+        ok(SlideCategory::TalkingHead, 0.9),
+        ok(SlideCategory::TitleCard, 0.9),
+        ok(SlideCategory::Chart, 0.9),
+    ];
+    let mut tally = ClassifyTally::default();
+    for r in &results {
+        tally.record(keep_outcome(r, &filter));
+    }
+    assert_eq!(tally.classified, 3);
+    assert_eq!(tally.kept, 0);
+    assert_eq!(tally.dropped_not_in_keep, 3);
+}
+
 #[test]
 fn test_strip_key_matches_case_insensitively() {
     assert_eq!(strip_key("category: foo", "CATEGORY"), Some(" foo"));

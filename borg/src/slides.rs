@@ -334,6 +334,57 @@ pub fn best_frame(start: f64, end: f64, frames: &[FrameRef]) -> Option<PathBuf> 
     Some(chosen)
 }
 
+/// The pure prefix of the content-filter path: hash every frame, cluster by
+/// pHash, collapse adjacent clusters into runs, and pick each run's most-complete
+/// frame. Returns one `(Run, best_frame)` per content span, with the best frame
+/// absent only when a run's window somehow contained no frames (it never should,
+/// since runs are built from clusters built from frames). No network, no OCR,
+/// no transition-drop: a true transition is a short run that the downstream
+/// vision keep-filter removes, so it must reach classification, not be pruned
+/// structurally here.
+///
+/// This is the seam the async orchestrator calls before `classify_slides`: it
+/// turns raw frames into the bounded set of best-frame candidates that get one
+/// vision call each.
+pub fn prepare_runs(
+    frames: &[FrameRef],
+    config: &YoutubeSlidesConfig,
+    duration_secs: f64,
+) -> Vec<(Run, Option<PathBuf>)> {
+    log::debug!(
+        "slides::prepare_runs: frames={} duration={duration_secs} threshold={}",
+        frames.len(),
+        config.phash_hamming_threshold,
+    );
+    if frames.is_empty() {
+        return Vec::new();
+    }
+
+    let hashes: Vec<ImageHash> = frames
+        .par_iter()
+        .map(|f| {
+            hash_frame(&f.path).unwrap_or_else(|e| {
+                log::warn!("pHash failed for {}: {e:#}", f.path.display());
+                ImageHash::from_bytes(&[0u8; 8]).expect("zero hash bytes")
+            })
+        })
+        .collect();
+
+    let clusters = cluster_frames(frames, &hashes, config.phash_hamming_threshold, duration_secs);
+    let runs = collapse_runs(&clusters, frames);
+
+    let out: Vec<(Run, Option<PathBuf>)> = runs
+        .into_iter()
+        .map(|run| {
+            let best = best_frame(run.start, run.end, frames);
+            (run, best)
+        })
+        .collect();
+
+    log::debug!("slides::prepare_runs: produced runs={}", out.len());
+    out
+}
+
 /// Map the count of kept (classifier-approved) slides to the note shape. The
 /// content filter answers "is this worth embedding" directly, so shape follows
 /// kept count instead of the structural ratio in [`propose_note_shape`]:
@@ -598,6 +649,109 @@ pub fn segment(
             frames_after_mpdecimate,
             unique_slides,
             transitions_dropped,
+            compression_ratio,
+            proposed_note_shape,
+        },
+        slides,
+    })
+}
+
+/// One kept run on the content-filter path: the run's most-complete frame
+/// (chosen by [`best_frame`]), its `[start, end]` window, and the classification
+/// that earned it a keep. Built by the orchestrator after the keep-filter and
+/// fed to [`segment_filtered`] to materialize the surviving slides.
+#[derive(Debug, Clone)]
+pub struct KeptRun {
+    /// Absolute path to the run's best frame (in the frames dir).
+    pub best_frame: PathBuf,
+    pub start: f64,
+    pub end: f64,
+    /// The vision classification that kept this run.
+    pub class: SlideClass,
+}
+
+/// Build a `SlideManifest` from the classifier-approved kept runs (content-filter
+/// path). Mirrors [`segment`]'s tail - copy each kept best frame into
+/// `out_dir/slides/`, OCR the materialized copies, bind transcript - but bypasses
+/// `propose_note_shape`'s structural ratio: the shape follows the kept count via
+/// [`shape_from_kept_count`] (the vision filter has already answered "is this
+/// worth embedding"). The OCR runs on the SAME frame that is embedded, so a
+/// slide's image and its OCR text always agree.
+///
+/// `frames_after_mpdecimate` is threaded through for the manifest's stats so the
+/// recorded compression ratio still reflects the full extraction, not just the
+/// survivors.
+pub fn segment_filtered(
+    trace_id: &str,
+    video_url: &str,
+    duration_secs: f64,
+    frames_after_mpdecimate: u32,
+    kept: &[KeptRun],
+    transcript_pairs: &[(f64, String)],
+    out_dir: &Path,
+    ocr_timeout_secs: u64,
+) -> Result<SlideManifest> {
+    log::debug!(
+        "slides::segment_filtered: trace={trace_id} kept={} frames_after_mpdecimate={frames_after_mpdecimate}",
+        kept.len(),
+    );
+
+    let slide_dir = out_dir.join("slides");
+    std::fs::create_dir_all(&slide_dir).with_context(|| format!("create slide dir: {}", slide_dir.display()))?;
+
+    let mut slides: Vec<Slide> = Vec::with_capacity(kept.len());
+    for (i, run) in kept.iter().enumerate() {
+        let id = format!("s{:03}", i + 1);
+        let filename = format!("slide-{:03}.jpg", i + 1);
+        let dest = slide_dir.join(&filename);
+        std::fs::copy(&run.best_frame, &dest)
+            .with_context(|| format!("copy {} -> {}", run.best_frame.display(), dest.display()))?;
+        log::trace!(
+            "slides::segment_filtered: materialized {id} from {} (category={:?})",
+            run.best_frame.display(),
+            run.class.category,
+        );
+        slides.push(Slide {
+            id,
+            frame_path: PathBuf::from("slides").join(&filename),
+            start: run.start,
+            end: run.end,
+            duration: (run.end - run.start).max(0.0),
+            ocr: String::new(),
+            class: Some(run.class),
+            transcript: Vec::new(),
+        });
+    }
+
+    // OCR the materialized copies - the SAME frames that will be embedded.
+    ocr_slides(&mut slides, &slide_dir, ocr_timeout_secs);
+    bind_transcript_pairs(&mut slides, transcript_pairs);
+
+    let unique_slides = slides.len() as u32;
+    let proposed_note_shape = shape_from_kept_count(slides.len());
+    let compression_ratio = if frames_after_mpdecimate == 0 {
+        0.0
+    } else {
+        unique_slides as f32 / frames_after_mpdecimate as f32
+    };
+
+    log::debug!(
+        "slides::segment_filtered: trace={trace_id} unique_slides={unique_slides} shape={proposed_note_shape:?}",
+    );
+
+    Ok(SlideManifest {
+        trace_id: trace_id.to_string(),
+        video: VideoMetaSnippet {
+            url: video_url.to_string(),
+            duration_seconds: duration_secs,
+        },
+        extraction: ExtractionStats {
+            frames_after_mpdecimate,
+            unique_slides,
+            // No transition-drop pass on the filter path: a true transition is a
+            // short run that classifies title-card/other and is removed by the
+            // keep-filter, so nothing is "dropped as a transition" here.
+            transitions_dropped: 0,
             compression_ratio,
             proposed_note_shape,
         },
