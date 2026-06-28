@@ -62,6 +62,22 @@ pub struct Cluster {
     pub end: f64,
 }
 
+/// A *run* of one or more temporally adjacent clusters stitched back together
+/// by [`collapse_runs`]. A live-drawn diagram drifts past the pHash threshold as
+/// ink accumulates and fragments into several growth-stage clusters; a run
+/// re-unites those fragments into a single content span keyed on its
+/// most-complete (terminal) frame. Structural only - carries no category; the
+/// vision classifier (Phase 3) runs one call *per run*, bounding the call count
+/// to the number of distinct content spans rather than the number of growth
+/// fragments. See docs/design/2026-06-28-content-aware-slide-filtering.md.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Run {
+    /// Start time of the run (start of its first cluster).
+    pub start: f64,
+    /// End time of the run (end of its last cluster).
+    pub end: f64,
+}
+
 /// Frame counts + compression ratio derived during segmentation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -191,6 +207,141 @@ pub fn propose_note_shape(frames_after_mpdecimate: u32, unique_slides: u32, thre
         return NoteShape::SlideSection;
     }
     NoteShape::Hero
+}
+
+/// Max inter-cluster gap (seconds) under which two temporally adjacent clusters
+/// are stitched into the same run. A live-drawn diagram grows continuously, so
+/// its growth-stage clusters abut (gap ~= the frame sampling interval); two
+/// genuinely distinct decks shown back-to-back are separated by a presenter
+/// pause well above this. Seconds-scale per the design doc's open question;
+/// tune empirically against a labeled sample.
+const RUN_MERGE_MAX_GAP_SECS: f64 = 2.0;
+
+/// Collapse temporally adjacent clusters into runs (structural, no I/O, no
+/// network). Adjacent clusters are merged when the gap between the previous
+/// cluster's `end` and the next cluster's `start` is at or below
+/// [`RUN_MERGE_MAX_GAP_SECS`] - this stitches a progressively-drawn diagram
+/// (which fragments into several growth-stage clusters as ink crosses the pHash
+/// threshold) back into one content span *before* classification, so the vision
+/// step makes one call per run rather than one per fragment.
+///
+/// Distinct diagrams shown back-to-back stay separate: a presenter pause leaves
+/// a gap above the threshold, breaking the run. The most-complete frame within
+/// each merged window is re-selected later by [`best_frame`] over the caller's
+/// `frames` slice, so no per-cluster member-frame refs need threading through
+/// the `Cluster` type.
+pub fn collapse_runs(clusters: &[Cluster], frames: &[FrameRef]) -> Vec<Run> {
+    log::debug!(
+        "slides::collapse_runs: clusters={} frames={}",
+        clusters.len(),
+        frames.len(),
+    );
+    if clusters.is_empty() {
+        return Vec::new();
+    }
+
+    let mut runs: Vec<Run> = Vec::new();
+    let mut current = Run {
+        start: clusters[0].start,
+        end: clusters[0].end,
+    };
+
+    for cluster in &clusters[1..] {
+        let gap = cluster.start - current.end;
+        if gap <= RUN_MERGE_MAX_GAP_SECS {
+            // Adjacent (or overlapping): extend the current run's window.
+            log::trace!(
+                "slides::collapse_runs: merge gap={gap:.3} into run [{:.3},{:.3}]",
+                current.start,
+                current.end,
+            );
+            if cluster.end > current.end {
+                current.end = cluster.end;
+            }
+        } else {
+            log::trace!(
+                "slides::collapse_runs: break gap={gap:.3}; new run at {:.3}",
+                cluster.start
+            );
+            runs.push(current);
+            current = Run {
+                start: cluster.start,
+                end: cluster.end,
+            };
+        }
+    }
+    runs.push(current);
+
+    log::debug!("slides::collapse_runs: produced runs={}", runs.len());
+    runs
+}
+
+/// Select the most-complete frame within a run's `[start, end]` time window from
+/// the caller's full `frames` slice. Completeness is proxied by JPEG byte size:
+/// at fixed encode quality, a frame with more ink/detail (a fully-drawn diagram
+/// vs. a near-blank canvas) compresses to more bytes. Reads only local file
+/// sizes (an `fs::metadata` stat per in-window frame) - no decode, no network.
+///
+/// Falls back to the last frame in the window when no byte size can be read
+/// (e.g. every stat failed). Returns `None` only when the window contains no
+/// frames at all.
+pub fn best_frame(start: f64, end: f64, frames: &[FrameRef]) -> Option<PathBuf> {
+    log::debug!("slides::best_frame: start={start} end={end} frames={}", frames.len());
+
+    let in_window: Vec<&FrameRef> = frames
+        .iter()
+        .filter(|f| f.timestamp_secs >= start && f.timestamp_secs <= end)
+        .collect();
+    if in_window.is_empty() {
+        log::debug!("slides::best_frame: no frames in window [{start},{end}]");
+        return None;
+    }
+
+    let mut best: Option<(u64, &Path)> = None;
+    for f in &in_window {
+        match std::fs::metadata(&f.path) {
+            Ok(meta) => {
+                let size = meta.len();
+                log::trace!("slides::best_frame: {} size={size}", f.path.display());
+                if best.is_none_or(|(best_size, _)| size > best_size) {
+                    best = Some((size, &f.path));
+                }
+            }
+            Err(e) => {
+                log::trace!("slides::best_frame: stat failed for {}: {e}", f.path.display());
+            }
+        }
+    }
+
+    let chosen = match best {
+        Some((size, path)) => {
+            log::debug!("slides::best_frame: chose {} ({size} bytes)", path.display());
+            path.to_path_buf()
+        }
+        None => {
+            // Every stat failed; fall back to the last in-window frame.
+            let last = in_window.last().expect("in_window is non-empty (checked above)");
+            log::warn!(
+                "slides::best_frame: all stats failed; falling back to last-in-window {}",
+                last.path.display(),
+            );
+            last.path.clone()
+        }
+    };
+    Some(chosen)
+}
+
+/// Map the count of kept (classifier-approved) slides to the note shape. The
+/// content filter answers "is this worth embedding" directly, so shape follows
+/// kept count instead of the structural ratio in [`propose_note_shape`]:
+/// `0` -> [`NoteShape::TextOnly`], `1` -> [`NoteShape::Hero`],
+/// `>= 2` -> [`NoteShape::SlideSection`].
+pub fn shape_from_kept_count(kept: usize) -> NoteShape {
+    match kept {
+        0 => NoteShape::TextOnly,
+        1 => NoteShape::Hero,
+        _ => NoteShape::SlideSection,
+    }
 }
 
 /// Parse a cleaned VTT-derived transcript (or any "[HH:MM] text" / "HH:MM text"

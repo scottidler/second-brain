@@ -531,6 +531,124 @@ fn test_enforce_shape_drops_unknown_slide_ids() {
     assert_eq!(slides, vec!["s001"]);
 }
 
+// --- Phase 2: capture stage (collapse_runs / best_frame / shape_from_kept_count) ---
+
+fn cluster_at(start: f64, end: f64) -> Cluster {
+    Cluster {
+        canonical: FrameRef {
+            index: 0,
+            path: PathBuf::new(),
+            timestamp_secs: start,
+        },
+        start,
+        end,
+    }
+}
+
+#[test]
+fn test_collapse_runs_empty() {
+    let runs = collapse_runs(&[], &[]);
+    assert!(runs.is_empty());
+}
+
+#[test]
+fn test_collapse_runs_growing_diagram_stitches_one_run() {
+    // A live-drawn diagram fragments into three abutting growth-stage clusters
+    // (gap of 1s each, <= RUN_MERGE_MAX_GAP_SECS). They collapse to one run
+    // spanning the whole window.
+    let clusters = vec![cluster_at(0.0, 5.0), cluster_at(6.0, 11.0), cluster_at(12.0, 20.0)];
+    let runs = collapse_runs(&clusters, &[]);
+    assert_eq!(runs.len(), 1, "growing-diagram fragments should stitch into one run");
+    assert_eq!(runs[0].start, 0.0);
+    assert_eq!(runs[0].end, 20.0);
+}
+
+#[test]
+fn test_collapse_runs_large_gap_splits_into_two_runs() {
+    // A presenter pause leaves a 30s gap between two distinct decks; the run
+    // breaks, yielding two runs.
+    let clusters = vec![
+        cluster_at(0.0, 10.0),
+        cluster_at(11.0, 20.0), // gap 1s -> merges into run 1
+        cluster_at(50.0, 60.0), // gap 30s -> new run
+    ];
+    let runs = collapse_runs(&clusters, &[]);
+    assert_eq!(runs.len(), 2, "gap beyond threshold should split into two runs");
+    assert_eq!(runs[0].start, 0.0);
+    assert_eq!(runs[0].end, 20.0);
+    assert_eq!(runs[1].start, 50.0);
+    assert_eq!(runs[1].end, 60.0);
+}
+
+#[test]
+fn test_collapse_runs_single_cluster_is_one_run() {
+    let clusters = vec![cluster_at(3.0, 9.0)];
+    let runs = collapse_runs(&clusters, &[]);
+    assert_eq!(runs, vec![Run { start: 3.0, end: 9.0 }]);
+}
+
+#[test]
+fn test_best_frame_picks_largest_jpeg_in_window() {
+    let tmp = std::env::temp_dir().join("borg-test-slides-best-frame");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+
+    // Three frames in the run window: a near-blank canvas (tiny JPEG), a
+    // partial drawing, and the terminal most-complete frame (largest JPEG via a
+    // high-frequency gradient). Plus an out-of-window frame that must be ignored.
+    let blank = tmp.join("f0001.jpg");
+    let partial = tmp.join("f0002.jpg");
+    let complete = tmp.join("f0003.jpg");
+    let outside = tmp.join("f0099.jpg");
+    write_solid_jpeg(&blank, [255, 255, 255], 64); // flat -> tiny
+    write_gradient_jpeg(&partial, 0, 64); // some detail
+    write_gradient_jpeg(&complete, 2, 256); // much larger -> most bytes
+    write_solid_jpeg(&outside, [0, 0, 0], 256);
+
+    let frames = vec![
+        frame_at(1, 0.0, blank.clone()),
+        frame_at(2, 5.0, partial.clone()),
+        frame_at(3, 10.0, complete.clone()),
+        frame_at(99, 100.0, outside.clone()), // out of window
+    ];
+
+    let chosen = best_frame(0.0, 20.0, &frames).expect("a frame in window");
+    assert_eq!(chosen, complete, "best_frame must pick the largest in-window JPEG");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_best_frame_none_when_window_empty() {
+    let frames = vec![
+        frame_at(1, 0.0, PathBuf::from("/nonexistent/a.jpg")),
+        frame_at(2, 5.0, PathBuf::from("/nonexistent/b.jpg")),
+    ];
+    // No frame falls in [50, 60].
+    assert!(best_frame(50.0, 60.0, &frames).is_none());
+}
+
+#[test]
+fn test_best_frame_falls_back_to_last_when_all_stats_fail() {
+    // Paths do not exist on disk -> every metadata() stat fails -> fall back to
+    // the last in-window frame.
+    let frames = vec![
+        frame_at(1, 0.0, PathBuf::from("/nonexistent/a.jpg")),
+        frame_at(2, 5.0, PathBuf::from("/nonexistent/b.jpg")),
+        frame_at(3, 9.0, PathBuf::from("/nonexistent/c.jpg")),
+    ];
+    let chosen = best_frame(0.0, 20.0, &frames).expect("fallback to last-in-window");
+    assert_eq!(chosen, PathBuf::from("/nonexistent/c.jpg"));
+}
+
+#[test]
+fn test_shape_from_kept_count_boundaries() {
+    assert_eq!(shape_from_kept_count(0), NoteShape::TextOnly);
+    assert_eq!(shape_from_kept_count(1), NoteShape::Hero);
+    assert_eq!(shape_from_kept_count(2), NoteShape::SlideSection);
+    assert_eq!(shape_from_kept_count(7), NoteShape::SlideSection);
+}
+
 #[test]
 fn test_write_manifest_round_trip() {
     let tmp = std::env::temp_dir().join("borg-test-slides-write-manifest");
