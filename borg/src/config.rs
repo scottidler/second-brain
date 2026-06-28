@@ -490,6 +490,19 @@ impl SlideCategory {
     }
 }
 
+/// One slide's vision-classification result: a taxonomy category plus the
+/// model's confidence in `0.0..=1.0`. Config-owned (alongside [`SlideCategory`])
+/// because the taxonomy lives here; `slides::classify` produces it and `Slide`
+/// carries it. See docs/design/2026-06-28-content-aware-slide-filtering.md.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct SlideClass {
+    /// The taxonomy category the vision model assigned.
+    pub category: SlideCategory,
+    /// Model confidence, clamped to `0.0..=1.0`.
+    pub confidence: f32,
+}
+
 const DEFAULT_MAX_VISION_CONCURRENCY: usize = 4;
 const DEFAULT_MIN_CONFIDENCE: f32 = 0.6;
 
@@ -932,7 +945,7 @@ pub struct GroqConfig {
     pub model: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct LlmConfig {
     pub provider: String,

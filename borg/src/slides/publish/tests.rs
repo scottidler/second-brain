@@ -26,7 +26,7 @@ fn fixture_manifest(staging_dir: &Path, slide_ids: &[&str]) -> SlideManifest {
             end: (i + 1) as f64 * 30.0,
             duration: 30.0,
             ocr: String::new(),
-            caption: None,
+            class: None,
             transcript: vec![],
         });
     }

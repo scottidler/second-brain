@@ -2,7 +2,9 @@ use base64::Engine;
 use eyre::{Context, Result};
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 use crate::config::{self, LlmConfig, VisionConfig};
 
@@ -12,6 +14,60 @@ use crate::config::{self, LlmConfig, VisionConfig};
 /// tighter bound. This is the per-call backstop, matching the rest of borg's
 /// external-call timeout discipline.
 const VISION_HTTP_TIMEOUT_SECS: u64 = 120;
+
+/// Max tokens requested for a vision *description* call (`vision_extract`).
+const VISION_EXTRACT_MAX_TOKENS: u32 = 1024;
+
+/// Max tokens requested for a vision *classification* call (`vision_classify`).
+/// The structured `CATEGORY`/`CONFIDENCE` reply is tiny; a small cap keeps the
+/// model terse and the call cheap.
+const VISION_CLASSIFY_MAX_TOKENS: u32 = 64;
+
+/// PROCESS-WIDE permit pool gating *every* Anthropic vision call - both the
+/// slide classifier (`vision_classify`) and the existing image-ingest
+/// description path (`vision_extract`). Sized once at startup from
+/// `content-filter.max-vision-concurrency` so N concurrent videos cannot
+/// multiply into N * concurrency simultaneous Anthropic calls. Modeled on
+/// `pipeline::permits::PermitPool` but local to the vision seam.
+///
+/// Uninitialized = unbounded: if `init_vision_permits` was never called (e.g.
+/// a code path that issues a vision call before startup wiring, or a unit test
+/// exercising only the parser) the pool is a no-op and calls proceed without a
+/// gate, preserving the pre-pool behaviour of `vision_extract`.
+static VISION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+/// Initialize the process-wide vision permit pool with `cap` permits. Idempotent:
+/// a second call after the first wins is logged and ignored (the first cap stands,
+/// mirroring `PermitPool::init`). Call once at startup from the content-filter
+/// config's `max-vision-concurrency`.
+pub fn init_vision_permits(cap: usize) {
+    log::debug!("init_vision_permits: cap={cap}");
+    if VISION_PERMITS.set(Arc::new(Semaphore::new(cap.max(1)))).is_err() {
+        log::warn!("init_vision_permits called twice; second call ignored");
+    }
+}
+
+/// Acquire one vision permit if the pool is initialized; awaits if saturated.
+/// Returns `None` when the pool was never initialized (treated as unbounded -
+/// the permit is simply absent and the call proceeds ungated). The returned
+/// guard must be held for the duration of the HTTP call.
+async fn acquire_vision_permit() -> Option<tokio::sync::OwnedSemaphorePermit> {
+    match VISION_PERMITS.get() {
+        Some(sem) => {
+            log::trace!("acquire_vision_permit: available={}", sem.available_permits());
+            Some(
+                sem.clone()
+                    .acquire_owned()
+                    .await
+                    .expect("vision semaphore never closed"),
+            )
+        }
+        None => {
+            log::trace!("acquire_vision_permit: pool uninitialized; proceeding ungated");
+            None
+        }
+    }
+}
 
 /// Result of vision-based image description.
 pub struct VisionResult {
@@ -68,16 +124,22 @@ pub fn ocr_extract(image_path: &Path, timeout_secs: u64) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Extract text and describe an image using the Claude Vision API directly.
+/// Shared HTTP/auth/base64 core for every Anthropic vision call. Resolves the
+/// API key, base64-encodes the image, builds the Messages-API body with the
+/// caller's `prompt` and `max_tokens`, acquires a process-wide vision permit,
+/// issues the POST (explicit per-call timeout), and returns the raw model text.
 ///
-/// Sends image bytes as base64 to the Anthropic Messages API.
-/// Returns structured results or error if API key unavailable or call fails.
-pub async fn vision_extract(
+/// Both `vision_extract` (image-ingest description) and `vision_classify`
+/// (slide classification) funnel through here so auth, base64, the permit pool,
+/// and the timeout discipline live in exactly one place.
+async fn vision_call(
     image_data: &[u8],
     mime_type: &str,
     vision_config: &VisionConfig,
     llm_config: &LlmConfig,
-) -> Result<VisionResult> {
+    prompt: &str,
+    max_tokens: u32,
+) -> Result<String> {
     let api_key = config::resolve_secret(&llm_config.api_key)?;
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(image_data);
@@ -90,7 +152,7 @@ pub async fn vision_extract(
 
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 1024,
+        "max_tokens": max_tokens,
         "messages": [{
             "role": "user",
             "content": [
@@ -104,7 +166,7 @@ pub async fn vision_extract(
                 },
                 {
                     "type": "text",
-                    "text": "Extract ALL text visible in this image and describe what you see.\n\nRespond in this exact format:\nTEXT: <all visible text, preserving layout>\nDESCRIPTION: <2-3 sentence description>\nTITLE: <3-8 word title>\nTAGS: <tag1>, <tag2>, <tag3>"
+                    "text": prompt
                 }
             ]
         }]
@@ -114,6 +176,11 @@ pub async fn vision_extract(
         .timeout(Duration::from_secs(VISION_HTTP_TIMEOUT_SECS))
         .build()
         .context("Failed to build vision HTTP client")?;
+
+    // Hold a process-wide vision permit across the HTTP call so total in-flight
+    // Anthropic calls are capped across all videos plus the image-ingest path.
+    let _permit = acquire_vision_permit().await;
+
     let resp = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", &api_key)
@@ -139,7 +206,73 @@ pub async fn vision_extract(
         .unwrap_or("")
         .to_string();
 
+    Ok(output)
+}
+
+/// Extract text and describe an image using the Claude Vision API directly.
+///
+/// Sends image bytes as base64 to the Anthropic Messages API.
+/// Returns structured results or error if API key unavailable or call fails.
+pub async fn vision_extract(
+    image_data: &[u8],
+    mime_type: &str,
+    vision_config: &VisionConfig,
+    llm_config: &LlmConfig,
+) -> Result<VisionResult> {
+    log::debug!(
+        "vision_extract: mime={mime_type} bytes={} model={}",
+        image_data.len(),
+        if vision_config.model.is_empty() {
+            llm_config.model.as_str()
+        } else {
+            vision_config.model.as_str()
+        }
+    );
+    const PROMPT: &str = "Extract ALL text visible in this image and describe what you see.\n\nRespond in this exact format:\nTEXT: <all visible text, preserving layout>\nDESCRIPTION: <2-3 sentence description>\nTITLE: <3-8 word title>\nTAGS: <tag1>, <tag2>, <tag3>";
+    let output = vision_call(
+        image_data,
+        mime_type,
+        vision_config,
+        llm_config,
+        PROMPT,
+        VISION_EXTRACT_MAX_TOKENS,
+    )
+    .await?;
     Ok(parse_vision_response(&output))
+}
+
+/// Classify an image with the Claude Vision API and return the *raw* model text.
+///
+/// Sibling of [`vision_extract`] sharing the same HTTP/auth/base64 core and the
+/// same process-wide vision permit pool. The caller supplies a classification
+/// `prompt` and parses the structured reply (e.g. `CATEGORY`/`CONFIDENCE`) - this
+/// function does no parsing, it returns exactly what the model said.
+pub async fn vision_classify(
+    image_data: &[u8],
+    mime_type: &str,
+    vision_config: &VisionConfig,
+    llm_config: &LlmConfig,
+    prompt: &str,
+) -> Result<String> {
+    log::debug!(
+        "vision_classify: mime={mime_type} bytes={} model={} prompt_len={}",
+        image_data.len(),
+        if vision_config.model.is_empty() {
+            llm_config.model.as_str()
+        } else {
+            vision_config.model.as_str()
+        },
+        prompt.len()
+    );
+    vision_call(
+        image_data,
+        mime_type,
+        vision_config,
+        llm_config,
+        prompt,
+        VISION_CLASSIFY_MAX_TOKENS,
+    )
+    .await
 }
 
 /// Parse the structured text response from the vision API into a VisionResult.

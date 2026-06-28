@@ -13,10 +13,11 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::config::{SlideThresholds, YoutubeSlidesConfig};
+use crate::config::{SlideClass, SlideThresholds, YoutubeSlidesConfig};
 use crate::ocr;
 use crate::youtube::FrameRef;
 
+pub mod classify;
 pub mod cleanup;
 pub mod publish;
 
@@ -35,7 +36,7 @@ pub enum NoteShape {
 
 /// One unique slide identified after the pHash dedupe pass. Each slide carries
 /// its first-seen frame, the timestamp range it covered, OCR text, optional
-/// vision caption, and the transcript segments bound to its time range.
+/// vision classification, and the transcript segments bound to its time range.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Slide {
@@ -47,8 +48,10 @@ pub struct Slide {
     pub duration: f64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ocr: String,
+    /// Vision classification of the embedded frame, when the content-aware
+    /// filter ran. Replaces the dead `caption` field, which was always `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub caption: Option<String>,
+    pub class: Option<SlideClass>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcript: Vec<String>,
 }
@@ -477,7 +480,7 @@ pub fn materialize_slides(clusters: &[Cluster], slide_dir: &Path) -> Result<Vec<
             end: c.end,
             duration: (c.end - c.start).max(0.0),
             ocr: String::new(),
-            caption: None,
+            class: None,
             transcript: Vec::new(),
         });
     }
@@ -650,12 +653,6 @@ pub fn render_pattern_input(manifest: &SlideManifest) -> String {
                 }
             }
             out.push('\n');
-        }
-        if let Some(caption) = &slide.caption
-            && !caption.trim().is_empty()
-        {
-            out.push_str("Visual caption:\n");
-            out.push_str(&format!("> {caption}\n\n"));
         }
         if !slide.transcript.is_empty() {
             out.push_str("Transcript while this slide was on screen:\n");

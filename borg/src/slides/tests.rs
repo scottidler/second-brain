@@ -153,7 +153,7 @@ fn test_bind_transcript_filters_to_slide_range() {
             end: 30.0,
             duration: 30.0,
             ocr: String::new(),
-            caption: None,
+            class: None,
             transcript: Vec::new(),
         },
         Slide {
@@ -163,7 +163,7 @@ fn test_bind_transcript_filters_to_slide_range() {
             end: 60.0,
             duration: 30.0,
             ocr: String::new(),
-            caption: None,
+            class: None,
             transcript: Vec::new(),
         },
     ];
@@ -352,7 +352,7 @@ fn test_render_pattern_input_includes_shape_and_slides() {
                 end: 42.3,
                 duration: 42.3,
                 ocr: "Title slide\nMy Talk".to_string(),
-                caption: Some("Title card with bold yellow text".to_string()),
+                class: None,
                 transcript: vec!["[00:00] welcome".to_string(), "[00:05] today we will".to_string()],
             },
             Slide {
@@ -362,7 +362,7 @@ fn test_render_pattern_input_includes_shape_and_slides() {
                 end: 135.8,
                 duration: 93.5,
                 ocr: "How it works".to_string(),
-                caption: None,
+                class: None,
                 transcript: vec!["[00:42] the way this works".to_string()],
             },
         ],
@@ -374,8 +374,6 @@ fn test_render_pattern_input_includes_shape_and_slides() {
     assert!(rendered.contains("![](slides/slide-001.jpg)"));
     assert!(rendered.contains("On-slide text (OCR):"));
     assert!(rendered.contains("> Title slide"));
-    assert!(rendered.contains("Visual caption:"));
-    assert!(rendered.contains("> Title card with bold yellow text"));
     assert!(rendered.contains("Transcript while this slide was on screen:"));
     assert!(rendered.contains("- [00:00] welcome"));
 }
@@ -452,7 +450,7 @@ fn test_enforce_shape_hero_proposal_caps_slide_section_request_to_one() {
                 end: 10.0,
                 duration: 10.0,
                 ocr: String::new(),
-                caption: None,
+                class: None,
                 transcript: vec![],
             },
             Slide {
@@ -462,7 +460,7 @@ fn test_enforce_shape_hero_proposal_caps_slide_section_request_to_one() {
                 end: 20.0,
                 duration: 10.0,
                 ocr: String::new(),
-                caption: None,
+                class: None,
                 transcript: vec![],
             },
         ],
@@ -492,7 +490,7 @@ fn test_enforce_shape_downgrade_to_text_only() {
             end: 10.0,
             duration: 10.0,
             ocr: String::new(),
-            caption: None,
+            class: None,
             transcript: vec![],
         }],
     };
@@ -521,7 +519,7 @@ fn test_enforce_shape_drops_unknown_slide_ids() {
             end: 10.0,
             duration: 10.0,
             ocr: String::new(),
-            caption: None,
+            class: None,
             transcript: vec![],
         }],
     };
@@ -675,7 +673,7 @@ fn test_write_manifest_round_trip() {
             end: 12.0,
             duration: 12.0,
             ocr: "Title".to_string(),
-            caption: None,
+            class: None,
             transcript: vec!["[00:00] hi".to_string()],
         }],
     };
