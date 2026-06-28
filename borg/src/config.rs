@@ -414,6 +414,142 @@ impl YoutubeConfig {
     }
 }
 
+/// Taxonomy of slide content categories used by the vision classifier.
+///
+/// The vocabulary is fixed in code so the vision model receives a closed label
+/// set. Which categories get embedded is the operator's choice via
+/// `ContentFilterConfig::keep`. Deserialization is case-insensitive so that
+/// e.g. `Architecture-Diagram`, `architecture-diagram`, and
+/// `ARCHITECTURE-DIAGRAM` all parse to `ArchitectureDiagram`.
+///
+/// See docs/design/2026-06-28-content-aware-slide-filtering.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SlideCategory {
+    /// Components/systems wired by arrows, data flow.
+    ArchitectureDiagram,
+    /// UML or interaction sequence diagram.
+    SequenceDiagram,
+    /// Flow or decision diagram.
+    Flowchart,
+    /// Source code on screen.
+    Code,
+    /// Terminal, TUI, or CLI output.
+    Terminal,
+    /// Framework, maturity-model, or quadrant slide (not a real diagram).
+    Infographic,
+    /// Bar, line, scatter, or plot chart.
+    Chart,
+    /// Application GUI screenshot.
+    AppUi,
+    /// Browser, blog, or docs page.
+    Webpage,
+    /// Person(s) on camera.
+    TalkingHead,
+    /// Physical objects, hardware, or scenery.
+    BRoll,
+    /// Title, intro, or transition frame.
+    TitleCard,
+    /// Anything that does not fit the above categories.
+    Other,
+}
+
+impl<'de> serde::Deserialize<'de> for SlideCategory {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        SlideCategory::from_str_case_insensitive(&s).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown slide-category {s:?}; valid values are: \
+                 architecture-diagram, sequence-diagram, flowchart, code, terminal, \
+                 infographic, chart, app-ui, webpage, talking-head, b-roll, title-card, other"
+            ))
+        })
+    }
+}
+
+impl SlideCategory {
+    /// Parse a kebab-case category string case-insensitively.
+    /// Returns `None` for unrecognised strings so callers can produce a typed error.
+    pub fn from_str_case_insensitive(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "architecture-diagram" => Some(Self::ArchitectureDiagram),
+            "sequence-diagram" => Some(Self::SequenceDiagram),
+            "flowchart" => Some(Self::Flowchart),
+            "code" => Some(Self::Code),
+            "terminal" => Some(Self::Terminal),
+            "infographic" => Some(Self::Infographic),
+            "chart" => Some(Self::Chart),
+            "app-ui" => Some(Self::AppUi),
+            "webpage" => Some(Self::Webpage),
+            "talking-head" => Some(Self::TalkingHead),
+            "b-roll" => Some(Self::BRoll),
+            "title-card" => Some(Self::TitleCard),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+const DEFAULT_MAX_VISION_CONCURRENCY: usize = 4;
+const DEFAULT_MIN_CONFIDENCE: f32 = 0.6;
+
+fn default_keep() -> Vec<SlideCategory> {
+    vec![SlideCategory::ArchitectureDiagram]
+}
+
+fn default_max_vision_concurrency() -> usize {
+    DEFAULT_MAX_VISION_CONCURRENCY
+}
+
+fn default_min_confidence() -> f32 {
+    DEFAULT_MIN_CONFIDENCE
+}
+
+/// Per-video content-aware slide filter config.
+///
+/// When `enabled` is true, every unique slide run is classified by a vision
+/// model and only slides whose category appears in `keep` (at or above
+/// `min-confidence`) are embedded in the published note. When `enabled` is
+/// false the old structural shape heuristic runs unchanged.
+///
+/// See docs/design/2026-06-28-content-aware-slide-filtering.md, Phase 1.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ContentFilterConfig {
+    /// Master switch for vision classification. When false the structural shape
+    /// heuristic runs unchanged (pre-filter behaviour).
+    pub enabled: bool,
+    /// Category strings to embed. Each entry must match one of the taxonomy
+    /// variants; an unknown string is a hard parse error at config load.
+    /// Default: `[architecture-diagram]`.
+    #[serde(default = "default_keep")]
+    pub keep: Vec<SlideCategory>,
+    /// Optional model override for the classification call. Empty string (the
+    /// default) inherits `llm.model`.
+    pub model: String,
+    /// Process-wide cap on concurrent in-flight vision calls across ALL videos
+    /// AND the existing image-ingest path. A per-video semaphore would allow
+    /// N_videos * max concurrency calls; this is a global ceiling.
+    #[serde(default = "default_max_vision_concurrency")]
+    pub max_vision_concurrency: usize,
+    /// Minimum classification confidence required to keep a slide. A run whose
+    /// confidence is below this threshold is dropped regardless of its category.
+    #[serde(default = "default_min_confidence")]
+    pub min_confidence: f32,
+}
+
+impl Default for ContentFilterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            keep: default_keep(),
+            model: String::new(),
+            max_vision_concurrency: DEFAULT_MAX_VISION_CONCURRENCY,
+            min_confidence: DEFAULT_MIN_CONFIDENCE,
+        }
+    }
+}
+
 /// Frame-aware YouTube ingestion config (see docs/design/2026-04-29-frame-aware-youtube-ingestion.md).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -438,8 +574,11 @@ pub struct YoutubeSlidesConfig {
     pub transition_min_seconds: f32,
     /// Width to downscale frames to before writing JPEGs (height auto-preserves aspect).
     pub frame_resolution_px: u32,
-    /// Per-slide vision-API captioning. `false` in Phase 1 (Tesseract OCR only).
-    pub vision_per_slide: bool,
+    /// Content-aware vision filter. When `content-filter.enabled` is true,
+    /// every slide run is classified by a vision model and only categories
+    /// listed in `keep` (at or above `min-confidence`) are embedded.
+    /// When false, the structural shape heuristic runs unchanged.
+    pub content_filter: ContentFilterConfig,
     /// Thresholds that drive Stage 1's note-shape proposal.
     pub slide_thresholds: SlideThresholds,
 }
@@ -456,7 +595,7 @@ impl Default for YoutubeSlidesConfig {
             phash_hamming_threshold: 6,
             transition_min_seconds: 5.0,
             frame_resolution_px: 512,
-            vision_per_slide: false,
+            content_filter: ContentFilterConfig::default(),
             slide_thresholds: SlideThresholds::default(),
         }
     }

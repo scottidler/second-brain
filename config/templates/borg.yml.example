@@ -96,5 +96,26 @@ desktop:
   timeout-ms: 5000
   appname: borg
 
+# YouTube ingestion settings.
+# `slides.enabled: false` surgically disables frame capture only; audio, Whisper
+# transcript, summary, classify, and publish all continue unchanged.
+#
+# `content-filter`: when enabled, every unique slide run is classified by a
+# vision model and only slides whose category appears in `keep` at/above
+# `min-confidence` are embedded in the published note.
+# Taxonomy: architecture-diagram, sequence-diagram, flowchart, code, terminal,
+#            infographic, chart, app-ui, webpage, talking-head, b-roll, title-card, other
+# Unknown category strings are a hard parse error at config load.
+#
+# youtube:
+#   slides:
+#     enabled: true
+#     content-filter:
+#       enabled: false          # flip to true in Phase 5 after validation
+#       keep: [architecture-diagram]
+#       model: ""               # empty = inherit llm.model
+#       max-vision-concurrency: 4
+#       min-confidence: 0.6
+
 # Log level: trace | debug | info | warn | error
 log-level: info

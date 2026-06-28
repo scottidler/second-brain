@@ -527,3 +527,199 @@ fn host_matches_fails_closed_when_hostname_unreadable() {
     // Pin set + hostname UNREADABLE: fail closed (do NOT run).
     assert!(!host_matches(&Some("desk".to_string()), None));
 }
+
+// ---------------------------------------------------------------------------
+// SlideCategory and ContentFilterConfig tests (Phase 1 of
+// docs/design/2026-06-28-content-aware-slide-filtering.md)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn slide_category_roundtrip_defaults() {
+    // ContentFilterConfig default: enabled=false, keep=[architecture-diagram],
+    // model="", max-vision-concurrency=4, min-confidence=0.6
+    let cfg = ContentFilterConfig::default();
+    assert!(!cfg.enabled);
+    assert_eq!(cfg.keep, vec![SlideCategory::ArchitectureDiagram]);
+    assert_eq!(cfg.model, "");
+    assert_eq!(cfg.max_vision_concurrency, DEFAULT_MAX_VISION_CONCURRENCY);
+    assert!((cfg.min_confidence - DEFAULT_MIN_CONFIDENCE).abs() < f32::EPSILON);
+}
+
+#[test]
+fn slide_category_roundtrip_yaml_override() {
+    let yaml = r#"
+youtube:
+  slides:
+    content-filter:
+      enabled: true
+      keep: [architecture-diagram, code, terminal]
+      model: claude-opus-4-5
+      max-vision-concurrency: 8
+      min-confidence: 0.75
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    let cf = &config.youtube.slides.content_filter;
+    assert!(cf.enabled);
+    assert_eq!(
+        cf.keep,
+        vec![
+            SlideCategory::ArchitectureDiagram,
+            SlideCategory::Code,
+            SlideCategory::Terminal
+        ]
+    );
+    assert_eq!(cf.model, "claude-opus-4-5");
+    assert_eq!(cf.max_vision_concurrency, 8);
+    assert!((cf.min_confidence - 0.75).abs() < f32::EPSILON);
+}
+
+#[test]
+fn slide_category_all_variants_parse_lowercase() {
+    let cases = [
+        ("architecture-diagram", SlideCategory::ArchitectureDiagram),
+        ("sequence-diagram", SlideCategory::SequenceDiagram),
+        ("flowchart", SlideCategory::Flowchart),
+        ("code", SlideCategory::Code),
+        ("terminal", SlideCategory::Terminal),
+        ("infographic", SlideCategory::Infographic),
+        ("chart", SlideCategory::Chart),
+        ("app-ui", SlideCategory::AppUi),
+        ("webpage", SlideCategory::Webpage),
+        ("talking-head", SlideCategory::TalkingHead),
+        ("b-roll", SlideCategory::BRoll),
+        ("title-card", SlideCategory::TitleCard),
+        ("other", SlideCategory::Other),
+    ];
+    for (input, expected) in &cases {
+        let yaml = format!(r#""{input}""#);
+        let parsed: SlideCategory =
+            serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("expected {input:?} to parse, got: {e}"));
+        assert_eq!(parsed, *expected, "mismatch for {input:?}");
+    }
+}
+
+#[test]
+fn slide_category_mixed_case_keep_entries_parse() {
+    // cli.md: enum-valued flags must be case-insensitive on input.
+    let yaml = r#"
+youtube:
+  slides:
+    content-filter:
+      enabled: true
+      keep: [Architecture-Diagram, CODE, Talking-Head]
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse mixed-case keep entries");
+    let keep = &config.youtube.slides.content_filter.keep;
+    assert_eq!(
+        keep,
+        &vec![
+            SlideCategory::ArchitectureDiagram,
+            SlideCategory::Code,
+            SlideCategory::TalkingHead
+        ]
+    );
+}
+
+#[test]
+fn slide_category_uppercase_variants_parse() {
+    // Each known variant must parse in all-uppercase form.
+    let cases = [
+        "ARCHITECTURE-DIAGRAM",
+        "SEQUENCE-DIAGRAM",
+        "FLOWCHART",
+        "CODE",
+        "TERMINAL",
+        "INFOGRAPHIC",
+        "CHART",
+        "APP-UI",
+        "WEBPAGE",
+        "TALKING-HEAD",
+        "B-ROLL",
+        "TITLE-CARD",
+        "OTHER",
+    ];
+    for input in &cases {
+        let yaml = format!(r#""{input}""#);
+        let result: Result<SlideCategory, _> = serde_yaml::from_str(&yaml);
+        assert!(
+            result.is_ok(),
+            "expected {input:?} to parse (case-insensitive), got: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[test]
+fn slide_category_unknown_string_is_hard_error() {
+    // An unrecognised category in the keep array must be a parse error at
+    // config load time, not a silent no-op.
+    let bad_inputs = [
+        r#""diagram""#,
+        r#""video""#,
+        r#""screenshot""#,
+        r#""architecture_diagram""#, // underscores are not accepted
+        r#""""#,
+    ];
+    for input in &bad_inputs {
+        let result: Result<SlideCategory, _> = serde_yaml::from_str(input);
+        assert!(
+            result.is_err(),
+            "expected {input:?} to fail, but it parsed successfully"
+        );
+    }
+}
+
+#[test]
+fn slide_category_unknown_in_keep_array_is_hard_error() {
+    let yaml = r#"
+youtube:
+  slides:
+    content-filter:
+      keep: [architecture-diagram, not-a-real-category]
+"#;
+    let result: Result<Config, _> = serde_yaml::from_str(yaml);
+    assert!(
+        result.is_err(),
+        "expected config with unknown keep entry to fail to parse"
+    );
+    let msg = result
+        .expect_err("config with unknown keep entry should fail to parse")
+        .to_string();
+    assert!(
+        msg.contains("not-a-real-category"),
+        "error should mention the unknown value, got: {msg}"
+    );
+}
+
+#[test]
+fn slide_category_serializes_to_kebab_case() {
+    // Round-trip: serialize to YAML and confirm the canonical kebab-case form.
+    let cat = SlideCategory::ArchitectureDiagram;
+    let yaml = serde_yaml::to_string(&cat).expect("serialize");
+    assert!(
+        yaml.trim() == "architecture-diagram",
+        "expected 'architecture-diagram', got: {yaml:?}"
+    );
+}
+
+#[test]
+fn content_filter_serde_default_matches_struct_default() {
+    // An empty content-filter block must deserialize to the same value as
+    // ContentFilterConfig::default().
+    let from_yaml: ContentFilterConfig = serde_yaml::from_str("{}").expect("parse empty");
+    let from_default = ContentFilterConfig::default();
+    assert_eq!(from_yaml.enabled, from_default.enabled);
+    assert_eq!(from_yaml.keep, from_default.keep);
+    assert_eq!(from_yaml.model, from_default.model);
+    assert_eq!(from_yaml.max_vision_concurrency, from_default.max_vision_concurrency);
+    assert!((from_yaml.min_confidence - from_default.min_confidence).abs() < f32::EPSILON);
+}
+
+#[test]
+fn youtube_slides_config_no_longer_has_vision_per_slide() {
+    // The dead `vision_per_slide` stub was removed in Phase 1.
+    // This test would fail to compile if the field were reintroduced.
+    let cfg = YoutubeSlidesConfig::default();
+    // Verify the new content_filter field is present instead.
+    assert!(!cfg.content_filter.enabled);
+}
