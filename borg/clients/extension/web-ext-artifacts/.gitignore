@@ -1,0 +1,7 @@
+# Signed Firefox extension builds are generated locally by
+# `sb borg extension sign` — install/deploy/bootstrap ALWAYS re-sign
+# (borg/src/extension/install.rs calls sign::run first), so nothing here
+# is ever consumed from git. Keep the dir (for the symlink target to land
+# in) but track nothing but this file.
+*
+!.gitignore
