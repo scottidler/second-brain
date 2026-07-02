@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# meeting - record a work meeting (mic + system audio), transcribe via Groq
+# whisper-large-v3 (no local inference; desk is AVX-only), distill minutes via
+# the fabric `meeting-minutes` pattern, and drop a type:meeting note into the
+# vault inbox for cortex to classify and promote.
+#
+# Audio + transcript are kept durably under ~/.local/share/sb/meetings/<stamp>-<slug>/.
+# Mic and system audio are captured as two streams and mixed afterward with
+# ffmpeg (simpler and more robust than live mixing).
+#
+# usage: meeting --title "sprint sync" [--mic-only] [--no-minutes]
+#   --title TEXT   meeting title (required)
+#   --mic-only     skip system-audio capture (in-person meeting)
+#   --no-minutes   skip fabric minutes; note carries transcript only
+set -euo pipefail
+
+log() { echo "meeting: $*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+title=""
+mic_only=false
+minutes=true
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --title) title="$2"; shift ;;
+    --mic-only) mic_only=true ;;
+    --no-minutes) minutes=false ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+  shift
+done
+[[ -n "$title" ]] || die "--title is required"
+[[ -n "${GROQ_API_KEY:-}" ]] || die "GROQ_API_KEY not set"
+for t in pw-record ffmpeg curl; do command -v "$t" >/dev/null || die "$t not found"; done
+
+vault="${VAULT_ROOT:-$HOME/repos/scottidler/obsidian}"
+[[ -d "$vault/inbox" ]] || die "vault inbox not found at $vault/inbox"
+
+slug="$(echo "$title" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')"
+stamp="$(date +%Y-%m-%d-%H%M%S)"
+day="$(date +%Y-%m-%d)"
+dir="$HOME/.local/share/sb/meetings/$stamp-$slug"
+mkdir -p "$dir"
+
+# --- record ---------------------------------------------------------------
+pids=()
+pw-record --rate 16000 --channels 1 --format s16 "$dir/mic.wav" &
+pids+=($!)
+if ! $mic_only; then
+  # stream.capture.sink=true makes pw-record capture the DEFAULT SINK's
+  # monitor, i.e. whatever the meeting app is playing (colleagues' voices).
+  pw-record -P stream.capture.sink=true --rate 16000 --channels 1 --format s16 "$dir/system.wav" &
+  pids+=($!)
+fi
+trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT
+log "recording '$title'... press Enter to stop"
+read -r
+kill "${pids[@]}" 2>/dev/null || true
+wait 2>/dev/null || true
+trap - EXIT
+[[ -s "$dir/mic.wav" ]] || die "no mic audio captured"
+
+# --- mix ------------------------------------------------------------------
+if $mic_only || [[ ! -s "$dir/system.wav" ]]; then
+  cp "$dir/mic.wav" "$dir/mix.wav"
+else
+  ffmpeg -hide_banner -loglevel error -i "$dir/mic.wav" -i "$dir/system.wav" \
+    -filter_complex "amix=inputs=2:duration=longest:normalize=1" \
+    -ac 1 -ar 16000 "$dir/mix.wav"
+fi
+log "mixed audio: $(du -h "$dir/mix.wav" | cut -f1)"
+
+# --- transcribe (10-min chunks keep every upload under Groq's 25 MB cap) ---
+mkdir -p "$dir/chunks"
+ffmpeg -hide_banner -loglevel error -i "$dir/mix.wav" \
+  -f segment -segment_time 600 -c copy "$dir/chunks/%03d.wav"
+: > "$dir/transcript.txt"
+for chunk in "$dir"/chunks/*.wav; do
+  log "transcribing $(basename "$chunk")..."
+  curl -fsS https://api.groq.com/openai/v1/audio/transcriptions \
+    -H "Authorization: Bearer $GROQ_API_KEY" \
+    -F "file=@$chunk" \
+    -F "model=whisper-large-v3" \
+    -F "temperature=0" \
+    -F "response_format=text" >> "$dir/transcript.txt" || die "transcription failed on $chunk"
+  echo >> "$dir/transcript.txt"
+done
+[[ -s "$dir/transcript.txt" ]] || die "empty transcript"
+
+# --- minutes ---------------------------------------------------------------
+minutes_md=""
+if $minutes; then
+  if command -v fabric >/dev/null && fabric --listpatterns 2>/dev/null | grep -qx meeting-minutes; then
+    log "distilling minutes via fabric meeting-minutes..."
+    minutes_md="$(fabric --pattern meeting-minutes < "$dir/transcript.txt")" \
+      || { log "fabric failed; note will carry transcript only"; minutes_md=""; }
+  else
+    log "fabric meeting-minutes pattern unavailable; transcript only"
+  fi
+fi
+
+# --- compose note into vault inbox -----------------------------------------
+note="$vault/inbox/$day-$slug.md"
+{
+  echo "---"
+  echo "title: \"$title\""
+  echo "date: $day"
+  echo "type: meeting"
+  echo "scope: work"
+  echo "company: tatari"
+  echo "confidential: true"
+  echo "origin: assisted"
+  echo "method: cli"
+  echo "source: meeting://$stamp-$slug"
+  echo "tags: []"
+  echo "---"
+  echo
+  echo "# $title"
+  echo
+  if [[ -n "$minutes_md" ]]; then
+    printf '%s\n\n' "$minutes_md"
+  fi
+  echo "## Transcript"
+  echo
+  cat "$dir/transcript.txt"
+} > "$note"
+
+log "note: $note"
+log "artifacts: $dir"
+echo "$note"

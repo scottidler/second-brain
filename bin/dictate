@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# dictate - push-to-talk dictation for an AVX-only box: record the mic with
+# pw-record, transcribe via Groq whisper-large-v3 (no local inference), print
+# the text to stdout. Recordings are kept under ~/.local/share/sb/dictate/
+# (durable-capture: nothing is deleted; prune by hand if it ever matters).
+#
+# usage: dictate [--seconds N] [--copy] [--model NAME] [--keep-audio-only]
+#   --seconds N        stop automatically after N seconds (default: Enter stops)
+#   --copy             also copy the transcript to the clipboard
+#   --model NAME       Groq transcription model (default: whisper-large-v3)
+#   --keep-audio-only  record + save, skip transcription (offline capture)
+set -euo pipefail
+
+log() { echo "dictate: $*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+model=whisper-large-v3
+copy=false
+seconds=""
+audio_only=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --seconds) seconds="$2"; shift ;;
+    --copy) copy=true ;;
+    --model) model="$2"; shift ;;
+    --keep-audio-only) audio_only=true ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+  shift
+done
+
+command -v pw-record >/dev/null || die "pw-record not found (pipewire-utils)"
+command -v curl >/dev/null || die "curl not found"
+$audio_only || [[ -n "${GROQ_API_KEY:-}" ]] || die "GROQ_API_KEY not set"
+
+store="$HOME/.local/share/sb/dictate"
+mkdir -p "$store"
+stamp="$(date +%Y-%m-%d-%H%M%S)"
+wav="$store/$stamp.wav"
+
+# 16 kHz mono s16: what whisper wants, ~2 MB/min, well under Groq's 25 MB cap
+# for any sane dictation length.
+pw-record --rate 16000 --channels 1 --format s16 "$wav" &
+rec_pid=$!
+trap 'kill "$rec_pid" 2>/dev/null || true' EXIT
+
+if [[ -n "$seconds" ]]; then
+  log "recording for ${seconds}s..."
+  sleep "$seconds"
+else
+  log "recording... press Enter to stop"
+  read -r
+fi
+kill "$rec_pid" 2>/dev/null || true
+wait "$rec_pid" 2>/dev/null || true
+trap - EXIT
+[[ -s "$wav" ]] || die "no audio captured at $wav"
+log "saved $wav ($(du -h "$wav" | cut -f1))"
+
+$audio_only && { echo "$wav"; exit 0; }
+
+text="$(curl -fsS https://api.groq.com/openai/v1/audio/transcriptions \
+  -H "Authorization: Bearer $GROQ_API_KEY" \
+  -F "file=@$wav" \
+  -F "model=$model" \
+  -F "temperature=0" \
+  -F "response_format=text")" || die "groq transcription failed"
+
+printf '%s\n' "$text" > "$store/$stamp.txt"
+
+if $copy; then
+  if command -v wl-copy >/dev/null; then printf '%s' "$text" | wl-copy
+  elif command -v xclip >/dev/null; then printf '%s' "$text" | xclip -selection clipboard
+  else log "no clipboard tool (wl-copy/xclip); skipping --copy"
+  fi
+fi
+
+printf '%s\n' "$text"
