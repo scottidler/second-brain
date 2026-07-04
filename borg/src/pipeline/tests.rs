@@ -432,7 +432,7 @@ fn test_vision_empty_text_falls_back_to_ocr() {
 #[test]
 fn test_build_obsidian_url_inbox() {
     let url = build_obsidian_url("obsidian", "/home/user/obsidian/inbox/my-note.md");
-    assert_eq!(url, Some("obsidian://search?vault=obsidian&query=my-note".to_string()));
+    assert_eq!(url, Some("obsidian://open?vault=obsidian&file=my-note".to_string()));
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn test_build_obsidian_url_notes_folder() {
     let url = build_obsidian_url("obsidian", "/home/user/obsidian/notes/claude-code-guide.md");
     assert_eq!(
         url,
-        Some("obsidian://search?vault=obsidian&query=claude-code-guide".to_string())
+        Some("obsidian://open?vault=obsidian&file=claude-code-guide".to_string())
     );
 }
 
@@ -454,13 +454,13 @@ fn test_build_obsidian_url_same_stem_different_dirs() {
 #[test]
 fn test_build_obsidian_url_vault_name_with_spaces() {
     let url = build_obsidian_url("My Notes", "/home/user/obsidian/note.md");
-    assert_eq!(url, Some("obsidian://search?vault=My%20Notes&query=note".to_string()));
+    assert_eq!(url, Some("obsidian://open?vault=My%20Notes&file=note".to_string()));
 }
 
 #[test]
 fn test_build_obsidian_url_bare_filename() {
     let url = build_obsidian_url("obsidian", "my-note.md");
-    assert_eq!(url, Some("obsidian://search?vault=obsidian&query=my-note".to_string()));
+    assert_eq!(url, Some("obsidian://open?vault=obsidian&file=my-note".to_string()));
 }
 
 #[test]

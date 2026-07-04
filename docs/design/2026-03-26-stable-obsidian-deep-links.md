@@ -2,8 +2,34 @@
 
 **Author:** Scott Idler
 **Date:** 2026-03-26
-**Status:** Implemented
+**Status:** Superseded (see note below)
 **Review Passes Completed:** 3/3
+
+> **SUPERSEDED (2026-07-03).** The `obsidian://search?query=<stem>` solution
+> chosen here was shipped but had a latent flaw: `search` only focuses the vault
+> and populates the search pane - it never navigates to the note. Clicking the
+> link switched to Obsidian but left the previously-open note/view showing, so it
+> never fulfilled this doc's core goal of opening the ingested note.
+>
+> The fix reverted the link to the **`open`** action - but keyed on the bare
+> filename **stem** (`obsidian://open?vault=obsidian&file=<stem>`), not the full
+> path this doc's Problem Statement correctly identified as move-fragile
+> (`file=inbox/my-note.md`).
+>
+> **Alternative 3 below is factually wrong** and is what made `search` look
+> necessary. It claims a bare filename "only resolves if the note is at the vault
+> root." The official Obsidian URI docs
+> (https://help.obsidian.md/Extending+Obsidian/Obsidian+URI) state `file` is
+> "a file name, or a path from the vault root" - a **bare filename resolves
+> vault-wide by name** (the same resolver wikilinks use). So `open?file=<stem>`
+> both opens the actual note *and* survives inbox/ -> notes/ moves, achieving all
+> the goals here without the never-navigates flaw of `search`.
+>
+> Known residual limitation: when two notes share a stem in different
+> directories, `open` navigates to whichever one Obsidian's resolver picks (the
+> `search` form surfaced all matches). This is not a regression - the `search`
+> link never navigated to anything - but it is why the link is keyed on the stem.
+> Implementation: `borg::pipeline::publish::build_obsidian_url`.
 
 ## Summary
 

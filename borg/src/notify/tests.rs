@@ -25,7 +25,7 @@ fn test_format_telegram_reply_with_obsidian_url() {
         title: Some("Test Article".to_string()),
         tags: vec!["ai".to_string()],
         elapsed_secs: Some(3.5),
-        obsidian_url: Some("obsidian://search?vault=obsidian&query=test-article".to_string()),
+        obsidian_url: Some("obsidian://open?vault=obsidian&file=test-article".to_string()),
         ..Default::default()
     };
     let reply = format_telegram_reply(&result, "https://example.com");
@@ -56,7 +56,7 @@ fn test_format_telegram_reply_escapes_html_in_title() {
         status: IngestStatus::Completed,
         title: Some("Title with <html> & stuff".to_string()),
         tags: vec![],
-        obsidian_url: Some("obsidian://search?vault=obsidian&query=test".to_string()),
+        obsidian_url: Some("obsidian://open?vault=obsidian&file=test".to_string()),
         ..Default::default()
     };
     let reply = format_telegram_reply(&result, "https://example.com");
@@ -233,12 +233,12 @@ fn test_format_desktop_body_appends_obsidian_url_unescaped() {
         status: IngestStatus::Completed,
         title: Some("Test".to_string()),
         tags: vec![],
-        obsidian_url: Some("obsidian://search?vault=obsidian&query=test".to_string()),
+        obsidian_url: Some("obsidian://open?vault=obsidian&file=test".to_string()),
         ..Default::default()
     };
     let body = format_desktop_body(&result, "https://example.com");
     assert!(body.contains("Saved: Test"));
-    assert!(body.ends_with("obsidian://search?vault=obsidian&query=test"));
+    assert!(body.ends_with("obsidian://open?vault=obsidian&file=test"));
     assert!(!body.contains("&amp;"));
 }
 

@@ -8,12 +8,12 @@ fn test_format_discord_reply_with_obsidian_url() {
         title: Some("Test Article".to_string()),
         tags: vec!["ai".to_string()],
         elapsed_secs: Some(3.5),
-        obsidian_url: Some("obsidian://search?vault=obsidian&query=test-article".to_string()),
+        obsidian_url: Some("obsidian://open?vault=obsidian&file=test-article".to_string()),
         ..Default::default()
     };
     let reply = format_discord_reply(&result, "https://example.com");
     assert!(reply.contains("Saved: Test Article"));
-    assert!(reply.contains("obsidian://search?vault=obsidian&query=test-article"));
+    assert!(reply.contains("obsidian://open?vault=obsidian&file=test-article"));
 }
 
 #[test]

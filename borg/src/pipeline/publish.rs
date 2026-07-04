@@ -1,15 +1,24 @@
 use super::*;
 
-/// Build an obsidian://search deep link from vault name and note path.
+/// Build an obsidian://open deep link from vault name and note path.
 ///
-/// Uses the filename stem (without extension or directory) as the search query,
-/// so the link survives note moves between directories (e.g. inbox/ -> notes/).
+/// Uses the bare filename stem (without extension or directory) as the `file`
+/// parameter. Obsidian's `open` action resolves a bare filename vault-wide by
+/// name, so the link opens the actual note *and* survives note moves between
+/// directories (e.g. inbox/ -> notes/). The earlier `search?query=` form only
+/// opened the search pane and never navigated to the note.
+///
+/// Precondition: assumes the stem is unique across the vault. When two notes
+/// share a stem in different directories, `open` navigates to whichever one
+/// Obsidian's name resolver picks (the old `search` form surfaced all matches).
+/// This is not a regression - the `search` link never navigated to any note -
+/// but it is why the link is keyed on the stem rather than the full path.
 pub(crate) fn build_obsidian_url(vault_name: &str, note_path: &str) -> Option<String> {
     let path = std::path::Path::new(note_path);
     let stem = path.file_stem()?.to_str()?;
     let encoded_vault = urlencoding::encode(vault_name);
-    let encoded_query = urlencoding::encode(stem);
-    Some(format!("obsidian://search?vault={encoded_vault}&query={encoded_query}"))
+    let encoded_file = urlencoding::encode(stem);
+    Some(format!("obsidian://open?vault={encoded_vault}&file={encoded_file}"))
 }
 
 /// Compute the vault-relative path for a note, for use in the ledger Path column.
