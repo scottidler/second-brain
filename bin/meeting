@@ -4,7 +4,9 @@
 # the fabric `meeting-minutes` pattern, and drop a type:meeting note into the
 # vault inbox for cortex to classify and promote.
 #
-# Audio + transcript are kept durably under ~/.local/share/sb/meetings/<stamp>-<slug>/.
+# The mic is resolved to the Blue Yeti by name at runtime (falls back to the
+# PipeWire default source); system audio is the default sink's monitor. Audio +
+# transcript are kept durably under ~/.local/share/sb/meetings/<stamp>-<slug>/.
 # Mic and system audio are captured as two streams and mixed afterward with
 # ffmpeg (simpler and more robust than live mixing).
 #
@@ -12,10 +14,15 @@
 #   --title TEXT   meeting title (required)
 #   --mic-only     skip system-audio capture (in-person meeting)
 #   --no-minutes   skip fabric minutes; note carries transcript only
+# env:
+#   MIC_TARGET   pw-record node name/serial to force a specific mic (skips resolve)
+#   MIC_MATCH    regex matched against source description/name (default: Blue|Yeti)
+#   MIC_MIN_DB   silence threshold in dBFS; warn if mic quieter (default: -50)
 set -euo pipefail
 
 log() { echo "meeting: $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
+help() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; }
 
 title=""
 mic_only=false
@@ -25,7 +32,7 @@ while [[ $# -gt 0 ]]; do
     --title) title="$2"; shift ;;
     --mic-only) mic_only=true ;;
     --no-minutes) minutes=false ;;
-    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) help; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -37,6 +44,33 @@ for t in pw-record ffmpeg curl; do command -v "$t" >/dev/null || die "$t not fou
 vault="${VAULT_ROOT:-$HOME/repos/scottidler/obsidian}"
 [[ -d "$vault/inbox" ]] || die "vault inbox not found at $vault/inbox"
 
+# Resolve the mic node (see dictate for rationale). Best-effort -> "auto".
+resolve_mic() {
+  [[ -n "${MIC_TARGET:-}" ]] && { printf '%s' "$MIC_TARGET"; return; }
+  command -v python3 >/dev/null || { printf 'auto'; return; }
+  # pw-dump JSON on stdin, MIC_MATCH regex as argv[1]. Use `python3 -c` (NOT
+  # `python3 - <<HEREDOC`) so stdin stays the pw-dump pipe instead of the heredoc.
+  local prog='
+import json,sys,re
+pat=re.compile(sys.argv[1], re.I)
+try:
+    objs=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for o in objs:
+    p=(o.get("info",{}) or {}).get("props",{}) or {}
+    if p.get("media.class")=="Audio/Source":
+        desc=str(p.get("node.description","")); nm=str(p.get("node.name",""))
+        if pat.search(desc) or pat.search(nm):
+            print(nm); break
+'
+  local name
+  name="$(pw-dump 2>/dev/null | python3 -c "$prog" "${MIC_MATCH:-Blue|Yeti}" || true)"
+  printf '%s' "${name:-auto}"
+}
+mic_target="$(resolve_mic)"
+log "mic target: $mic_target"
+
 slug="$(echo "$title" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')"
 stamp="$(date +%Y-%m-%d-%H%M%S)"
 day="$(date +%Y-%m-%d)"
@@ -45,7 +79,7 @@ mkdir -p "$dir"
 
 # --- record ---------------------------------------------------------------
 pids=()
-pw-record --rate 16000 --channels 1 --format s16 "$dir/mic.wav" &
+pw-record --target "$mic_target" --rate 16000 --channels 1 --format s16 "$dir/mic.wav" &
 pids+=($!)
 if ! $mic_only; then
   # stream.capture.sink=true makes pw-record capture the DEFAULT SINK's
@@ -60,6 +94,18 @@ kill "${pids[@]}" 2>/dev/null || true
 wait 2>/dev/null || true
 trap - EXIT
 [[ -s "$dir/mic.wav" ]] || die "no mic audio captured"
+
+# Mic level guard: warn (don't abort - you may be mostly listening), but make a
+# dead mic loud in the log so a silent-Yeti profile bug can't pass unnoticed.
+mic_bytes="$(stat -c%s "$dir/mic.wav" 2>/dev/null || echo 0)"
+mic_max="$(ffmpeg -hide_banner -nostats -i "$dir/mic.wav" -af volumedetect -f null /dev/null 2>&1 \
+  | sed -n 's/.*max_volume: \(-\{0,1\}[0-9.]*\) dB.*/\1/p' | head -1)"
+min_db="${MIC_MIN_DB:--50}"
+if (( mic_bytes <= 1044 )) || { [[ -n "$mic_max" ]] && awk "BEGIN{exit !($mic_max < $min_db)}"; }; then
+  log "WARNING: mic track is silent (max ${mic_max:-n/a} dBFS, ${mic_bytes}B) - your voice may be missing. Check: wpctl status"
+else
+  log "mic level ok (max ${mic_max:-?} dBFS)"
+fi
 
 # --- mix ------------------------------------------------------------------
 if $mic_only || [[ ! -s "$dir/system.wav" ]]; then

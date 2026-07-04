@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
-# dictate - push-to-talk dictation for an AVX-only box: record the mic with
-# pw-record, transcribe via Groq whisper-large-v3 (no local inference), print
-# the text to stdout. Recordings are kept under ~/.local/share/sb/dictate/
+# dictate - push-to-talk dictation: record the mic with pw-record, transcribe
+# via Groq whisper-large-v3 (no local inference; works on an AVX-only box), and
+# print the text to stdout. Recordings are kept under ~/.local/share/sb/dictate/
 # (durable-capture: nothing is deleted; prune by hand if it ever matters).
+#
+# The mic is resolved to the Blue Yeti by name at runtime (falls back to the
+# PipeWire default source), so the system default input can be anything. A
+# silence guard aborts before the Groq call if the capture is effectively empty
+# - the failure mode when a mic is muted or on the wrong (e.g. IEC958) profile.
 #
 # usage: dictate [--seconds N] [--copy] [--model NAME] [--keep-audio-only]
 #   --seconds N        stop automatically after N seconds (default: Enter stops)
 #   --copy             also copy the transcript to the clipboard
 #   --model NAME       Groq transcription model (default: whisper-large-v3)
 #   --keep-audio-only  record + save, skip transcription (offline capture)
+# env:
+#   MIC_TARGET   pw-record node name/serial to force a specific mic (skips resolve)
+#   MIC_MATCH    regex matched against source description/name (default: Blue|Yeti)
+#   MIC_MIN_DB   silence threshold in dBFS; abort if max level is quieter (default: -50)
 set -euo pipefail
 
 log() { echo "dictate: $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
+help() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; }
 
 model=whisper-large-v3
 copy=false
@@ -24,7 +34,7 @@ while [[ $# -gt 0 ]]; do
     --copy) copy=true ;;
     --model) model="$2"; shift ;;
     --keep-audio-only) audio_only=true ;;
-    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) help; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -34,14 +44,42 @@ command -v pw-record >/dev/null || die "pw-record not found (pipewire-utils)"
 command -v curl >/dev/null || die "curl not found"
 $audio_only || [[ -n "${GROQ_API_KEY:-}" ]] || die "GROQ_API_KEY not set"
 
+# Resolve the mic node. Precedence: MIC_TARGET > name match (Blue Yeti) > auto
+# (pw-record's default-source behavior). Best-effort: any failure falls back to
+# "auto" so dictation still works on a box without python3 or without a Yeti.
+resolve_mic() {
+  [[ -n "${MIC_TARGET:-}" ]] && { printf '%s' "$MIC_TARGET"; return; }
+  command -v python3 >/dev/null || { printf 'auto'; return; }
+  # pw-dump JSON on stdin, MIC_MATCH regex as argv[1]. Use `python3 -c` (NOT
+  # `python3 - <<HEREDOC`) so stdin stays the pw-dump pipe instead of the heredoc.
+  local prog='
+import json,sys,re
+pat=re.compile(sys.argv[1], re.I)
+try:
+    objs=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for o in objs:
+    p=(o.get("info",{}) or {}).get("props",{}) or {}
+    if p.get("media.class")=="Audio/Source":
+        desc=str(p.get("node.description","")); nm=str(p.get("node.name",""))
+        if pat.search(desc) or pat.search(nm):
+            print(nm); break
+'
+  local name
+  name="$(pw-dump 2>/dev/null | python3 -c "$prog" "${MIC_MATCH:-Blue|Yeti}" || true)"
+  printf '%s' "${name:-auto}"
+}
+target="$(resolve_mic)"
+log "mic target: $target"
+
 store="$HOME/.local/share/sb/dictate"
 mkdir -p "$store"
 stamp="$(date +%Y-%m-%d-%H%M%S)"
 wav="$store/$stamp.wav"
 
-# 16 kHz mono s16: what whisper wants, ~2 MB/min, well under Groq's 25 MB cap
-# for any sane dictation length.
-pw-record --rate 16000 --channels 1 --format s16 "$wav" &
+# 16 kHz mono s16: what whisper wants, ~2 MB/min, well under Groq's 25 MB cap.
+pw-record --target "$target" --rate 16000 --channels 1 --format s16 "$wav" &
 rec_pid=$!
 trap 'kill "$rec_pid" 2>/dev/null || true' EXIT
 
@@ -55,9 +93,26 @@ fi
 kill "$rec_pid" 2>/dev/null || true
 wait "$rec_pid" 2>/dev/null || true
 trap - EXIT
-[[ -s "$wav" ]] || die "no audio captured at $wav"
-log "saved $wav ($(du -h "$wav" | cut -f1))"
 
+# --- capture guards --------------------------------------------------------
+# A 16k mono s16 WAV is ~32 KB/s of data plus a 44-byte header; a header-only
+# file means zero frames were captured (dead/wrong source).
+bytes="$(stat -c%s "$wav" 2>/dev/null || echo 0)"
+(( bytes > 1044 )) || die "no audio captured at $wav (${bytes}B) - is the mic live? check: wpctl status"
+
+# Level guard (best-effort; needs ffmpeg). Aborts on effective silence so we
+# never spend a Groq call transcribing a dead mic into a hallucinated sentence.
+min_db="${MIC_MIN_DB:--50}"
+if command -v ffmpeg >/dev/null; then
+  max_db="$(ffmpeg -hide_banner -nostats -i "$wav" -af volumedetect -f null /dev/null 2>&1 \
+    | sed -n 's/.*max_volume: \(-\{0,1\}[0-9.]*\) dB.*/\1/p' | head -1)"
+  if [[ -n "$max_db" ]] && awk "BEGIN{exit !($max_db < $min_db)}"; then
+    die "captured audio is silent (max ${max_db} dBFS < ${min_db}). Mic muted or wrong source? wpctl status; wpctl get-volume @DEFAULT_AUDIO_SOURCE@"
+  fi
+  log "level ok (max ${max_db:-?} dBFS)"
+fi
+
+log "saved $wav ($(du -h "$wav" | cut -f1))"
 $audio_only && { echo "$wav"; exit 0; }
 
 text="$(curl -fsS https://api.groq.com/openai/v1/audio/transcriptions \
