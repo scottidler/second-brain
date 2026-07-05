@@ -17,6 +17,9 @@ summary: "1-2 sentence summary of THIS CHUNK"
 claims:
   - text: "single sentence stating one assertion"
     anchor: "HH:MM:SS"
+    kind: fact
+    who: null
+    quote: null
 tags: []
 links:
   - url: "https://..."
@@ -29,13 +32,25 @@ links:
 - `summary`: 1-2 sentences describing what is discussed in THIS CHUNK
   specifically. A later reduce step combines chunk summaries into the
   full-video summary; don't try to summarize the whole video.
-- `claims`: maximum 5 per chunk. Single sentences stating assertions or
-  recommendations the speaker makes IN THIS CHUNK.
+- `claims`: maximum 5 per chunk. Single sentences stating assertions,
+  positions, or recommendations the speaker makes IN THIS CHUNK. Capture
+  the speaker's own arguments as `position` claims, attributed via
+  `who` - don't drop them as opinion.
   - `text`: the claim itself.
   - `anchor`: the `HH:MM:SS` timestamp at which the claim is stated.
     Copy verbatim from the timestamp prefixing the relevant transcript
     line. Use the timestamp where the claim BEGINS. Do not invent
     timestamps. If a line has no timestamp, set `anchor: null`.
+  - `kind`: one of `fact`, `position`, `recommendation`, `number`.
+    Default `fact`. Use `position` for the speaker's stance in THIS
+    CHUNK, `recommendation` for an actionable suggestion, `number` for a
+    standout quantitative datum.
+  - `who`: attribution for `position` claims - the speaker's name if
+    known, otherwise `"the speaker"`. `null` for unattributed facts.
+  - `quote`: OPTIONAL short verbatim quote (<=200 characters) copied
+    exactly from this chunk's transcript at the claim's anchor - do not
+    invent or paraphrase. `null` if none captures it cleanly, or it
+    would exceed 200 characters.
 - `tags`: propose up to 7 lowercase candidate tags describing THIS
   CHUNK's subject matter. Hyphenate multi-word tags. A later reduce
   step (and a downstream canonical-vocabulary filter) merges and caps

@@ -19,6 +19,9 @@ summary: "2-4 sentence prose summary"
 claims:
   - text: "single sentence stating one claim, argument, or observation"
     anchor: null
+    kind: fact
+    who: null
+    quote: null
 tags: []
 links:
   - url: "https://..."
@@ -32,19 +35,35 @@ post-count: 0
 - Output ONLY valid YAML matching the schema above. No leading prose, no
   closing prose, no Markdown code fences. The YAML body is parsed
   directly by a downstream consumer.
-- `summary`: 2-4 sentences. State what the original poster is arguing or
-  asking, and how the thread evolves through replies (does the OP win
-  the argument, get pushed back on, or pivot?). Do not state what you
-  think; report what the thread says.
-- `claims`: maximum 8. Each is a single sentence stating one distinct
-  claim, argument, observation, or notable counterpoint from the thread.
-  Order matters: lead with the original post's main claim, then add
-  notable replies that change or sharpen the picture.
+- `summary`: 2-4 sentences. Lead with the original poster's thesis or
+  argument and the strongest takeaway from how the thread evolves (does
+  the OP win the argument, get pushed back on, or pivot?). Do not state
+  what you think; report what the thread says.
+- `claims`: maximum 10. Each is a single sentence stating one distinct
+  claim, position, argument, observation, or notable counterpoint from
+  the thread. Order matters: lead with the original post's main claim
+  or position, then add notable replies that change or sharpen the
+  picture. Capture the OP's (and repliers') stances as `position`
+  claims, attributed via `who` - the thread's arguments are the value,
+  not noise.
   - `text`: the claim itself.
   - `anchor`: leave `null` unless the source markdown carries a stable
     in-thread identifier (e.g. an X status ID, a Reddit comment id like
     `t1_abc123`, an HN item id). If you cannot extract one cleanly,
     leave it `null`. Do not fabricate IDs.
+  - `kind`: one of `fact`, `position`, `recommendation`, `number`.
+    Default `fact`. Use `position` for a stance or argument advanced by
+    the OP or a replier, `recommendation` for an actionable suggestion,
+    `number` for a standout quantitative datum.
+  - `who`: attribution - the poster's handle or display name as it
+    appears in the transcript (e.g. `@simonw`, `u/spez`, `pg`). `null`
+    when the claim is an unattributed fact or the source doesn't
+    surface authorship cleanly.
+  - `quote`: OPTIONAL short verbatim quote (<=200 characters) copied
+    exactly from the post/comment text supporting the claim - do not
+    paraphrase. Especially valuable for `position` claims. `null` if no
+    clean single-post quote captures it, or it would exceed 200
+    characters.
 - `tags`: propose up to 7 lowercase candidate tags describing the
   thread's subject matter (e.g. `rust`, `distributed-systems`).
   Hyphenate multi-word tags. A downstream canonical-vocabulary filter

@@ -16,6 +16,9 @@ summary: "2-3 sentence prose summary"
 claims:
   - text: "single sentence stating one capability or design choice"
     anchor: null
+    kind: fact
+    who: null
+    quote: null
 tags: []
 links:
   - url: "https://..."
@@ -28,16 +31,31 @@ install: null
 - Output ONLY valid YAML matching the schema above. No leading prose, no
   closing prose, no Markdown code fences. The YAML body is parsed
   directly by a downstream consumer.
-- `summary`: 2-3 sentences. State what the project does and who it is
-  for. Lead with the project's purpose, not its star count or popularity.
-  Do not state what you think about it.
-- `claims`: maximum 5. Each is a single sentence stating one distinct
-  capability, design choice, or operational requirement the README
-  documents. Drop marketing language; retain technical specifics
-  (e.g., "uses SQLite for persistence", "requires Python 3.11+").
+- `summary`: 2-3 sentences. State the project's core thesis - what it
+  does and the single strongest reason to use it - first; lead with
+  purpose, not star count or popularity. Do not state what you think
+  about it.
+- `claims`: maximum 10. Each is a single sentence stating one distinct
+  capability, design choice, operational requirement, or maintainer
+  rationale the README documents. Drop marketing language; retain
+  technical specifics (e.g., "uses SQLite for persistence", "requires
+  Python 3.11+") and the maintainers' own design arguments, captured
+  attributed as `position` claims rather than dropped.
   - `text`: the claim itself.
   - `anchor`: leave `null` for repos. Anchors only apply to videos
     (timestamps) and threads (post IDs).
+  - `kind`: one of `fact`, `position`, `recommendation`, `number`.
+    Default `fact` for a plain capability/requirement. Use `position`
+    for a design rationale or tradeoff the README argues for (e.g. "why
+    this project chose X over Y"), `recommendation` for a documented
+    best-practice/usage suggestion, `number` for a standout quantitative
+    datum (e.g. a benchmark figure).
+  - `who`: attribution for `position` claims - `"the maintainers"` or
+    `"the README"` when no individual is named. `null` for unattributed
+    facts.
+  - `quote`: OPTIONAL short verbatim quote (<=200 characters) copied
+    exactly from the README supporting the claim. `null` if no clean
+    single quote captures it, or it would exceed 200 characters.
 - `tags`: propose up to 7 lowercase candidate tags describing the
   project's subject matter (e.g. `rust`, `cli-tool`). Hyphenate
   multi-word tags. A downstream canonical-vocabulary filter gates and

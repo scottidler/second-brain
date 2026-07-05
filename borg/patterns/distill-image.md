@@ -24,6 +24,9 @@ summary: "2-3 sentence prose summary"
 claims:
   - text: "single sentence stating one observation or claim"
     anchor: null
+    kind: fact
+    who: null
+    quote: null
 tags: []
 links:
   - url: "https://..."
@@ -35,19 +38,33 @@ links:
 - Output ONLY valid YAML matching the schema above. No leading prose, no
   closing prose, no Markdown code fences. The YAML body is parsed
   directly by a downstream consumer.
-- `summary`: 2-3 sentences. State what the image shows and what its
-  substantive content is. Synthesize across both the vision description
-  and the OCR text; do not just repeat one section. If the OCR text is
-  long-form prose (a screenshot of an article paragraph), summarize the
-  argument. If it is short (a tweet, a slogan, a code snippet), describe
-  the artifact and its content.
-- `claims`: maximum 5. Each is a single sentence stating one distinct
-  observation, fact, or assertion the image conveys. Drop visual filler
-  ("the image is colorful"); retain substantive content (what a quote
-  says, what a chart's axis labels are, what a code snippet does).
+- `summary`: 2-3 sentences. Lead with the image's substantive thesis or
+  strongest takeaway (what a quote, chart, or slide argues or shows),
+  then the rest of its content. Synthesize across both the vision
+  description and the OCR text; do not just repeat one section. If the
+  OCR text is long-form prose (a screenshot of an article paragraph),
+  summarize the argument. If it is short (a tweet, a slogan, a code
+  snippet), describe the artifact and its content.
+- `claims`: maximum 10. Each is a single sentence stating one distinct
+  observation, fact, position, or assertion the image conveys. Drop
+  visual filler ("the image is colorful"); retain substantive content
+  (what a quote says, what a chart's axis labels are, what a code
+  snippet does, what stance a screenshotted post or slide argues).
   - `text`: the claim itself.
   - `anchor`: leave `null` for images. Anchors only apply to videos
     (timestamps) and threads (post IDs).
+  - `kind`: one of `fact`, `position`, `recommendation`, `number`.
+    Default `fact`. Use `position` when the image content (a
+    screenshotted post, quote, or slide) argues a stance, attributed via
+    `who`. Use `recommendation` for an actionable suggestion the image
+    conveys, `number` for a standout quantitative datum (a chart value,
+    a stat on a slide).
+  - `who`: attribution for `position` claims - the screenshotted
+    author/handle if the OCR text surfaces one, otherwise `null`.
+  - `quote`: OPTIONAL short verbatim quote (<=200 characters) copied
+    exactly from the OCR text supporting the claim - do not paraphrase.
+    Especially valuable for `position` claims. `null` if no clean quote
+    captures it, or it would exceed 200 characters.
 - `tags`: propose up to 7 lowercase candidate tags describing the
   image's subject matter (e.g. `rust`, `hardware`). Hyphenate
   multi-word tags. A downstream canonical-vocabulary filter gates and

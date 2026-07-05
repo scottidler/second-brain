@@ -16,6 +16,9 @@ summary: "3-4 sentence prose summary"
 claims:
   - text: "single sentence stating one assertion"
     anchor: "HH:MM:SS"
+    kind: fact
+    who: null
+    quote: null
 tags: []
 links:
   - url: "https://..."
@@ -27,17 +30,32 @@ links:
 - Output ONLY valid YAML matching the schema above. No leading prose, no
   closing prose, no Markdown code fences. The YAML body is parsed
   directly by a downstream consumer.
-- `summary`: 3-4 sentences. State what the video covers and who it is
-  for. Lead with the topic, not your impressions.
-- `claims`: maximum 10. Each is a single sentence stating one assertion
-  or recommendation the speaker makes. Drop filler and aside; retain
-  technical specifics, recommendations, and key conclusions.
+- `summary`: 3-4 sentences. Lead with the video's central thesis or the
+  speaker's strongest takeaway, then cover the remaining topics. Report
+  the speaker's own thesis, not your impressions.
+- `claims`: maximum 10. Each is a single sentence stating one assertion,
+  position, or recommendation the speaker makes. Drop filler and aside;
+  retain technical specifics, recommendations, key conclusions, and the
+  speaker's own arguments - captured attributed as `position` claims,
+  not dropped as opinion.
   - `text`: the claim itself.
   - `anchor`: the `HH:MM:SS` timestamp at which the claim is stated.
     Copy verbatim from the timestamp prefixing the relevant transcript
     line. Use the timestamp where the claim BEGINS, not where it ends.
     Do not invent or interpolate timestamps. If the transcript has no
     timestamps, set `anchor: null`.
+  - `kind`: one of `fact`, `position`, `recommendation`, `number`.
+    Default `fact`. Use `position` for the speaker's stance or argument
+    (e.g. "The speaker argues that..."), `recommendation` for an
+    actionable suggestion, `number` for a standout quantitative datum.
+  - `who`: attribution for `position` claims - the speaker's name or
+    channel if known, otherwise `"the speaker"`. `null` for unattributed
+    facts.
+  - `quote`: OPTIONAL short verbatim quote (<=200 characters) copied
+    exactly from the transcript line(s) at the claim's anchor - do not
+    invent or paraphrase. Especially valuable for `position` claims.
+    `null` if no clean single-line quote captures it, or it would
+    exceed 200 characters.
 - `tags`: propose up to 7 lowercase candidate tags describing the
   video's subject matter (e.g. `rust`, `distributed-systems`).
   Hyphenate multi-word tags. A downstream canonical-vocabulary filter
