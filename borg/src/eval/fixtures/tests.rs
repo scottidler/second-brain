@@ -65,10 +65,12 @@ fn judge_note_text_renders_summary_and_anchored_claims() {
             Claim {
                 text: "anchored claim".to_string(),
                 anchor: Some("00:14".to_string()),
+                ..Default::default()
             },
             Claim {
                 text: "bare claim".to_string(),
                 anchor: None,
+                ..Default::default()
             },
         ],
         ..Default::default()

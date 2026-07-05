@@ -9,24 +9,44 @@ use vault::distilled::{Distilled, DistilledMeta, ValidationMeta};
 
 /// Maximum summary length before sentence-boundary truncation.
 pub const MAX_SUMMARY_CHARS: usize = 2000;
-/// Hard cap on the number of claims any distiller may publish.
-pub const MAX_CLAIMS: usize = 10;
 /// Hard cap on tags. Canonical-tag filtering happens upstream.
 pub const MAX_TAGS: usize = 7;
 
+/// Base claim budget for a single-call (unchunked) distillation.
+const CLAIMS_BASE: usize = 10;
+/// Additional claims allowed per chunk beyond the first.
+const CLAIMS_PER_CHUNK: usize = 2;
+/// Hard ceiling on the claim budget regardless of chunk count. 24 narrow
+/// claims already risks exceeding bge-small's 512-token window at embed time.
+const CLAIMS_CEILING: usize = 24;
+
+/// Size-aware claim budget: base 10, +2 per chunk beyond the first, hard
+/// ceiling 24. Single-call kinds pass `chunk_count = 1` (cap stays 10);
+/// chunked kinds (video / voicenote map-reduce) pass their real chunk count so
+/// a long source keeps proportionally more claims. Replaces the former flat
+/// `MAX_CLAIMS` constant.
+pub fn max_claims(chunk_count: usize) -> usize {
+    let extra = chunk_count.saturating_sub(1) * CLAIMS_PER_CHUNK;
+    (CLAIMS_BASE + extra).min(CLAIMS_CEILING)
+}
+
 /// Apply bounds and per-kind anchor validation to a freshly parsed Distilled.
+///
+/// `max_claims` is the claim cap the caller computed for this distillation
+/// (via [`max_claims`] with the appropriate chunk count) — `enforce_bounds`
+/// cannot know the chunk count itself.
 ///
 /// Mutates the payload in place and records truncation tags into
 /// `meta.validation`. Returns the mutated payload for chaining.
-pub fn enforce_bounds(mut distilled: Distilled) -> Distilled {
-    if distilled.claims.len() > MAX_CLAIMS {
+pub fn enforce_bounds(mut distilled: Distilled, max_claims: usize) -> Distilled {
+    if distilled.claims.len() > max_claims {
         let original = distilled.claims.len();
-        distilled.claims.truncate(MAX_CLAIMS);
+        distilled.claims.truncate(max_claims);
         distilled
             .meta
             .validation
             .bounds_truncations
-            .push(format!("claims:{original}>{MAX_CLAIMS}"));
+            .push(format!("claims:{original}>{max_claims}"));
     }
     if distilled.tags.len() > MAX_TAGS {
         let original = distilled.tags.len();

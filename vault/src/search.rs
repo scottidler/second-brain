@@ -5,7 +5,7 @@
 
 use crate::config::ScanConfig;
 use crate::detail;
-use crate::distilled::Claim;
+use crate::distilled::{Claim, ClaimKind};
 use crate::note::{Note, scan_vault};
 use crate::schema::{Domain, NoteType, Origin, Status};
 use chrono;
@@ -180,11 +180,17 @@ pub fn parse_body_summary(body: &str) -> Option<String> {
 
 /// Parse the `## Claims` section out of a published note body.
 ///
-/// Each bulleted line becomes one `Claim`; a trailing `[anchor]` marker is
-/// extracted into `Claim.anchor`. Returns an empty Vec when no `## Claims`
-/// section is present.
+/// Each bulleted line becomes one `Claim`. The renderer decorates a claim as
+/// `- **kind** (who): text [anchor]` with an optional indented `  > "quote"`
+/// continuation line; this parser strips every piece of that decoration so the
+/// recovered `Claim.text` is the clean claim sentence the FTS index stores,
+/// while the kind / who / quote / anchor fields are recovered for round-trip.
+///
+/// The `fact` kind and an absent `who` produce no prefix (the legacy shape
+/// `- text [anchor]`), so pre-Phase-3 notes parse exactly as before. Returns an
+/// empty Vec when no `## Claims` section is present.
 pub fn parse_body_claims(body: &str) -> Vec<Claim> {
-    let mut claims = Vec::new();
+    let mut claims: Vec<Claim> = Vec::new();
     let mut in_claims = false;
     for line in body.lines() {
         if line.trim() == "## Claims" {
@@ -198,6 +204,20 @@ pub fn parse_body_claims(body: &str) -> Vec<Claim> {
             break;
         }
         let trimmed = line.trim_start();
+
+        // A `> "..."` continuation line carries the verbatim quote for the
+        // most recent claim bullet. Strip the blockquote marker and the
+        // surrounding double quotes for the recovered `quote` field.
+        if let Some(rest) = trimmed.strip_prefix("> ") {
+            if let Some(last) = claims.last_mut() {
+                let quote = rest.trim().trim_matches('"').trim();
+                if !quote.is_empty() {
+                    last.quote = Some(quote.to_string());
+                }
+            }
+            continue;
+        }
+
         let bullet = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* "));
         let Some(content) = bullet else {
             continue;
@@ -206,13 +226,69 @@ pub fn parse_body_claims(body: &str) -> Vec<Claim> {
         if content.is_empty() {
             continue;
         }
-        let (text, anchor) = split_trailing_anchor(content);
+        // Peel decoration in render order (reverse): trailing [anchor], then
+        // the leading `**kind**` / `(who)` prefix.
+        let (rest, anchor) = split_trailing_anchor(content);
+        let (kind, rest) = split_leading_kind(rest);
+        let (who, text) = split_leading_who(rest);
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
         claims.push(Claim {
             text: text.to_string(),
             anchor,
+            kind,
+            who,
+            quote: None,
         });
     }
     claims
+}
+
+/// Strip a leading `**kind**` decoration when `content` begins with a bold
+/// token that is a known [`ClaimKind`] followed by ` ` / `(` / `:`. An unknown
+/// bold token is left untouched (returns `Fact` and the original content) so a
+/// legacy claim that happens to start with bold text is never misparsed.
+fn split_leading_kind(content: &str) -> (ClaimKind, &str) {
+    let Some(after_open) = content.strip_prefix("**") else {
+        return (ClaimKind::Fact, content);
+    };
+    let Some(close) = after_open.find("**") else {
+        return (ClaimKind::Fact, content);
+    };
+    let word = &after_open[..close];
+    let Some(kind) = ClaimKind::parse_known(word) else {
+        return (ClaimKind::Fact, content);
+    };
+    let rest = after_open[close + 2..].trim_start();
+    // Drop the `: ` separator only when it directly follows the kind prefix
+    // and there is no `(who)` group (which owns the separator instead).
+    let rest = rest.strip_prefix(':').map(str::trim_start).unwrap_or(rest);
+    (kind, rest)
+}
+
+/// Strip a leading `(who)` decoration followed by a `: ` separator. Returns the
+/// attribution and the remaining claim text. Only a `(...)` group at the very
+/// start immediately followed by `:` is treated as attribution, so mid-text
+/// parentheses are never mistaken for a who-field.
+fn split_leading_who(content: &str) -> (Option<String>, &str) {
+    let Some(after_open) = content.strip_prefix('(') else {
+        return (None, content);
+    };
+    let Some(close) = after_open.find(')') else {
+        return (None, content);
+    };
+    let after_paren = after_open[close + 1..].trim_start();
+    let Some(text) = after_paren.strip_prefix(':') else {
+        // A leading `(...)` that is not a `(who):` prefix is real claim text.
+        return (None, content);
+    };
+    let who = after_open[..close].trim();
+    if who.is_empty() {
+        return (None, content);
+    }
+    (Some(who.to_string()), text.trim_start())
 }
 
 /// Split a bulleted claim line into its text and an optional trailing

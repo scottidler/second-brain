@@ -3,6 +3,7 @@
 //! structs. Consolidated in Phase 9 from six near-identical copies.
 
 use serde::{Deserialize, Serialize};
+use vault::distilled::{Claim, ClaimKind};
 
 /// ~4 chars per token (English-prose rule of thumb); good enough for budget
 /// reporting.
@@ -37,11 +38,36 @@ pub fn strip_fences(raw: &str) -> &str {
     }
 }
 
+/// The YAML leaf mirroring `vault::distilled::Claim` as a distiller pattern
+/// emits it. All Phase 3 fields are serde-defaulted, so a pattern that omits
+/// `kind` / `who` / `quote` (every pre-Phase-4 pattern) parses unchanged and
+/// the forward-compat `ClaimKind` shim absorbs any drifting `kind:` value.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PatternClaim {
     pub text: String,
     #[serde(default)]
     pub anchor: Option<String>,
+    #[serde(default)]
+    pub kind: ClaimKind,
+    #[serde(default)]
+    pub who: Option<String>,
+    #[serde(default)]
+    pub quote: Option<String>,
+}
+
+impl PatternClaim {
+    /// Convert a parsed pattern claim into the canonical `Claim`, trimming the
+    /// text and dropping empty optional decorations. Empty-text filtering is
+    /// the caller's responsibility (the per-kind distillers already do it).
+    pub fn into_claim(self) -> Claim {
+        Claim {
+            text: self.text.trim().to_string(),
+            anchor: self.anchor.filter(|s| !s.is_empty()),
+            kind: self.kind,
+            who: self.who.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            quote: self.quote.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

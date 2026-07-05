@@ -54,8 +54,80 @@ pub struct Distilled {
     pub transcript: Option<String>,
 }
 
+/// The epistemic kind of a claim. Governs render decoration (a `**kind**`
+/// prefix for every kind except `Fact`) and, downstream, cortex's
+/// entity/triple extraction weighting.
+///
+/// This is the single source of truth for the claim vocabulary — consumers
+/// import it, they never re-string the values. New values are added here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaimKind {
+    /// A factual assertion. The default, so legacy `distilled.yml` artifacts
+    /// (no `kind:` field) and fact claims render with the exact pre-Phase-3
+    /// visual shape (no `**kind**` prefix).
+    #[default]
+    Fact,
+    /// An opinion / stance / argument the source advances. Captured attributed
+    /// (see `Claim.who`) rather than dropped.
+    Position,
+    /// An actionable suggestion.
+    Recommendation,
+    /// A quantitative datum.
+    Number,
+}
+
+impl ClaimKind {
+    /// Canonical lowercase string form. Matches the serde representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fact => "fact",
+            Self::Position => "position",
+            Self::Recommendation => "recommendation",
+            Self::Number => "number",
+        }
+    }
+
+    /// Parse a known kind string, case-insensitively. Returns `None` for an
+    /// unknown value so callers (e.g. the markdown parser) can decline to
+    /// strip a bold token that is not actually a claim-kind decoration. The
+    /// deserialize path, by contrast, maps unknown values to `Fact` with a
+    /// WARN — see the `Deserialize` impl.
+    pub fn parse_known(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "fact" => Some(Self::Fact),
+            "position" => Some(Self::Position),
+            "recommendation" => Some(Self::Recommendation),
+            "number" => Some(Self::Number),
+            _ => None,
+        }
+    }
+}
+
+/// Forward-compatible deserialization (panel condition): an unknown `kind:`
+/// string from a drifting LLM must NOT hard-fail the parse of the whole
+/// `Distilled`. One bad enum value would otherwise demote an entire
+/// distillation to the `yaml-parse-error` fallback path. Unknown values map to
+/// `Fact` with a WARN so the datum survives (as a plain fact) and the operator
+/// still sees the drift in the logs.
+impl<'de> Deserialize<'de> for ClaimKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match Self::parse_known(&raw) {
+            Some(kind) => kind,
+            None => {
+                log::warn!("ClaimKind::deserialize: unknown claim kind {raw:?}; defaulting to fact");
+                Self::Fact
+            }
+        })
+    }
+}
+
 /// One claim extracted from the source.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Claim {
     /// The claim text. Single sentence preferred; multi-sentence allowed.
@@ -66,6 +138,22 @@ pub struct Claim {
     /// threads, a tweet ID. None when no precise anchor is available.
     #[serde(default)]
     pub anchor: Option<String>,
+
+    /// The epistemic kind of the claim. `#[serde(default)]` (via
+    /// `ClaimKind::default() == Fact`) keeps legacy `distilled.yml` artifacts
+    /// without the field deserializable and unchanged.
+    #[serde(default)]
+    pub kind: ClaimKind,
+
+    /// Attribution for positions / thread claims: "@simonw", "the author".
+    /// None when the source does not attribute the claim.
+    #[serde(default)]
+    pub who: Option<String>,
+
+    /// Short verbatim quote (≤200 chars) supporting the claim. Rendered as an
+    /// indented blockquote line beneath the claim bullet when present.
+    #[serde(default)]
+    pub quote: Option<String>,
 }
 
 /// An outbound link discovered in the source.

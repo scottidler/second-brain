@@ -1,6 +1,7 @@
 use super::*;
 use vault::distilled::{
-    Claim, Distilled, DistilledMeta, KindPayload, Link, RepoPayload, ThreadPayload, ValidationMeta, VideoPayload,
+    Claim, ClaimKind, Distilled, DistilledMeta, KindPayload, Link, RepoPayload, ThreadPayload, ValidationMeta,
+    VideoPayload,
 };
 
 fn base_meta(extractor: &str) -> DistilledMeta {
@@ -22,10 +23,12 @@ fn render_emits_managed_sections_in_canonical_order() {
             Claim {
                 text: "First claim.".to_string(),
                 anchor: None,
+                ..Default::default()
             },
             Claim {
                 text: "Second claim with anchor.".to_string(),
                 anchor: Some("12:34".to_string()),
+                ..Default::default()
             },
         ],
         tags: vec![],
@@ -272,10 +275,12 @@ fn render_round_trips_through_vault_body_parsers() {
             Claim {
                 text: "Alpha claim.".to_string(),
                 anchor: None,
+                ..Default::default()
             },
             Claim {
                 text: "Beta claim.".to_string(),
                 anchor: Some("00:42".to_string()),
+                ..Default::default()
             },
         ],
         tags: Vec::new(),
@@ -295,6 +300,119 @@ fn render_round_trips_through_vault_body_parsers() {
     assert!(parsed_claims[0].anchor.is_none());
     assert_eq!(parsed_claims[1].text, "Beta claim.");
     assert_eq!(parsed_claims[1].anchor.as_deref(), Some("00:42"));
+}
+
+#[test]
+fn render_fact_claim_with_no_who_or_quote_is_byte_identical_to_legacy() {
+    // Regression guard: the default (fact, no who, no quote) claim must render
+    // exactly as it did pre-Phase-3 — no `**kind**` prefix, no `: ` separator.
+    let distilled = Distilled {
+        summary: "s".to_string(),
+        claims: vec![
+            Claim {
+                text: "A plain fact.".to_string(),
+                anchor: None,
+                ..Default::default()
+            },
+            Claim {
+                text: "A fact with an anchor.".to_string(),
+                anchor: Some("12:34".to_string()),
+                ..Default::default()
+            },
+        ],
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: None,
+        meta: base_meta("distill-idea-v1"),
+        transcript: None,
+    };
+    let body = render(&distilled).body_markdown;
+    assert!(body.contains("- A plain fact.\n"), "legacy fact shape changed: {body}");
+    assert!(body.contains("- A fact with an anchor. [12:34]\n"));
+    assert!(!body.contains("**fact**"), "fact kind must never render a prefix");
+}
+
+#[test]
+fn render_decorates_kind_who_and_quote() {
+    let distilled = Distilled {
+        summary: "s".to_string(),
+        claims: vec![Claim {
+            text: "Orchestration beats autonomy for coding agents.".to_string(),
+            anchor: Some("00:14:30".to_string()),
+            kind: ClaimKind::Position,
+            who: Some("@simonw".to_string()),
+            quote: Some("the agents don't need to be smart, the harness does".to_string()),
+        }],
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: None,
+        meta: base_meta("distill-video-v1"),
+        transcript: None,
+    };
+    let body = render(&distilled).body_markdown;
+    assert!(
+        body.contains("- **position** (@simonw): Orchestration beats autonomy for coding agents. [00:14:30]\n"),
+        "decorated bullet missing: {body}"
+    );
+    assert!(
+        body.contains("  > \"the agents don't need to be smart, the harness does\"\n"),
+        "quote blockquote missing: {body}"
+    );
+}
+
+#[test]
+fn render_omits_who_parens_when_absent() {
+    let distilled = Distilled {
+        summary: "s".to_string(),
+        claims: vec![Claim {
+            text: "You should pin the model version.".to_string(),
+            anchor: None,
+            kind: ClaimKind::Recommendation,
+            who: None,
+            quote: None,
+        }],
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: None,
+        meta: base_meta("distill-article-v1"),
+        transcript: None,
+    };
+    let body = render(&distilled).body_markdown;
+    assert!(
+        body.contains("- **recommendation**: You should pin the model version.\n"),
+        "recommendation-only decoration wrong: {body}"
+    );
+    assert!(!body.contains("()"), "empty who parens must not render");
+}
+
+#[test]
+fn render_fully_decorated_claim_round_trips_through_parse_body_claims() {
+    // Success criterion: a rendered claim with all fields present parses back
+    // via parse_body_claims and yields the claim text (plus the decoration).
+    let distilled = Distilled {
+        summary: "Round-trip.".to_string(),
+        claims: vec![Claim {
+            text: "Orchestration beats autonomy.".to_string(),
+            anchor: Some("00:14:30".to_string()),
+            kind: ClaimKind::Position,
+            who: Some("@simonw".to_string()),
+            quote: Some("the harness does the thinking".to_string()),
+        }],
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: None,
+        meta: base_meta("distill-video-v1"),
+        transcript: None,
+    };
+    let body = render(&distilled).body_markdown;
+    let parsed = vault::search::parse_body_claims(&body);
+    assert_eq!(parsed.len(), 1);
+    let c = &parsed[0];
+    assert_eq!(c.text, "Orchestration beats autonomy.");
+    assert_eq!(c.anchor.as_deref(), Some("00:14:30"));
+    assert_eq!(c.kind, ClaimKind::Position);
+    assert_eq!(c.who.as_deref(), Some("@simonw"));
+    assert_eq!(c.quote.as_deref(), Some("the harness does the thinking"));
 }
 
 #[test]

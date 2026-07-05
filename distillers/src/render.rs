@@ -5,7 +5,7 @@
 //! `index_vault` later parses these sections back into the FTS5 index.
 
 use std::collections::BTreeMap;
-use vault::distilled::{Claim, Distilled, KindPayload};
+use vault::distilled::{Claim, ClaimKind, Distilled, KindPayload};
 
 /// Output of the renderer. The caller (Stage 3) is responsible for splicing
 /// `body_markdown` into the published note's body and merging
@@ -149,6 +149,27 @@ fn push_claims(body: &mut String, claims: &[Claim]) {
     body.push_str("## Claims\n\n");
     for claim in claims {
         body.push_str("- ");
+        // Decoration prefix: `**kind**` (omitted for `fact`, the default, so a
+        // legacy fact claim with no who/quote renders byte-identically to the
+        // pre-Phase-3 shape) and `(who)` (omitted when absent), joined by a
+        // space and terminated by `: ` before the claim text.
+        let kind_part = (claim.kind != ClaimKind::Fact).then(|| format!("**{}**", claim.kind.as_str()));
+        let who_part = claim
+            .who
+            .as_deref()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .map(|w| format!("({w})"));
+        let prefix = match (kind_part, who_part) {
+            (Some(k), Some(w)) => format!("{k} {w}"),
+            (Some(k), None) => k,
+            (None, Some(w)) => w,
+            (None, None) => String::new(),
+        };
+        if !prefix.is_empty() {
+            body.push_str(&prefix);
+            body.push_str(": ");
+        }
         // Flatten any internal line breaks: a multi-line claim would otherwise
         // break the `- ` bullet into stray continuation lines.
         body.push_str(&crate::text::flatten_lines(claim.text.trim()));
@@ -160,6 +181,15 @@ fn push_claims(body: &mut String, claims: &[Claim]) {
             body.push(']');
         }
         body.push('\n');
+        // Optional verbatim quote as an indented blockquote line beneath the
+        // bullet. Flattened so a multi-line quote can't spill into stray lines.
+        if let Some(quote) = &claim.quote
+            && !quote.trim().is_empty()
+        {
+            body.push_str("  > \"");
+            body.push_str(&crate::text::flatten_lines(quote.trim()));
+            body.push_str("\"\n");
+        }
     }
     body.push('\n');
 }

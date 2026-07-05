@@ -19,10 +19,12 @@ fn roundtrip_article_distilled() {
             Claim {
                 text: "First claim.".to_string(),
                 anchor: None,
+                ..Default::default()
             },
             Claim {
                 text: "Second claim.".to_string(),
                 anchor: Some("section-three".to_string()),
+                ..Default::default()
             },
         ],
         tags: vec!["rust".to_string(), "cli".to_string()],
@@ -88,6 +90,7 @@ fn roundtrip_video_payload() {
         claims: vec![Claim {
             text: "Consensus is hard.".to_string(),
             anchor: Some("12:34".to_string()),
+            ..Default::default()
         }],
         tags: vec![],
         links: vec![],
@@ -224,4 +227,141 @@ meta:
         Some("fabric-timeout")
     );
     assert_eq!(decoded.meta.model, "timeout");
+}
+
+// ---- Phase 3: Claim schema back/forward compatibility ---------------------
+
+/// Old-shape claim: no `kind` / `who` / `quote` field, exactly as every
+/// pre-Phase-3 staged `distilled.yml` and `cortex summarize --backfill` input
+/// looks. Must deserialize to `kind=fact, who=None, quote=None`.
+const FIXTURE_OLD_SHAPE: &str = r#"
+summary: "A pre-Phase-3 article."
+claims:
+  - text: "The first claim."
+  - text: "The second claim."
+    anchor: "section-two"
+meta:
+  extractor: distill-article-v1
+  model: claude-sonnet-4-6
+  produced-at: "2026-05-16T14:03:22Z"
+"#;
+
+/// New-shape claim: all Phase 3 fields present.
+const FIXTURE_NEW_SHAPE: &str = r#"
+summary: "A Phase-3 article with rich claims."
+claims:
+  - text: "Orchestration beats autonomy for coding agents."
+    anchor: "00:14:30"
+    kind: position
+    who: "@simonw"
+    quote: "the agents don't need to be smart, the harness does"
+  - text: "Latency dropped 40% after the rewrite."
+    kind: number
+meta:
+  extractor: distill-video-v1
+  model: claude-sonnet-4-6
+  produced-at: "2026-05-16T14:03:22Z"
+"#;
+
+/// Unknown-kind claim: a drifting LLM emits a claim kind outside the
+/// vocabulary. The whole `Distilled` MUST still deserialize (not fall to the
+/// yaml-parse-error path); the offending claim degrades to `kind=fact`.
+const FIXTURE_UNKNOWN_KIND: &str = r#"
+summary: "A distillation with a drifting claim kind."
+claims:
+  - text: "This is speculative."
+    kind: speculation
+  - text: "This is fine."
+    kind: recommendation
+meta:
+  extractor: distill-article-v1
+  model: claude-sonnet-4-6
+  produced-at: "2026-05-16T14:03:22Z"
+"#;
+
+#[test]
+fn fixture_old_shape_claims_default_to_fact() {
+    let decoded: Distilled = serde_yaml::from_str(FIXTURE_OLD_SHAPE).expect("old-shape deserialize");
+    assert_eq!(decoded.claims.len(), 2);
+    for claim in &decoded.claims {
+        assert_eq!(claim.kind, ClaimKind::Fact, "old-shape claim must default to fact");
+        assert!(claim.who.is_none(), "old-shape claim must have who=None");
+        assert!(claim.quote.is_none(), "old-shape claim must have quote=None");
+    }
+    assert_eq!(decoded.claims[0].text, "The first claim.");
+    assert!(decoded.claims[0].anchor.is_none());
+    assert_eq!(decoded.claims[1].anchor.as_deref(), Some("section-two"));
+}
+
+#[test]
+fn fixture_new_shape_claims_carry_all_fields() {
+    let decoded: Distilled = serde_yaml::from_str(FIXTURE_NEW_SHAPE).expect("new-shape deserialize");
+    assert_eq!(decoded.claims.len(), 2);
+
+    let first = &decoded.claims[0];
+    assert_eq!(first.kind, ClaimKind::Position);
+    assert_eq!(first.who.as_deref(), Some("@simonw"));
+    assert_eq!(first.anchor.as_deref(), Some("00:14:30"));
+    assert_eq!(
+        first.quote.as_deref(),
+        Some("the agents don't need to be smart, the harness does")
+    );
+
+    let second = &decoded.claims[1];
+    assert_eq!(second.kind, ClaimKind::Number);
+    assert!(second.who.is_none());
+    assert!(second.quote.is_none());
+}
+
+#[test]
+fn fixture_unknown_kind_degrades_to_fact_without_failing_parse() {
+    // The whole payload deserializes (forward-compat shim); the unknown kind
+    // becomes fact, the known kind survives.
+    let decoded: Distilled = serde_yaml::from_str(FIXTURE_UNKNOWN_KIND).expect("unknown-kind deserialize");
+    assert_eq!(decoded.claims.len(), 2);
+    assert_eq!(
+        decoded.claims[0].kind,
+        ClaimKind::Fact,
+        "unknown kind must degrade to fact, not error"
+    );
+    assert_eq!(decoded.claims[1].kind, ClaimKind::Recommendation);
+}
+
+#[test]
+fn claim_kind_deserializes_unknown_value_to_fact() {
+    // Direct probe of the shim at the enum level.
+    let kind: ClaimKind = serde_yaml::from_str("nonsense-kind").expect("unknown kind deserialize");
+    assert_eq!(kind, ClaimKind::Fact);
+}
+
+#[test]
+fn claim_kind_deserialize_is_case_insensitive() {
+    let kind: ClaimKind = serde_yaml::from_str("POSITION").expect("uppercase kind deserialize");
+    assert_eq!(kind, ClaimKind::Position);
+}
+
+#[test]
+fn claim_kind_serializes_lowercase() {
+    assert_eq!(
+        serde_yaml::to_string(&ClaimKind::Position).expect("serialize").trim(),
+        "position"
+    );
+    assert_eq!(
+        serde_yaml::to_string(&ClaimKind::Fact).expect("serialize").trim(),
+        "fact"
+    );
+}
+
+#[test]
+fn claim_kind_roundtrips_all_known_values() {
+    for kind in [
+        ClaimKind::Fact,
+        ClaimKind::Position,
+        ClaimKind::Recommendation,
+        ClaimKind::Number,
+    ] {
+        let yaml = serde_yaml::to_string(&kind).expect("serialize");
+        let decoded: ClaimKind = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(decoded, kind);
+    }
 }

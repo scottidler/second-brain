@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use vault::distilled::{Claim, Distilled, DistilledMeta, KindPayload, Link, ThreadPayload, ValidationMeta};
 
 use crate::{
-    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled,
+    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled, max_claims,
     validate::MAX_SUMMARY_CHARS,
 };
 
@@ -136,10 +136,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for ThreadDistiller<F> {
             .claims
             .unwrap_or_default()
             .into_iter()
-            .map(|c| Claim {
-                text: c.text.trim().to_string(),
-                anchor: c.anchor.filter(|s| !s.is_empty()),
-            })
+            .map(|c| c.into_claim())
             .filter(|c| !c.text.is_empty())
             .collect();
         let tags: Vec<String> = parsed
@@ -202,7 +199,8 @@ impl<F: FabricCaller + Clone> DistillExtractor for ThreadDistiller<F> {
             },
         };
 
-        let mut bounded = enforce_bounds(distilled);
+        // Single-call kind: chunk_count = 1, so the cap stays 10.
+        let mut bounded = enforce_bounds(distilled, max_claims(1));
         debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
         bounded.tags.iter_mut().for_each(|t| *t = t.to_lowercase());
         Ok(attach_platform(bounded, platform, author, post_count))

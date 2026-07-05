@@ -11,7 +11,7 @@ use eyre::Result;
 use vault::distilled::{Claim, Distilled, DistilledMeta, Link, ValidationMeta};
 
 use crate::{
-    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled,
+    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled, max_claims,
     validate::MAX_SUMMARY_CHARS,
 };
 
@@ -121,10 +121,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
             .claims
             .unwrap_or_default()
             .into_iter()
-            .map(|c| Claim {
-                text: c.text.trim().to_string(),
-                anchor: c.anchor.filter(|s| !s.is_empty()),
-            })
+            .map(|c| c.into_claim())
             .filter(|c| !c.text.is_empty())
             .collect();
         let tags: Vec<String> = parsed
@@ -183,7 +180,8 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
             transcript: None,
         };
 
-        let mut bounded = enforce_bounds(distilled);
+        // Single-call kind: chunk_count = 1, so the cap stays 10.
+        let mut bounded = enforce_bounds(distilled, max_claims(1));
         // After bounds enforcement the summary may have lost its trailing
         // punctuation if the original was huge. Validation already records
         // the truncation tag; nothing more to do here. Keep the post-bounds

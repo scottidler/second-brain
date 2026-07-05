@@ -21,7 +21,7 @@ use futures::stream::{self, StreamExt};
 use vault::distilled::{Claim, Distilled, DistilledMeta, KindPayload, Link, ValidationMeta, VideoPayload};
 
 use crate::{
-    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled,
+    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled, max_claims,
     validate::MAX_SUMMARY_CHARS,
 };
 
@@ -123,7 +123,10 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
         // long ones routed through the map-reduce path.
         let transcript_owned = if transcript.trim().is_empty() { None } else { Some(transcript.to_string()) };
         distilled.transcript = transcript_owned.clone();
-        let mut bounded = enforce_bounds(distilled);
+        // Phase 3 preserves the flat cap (chunk_count = 1 → 10) for both the
+        // short and long paths; Phase 5 threads the real chunk count so the
+        // reduce step can select proportionally more claims from a long video.
+        let mut bounded = enforce_bounds(distilled, max_claims(1));
         debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
         bounded.tags.iter_mut().for_each(|t| *t = t.to_lowercase());
         attach_payload(&mut bounded, inputs.video_metadata);
@@ -246,14 +249,8 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
                 chunk_summaries.push(s.trim().to_string());
             }
             combined_claims.extend(parsed.claims.unwrap_or_default().into_iter().filter_map(|c| {
-                let text = c.text.trim().to_string();
-                if text.is_empty() {
-                    return None;
-                }
-                Some(Claim {
-                    text,
-                    anchor: c.anchor.filter(|s| !s.is_empty()),
-                })
+                let claim = c.into_claim();
+                (!claim.text.is_empty()).then_some(claim)
             }));
             combined_links.extend(parsed.links.unwrap_or_default().into_iter().filter_map(|l| {
                 let url = l.url.trim().to_string();
@@ -378,14 +375,8 @@ fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str
         .unwrap_or_default()
         .into_iter()
         .filter_map(|c| {
-            let text = c.text.trim().to_string();
-            if text.is_empty() {
-                return None;
-            }
-            Some(Claim {
-                text,
-                anchor: c.anchor.filter(|s| !s.is_empty()),
-            })
+            let claim = c.into_claim();
+            (!claim.text.is_empty()).then_some(claim)
         })
         .collect();
     let tags: Vec<String> = parsed

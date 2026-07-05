@@ -19,6 +19,7 @@ fn distilled(summary: &str, claims: &[(&str, Option<&str>)], fallback: Option<&s
             .map(|(t, a)| Claim {
                 text: t.to_string(),
                 anchor: a.map(|s| s.to_string()),
+                ..Default::default()
             })
             .collect(),
         meta: DistilledMeta {

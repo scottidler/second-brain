@@ -286,7 +286,7 @@ async fn truncates_excess_claims_via_enforce_bounds() {
         .await
         .expect("distill");
 
-    assert_eq!(distilled.claims.len(), crate::validate::MAX_CLAIMS);
+    assert_eq!(distilled.claims.len(), crate::validate::max_claims(1));
     assert!(
         distilled
             .meta

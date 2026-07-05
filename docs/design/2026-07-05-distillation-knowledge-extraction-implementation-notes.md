@@ -242,3 +242,84 @@ against its pre-edit text to confirm.
   measured by the distillation-quality judge at all (tags aren't a rubric
   axis). Worth flagging for whoever runs the operator step: watch `sb borg
   log` / vault tag distributions post-deploy, not `sb borg eval`.
+
+## Phase 3: Claim schema upgrade
+
+### Design decisions
+- `ClaimKind { Fact, Position, Recommendation, Number }` added to
+  `vault::distilled` — `vault/src/distilled.rs::ClaimKind` — schema-is-law: the
+  distillers and the markdown parser import it, they never re-string the
+  vocabulary. `Default = Fact` so `#[serde(default)]` on `Claim.kind` keeps
+  legacy `distilled.yml` artifacts (no `kind:`) deserializable and unchanged.
+- Forward-compat via a hand-written `impl Deserialize for ClaimKind`
+  (`vault/src/distilled.rs`) — an unknown `kind:` string maps to `Fact` with a
+  `log::warn!` instead of erroring, so one drifting enum value cannot demote a
+  whole `Distilled` to the `yaml-parse-error` fallback path. `#[serde(other)]`
+  was rejected because it cannot log. Serialize is derived
+  (`rename_all = "kebab-case"`, lowercase for these single-word variants).
+- `Claim` gained `kind`, `who`, `quote`, all `#[serde(default)]`, and now
+  derives `Default` — `vault/src/distilled.rs::Claim` — the `Default` derive lets
+  every existing construction site add `..Default::default()` (minimal churn)
+  and gives Phase 5's reduce path an ergonomic partial constructor.
+- `PatternClaim` mirrors the new `Claim` shape and gained
+  `PatternClaim::into_claim` — `distillers/src/parse.rs` — a single conversion
+  seam (trim text, drop empty optional decorations, carry kind/who/quote) that
+  replaced the six near-identical `.map(|c| Claim {..})` closures in the
+  per-kind distillers. `PatternClaim.kind: ClaimKind` means the forward-compat
+  shim fires while parsing live LLM output, not just staged YAML.
+- Render decoration — `distillers/src/render.rs::push_claims` — prefix is
+  `**kind**` (omitted for `Fact`) then `(who)` (omitted when absent), joined by
+  a space and followed by `: `; the quote renders as an indented
+  `  > "..."` continuation line. A `Fact` claim with no who/quote renders
+  byte-identically to the pre-Phase-3 shape (`- text [anchor]`), guarded by a
+  dedicated regression test.
+- `parse_body_claims` — `vault/src/search.rs` — now strips the decoration for
+  clean FTS text AND recovers kind/who/quote/anchor for a full round-trip.
+  Peels in reverse render order (trailing `[anchor]`, leading `**kind**`,
+  leading `(who):`) and attaches a following `> "..."` line to the prior claim.
+  An unknown bold token (`**Important**`) is left in the text via
+  `ClaimKind::parse_known` returning `None`, so a legacy claim that opens with
+  bold is never misparsed.
+- `max_claims(chunk_count)` replaced the flat `MAX_CLAIMS` const —
+  `distillers/src/validate.rs` — base 10, +2 per chunk beyond the first,
+  ceiling 24 (reached at 8 chunks). `enforce_bounds(distilled, max_claims)`
+  takes the cap as a parameter since it cannot know chunk count.
+
+### Deviations
+- Exact `Claim` field signature from the doc matches; additionally derived
+  `Default` on `Claim` (not shown in the doc's struct) — same effect, correct
+  seam: it is the low-churn way to satisfy `#[serde(default)]` semantics at
+  construction sites and needed by later phases. Documented here.
+- All six `enforce_bounds` callers (article, image, repo, thread, video,
+  voicenote) pass `max_claims(1)` in this phase, so the effective cap stays 10
+  everywhere — byte-identical to the old flat `MAX_CLAIMS = 10` behavior.
+  Video/voicenote are NOT single-call kinds, but threading their real chunk
+  count into the reduce step is explicitly Phase 5's job ("select up to
+  `max_claims(chunk_count)`"). Wiring it here would change behavior with no eval
+  gate in this phase. The two long-path call sites carry a comment pointing at
+  Phase 5.
+- Success-criterion fixtures are named inline YAML constants
+  (`FIXTURE_OLD_SHAPE` / `FIXTURE_NEW_SHAPE` / `FIXTURE_UNKNOWN_KIND` in
+  `vault/src/distilled/tests.rs`) rather than files under a fixtures dir. The
+  criterion's intent ("named ... fixtures, not a sampled staging dir") is about
+  determinism and explicit naming, which inline named constants satisfy; this
+  matches the crate's existing serde back-compat test style.
+
+### Tradeoffs
+- Centralized the six distiller claim-mapping closures into
+  `PatternClaim::into_claim` vs. expanding the three new fields inline at each
+  site — the helper is DRYer, gives Phase 5 one place to evolve the mapping,
+  and keeps the who/quote trimming consistent. Cost: one extra indirection.
+- Recovered kind/who/quote in `parse_body_claims` (full round-trip) rather than
+  only stripping decoration to clean text (the literal minimum the criterion
+  demands). The extra recovery is cheap, makes the render/parse contract
+  symmetric, and is asserted by the round-trip test.
+
+### Open questions
+- None. No consumer outside the `distillers` crate referenced `MAX_CLAIMS`
+  (grep-verified: all references were in `distillers/`), so removing it is
+  contained. The `who`-only fact prefix `(who): text` is a legal render shape;
+  if a legacy claim's text literally begins `(x): y` the parser will treat
+  `x` as `who` — an accepted, contract-consistent edge (the renderer only emits
+  that shape when `who` is set) that at worst trims a rare parenthetical from
+  FTS text.

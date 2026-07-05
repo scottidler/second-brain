@@ -480,6 +480,46 @@ fn parse_body_claims_does_not_extract_anchor_when_brackets_are_inline() {
 }
 
 #[test]
+fn parse_body_claims_strips_kind_who_and_quote_decoration() {
+    // Phase 3: FTS text must be the clean claim sentence, with the
+    // `**kind**` / `(who)` prefix, trailing `[anchor]`, and `  > "quote"`
+    // continuation line all peeled off — but recovered into the fields.
+    let body = concat!(
+        "## Claims\n",
+        "- **position** (@simonw): Orchestration beats autonomy. [00:14:30]\n",
+        "  > \"the harness does the thinking\"\n",
+        "\n## Links\n",
+    );
+    let claims = parse_body_claims(body);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].text, "Orchestration beats autonomy.");
+    assert_eq!(claims[0].anchor.as_deref(), Some("00:14:30"));
+    assert_eq!(claims[0].kind, crate::distilled::ClaimKind::Position);
+    assert_eq!(claims[0].who.as_deref(), Some("@simonw"));
+    assert_eq!(claims[0].quote.as_deref(), Some("the harness does the thinking"));
+}
+
+#[test]
+fn parse_body_claims_strips_kind_only_prefix() {
+    let body = "## Claims\n- **recommendation**: Pin the model version.\n";
+    let claims = parse_body_claims(body);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].text, "Pin the model version.");
+    assert!(claims[0].who.is_none());
+}
+
+#[test]
+fn parse_body_claims_leaves_unknown_bold_prefix_in_text() {
+    // A legacy claim that legitimately opens with bold text (not a claim kind)
+    // must NOT be stripped — the whole sentence stays as the FTS text.
+    let body = "## Claims\n- **Important** takeaway about caching.\n";
+    let claims = parse_body_claims(body);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].text, "**Important** takeaway about caching.");
+    assert_eq!(claims[0].kind, crate::distilled::ClaimKind::Fact);
+}
+
+#[test]
 fn index_one_insert_zeroes_signal_columns() {
     let index = SearchIndex::open_memory().expect("open");
     let note = make_test_note("inbox/new.md", "# T\n\n## Summary\n\nHello.\n");

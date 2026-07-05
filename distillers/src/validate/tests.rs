@@ -14,10 +14,12 @@ fn meta(extractor: &str) -> DistilledMeta {
 
 #[test]
 fn enforce_bounds_truncates_excess_claims() {
-    let claims = (0..MAX_CLAIMS + 3)
+    let cap = max_claims(1);
+    let claims = (0..cap + 3)
         .map(|i| Claim {
             text: format!("claim {i}"),
             anchor: None,
+            ..Default::default()
         })
         .collect();
     let distilled = Distilled {
@@ -30,8 +32,8 @@ fn enforce_bounds_truncates_excess_claims() {
         transcript: None,
     };
 
-    let bounded = enforce_bounds(distilled);
-    assert_eq!(bounded.claims.len(), MAX_CLAIMS);
+    let bounded = enforce_bounds(distilled, cap);
+    assert_eq!(bounded.claims.len(), cap);
     assert!(
         bounded
             .meta
@@ -55,7 +57,7 @@ fn enforce_bounds_truncates_excess_tags() {
         transcript: None,
     };
 
-    let bounded = enforce_bounds(distilled);
+    let bounded = enforce_bounds(distilled, max_claims(1));
     assert_eq!(bounded.tags.len(), MAX_TAGS);
     assert!(
         bounded
@@ -83,7 +85,7 @@ fn enforce_bounds_truncates_summary_at_sentence() {
         transcript: None,
     };
 
-    let bounded = enforce_bounds(distilled);
+    let bounded = enforce_bounds(distilled, max_claims(1));
     assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
     assert!(
         bounded.summary.ends_with('.'),
@@ -99,6 +101,7 @@ fn enforce_bounds_leaves_within_limit_payload_untouched() {
         claims: vec![Claim {
             text: "one".to_string(),
             anchor: None,
+            ..Default::default()
         }],
         tags: vec!["rust".to_string()],
         links: vec![Link {
@@ -110,11 +113,28 @@ fn enforce_bounds_leaves_within_limit_payload_untouched() {
         transcript: None,
     };
 
-    let bounded = enforce_bounds(distilled);
+    let bounded = enforce_bounds(distilled, max_claims(1));
     assert!(bounded.meta.validation.bounds_truncations.is_empty());
     assert_eq!(bounded.claims.len(), 1);
     assert_eq!(bounded.tags.len(), 1);
     assert_eq!(bounded.links.len(), 1);
+}
+
+#[test]
+fn max_claims_scales_with_chunk_count_and_ceilings_at_24() {
+    // Single-call kinds pass chunk_count = 1; cap stays 10 (preserves the old
+    // flat MAX_CLAIMS behavior).
+    assert_eq!(max_claims(1), 10);
+    // chunk_count = 0 is defensive: saturating_sub keeps it at the base.
+    assert_eq!(max_claims(0), 10);
+    // +2 per chunk beyond the first.
+    assert_eq!(max_claims(2), 12);
+    assert_eq!(max_claims(3), 14);
+    assert_eq!(max_claims(7), 22);
+    // Hard ceiling at 24 (reached at 8 chunks) and held beyond.
+    assert_eq!(max_claims(8), 24);
+    assert_eq!(max_claims(20), 24);
+    assert_eq!(max_claims(1000), 24);
 }
 
 #[test]
