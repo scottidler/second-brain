@@ -59,6 +59,14 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
         include_str!("../../../borg/patterns/distill-article.md"),
     ),
     (
+        "distill-article-chunk.md",
+        include_str!("../../../borg/patterns/distill-article-chunk.md"),
+    ),
+    (
+        "distill-article-reduce.md",
+        include_str!("../../../borg/patterns/distill-article-reduce.md"),
+    ),
+    (
         "distill-image.md",
         include_str!("../../../borg/patterns/distill-image.md"),
     ),
@@ -69,6 +77,14 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
     (
         "distill-thread.md",
         include_str!("../../../borg/patterns/distill-thread.md"),
+    ),
+    (
+        "distill-thread-chunk.md",
+        include_str!("../../../borg/patterns/distill-thread-chunk.md"),
+    ),
+    (
+        "distill-thread-reduce.md",
+        include_str!("../../../borg/patterns/distill-thread-reduce.md"),
     ),
     (
         "distill-video.md",

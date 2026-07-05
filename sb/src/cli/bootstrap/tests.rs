@@ -35,8 +35,8 @@ fn patterns_array_matches_source_tree() {
     // assertion catches it.
     assert_eq!(
         PATTERNS.len(),
-        17,
-        "expected 17 patterns; update PATTERNS in sb/src/cli/bootstrap.rs"
+        21,
+        "expected 21 patterns; update PATTERNS in sb/src/cli/bootstrap.rs"
     );
 }
 

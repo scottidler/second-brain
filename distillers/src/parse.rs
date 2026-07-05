@@ -161,6 +161,36 @@ pub fn select_reduce_claims(
     if selected.is_empty() { None } else { Some(selected) }
 }
 
+/// Thread long-path reduce input (Phase 6). Same two labeled sections as
+/// [`build_reduce_input`], PLUS a leading `## Thread Head` section carrying the
+/// verbatim transcript head. Thread metadata (the author handle and post
+/// structure) lives at the top of the rendered thread, so the thread reduce
+/// pattern reads `author`/`post-count` from this head — the mechanism that
+/// keeps `KindPayload::Thread` fields alive through the map-reduce path (a
+/// chunked thread's individual chunks otherwise never see the whole author
+/// line, and the single-call parse that used to extract it no longer runs).
+pub fn build_thread_reduce_input(head: &str, chunk_summaries: &[String], pool_claims: &[Claim]) -> String {
+    let base = build_reduce_input(chunk_summaries, pool_claims);
+    format!("## Thread Head\n\n{head}\n\n{base}")
+}
+
+/// Loud sub-threshold truncation signal (Phase 6). `vault::fabric::run_pattern`
+/// calls `truncate_input`, which silently cuts the tail of any single-call
+/// distiller input longer than `max_chars`, logging only a daemon-log WARN with
+/// no trace id (the LLM-free vault crate has none in scope). A distiller
+/// detects the same cut at its own boundary — where the source URL is in scope —
+/// and records this distinct `bounds_truncations` entry so the truncation is
+/// visible in the distillation metadata, not just a stray log line. Returns
+/// `None` when no cut would happen (`max_chars == 0` means "no limit", matching
+/// `truncate_input`'s own short-circuit).
+pub fn input_truncation_tag(char_count: usize, max_chars: usize) -> Option<String> {
+    if max_chars > 0 && char_count > max_chars {
+        Some(format!("input:{char_count}>{max_chars}"))
+    } else {
+        None
+    }
+}
+
 /// Normalize an anchor for pool matching: trim whitespace and strip a single
 /// pair of surrounding brackets so `[00:00:05]` and `00:00:05` compare equal.
 fn normalize_anchor(anchor: &str) -> String {

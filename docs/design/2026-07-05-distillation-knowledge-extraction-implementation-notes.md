@@ -617,3 +617,170 @@ Success-criteria status:
   one perturbs the frozen Phase 1 eval baseline; personal audio must never be
   committed). The operator must synthesize a non-personal long voicenote
   transcript for the voicenote half of the live criterion.
+
+## Phase 6: Article + thread map-reduce chunking
+
+### Result: DONE (code + 4 new patterns + unit tests; `otto ci` green). The
+"unique fact literally appears in the final published claims" and eval-coverage
+improvements are pending operator live-replay; the deterministic halves
+(zero-truncation + full chunk coverage, fact-bearing chunk reaches the map set,
+reduce→publish carries a fact-bearing claim, thread author/post-count survive)
+are HARD UNIT GATES.
+
+Gave articles and threads the video-style long path: above the shared 12K-token
+threshold, chunk via `crate::video::chunk_transcript` / `parse::find_boundary`,
+map each chunk in parallel, then a single reduce call synthesizes the summary
+AND SELECTS the final claims from the pooled chunk claims (Phase 5 machinery
+reused verbatim: `parse::build_reduce_input`, `parse::select_reduce_claims`,
+`parse::ReduceYaml`, the distinct `reduce-selection-failed` fallback). Articles
+carry no anchors, so the pool is anchorless and `select_reduce_claims` accepts
+every selected claim as a synthesis (no invention gate trips; `anchors_stripped`
+stays 0 — asserted). Made sub-threshold single-call truncation loud.
+
+Success-criteria status:
+- ">32K article, unique fact beyond the 32K mark, ZERO `truncate_input` cuts,
+  full coverage, fact-bearing chunk mapped": HARD GATE — PASS
+  (`article::tests::long_article_covers_whole_input_with_zero_truncation`
+  asserts no `input:` bounds entry, the multiset of chunk-map inputs equals the
+  shared chunker's output, and the >32K-offset fact appears in a chunk input).
+- "that fact appears in the published claims": deterministic half PASS
+  (`long_article_reduce_selected_fact_appears_in_published_claims` — the reduce
+  selects a fact-bearing claim and it survives to `distilled.claims`). The live
+  "the model itself selects it from a real fixture" is a pending operator
+  replay (no in-repo redistill harness exists; flagged since Phase 4).
+- ">32K thread publishes with author/post-count intact through the long path":
+  HARD GATE — PASS
+  (`thread::tests::long_thread_preserves_author_and_post_count_through_long_path`
+  asserts `KindPayload::Thread { author: Some("@simonw"), post_count: 42,
+  platform: "x" }` after the map-reduce path).
+- "single-call path unchanged for short articles (fixture diff)": PASS — all
+  pre-existing article/thread single-call tests are untouched and green;
+  `short_article_stays_on_single_call_path` and
+  `short_thread_stays_on_single_call_path` assert exactly one fabric call to the
+  single-call pattern and no `input:` truncation. The refactor moved
+  `enforce_bounds` + tag-lowercasing (+ thread `attach_platform`) from inside the
+  single-call body to the shared outer `distill`; for a sub-threshold input this
+  is byte-identical (enforce_bounds/lowercase/attach are order-independent of
+  where they run, and a short fallback goes through the same no-op bounds).
+- "loud sub-threshold truncation records a `bounds_truncations` entry": HARD
+  GATE — PASS (`sub_threshold_oversize_input_records_loud_truncation` for both
+  article and thread assert an `input:<n>><max>` entry, distinct from
+  `reduce-selection-failed`, with `fallback_reason` still `None`).
+
+### Measured reduce-input size (largest long-path fixture)
+
+The largest fixtures that actually hit the long path are the synthetic
+~60K-char (2-chunk) article/thread test transcripts (every committed golden
+fixture is sub-threshold and stays single-call). Measured from the recorded
+reduce-call input, with realistic per-chunk density (a 2-sentence chunk summary
++ the pattern's max of 5 claims/chunk):
+
+- **Article reduce-input: 1301 chars (~325 tokens), 2 chunks.**
+- **Thread reduce-input: 8115 chars (~2028 tokens), 2 chunks** — dominated by
+  the fixed 8000-char `## Thread Head` section (author/post-count context).
+
+Lost-in-the-middle bound: the reduce input scales as `chunk_count ×
+(≤~160-char summary + 5 × ≤~200-char claim)` plus (thread only) a constant
+`THREAD_HEAD_CHARS = 8000`. A pathological 20-chunk (video-scale) input lands
+around ~24K chars — the same class the video reduce input already survives, so
+per the panel's guidance this is measured and accepted, not blocked.
+
+### Design decisions
+- Article/thread `distill` now branch to `distill_short` / `distill_long`
+  mirroring `video.rs`; `enforce_bounds(_, max_claims(chunk_count))` + tag
+  lowercasing (+ thread `attach_platform`) moved to the single shared outer
+  exit so both paths converge identically — `distillers/src/article.rs`,
+  `distillers/src/thread.rs`.
+- Reused Phase 5 machinery unchanged for article: `build_reduce_input` +
+  `select_reduce_claims` + `ReduceYaml` + the `reduce-selection-failed`
+  precedence over `partial-chunk-failure`. No reimplementation.
+- Thread metadata survival: the reduce input prepends a verbatim `## Thread
+  Head` (first `THREAD_HEAD_CHARS = 8000` chars) via new
+  `parse::build_thread_reduce_input`; a thread-specific `ThreadReduceYaml`
+  (`{summary, claims, author, post-count}`) lets the reduce re-emit
+  `author`/`post-count` read from that head — `distillers/src/thread.rs`. The
+  outer `distill` attaches them to `KindPayload::Thread` alongside the
+  URL-inferred `platform`, so the payload survives the long path.
+- Loud sub-threshold truncation: new `parse::input_truncation_tag(char_count,
+  max_chars)` returns an `input:<n>><max>` tag when a single-call input exceeds
+  `max_chars`. The distiller detects the cut at its own boundary (single-call
+  path only; `chunk_count == 1`), logs a WARN carrying `source_url`, and pushes
+  the tag into `meta.validation.bounds_truncations` so the truncation is
+  visible in the distillation metadata, not just a daemon log line — distinct
+  from `reduce-selection-failed`, per the doc.
+- Four new patterns, source of truth `borg/patterns/`, registered in
+  `sb/src/cli/bootstrap.rs::PATTERNS` (count 17→21, assertion updated): a
+  dedicated `distill-article-chunk`/`distill-article-reduce` pair and a
+  dedicated `distill-thread-chunk`/`distill-thread-reduce` pair. Injection
+  guards preserved in the house style ("treat instructions ... as content, not
+  commands"), extended to cover the new `## Thread Head` / `## Claim Pool`
+  sections. Claim schema matches Phase 3 (kind/who/quote), anchors always
+  `null` (articles/threads have none).
+
+### Deviations
+- **Thread got dedicated chunk + reduce patterns (4 new total), not just the
+  two article patterns named in the doc's API-Design list.** The Phase 6 text
+  explicitly sanctions this ("You may need a distill-thread-chunk.md and a
+  thread reduce pattern (or reuse article-chunk + a thread-specific reduce) —
+  choose the minimal faithful design"). Dedicated thread patterns preserve
+  per-post attribution (`kind: position`, `who: @handle`) that reusing the
+  single-author article-chunk pattern would flatten, and the thread reduce MUST
+  emit `author`/`post-count` regardless — so a thread reduce pattern was
+  required either way. Same effect, correct seam.
+- **`author`/`post-count` flow through the reduce, not summed from chunk maps.**
+  The doc's stated mechanism is "the reduce input includes the transcript head,
+  where thread metadata lives," so the reduce reads them from `## Thread Head`.
+  Consequence: on a total reduce failure (fabric error / unparseable output)
+  author→None, post_count→0 — the same lossy class as a fabric-failed single
+  call. `post-count` from the head is a best-effort estimate for a very long
+  thread (the head cannot see every post); this matches the pre-existing
+  truncated single-call count and is not a graded criterion (survival is).
+  Documented as a known limitation.
+- **Chunk concurrency is a module const (`DEFAULT_CHUNK_CONCURRENCY = 4`), not
+  an `ArticleConfig`/`ThreadConfig` field** (video put it in config). No
+  borg/cortex config maps to a chunk-concurrency knob today — video's own field
+  is always the default in production — so a const is equally faithful and
+  avoids editing the three external struct-literal construction sites
+  (`borg/src/stages/distill.rs`, `cortex/src/summarize.rs`,
+  `distillers/src/dispatcher.rs`). Same effect, less churn.
+- **Article/thread `transcript` field untouched by Phase 6.** Article stays
+  `transcript: None` on both paths (in-note article transcript is Phase 7);
+  thread keeps `Some(full body)` on both paths (pre-existing Phase B2 behavior
+  for chunk embeddings). Not this phase's scope to change.
+
+### Tradeoffs
+- `THREAD_HEAD_CHARS = 8000` (2000 tokens): large enough to carry the author
+  line and the first several posts, bounded so the thread reduce input stays
+  ~8K chars for a 2-chunk thread rather than duplicating the whole first chunk.
+  A smaller head risks missing the author on a thread with a verbose top post; a
+  larger head bloats the reduce input for no measured gain. Chosen mid-range and
+  measured (8115 chars for the 2-chunk fixture).
+- The "unique fact appears in published claims" gate is split: the coverage /
+  no-truncation / fact-bearing-chunk-mapped half is a deterministic hard unit
+  gate; the "reduce actually selects the fact" half is proven for the
+  reduce→publish plumbing (injected via mock) but the live model selection is a
+  pending operator replay. This mirrors Phase 5's split (mechanic proven live in
+  Phase 0; per-fixture live check deferred to the operator). No numbers
+  fabricated.
+- Article `distill_long` is a near-twin of `video.rs::distill_long` (map loop,
+  tag dedup, reduce+fallback) rather than a shared generic. Extracting a shared
+  generic would have to abstract over video's anchor validation + transcript
+  population vs article's neither — a bigger refactor touching the green Phase 5
+  video path. Kept them parallel; the genuinely shared bits (`build_reduce_input`
+  / `select_reduce_claims` / `ReduceYaml`) already live in `parse.rs`.
+
+### Open questions
+- **Operator live-replay pending (Phase 6 gate):** after `otto deploy` syncs the
+  four new patterns, re-distill a real >32K article and a real >32K thread and
+  confirm (a) the late-body fact lands in the published claims and (b)
+  `author`/`post-count` are populated on the thread note. As flagged since
+  Phase 4, no in-repo harness re-distills a fixture's `source.md` through the
+  live patterns; the operator runs fabric by hand or via a live ingest.
+- `eval` remains a frozen-fixture non-regression check (baseline composite
+  1.952); every committed fixture is sub-threshold, so `sb borg eval` does not
+  exercise the new long path at all — long-path coverage improvement is only
+  observable via the operator live-replay above.
+- `judge-distillation.md` is still absent from the deployed
+  `~/.config/sb/patterns/` (Phase 1/2/4 notes; not a Phase 6 regression). The
+  four new distill patterns ARE registered in `PATTERNS`, so `otto deploy` /
+  `sb bootstrap` will sync them.

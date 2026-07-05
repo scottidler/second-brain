@@ -202,3 +202,57 @@ fn select_reduce_claims_empty_returns_none() {
     assert!(select_reduce_claims(vec![pattern_claim("   ", None)], &pool, &mut stripped).is_none());
     assert_eq!(stripped, 0);
 }
+
+#[test]
+fn select_reduce_claims_accepts_anchorless_pool_as_synthesis() {
+    // Articles/threads carry no anchors: the pool is anchorless and every
+    // selected claim (also anchorless) is accepted as a synthesis, no invention
+    // gate tripped, nothing stripped.
+    let pool = vec![
+        claim("An anchorless article claim.", None),
+        claim("Another anchorless article claim.", None),
+    ];
+    let mut stripped = 0;
+    let selected = select_reduce_claims(
+        vec![
+            pattern_claim("A selected article claim.", None),
+            pattern_claim("A synthesized article claim.", None),
+        ],
+        &pool,
+        &mut stripped,
+    )
+    .expect("non-empty selection");
+    assert_eq!(selected.len(), 2);
+    assert!(selected.iter().all(|c| c.anchor.is_none()));
+    assert_eq!(stripped, 0, "no anchors to strip in an anchorless pool");
+}
+
+#[test]
+fn build_thread_reduce_input_prepends_verbatim_thread_head() {
+    let head = "@simonw: Original post where the thread metadata lives.";
+    let summaries = vec!["First chunk summary.".to_string()];
+    let pool = vec![claim("An anchorless thread claim.", None)];
+    let input = build_thread_reduce_input(head, &summaries, &pool);
+
+    assert!(input.contains("## Thread Head"), "{input:?}");
+    assert!(input.contains(head), "the head is carried verbatim: {input:?}");
+    assert!(input.contains("## Chunk Summaries"));
+    assert!(input.contains("## Claim Pool"));
+    // Head precedes the summaries (author/post-count context comes first).
+    let head_at = input.find("## Thread Head").expect("head heading");
+    let summaries_at = input.find("## Chunk Summaries").expect("summaries heading");
+    assert!(head_at < summaries_at);
+}
+
+#[test]
+fn input_truncation_tag_fires_only_over_limit() {
+    assert_eq!(
+        input_truncation_tag(40_000, 32_000).as_deref(),
+        Some("input:40000>32000")
+    );
+    // Exactly at the limit is not a cut.
+    assert!(input_truncation_tag(32_000, 32_000).is_none());
+    assert!(input_truncation_tag(100, 32_000).is_none());
+    // max_chars == 0 means "no limit" (matches truncate_input's short-circuit).
+    assert!(input_truncation_tag(1_000_000, 0).is_none());
+}
