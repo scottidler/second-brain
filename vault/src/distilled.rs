@@ -44,8 +44,10 @@ pub struct Distilled {
     /// Idea, Vocabulary) so the verbatim content is searchable in Obsidian
     /// months later, AND — as of Phase B2 — for Video and Thread, whose
     /// transcripts power chunked semantic recall (regression-guarded; do not
-    /// revert to `None`). Article and Repo still leave this `None`: the fetched
-    /// markdown / origin URL is the recoverable archive.
+    /// revert to `None`), AND, as of the 2026-07-05 distillation overhaul,
+    /// for Article, whose fetched markdown is now kept in-note so it survives
+    /// the 60-day staging retention. Repo still leaves this `None`: the
+    /// structurally-summarized README plus origin URL is the recoverable archive.
     ///
     /// Rendered by `distillers::render` as a `## Transcript` body section
     /// when `Some`. Indexed via the existing FTS5 `body` column (no new

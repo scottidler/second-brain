@@ -29,14 +29,31 @@ impl Drop for EnvGuard {
 
 #[test]
 fn patterns_array_matches_source_tree() {
-    // Compile-time invariant: the explicit `PATTERNS` array is the
-    // single source of truth for what gets bundled. If a new pattern
-    // file is added to `borg/patterns/` and not listed here, this
-    // assertion catches it.
+    // The explicit `PATTERNS` array is the only mechanism that installs
+    // patterns into `~/.config/sb/patterns` (via `include_str!`), so a
+    // `.md` file present in `borg/patterns/` but absent from `PATTERNS`
+    // is silently never installed on any bootstrap/deploy-provisioned
+    // machine. Compare the actual source tree against the array by name
+    // rather than a hardcoded count, so an omission cannot slip through
+    // (the count-only check that this replaces let `judge-distillation.md`
+    // ship orphaned).
+    let patterns_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../borg/patterns");
+    let mut on_disk: Vec<String> = std::fs::read_dir(&patterns_dir)
+        .expect("read borg/patterns")
+        .filter_map(|entry| {
+            let name = entry.expect("dir entry").file_name().into_string().ok()?;
+            name.ends_with(".md").then_some(name)
+        })
+        .collect();
+    on_disk.sort();
+
+    let mut listed: Vec<String> = PATTERNS.iter().map(|(name, _)| name.to_string()).collect();
+    listed.sort();
+
     assert_eq!(
-        PATTERNS.len(),
-        21,
-        "expected 21 patterns; update PATTERNS in sb/src/cli/bootstrap.rs"
+        on_disk, listed,
+        "borg/patterns/*.md and PATTERNS in sb/src/cli/bootstrap.rs are out of sync; \
+         every pattern file must be listed so bootstrap installs it"
     );
 }
 

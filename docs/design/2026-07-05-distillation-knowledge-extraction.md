@@ -298,7 +298,27 @@ All five author-proposed decisions were reviewed 2026-07-05 by the panel (Archit
 
 ## Open Questions
 
-None. All decision points were confirmed by the 2026-07-05 review panel (unanimous, conditions folded into phases); every panel finding is dispositioned in Resolved Decisions, the phases, or the risk table.
+All *design* decision points were confirmed by the 2026-07-05 pre-implementation review panel (unanimous, conditions folded into phases); every panel finding is dispositioned in Resolved Decisions, the phases, or the risk table.
+
+### Post-implementation audit follow-ups (2026-07-05 Implementation Audit)
+
+A second panel (Architect/Gemini + Staff Engineer/Codex) audited the committed implementation. The high-risk mechanics (Phase 9 migration crash-safety/idempotency, Phase 3 forward-compat shim, Phase 5 anchor-honesty + distinct fallback, the recall-only vector invariant, byte-identical no-capture-note embed text, injection-guard preservation) were independently verified correct. Two defects were fixed in the audit follow-up commit; the remainder are tracked here:
+
+- **FIXED - `judge-distillation.md` was orphaned from install.** The eval judge pattern shipped in `borg/patterns/` but was absent from the `PATTERNS` array in `sb/src/cli/bootstrap.rs` (the only install mechanism), and the guardrail test asserted a hardcoded count instead of comparing the tree, so `sb borg eval` could not find its judge on any provisioned machine. Added to `PATTERNS`; the guardrail test now globs `borg/patterns/*.md` and compares by name so an omission cannot recur.
+- **FIXED - schema source-of-truth comment drift.** `Distilled.transcript`'s doc comment claimed Article leaves it `None`; Phase 7 populates it. Corrected.
+- **TRACKED (observability) - sub-threshold truncation lacks a trace-bearing breadcrumb.** Phase 6 records a `bounds_truncations` entry in the in-memory distilled meta and WARNs at the distiller layer with `source_url`, but `bounds_truncations` is not persisted to receipts/frontmatter and `degraded` is derived only from `fallback_reason`, so a truncated single-call article/thread is not surfaced by `sb borg log --degraded` and no `trace_id`-bearing WARN is emitted at the pipeline layer (which is the layer that has the trace). Follow-up: either persist `bounds_truncations` into receipts or emit a `trace_id`-bearing WARN at the pipeline distill sites. Deferred rather than patched hastily during finalization.
+- **DEFERRED (disclosed) - capture-note reaches the distiller only on the single-call path** of the four URL distillers; the long map-reduce paths and Signal attachment captions render the note in `## Why Captured` but do not feed it to the distiller. Reasoned in the Phase 8 impl notes (prepending to every chunk duplicates context, which the design forbids); the reduce step is the correct future seam if operator-note-informed distillation is wanted for large inputs.
+
+### Post-deploy live-gate checklist (operator, daemon host)
+
+`Status: Implemented` reflects code-complete + unit/integration gates green. The design's measurement gates are operator-run and remain outstanding (done-means-live):
+
+1. Calibrate the eval judge: `sb borg eval --emit-calibration`, hand-label a subset, confirm the judge reports TRUSTWORTHY (else every coverage/per-query gate below measures an unvalidated judge).
+2. `otto deploy` (syncs rewritten + new patterns, incl. the now-listed `judge-distillation.md`; restarts daemons).
+3. Extension re-sign for the additive `IngestRequest.note` (Phase 8).
+4. Phase 4-7 quality gate: live re-distill/replay of fixtures + `sb borg eval`; confirm composite holds-or-improves per kind vs the 1.952 baseline and no increase in `yaml-parse-error` fallbacks.
+5. Phase 5/6 coverage: confirm a >4-chunk video/voicenote publishes a final-third-anchored claim, and a >32K article surfaces its late-body fact in published claims.
+6. Phase 9 retrieval: `sb oracle eval` on `configured` before backfill (record per-query + aggregate baseline) → `sb cortex embed --backfill` → `sb oracle eval` after; accept only if no per-query nDCG regression beyond noise AND aggregate non-negative. On failure: `sb cortex embed --drop-kind claim`, implement the kind-weighted-pooling contingency (comment sited at the `search_vector` max-pool), re-backfill, re-measure.
 
 ## References
 
