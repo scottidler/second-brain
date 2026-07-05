@@ -339,10 +339,14 @@ fn stale_embedding_targets_returns_modified_notes_for_summary() {
 
 #[test]
 fn stale_embedding_targets_transcript_kind_filters_by_note_type() {
-    // Critical regression: a vault of 100 Articles + 1 VoiceNote must
-    // produce 1 stale target for transcript-chunk (the VoiceNote only),
-    // not 101. Without the note_type filter, every Article matches
+    // Critical regression: a vault of 100 non-eligible notes + 1 VoiceNote
+    // must produce 1 stale target for transcript-chunk (the VoiceNote only),
+    // not 101. Without the note_type filter, every non-eligible note matches
     // `e.id IS NULL` forever.
+    //
+    // The filler is `github`/repo - the one URL kind Phase 7 keeps
+    // transcript-free (article and youtube became eligible in Phase 7, so
+    // they can no longer serve as the non-eligible sentinel).
     //
     // The schema enum string for VoiceNote is `audio` (see
     // `NoteType::Audio` in `vault::schema`); the design doc's conceptual
@@ -350,7 +354,7 @@ fn stale_embedding_targets_transcript_kind_filters_by_note_type() {
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
     for i in 0..100 {
-        insert_note(&index, &format!("notes/a{i}.md"), "tech", "article", 100);
+        insert_note(&index, &format!("notes/a{i}.md"), "tech", "github", 100);
     }
     insert_note(&index, "notes/v.md", "tech", "audio", 100);
 
@@ -376,8 +380,10 @@ fn stale_embedding_targets_transcript_kind_covers_all_transcript_eligible_kinds(
     for (i, t) in eligible.iter().enumerate() {
         insert_note(&index, &format!("notes/n{i}.md"), "tech", t.as_str(), 100);
     }
-    // A non-eligible kind that must NOT surface.
-    insert_note(&index, "notes/article.md", "tech", "article", 100);
+    // A non-eligible kind that must NOT surface. `github`/repo stays
+    // transcript-free (Phase 7 keeps repos transcript-free deliberately), so
+    // it is the sentinel here now that `article`/`youtube` ARE eligible.
+    insert_note(&index, "notes/repo.md", "tech", "github", 100);
 
     let targets = index
         .stale_embedding_targets(EmbeddingKind::TranscriptChunk, m.model_version(), 1000)
@@ -391,8 +397,8 @@ fn stale_embedding_targets_transcript_kind_covers_all_transcript_eligible_kinds(
     );
     let paths: std::collections::HashSet<&str> = targets.iter().map(|t| t.note_path.as_str()).collect();
     assert!(
-        !paths.contains("notes/article.md"),
-        "article (non-eligible) must not surface"
+        !paths.contains("notes/repo.md"),
+        "github/repo (non-eligible) must not surface"
     );
 }
 

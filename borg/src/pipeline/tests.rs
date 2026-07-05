@@ -740,3 +740,118 @@ fn test_read_cortex_fields_missing_file() {
 // Phase 3 of borg-pipeline-resilience: the previous patch_cortex_fields
 // tests have moved to pipeline/atomic.rs alongside the apply_cortex_fields
 // and apply_original_date helpers that replaced the patch_* functions.
+
+// ---------------------------------------------------------------------------
+// Phase 7 (distillation overhaul): slide-body-then-append splice + FTS reach.
+// ---------------------------------------------------------------------------
+
+/// A distilled payload with a summary, two claims, and a transcript - the
+/// shape `distillers::render` turns into `## Summary` / `## Claims` /
+/// `## Transcript` body sections.
+fn phase7_distilled() -> vault::distilled::Distilled {
+    use vault::distilled::{Claim, Distilled};
+    Distilled {
+        summary: "The talk argues orchestration beats raw model capability.".to_string(),
+        claims: vec![
+            Claim {
+                text: "Harness quality dominates model quality for coding agents.".to_string(),
+                ..Default::default()
+            },
+            Claim {
+                text: "A tight feedback loop is the highest-leverage investment.".to_string(),
+                ..Default::default()
+            },
+        ],
+        transcript: Some("Full spoken transcript of the video goes here.".to_string()),
+        ..Default::default()
+    }
+}
+
+/// A representative slide-published body: an LLM section body with a slide
+/// wikilink embedded under a `## <section>` heading (what `publish_slides`
+/// emits for the `slide-section` shape).
+fn phase7_slide_body() -> String {
+    "## Opening Thesis\n\n![[talk-slide-001.jpg]]\n\nThe speaker frames the core question.\n\n\
+     ## Live Demo\n\n![[talk-slide-002.jpg]]\n\nA worked example follows.\n"
+        .to_string()
+}
+
+#[test]
+fn append_distilled_below_slides_keeps_both_slide_and_distilled_sections() {
+    // Defect #2: the splice must APPEND, not REPLACE. The composed body must
+    // carry the slide sections AND the distilled `## Claims` (previously lost
+    // wholesale on the slide path).
+    let slide_body = phase7_slide_body();
+    let distilled_body = distillers::render(&phase7_distilled()).body_markdown;
+
+    let composed = append_distilled_below_slides(slide_body.clone(), &distilled_body);
+
+    // Slide sections survive.
+    assert!(
+        composed.contains("## Opening Thesis") && composed.contains("![[talk-slide-001.jpg]]"),
+        "slide sections must survive the splice: {composed}"
+    );
+    assert!(composed.contains("## Live Demo"), "second slide section must survive");
+    // Distilled sections are appended below.
+    assert!(composed.contains("## Claims"), "distilled ## Claims must be appended");
+    assert!(composed.contains("## Summary"), "distilled ## Summary must be appended");
+    assert!(
+        composed.contains("## Transcript"),
+        "distilled ## Transcript must be appended"
+    );
+    // Ordering: the slide body comes first, distilled sections follow.
+    let slide_pos = composed.find("## Opening Thesis").expect("slide heading");
+    let claims_pos = composed.find("## Claims").expect("claims heading");
+    assert!(
+        slide_pos < claims_pos,
+        "slide body must precede appended distilled sections"
+    );
+    // A blank line separates the last slide block from the appended block.
+    assert!(
+        !composed.contains("A worked example follows.\n## Summary"),
+        "there must be a blank line between the slide body and the appended sections"
+    );
+}
+
+#[test]
+fn append_distilled_below_slides_noop_on_empty_distilled_body() {
+    let slide_body = phase7_slide_body();
+    let composed = append_distilled_below_slides(slide_body.clone(), "");
+    assert_eq!(
+        composed, slide_body,
+        "empty distilled body leaves the slide body untouched"
+    );
+}
+
+#[test]
+fn slide_path_composed_body_yields_claims_fts_text() {
+    // FTS-parsing code path (vault::search::parse_body_claims, the same parse
+    // `index_vault`/`index_one` runs to populate `notes.claims`). The
+    // slide-path composed body must yield the distilled claims as FTS text -
+    // exactly what the pre-Phase-7 replace behavior destroyed.
+    let composed = append_distilled_below_slides(
+        phase7_slide_body(),
+        &distillers::render(&phase7_distilled()).body_markdown,
+    );
+    let claims = vault::search::parse_body_claims(&composed);
+    assert_eq!(claims.len(), 2, "both claims must be parseable for FTS: {composed}");
+    assert!(claims.iter().any(|c| c.text.contains("Harness quality dominates")));
+    assert!(claims.iter().any(|c| c.text.contains("tight feedback loop")));
+}
+
+#[test]
+fn article_rendered_body_carries_transcript_and_yields_claims_fts_text() {
+    // Article durability + FTS reach. The rendered article body must carry the
+    // full fetched markdown under `## Transcript` AND expose its claims to the
+    // same FTS parse the indexer runs.
+    let rendered = distillers::render(&phase7_distilled());
+    assert!(
+        rendered
+            .body_markdown
+            .contains("## Transcript\n\nFull spoken transcript of the video goes here."),
+        "article body must carry the full fetched markdown under ## Transcript: {}",
+        rendered.body_markdown
+    );
+    let claims = vault::search::parse_body_claims(&rendered.body_markdown);
+    assert_eq!(claims.len(), 2, "article claims must be FTS-parseable");
+}

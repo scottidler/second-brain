@@ -205,6 +205,13 @@ impl NoteType {
     /// - Vocabulary       -> `Vocab`
     /// - Video            -> `Video`
     /// - Thread           -> `Social` (X/Twitter) and `Reddit`
+    ///
+    /// `Article` and `Youtube` were added in the 2026-07-05 distillation
+    /// overhaul (Phase 7): articles now persist their fetched markdown in-note
+    /// under `## Transcript`, and slide-published YouTube notes gain the
+    /// appended distilled `## Transcript` section. Without them here the embed
+    /// loop's `note_type IN (...)` filter would FTS-index those new sections
+    /// but never embed them.
     pub fn transcript_eligible() -> &'static [Self] {
         &[
             Self::Image,
@@ -212,6 +219,8 @@ impl NoteType {
             Self::Note,
             Self::Vocab,
             Self::Video,
+            Self::Youtube,
+            Self::Article,
             Self::Social,
             Self::Reddit,
         ]

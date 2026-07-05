@@ -71,6 +71,34 @@ pub(crate) struct SlidePayload {
     slides_source_root: PathBuf,
 }
 
+/// Splice the distilled sections BELOW a slide-published body (Phase 7,
+/// defect #2). The slide body is the user-visible value of the slide pipeline
+/// and stays first; the distilled `## Summary` / `## Claims` / `## Links` /
+/// `## Transcript` sections (`rendered_distilled.body_markdown`) are APPENDED
+/// beneath it rather than replacing it, so slide-published videos regain
+/// claims-FTS text and transcript-chunk embeddings (which `index_vault` parses
+/// out of the body). Some slide-vs-summary redundancy in these notes is
+/// accepted; reach wins.
+///
+/// A blank line separates the two blocks so the appended `##` heading opens its
+/// own paragraph. An empty `distilled_body` leaves the slide body untouched
+/// (no trailing empty section).
+pub(crate) fn append_distilled_below_slides(mut slide_body: String, distilled_body: &str) -> String {
+    if distilled_body.trim().is_empty() {
+        return slide_body;
+    }
+    if !slide_body.is_empty() {
+        if !slide_body.ends_with('\n') {
+            slide_body.push('\n');
+        }
+        if !slide_body.ends_with("\n\n") {
+            slide_body.push('\n');
+        }
+    }
+    slide_body.push_str(distilled_body);
+    slide_body
+}
+
 /// Top-level pipeline entry point. Dispatches to type-specific handlers based on content kind.
 /// If `trace_id` is provided, it is used as-is; otherwise one is generated internally.
 pub async fn process_content(
@@ -665,7 +693,12 @@ async fn process_url_inner(
                     result.shape,
                     result.slides.len(),
                 );
-                (result.body, result.slides)
+                // Phase 7 (defect #2): APPEND the distilled sections below the
+                // slide body rather than REPLACING them. Frontmatter is
+                // untouched here - `rendered_distilled.frontmatter_additions` is
+                // consumed below.
+                let body = append_distilled_below_slides(result.body, &rendered_distilled.body_markdown);
+                (body, result.slides)
             }
             Err(e) => {
                 log::warn!("[{trace_id}] Slide publish failed: {e:#} - using rendered Distilled body");

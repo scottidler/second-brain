@@ -111,6 +111,91 @@ fn process_batch_prefixes_title_to_summary() {
     );
 }
 
+/// Write a note file carrying a `## Transcript` section (Phase 7). `body_head`
+/// is any markdown that precedes it (e.g. slide sections for a slide-path
+/// youtube note); pass `""` for a plain article.
+fn write_note_with_transcript(vault: &std::path::Path, rel: &str, note_type: &str, body_head: &str, transcript: &str) {
+    let abs = vault.join(rel);
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir");
+    }
+    let body = format!(
+        "---\ntitle: T\nnote-type: {note_type}\norigin: assisted\n---\n# T\n\n{body_head}## Transcript\n\n{transcript}\n"
+    );
+    std::fs::write(abs, body).expect("write note");
+}
+
+#[test]
+fn process_transcript_batch_embeds_article_and_slide_youtube_notes() {
+    // Phase 7 embedding-CREATION path (distinct from the FTS-parsing path
+    // asserted in borg's pipeline tests). This exercises the
+    // `transcript_eligible()` amendment end-to-end: an `article` note and a
+    // slide-path `youtube` note must now surface as transcript targets and
+    // produce `transcript-chunk` rows. Before the amendment neither note type
+    // was eligible, so `stale_embedding_targets(TranscriptChunk)` returned
+    // nothing and no rows were ever written.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-batch-test");
+    index
+        .set_active_embedding(m.model_version(), m.dim())
+        .expect("set model");
+
+    let tmp = TempDir::new().expect("tmp");
+    // Article note: fetched markdown persisted verbatim under ## Transcript.
+    write_note_with_transcript(
+        tmp.path(),
+        "notes/article.md",
+        "article",
+        "## Summary\n\nAn essay on consensus.\n\n",
+        "The full fetched article markdown, preserved in-note past staging retention.",
+    );
+    // Slide-path youtube note: slide sections FIRST, distilled ## Transcript
+    // appended below (the Phase 7 splice shape).
+    write_note_with_transcript(
+        tmp.path(),
+        "notes/yt.md",
+        "youtube",
+        "## Opening\n\n![[yt-slide-001.jpg]]\n\nThe speaker opens.\n\n## Summary\n\nOrchestration beats capability.\n\n",
+        "Full spoken transcript of the slide-published video.",
+    );
+    index
+        .insert_test_note_row("notes/article.md", "article", 100)
+        .expect("article row");
+    index
+        .insert_test_note_row("notes/yt.md", "youtube", 100)
+        .expect("youtube row");
+
+    let stats = process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::TranscriptChunk,
+        m.model_version(),
+        tmp.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("process");
+
+    assert_eq!(
+        stats.scanned, 2,
+        "both the article and the slide-path youtube note must be scanned"
+    );
+    assert!(
+        stats.embedded >= 2,
+        "each note produces at least one transcript-chunk row"
+    );
+    assert_eq!(stats.skipped_empty, 0);
+    assert_eq!(stats.failed, 0);
+
+    let count = index
+        .count_embeddings(Some(EmbeddingKind::TranscriptChunk))
+        .expect("count");
+    assert!(
+        count >= 2,
+        "transcript-chunk rows must exist for both notes; got {count}"
+    );
+}
+
 #[test]
 fn process_batch_skips_notes_with_empty_summary() {
     // Notes whose `notes.summary` column is empty are filtered out at

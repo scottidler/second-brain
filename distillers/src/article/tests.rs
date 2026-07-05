@@ -46,6 +46,13 @@ links:
     assert_eq!(distilled.links.len(), 1);
     assert_eq!(distilled.links[0].url, "https://raft.github.io");
     assert!(distilled.meta.validation.fallback_reason.is_none());
+    // Phase 7: the short single-call path now persists the fetched markdown
+    // verbatim in-note (was `None` pre-Phase-7 - "origin URL is the archive").
+    assert_eq!(
+        distilled.transcript.as_deref(),
+        Some("Article body about Raft and Paxos."),
+        "short-path article must carry its fetched markdown under ## Transcript"
+    );
 }
 
 #[tokio::test]
@@ -421,6 +428,14 @@ async fn long_article_covers_whole_input_with_zero_truncation() {
 
     assert!(distilled.meta.validation.fallback_reason.is_none());
     assert_eq!(distilled.summary, "Synthesized whole-article summary.");
+    // Phase 7: the long (map-reduce) path persists the FULL fetched markdown
+    // in-note too - not just the short path - so a chunked essay is as durable
+    // as a short one past staging retention.
+    assert_eq!(
+        distilled.transcript.as_deref(),
+        Some(transcript.as_str()),
+        "long-path article must carry the full fetched markdown under ## Transcript"
+    );
 }
 
 #[tokio::test]

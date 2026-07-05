@@ -234,9 +234,13 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
                 produced_at: Utc::now().to_rfc3339(),
                 validation: ValidationMeta::default(),
             },
-            // URL kind: origin URL is the recoverable archive, so no verbatim
-            // transcript in the published note (Phase 7 revisits this).
-            transcript: None,
+            // Phase 7: articles are the lossiest kind past the 60-day staging
+            // retention (an 8K-word essay collapsing to a ≤2000-char summary +
+            // a URL that may rot). Keep the fetched markdown verbatim in-note
+            // under `## Transcript`, mirroring video/voicenote/thread; this
+            // restores FTS + (with the `transcript_eligible()` amendment)
+            // embedding reach for the whole article class.
+            transcript: article_transcript(transcript),
         })
     }
 
@@ -428,9 +432,10 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
                 produced_at: Utc::now().to_rfc3339(),
                 validation,
             },
-            // Article transcript in-note is Phase 7; the long path keeps the
-            // single-call path's `None` here.
-            transcript: None,
+            // Phase 7: long articles keep their full fetched markdown in-note
+            // too (both paths share this behavior), so a chunked essay is just
+            // as durable as a short one past staging retention.
+            transcript: article_transcript(transcript),
         })
     }
 
@@ -458,6 +463,16 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
             }
         }
     }
+}
+
+/// The verbatim fetched article markdown to persist in-note under
+/// `## Transcript` (Phase 7). Mirrors `thread::thread_transcript`: `None` for
+/// an empty/whitespace-only input so the renderer emits no empty section;
+/// otherwise the full fetched markdown. `render::push_transcript` demotes any
+/// embedded headings so nav junk / H1s in the fetched markdown stay
+/// subordinate to the note's section structure.
+fn article_transcript(transcript: &str) -> Option<String> {
+    if transcript.trim().is_empty() { None } else { Some(transcript.to_string()) }
 }
 
 fn parse_article_yaml(raw: &str) -> Result<PatternYaml> {

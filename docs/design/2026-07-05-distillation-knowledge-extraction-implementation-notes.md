@@ -784,3 +784,73 @@ per the panel's guidance this is measured and accepted, not blocked.
   `~/.config/sb/patterns/` (Phase 1/2/4 notes; not a Phase 6 regression). The
   four new distill patterns ARE registered in `PATTERNS`, so `otto deploy` /
   `sb bootstrap` will sync them.
+
+## Phase 7: Durable note content
+
+### Design decisions
+- Article transcript persisted in BOTH distiller paths, via one helper -
+  `distillers/src/article.rs:article_transcript` (mirrors
+  `thread::thread_transcript`: `None` for empty/whitespace input, else the full
+  fetched markdown). Wired into `distill_short` and `distill_long` so a chunked
+  essay is exactly as durable as a short one past the 60-day staging retention.
+  Reverses the pre-Phase-7 `transcript: None` ("origin URL is the recoverable
+  archive"). Rendering was already handled: `render::push_transcript` demotes
+  embedded H1/H2 so nav junk in the fetched markdown stays subordinate to the
+  note's L2 section structure.
+- Slide-append is a pure, testable seam - `borg/src/pipeline.rs::append_distilled_below_slides(slide_body, distilled_body)`.
+  The slide-path `Ok` arm now calls it instead of returning `result.body`
+  wholesale. It appends `rendered_distilled.body_markdown` (the `## Summary` /
+  `## Claims` / `## Links` / `## Transcript` block) BELOW the slide body with a
+  guaranteed blank-line separator; an empty distilled body is a no-op (no
+  trailing empty section). Frontmatter is untouched - the append clones
+  `body_markdown` only, so `rendered_distilled.frontmatter_additions` is still
+  moved into the note's frontmatter unchanged downstream.
+- `transcript_eligible()` (`vault/src/schema.rs`) gains `NoteType::Youtube` and
+  `NoteType::Article` (schema enum, not string-matched). This is load-bearing:
+  the embed loop's `note_type IN (...)` filter in
+  `vault::search::vector::stale_embedding_targets` drives which notes get
+  transcript-chunk embeddings, and without the amendment the new `## Transcript`
+  sections would be FTS-indexed but never embedded.
+
+### Deviations
+- Design bullet cites `thread.rs:192-202` and `pipeline.rs:653-674` as the
+  seams; the transcript-set line in `thread.rs` is actually ~240/437 (the
+  192-202 span is the claims/tags/links parse) and the splice `Ok` arm moved a
+  few lines from the doc's cited range. Implemented at the correct seams; same
+  effect.
+- The slide-append splice was extracted into a named `pub(crate)` helper rather
+  than left inline, so the "slide sections AND `## Claims` coexist" criterion is
+  unit-testable without driving the full async `process_url_inner`. Same
+  behavior, cleaner seam.
+
+### Tradeoffs
+- Preserving the legacy note body as `## Transcript` on `cortex summarize
+  --backfill` (the backfill "transcript" input is the existing note body, per
+  `summarize.rs:247-254`) means a legacy article's prior prose survives verbatim
+  under a `## Transcript` heading even though it may be an old lossy summary, not
+  the full fetched markdown. Accepted: this matches the video/voicenote backfill
+  precedent already in that code path, and durability of whatever verbatim
+  content the note has beats discarding it. The old test that pinned "backfill
+  discards the legacy article body" was inverted to assert preservation.
+- Two existing transcript-eligibility tests used `article` as their
+  non-eligible sentinel/filler; both were migrated to `github` (repo), the one
+  URL kind Phase 7 deliberately keeps transcript-free, so they still prove the
+  `note_type IN (...)` filter excludes non-eligible kinds.
+- Some slide-vs-summary redundancy in slide-published notes is accepted per the
+  design (the slide body's section prose and the distilled `## Summary` overlap);
+  reach - claims-FTS + transcript-chunk embeddings for the whole slide class -
+  wins.
+
+### Open questions
+- **Article-note size delta is a pending operator measurement.** Measuring the
+  median article-note size before/after requires re-ingesting / backfilling real
+  articles on the daemon host (a one-time operator step, out of scope for this
+  phase), so no live median is recorded here. Expected growth per the design's
+  Performance section: article notes grow by the size of the fetched markdown,
+  the same class as existing video-transcript notes (which Obsidian already
+  renders without issue). Operator: after `otto deploy` + a `cortex summarize
+  --backfill` (or organic re-ingest), compare median article-note bytes to the
+  pre-Phase-7 baseline.
+- `eval` is unaffected by this phase (no prompt/pattern changes - Phase 7 is
+  code-only), so the frozen-fixture `sb borg eval` non-regression baseline
+  (composite 1.952) holds by construction; not re-run here.
