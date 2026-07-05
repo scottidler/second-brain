@@ -445,7 +445,10 @@ fn test_build_obsidian_url_notes_folder() {
 fn test_build_obsidian_url_same_stem_different_dirs() {
     let inbox = build_obsidian_url("/home/user/obsidian/inbox/my-note.md");
     let notes = build_obsidian_url("/home/user/obsidian/notes/my-note.md");
-    assert_eq!(inbox, notes, "URL must be path-independent (survives inbox/ -> notes/ move)");
+    assert_eq!(
+        inbox, notes,
+        "URL must be path-independent (survives inbox/ -> notes/ move)"
+    );
 }
 
 // Regression guard for the 2026-07-04 vault-name-mismatch bug: the link is
@@ -455,7 +458,10 @@ fn test_build_obsidian_url_same_stem_different_dirs() {
 #[test]
 fn test_build_obsidian_url_omits_vault_param() {
     let url = build_obsidian_url("/home/user/obsidian/notes/my-note.md").unwrap();
-    assert!(!url.contains("vault="), "deep link must not hardcode a vault name: {url}");
+    assert!(
+        !url.contains("vault="),
+        "deep link must not hardcode a vault name: {url}"
+    );
 }
 
 #[test]
