@@ -715,6 +715,80 @@ fn content_filter_serde_default_matches_struct_default() {
     assert!((from_yaml.min_confidence - from_default.min_confidence).abs() < f32::EPSILON);
 }
 
+// ---------------------------------------------------------------------------
+// DistillConfig tests — distillation feature toggles, all default-on.
+// The critical guard is the bool-serde-default footgun: absent fields (and an
+// absent `distill:` block entirely) MUST land TRUE, not the bool default false.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_distill_config_default_all_true() {
+    let d = DistillConfig::default();
+    assert!(d.article_transcript);
+    assert!(d.slide_append);
+    assert!(d.capture_note);
+    assert!(d.propose_tags);
+}
+
+#[test]
+fn test_distill_config_absent_block_defaults_all_true() {
+    // CRITICAL back-compat: a borg.yml with NO `distill:` section must
+    // deserialize to all four flags = TRUE (guards the bool-serde-default
+    // footgun — container `#[serde(default)]` fills from the struct Default).
+    let yaml = r#"
+server:
+  host: "0.0.0.0"
+  port: 8181
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    assert!(config.distill.article_transcript);
+    assert!(config.distill.slide_append);
+    assert!(config.distill.capture_note);
+    assert!(config.distill.propose_tags);
+}
+
+#[test]
+fn test_distill_config_empty_block_defaults_all_true() {
+    // An empty `distill: {}` block must also default every flag TRUE.
+    let from_yaml: DistillConfig = serde_yaml::from_str("{}").expect("parse empty");
+    assert!(from_yaml.article_transcript);
+    assert!(from_yaml.slide_append);
+    assert!(from_yaml.capture_note);
+    assert!(from_yaml.propose_tags);
+}
+
+#[test]
+fn test_distill_config_partial_block_defaults_unspecified_true() {
+    // Explicit `article-transcript: false` flips ONLY that flag; the other
+    // three stay TRUE (container default fills the missing fields from the
+    // struct Default, not from bool::default()).
+    let yaml = r#"
+distill:
+  article-transcript: false
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    assert!(!config.distill.article_transcript);
+    assert!(config.distill.slide_append);
+    assert!(config.distill.capture_note);
+    assert!(config.distill.propose_tags);
+}
+
+#[test]
+fn test_distill_config_all_false_yaml_override() {
+    let yaml = r#"
+distill:
+  article-transcript: false
+  slide-append: false
+  capture-note: false
+  propose-tags: false
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    assert!(!config.distill.article_transcript);
+    assert!(!config.distill.slide_append);
+    assert!(!config.distill.capture_note);
+    assert!(!config.distill.propose_tags);
+}
+
 #[test]
 fn youtube_slides_config_no_longer_has_vision_per_slide() {
     // The dead `vision_per_slide` stub was removed in Phase 1.

@@ -179,7 +179,57 @@ pub struct Config {
     pub extension: ExtensionConfig,
     #[serde(default)]
     pub pipeline: PipelineConfig,
+    #[serde(default)]
+    pub distill: DistillConfig,
     pub log_level: Option<String>,
+}
+
+/// Distillation feature toggles. Each flag turns off one distillation feature
+/// on the borg ingest path. The daemon has no per-invocation CLI surface, so a
+/// config toggle is the right home (the "methodology selection is legitimate
+/// config" carve-out). All four DEFAULT TO TRUE so an existing
+/// `~/.config/sb/borg.yml` with no `distill:` section — or a partial one —
+/// keeps today's shipped behavior (back-compat, mirroring the cortex embed
+/// kinds and `youtube.slides.content-filter.enabled` patterns).
+///
+/// The gates all live at the BORG layer; the `distillers` crate stays
+/// config-free.
+///
+/// Footgun guard: `bool`'s `Default` is `false`, so the container-level
+/// `#[serde(default)]` alone would default absent fields to false. The
+/// hand-written `impl Default` (all true) is what the container default reads
+/// from to fill missing fields, so both an absent `distill:` block and a
+/// partial one land the unspecified flags TRUE. `test_distill_config_*` pins
+/// this.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct DistillConfig {
+    /// Store the fetched article markdown as the note's `## Transcript` section.
+    /// When false, article notes carry no `## Transcript` (pre-Phase-7 shape).
+    /// Article-only: video/voicenote/thread/image transcripts are unaffected.
+    pub article_transcript: bool,
+    /// Append the distilled sections below the slide body on slide-published
+    /// videos (Phase 7). When false, the slide body stands alone.
+    pub slide_append: bool,
+    /// Thread the operator capture note into `## Why Captured`, the
+    /// `capture-note:` frontmatter key, and the distiller context (Phase 8).
+    /// When false, none of the three are produced.
+    pub capture_note: bool,
+    /// Merge distiller-proposed candidate tags into the tag pipeline (Phase 2).
+    /// When false, only the proposed-tag merge is skipped; the canonical filter
+    /// and every other tag source are unaffected.
+    pub propose_tags: bool,
+}
+
+impl Default for DistillConfig {
+    fn default() -> Self {
+        Self {
+            article_transcript: true,
+            slide_append: true,
+            capture_note: true,
+            propose_tags: true,
+        }
+    }
 }
 
 /// Browser-extension lifecycle settings. The only field today is

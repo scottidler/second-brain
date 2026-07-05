@@ -99,6 +99,69 @@ pub(crate) fn append_distilled_below_slides(mut slide_body: String, distilled_bo
     slide_body
 }
 
+/// Apply the `distill.article-transcript` toggle to an ARTICLE's `Distilled`.
+/// When the toggle is off the raw-fetch `## Transcript` section is dropped so
+/// the published article note matches its pre-Phase-7 shape. Invoked ONLY on
+/// the article distiller path in `process_url_inner`; video, thread,
+/// voicenote, and image transcripts flow through their own paths and are never
+/// touched by this gate.
+pub(crate) fn gate_article_transcript(
+    mut distilled: vault::distilled::Distilled,
+    enabled: bool,
+) -> vault::distilled::Distilled {
+    log::debug!(
+        "gate_article_transcript: enabled={enabled} has_transcript={}",
+        distilled.transcript.is_some()
+    );
+    if !enabled {
+        distilled.transcript = None;
+    }
+    distilled
+}
+
+/// Compose the slide-published note body subject to the `distill.slide-append`
+/// toggle. When `append` is true the distilled `## Summary`/`## Claims`/
+/// `## Links`/`## Transcript` sections are spliced beneath the slide body
+/// (Phase 7 behavior); when false the slide body stands alone (pre-Phase-7
+/// slide-only shape).
+pub(crate) fn compose_slide_body(slide_body: String, distilled_body: &str, append: bool) -> String {
+    log::debug!(
+        "compose_slide_body: append={append} distilled_len={}",
+        distilled_body.len()
+    );
+    if append {
+        append_distilled_below_slides(slide_body, distilled_body)
+    } else {
+        slide_body
+    }
+}
+
+/// Resolve the operator capture note subject to the `distill.capture-note`
+/// toggle. When enabled the trimmed non-empty note is returned (it then feeds
+/// the distiller context, `## Why Captured`, and the `capture-note:`
+/// frontmatter key); when disabled it is dropped at this single seam so none
+/// of the three are produced.
+pub(crate) fn gate_capture_note(note: Option<&str>, enabled: bool) -> Option<&str> {
+    if !enabled {
+        return None;
+    }
+    note.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Merge distiller-proposed candidate tags into the tag pipeline subject to the
+/// `distill.propose-tags` toggle. When disabled only the proposed-tag merge is
+/// skipped; the canonical filter and every other tag source (operator tags,
+/// yt-dlp tags, fabric tags) are unaffected.
+pub(crate) fn merge_proposed_tags(all_tags: &mut Vec<String>, proposed: &[String], enabled: bool) {
+    log::debug!(
+        "merge_proposed_tags: enabled={enabled} proposed_count={}",
+        proposed.len()
+    );
+    if enabled {
+        all_tags.extend(proposed.iter().map(|t| hygiene::sanitize_tag(t)));
+    }
+}
+
 /// Top-level pipeline entry point. Dispatches to type-specific handlers based on content kind.
 /// If `trace_id` is provided, it is used as-is; otherwise one is generated internally.
 pub async fn process_content(
@@ -133,6 +196,12 @@ pub async fn process_content(
     // ~31 min later with the wrong stage. So set the failure result and fall
     // through instead of early-returning.
     let stage0 = crate::stages::raw::stage_0_init(config, &content, method, &trace_id);
+
+    // Gate: distill.capture-note for the attachment/text kinds. The URL path
+    // gates its own `note` inside `process_url_inner`; this drops the
+    // attachment caption at the door when the toggle is off so it reaches
+    // neither the distiller context nor the rendered note.
+    let attachment_note = if config.distill.capture_note { attachment_note } else { None };
 
     // Every handler runs under the pipeline hard timeout. `process_url`
     // applies its own equivalent timeout internally; the non-URL handlers
@@ -418,7 +487,10 @@ async fn process_url_inner(
     // The capture note is the operator's own trusted text. It is rendered
     // verbatim in-note (`## Why Captured`) and passed to the distiller as a
     // labeled block (not injection-guarded) so it is available as context.
-    let capture_note = note.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // Gate: distill.capture-note. When off, dropped at this single seam so
+    // neither the distiller context, `## Why Captured`, nor the
+    // `capture-note:` frontmatter key are produced.
+    let capture_note = gate_capture_note(note.as_deref(), config.distill.capture_note);
 
     // Normalize URL (clean + canonicalize) before classification
     let canonical = hygiene::normalize_url(url, &config.canonicalization.rules)?;
@@ -636,7 +708,7 @@ async fn process_url_inner(
             )
             .await
         } else {
-            crate::stages::distill::distill_for_publish_article(
+            let article_distilled = crate::stages::distill::distill_for_publish_article(
                 &config.fabric,
                 &config.staging,
                 trace_id,
@@ -644,7 +716,11 @@ async fn process_url_inner(
                 &article_md,
                 capture_note,
             )
-            .await
+            .await;
+            // Gate: distill.article-transcript. Article-only — clears the
+            // raw-fetch `## Transcript` section when the toggle is off, so
+            // video/thread/voicenote/image transcripts are untouched.
+            gate_article_transcript(article_distilled, config.distill.article_transcript)
         };
         // Gate-2 runs against the concise Distilled summary, which is what
         // we now display to users; it is also what `fabric::generate_tags`
@@ -675,8 +751,9 @@ async fn process_url_inner(
 
     let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
     // Extractor-produced tags also flow into the tag pipeline so canonical
-    // filtering applies to them uniformly.
-    all_tags.extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    // filtering applies to them uniformly. Gate: distill.propose-tags — when
+    // off, the distiller-proposed tags are not merged (other sources stand).
+    merge_proposed_tags(&mut all_tags, &distilled.tags, config.distill.propose_tags);
 
     // Extract hashtags from YouTube description and merge yt-dlp tags
     if let Some(ref desc) = raw_description {
@@ -730,8 +807,13 @@ async fn process_url_inner(
                 // Phase 7 (defect #2): APPEND the distilled sections below the
                 // slide body rather than REPLACING them. Frontmatter is
                 // untouched here - `rendered_distilled.frontmatter_additions` is
-                // consumed below.
-                let body = append_distilled_below_slides(result.body, &rendered_distilled.body_markdown);
+                // consumed below. Gate: distill.slide-append — when off, the
+                // slide body stands alone (pre-Phase-7 slide-only shape).
+                let body = compose_slide_body(
+                    result.body,
+                    &rendered_distilled.body_markdown,
+                    config.distill.slide_append,
+                );
                 (body, result.slides)
             }
             Err(e) => {

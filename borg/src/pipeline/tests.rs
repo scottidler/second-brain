@@ -898,3 +898,177 @@ fn article_rendered_body_carries_transcript_and_yields_claims_fts_text() {
     let claims = vault::search::parse_body_claims(&rendered.body_markdown);
     assert_eq!(claims.len(), 2, "article claims must be FTS-parseable");
 }
+
+// ---------------------------------------------------------------------------
+// distill.* feature-toggle gate seams. Each gate lives at the borg layer so
+// the `distillers` crate stays config-free; these tests pin the on/off shape
+// at the narrowest testable seam.
+// ---------------------------------------------------------------------------
+
+/// Build a minimal `Distilled` carrying only a transcript, for the
+/// article-transcript gate + render assertions.
+fn distilled_with_transcript(kind: Option<vault::distilled::KindPayload>) -> vault::distilled::Distilled {
+    vault::distilled::Distilled {
+        summary: "A summary.".to_string(),
+        transcript: Some("Raw fetched body markdown.".to_string()),
+        kind_specific: kind,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn gate_article_transcript_off_drops_transcript_section() {
+    // Article-transcript OFF: the raw-fetch `## Transcript` section must be
+    // gone from the rendered note (pre-Phase-7 article shape).
+    let gated = gate_article_transcript(distilled_with_transcript(None), false);
+    assert!(
+        gated.transcript.is_none(),
+        "transcript must be cleared when the toggle is off"
+    );
+    let rendered = distillers::render(&gated);
+    assert!(
+        !rendered.body_markdown.contains("## Transcript"),
+        "article note must have NO ## Transcript when gate is off:\n{}",
+        rendered.body_markdown
+    );
+}
+
+#[test]
+fn gate_article_transcript_on_keeps_transcript_section() {
+    // Article-transcript ON: the `## Transcript` section is present.
+    let gated = gate_article_transcript(distilled_with_transcript(None), true);
+    assert!(
+        gated.transcript.is_some(),
+        "transcript must survive when the toggle is on"
+    );
+    let rendered = distillers::render(&gated);
+    assert!(
+        rendered.body_markdown.contains("## Transcript"),
+        "article note must carry ## Transcript when gate is on:\n{}",
+        rendered.body_markdown
+    );
+}
+
+#[test]
+fn article_transcript_gate_is_article_only_video_unaffected() {
+    // The gate is invoked ONLY on the article distiller path in
+    // process_url_inner. A VIDEO Distilled never passes through it, so its
+    // transcript survives to render regardless of the article toggle. Render
+    // is kind-agnostic, so a video-kind Distilled with a transcript always
+    // yields `## Transcript`.
+    let video = distilled_with_transcript(Some(vault::distilled::KindPayload::Video(
+        vault::distilled::VideoPayload::default(),
+    )));
+    let rendered = distillers::render(&video);
+    assert!(
+        rendered.body_markdown.contains("## Transcript"),
+        "video note must keep its ## Transcript (article gate does not apply):\n{}",
+        rendered.body_markdown
+    );
+}
+
+#[test]
+fn compose_slide_body_off_omits_distilled_sections() {
+    let slide_body = "## Slides\n\n![](slide-1.jpg)\n".to_string();
+    let distilled_body = "## Summary\n\nThe distilled summary.\n\n";
+    // slide-append OFF: slide body stands alone, no appended distilled sections.
+    let composed = compose_slide_body(slide_body.clone(), distilled_body, false);
+    assert_eq!(
+        composed, slide_body,
+        "slide body must be untouched when slide-append is off"
+    );
+    assert!(
+        !composed.contains("## Summary"),
+        "no appended distilled sections when off"
+    );
+}
+
+#[test]
+fn compose_slide_body_on_appends_distilled_sections() {
+    let slide_body = "## Slides\n\n![](slide-1.jpg)\n".to_string();
+    let distilled_body = "## Summary\n\nThe distilled summary.\n\n";
+    // slide-append ON: Phase-7 behavior — distilled sections appended below.
+    let composed = compose_slide_body(slide_body, distilled_body, true);
+    assert!(composed.contains("## Slides"), "slide body preserved");
+    assert!(composed.contains("## Summary"), "distilled sections appended when on");
+}
+
+#[test]
+fn gate_capture_note_off_returns_none() {
+    // capture-note OFF: dropped at the single seam even when a note is present.
+    assert_eq!(gate_capture_note(Some("why I saved this"), false), None);
+    // capture-note ON: trimmed non-empty note is threaded through.
+    assert_eq!(
+        gate_capture_note(Some("  why I saved this  "), true),
+        Some("why I saved this")
+    );
+    // ON but blank/whitespace-only note collapses to None (unchanged behavior).
+    assert_eq!(gate_capture_note(Some("   "), true), None);
+    assert_eq!(gate_capture_note(None, true), None);
+}
+
+/// Render a note with the given capture_note and assert `## Why Captured` +
+/// `capture-note:` presence. Mirrors how process_url_inner feeds the gated
+/// capture note into `NoteContent.capture_note`.
+fn render_note_with_capture(capture: Option<&str>) -> String {
+    let note = crate::markdown::NoteContent {
+        title: "T".to_string(),
+        summary: "S".to_string(),
+        capture_note: capture.map(str::to_string),
+        ..Default::default()
+    };
+    crate::markdown::render_note(&note, &crate::config::FrontmatterConfig::default())
+}
+
+#[test]
+fn capture_note_off_omits_why_captured_and_frontmatter() {
+    // With the gate off, capture_note is None → no `## Why Captured` section
+    // and no `capture-note:` frontmatter key.
+    let none = gate_capture_note(Some("prose about the URL"), false);
+    let rendered = render_note_with_capture(none);
+    assert!(
+        !rendered.contains("## Why Captured"),
+        "no Why Captured when capture-note off:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("capture-note:"),
+        "no capture-note frontmatter when off:\n{rendered}"
+    );
+}
+
+#[test]
+fn capture_note_on_renders_why_captured_and_frontmatter() {
+    let some = gate_capture_note(Some("prose about the URL"), true);
+    let rendered = render_note_with_capture(some);
+    assert!(
+        rendered.contains("## Why Captured"),
+        "Why Captured present when on:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("capture-note: prose about the URL"),
+        "capture-note frontmatter present when on:\n{rendered}"
+    );
+}
+
+#[test]
+fn merge_proposed_tags_off_skips_distiller_tags() {
+    // propose-tags OFF: a distiller-proposed tag does NOT enter the pipeline.
+    let mut all_tags = vec!["rust".to_string()];
+    merge_proposed_tags(&mut all_tags, &["llm".to_string()], false);
+    assert_eq!(
+        all_tags,
+        vec!["rust".to_string()],
+        "proposed tag must not be merged when off"
+    );
+}
+
+#[test]
+fn merge_proposed_tags_on_merges_distiller_tags() {
+    // propose-tags ON: the proposed tag is merged (Phase 2 behavior).
+    let mut all_tags = vec!["rust".to_string()];
+    merge_proposed_tags(&mut all_tags, &["llm".to_string()], true);
+    assert!(
+        all_tags.contains(&"llm".to_string()),
+        "proposed tag must be merged when on: {all_tags:?}"
+    );
+}
