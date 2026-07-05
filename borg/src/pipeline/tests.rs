@@ -431,36 +431,37 @@ fn test_vision_empty_text_falls_back_to_ocr() {
 
 #[test]
 fn test_build_obsidian_url_inbox() {
-    let url = build_obsidian_url("obsidian", "/home/user/obsidian/inbox/my-note.md");
-    assert_eq!(url, Some("obsidian://open?vault=obsidian&file=my-note".to_string()));
+    let url = build_obsidian_url("/home/user/obsidian/inbox/my-note.md");
+    assert_eq!(url, Some("obsidian://open?file=my-note".to_string()));
 }
 
 #[test]
 fn test_build_obsidian_url_notes_folder() {
-    let url = build_obsidian_url("obsidian", "/home/user/obsidian/notes/claude-code-guide.md");
-    assert_eq!(
-        url,
-        Some("obsidian://open?vault=obsidian&file=claude-code-guide".to_string())
-    );
+    let url = build_obsidian_url("/home/user/obsidian/notes/claude-code-guide.md");
+    assert_eq!(url, Some("obsidian://open?file=claude-code-guide".to_string()));
 }
 
 #[test]
 fn test_build_obsidian_url_same_stem_different_dirs() {
-    let inbox = build_obsidian_url("obsidian", "/home/user/obsidian/inbox/my-note.md");
-    let notes = build_obsidian_url("obsidian", "/home/user/obsidian/notes/my-note.md");
-    assert_eq!(inbox, notes, "URL should be path-independent");
+    let inbox = build_obsidian_url("/home/user/obsidian/inbox/my-note.md");
+    let notes = build_obsidian_url("/home/user/obsidian/notes/my-note.md");
+    assert_eq!(inbox, notes, "URL must be path-independent (survives inbox/ -> notes/ move)");
 }
 
+// Regression guard for the 2026-07-04 vault-name-mismatch bug: the link is
+// tapped on devices with different vault names (desktop "obsidian", phone
+// "obsidian-remote"), so it MUST NOT carry a `vault=` param. Bites if anyone
+// re-hardcodes a vault name.
 #[test]
-fn test_build_obsidian_url_vault_name_with_spaces() {
-    let url = build_obsidian_url("My Notes", "/home/user/obsidian/note.md");
-    assert_eq!(url, Some("obsidian://open?vault=My%20Notes&file=note".to_string()));
+fn test_build_obsidian_url_omits_vault_param() {
+    let url = build_obsidian_url("/home/user/obsidian/notes/my-note.md").unwrap();
+    assert!(!url.contains("vault="), "deep link must not hardcode a vault name: {url}");
 }
 
 #[test]
 fn test_build_obsidian_url_bare_filename() {
-    let url = build_obsidian_url("obsidian", "my-note.md");
-    assert_eq!(url, Some("obsidian://open?vault=obsidian&file=my-note".to_string()));
+    let url = build_obsidian_url("my-note.md");
+    assert_eq!(url, Some("obsidian://open?file=my-note".to_string()));
 }
 
 #[test]

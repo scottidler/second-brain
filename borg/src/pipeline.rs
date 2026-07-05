@@ -822,7 +822,7 @@ async fn process_url_inner(
     // of scope at function return (success path here).
     drop(inflight_guard);
 
-    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
+    let obsidian_url = build_obsidian_url(&note_path.to_string_lossy());
 
     Ok(IngestResult {
         status: IngestStatus::Completed,

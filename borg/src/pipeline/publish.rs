@@ -1,24 +1,25 @@
 use super::*;
 
-/// Build an obsidian://open deep link from vault name and note path.
+/// Build an obsidian://open deep link from the note path.
 ///
-/// Uses the bare filename stem (without extension or directory) as the `file`
-/// parameter. Obsidian's `open` action resolves a bare filename vault-wide by
-/// name, so the link opens the actual note *and* survives note moves between
-/// directories (e.g. inbox/ -> notes/). The earlier `search?query=` form only
-/// opened the search pane and never navigated to the note.
+/// Emits `obsidian://open?file=<stem>` with NO `vault=` parameter. The link is
+/// generated once by borg but tapped on multiple devices whose vaults have
+/// DIFFERENT names (desktop "obsidian", phone "obsidian-remote"); a hardcoded
+/// `vault=obsidian` matched at most one, so on the phone Obsidian opened but
+/// could not resolve the named vault to navigate (confirmed on Android 2026-07-04:
+/// `vault=obsidian` never navigated in the `obsidian-remote` vault, while the
+/// vault-less form did). Omitting `vault` opens the file in each device's CURRENT
+/// vault, which is correct everywhere.
 ///
-/// Precondition: assumes the stem is unique across the vault. When two notes
-/// share a stem in different directories, `open` navigates to whichever one
-/// Obsidian's name resolver picks (the old `search` form surfaced all matches).
-/// This is not a regression - the `search` link never navigated to any note -
-/// but it is why the link is keyed on the stem rather than the full path.
-pub(crate) fn build_obsidian_url(vault_name: &str, note_path: &str) -> Option<String> {
+/// The bare filename stem (no extension, no directory) resolves vault-wide by
+/// name, so the link is location-independent and survives cortex's inbox/ ->
+/// notes/ promotion. Precondition: the stem is unique across the vault; when two
+/// notes share a stem, `open` navigates to whichever one Obsidian's resolver picks.
+pub(crate) fn build_obsidian_url(note_path: &str) -> Option<String> {
     let path = std::path::Path::new(note_path);
     let stem = path.file_stem()?.to_str()?;
-    let encoded_vault = urlencoding::encode(vault_name);
     let encoded_file = urlencoding::encode(stem);
-    Some(format!("obsidian://open?vault={encoded_vault}&file={encoded_file}"))
+    Some(format!("obsidian://open?file={encoded_file}"))
 }
 
 /// Compute the vault-relative path for a note, for use in the ledger Path column.
@@ -59,7 +60,7 @@ pub(crate) fn publish_note(
         },
     )?;
 
-    let obsidian_url = build_obsidian_url(&config.vault.vault_name, &note_path.to_string_lossy());
+    let obsidian_url = build_obsidian_url(&note_path.to_string_lossy());
 
     Ok(IngestResult {
         status: IngestStatus::Completed,

@@ -194,7 +194,7 @@ pub(crate) async fn install_systemd(exe_path: &str, config: &Config) -> Result<P
     let data_path = vault::receipts::receipts_dir()
         .map(|d| d.parent().map(|p| p.to_path_buf()).unwrap_or(d))
         .unwrap_or_else(|_| home.join(".local/share/sb"));
-    let secrets_path = home.join("repos/scottidler/secrets/.secrets");
+    let secrets_path = home.join("repos/scottidler/keep/.secrets");
     let manifest_bin = home.join(".cargo/bin/manifest");
     let uid = std::process::Command::new("id")
         .arg("-u")
