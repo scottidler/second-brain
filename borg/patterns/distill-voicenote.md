@@ -40,8 +40,11 @@ links:
   - `text`: the claim itself.
   - `anchor`: leave `null` for voice notes. The Groq transcript does
     not carry timestamps, so anchors are not available at this layer.
-- `tags`: leave the list empty (`tags: []`). Tagging happens downstream
-  against the canonical tag vocabulary.
+- `tags`: propose up to 7 lowercase candidate tags describing the
+  voice note's subject matter (e.g. `rust`, `meeting-notes`). Hyphenate
+  multi-word tags. A downstream canonical-vocabulary filter gates and
+  caps these; propose freely from the content, don't try to guess the
+  canonical vocabulary yourself.
 - `links`: include any URLs the speaker mentions. ASR transcripts often
   garble URLs ("h-t-t-p-s colon slash slash example dot com" reads as
   one mangled token); reconstruct only when you are confident the URL

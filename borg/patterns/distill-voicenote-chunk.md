@@ -32,7 +32,11 @@ links:
   decisions, action items, or open questions raised IN THIS CHUNK.
   - `text`: the claim itself.
   - `anchor`: leave `null`. Voice-note transcripts have no timestamps.
-- `tags`: leave empty (`tags: []`).
+- `tags`: propose up to 7 lowercase candidate tags describing THIS
+  CHUNK's subject matter. Hyphenate multi-word tags. A later reduce
+  step (and a downstream canonical-vocabulary filter) merges and caps
+  tags across chunks; propose freely, don't try to guess the canonical
+  vocabulary yourself.
 - `links`: links the speaker explicitly mentions in this chunk; reconstruct
   only when you are confident which URL the speaker meant. Omit if
   uncertain.

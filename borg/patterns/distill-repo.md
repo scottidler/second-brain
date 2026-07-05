@@ -38,8 +38,11 @@ install: null
   - `text`: the claim itself.
   - `anchor`: leave `null` for repos. Anchors only apply to videos
     (timestamps) and threads (post IDs).
-- `tags`: leave the list empty (`tags: []`). Tagging happens downstream
-  against the canonical tag vocabulary.
+- `tags`: propose up to 7 lowercase candidate tags describing the
+  project's subject matter (e.g. `rust`, `cli-tool`). Hyphenate
+  multi-word tags. A downstream canonical-vocabulary filter gates and
+  caps these; propose freely from the content, don't try to guess the
+  canonical vocabulary yourself.
 - `links`: include only links the README actively cites as related
   projects, documentation, or further reading. Omit badge images and
   shields.

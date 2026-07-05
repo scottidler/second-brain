@@ -45,8 +45,11 @@ post-count: 0
     in-thread identifier (e.g. an X status ID, a Reddit comment id like
     `t1_abc123`, an HN item id). If you cannot extract one cleanly,
     leave it `null`. Do not fabricate IDs.
-- `tags`: leave the list empty (`tags: []`). Tagging happens downstream
-  against the canonical tag vocabulary.
+- `tags`: propose up to 7 lowercase candidate tags describing the
+  thread's subject matter (e.g. `rust`, `distributed-systems`).
+  Hyphenate multi-word tags. A downstream canonical-vocabulary filter
+  gates and caps these; propose freely from the content, don't try to
+  guess the canonical vocabulary yourself.
 - `links`: include only URLs the thread cites as supporting material
   (papers, repos, articles). Omit image/embed URLs and platform-internal
   reply links.

@@ -48,8 +48,11 @@ links:
   - `text`: the claim itself.
   - `anchor`: leave `null` for images. Anchors only apply to videos
     (timestamps) and threads (post IDs).
-- `tags`: leave the list empty (`tags: []`). Tagging happens downstream
-  against the canonical tag vocabulary.
+- `tags`: propose up to 7 lowercase candidate tags describing the
+  image's subject matter (e.g. `rust`, `hardware`). Hyphenate
+  multi-word tags. A downstream canonical-vocabulary filter gates and
+  caps these; propose freely from the content, don't try to guess the
+  canonical vocabulary yourself.
 - `links`: include any URLs the OCR text contains. Many screenshots are
   of pages with a visible URL bar or in-line citation; capture those.
   - `url`: the absolute URL as the OCR extracted it (correct obvious

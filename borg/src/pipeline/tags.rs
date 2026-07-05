@@ -60,3 +60,6 @@ pub(crate) async fn finalize_tags(tags: &mut Vec<String>, config: &Config) {
         *tags = canonical::filter_and_cap(tags, &state.canonical_set, &state.mapping, state.max_per_note);
     }
 }
+
+#[cfg(test)]
+mod tests;

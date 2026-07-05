@@ -24,14 +24,17 @@ links:
   directly by a downstream consumer.
 - `summary`: 2-4 sentences. State what the article is and who it is for.
   Do not state what you think about it.
-- `claims`: maximum 7. Each is a single sentence stating one assertion
+- `claims`: maximum 10. Each is a single sentence stating one assertion
   the article makes. Drop opinion and authorial reflection; retain
   factual assertions and concrete recommendations.
   - `text`: the claim itself.
   - `anchor`: leave `null` for articles. Anchors only apply to videos
     (timestamps) and threads (post IDs).
-- `tags`: leave the list empty (`tags: []`). Tagging happens downstream
-  against the canonical tag vocabulary.
+- `tags`: propose up to 7 lowercase candidate tags describing the
+  article's subject matter (e.g. `rust`, `distributed-systems`).
+  Hyphenate multi-word tags. A downstream canonical-vocabulary filter
+  gates and caps these; propose freely from the content, don't try to
+  guess the canonical vocabulary yourself.
 - `links`: include only links the article body actively cites or
   recommends. Omit navigation, social-share, and boilerplate links.
   - `url`: the absolute URL.

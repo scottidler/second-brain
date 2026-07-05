@@ -38,8 +38,11 @@ links:
     line. Use the timestamp where the claim BEGINS, not where it ends.
     Do not invent or interpolate timestamps. If the transcript has no
     timestamps, set `anchor: null`.
-- `tags`: leave the list empty (`tags: []`). Tagging happens downstream
-  against the canonical tag vocabulary.
+- `tags`: propose up to 7 lowercase candidate tags describing the
+  video's subject matter (e.g. `rust`, `distributed-systems`).
+  Hyphenate multi-word tags. A downstream canonical-vocabulary filter
+  gates and caps these; propose freely from the content, don't try to
+  guess the canonical vocabulary yourself.
 - `links`: include only URLs the speaker actively cites or recommends
   (project pages, papers, tools). Omit affiliate or sponsor links unless
   they are the topic.
