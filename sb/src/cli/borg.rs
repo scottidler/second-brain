@@ -104,6 +104,45 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Score distillation quality over golden fixtures (design 2026-07-05)
+    Eval(EvalArgs),
+}
+
+#[derive(Args)]
+pub struct EvalArgs {
+    /// Root of the fixture tree. Default is REPO-RELATIVE
+    /// (`config/eval/distill-fixtures`): `sb borg eval` is a developer command
+    /// meant to run from the second-brain repo root. Pass an absolute path to
+    /// run it elsewhere.
+    #[arg(long, default_value = "config/eval/distill-fixtures")]
+    pub fixtures: PathBuf,
+    /// Hand-labeled calibration file (fixture -> human axis scores). Optional.
+    #[arg(long, default_value = "config/eval/distill-calibration.yml")]
+    pub calibration: PathBuf,
+    /// Judge model name (empty = fabric's default model)
+    #[arg(long, default_value = "")]
+    pub judge_model: String,
+    /// Ignore and overwrite cached judgments
+    #[arg(long)]
+    pub rebuild_cache: bool,
+    /// Write a fillable calibration sheet to this path and skip metrics
+    #[arg(long)]
+    pub emit_calibration: Option<PathBuf>,
+    /// Also write the rendered report to this path
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+}
+
+impl From<&EvalArgs> for borg::eval::EvalOpts {
+    fn from(a: &EvalArgs) -> Self {
+        Self {
+            fixtures_dir: vault::paths::expand_tilde(&a.fixtures),
+            calibration_path: vault::paths::expand_tilde(&a.calibration),
+            judge_model: a.judge_model.clone(),
+            rebuild_cache: a.rebuild_cache,
+            emit_calibration: a.emit_calibration.as_ref().map(vault::paths::expand_tilde),
+        }
+    }
 }
 
 #[derive(Args)]
@@ -489,6 +528,28 @@ impl BorgCli {
                     report.skipped_recent_mtime,
                     report.skipped_no_date,
                 );
+                Ok(())
+            }
+            Some(Command::Eval(a)) => {
+                let opts = borg::eval::EvalOpts::from(&a);
+                match borg::eval::run(&opts)? {
+                    borg::eval::EvalOutcome::CalibrationSheet(path) => {
+                        println!("wrote calibration sheet: {}", path.display());
+                        println!(
+                            "Fill the `human-*` scores, then copy them into {}.",
+                            a.calibration.display()
+                        );
+                    }
+                    borg::eval::EvalOutcome::Report(report) => {
+                        let rendered = report.render();
+                        print!("{rendered}");
+                        if let Some(path) = a.report {
+                            std::fs::write(&path, &rendered)
+                                .with_context(|| format!("writing report to {}", path.display()))?;
+                            println!("\nreport written to {}", path.display());
+                        }
+                    }
+                }
                 Ok(())
             }
             Some(Command::Blocklist(args)) => match args.action {

@@ -1,0 +1,44 @@
+summary: This technical report from Chroma Research investigates how increasing input token counts degrade LLM performance across 18 models, including leading closed-source and open-weights models. It extends the standard Needle in a Haystack benchmark with semantic matching, distractor, and haystack-variation experiments, and adds a conversational QA evaluation using LongMemEval and a repeated-word replication task. The findings are intended for researchers, engineers, and practitioners working on long-context LLM applications and evaluation design.
+claims:
+- text: LLM performance consistently degrades as input length increases, even on simple tasks held at constant difficulty.
+  anchor: null
+- text: Lower needle-question semantic similarity accelerates performance degradation as context length grows.
+  anchor: null
+- text: Even a single distractor reduces model performance relative to a no-distractor baseline, and adding more distractors compounds the degradation.
+  anchor: null
+- text: Models perform better on semantically shuffled haystacks than on logically structured ones, a counterintuitive finding observed across all 18 models tested.
+  anchor: null
+- text: All tested models show significantly higher performance on focused prompts (~300 tokens of relevant content) than on full LongMemEval prompts (~113k tokens), demonstrating that adding irrelevant context imposes a measurable retrieval cost.
+  anchor: null
+- text: Claude models exhibit the lowest hallucination rates when distractors are present, while GPT models show the highest rates of confident but incorrect responses.
+  anchor: null
+- text: In the repeated-words replication task, performance degrades with context length and models are more likely to place a unique word correctly when it appears near the beginning of the sequence.
+  anchor: null
+tags: []
+links:
+- url: https://github.com/chroma-core/context-rot
+  label: Complete codebase
+- url: https://arxiv.org/abs/2410.10813
+  label: LongMemEval
+- url: https://arxiv.org/abs/2502.05167
+  label: NoLiMa
+- url: https://arxiv.org/abs/2506.11440
+  label: AbsenceBench
+- url: https://arxiv.org/abs/2409.12640
+  label: Michelangelo / Latent List
+- url: https://arxiv.org/abs/2302.00093
+  label: Distractors paper
+- url: https://drive.google.com/drive/folders/1FuOysriSotnYasJUbZJzn31SWt85_3yf
+  label: Cleaned datasets and needles
+kind-specific: null
+meta:
+  extractor: distill-article-v1
+  model: default
+  input-tokens: 14577
+  output-tokens: 617
+  produced-at: 2026-06-19T16:30:04.470023916+00:00
+  validation:
+    fallback-reason: null
+    bounds-truncations: []
+    anchors-stripped: 0
+    raw-output: null

@@ -21,6 +21,7 @@ pub mod description;
 pub mod discord;
 pub mod dispatch;
 pub mod error;
+pub mod eval;
 pub mod extension;
 pub mod extraction;
 pub mod fabric;

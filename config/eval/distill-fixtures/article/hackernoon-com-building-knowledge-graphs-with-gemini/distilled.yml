@@ -1,0 +1,56 @@
+summary: This article demonstrates how to build knowledge graphs from unstructured documents using Gemini, Google's LLM. It covers the complete process from prototyping with simple prompts to optimizing structured outputs using TSV format instead of JSON for better token efficiency, and includes visualization techniques for understanding extracted relationships between entities.
+claims:
+- text: TSV output format provides 30-40% savings in output tokens compared to compact JSON and 60-70% savings compared to standard JSON when generating knowledge graphs.
+  anchor: null
+- text: Gemini can process multiple document formats natively including text, PDF, images, audio, and video for knowledge graph extraction.
+  anchor: null
+- text: The article demonstrates extracting knowledge graphs from books containing 800k+ tokens in a single API request.
+  anchor: null
+- text: Knowledge graphs consist of entities (nodes) and relationships (edges) that can be structured as two linked tables with fields like id, name, label for entities and source_id, link, target_id for relationships.
+  anchor: null
+- text: Setting temperature=0.0, top_p=0.0, and seed=42 in Gemini configuration minimizes randomness for more deterministic data extraction results.
+  anchor: null
+- text: The tabular extraction approach uses structured prompts with data schema, instructions, and output format sections to generate consistent results.
+  anchor: null
+- text: NetworkX library can be used to build network graphs from extracted knowledge graph data and calculate node centralities to identify key entities.
+  anchor: null
+tags: []
+links:
+- url: https://github.com/GoogleCloudPlatform/generative-ai/blob/main/gemini/use-cases/knowledge-graph/knowledge_graph_generation.ipynb
+  label: notebook
+- url: https://colab.research.google.com/github/GoogleCloudPlatform/generative-ai/blob/main/gemini/use-cases/knowledge-graph/knowledge_graph_generation.ipynb
+  label: open the notebook in Colab
+- url: https://aistudio.google.com/
+  label: Google AI Studio
+- url: https://console.cloud.google.com/freetrial?redirectPath=%2Fagent-platform%2Fstudio
+  label: Agent Studio
+- url: https://pypi.org/project/google-genai
+  label: Google Gen AI Python SDK
+- url: https://gutenberg.org/ebooks
+  label: null
+- url: https://www-cs-faculty.stanford.edu/~knuth/sgb.html
+  label: Stanford GraphBase
+- url: https://github.com/toon-format/toon
+  label: TOON format
+- url: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/context-cache/context-cache-overview
+  label: context caching
+- url: https://console.cloud.google.com/agent-platform/studio/prompt-gallery
+  label: Agent Platform Prompt Gallery
+- url: https://docs.cloud.google.com/gemini-enterprise-agent-platform/release-notes
+  label: Agent Platform Release Notes
+- url: https://www.linkedin.com/in/picardparis
+  label: LinkedIn
+- url: https://x.com/PicardParis
+  label: Twitter / X
+kind-specific: null
+meta:
+  extractor: distill-article-v1
+  model: default
+  input-tokens: 21318
+  output-tokens: 766
+  produced-at: 2026-06-15T05:53:12.521371882+00:00
+  validation:
+    fallback-reason: null
+    bounds-truncations: []
+    anchors-stripped: 0
+    raw-output: null

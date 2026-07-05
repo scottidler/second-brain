@@ -1,0 +1,54 @@
+summary: Smart Connections is an Obsidian plugin that automatically finds semantically related notes using local embeddings. It provides a Connections view showing relevant notes for your current context and a Lookup view for semantic search across your vault, with zero setup required.
+claims:
+- text: Ships with a local embedding model that works offline without requiring API keys or external services
+  anchor: null
+- text: Uses semantic similarity rather than text matching to find connections between notes
+  anchor: null
+- text: Automatically indexes your vault and updates connections as you work
+  anchor: null
+- text: Allows dragging results to create links and copying connections as context for AI tools
+  anchor: null
+- text: Works on mobile devices and supports pinning or hiding specific connections
+  anchor: null
+tags: []
+links:
+- url: https://smartconnections.app/smart-connections/
+  label: Smart Connections overview
+- url: https://smartconnections.app/smart-connections/getting-started/
+  label: Getting Started guide
+- url: https://smartconnections.app/smart-connections/list-feature/
+  label: Connections view guide
+- url: https://smartconnections.app/smart-connections/lookup/
+  label: Lookup guide
+- url: https://smartconnections.app/smart-connections/settings/
+  label: Settings guide
+- url: https://youtu.be/7Rvl9Sl29Jk
+  label: Walkthrough video
+kind-specific:
+  kind: repo
+  stars: 5100
+  primary-language: JavaScript
+  last-commit: 2026-06-04T16:34:57Z
+  topics:
+  - chatgpt
+  - claude
+  - embeddings
+  - gemini
+  - obsidian
+  - obsidian-md
+  - obsidian-plugin
+  - related-items
+  - semantic-search
+  - vectors
+  install: null
+meta:
+  extractor: distill-repo-v1
+  model: default
+  input-tokens: 10658
+  output-tokens: 369
+  produced-at: 2026-06-06T22:59:30.468578562+00:00
+  validation:
+    fallback-reason: null
+    bounds-truncations: []
+    anchors-stripped: 0
+    raw-output: null

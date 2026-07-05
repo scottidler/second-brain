@@ -1,0 +1,14 @@
+summary: A hand-drawn whiteboard diagram titled "Ingest Pipeline" shows content flowing from transports through a fetch stage into per-kind distillation and finally publish to a vault note. A separate embedding path feeds an oracle SQLite index. The board is annotated with a red note that claims are invisible to vector-only retrieval.
+claims:
+- text: The ingest pipeline moves content from transports through Stage 0 fetch, Stage 2 distill, and Stage 3 publish into a vault note.
+  anchor: null
+- text: Long inputs take a chunk/map/reduce path while short inputs take a single distill call.
+  anchor: null
+- text: The diagram warns in red that claims are invisible to vector-only retrieval and must be fixed.
+  anchor: null
+tags: []
+links: []
+meta:
+  extractor: distill-image-v1
+  model: synthetic-fixture
+  produced-at: "2026-07-05T00:00:00Z"

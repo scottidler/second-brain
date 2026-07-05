@@ -1,0 +1,28 @@
+summary: "This video introduces the upcoming plugin system for the Helix text editor, built around the Steel scripting language (a Scheme dialect), and demonstrates how plugins are developed using config files, require statements, and prefixed namespaces to access Helix APIs. The speakers walk through practical examples ranging from simple scripts like insert-hello to more complex plugins such as a Vim emulation layer and an Oil.hx buffer-based file manager. They discuss the deliberate choice of Scheme over Rust for extensibility, and acknowledge the multi-year community effort that went into the plugin pull request. The video is aimed at Helix users and contributors interested in understanding how to write and use plugins once the system lands."
+claims:
+- text: "The Helix plugin system PR has been open since October 30th, 2023, making it nearly 3 years old."
+  anchor: "00:00:06"
+- text: "The language chosen for Helix plugins is Steel, a dialect of Scheme (itself a dialect of Lisp), built by Matt Paris."
+  anchor: "00:02:28"
+- text: "Steel is both a language and a runtime that can be embedded in a Rust application to run Steel code in a sandbox environment."
+  anchor: "00:02:36"
+- text: "Helix's core philosophy has been to build features like LSP support, git integration, and file picking directly into the editor rather than as plugins, resulting in noticeably faster performance than Neovim."
+  anchor: "00:01:45"
+- text: "The plugin-enabled version of Helix ships with the Steel package manager called Forge, installable via the 'forgepkg install --git' command."
+  anchor: "00:04:50"
+- text: "Steel installs packages to a local repository located at home/local/share/steel/cogs by default."
+  anchor: "00:05:08"
+- text: "The more idiomatic way to incorporate plugins in Helix, whether community-built or custom, is through the init.scm file."
+  anchor: "00:06:24"
+- text: "Using prefix when requiring a file prevents namespace pollution by requiring functions to be called with a qualified prefix like helix.static."
+  anchor: "00:08:36"
+- text: "An exhaustive list of all APIs exposed for plugins to use can be found in the steel docs.md file in the pull request."
+  anchor: "00:09:53"
+- text: "Plugin functions must be exported using 'provide' to make them available wherever the file is required."
+  anchor: "00:07:34"
+tags: []
+links: []
+meta:
+  extractor: "distill-video-v1"
+  model: "harvested-from-vault"
+  produced-at: "2026-07-02T01:45:08-07:00"

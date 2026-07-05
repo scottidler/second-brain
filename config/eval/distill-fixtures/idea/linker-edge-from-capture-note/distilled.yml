@@ -1,0 +1,14 @@
+summary: An idea note proposes using the user's capture annotation as a seed edge for the vault linker. Because the capture sentence names how a new source relates to existing work, threading it into the distiller as trusted context lets the linker treat mentioned entities as high-priority link candidates, gated by the existing link-confidence check.
+claims:
+- text: The capture annotation names the relationship between a new source and existing vault content but is currently discarded at the transport.
+  anchor: null
+- text: Threading the capture note into the distiller as trusted context lets the linker treat its mentioned entities as high-priority link candidates.
+  anchor: null
+- text: The capture note seeds link candidates rather than forcing edges, so the existing link-confidence gate still applies.
+  anchor: null
+tags: []
+links: []
+meta:
+  extractor: distill-passthrough-v1
+  model: synthetic-fixture
+  produced-at: "2026-07-05T00:00:00Z"

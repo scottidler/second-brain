@@ -1,0 +1,16 @@
+summary: A voice note proposes adding a small in-memory LRU cache for query embeddings in the retrieval path, since identical query strings get re-embedded within a session. It notes the cache key must include the model id so a model change invalidates stale vectors, and stresses measuring the actual re-embed rate before building the cache.
+claims:
+- text: Every knowledge search re-embeds the query from scratch even when the same query string repeats within a session.
+  anchor: "00:12"
+- text: The proposed fix is a small in-memory LRU cache mapping query string to its computed embedding vector, capped at a few hundred entries.
+  anchor: "00:31"
+- text: The cache key must include the model id so a change of active embedding model invalidates the old vectors.
+  anchor: "00:52"
+- text: Only the query embedding should be cached, not full search results, because the index changes as the vault updates.
+  anchor: "01:40"
+tags: []
+links: []
+meta:
+  extractor: distill-voicenote-v1
+  model: synthetic-fixture
+  produced-at: "2026-07-05T00:00:00Z"

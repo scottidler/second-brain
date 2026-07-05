@@ -1,0 +1,14 @@
+summary: A conference slide titled "Choosing an Embedding Model" lists three tradeoffs when picking an embedding model - dimensionality versus cost, context window versus truncation, and local versus hosted inference. It closes with a rule of thumb to chunk before embedding.
+claims:
+- text: Higher-dimensional embeddings capture more nuance but cost more to store and are slower to search at scale.
+  anchor: null
+- text: Most sentence-embedding models cap at 512 tokens and silently drop text past the cap, so long documents must be chunked first.
+  anchor: null
+- text: Local embedding models have zero per-call cost and no egress but need AVX or GPU for acceptable latency.
+  anchor: null
+tags: []
+links: []
+meta:
+  extractor: distill-image-v1
+  model: synthetic-fixture
+  produced-at: "2026-07-05T00:00:00Z"

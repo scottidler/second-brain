@@ -1,0 +1,28 @@
+summary: "The video introduces Git work trees as a workflow solution for agentic programming, demonstrating how developers can maintain in-progress feature work while simultaneously handling urgent tasks like bug fixes on separate branches. The speaker shows how multiple AI coding agents, such as Claude Code, can operate in parallel across different work trees of the same repository without interfering with each other. Practical steps are covered, including creating work trees, committing changes, and pushing to the correct branch using 'git push origin head', as well as using Claude Code's built-in --worktree flag. The video is aimed at developers using AI-assisted coding tools who want to maximize parallel productivity across multiple branches."
+claims:
+- text: "Git work trees allow you to run multiple coding agent sessions in parallel working on specific parts of the same project without inconsistency."
+  anchor: "00:00:06"
+- text: "Git work tree is not a separate tool to install; it is already part of Git and has been around for a while."
+  anchor: "00:03:43"
+- text: "Using a Git work tree is the easiest and most professional way to handle an urgent bug fix when you already have uncommitted in-progress changes."
+  anchor: "00:03:36"
+- text: "Creating a Git work tree leaves the original working directory and its uncommitted changes completely untouched."
+  anchor: "00:04:24"
+- text: "The git worktree add command creates a new directory at the specified path that contains its own copy of the repository on a new branch."
+  anchor: "00:04:10"
+- text: "Git work trees allow you to have multiple branches checked out at the same time locally, enabling parallel work on bug fixes, performance optimizations, and UI changes simultaneously."
+  anchor: "00:07:22"
+- text: "With Claude Code, you don't need to manually set up work trees; you can use the 'claude --worktree' flag and it automatically creates a work tree with a default name."
+  anchor: "00:08:13"
+- text: "The ideal use case for Git work trees with agentic coding is having one agent working on style, one on performance, and one on a database change, then combining the changes."
+  anchor: "00:09:39"
+- text: "With OpenCode, you must create work trees manually and start multiple OpenCode instances, one per folder, to achieve parallel agentic coding."
+  anchor: "00:07:43"
+- text: "Nesting a Git work tree inside an existing Git repository is possible but not recommended because it creates a Git repository within a Git repository, which is difficult to work with."
+  anchor: "00:06:52"
+tags: []
+links: []
+meta:
+  extractor: "distill-video-v1"
+  model: "harvested-from-vault"
+  produced-at: "2026-07-03T11:16:04-07:00"

@@ -1,0 +1,14 @@
+summary: A voice note argues the transcript chunk-boundary tests are too weak because they only check that chunking produces multiple chunks. It proposes three concrete tests - splitting near target size on unbroken text, no panic on multi-byte characters at the boundary, and byte-for-byte round-trip equality of reassembled chunks - with round-trip equality as the key invariant.
+claims:
+- text: The current chunking tests only assert that a large input produces more than one chunk, which is insufficient.
+  anchor: "00:14"
+- text: A chunk boundary landing inside a multi-byte character could cause a panic, so boundary handling must be tested with emoji and accented characters.
+  anchor: "00:38"
+- text: The concatenation of all chunks must equal the original input byte for byte to guarantee no content is dropped or duplicated.
+  anchor: "01:10"
+tags: []
+links: []
+meta:
+  extractor: distill-voicenote-v1
+  model: synthetic-fixture
+  produced-at: "2026-07-05T00:00:00Z"

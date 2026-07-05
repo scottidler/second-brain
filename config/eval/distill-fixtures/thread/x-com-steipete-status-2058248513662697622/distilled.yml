@@ -1,0 +1,29 @@
+summary: Peter Steinberger announces building a cloud-based system that runs codex using Cloudflare firecracker boxes for compute, with larger project tests handled by crabbox. The system uses Ghostty via WebAssembly, and he describes it as codex having replicated itself. The post appears to be a standalone announcement without visible replies in the transcript.
+claims:
+- text: Peter Steinberger built a cloud-based system to run codex using Cloudflare firecracker boxes due to compute limitations.
+  anchor: null
+- text: Larger projects require testing via crabbox since firecracker boxes aren't powerful enough.
+  anchor: null
+- text: The system uses Ghostty terminal via WebAssembly.
+  anchor: null
+- text: The implementation represents codex essentially replicating itself.
+  anchor: null
+tags: []
+links: []
+kind-specific:
+  kind: thread
+  author: '@steipete'
+  post-count: 1
+  platform: x
+meta:
+  extractor: distill-thread-v1
+  model: default
+  input-tokens: 901
+  output-tokens: 221
+  produced-at: 2026-05-26T20:42:59.708947928+00:00
+  validation:
+    fallback-reason: null
+    bounds-truncations: []
+    anchors-stripped: 0
+    raw-output: null
+transcript: "Title: Peter Steinberger 🦞 on X: \"Still limited by compute, so I built a thing that runs codex in the cloud, powered by @Cloudflare firecracker boxes (and since that's not beefy enough for larger projects, tests are run via crabbox)\n\nUses Ghostty ofc, via WebAssembly.\nCodex replicated itself, basically. https://t.co/6VE5HRs1BQ\" / X\n\nURL Source: https://x.com/steipete/status/2058248513662697622\n\nMarkdown Content:\n# Peter Steinberger 🦞 on X: \"Still limited by compute, so I built a thing that runs codex in the cloud, powered by @Cloudflare firecracker boxes (and since that's not beefy enough for larger projects, tests are run via crabbox) Uses Ghostty ofc, via WebAssembly. Codex replicated itself, basically. https://t.co/6VE5HRs1BQ\" / X\n\nDon’t miss what’s happening\n\nPeople on X are the first to know.\n\n[Log in](https://x.com/login)\n\n[Sign up](https://x.com/i/flow/signup)\n\n# [](https://x.com/)\n\n## Post\n\nSee new posts\n\n# Conversation\n\n[![Image 4](https://pbs.twimg.com/profile_images/1131851609774985216/OcsssQ9J_normal.png)](https://x.com/steipete)\n\n[Peter Steinberger ![Image 5: 🦞](https://abs.twimg.com/emoji/v2/svg/1f99e.svg) ![Image 6](https://pbs.twimg.com/profile_images/2017100664984186880/orbYx-3U_bigger.jpg)](https://x.com/steipete)\n\n[@steipete](https://x.com/steipete)\n\nStill limited by compute, so I built a thing that runs codex in the cloud, powered by \n\n[@Cloudflare](https://x.com/Cloudflare)\n\n firecracker boxes (and since that's not beefy enough for larger projects, tests are run via crabbox) Uses Ghostty ofc, via WebAssembly. Codex replicated itself, basically.\n\n[![Image 7: Image](https://pbs.twimg.com/media/HJBd1YTXAAADnx0?format=jpg&name=small)](https://x.com/steipete/status/2058248513662697622/photo/1)\n\n[6:07 PM · May 23, 2026](https://x.com/steipete/status/2058248513662697622)\n\n65\n\n53\n\n764\n\n545\n\nRead 65 replies\n\n## New to X?\n\nSign up now to get your own personalized timeline!\n\nSign up with Apple\n\n[Create account](https://x.com/i/flow/signup)\n\nBy signing up, you agree to the [Terms of Service](https://x.com/tos) and [Privacy Policy](https://x.com/privacy), including [Cookie Use.](https://help.x.com/rules-and-policies/twitter-cookies)\n\n## Relevant people\n\n*     [![Image 8](https://pbs.twimg.com/profile_images/1131851609774985216/OcsssQ9J_normal.png)](https://x.com/steipete)       [Peter Steinberger ![Image 9: 🦞](https://abs.twimg.com/emoji/v2/svg/1f99e.svg) ![Image 10](https://pbs.twimg.com/profile_images/2017100664984186880/orbYx-3U_bigger.jpg)](https://x.com/steipete) [@steipete](https://x.com/steipete)    Follow   Click to Follow steipete  Polyagentmorous ClawFather. Came back from retirement to mess with AI and help a lobster take over the world. [@OpenClaw](https://x.com/OpenClaw) ![Image 11: 🦞](https://abs.twimg.com/emoji/v2/svg/1f99e.svg) + [@OpenAI](https://x.com/OpenAI)    \n\n# Trending now\n\n## What’s happening\n\nTrending in United States\n\nMamdani\n\nPolitics · Trending\n\nWill Cain\n\nTrending with [Abdul El-Sayed](https://x.com/search?q=Abdul%20El-Sayed&src=trend_click&vertical=trends)\n\nTrending in United States\n\nZest\n\nTrending in United States\n\nSavanah\n\n[Show more](https://x.com/explore/tabs/for-you)\n\n[Terms of Service](https://x.com/tos)\n\n|\n\n[Privacy Policy](https://x.com/privacy)\n\n|\n\n[Cookie Policy](https://support.x.com/articles/20170514)\n\n|\n\n[Accessibility](https://help.x.com/resources/accessibility)\n\n|\n\n[Ads info](https://business.x.com/en/help/troubleshooting/how-twitter-ads-work.html?ref=web-twc-ao-gbl-adsinfo&utm_source=twc&utm_medium=web&utm_campaign=ao&utm_content=adsinfo)\n\n|\n\nMore\n\n© 2026 X Corp."

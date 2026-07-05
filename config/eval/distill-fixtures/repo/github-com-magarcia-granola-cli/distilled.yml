@@ -1,0 +1,36 @@
+summary: Granola CLI is an unofficial command-line interface for accessing Granola.ai meeting notes, transcripts, and AI-enhanced summaries directly from the terminal. It provides comprehensive meeting management features including search, filtering, export capabilities, and integration with system tools for developers and power users.
+claims:
+- text: Imports authentication credentials from the Granola desktop app and stores them securely in the system keychain
+  anchor: null
+- text: Supports natural language date filtering with keywords like 'today', 'yesterday', and relative dates like '3 days ago'
+  anchor: null
+- text: Exports meeting data in JSON and TOON format, with TOON using ~40% fewer tokens than JSON for LLM consumption
+  anchor: null
+- text: Converts ProseMirror documents to markdown for both manual notes and AI-enhanced summaries
+  anchor: null
+- text: Has only been tested on macOS and may not work on Windows and Linux
+  anchor: null
+tags: []
+links:
+- url: https://www.granola.ai/
+  label: Granola
+- url: https://toonformat.dev/
+  label: TOON
+kind-specific:
+  kind: repo
+  stars: 29
+  primary-language: TypeScript
+  last-commit: 2025-12-22T14:34:40Z
+  topics: []
+  install: npm install -g granola-cli
+meta:
+  extractor: distill-repo-v1
+  model: default
+  input-tokens: 5433
+  output-tokens: 289
+  produced-at: 2026-05-20T14:53:21.484358185+00:00
+  validation:
+    fallback-reason: null
+    bounds-truncations: []
+    anchors-stripped: 0
+    raw-output: null

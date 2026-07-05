@@ -295,6 +295,19 @@ pub fn cortex_lock_path() -> PathBuf {
         .join("embed.lock")
 }
 
+/// `sb borg eval`'s distillation judgment-cache path, under the `sb/borg/`
+/// data namespace (per-host, beside the receipts DB). Keyed judgments persist
+/// here so a re-run is cache-hit stable. Panics only when `xdg_data_dir()`
+/// returns `None`, same as [`borg_signal_state_dir`].
+///
+/// `~/.local/share/sb/borg/eval-cache.db` on Linux.
+pub fn borg_eval_cache_path() -> PathBuf {
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("sb/borg")
+        .join("eval-cache.db")
+}
+
 /// The single source of truth for the oracle SQLite DB path. Both oracle
 /// (the reader / FTS5+vector indexer) and cortex (the sole embeddings
 /// writer) resolve here so the two crates can never desync on the file

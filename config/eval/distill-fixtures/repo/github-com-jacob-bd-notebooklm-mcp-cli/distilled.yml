@@ -1,0 +1,42 @@
+summary: NotebookLM CLI & MCP Server provides programmatic access to Google NotebookLM through both a command-line interface and Model Context Protocol server. It enables AI assistants and users to create notebooks, add sources, generate podcasts/videos, query content, and manage NotebookLM functionality via natural language or CLI commands. The tool uses internal APIs and requires cookie-based authentication from a browser session.
+claims:
+- text: Uses internal undocumented APIs that may change without notice and require cookie extraction from browser sessions
+  anchor: null
+- text: Provides 35 MCP tools for AI assistants to interact with NotebookLM functionality
+  anchor: null
+- text: Supports automatic authentication with multiple Google accounts through isolated browser profiles
+  anchor: null
+- text: Includes automatic token refresh and handles CSRF token expiration
+  anchor: null
+- text: Requires Python 3.11+ and works with NotebookLM Pro/free and Google AI Ultra tier accounts
+  anchor: null
+tags: []
+links:
+- url: https://github.com/jacob-bd/notebooklm-mcp-cli/blob/main/docs/GETTING_STARTED.md
+  label: Getting Started
+- url: https://github.com/jacob-bd/notebooklm-mcp-cli/blob/main/docs/CLI_GUIDE.md
+  label: CLI Guide
+- url: https://github.com/jacob-bd/notebooklm-mcp-cli/blob/main/docs/MCP_GUIDE.md
+  label: MCP Guide
+- url: https://github.com/jacob-bd/notebooklm-mcp-cli/blob/main/docs/AUTHENTICATION.md
+  label: Authentication
+- url: https://github.com/jacob-bd/notebooklm-mcp-cli/blob/main/docs/API_REFERENCE.md
+  label: API Reference
+kind-specific:
+  kind: repo
+  stars: 4795
+  primary-language: Python
+  last-commit: 2026-06-08T21:25:38Z
+  topics: []
+  install: uv tool install notebooklm-mcp-cli
+meta:
+  extractor: distill-repo-v1
+  model: default
+  input-tokens: 5481
+  output-tokens: 421
+  produced-at: 2026-06-09T00:33:55.208404071+00:00
+  validation:
+    fallback-reason: null
+    bounds-truncations: []
+    anchors-stripped: 0
+    raw-output: null

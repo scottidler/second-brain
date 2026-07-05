@@ -1,0 +1,28 @@
+summary: "The video introduces the concept of 'skill hell' and presents a four-part framework for writing effective AI agent skills, covering triggers, internal structure, steering, and minimization. The speaker explains tradeoffs between model-invoked and user-invoked skills, and details how to structure skills using steps, reference material, and external context pointers to keep skill files small and focused. Key techniques include using semantically dense 'leading words' to steer agent behavior, hiding future steps to encourage thorough work per step, and pruning skills to avoid duplication and redundancy. The video is aimed at developers building or evaluating AI agent skills who want practical tools to improve skill quality and avoid common pitfalls."
+claims:
+- text: "Developers are now facing 'skill hell,' where many skills are freely available but people cannot tell a good skill from a bad skill or get the results skills promise."
+  anchor: "00:00:50"
+- text: "The missing element in the AI skills ecosystem is a shared rubric or framework for evaluating and improving skills."
+  anchor: "00:01:57"
+- text: "The speaker has encoded a skill checklist into a new skill in their repo called 'writing great skills' that others can use immediately."
+  anchor: "00:02:59"
+- text: "Skills can be invoked either by the user manually or by the model itself based on the skill's description appearing in the agent's context."
+  anchor: "00:03:37"
+- text: "When a model-invoked skill is triggered, the agent reads the skill.md file into its context window to get the full content of the skill."
+  anchor: "00:04:17"
+- text: "Every model-invoked skill added to an agent's environment increases context load by adding a description that costs tokens on every request."
+  anchor: "00:05:23"
+- text: "Model-invoked skills introduce unpredictability because the model may choose not to invoke a skill even when it is perfectly suited to the task."
+  anchor: "00:06:38"
+- text: "User-invoked skills reduce agent context load but increase cognitive load on the user, requiring the user to understand skills deeply."
+  anchor: "00:05:53"
+- text: "Skills are internally composed of two main units: steps (the step-by-step procedure) and reference (supporting information for those steps)."
+  anchor: "00:07:38"
+- text: "Keeping the main skill.md file as small as possible saves tokens, makes skills easier to maintain and audit, and benefits both maintainers and users."
+  anchor: "00:09:00"
+tags: []
+links: []
+meta:
+  extractor: "distill-video-v1"
+  model: "harvested-from-vault"
+  produced-at: "2026-07-04T11:11:24-07:00"

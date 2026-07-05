@@ -1,0 +1,38 @@
+summary: This article discusses how engineering teams are experiencing burnout from building and maintaining DIY platform solutions instead of using pre-engineered Platform as a Service offerings. The author argues that DIY automation creates complexity debt and recommends VMware Tanzu Platform as a solution for organizations looking to escape the maintenance burden of custom-built platforms.
+claims:
+- text: Platform teams that build custom automation don't eliminate complexity but become responsible for maintaining it indefinitely.
+  anchor: null
+- text: DIY platform solutions trade software costs for people costs and often end up being more expensive than commercial alternatives.
+  anchor: null
+- text: A pre-engineered PaaS provides integrated plumbing, services, security, and resilience ready to use on Day 1.
+  anchor: null
+- text: AI-assisted attacks are increasing and platform teams won't be able to keep up with security vulnerabilities in build-it-yourself models.
+  anchor: null
+- text: VMware Tanzu Platform 10.4 includes MCP Gateway and agent buildpack capabilities for agentic AI applications.
+  anchor: null
+- text: Organizations need to deploy applications nearly as fast as they can be coded with AI to avoid eroding the benefits of code generation.
+  anchor: null
+- text: VMware Tanzu Platform runs on top of existing VMware Cloud Foundation infrastructure without requiring replacement of current systems.
+  anchor: null
+tags: []
+links:
+- url: https://images.sw.broadcom.com/Web/CAInc2/%7B68c6ad82-a684-4e39-8feb-12803e4b1f0e%7D_The_Upside_Down_Economics_of_DIY_PaaS.pdf
+  label: null
+- url: https://tanzu.vmware.com
+  label: null
+- url: https://thenewstack.io/terms-of-use/
+  label: Terms of Use
+- url: https://thenewstack.io/privacy-policy/
+  label: Privacy Policy
+kind-specific: null
+meta:
+  extractor: distill-article-v1
+  model: default
+  input-tokens: 14869
+  output-tokens: 467
+  produced-at: 2026-05-31T20:53:24.984062043+00:00
+  validation:
+    fallback-reason: null
+    bounds-truncations: []
+    anchors-stripped: 0
+    raw-output: null

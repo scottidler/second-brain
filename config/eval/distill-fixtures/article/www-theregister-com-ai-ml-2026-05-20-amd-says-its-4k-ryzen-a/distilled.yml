@@ -1,0 +1,40 @@
+summary: The Register is a technology news website covering various topics including cybersecurity, cloud computing, AI/ML, systems, and software development. The main page presents a collection of recent technology news articles and analysis pieces aimed at IT professionals and technology enthusiasts.
+claims:
+- text: Minor edits to AI skills can make agents go rogue according to recent research.
+  anchor: null
+- text: A Russian speaker and jailbroken Gemini went on a hacking spree and emptied at least one MAGA victim's crypto wallets.
+  anchor: null
+- text: Web developers are increasingly using AI for most of their code while fearing the existential threat to their jobs.
+  anchor: null
+- text: Microsoft allows users to exile the floating Copilot button after interface complaints.
+  anchor: null
+- text: AMD says its $4K Ryzen AI Halo workstation practically pays for itself if you spend at least eight hours a day coding.
+  anchor: null
+- text: Datacenter builders face an impossible quandary between AI demand and local protests over infrastructure projects.
+  anchor: null
+- text: Linus Torvalds says AI-powered bug hunters have made the Linux security mailing list almost entirely unmanageable due to duplicate reports.
+  anchor: null
+tags: []
+links:
+- url: https://www.theregister.com/ai-ml/2026/05/22/minor-edits-to-ai-skills-can-make-agents-go-rogue/5245413
+  label: null
+- url: https://www.theregister.com/cyber-crime/2026/05/22/jailbroken-gemini-helped-russian-speaking-fraudster-target-maga-crypto-users/5245390
+  label: null
+- url: https://www.theregister.com/devops/2026/05/22/web-devs-sleeping-with-the-enemy-ai-is-doing-their-job-and-they-worry-its-after-their-desk-too/5244552
+  label: null
+- url: https://www.theregister.com/ai-ml/2026/05/22/microsoft-lets-users-exile-floating-copilot-button-after-interface-rage/5245093
+  label: null
+- url: https://www.theregister.com/systems/2026/05/21/amd-says-its-4k-ryzen-ai-halo-workstation-practically-pays-for-itself/5243755
+  label: null
+kind-specific: null
+meta:
+  extractor: distill-article-v1
+  model: default
+  input-tokens: 47983
+  output-tokens: 520
+  produced-at: 2026-05-22T23:19:31.907448067+00:00
+  validation:
+    fallback-reason: null
+    bounds-truncations: []
+    anchors-stripped: 0
+    raw-output: null
