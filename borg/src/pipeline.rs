@@ -108,6 +108,11 @@ pub async fn process_content(
     force: bool,
     config: &Config,
     trace_id: Option<String>,
+    // Operator capture note for the non-URL kinds (Signal attachment captions).
+    // URL captures carry their note inside `ContentKind::Url { note }`; this
+    // param is the carrier for attachment/text kinds whose variant has no note
+    // field. `None` for every transport except the Signal attachment path.
+    attachment_note: Option<String>,
 ) -> IngestResult {
     let trace_id = trace_id.unwrap_or_else(|| trace::generate(method));
     log::info!("[{trace_id}] Starting ingest: method={method}");
@@ -147,10 +152,19 @@ pub async fn process_content(
         }
     } else {
         match content {
-            ContentKind::Url(url) => process_url(&url, tags, method, force, config, &trace_id).await,
+            ContentKind::Url { url, note } => process_url(&url, note, tags, method, force, config, &trace_id).await,
             ContentKind::Image { data, filename } => {
                 with_hard_timeout(
-                    process_image(&data, &filename, tags, method, force, config, &trace_id),
+                    process_image(
+                        &data,
+                        &filename,
+                        tags,
+                        method,
+                        force,
+                        config,
+                        &trace_id,
+                        attachment_note,
+                    ),
                     config,
                     &trace_id,
                     method,
@@ -169,6 +183,7 @@ pub async fn process_content(
                         config,
                         DocumentKind::Pdf,
                         &trace_id,
+                        attachment_note,
                     ),
                     config,
                     &trace_id,
@@ -179,7 +194,16 @@ pub async fn process_content(
             }
             ContentKind::Audio { data, filename } => {
                 with_hard_timeout(
-                    process_audio(&data, &filename, tags, method, force, config, &trace_id),
+                    process_audio(
+                        &data,
+                        &filename,
+                        tags,
+                        method,
+                        force,
+                        config,
+                        &trace_id,
+                        attachment_note,
+                    ),
                     config,
                     &trace_id,
                     method,
@@ -208,6 +232,7 @@ pub async fn process_content(
                         config,
                         DocumentKind::Document,
                         &trace_id,
+                        attachment_note,
                     ),
                     config,
                     &trace_id,
@@ -314,6 +339,7 @@ where
 
 pub async fn process_url(
     url: &str,
+    note: Option<String>,
     tags: Vec<String>,
     method: IngestMethod,
     force: bool,
@@ -324,7 +350,7 @@ pub async fn process_url(
     let hard_timeout = std::time::Duration::from_secs(config.pipeline.hard_timeout_secs);
     let outcome = tokio::time::timeout(
         hard_timeout,
-        process_url_inner(url, tags, method, force, config, trace_id),
+        process_url_inner(url, note, tags, method, force, config, trace_id),
     )
     .await;
 
@@ -381,13 +407,18 @@ pub async fn process_url(
 
 async fn process_url_inner(
     url: &str,
+    note: Option<String>,
     tags: Vec<String>,
     method: IngestMethod,
     force: bool,
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
-    log::debug!("Processing URL: {url}");
+    log::debug!("Processing URL: {url} capture_note={}", note.is_some());
+    // The capture note is the operator's own trusted text. It is rendered
+    // verbatim in-note (`## Why Captured`) and passed to the distiller as a
+    // labeled block (not injection-guarded) so it is available as context.
+    let capture_note = note.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
     // Normalize URL (clean + canonicalize) before classification
     let canonical = hygiene::normalize_url(url, &config.canonicalization.rules)?;
@@ -524,7 +555,7 @@ async fn process_url_inner(
     // older `summary: String` field unchanged.
     let mut slide_payload: Option<SlidePayload> = None;
     let (title, scraped_title, distilled, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
-        let yt_result = process_youtube(&url_match.url, config, trace_id).await?;
+        let yt_result = process_youtube(&url_match.url, config, trace_id, capture_note).await?;
         slide_payload = yt_result.slide_payload;
         let yt_title = yt_result.title;
         (
@@ -591,6 +622,7 @@ async fn process_url_inner(
                 trace_id,
                 &url_match.url,
                 &article_md,
+                capture_note,
             )
             .await
         } else if crate::stages::raw::is_thread_url(&url_match.url) {
@@ -600,6 +632,7 @@ async fn process_url_inner(
                 trace_id,
                 &url_match.url,
                 &article_md,
+                capture_note,
             )
             .await
         } else {
@@ -609,6 +642,7 @@ async fn process_url_inner(
                 trace_id,
                 &url_match.url,
                 &article_md,
+                capture_note,
             )
             .await
         };
@@ -727,6 +761,7 @@ async fn process_url_inner(
         tags: all_tags.clone(),
         summary: distilled.summary.clone(),
         description: filtered_description,
+        capture_note: capture_note.map(str::to_string),
         content_type,
         embed_code,
         method: Some(method),
@@ -914,9 +949,20 @@ impl DocumentKind {
 /// Detect structured text patterns before LLM classification.
 #[derive(Debug, PartialEq)]
 pub(crate) enum TextPattern {
-    Define { word: String },
-    Clarify { word_a: String, word_b: String },
-    ContainsUrl(String),
+    Define {
+        word: String,
+    },
+    Clarify {
+        word_a: String,
+        word_b: String,
+    },
+    /// The text contains a URL: it becomes an annotated URL ingest (Phase 8).
+    /// `note` is the surrounding prose (first-URL token removed) - the capture
+    /// annotation. An `idea:` prefix bypasses this (forces an Idea note).
+    ContainsUrl {
+        url: String,
+        note: Option<String>,
+    },
     General,
 }
 

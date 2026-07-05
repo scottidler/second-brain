@@ -9,6 +9,7 @@ async fn passthrough_summary_matches_transcript() {
         title_hint: None,
         repo_metadata: None,
         video_metadata: None,
+        capture_note: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
     assert_eq!(distilled.summary, "Quick observation about distributed consensus.");
@@ -39,6 +40,7 @@ async fn preserves_long_input_verbatim_in_transcript() {
         title_hint: None,
         repo_metadata: None,
         video_metadata: None,
+        capture_note: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
     // Distiller does not truncate; only enforce_bounds (called by URL kinds
@@ -59,6 +61,7 @@ async fn extracts_outbound_links_from_transcript() {
         title_hint: None,
         repo_metadata: None,
         video_metadata: None,
+        capture_note: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
     let urls: Vec<&str> = distilled.links.iter().map(|l| l.url.as_str()).collect();

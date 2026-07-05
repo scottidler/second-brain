@@ -385,3 +385,31 @@ fn classify_photo_plus_document_is_partial_keeping_first() {
         other => panic!("expected PartialMultiAttachment, got {other:?}"),
     }
 }
+
+#[test]
+fn signal_prose_and_url_captures_note() {
+    // Phase 8 (signal transport capture-note fixture): the signal URL arm
+    // builds its content via `router::url_content_from_text`.
+    let (content, _display) =
+        crate::router::url_content_from_text("this rebuts the linker post https://example.com/x").expect("url present");
+    match content {
+        crate::types::ContentKind::Url { url, note } => {
+            assert_eq!(url, "https://example.com/x");
+            assert_eq!(note.as_deref(), Some("this rebuts the linker post"));
+        }
+        other => panic!("expected Url, got {other:?}"),
+    }
+}
+
+#[test]
+fn signal_attachment_caption_migrates_to_capture_note() {
+    // Phase 8: the Signal attachment caption (formerly a mangled `caption:` tag)
+    // now travels as the capture note.
+    assert_eq!(
+        attachment_caption(Some("  a screenshot of the bug  ")),
+        Some("a screenshot of the bug".to_string())
+    );
+    // No caption -> no note.
+    assert_eq!(attachment_caption(None), None);
+    assert_eq!(attachment_caption(Some("   ")), None);
+}

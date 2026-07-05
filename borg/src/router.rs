@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
 use crate::config::LinkConfig;
-use crate::types::{IngestResult, IngestStatus};
+use crate::types::{ContentKind, IngestResult, IngestStatus};
 
 static URL_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"https?://\S+").expect("valid regex"));
 
@@ -75,6 +75,47 @@ pub fn extract_url_from_text(text: &str) -> Option<String> {
             .trim_end_matches(['.', ',', ')', ']', '>', ';', '!'])
             .to_string()
     })
+}
+
+/// The one capture-note extraction rule, shared by every transport (telegram,
+/// signal, ntfy, discord, CLI text). Given the raw message `text` and the
+/// already-extracted first `url`, the capture note is the message text with the
+/// FIRST whitespace token that contains that URL removed, then
+/// whitespace-collapsed. Empty result -> `None`. Any additional URLs stay in
+/// the note text as plain links; the first URL remains the capture target (as
+/// today). This is the single source of truth for the rule so no transport can
+/// drift from the others.
+pub fn extract_capture_note(text: &str, url: &str) -> Option<String> {
+    let mut removed = false;
+    let note = text
+        .split_whitespace()
+        .filter(|token| {
+            if !removed && token.contains(url) {
+                removed = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    match note.trim() {
+        "" => None,
+        trimmed => Some(trimmed.to_string()),
+    }
+}
+
+/// Build a URL `ContentKind` from a text-bearing transport message (telegram,
+/// discord, signal): the first URL is the capture target, the surrounding
+/// prose becomes the capture note via [`extract_capture_note`]. Returns the
+/// content plus a display string (the URL). `None` when the text has no URL.
+/// This is the single wiring point so every text transport applies the exact
+/// same capture-note rule.
+pub fn url_content_from_text(text: &str) -> Option<(ContentKind, String)> {
+    let url = extract_url_from_text(text)?;
+    let note = extract_capture_note(text, &url);
+    let display = url.clone();
+    Some((ContentKind::Url { url, note }, display))
 }
 
 pub fn format_reply(result: &IngestResult, url: &str) -> String {

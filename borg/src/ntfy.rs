@@ -2,7 +2,7 @@ use crate::backoff::ExponentialBackoff;
 use crate::config::Config;
 use crate::intake::{self as intake_log, Kind as IntakeKind};
 use crate::notify::{Desktop, Telegram};
-use crate::router::extract_url_from_text;
+use crate::router::{extract_capture_note, extract_url_from_text};
 use crate::trace;
 use crate::types::{ContentKind, IngestMethod};
 use eyre::Result;
@@ -25,6 +25,10 @@ struct JsonBody {
     url: String,
     #[serde(default)]
     tags: Vec<String>,
+    /// Optional operator capture annotation (Phase 8), threaded to the note's
+    /// `## Why Captured`. Absent in existing ntfy senders -> `None`.
+    #[serde(default)]
+    note: Option<String>,
     // NOTE: there is intentionally no `force` field. ntfy's only "auth" is the
     // topic name (a shared secret at best); honoring `force: true` from the
     // body would let anyone who guesses the topic force-overwrite vault notes.
@@ -37,6 +41,9 @@ enum ParsedMessage {
         url: String,
         tags: Vec<String>,
         force: bool,
+        /// Operator capture annotation (Phase 8): the JSON `note`, or the prose
+        /// surrounding the URL in a plain-text message (first-URL token removed).
+        note: Option<String>,
     },
     Text(String),
 }
@@ -56,15 +63,18 @@ fn parse_message(message: &str) -> Option<ParsedMessage> {
             tags: body.tags,
             // `force` is never honored from the ntfy channel (topic-only auth).
             force: false,
+            note: body.note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
         });
     }
 
     // Plain text: extract first URL, or fall back to text capture
     if let Some(url) = extract_url_from_text(trimmed) {
+        let note = extract_capture_note(trimmed, &url);
         Some(ParsedMessage::Url {
             url,
             tags: vec![],
             force: false,
+            note,
         })
     } else {
         Some(ParsedMessage::Text(trimmed.to_string()))
@@ -171,7 +181,7 @@ pub async fn run(
             };
 
             match parsed {
-                ParsedMessage::Url { url, tags, force } => {
+                ParsedMessage::Url { url, tags, force, note } => {
                     log::info!("ntfy: processing URL {url} (trace={trace_id})");
                     let cfg = config.clone();
                     let tg = telegram.clone();
@@ -180,7 +190,7 @@ pub async fn run(
                     tokio::spawn(async move {
                         let display_source = url.clone();
                         let result = crate::dispatch::dispatch_ingest(
-                            ContentKind::Url(url.clone()),
+                            ContentKind::Url { url: url.clone(), note },
                             tags,
                             IngestMethod::Ntfy,
                             force,

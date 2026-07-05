@@ -89,7 +89,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
         // The single-call path is chunk_count = 1 (cap 10); the long path scales
         // the claim budget by the real chunk count.
         let (mut distilled, chunk_count) = if token_estimate <= SINGLE_CALL_TOKEN_THRESHOLD {
-            (self.distill_short(transcript).await?, 1usize)
+            (self.distill_short(transcript, inputs.capture_note).await?, 1usize)
         } else {
             let chunks = chunk_transcript(transcript, CHUNK_TOKEN_TARGET);
             let chunk_count = chunks.len().max(1);
@@ -126,10 +126,10 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
     /// Single-call path for inputs under the threshold. Returns the parsed (or
     /// fallback) `Distilled`; the outer `distill` applies bounds + tag
     /// lowercasing so both paths share one exit.
-    async fn distill_short(&self, transcript: &str) -> Result<Distilled> {
+    async fn distill_short(&self, transcript: &str, capture_note: Option<&str>) -> Result<Distilled> {
         let request = FabricRequest {
             pattern: PATTERN.to_string(),
-            input: transcript.to_string(),
+            input: crate::parse::compose_capture_input(transcript, capture_note),
             model: self.config.model.clone(),
             max_chars: self.config.max_chars,
             timeout_secs: self.config.timeout_secs,

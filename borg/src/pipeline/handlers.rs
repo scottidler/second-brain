@@ -73,7 +73,12 @@ pub(crate) fn extract_article_title(article_md: &str, url: &str) -> String {
 /// Unified YouTube processing: yt-dlp for metadata, fabric for transcript+summary.
 /// Metadata and transcript run concurrently. Fabric is optional (gates transcript+summary).
 /// See docs/design/2026-03-22-youtube-metadata-pipeline-redesign.md.
-pub(crate) async fn process_youtube(url: &str, config: &Config, trace_id: &str) -> Result<YouTubeResult> {
+pub(crate) async fn process_youtube(
+    url: &str,
+    config: &Config,
+    trace_id: &str,
+    capture_note: Option<&str>,
+) -> Result<YouTubeResult> {
     // Heavy permit: yt-dlp + fabric + (optional) ffmpeg slides + vision all run
     // under this handler. Held for the lifetime of the function.
     log::debug!("process_youtube: acquiring heavy permit (url={url})");
@@ -186,6 +191,7 @@ pub(crate) async fn process_youtube(url: &str, config: &Config, trace_id: &str) 
         url,
         &transcript,
         Some(metadata.title.as_str()),
+        capture_note,
     )
     .await;
 
@@ -521,9 +527,10 @@ pub(crate) async fn process_image(
     force: bool,
     config: &Config,
     trace_id: &str,
+    capture_note: Option<String>,
 ) -> IngestResult {
     let start = Instant::now();
-    match process_image_inner(data, filename, tags, method, force, config, trace_id).await {
+    match process_image_inner(data, filename, tags, method, force, config, trace_id, capture_note).await {
         Ok(mut result) => {
             let elapsed = start.elapsed();
             log::info!("[{trace_id}] Image pipeline completed in {elapsed:.2?}");
@@ -558,6 +565,7 @@ pub(crate) async fn process_image_inner(
     force: bool,
     config: &Config,
     trace_id: &str,
+    capture_note: Option<String>,
 ) -> Result<IngestResult> {
     // Store asset in vault
     let date_bucket = chrono::Utc::now().format("%Y-%m").to_string();
@@ -697,6 +705,7 @@ pub(crate) async fn process_image_inner(
         tags: all_tags.clone(),
         summary: distilled.summary.clone(),
         description: None,
+        capture_note,
         content_type: ContentType::Image { asset_path: rel_path },
         embed_code: None,
         method: Some(method),
@@ -750,9 +759,10 @@ pub(crate) async fn process_audio(
     force: bool,
     config: &Config,
     trace_id: &str,
+    capture_note: Option<String>,
 ) -> IngestResult {
     let start = Instant::now();
-    match process_audio_inner(data, filename, tags, method, force, config, trace_id).await {
+    match process_audio_inner(data, filename, tags, method, force, config, trace_id, capture_note).await {
         Ok(mut result) => {
             let elapsed = start.elapsed();
             log::info!("[{trace_id}] Audio pipeline completed in {elapsed:.2?}");
@@ -796,6 +806,7 @@ pub(crate) async fn process_audio_inner(
     force: bool,
     config: &Config,
     trace_id: &str,
+    capture_note: Option<String>,
 ) -> Result<IngestResult> {
     // Heavy permit: Groq transcription + any ffmpeg pre-processing runs
     // under this handler.
@@ -911,6 +922,7 @@ pub(crate) async fn process_audio_inner(
         tags: all_tags.clone(),
         summary: distilled.summary.clone(),
         description: None,
+        capture_note,
         content_type: ContentType::Audio {
             asset_path: rel_path,
             duration_secs,
@@ -955,9 +967,22 @@ pub(crate) async fn process_document_file(
     config: &Config,
     kind: DocumentKind,
     trace_id: &str,
+    capture_note: Option<String>,
 ) -> IngestResult {
     let start = Instant::now();
-    match process_document_file_inner(data, filename, tags, method, force, config, kind, trace_id).await {
+    match process_document_file_inner(
+        data,
+        filename,
+        tags,
+        method,
+        force,
+        config,
+        kind,
+        trace_id,
+        capture_note,
+    )
+    .await
+    {
         Ok(mut result) => {
             let elapsed = start.elapsed();
             log::info!(
@@ -997,6 +1022,7 @@ pub(crate) async fn process_document_file_inner(
     config: &Config,
     kind: DocumentKind,
     trace_id: &str,
+    capture_note: Option<String>,
 ) -> Result<IngestResult> {
     // Heavy permit: OCR / markitdown / document::extract_text are subprocess-
     // backed and CPU-heavy.
@@ -1121,6 +1147,7 @@ pub(crate) async fn process_document_file_inner(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        capture_note,
         ..NoteContent::default()
     };
 

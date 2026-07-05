@@ -584,12 +584,13 @@ pub async fn run(
                 let text = message.text().unwrap_or("");
                 log::debug!("Telegram message from chat {}: {text}", chat_id);
 
-                let (content, display_source) = if let Some(url) = extract_url_from_text(text) {
+                let (content, display_source) = if let Some((content, url)) = crate::router::url_content_from_text(text)
+                {
                     log::info!(
                         "Telegram: processing URL {url} from chat {} (trace={trace_id})",
                         chat_id
                     );
-                    (ContentKind::Url(url.clone()), url)
+                    (content, url)
                 } else {
                     log::info!("Telegram: processing text from chat {} (trace={trace_id})", chat_id);
                     let display = vault::text::truncate_with_ellipsis(text, 50);

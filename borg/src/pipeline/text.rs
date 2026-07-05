@@ -27,13 +27,21 @@ pub(crate) fn detect_text_pattern(text: &str) -> TextPattern {
         }
     }
 
-    // Check if text contains a URL (redirect to URL pipeline)
-    if let Some(url) = router::extract_url_from_text(trimmed) {
-        // Only redirect if the text IS essentially just a URL
-        let without_url = trimmed.replace(&url, "").trim().to_string();
-        if without_url.is_empty() || without_url.len() < 10 {
-            return TextPattern::ContainsUrl(url);
-        }
+    // `idea:` prefix forces an Idea note even when the text carries a URL - the
+    // explicit escape hatch that replaces the old `<10 chars` prose heuristic
+    // (Phase 8 resolved decision). It short-circuits the URL redirect below.
+    let is_idea = trimmed
+        .strip_prefix("idea:")
+        .or_else(|| trimmed.strip_prefix("Idea:"))
+        .is_some();
+
+    // Phase 8: prose+URL ALWAYS becomes an annotated URL ingest (the source is
+    // fetched). The surrounding prose becomes the capture note. A bare URL
+    // yields `note = None`. Additional URLs stay in the note text as plain
+    // links; the first URL is the capture target.
+    if !is_idea && let Some(url) = router::extract_url_from_text(trimmed) {
+        let note = router::extract_capture_note(trimmed, &url);
+        return TextPattern::ContainsUrl { url, note };
     }
 
     TextPattern::General
@@ -85,9 +93,9 @@ pub(crate) async fn process_text_inner(
     log::debug!("Text pattern detected: {pattern:?}");
 
     match pattern {
-        TextPattern::ContainsUrl(url) => {
-            // Redirect to URL pipeline
-            return Ok(process_url(&url, tags, method, force, config, trace_id).await);
+        TextPattern::ContainsUrl { url, note } => {
+            // Redirect to URL pipeline, carrying the capture note (Phase 8).
+            return Ok(process_url(&url, note, tags, method, force, config, trace_id).await);
         }
         TextPattern::Define { .. } | TextPattern::Clarify { .. } => {
             return process_vocab(text, &pattern, tags, method, force, config, trace_id).await;
@@ -139,6 +147,7 @@ pub(crate) async fn process_text_inner(
         // body comes from `distilled_body`.
         summary: distilled.summary.clone(),
         description: None,
+        capture_note: None,
         content_type: ContentType::Note,
         embed_code: None,
         method: Some(method),
@@ -283,6 +292,7 @@ pub(crate) async fn process_vocab(
         tags: all_tags.clone(),
         summary: distilled.summary.clone(),
         description: None,
+        capture_note: None,
         content_type,
         embed_code: None,
         method: Some(method),

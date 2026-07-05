@@ -15,7 +15,7 @@ use crate::types::{ContentKind, Envelope, FetchMeta, GateId, IngestKind, IngestM
 pub fn classify(content: &ContentKind) -> IngestKind {
     match content {
         ContentKind::Text(body) => classify_text(body.trim()),
-        ContentKind::Url(url) => classify_url(url),
+        ContentKind::Url { url, .. } => classify_url(url),
         ContentKind::Image { .. } | ContentKind::Pdf { .. } | ContentKind::Document { .. } => IngestKind::Image,
         ContentKind::Audio { .. } => IngestKind::VoiceNote,
     }
@@ -114,7 +114,7 @@ pub fn write_capture<S: ArtifactStore>(
         ContentKind::Text(body) => {
             store.write_body(trace_id, body.as_bytes())?;
         }
-        ContentKind::Url(url) => {
+        ContentKind::Url { url, .. } => {
             store.write_body(trace_id, url.as_bytes())?;
         }
         ContentKind::Image { data, filename } => {
@@ -145,7 +145,7 @@ pub fn stage_0_init(config: &Config, content: &ContentKind, method: IngestMethod
     }
     let store = FsArtifactStore::from_config(&config.staging);
 
-    if let ContentKind::Url(url) = content {
+    if let ContentKind::Url { url, .. } = content {
         let blocklist_path = blocklist::default_path();
         let blocklist = Blocklist::from_file(&blocklist_path).unwrap_or_else(|e| {
             log::warn!("stage_0_init: blocklist load failed, treating as empty: {e:#}");

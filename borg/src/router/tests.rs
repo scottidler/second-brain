@@ -325,3 +325,60 @@ fn test_format_reply_with_trace_id_failed() {
         "[tg-7f3a2c] Failed (0.3s): connection timeout\nURL: https://example.com"
     );
 }
+
+// --- Phase 8: capture-note extraction (the one shared rule) ---
+
+#[test]
+fn extract_capture_note_removes_first_url_token_and_collapses_whitespace() {
+    let note = extract_capture_note(
+        "This is how we should fix borg's linker:   https://example.com/post",
+        "https://example.com/post",
+    );
+    assert_eq!(note.as_deref(), Some("This is how we should fix borg's linker:"));
+}
+
+#[test]
+fn extract_capture_note_bare_url_is_none() {
+    assert_eq!(extract_capture_note("https://example.com", "https://example.com"), None);
+    // Whitespace-only remainder also collapses to None.
+    assert_eq!(
+        extract_capture_note("   https://example.com   ", "https://example.com"),
+        None
+    );
+}
+
+#[test]
+fn extract_capture_note_keeps_additional_urls_in_note_text() {
+    let note = extract_capture_note(
+        "compare https://a.example.com and https://b.example.com",
+        "https://a.example.com",
+    );
+    // Only the first URL token is removed; the trailing URL stays as a plain link.
+    assert_eq!(note.as_deref(), Some("compare and https://b.example.com"));
+}
+
+#[test]
+fn extract_capture_note_strips_wrapping_token_punctuation() {
+    // The URL token may be wrapped in punctuation; the whole token is removed.
+    let note = extract_capture_note("see (https://example.com/p) now", "https://example.com/p");
+    assert_eq!(note.as_deref(), Some("see now"));
+}
+
+#[test]
+fn url_content_from_text_builds_url_with_note() {
+    let (content, display) =
+        crate::router::url_content_from_text("read this https://example.com/x").expect("url present");
+    assert_eq!(display, "https://example.com/x");
+    match content {
+        crate::types::ContentKind::Url { url, note } => {
+            assert_eq!(url, "https://example.com/x");
+            assert_eq!(note.as_deref(), Some("read this"));
+        }
+        other => panic!("expected Url, got {other:?}"),
+    }
+}
+
+#[test]
+fn url_content_from_text_returns_none_without_url() {
+    assert!(crate::router::url_content_from_text("no url here").is_none());
+}

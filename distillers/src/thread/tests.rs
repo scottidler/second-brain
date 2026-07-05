@@ -34,6 +34,7 @@ post-count: 7
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -67,6 +68,7 @@ async fn infers_reddit_platform_from_source_url() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -92,6 +94,7 @@ async fn infers_hn_platform_from_source_url() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -116,6 +119,7 @@ async fn infers_twitter_legacy_host() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -140,6 +144,7 @@ async fn unknown_platform_when_source_url_is_none() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -161,6 +166,7 @@ async fn fabric_timeout_falls_back_with_platform_attached() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -188,6 +194,7 @@ async fn fabric_error_falls_back_with_error_reason() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -209,6 +216,7 @@ async fn malformed_yaml_falls_back_with_raw_output() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -234,6 +242,7 @@ async fn empty_summary_falls_back() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -258,6 +267,7 @@ async fn strips_yaml_code_fence() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -282,6 +292,7 @@ async fn truncates_excess_claims_via_enforce_bounds() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -312,6 +323,7 @@ async fn drops_empty_author_and_zero_post_count() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -337,6 +349,7 @@ async fn records_request_pattern_in_fake_history() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -375,6 +388,7 @@ async fn short_thread_stays_on_single_call_path() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -417,6 +431,7 @@ async fn long_thread_preserves_author_and_post_count_through_long_path() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -465,6 +480,7 @@ async fn long_thread_reduce_input_carries_thread_head() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -509,6 +525,7 @@ async fn long_thread_reduce_failure_falls_back_and_keeps_platform() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -551,6 +568,7 @@ async fn sub_threshold_oversize_thread_records_loud_truncation() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");

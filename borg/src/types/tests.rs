@@ -21,17 +21,31 @@ fn test_ingest_request_roundtrip() {
         priority: Some(Priority::High),
         force: false,
         method: Some(IngestMethod::Clipboard),
+        note: Some("why I saved this".to_string()),
     };
     let json = serde_yaml::to_string(&req).expect("serialize");
     let deserialized: IngestRequest = serde_yaml::from_str(&json).expect("deserialize");
     assert_eq!(deserialized.url, "https://youtube.com/watch?v=abc");
     assert_eq!(deserialized.tags, Some(vec!["ai".to_string(), "rust".to_string()]));
+    assert_eq!(deserialized.note.as_deref(), Some("why I saved this"));
+}
+
+#[test]
+fn test_ingest_request_note_defaults_to_none_when_absent() {
+    // The browser extension POST body omits `note`; it must deserialize to None
+    // (additive-optional field, Phase 8), keeping the extension compatible.
+    let body = serde_json::json!({ "url": "https://example.com/" });
+    let req: IngestRequest = serde_json::from_value(body).expect("deserialize");
+    assert_eq!(req.note, None);
 }
 
 #[test]
 fn test_content_kind_url() {
-    let kind = ContentKind::Url("https://example.com".to_string());
-    assert!(matches!(kind, ContentKind::Url(ref u) if u == "https://example.com"));
+    let kind = ContentKind::Url {
+        url: "https://example.com".to_string(),
+        note: None,
+    };
+    assert!(matches!(kind, ContentKind::Url { ref url, note: None } if url == "https://example.com"));
 }
 
 #[test]

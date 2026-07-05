@@ -238,6 +238,7 @@ impl EventHandler for Handler {
                             false,
                             &config,
                             Some(trace_id.clone()),
+                            None,
                         )
                         .await;
                         let _ = channel_id
@@ -283,8 +284,9 @@ impl EventHandler for Handler {
 
         // Priority 2: URL in text
         // Priority 3: Plain text. Empty was already recorded as a failed receipt above.
-        let (content, display_source) = if let Some(url) = extract_url_from_text(&msg.content) {
-            (ContentKind::Url(url.clone()), url)
+        let (content, display_source) = if let Some((content, url)) = crate::router::url_content_from_text(&msg.content)
+        {
+            (content, url)
         } else {
             let display = vault::text::truncate_with_ellipsis(&msg.content, 50);
             (ContentKind::Text(msg.content.clone()), display)
@@ -313,6 +315,7 @@ impl EventHandler for Handler {
                 false,
                 &config,
                 Some(trace_id.clone()),
+                None,
             )
             .await;
             let _ = channel_id

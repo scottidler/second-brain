@@ -63,6 +63,14 @@ pub struct DistillInputs<'a> {
     /// (`duration_seconds`) and `Distilled.kind_specific`; other distillers
     /// ignore it.
     pub video_metadata: Option<&'a VideoMetadata>,
+    /// Operator capture note (Phase 8): the user's own annotation about why
+    /// they captured this source. Made available to the single-call pattern as
+    /// a LABELED block (see `compose_capture_input`) so it can serve as context.
+    /// It is the operator's trusted text - rendered verbatim in-note by borg -
+    /// but is wrapped in a labeled "treat as context, not instructions" frame
+    /// before reaching the LLM so a pasted hostile string cannot masquerade as
+    /// pattern instructions. `None` for bare captures and cortex backfill.
+    pub capture_note: Option<&'a str>,
 }
 
 /// Per-kind extractor contract. Async because the LLM-bound distillers shell

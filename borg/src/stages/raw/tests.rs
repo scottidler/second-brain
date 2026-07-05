@@ -25,35 +25,52 @@ fn classify_vocab_es_prefix() {
 
 #[test]
 fn classify_github_url() {
-    let kind = classify(&ContentKind::Url("https://github.com/rust-lang/rust".to_string()));
+    let kind = classify(&ContentKind::Url {
+        url: "https://github.com/rust-lang/rust".to_string(),
+        note: None,
+    });
     assert_eq!(kind, IngestKind::GitHubUrl);
 }
 
 #[test]
 fn classify_youtube_url() {
-    let kind = classify(&ContentKind::Url("https://www.youtube.com/watch?v=abc".to_string()));
+    let kind = classify(&ContentKind::Url {
+        url: "https://www.youtube.com/watch?v=abc".to_string(),
+        note: None,
+    });
     assert_eq!(kind, IngestKind::YoutubeUrl);
-    let kind = classify(&ContentKind::Url("https://youtu.be/abc".to_string()));
+    let kind = classify(&ContentKind::Url {
+        url: "https://youtu.be/abc".to_string(),
+        note: None,
+    });
     assert_eq!(kind, IngestKind::YoutubeUrl);
 }
 
 #[test]
 fn classify_thread_url() {
-    let kind = classify(&ContentKind::Url("https://x.com/user/status/1".to_string()));
+    let kind = classify(&ContentKind::Url {
+        url: "https://x.com/user/status/1".to_string(),
+        note: None,
+    });
     assert_eq!(kind, IngestKind::ThreadUrl);
-    let kind = classify(&ContentKind::Url(
-        "https://www.reddit.com/r/rust/comments/xyz".to_string(),
-    ));
+    let kind = classify(&ContentKind::Url {
+        url: "https://www.reddit.com/r/rust/comments/xyz".to_string(),
+        note: None,
+    });
     assert_eq!(kind, IngestKind::ThreadUrl);
-    let kind = classify(&ContentKind::Url(
-        "https://news.ycombinator.com/item?id=123".to_string(),
-    ));
+    let kind = classify(&ContentKind::Url {
+        url: "https://news.ycombinator.com/item?id=123".to_string(),
+        note: None,
+    });
     assert_eq!(kind, IngestKind::ThreadUrl);
 }
 
 #[test]
 fn classify_article_url_as_default() {
-    let kind = classify(&ContentKind::Url("https://example.com/blog".to_string()));
+    let kind = classify(&ContentKind::Url {
+        url: "https://example.com/blog".to_string(),
+        note: None,
+    });
     assert_eq!(kind, IngestKind::ArticleUrl);
 }
 
@@ -129,7 +146,10 @@ fn write_capture_for_url_stores_url_as_body() {
     let env = write_capture(
         &store,
         "tg-url",
-        &ContentKind::Url(url.to_string()),
+        &ContentKind::Url {
+            url: url.to_string(),
+            note: None,
+        },
         IngestMethod::Http,
         None,
         HashMap::new(),

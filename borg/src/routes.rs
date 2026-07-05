@@ -141,11 +141,22 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
     let telegram = state.telegram.clone();
     let desktop = state.desktop.clone();
     let force = request.force;
+    // Phase 8: the HTTP transport's capture note is the `IngestRequest.note`
+    // field (optional). Trimmed empty -> None so a bare-URL POST renders no
+    // `## Why Captured`.
+    let note = request
+        .note
+        .clone()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
     let task_trace = trace_id.clone();
     let task_url = url.clone();
     tokio::spawn(async move {
         let result = crate::dispatch::dispatch_ingest(
-            ContentKind::Url(task_url.clone()),
+            ContentKind::Url {
+                url: task_url.clone(),
+                note,
+            },
             tags,
             method,
             force,

@@ -545,7 +545,7 @@ async fn dispatch_envelope(env: Envelope, ctx: DispatchEnv) -> Result<()> {
         }
     }
 
-    let (kind_for_dispatch, content, display_source, extra_tags, partial_dropped) =
+    let (kind_for_dispatch, content, display_source, attachment_note, partial_dropped) =
         match build_dispatch_payload(&ctx.client, &outcome, body.as_deref(), &attachments, &trace_id).await {
             Some(payload) => payload,
             None => {
@@ -595,11 +595,12 @@ async fn dispatch_envelope(env: Envelope, ctx: DispatchEnv) -> Result<()> {
 
         let result = pipeline::process_content(
             content,
-            extra_tags,
+            vec![],
             IngestMethod::Signal,
             false,
             &config,
             Some(trace_for_pipeline.clone()),
+            attachment_note,
         )
         .await;
         log::debug!(
@@ -628,26 +629,34 @@ async fn dispatch_envelope(env: Envelope, ctx: DispatchEnv) -> Result<()> {
     Ok(())
 }
 
+/// Extract an attachment caption (the message body accompanying a Signal
+/// attachment) as a capture note (Phase 8). Replaces the legacy `caption:` tag
+/// hack: the caption is the operator's annotation and now travels in the
+/// capture-note field (rendered under `## Why Captured`), not as a mangled tag.
+fn attachment_caption(body: Option<&str>) -> Option<String> {
+    body.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
 async fn build_dispatch_payload(
     client: &Client,
     outcome: &ClassifyOutcome,
     body: Option<&str>,
     attachments: &[AttachmentPointer],
     trace_id: &str,
-) -> Option<(IntakeKind, ContentKind, String, Vec<String>, Option<usize>)> {
+) -> Option<(IntakeKind, ContentKind, String, Option<String>, Option<usize>)> {
     match outcome {
         ClassifyOutcome::Empty => None,
         ClassifyOutcome::Single { kind, .. } => match kind {
             IntakeKind::Url => {
-                let text = body.unwrap_or("");
-                let url = extract_url_from_text(text)?;
-                let display_source = url.clone();
-                Some((IntakeKind::Url, ContentKind::Url(url), display_source, vec![], None))
+                let (content, display_source) = crate::router::url_content_from_text(body.unwrap_or(""))?;
+                // URL capture note rides inside the variant; the attachment-note
+                // channel (4th tuple slot) stays None for URL captures.
+                Some((IntakeKind::Url, content, display_source, None, None))
             }
             IntakeKind::Text => {
                 let text = body.unwrap_or("").to_string();
                 let display_source = display_for_text(&text);
-                Some((IntakeKind::Text, ContentKind::Text(text), display_source, vec![], None))
+                Some((IntakeKind::Text, ContentKind::Text(text), display_source, None, None))
             }
             _ => {
                 let pointer = attachments.first()?;
@@ -660,13 +669,7 @@ async fn build_dispatch_payload(
                 };
                 let content = attachment_to_content(bytes, filename.clone(), pointer);
                 let display_source = display_for_attachment(&content, &filename);
-                let extra_tags = body
-                    .and_then(|c| {
-                        let trimmed = c.trim();
-                        if trimmed.is_empty() { None } else { Some(vec![format!("caption:{trimmed}")]) }
-                    })
-                    .unwrap_or_default();
-                Some((*kind, content, display_source, extra_tags, None))
+                Some((*kind, content, display_source, attachment_caption(body), None))
             }
         },
         ClassifyOutcome::PartialMultiAttachment {
@@ -682,13 +685,13 @@ async fn build_dispatch_payload(
             };
             let content = attachment_to_content(bytes, filename.clone(), pointer);
             let display_source = display_for_attachment(&content, &filename);
-            let extra_tags = body
-                .and_then(|c| {
-                    let trimmed = c.trim();
-                    if trimmed.is_empty() { None } else { Some(vec![format!("caption:{trimmed}")]) }
-                })
-                .unwrap_or_default();
-            Some((*kind, content, display_source, extra_tags, Some(*dropped_count)))
+            Some((
+                *kind,
+                content,
+                display_source,
+                attachment_caption(body),
+                Some(*dropped_count),
+            ))
         }
     }
 }
@@ -703,7 +706,7 @@ fn display_for_attachment(content: &ContentKind, filename: &str) -> String {
         ContentKind::Pdf { .. } => "pdf",
         ContentKind::Audio { .. } => "audio",
         ContentKind::Document { .. } => "document",
-        ContentKind::Url(_) => "url",
+        ContentKind::Url { .. } => "url",
         ContentKind::Text(_) => "text",
     };
     format!("[{label}: {filename}]")

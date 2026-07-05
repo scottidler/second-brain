@@ -143,8 +143,9 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
         transcript: &str,
         source_url: Option<&str>,
         title_hint: Option<&str>,
+        capture_note: Option<&str>,
     ) -> Result<Distilled> {
-        self.distill_with_metadata(kind, transcript, source_url, title_hint, None)
+        self.distill_with_metadata(kind, transcript, source_url, title_hint, None, capture_note)
             .await
     }
 
@@ -157,13 +158,15 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
         source_url: Option<&str>,
         title_hint: Option<&str>,
         repo_metadata: Option<&RepoMetadata>,
+        capture_note: Option<&str>,
     ) -> Result<Distilled> {
         log::debug!(
-            "DistillStage::distill: kind={} transcript_len={} source_url={:?} has_repo_metadata={}",
+            "DistillStage::distill: kind={} transcript_len={} source_url={:?} has_repo_metadata={} has_capture_note={}",
             kind,
             transcript.len(),
             source_url,
-            repo_metadata.is_some()
+            repo_metadata.is_some(),
+            capture_note.is_some()
         );
         let distill_kind = distill_kind_from_ingest(kind)?;
         let inputs = DistillInputs {
@@ -172,6 +175,7 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
             title_hint,
             repo_metadata,
             video_metadata: None,
+            capture_note,
         };
         self.dispatcher.distill(distill_kind, inputs).await
     }
@@ -186,13 +190,15 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
         source_url: Option<&str>,
         title_hint: Option<&str>,
         video_metadata: Option<&distillers::VideoMetadata>,
+        capture_note: Option<&str>,
     ) -> Result<Distilled> {
         log::debug!(
-            "DistillStage::distill_with_video_metadata: kind={} transcript_len={} source_url={:?} has_video_metadata={}",
+            "DistillStage::distill_with_video_metadata: kind={} transcript_len={} source_url={:?} has_video_metadata={} has_capture_note={}",
             kind,
             transcript.len(),
             source_url,
-            video_metadata.is_some()
+            video_metadata.is_some(),
+            capture_note.is_some()
         );
         let distill_kind = distill_kind_from_ingest(kind)?;
         let inputs = DistillInputs {
@@ -201,6 +207,7 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
             title_hint,
             repo_metadata: None,
             video_metadata,
+            capture_note,
         };
         self.dispatcher.distill(distill_kind, inputs).await
     }
@@ -233,14 +240,16 @@ async fn run_distiller(
     transcript: &str,
     source_url: Option<&str>,
     title: Option<&str>,
+    capture_note: Option<&str>,
 ) -> Distilled {
     log::debug!(
-        "{label}: trace={trace_id} kind={kind} transcript_len={} title_hint={title:?}",
-        transcript.len()
+        "{label}: trace={trace_id} kind={kind} transcript_len={} title_hint={title:?} has_capture_note={}",
+        transcript.len(),
+        capture_note.is_some()
     );
     let stage = DistillStage::from_fabric_config(fabric);
     let started = std::time::Instant::now();
-    let distilled = match stage.distill(kind, transcript, source_url, title).await {
+    let distilled = match stage.distill(kind, transcript, source_url, title, capture_note).await {
         Ok(d) => d,
         Err(e) => {
             log::warn!("[{trace_id}] {label}: dispatch error: {e:#}; using fallback");
@@ -278,6 +287,7 @@ pub async fn distill_for_publish_article(
     trace_id: &str,
     url: &str,
     article_md: &str,
+    capture_note: Option<&str>,
 ) -> Distilled {
     run_distiller(
         fabric,
@@ -289,6 +299,7 @@ pub async fn distill_for_publish_article(
         article_md,
         Some(url),
         None,
+        capture_note,
     )
     .await
 }
@@ -315,6 +326,7 @@ pub async fn distill_for_publish_voicenote(
         transcript,
         None,
         title_hint,
+        None,
     )
     .await
 }
@@ -340,6 +352,7 @@ pub async fn distill_for_publish_image(
         transcript,
         None,
         title_hint,
+        None,
     )
     .await
 }
@@ -368,6 +381,7 @@ pub async fn distill_for_publish_idea(
         transcript,
         None,
         title_hint,
+        None,
     )
     .await
 }
@@ -397,6 +411,7 @@ pub async fn distill_for_publish_vocab(
         transcript,
         None,
         title_hint,
+        None,
     )
     .await
 }
@@ -412,6 +427,7 @@ pub async fn distill_for_publish_repo(
     trace_id: &str,
     url: &str,
     article_md_fallback: &str,
+    capture_note: Option<&str>,
 ) -> Distilled {
     log::debug!("distill_for_publish_repo: trace={trace_id} url={url}");
     let Some((owner, repo)) = crate::github::parse_repo_url(url) else {
@@ -452,6 +468,7 @@ pub async fn distill_for_publish_repo(
             Some(url),
             None,
             Some(&metadata),
+            capture_note,
         )
         .await
     {
@@ -505,6 +522,7 @@ pub async fn distill_for_publish_video(
     url: &str,
     transcript_fallback: &str,
     title_hint: Option<&str>,
+    capture_note: Option<&str>,
 ) -> Distilled {
     log::debug!("distill_for_publish_video: trace={trace_id} url={url}");
 
@@ -566,6 +584,7 @@ pub async fn distill_for_publish_video(
             Some(url),
             Some(resolved_title.as_str()),
             Some(&video_metadata),
+            capture_note,
         )
         .await
     {
@@ -618,6 +637,7 @@ pub async fn distill_for_publish_thread(
     trace_id: &str,
     url: &str,
     thread_md: &str,
+    capture_note: Option<&str>,
 ) -> Distilled {
     log::debug!(
         "distill_for_publish_thread: trace={trace_id} url={url} transcript_len={}",
@@ -628,7 +648,10 @@ pub async fn distill_for_publish_thread(
     }
     let stage = DistillStage::from_fabric_config(fabric);
     let started = std::time::Instant::now();
-    let distilled = match stage.distill(IngestKind::ThreadUrl, thread_md, Some(url), None).await {
+    let distilled = match stage
+        .distill(IngestKind::ThreadUrl, thread_md, Some(url), None, capture_note)
+        .await
+    {
         Ok(d) => d,
         Err(e) => {
             log::warn!("[{trace_id}] distill_for_publish_thread: dispatch error: {e:#}; using fallback");

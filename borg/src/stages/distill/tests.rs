@@ -59,7 +59,7 @@ fn vocabulary_kinds_map_to_vocabulary_distill_kind() {
 async fn distill_stage_handles_idea_through_dispatcher() {
     let stage = make_stage();
     let distilled = stage
-        .distill(IngestKind::Idea, "A small idea.", None, None)
+        .distill(IngestKind::Idea, "A small idea.", None, None, None)
         .await
         .expect("distill");
     assert_eq!(distilled.summary, "A small idea.");
@@ -75,6 +75,7 @@ async fn distill_stage_handles_vocabulary_through_idea_distiller() {
         .distill(
             IngestKind::VocabularyEn,
             "definir: a Spanish-style infinitive",
+            None,
             None,
             None,
         )
@@ -95,7 +96,7 @@ async fn distill_stage_handles_image_through_image_distiller() {
     // the call falls back; the fallback path mirrors the live extractor id.
     let stage = make_stage();
     let distilled = stage
-        .distill(IngestKind::Image, "ocr'd text", None, None)
+        .distill(IngestKind::Image, "ocr'd text", None, None, None)
         .await
         .expect("distill");
     assert_eq!(distilled.meta.extractor, "distill-image-v1");
@@ -114,6 +115,7 @@ async fn distill_stage_handles_article_through_fabric() {
             IngestKind::ArticleUrl,
             "Article body.",
             Some("https://example.com"),
+            None,
             None,
         )
         .await
@@ -135,6 +137,7 @@ async fn distill_stage_handles_thread_through_fabric() {
             IngestKind::ThreadUrl,
             "Thread body.",
             Some("https://www.reddit.com/r/rust/comments/abc/x/"),
+            None,
             None,
         )
         .await
@@ -170,6 +173,7 @@ async fn distill_stage_handles_repo_through_fabric_with_metadata() {
             Some("https://github.com/scottidler/second-brain"),
             None,
             Some(&metadata),
+            None,
         )
         .await
         .expect("distill");
@@ -268,6 +272,7 @@ async fn distill_stage_handles_video_through_fabric_with_metadata() {
             Some("https://youtu.be/abc"),
             Some("Title"),
             Some(&metadata),
+            None,
         )
         .await
         .expect("distill");

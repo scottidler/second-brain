@@ -50,6 +50,11 @@ async function capture() {
     headers["Authorization"] = `Bearer ${authToken}`;
   }
   try {
+    // IngestRequest gained an optional `note` capture-annotation field
+    // (Phase 8, docs/design/2026-07-05-distillation-knowledge-extraction.md).
+    // The toolbar popup captures a bare tab URL with no annotation surface, so
+    // `note` is omitted here; it deserializes to None server-side. If a future
+    // popup adds a note textarea, send it as `note` in this body.
     const res = await fetch(`${endpoint}/ingest`, {
       method: "POST",
       headers,

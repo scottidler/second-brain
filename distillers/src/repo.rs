@@ -85,7 +85,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
 
         let request = FabricRequest {
             pattern: PATTERN.to_string(),
-            input: inputs.transcript.to_string(),
+            input: crate::parse::compose_capture_input(inputs.transcript, inputs.capture_note),
             model: self.config.model.clone(),
             max_chars: self.config.max_chars,
             timeout_secs: self.config.timeout_secs,

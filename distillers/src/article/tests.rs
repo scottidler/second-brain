@@ -31,6 +31,7 @@ links:
             title_hint: Some("Raft vs Paxos"),
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -67,6 +68,7 @@ async fn fabric_timeout_falls_back() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -94,6 +96,7 @@ async fn fabric_error_falls_back_with_error_reason() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -116,6 +119,7 @@ async fn malformed_yaml_falls_back_with_raw_output() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -142,6 +146,7 @@ async fn empty_summary_falls_back() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -167,6 +172,7 @@ async fn strips_yaml_code_fence_if_present() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -188,6 +194,7 @@ async fn strips_bare_code_fence_if_present() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -212,6 +219,7 @@ async fn truncates_excess_claims_via_enforce_bounds() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -242,6 +250,7 @@ async fn drops_empty_claim_texts_and_anchors() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -266,6 +275,7 @@ async fn lowercases_tag_strings() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -285,6 +295,7 @@ async fn records_request_pattern_in_fake_history() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -334,6 +345,7 @@ async fn short_article_stays_on_single_call_path() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -387,6 +399,7 @@ async fn long_article_covers_whole_input_with_zero_truncation() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -462,6 +475,7 @@ async fn long_article_reduce_selected_fact_appears_in_published_claims() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -497,6 +511,7 @@ async fn long_article_reduce_failure_falls_back_to_chronological() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -544,6 +559,7 @@ async fn long_article_builds_two_section_reduce_input() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -598,6 +614,7 @@ async fn sub_threshold_oversize_input_records_loud_truncation() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");

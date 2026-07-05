@@ -572,3 +572,74 @@ fn render_note_emits_trace_expires_from_frontmatter_additions() {
     assert_eq!(fm.trace_expires.as_deref(), Some("2026-08-19"));
     assert_eq!(fm.trace.as_deref(), Some("ht-95aa4e"));
 }
+
+// --- Phase 8: capture-note rendering (## Why Captured + frontmatter) ---
+
+#[test]
+fn test_capture_note_renders_why_captured_above_summary() {
+    let note = NoteContent {
+        title: "Annotated".to_string(),
+        source_url: Some("https://example.com/post".to_string()),
+        tags: vec![],
+        summary: "The distilled summary.".to_string(),
+        capture_note: Some("This is how we should fix borg's linker.".to_string()),
+        content_type: ContentType::Article { author: None },
+        distilled_body: Some("## Summary\n\nThe distilled summary.\n\n".to_string()),
+        ..NoteContent::default()
+    };
+    let rendered = render_note(&note, &test_config());
+    // Frontmatter carries the capture note.
+    assert!(
+        rendered.contains("capture-note: This is how we should fix borg's linker."),
+        "missing capture-note frontmatter:\n{rendered}"
+    );
+    // Body carries the `## Why Captured` section with the verbatim note.
+    assert!(
+        rendered.contains("## Why Captured\n\nThis is how we should fix borg's linker."),
+        "missing Why Captured section:\n{rendered}"
+    );
+    // `## Why Captured` renders ABOVE `## Summary`.
+    let why = rendered.find("## Why Captured").expect("why captured present");
+    let summary = rendered.find("## Summary").expect("summary present");
+    assert!(why < summary, "Why Captured must precede Summary:\n{rendered}");
+}
+
+#[test]
+fn test_bare_capture_renders_no_why_captured_and_no_empty_frontmatter_key() {
+    let note = NoteContent {
+        title: "Bare".to_string(),
+        source_url: Some("https://example.com/post".to_string()),
+        tags: vec![],
+        summary: "The distilled summary.".to_string(),
+        capture_note: None,
+        content_type: ContentType::Article { author: None },
+        distilled_body: Some("## Summary\n\nThe distilled summary.\n\n".to_string()),
+        ..NoteContent::default()
+    };
+    let rendered = render_note(&note, &test_config());
+    assert!(
+        !rendered.contains("## Why Captured"),
+        "bare capture must not render a section:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("capture-note:"),
+        "bare capture must not write a frontmatter key:\n{rendered}"
+    );
+}
+
+#[test]
+fn test_blank_capture_note_is_treated_as_bare() {
+    // A whitespace-only capture note collapses to no section / no key.
+    let note = NoteContent {
+        title: "Blank".to_string(),
+        source_url: Some("https://example.com/post".to_string()),
+        tags: vec![],
+        summary: "s".to_string(),
+        capture_note: Some("   ".to_string()),
+        content_type: ContentType::Article { author: None },
+        ..NoteContent::default()
+    };
+    let rendered = render_note(&note, &test_config());
+    assert!(!rendered.contains("## Why Captured"));
+    assert!(!rendered.contains("capture-note:"));
+}

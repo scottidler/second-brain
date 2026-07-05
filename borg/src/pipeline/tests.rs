@@ -68,8 +68,12 @@ fn test_detect_text_pattern_clarify() {
 
 #[test]
 fn test_detect_text_pattern_url() {
+    // Bare URL: annotated URL ingest with no capture note.
     match detect_text_pattern("https://example.com") {
-        TextPattern::ContainsUrl(url) => assert_eq!(url, "https://example.com"),
+        TextPattern::ContainsUrl { url, note } => {
+            assert_eq!(url, "https://example.com");
+            assert_eq!(note, None);
+        }
         other => panic!("expected ContainsUrl, got {other:?}"),
     }
 }
@@ -78,7 +82,46 @@ fn test_detect_text_pattern_url() {
 fn test_detect_text_pattern_url_with_short_context() {
     // URL with very short surrounding text should still be treated as URL
     match detect_text_pattern("check https://example.com") {
-        TextPattern::ContainsUrl(url) => assert_eq!(url, "https://example.com"),
+        TextPattern::ContainsUrl { url, note } => {
+            assert_eq!(url, "https://example.com");
+            assert_eq!(note.as_deref(), Some("check"));
+        }
+        other => panic!("expected ContainsUrl, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_detect_text_pattern_prose_and_url_is_annotated_url() {
+    // Phase 8 (CLI transport capture-note fixture): long prose + URL now ALWAYS
+    // becomes an annotated URL ingest (the old <10-char heuristic is gone). The
+    // prose is the capture note (first-URL token removed, whitespace collapsed).
+    match detect_text_pattern("This is how we should fix borg's linker: https://example.com/post") {
+        TextPattern::ContainsUrl { url, note } => {
+            assert_eq!(url, "https://example.com/post");
+            assert_eq!(note.as_deref(), Some("This is how we should fix borg's linker:"));
+        }
+        other => panic!("expected ContainsUrl, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_detect_text_pattern_idea_prefix_forces_idea_even_with_url() {
+    // Phase 8: the `idea:` prefix is the escape hatch - it forces an Idea note
+    // (General path) even when the text carries a URL.
+    assert_eq!(
+        detect_text_pattern("idea: a thought inspired by https://example.com/post"),
+        TextPattern::General
+    );
+}
+
+#[test]
+fn test_detect_text_pattern_multi_url_keeps_trailing_urls_in_note() {
+    // Only the FIRST URL token is removed; additional URLs stay in the note.
+    match detect_text_pattern("compare https://a.example.com and https://b.example.com") {
+        TextPattern::ContainsUrl { url, note } => {
+            assert_eq!(url, "https://a.example.com");
+            assert_eq!(note.as_deref(), Some("compare and https://b.example.com"));
+        }
         other => panic!("expected ContainsUrl, got {other:?}"),
     }
 }

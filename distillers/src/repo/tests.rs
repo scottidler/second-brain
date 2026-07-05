@@ -45,6 +45,7 @@ install: "cargo install --path borg"
             title_hint: None,
             repo_metadata: Some(&metadata),
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -75,6 +76,7 @@ async fn fabric_timeout_still_attaches_metadata() {
             title_hint: None,
             repo_metadata: Some(&metadata),
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -102,6 +104,7 @@ async fn fabric_error_falls_back_without_metadata() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -126,6 +129,7 @@ async fn malformed_yaml_falls_back_with_raw_output() {
             title_hint: None,
             repo_metadata: Some(&metadata),
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -155,6 +159,7 @@ async fn empty_summary_falls_back() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -180,6 +185,7 @@ async fn install_over_500_chars_is_dropped() {
             title_hint: None,
             repo_metadata: Some(&metadata),
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -202,6 +208,7 @@ async fn no_metadata_no_install_leaves_kind_specific_unset() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -224,6 +231,7 @@ async fn no_metadata_with_install_attaches_install_only_payload() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -251,6 +259,7 @@ async fn strips_yaml_code_fence_if_present() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");
@@ -272,6 +281,7 @@ async fn lowercases_tag_strings() {
             title_hint: None,
             repo_metadata: None,
             video_metadata: None,
+            capture_note: None,
         })
         .await
         .expect("distill");

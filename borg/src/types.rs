@@ -6,12 +6,32 @@ use std::fmt;
 /// Input sources construct this; the pipeline dispatches on it.
 #[derive(Debug, Clone)]
 pub enum ContentKind {
-    Url(String),
-    Image { data: Vec<u8>, filename: String },
-    Pdf { data: Vec<u8>, filename: String },
-    Audio { data: Vec<u8>, filename: String },
+    /// A URL capture. `note` is the operator's capture annotation (the prose
+    /// that accompanied the URL, first-URL token removed + whitespace
+    /// collapsed); `None` for a bare-URL capture. Threaded to the published
+    /// note's `capture-note:` frontmatter + `## Why Captured` section, and to
+    /// the distiller as trusted-but-labeled context.
+    Url {
+        url: String,
+        note: Option<String>,
+    },
+    Image {
+        data: Vec<u8>,
+        filename: String,
+    },
+    Pdf {
+        data: Vec<u8>,
+        filename: String,
+    },
+    Audio {
+        data: Vec<u8>,
+        filename: String,
+    },
     Text(String),
-    Document { data: Vec<u8>, filename: String },
+    Document {
+        data: Vec<u8>,
+        filename: String,
+    },
 }
 
 /// Content-kind classification for staged pipeline dispatch.
@@ -243,6 +263,12 @@ pub struct IngestRequest {
     pub force: bool,
     #[serde(default)]
     pub method: Option<IngestMethod>,
+    /// Operator capture annotation accompanying the URL (Phase 8). Additive +
+    /// optional: existing extension bodies that omit it deserialize unchanged
+    /// (`extension_body_matches_ingest_request` enforces this). Rendered into
+    /// the published note's `## Why Captured` section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]

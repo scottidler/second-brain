@@ -114,7 +114,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
         // computes the chunks once here and hands them to distill_long so the
         // real count scales the budget instead of the flat max_claims(1).
         let (mut distilled, chunk_count) = if token_estimate <= SINGLE_CALL_TOKEN_THRESHOLD {
-            (self.distill_short(transcript).await?, 1usize)
+            (self.distill_short(transcript, inputs.capture_note).await?, 1usize)
         } else {
             let chunks = chunk_transcript(transcript, CHUNK_TOKEN_TARGET);
             let chunk_count = chunks.len().max(1);
@@ -146,7 +146,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
 
 impl<F: FabricCaller + Clone> VideoDistiller<F> {
     /// Single-call path for transcripts under the threshold.
-    async fn distill_short(&self, transcript: &str) -> Result<Distilled> {
+    async fn distill_short(&self, transcript: &str, capture_note: Option<&str>) -> Result<Distilled> {
         // Short-circuit an empty transcript before burning a Fabric call (the
         // long path already guards via `chunks.is_empty()`).
         if transcript.trim().is_empty() {
@@ -158,7 +158,8 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
                 &self.config.model,
             ));
         }
-        let raw = match self.call_fabric(PATTERN_SHORT, transcript).await {
+        let input = crate::parse::compose_capture_input(transcript, capture_note);
+        let raw = match self.call_fabric(PATTERN_SHORT, &input).await {
             Ok(r) => r,
             Err((reason, _)) => return Ok(fallback_distilled(ID, &reason, transcript, None, &self.config.model)),
         };

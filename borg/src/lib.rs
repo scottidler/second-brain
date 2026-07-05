@@ -515,6 +515,7 @@ pub async fn note(config: Config, text: String, tags: Option<Vec<String>>) -> Re
         false,
         &config,
         Some(trace_id),
+        None,
     )
     .await;
 
@@ -600,6 +601,7 @@ pub async fn ingest_file(
         force,
         &config,
         Some(trace_id),
+        None,
     )
     .await;
 

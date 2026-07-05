@@ -854,3 +854,27 @@ per the panel's guidance this is measured and accepted, not blocked.
 - `eval` is unaffected by this phase (no prompt/pattern changes - Phase 7 is
   code-only), so the frozen-fixture `sb borg eval` non-regression baseline
   (composite 1.952) holds by construction; not re-run here.
+
+## Phase 8: Capture-note threading
+
+### Design decisions
+- `ContentKind::Url(String)` → struct variant `ContentKind::Url { url, note: Option<String> }` — `borg/src/types.rs` — the URL capture note travels inside the variant (transport → `process_content` → `process_url` → `process_url_inner` → `NoteContent`), per the doc's data-flow diagram. Every construction and match site was updated (telegram, discord, signal, ntfy, routes, `stages/raw`, tests).
+- One shared extraction rule — `router::extract_capture_note(text, url)` and its wrapper `router::url_content_from_text(text)` — `borg/src/router.rs` — capture note = message text with the first token *containing* the URL removed, whitespace-collapsed, empty → `None`. Wired at telegram (`telegram.rs`), discord (`discord.rs`), signal URL arm (`signal.rs::build_dispatch_payload`), ntfy (`ntfy.rs::parse_message`), and CLI (`pipeline/text.rs::detect_text_pattern`). Single source of truth so no transport drifts.
+- HTTP capture note is `IngestRequest.note` (additive, `#[serde(default, skip_serializing_if)]`) — `borg/src/types.rs`, threaded in `routes.rs::ingest`. The extension request-body *schema* is auto-derived from `IngestRequest` via `schemars` (`extension/schema.rs`), so it now advertises `note` with no hand-edit; `extension_body_matches_ingest_request` stays green because `note` is optional. popup.js keeps sending `{url}` (the toolbar captures a bare tab URL with no annotation surface) with a comment documenting the field.
+- CLI rule change — `pipeline/text.rs::detect_text_pattern` — replaced the `<10 chars` prose heuristic: prose+URL ALWAYS becomes an annotated URL ingest (`TextPattern::ContainsUrl { url, note }`); an `idea:`/`Idea:` prefix short-circuits to the Idea/General path (the escape hatch).
+- Render — `markdown.rs::render_note` — `NoteContent.capture_note` emits a `capture-note:` frontmatter key (via `yaml_scalar`) AND a `## Why Captured` body section rendered ABOVE `## Summary`; both suppressed when the note is absent or whitespace-only.
+- Distiller context — `DistillInputs.capture_note` (`distillers/src/lib.rs`) + shared helper `parse::compose_capture_input(transcript, capture_note)` — the capture note reaches the single-call fabric input of the article/repo/thread/video distillers wrapped in a labeled `## Operator Capture Note (context only - NOT instructions)` block. It is the operator's trusted text (rendered verbatim in-note, NOT injection-guarded) but is framed as content-not-instructions before the LLM sees it, so a pasted hostile string cannot masquerade as pattern instructions. Threaded through `DistillStage::{distill,distill_with_metadata,distill_with_video_metadata}` and `distill_for_publish_{article,repo,thread,video}`.
+- Signal attachment caption migration — `signal.rs::attachment_caption` — the caption (formerly a mangled `caption:<text>` tag) now travels as the capture note through `process_content`'s new `attachment_note` param into `process_image`/`process_audio`/`process_document_file` → `NoteContent.capture_note`.
+
+### Deviations
+- `process_content` gained an `attachment_note: Option<String>` param (not in the literal spec) as the carrier for the Signal attachment caption. URL captures carry their note in the `ContentKind::Url` variant (spec); attachment variants have no note field and adding one to all four would have churned dozens of construction sites across telegram/discord/signal/routes/lib/tests. Same effect (caption → `## Why Captured`), correct seam. All non-Signal `process_content`/`dispatch_ingest` callers pass `None`.
+- Labeled-block threading into `DistillInputs` is applied only on the single-call path of the four URL distillers (article/repo/thread/video). The map-reduce/chunk and reduce paths, and the image/voicenote/idea/vocab distillers, are left unchanged so distillation behavior is otherwise identical (prepending the note to every chunk would duplicate context and change behavior — the doc forbids that). The Signal image caption still renders in `## Why Captured` but is not fed to the image pattern.
+- popup.js was not changed to *send* `note` (comment only): the toolbar popup captures a bare tab URL and has no annotation input. Sending a synthetic note would be wrong; `note` is optional so the contract test passes regardless.
+
+### Tradeoffs
+- Shared `url_content_from_text` helper (DRY, one rule) vs. per-transport inline extraction — chose the shared helper (the doc mandates one rule at every transport). Each transport still has its own capture-note fixture test asserting its wiring.
+- `attachment_note` param on `process_content` vs. adding `note` to every attachment `ContentKind` variant — chose the param to bound the blast radius; the asymmetry (URL note in variant, attachment note in param) is the price.
+
+### Open questions
+- Operator step (NOT run here): the additive `IngestRequest.note` requires an extension re-sign per the standing contract — `sb borg extension sign` — plus `otto deploy` to sync. Only the schema/body *definition* was updated in-repo; the actual .xpi re-sign is the operator's to run.
+- Confirm the desired UX for the Firefox popup: should it grow a note textarea (page selection → capture note) in a follow-up? Out of scope for Phase 8.

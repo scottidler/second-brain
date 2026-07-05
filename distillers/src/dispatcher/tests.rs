@@ -15,6 +15,7 @@ async fn dispatches_idea_to_idea_distiller() {
         title_hint: None,
         repo_metadata: None,
         video_metadata: None,
+        capture_note: None,
     };
     let distilled = dispatcher.distill(DistillKind::Idea, inputs).await.expect("distill");
     // Phase 9c-hotfix: IdeaDistiller ID bumped to v2 after 280-cap deletion.
@@ -33,6 +34,7 @@ async fn dispatches_vocabulary_to_idea_distiller() {
         title_hint: None,
         repo_metadata: None,
         video_metadata: None,
+        capture_note: None,
     };
     let distilled = dispatcher
         .distill(DistillKind::Vocabulary, inputs)
@@ -57,6 +59,7 @@ async fn dispatches_image_to_image_distiller() {
         title_hint: None,
         repo_metadata: None,
         video_metadata: None,
+        capture_note: None,
     };
     let distilled = dispatcher.distill(DistillKind::Image, inputs).await.expect("distill");
     assert_eq!(distilled.meta.extractor, "distill-image-v1");
@@ -75,6 +78,7 @@ async fn dispatches_voice_note_to_voicenote_distiller() {
         title_hint: None,
         repo_metadata: None,
         video_metadata: None,
+        capture_note: None,
     };
     let distilled = dispatcher
         .distill(DistillKind::VoiceNote, inputs)
@@ -100,6 +104,7 @@ async fn dispatches_article_to_fabric_backed_distiller() {
         title_hint: None,
         repo_metadata: None,
         video_metadata: None,
+        capture_note: None,
     };
     let distilled = dispatcher.distill(DistillKind::Article, inputs).await.expect("distill");
     assert_eq!(distilled.meta.extractor, "distill-article-v1");
@@ -128,6 +133,7 @@ async fn dispatches_repo_to_fabric_backed_distiller() {
         title_hint: None,
         repo_metadata: Some(&metadata),
         video_metadata: None,
+        capture_note: None,
     };
     let distilled = dispatcher.distill(DistillKind::Repo, inputs).await.expect("distill");
     assert_eq!(distilled.meta.extractor, "distill-repo-v1");
@@ -157,6 +163,7 @@ async fn dispatches_video_to_fabric_backed_distiller() {
         title_hint: None,
         repo_metadata: None,
         video_metadata: Some(&metadata),
+        capture_note: None,
     };
     let distilled = dispatcher.distill(DistillKind::Video, inputs).await.expect("distill");
     assert_eq!(distilled.meta.extractor, "distill-video-v1");
@@ -180,6 +187,7 @@ async fn dispatches_thread_to_fabric_backed_distiller() {
         title_hint: None,
         repo_metadata: None,
         video_metadata: None,
+        capture_note: None,
     };
     let distilled = dispatcher.distill(DistillKind::Thread, inputs).await.expect("distill");
     assert_eq!(distilled.meta.extractor, "distill-thread-v1");

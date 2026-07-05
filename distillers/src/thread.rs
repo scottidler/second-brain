@@ -99,7 +99,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for ThreadDistiller<F> {
         );
 
         let (mut distilled, author, post_count, chunk_count) = if token_estimate <= SINGLE_CALL_TOKEN_THRESHOLD {
-            let (d, author, post_count) = self.distill_short(transcript).await?;
+            let (d, author, post_count) = self.distill_short(transcript, inputs.capture_note).await?;
             (d, author, post_count, 1usize)
         } else {
             let chunks = chunk_transcript(transcript, CHUNK_TOKEN_TARGET);
@@ -133,10 +133,10 @@ impl<F: FabricCaller + Clone> ThreadDistiller<F> {
     /// fallback) `Distilled` plus the extracted `author`/`post_count`; the
     /// outer `distill` applies bounds, lowercases tags, and attaches the
     /// platform payload so both paths share one exit.
-    async fn distill_short(&self, transcript: &str) -> Result<ThreadDistilled> {
+    async fn distill_short(&self, transcript: &str, capture_note: Option<&str>) -> Result<ThreadDistilled> {
         let request = FabricRequest {
             pattern: PATTERN.to_string(),
-            input: transcript.to_string(),
+            input: crate::parse::compose_capture_input(transcript, capture_note),
             model: self.config.model.clone(),
             max_chars: self.config.max_chars,
             timeout_secs: self.config.timeout_secs,

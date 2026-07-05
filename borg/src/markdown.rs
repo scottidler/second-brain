@@ -13,6 +13,12 @@ pub struct NoteContent {
     pub tags: Vec<String>,
     pub summary: String,
     pub description: Option<String>,
+    /// Operator capture annotation (Phase 8): the prose that accompanied the
+    /// captured URL / the Signal attachment caption. Rendered verbatim as a
+    /// `capture-note:` frontmatter key and a `## Why Captured` body section
+    /// above `## Summary`. `None` for a bare capture (no annotation) so no
+    /// empty key / empty section is emitted.
+    pub capture_note: Option<String>,
     pub content_type: ContentType,
     pub embed_code: Option<String>,
     pub method: Option<IngestMethod>,
@@ -139,6 +145,12 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         fm.push_str(&format!("trace: {tid}\n"));
     }
 
+    // Capture note (Phase 8): the operator's own annotation. Emitted only when
+    // present and non-empty so a bare capture never writes an empty key.
+    if let Some(capture) = note.capture_note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        fm.push_str(&format!("capture-note: {}\n", yaml_scalar(capture)));
+    }
+
     if !note.slides.is_empty() {
         fm.push_str("slides:\n");
         for s in &note.slides {
@@ -216,6 +228,15 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
             }
         }
         body.push('\n');
+    }
+
+    // Why Captured (Phase 8): the operator's capture annotation, rendered
+    // verbatim ABOVE `## Summary`. Emitted only when present and non-empty so a
+    // bare capture renders no empty section.
+    if let Some(capture) = note.capture_note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        body.push_str("## Why Captured\n\n");
+        body.push_str(capture);
+        body.push_str("\n\n");
     }
 
     // Body: post-Phase-6 cutover prefers the pre-rendered structured body
