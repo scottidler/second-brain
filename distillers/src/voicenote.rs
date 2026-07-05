@@ -16,7 +16,9 @@
 //! even after the LLM-distilled summary collapses the original. This is the
 //! sole structural difference vs. URL kinds (which leave transcript as None).
 
-use crate::parse::{PatternYaml, ReduceYaml, approx_tokens, find_boundary, strip_fences};
+use crate::parse::{
+    PatternYaml, ReduceYaml, approx_tokens, build_reduce_input, find_boundary, select_reduce_claims, strip_fences,
+};
 use async_trait::async_trait;
 use chrono::Utc;
 use eyre::Result;
@@ -91,10 +93,16 @@ impl<F: FabricCaller + Clone> DistillExtractor for VoiceNoteDistiller<F> {
             inputs.title_hint
         );
 
-        let mut distilled = if token_estimate <= SINGLE_CALL_TOKEN_THRESHOLD {
-            self.distill_short(transcript).await?
+        // The chunk count drives the size-aware claim budget (Phase 5). The
+        // single-call path is chunk_count = 1 (cap 10); the map-reduce path
+        // computes the chunks once here and hands them to distill_long so the
+        // real count scales the budget instead of the flat max_claims(1).
+        let (mut distilled, chunk_count) = if token_estimate <= SINGLE_CALL_TOKEN_THRESHOLD {
+            (self.distill_short(transcript).await?, 1usize)
         } else {
-            self.distill_long(transcript).await?
+            let chunks = chunk_transcript(transcript, CHUNK_TOKEN_TARGET);
+            let chunk_count = chunks.len().max(1);
+            (self.distill_long(transcript, chunks).await?, chunk_count)
         };
 
         // Verbatim preservation contract. Set AFTER distill_short / distill_long
@@ -102,10 +110,10 @@ impl<F: FabricCaller + Clone> DistillExtractor for VoiceNoteDistiller<F> {
         // Distilled with transcript = None and we override here.
         distilled.transcript = Some(transcript.to_string());
 
-        // Phase 3 preserves the flat cap (chunk_count = 1 → 10) for both the
-        // short and long paths; Phase 5 threads the real chunk count so the
-        // reduce step can select proportionally more claims from a long note.
-        let mut bounded = enforce_bounds(distilled, max_claims(1));
+        // Phase 5: the real chunk count scales the claim budget so a long
+        // voice note keeps proportionally more selected claims (single-call
+        // path passes chunk_count = 1, holding the cap at 10 as before).
+        let mut bounded = enforce_bounds(distilled, max_claims(chunk_count));
         debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
         bounded.tags.iter_mut().for_each(|t| *t = t.to_lowercase());
         // Re-set transcript after enforce_bounds in case any future bounds
@@ -147,8 +155,7 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
     }
 
     /// Map-reduce path for long transcripts.
-    async fn distill_long(&self, transcript: &str) -> Result<Distilled> {
-        let chunks = chunk_transcript(transcript, CHUNK_TOKEN_TARGET);
+    async fn distill_long(&self, transcript: &str, chunks: Vec<String>) -> Result<Distilled> {
         log::debug!(
             "VoiceNoteDistiller::distill_long: chunks={} threshold_tokens={} target_tokens={}",
             chunks.len(),
@@ -264,37 +271,71 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
             ));
         }
 
-        // Reduce step.
+        // Reduce step (Phase 5): the reduce pattern re-synthesizes the summary
+        // AND SELECTS the final claims from the pooled chunk claims, spanning
+        // the whole recording. `combined_claims` is both the selection pool
+        // and the chronological fallback used when selection fails — that
+        // fallback silently reintroduces head-bias, so it is recorded as a
+        // distinct `reduce-selection-failed` reason for the eval harness.
         let joined = chunk_summaries.join("\n\n");
-        let summary = match self.call_fabric(PATTERN_REDUCE, &joined).await {
+        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims);
+        let mut anchors_stripped: u32 = 0;
+        let (summary, claims, reduce_selection_failed) = match self.call_fabric(PATTERN_REDUCE, &reduce_input).await {
             Ok(raw) => match parse_reduce_yaml(&raw) {
-                Ok(parsed) => parsed
-                    .summary
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| joined.clone()),
+                Ok(parsed) => {
+                    let summary = parsed
+                        .summary
+                        .as_ref()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| joined.clone());
+                    match parsed
+                        .claims
+                        .and_then(|c| select_reduce_claims(c, &combined_claims, &mut anchors_stripped))
+                    {
+                        Some(mut selected) => {
+                            // Voice notes carry no anchors at this layer regardless
+                            // of what the reduce pattern produced.
+                            selected.iter_mut().for_each(|c| c.anchor = None);
+                            (summary, selected, false)
+                        }
+                        None => {
+                            log::warn!(
+                                "VoiceNoteDistiller: reduce selected no claims; falling back to chronological merge"
+                            );
+                            (summary, combined_claims.clone(), true)
+                        }
+                    }
+                }
                 Err(err) => {
-                    log::warn!("VoiceNoteDistiller: reduce yaml parse failed: {err}; falling back to concat");
-                    joined.clone()
+                    log::warn!(
+                        "VoiceNoteDistiller: reduce yaml parse failed: {err}; falling back to concat + chronological claims"
+                    );
+                    (joined.clone(), combined_claims.clone(), true)
                 }
             },
             Err((reason, _)) => {
                 log::warn!(
-                    "VoiceNoteDistiller: reduce fabric call failed ({reason}); falling back to concatenated chunks"
+                    "VoiceNoteDistiller: reduce fabric call failed ({reason}); falling back to concatenated chunks + chronological claims"
                 );
-                joined.clone()
+                (joined.clone(), combined_claims.clone(), true)
             }
         };
 
         let mut validation = ValidationMeta::default();
-        if any_chunk_failed {
+        // reduce-selection-failed takes precedence over partial-chunk-failure:
+        // reintroduced head-bias is the signal this phase exists to surface.
+        if reduce_selection_failed {
+            validation.fallback_reason = Some("reduce-selection-failed".to_string());
+        } else if any_chunk_failed {
             validation.fallback_reason = Some("partial-chunk-failure".to_string());
         }
+        validation.anchors_stripped = anchors_stripped;
         let input_tokens = approx_tokens(transcript.len()) as u32;
         let output_tokens = approx_tokens(output_chars) as u32;
         Ok(Distilled {
             summary,
-            claims: combined_claims,
+            claims,
             tags: combined_tags,
             links: combined_links,
             kind_specific: None,

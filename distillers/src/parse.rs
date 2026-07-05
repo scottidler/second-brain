@@ -78,11 +78,98 @@ pub struct PatternLink {
 }
 
 /// The YAML shape of the map-reduce reduce step (video / voicenote long path):
-/// just a re-synthesized summary over the per-chunk summaries.
+/// a re-synthesized summary over the per-chunk summaries plus (Phase 5) the
+/// claims the reduce pattern SELECTED from the pooled chunk claims. `claims`
+/// is serde-defaulted so a reduce pattern that emits only `summary` (the
+/// pre-Phase-5 shape) still parses; the distiller falls back to the
+/// chronological chunk-claim merge in that case.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ReduceYaml {
     #[serde(default)]
     pub summary: Option<String>,
+    #[serde(default)]
+    pub claims: Option<Vec<PatternClaim>>,
+}
+
+/// Assemble the Phase 5 two-section reduce input. The reduce pattern selects
+/// the final claim set from this pool, so the pool is both the selection
+/// source and (on selection failure) the caller's chronological fallback.
+///
+/// - `## Chunk Summaries`: the per-chunk summaries, chronological, blank-line
+///   joined (identical to the pre-Phase-5 reduce input).
+/// - `## Claim Pool`: every pooled chunk claim, one per line, prefixed with its
+///   `[HH:MM:SS]` anchor when it carries one (voice-note claims carry none, so
+///   those lines are plain text).
+pub fn build_reduce_input(chunk_summaries: &[String], pool_claims: &[Claim]) -> String {
+    let summaries = chunk_summaries.join("\n\n");
+    let pool = pool_claims
+        .iter()
+        .map(|c| match c.anchor.as_deref() {
+            Some(a) if !a.trim().is_empty() => format!("[{}] {}", normalize_anchor(a), c.text),
+            _ => c.text.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("## Chunk Summaries\n\n{summaries}\n\n## Claim Pool\n\n{pool}\n")
+}
+
+/// Apply the Phase 5 anchor-honesty rule to the claims the reduce pattern
+/// selected, resolving each against the pooled chunk claims.
+///
+/// The rule tolerates paraphrase without permitting invention:
+/// - a selected claim WITH an anchor that matches a pool anchor is kept (the
+///   anchor is normalized to the bracket-free form);
+/// - a selected claim WITH an anchor absent from the pool has the anchor
+///   stripped to `None` and counts toward `anchors_stripped` (an invented
+///   timestamp) — the claim text is retained, never dropped;
+/// - a selected claim WITHOUT an anchor is accepted as a legitimate synthesis
+///   across pool claims, with NO text-match gate, so consolidation is never
+///   discarded as "invented".
+///
+/// Returns `None` when the selection is empty (every claim had empty text, or
+/// the pattern selected nothing), signalling the caller to fall back to the
+/// chronological chunk-claim merge.
+pub fn select_reduce_claims(
+    reduce_claims: Vec<PatternClaim>,
+    pool_claims: &[Claim],
+    anchors_stripped: &mut u32,
+) -> Option<Vec<Claim>> {
+    let pool_anchors: std::collections::HashSet<String> = pool_claims
+        .iter()
+        .filter_map(|c| c.anchor.as_deref())
+        .filter(|a| !a.trim().is_empty())
+        .map(normalize_anchor)
+        .collect();
+    let mut selected: Vec<Claim> = Vec::new();
+    for pc in reduce_claims {
+        let mut claim = pc.into_claim();
+        if claim.text.is_empty() {
+            continue;
+        }
+        if let Some(anchor) = claim.anchor.take() {
+            let norm = normalize_anchor(&anchor);
+            if !norm.is_empty() && pool_anchors.contains(&norm) {
+                claim.anchor = Some(norm);
+            } else {
+                // Anchor not present in the pool: an invented/altered timestamp.
+                // Strip it and count it; keep the claim text.
+                *anchors_stripped = anchors_stripped.saturating_add(1);
+            }
+        }
+        selected.push(claim);
+    }
+    if selected.is_empty() { None } else { Some(selected) }
+}
+
+/// Normalize an anchor for pool matching: trim whitespace and strip a single
+/// pair of surrounding brackets so `[00:00:05]` and `00:00:05` compare equal.
+fn normalize_anchor(anchor: &str) -> String {
+    anchor
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim()
+        .to_string()
 }
 
 /// Find a clean break point in `transcript` for chunking: scan backwards from

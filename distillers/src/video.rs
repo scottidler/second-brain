@@ -13,7 +13,9 @@
 //! of range strips the anchor (claim text retained, anchor cleared)
 //! and increments `meta.validation.anchors_stripped`.
 
-use crate::parse::{PatternYaml, ReduceYaml, approx_tokens, find_boundary, strip_fences};
+use crate::parse::{
+    PatternYaml, ReduceYaml, approx_tokens, build_reduce_input, find_boundary, select_reduce_claims, strip_fences,
+};
 use async_trait::async_trait;
 use chrono::Utc;
 use eyre::Result;
@@ -107,13 +109,18 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
             has_metadata
         );
 
-        let distilled = if token_estimate <= SINGLE_CALL_TOKEN_THRESHOLD {
-            self.distill_short(transcript).await
+        // The chunk count drives the size-aware claim budget (Phase 5). The
+        // single-call path is chunk_count = 1 (cap 10); the map-reduce path
+        // computes the chunks once here and hands them to distill_long so the
+        // real count scales the budget instead of the flat max_claims(1).
+        let (mut distilled, chunk_count) = if token_estimate <= SINGLE_CALL_TOKEN_THRESHOLD {
+            (self.distill_short(transcript).await?, 1usize)
         } else {
-            self.distill_long(transcript).await
+            let chunks = chunk_transcript(transcript, CHUNK_TOKEN_TARGET);
+            let chunk_count = chunks.len().max(1);
+            (self.distill_long(transcript, chunks).await?, chunk_count)
         };
 
-        let mut distilled = distilled?;
         validate_anchors(&mut distilled, inputs.video_metadata);
         // Phase B2: populate transcript for chunked semantic recall AFTER
         // distill_short / distill_long so neither path needs to know about
@@ -123,10 +130,10 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
         // long ones routed through the map-reduce path.
         let transcript_owned = if transcript.trim().is_empty() { None } else { Some(transcript.to_string()) };
         distilled.transcript = transcript_owned.clone();
-        // Phase 3 preserves the flat cap (chunk_count = 1 → 10) for both the
-        // short and long paths; Phase 5 threads the real chunk count so the
-        // reduce step can select proportionally more claims from a long video.
-        let mut bounded = enforce_bounds(distilled, max_claims(1));
+        // Phase 5: the real chunk count scales the claim budget so a long
+        // video keeps proportionally more selected claims (single-call path
+        // passes chunk_count = 1, holding the cap at 10 as before).
+        let mut bounded = enforce_bounds(distilled, max_claims(chunk_count));
         debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
         bounded.tags.iter_mut().for_each(|t| *t = t.to_lowercase());
         attach_payload(&mut bounded, inputs.video_metadata);
@@ -170,8 +177,7 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
     /// Map-reduce path for long transcripts. Chunks are distilled in parallel
     /// (bounded by `chunk_concurrency`); chunk claims are concatenated and
     /// chunk summaries are reduced via a final Fabric call.
-    async fn distill_long(&self, transcript: &str) -> Result<Distilled> {
-        let chunks = chunk_transcript(transcript, CHUNK_TOKEN_TARGET);
+    async fn distill_long(&self, transcript: &str, chunks: Vec<String>) -> Result<Distilled> {
         log::debug!(
             "VideoDistiller::distill_long: chunks={} threshold_tokens={} target_tokens={}",
             chunks.len(),
@@ -289,35 +295,68 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
             ));
         }
 
-        // Reduce step: combine chunk summaries via Fabric.
+        // Reduce step (Phase 5): the reduce pattern re-synthesizes the summary
+        // AND SELECTS the final claims from the pooled chunk claims, spanning
+        // the whole timeline. `combined_claims` is both the selection pool
+        // (rendered into the reduce input) and the chronological fallback used
+        // when selection fails — that fallback silently reintroduces the
+        // head-bias this phase removes, so it is recorded as a distinct
+        // `reduce-selection-failed` reason (never folded into
+        // bounds_truncations) for the eval harness to watch.
         let joined = chunk_summaries.join("\n\n");
-        let summary = match self.call_fabric(PATTERN_REDUCE, &joined).await {
+        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims);
+        let mut anchors_stripped: u32 = 0;
+        let (summary, claims, reduce_selection_failed) = match self.call_fabric(PATTERN_REDUCE, &reduce_input).await {
             Ok(raw) => match parse_reduce_yaml(&raw) {
-                Ok(parsed) => parsed
-                    .summary
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| joined.clone()),
+                Ok(parsed) => {
+                    let summary = parsed
+                        .summary
+                        .as_ref()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| joined.clone());
+                    match parsed
+                        .claims
+                        .and_then(|c| select_reduce_claims(c, &combined_claims, &mut anchors_stripped))
+                    {
+                        Some(selected) => (summary, selected, false),
+                        None => {
+                            log::warn!(
+                                "VideoDistiller: reduce selected no claims; falling back to chronological merge"
+                            );
+                            (summary, combined_claims.clone(), true)
+                        }
+                    }
+                }
                 Err(err) => {
-                    log::warn!("VideoDistiller: reduce yaml parse failed: {err}; falling back to concat");
-                    joined.clone()
+                    log::warn!(
+                        "VideoDistiller: reduce yaml parse failed: {err}; falling back to concat + chronological claims"
+                    );
+                    (joined.clone(), combined_claims.clone(), true)
                 }
             },
             Err((reason, _)) => {
-                log::warn!("VideoDistiller: reduce fabric call failed ({reason}); falling back to concatenated chunks");
-                joined.clone()
+                log::warn!(
+                    "VideoDistiller: reduce fabric call failed ({reason}); falling back to concatenated chunks + chronological claims"
+                );
+                (joined.clone(), combined_claims.clone(), true)
             }
         };
 
         let mut validation = ValidationMeta::default();
-        if any_chunk_failed {
+        // reduce-selection-failed takes precedence over partial-chunk-failure:
+        // reintroduced head-bias is the signal this phase exists to surface.
+        if reduce_selection_failed {
+            validation.fallback_reason = Some("reduce-selection-failed".to_string());
+        } else if any_chunk_failed {
             validation.fallback_reason = Some("partial-chunk-failure".to_string());
         }
+        validation.anchors_stripped = anchors_stripped;
         let input_tokens = approx_tokens(transcript.len()) as u32;
         let output_tokens = approx_tokens(output_chars) as u32;
         Ok(Distilled {
             summary,
-            claims: combined_claims,
+            claims,
             tags: combined_tags,
             links: combined_links,
             kind_specific: None,

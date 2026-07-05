@@ -247,7 +247,10 @@ tags: []
 links: []
 "#,
     );
-    fake.set_response(PATTERN_REDUCE, "summary: \"Reduced full-video summary.\"\n");
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Reduced full-video summary.\"\nclaims:\n  - text: \"A selected synthesis claim.\"\n    anchor: null\n",
+    );
 
     let distiller = make_distiller(fake);
     let distilled = distiller
@@ -262,7 +265,7 @@ links: []
         .expect("distill");
 
     assert_eq!(distilled.summary, "Reduced full-video summary.");
-    assert!(!distilled.claims.is_empty(), "claims should be merged from chunks");
+    assert!(!distilled.claims.is_empty(), "claims should come from reduce selection");
     assert!(distilled.meta.validation.fallback_reason.is_none());
     // Regression: the map-reduce (long) path must also populate the
     // transcript field so Phase B2 chunk-embedding has a source to work
@@ -289,7 +292,12 @@ async fn long_transcript_partial_chunk_failure_keeps_surviving_claims() {
         "summary: \"Chunk summary.\"\nclaims:\n  - text: \"Chunk-level claim.\"\n    anchor: null\ntags: []\nlinks: []\n",
     );
     fake.set_response_sequence(PATTERN_CHUNK, vec![Err("chunk boom".to_string())]);
-    fake.set_response(PATTERN_REDUCE, "summary: \"Reduced full-video summary.\"\n");
+    // The reduce selects claims cleanly, so the surviving fallback_reason is
+    // the partial-chunk-failure (reduce-selection did NOT fall back).
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Reduced full-video summary.\"\nclaims:\n  - text: \"A selected synthesis claim.\"\n    anchor: null\n",
+    );
 
     let distiller = make_distiller(fake);
     let distilled = distiller
@@ -314,7 +322,11 @@ async fn long_transcript_partial_chunk_failure_keeps_surviving_claims() {
 #[tokio::test]
 async fn long_transcript_reduce_failure_falls_back_to_concatenated_summaries() {
     // All chunks succeed but the reduce call fails; the final summary is the
-    // concatenation of per-chunk summaries with no fallback_reason set.
+    // concatenation of per-chunk summaries. Phase 5: a failed reduce call also
+    // means claim SELECTION never ran, so the claims revert to the chronological
+    // chunk merge — head-bias reintroduced — recorded as the distinct
+    // `reduce-selection-failed` reason (was `None` pre-Phase-5, when the reduce
+    // only touched the summary).
     let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
     let transcript = sentence.repeat(800);
     assert!(approx_tokens(transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
@@ -322,7 +334,7 @@ async fn long_transcript_reduce_failure_falls_back_to_concatenated_summaries() {
     let fake = FakeFabric::new();
     fake.set_response(
         PATTERN_CHUNK,
-        "summary: \"Chunk summary text.\"\nclaims: []\ntags: []\nlinks: []\n",
+        "summary: \"Chunk summary text.\"\nclaims:\n  - text: \"Chunk claim one.\"\n    anchor: null\ntags: []\nlinks: []\n",
     );
     fake.set_error(PATTERN_REDUCE, "reduce boom");
 
@@ -338,11 +350,242 @@ async fn long_transcript_reduce_failure_falls_back_to_concatenated_summaries() {
         .await
         .expect("distill");
 
-    assert_eq!(distilled.meta.validation.fallback_reason, None);
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("reduce-selection-failed"),
+        "a failed reduce call must record the distinct reduce-selection-failed reason"
+    );
     assert!(
         distilled.summary.contains("Chunk summary text."),
         "summary should fall back to concatenated chunk summaries: {:?}",
         distilled.summary
+    );
+    // The claims fell back to the chronological chunk merge (not empty, not
+    // reduce-selected).
+    assert!(!distilled.claims.is_empty(), "chronological fallback claims survive");
+}
+
+#[tokio::test]
+async fn long_transcript_reduce_selects_late_anchor_from_pool() {
+    // The pool carries an early AND a late anchor; the reduce SELECTS the late
+    // one, and its anchor survives the honesty check because it matches a pool
+    // anchor. This is the unit-level proxy for "published claims land in the
+    // final third" (a live-model integration criterion).
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    assert!(approx_tokens(transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary.\"\nclaims:\n  - text: \"Early claim.\"\n    anchor: \"00:00:05\"\n  - text: \"Late claim near the end.\"\n    anchor: \"00:25:00\"\ntags: []\nlinks: []\n",
+    );
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Reduced.\"\nclaims:\n  - text: \"Late claim near the end.\"\n    anchor: \"00:25:00\"\n",
+    );
+
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+        })
+        .await
+        .expect("distill");
+
+    assert!(distilled.meta.validation.fallback_reason.is_none());
+    assert_eq!(distilled.claims.len(), 1, "only the selected claim survives");
+    assert_eq!(distilled.claims[0].anchor.as_deref(), Some("00:25:00"));
+    assert_eq!(
+        distilled.meta.validation.anchors_stripped, 0,
+        "a pool anchor is not stripped"
+    );
+}
+
+#[tokio::test]
+async fn long_transcript_reduce_invented_anchor_stripped_and_counted() {
+    // A selected claim whose anchor is NOT in the pool has the anchor stripped
+    // to None and counted; the claim TEXT is retained (never dropped as
+    // "invented").
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    assert!(approx_tokens(transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary.\"\nclaims:\n  - text: \"Pooled claim.\"\n    anchor: \"00:00:05\"\ntags: []\nlinks: []\n",
+    );
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Reduced.\"\nclaims:\n  - text: \"Reworded claim with a fabricated timestamp.\"\n    anchor: \"09:09:09\"\n",
+    );
+
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+        })
+        .await
+        .expect("distill");
+
+    assert!(distilled.meta.validation.fallback_reason.is_none());
+    assert_eq!(distilled.claims.len(), 1, "claim text retained after anchor strip");
+    assert!(distilled.claims[0].anchor.is_none(), "invented anchor stripped");
+    assert!(
+        distilled.claims[0].text.contains("Reworded claim"),
+        "claim text preserved verbatim"
+    );
+    assert_eq!(
+        distilled.meta.validation.anchors_stripped, 1,
+        "the invented anchor is counted"
+    );
+}
+
+#[tokio::test]
+async fn long_transcript_reduce_empty_selection_falls_back_to_chronological() {
+    // Reduce output parses but carries NO claims (empty selection). The claims
+    // fall back to the chronological chunk merge, recorded as the distinct
+    // reduce-selection-failed reason — NOT folded into bounds_truncations.
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    assert!(approx_tokens(transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary.\"\nclaims:\n  - text: \"Chronological claim one.\"\n    anchor: \"00:00:05\"\ntags: []\nlinks: []\n",
+    );
+    // Summary only — no claims selected.
+    fake.set_response(PATTERN_REDUCE, "summary: \"Reduced full-video summary.\"\n");
+
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+        })
+        .await
+        .expect("distill");
+
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("reduce-selection-failed")
+    );
+    assert!(
+        !distilled
+            .meta
+            .validation
+            .bounds_truncations
+            .iter()
+            .any(|t| t.contains("reduce-selection")),
+        "the fallback reason must be distinct from bounds_truncations"
+    );
+    assert!(!distilled.claims.is_empty(), "chronological merge claims survive");
+    assert_eq!(
+        distilled.summary, "Reduced full-video summary.",
+        "summary still uses the reduce output"
+    );
+}
+
+#[tokio::test]
+async fn long_transcript_reduce_malformed_output_falls_back_to_chronological() {
+    // Malformed (unparseable) reduce output → chronological merge, summary
+    // falls back to the concatenated chunk summaries, reduce-selection-failed
+    // recorded. This is the fallback-path success-criterion test.
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    assert!(approx_tokens(transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary text.\"\nclaims:\n  - text: \"Chronological claim.\"\n    anchor: \"00:00:05\"\ntags: []\nlinks: []\n",
+    );
+    fake.set_response(PATTERN_REDUCE, "this is not yaml: [unclosed");
+
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+        })
+        .await
+        .expect("distill");
+
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("reduce-selection-failed")
+    );
+    assert!(!distilled.claims.is_empty(), "chronological merge claims survive");
+    assert!(
+        distilled.summary.contains("Chunk summary text."),
+        "summary falls back to concatenated chunk summaries: {:?}",
+        distilled.summary
+    );
+}
+
+#[tokio::test]
+async fn long_transcript_builds_two_section_reduce_input_with_anchor_pool() {
+    // The reduce call receives the two labeled sections; the Claim Pool lists
+    // each pooled chunk claim, anchor-prefixed.
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    assert!(approx_tokens(transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+
+    let fake = std::sync::Arc::new(FakeFabric::new());
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary.\"\nclaims:\n  - text: \"Anchored pool claim.\"\n    anchor: \"00:00:05\"\ntags: []\nlinks: []\n",
+    );
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Reduced.\"\nclaims:\n  - text: \"Anchored pool claim.\"\n    anchor: \"00:00:05\"\n",
+    );
+
+    let distiller = VideoDistiller::new(fake.clone(), VideoConfig::default());
+    distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+        })
+        .await
+        .expect("distill");
+
+    let reduce_call = fake
+        .calls()
+        .into_iter()
+        .find(|c| c.pattern == PATTERN_REDUCE)
+        .expect("reduce call recorded");
+    assert!(
+        reduce_call.input.contains("## Chunk Summaries"),
+        "reduce input has summaries section"
+    );
+    assert!(
+        reduce_call.input.contains("## Claim Pool"),
+        "reduce input has claim pool section"
+    );
+    assert!(
+        reduce_call.input.contains("[00:00:05] Anchored pool claim."),
+        "pool lines are anchor-prefixed: {:?}",
+        reduce_call.input
     );
 }
 
