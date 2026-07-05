@@ -194,6 +194,9 @@ pub struct EmbedConfig {
     /// embed cadence as configurable (default 10 min); the previous
     /// `daemon_cadence` ignored its config argument and hardcoded the value.
     pub cadence_secs: u64,
+    /// Which embedding kinds the default (no-`--kind`) `cortex embed`/`--backfill`
+    /// pass and the daemon embed tick generate. See [`EmbedKindsConfig`].
+    pub kinds: EmbedKindsConfig,
 }
 
 impl Default for EmbedConfig {
@@ -202,6 +205,39 @@ impl Default for EmbedConfig {
             workers: 0,
             max_chunks_per_call: crate::embed::DEFAULT_MAX_CHUNKS_PER_CALL,
             cadence_secs: crate::embed::DEFAULT_CADENCE_SECS,
+            kinds: EmbedKindsConfig::default(),
+        }
+    }
+}
+
+/// Per-kind on/off toggles for the embed loop's default kind set. This is the
+/// "methodology selection is legitimate config" carve-out (`general.md`): the
+/// daemon embed tick has no per-invocation CLI surface, so which kinds it
+/// generates must be config. Mirrors the per-method `enabled` flags in
+/// `oracle.yml`'s retrieval pipeline.
+///
+/// `claim` is default-OFF pending the kind-weighted-pooling contingency: the
+/// v0.9.0 claim-embedding rollout regressed retrieval (the live `sb oracle eval`
+/// gate failed 2026-07-05, nDCG 0.8795 -> 0.8471 with recall down too), and the
+/// daemon tick embedded claims unconditionally so the `--drop-kind claim`
+/// rollback was non-sticky. Gating it here keeps the claim-free baseline
+/// restored across daemon ticks. The explicit `sb cortex embed --kind claim`
+/// override still forces claim embedding (CLI > config) for the future
+/// guard-first experiment.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct EmbedKindsConfig {
+    pub summary: bool,
+    pub transcript_chunk: bool,
+    pub claim: bool,
+}
+
+impl Default for EmbedKindsConfig {
+    fn default() -> Self {
+        Self {
+            summary: true,
+            transcript_chunk: true,
+            claim: false,
         }
     }
 }

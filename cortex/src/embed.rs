@@ -43,7 +43,7 @@ use vault::embedding::{
 };
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
-use crate::config::Config;
+use crate::config::{Config, EmbedKindsConfig};
 use crate::opts::EmbedOpts;
 
 /// Default batch size for the embed loop. Phase A5's transaction
@@ -164,18 +164,12 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
     // so oracle's search_vector pulls compatible rows on the next query.
     index.set_active_embedding(model.model_version(), model.dim())?;
 
-    let kinds = match opts.kind.as_deref() {
-        Some(k) => vec![parse_kind(k)?],
-        // Phase 9 default: summary, transcript-chunk, then claim. Cortex
-        // walks summary first (one row per note, fast), then transcript
-        // chunks (N rows per transcript-eligible note), then claims (one
-        // or a few rows per note carrying claims).
-        None => vec![
-            EmbeddingKind::Summary,
-            EmbeddingKind::TranscriptChunk,
-            EmbeddingKind::Claim,
-        ],
-    };
+    // CLI > config: an explicit `--kind <k>` embeds exactly that kind
+    // regardless of the config toggle (the escape hatch for the future
+    // guard-first claim experiment). With no `--kind`, the default pass
+    // embeds only the config-enabled kinds (default: summary +
+    // transcript-chunk, NOT claim - see `resolve_kinds`).
+    let kinds = resolve_kinds(opts.kind.as_deref(), &config.embed.kinds)?;
 
     let mut total = EmbedStats::default();
     for kind in kinds {
@@ -303,13 +297,11 @@ pub fn daemon_tick_with_model(vault_root: &Path, config: &Config, model: &dyn Em
         Err(e) => return Err(e),
     };
 
-    // Phase 9: the daemon tick embeds claims on its cadence alongside
-    // summaries and transcript chunks.
-    let kinds = [
-        EmbeddingKind::Summary,
-        EmbeddingKind::TranscriptChunk,
-        EmbeddingKind::Claim,
-    ];
+    // The daemon tick has no per-invocation CLI surface, so the kinds it
+    // generates are gated by config only. With defaults that is summary +
+    // transcript-chunk (claim is default-OFF after the 2026-07-05 retrieval
+    // gate failure); enabling `embed.kinds.claim` re-adds it here.
+    let kinds = enabled_default_kinds(&config.embed.kinds);
     let mut total = EmbedStats::default();
     for kind in kinds {
         loop {
@@ -386,6 +378,35 @@ pub fn process_batch(
         }
         EmbeddingKind::Claim => process_claim_batch(index, model, model_version, batch_size, max_chunks_per_call),
     }
+}
+
+/// Resolve the kind set for a `cortex embed` pass. CLI beats config: an
+/// explicit `--kind <k>` restricts the pass to exactly that kind regardless of
+/// the config toggle (the escape hatch for the future guard-first claim
+/// experiment). With no `--kind`, the pass embeds the config-enabled kinds.
+fn resolve_kinds(kind_override: Option<&str>, kinds: &EmbedKindsConfig) -> Result<Vec<EmbeddingKind>> {
+    match kind_override {
+        Some(k) => Ok(vec![parse_kind(k)?]),
+        None => Ok(enabled_default_kinds(kinds)),
+    }
+}
+
+/// The default (no-`--kind`) kind list, filtered by the `embed.kinds` config
+/// toggles. Order is load-bearing for progress logging: summary first (one row
+/// per note, fast), then transcript chunks (N rows per transcript-eligible
+/// note), then claims. `claim` is default-OFF (see [`EmbedKindsConfig`]).
+fn enabled_default_kinds(kinds: &EmbedKindsConfig) -> Vec<EmbeddingKind> {
+    let mut out = Vec::with_capacity(3);
+    if kinds.summary {
+        out.push(EmbeddingKind::Summary);
+    }
+    if kinds.transcript_chunk {
+        out.push(EmbeddingKind::TranscriptChunk);
+    }
+    if kinds.claim {
+        out.push(EmbeddingKind::Claim);
+    }
+    out
 }
 
 /// Parse a `--kind` / `--drop-kind` value into an [`EmbeddingKind`].

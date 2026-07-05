@@ -537,3 +537,56 @@ fn group_claims_splits_by_word_budget() {
     let overlong = group_claims("one two three four five\nsix", 3);
     assert_eq!(overlong, vec!["one two three four five".to_string(), "six".to_string()]);
 }
+
+// ---- Config-gated embed kinds (2026-07-05 retrieval-gate remediation) ----
+
+#[test]
+fn enabled_default_kinds_excludes_claim_by_default() {
+    // The default (no-`--kind`) kind list resolved from the default config must
+    // exclude Claim - the claim-free retrieval baseline - and include summary +
+    // transcript-chunk. This is what `cortex embed` / `--backfill` / the daemon
+    // tick generate with an absent or default `embed.kinds` config.
+    let kinds = enabled_default_kinds(&EmbedKindsConfig::default());
+    assert_eq!(kinds, vec![EmbeddingKind::Summary, EmbeddingKind::TranscriptChunk]);
+    assert!(
+        !kinds.contains(&EmbeddingKind::Claim),
+        "claim must be absent from the default kind list"
+    );
+}
+
+#[test]
+fn enabled_default_kinds_includes_claim_when_toggled_on() {
+    let kinds = enabled_default_kinds(&EmbedKindsConfig {
+        summary: true,
+        transcript_chunk: true,
+        claim: true,
+    });
+    assert_eq!(
+        kinds,
+        vec![
+            EmbeddingKind::Summary,
+            EmbeddingKind::TranscriptChunk,
+            EmbeddingKind::Claim,
+        ]
+    );
+}
+
+#[test]
+fn resolve_kinds_cli_kind_claim_beats_config_toggle_off() {
+    // CLI > config: `--kind claim` must embed claims regardless of the config
+    // toggle (default OFF). This is the escape hatch for the future guard-first
+    // claim experiment.
+    let kinds = resolve_kinds(Some("claim"), &EmbedKindsConfig::default()).expect("resolve");
+    assert_eq!(
+        kinds,
+        vec![EmbeddingKind::Claim],
+        "--kind claim overrides the default-OFF config toggle"
+    );
+}
+
+#[test]
+fn resolve_kinds_no_override_uses_config_defaults() {
+    // No `--kind` -> the config-enabled default set (claim OFF by default).
+    let kinds = resolve_kinds(None, &EmbedKindsConfig::default()).expect("resolve");
+    assert_eq!(kinds, vec![EmbeddingKind::Summary, EmbeddingKind::TranscriptChunk]);
+}
