@@ -102,6 +102,13 @@ impl super::SearchIndex {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Phase 9: the operator's capture annotation (rendered as
+        // `capture-note:` frontmatter by Phase 8). Not a known Frontmatter
+        // field, so it lands in `extra`; persisted here so the summary embed
+        // path can splice it into the embed text (title + capture-note +
+        // summary) without any file I/O.
+        let capture_note = extract_cortex_string(&fm.extra, "capture-note");
+
         let tags_json = fm
             .tags
             .as_ref()
@@ -177,7 +184,8 @@ impl super::SearchIndex {
                     cortex_thread_platform = ?27, cortex_thread_post_count = ?28,
                     cortex_thread_author = ?29,
                     pinned = ?30,
-                    trace = ?31, ingested = ?32, trace_expires = ?33
+                    trace = ?31, ingested = ?32, trace_expires = ?33,
+                    capture_note = ?34
                  WHERE path = ?1",
                 params![
                     path_str.as_ref(),
@@ -213,6 +221,7 @@ impl super::SearchIndex {
                     trace,
                     ingested,
                     trace_expires,
+                    capture_note,
                 ],
             )?;
             Ok(IndexAction::Updated)
@@ -231,14 +240,16 @@ impl super::SearchIndex {
                     cortex_thread_author,
                     search_hit_count, last_accessed_at, inbound_link_count,
                     pinned,
-                    trace, ingested, trace_expires
+                    trace, ingested, trace_expires,
+                    capture_note
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                     ?15, ?16, ?17, ?18, ?19, ?20,
                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29,
                     0, NULL, 0,
                     ?30,
-                    ?31, ?32, ?33
+                    ?31, ?32, ?33,
+                    ?34
                 )",
                 params![
                     path_str.as_ref(),
@@ -274,6 +285,7 @@ impl super::SearchIndex {
                     trace,
                     ingested,
                     trace_expires,
+                    capture_note,
                 ],
             )?;
             Ok(IndexAction::Inserted)

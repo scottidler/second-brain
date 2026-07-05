@@ -19,6 +19,7 @@ impl super::SearchIndex {
                 body TEXT,
                 summary TEXT,
                 claims TEXT DEFAULT '',
+                capture_note TEXT DEFAULT '',
                 modified_at INTEGER,
                 quality TEXT DEFAULT '',
                 classified INTEGER DEFAULT 0,
@@ -91,16 +92,15 @@ impl super::SearchIndex {
     /// loss.
     #[cfg(feature = "vec")]
     fn ensure_vec_schema(&self) -> Result<()> {
-        // Two-step setup: the static DDL runs as a batch, the
-        // backend-dependent seed for `active_model` runs separately so
-        // the model_version string stays a Rust const (driven by the
-        // active embedding-backend feature) rather than baked into a SQL
-        // string literal.
+        // Fresh DBs get the widened CHECK immediately (`'claim'` included,
+        // Phase 9). Existing DBs created before Phase 9 keep the old
+        // two-value CHECK here (CREATE TABLE IF NOT EXISTS is a no-op) and
+        // are widened by `migrate_note_embeddings_add_claim_kind` below.
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS note_embeddings (
                 id INTEGER PRIMARY KEY,
                 note_path TEXT NOT NULL,
-                kind TEXT NOT NULL CHECK (kind IN ('summary', 'transcript-chunk')),
+                kind TEXT NOT NULL CHECK (kind IN ('summary', 'transcript-chunk', 'claim')),
                 chunk_index INTEGER NOT NULL DEFAULT 0,
                 text TEXT NOT NULL,
                 embedding BLOB NOT NULL,
@@ -110,9 +110,19 @@ impl super::SearchIndex {
                 source_modified_at INTEGER NOT NULL,
                 FOREIGN KEY (note_path) REFERENCES notes(path) ON DELETE CASCADE,
                 UNIQUE (note_path, kind, chunk_index, model_version)
-            );
+            );",
+        )?;
 
-            CREATE INDEX IF NOT EXISTS idx_note_embeddings_path
+        // SQLite cannot ALTER a CHECK constraint, so a pre-Phase-9 DB needs a
+        // table rebuild to permit the `'claim'` kind. Run it before the index
+        // creation below so the rebuilt table's indexes are (re)created here.
+        self.migrate_note_embeddings_add_claim_kind()?;
+
+        // Indexes are idempotent (`IF NOT EXISTS`) and are also recreated
+        // inside the migration's transaction; this covers the fresh-DB path
+        // and the already-migrated path.
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_note_embeddings_path
                 ON note_embeddings(note_path);
             CREATE INDEX IF NOT EXISTS idx_note_embeddings_stale
                 ON note_embeddings(source_modified_at);
@@ -131,6 +141,100 @@ impl super::SearchIndex {
             rusqlite::params![crate::embedding::ACTIVE_MODEL_VERSION],
         )?;
         Ok(())
+    }
+
+    /// Widen the `note_embeddings.kind` CHECK constraint to include
+    /// `'claim'` (Phase 9 of
+    /// `docs/design/2026-07-05-distillation-knowledge-extraction.md`).
+    ///
+    /// SQLite cannot `ALTER` a CHECK, so this rebuilds the table preserving
+    /// every existing row. Returns `true` if it rebuilt, `false` if the
+    /// table was already current (or absent). Guarantees, per the design's
+    /// migration spec:
+    ///
+    /// - **One transaction.** `BEGIN IMMEDIATE` → build → swap → `COMMIT`;
+    ///   any error rolls the whole thing back.
+    /// - **Idempotent.** Inspects the stored DDL in `sqlite_master.sql` for
+    ///   the `'claim'` literal in the CHECK; if already present, no-op.
+    /// - **Crash-safe.** The new table is built under a temp name and the
+    ///   old table is dropped/renamed LAST, so a crash mid-migration leaves
+    ///   the original `note_embeddings` intact (and the wrapping transaction
+    ///   makes the whole rebuild atomic regardless).
+    /// - **Row-preserving.** `INSERT ... SELECT` copies every column
+    ///   (including `id`) verbatim, so existing summary/transcript rows
+    ///   survive byte-identical.
+    /// - **Indexes recreated; `embedding_config` untouched** (a separate
+    ///   table the rebuild never drops).
+    #[cfg(feature = "vec")]
+    pub(crate) fn migrate_note_embeddings_add_claim_kind(&self) -> Result<bool> {
+        let stored_sql: Option<String> = super::optional_row(self.conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='note_embeddings'",
+            [],
+            |row| row.get(0),
+        ))?;
+
+        let Some(stored_sql) = stored_sql else {
+            // No table yet - the fresh-DB CREATE above already wrote the
+            // widened CHECK, so there is nothing to migrate.
+            return Ok(false);
+        };
+        if stored_sql.contains("'claim'") {
+            // CHECK already permits 'claim'; idempotent no-op.
+            return Ok(false);
+        }
+
+        log::info!("search::migrate: rebuilding note_embeddings to widen kind CHECK for 'claim'");
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            self.conn.execute_batch(
+                "CREATE TABLE note_embeddings_new (
+                    id INTEGER PRIMARY KEY,
+                    note_path TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('summary', 'transcript-chunk', 'claim')),
+                    chunk_index INTEGER NOT NULL DEFAULT 0,
+                    text TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    dim INTEGER NOT NULL,
+                    model_version TEXT NOT NULL,
+                    produced_at INTEGER NOT NULL,
+                    source_modified_at INTEGER NOT NULL,
+                    FOREIGN KEY (note_path) REFERENCES notes(path) ON DELETE CASCADE,
+                    UNIQUE (note_path, kind, chunk_index, model_version)
+                );
+
+                INSERT INTO note_embeddings_new (
+                    id, note_path, kind, chunk_index, text, embedding, dim,
+                    model_version, produced_at, source_modified_at
+                )
+                SELECT
+                    id, note_path, kind, chunk_index, text, embedding, dim,
+                    model_version, produced_at, source_modified_at
+                FROM note_embeddings;
+
+                DROP TABLE note_embeddings;
+                ALTER TABLE note_embeddings_new RENAME TO note_embeddings;
+
+                CREATE INDEX IF NOT EXISTS idx_note_embeddings_path
+                    ON note_embeddings(note_path);
+                CREATE INDEX IF NOT EXISTS idx_note_embeddings_stale
+                    ON note_embeddings(source_modified_at);
+                CREATE INDEX IF NOT EXISTS idx_note_embeddings_kind_model
+                    ON note_embeddings(kind, model_version);",
+            )?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(true)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 
     /// Add cortex governance columns if they don't exist yet (handles schema migration)
@@ -172,6 +276,10 @@ impl super::SearchIndex {
 
         let distilled_columns = [
             ("claims", "TEXT DEFAULT ''"),
+            // Phase 9: the operator's capture annotation, populated by the
+            // indexer from the `capture-note:` frontmatter, spliced into the
+            // summary embedding text.
+            ("capture_note", "TEXT DEFAULT ''"),
             ("cortex_repo_stars", "INTEGER"),
             ("cortex_repo_last_commit", "TEXT"),
             ("cortex_repo_primary_language", "TEXT"),
@@ -311,3 +419,6 @@ impl super::SearchIndex {
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "vec"))]
+mod tests;

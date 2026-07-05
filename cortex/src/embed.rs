@@ -165,13 +165,16 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
     index.set_active_embedding(model.model_version(), model.dim())?;
 
     let kinds = match opts.kind.as_deref() {
-        Some("summary") => vec![EmbeddingKind::Summary],
-        Some("transcript-chunk") => vec![EmbeddingKind::TranscriptChunk],
-        Some(other) => eyre::bail!("unknown --kind {other:?}; expected summary | transcript-chunk"),
-        // Phase B2 default: both summary and transcript-chunk. Cortex
-        // walks summary first (one row per note, fast) then transcript
-        // chunks (N rows per transcript-eligible note).
-        None => vec![EmbeddingKind::Summary, EmbeddingKind::TranscriptChunk],
+        Some(k) => vec![parse_kind(k)?],
+        // Phase 9 default: summary, transcript-chunk, then claim. Cortex
+        // walks summary first (one row per note, fast), then transcript
+        // chunks (N rows per transcript-eligible note), then claims (one
+        // or a few rows per note carrying claims).
+        None => vec![
+            EmbeddingKind::Summary,
+            EmbeddingKind::TranscriptChunk,
+            EmbeddingKind::Claim,
+        ],
     };
 
     let mut total = EmbedStats::default();
@@ -300,7 +303,13 @@ pub fn daemon_tick_with_model(vault_root: &Path, config: &Config, model: &dyn Em
         Err(e) => return Err(e),
     };
 
-    let kinds = [EmbeddingKind::Summary, EmbeddingKind::TranscriptChunk];
+    // Phase 9: the daemon tick embeds claims on its cadence alongside
+    // summaries and transcript chunks.
+    let kinds = [
+        EmbeddingKind::Summary,
+        EmbeddingKind::TranscriptChunk,
+        EmbeddingKind::Claim,
+    ];
     let mut total = EmbedStats::default();
     for kind in kinds {
         loop {
@@ -375,7 +384,37 @@ pub fn process_batch(
         EmbeddingKind::TranscriptChunk => {
             process_transcript_batch(index, model, model_version, vault_root, batch_size, max_chunks_per_call)
         }
+        EmbeddingKind::Claim => process_claim_batch(index, model, model_version, batch_size, max_chunks_per_call),
     }
+}
+
+/// Parse a `--kind` / `--drop-kind` value into an [`EmbeddingKind`].
+/// Shared by `run` (which restricts the pass to one kind) and `drop_kind`
+/// (the rollback verb) so both accept the same vocabulary.
+fn parse_kind(s: &str) -> Result<EmbeddingKind> {
+    match s {
+        "summary" => Ok(EmbeddingKind::Summary),
+        "transcript-chunk" => Ok(EmbeddingKind::TranscriptChunk),
+        "claim" => Ok(EmbeddingKind::Claim),
+        other => eyre::bail!("unknown embedding kind {other:?}; expected summary | transcript-chunk | claim"),
+    }
+}
+
+/// First-class rollback verb behind `sb cortex embed --drop-kind <kind>`
+/// (Phase 9). Deletes every embedding row of `kind` and returns the count.
+///
+/// Reverting cortex code does NOT stop oracle reading, e.g., claim rows -
+/// `search_vector` scans all kinds - so deleting the rows is the only real
+/// rollback. Kept out of the read/inference/write loop entirely: it opens
+/// the index, deletes, and returns.
+pub fn drop_kind(config: &Config, kind: &str) -> Result<usize> {
+    let embedding_kind = parse_kind(kind)?;
+    let db_path = config.oracle_db_path();
+    let index = SearchIndex::open(&db_path)
+        .wrap_err_with(|| format!("failed to open search index at {}", db_path.display()))?;
+    let deleted = index.delete_embeddings_of_kind(embedding_kind)?;
+    log::info!("cortex::embed::drop_kind: kind={kind} deleted={deleted}");
+    Ok(deleted)
 }
 
 /// Phase A5: one batch of summary embeddings. Read auto-commit, embed
@@ -417,16 +456,29 @@ fn process_summary_batch(
             stats.skipped_empty += 1;
             continue;
         }
-        // Phase 7a: prepend the note title (strong topical signal) to the
-        // summary before embedding. Same model + dimension; existing rows
-        // re-embed on the next `cortex embed --backfill`. A note with an empty
-        // title embeds the bare summary (no leading blank lines).
+        // Phase 7a + Phase 9: assemble the embed text as
+        // `title` + `capture_note` + `summary`, each non-empty segment joined
+        // by a blank line. The title carries strong topical signal; the
+        // capture note ("why I captured this") makes the operator's own words
+        // semantically searchable.
+        //
+        // BYTE-IDENTICAL INVARIANT (Phase 9): a note WITHOUT a capture note
+        // must produce the exact pre-Phase-9 text (`title\n\nsummary`, or the
+        // bare summary when the title is empty) so the staleness watermark
+        // does not treat every existing note as changed and re-embed the whole
+        // vault. Because empty segments are dropped before the join, an empty
+        // capture note contributes nothing and the result is unchanged.
         let title = t.title.trim();
-        let text = if title.is_empty() {
-            summary.to_string()
-        } else {
-            format!("{title}\n\n{summary}")
-        };
+        let capture = t.capture_note.trim();
+        let mut segments: Vec<&str> = Vec::with_capacity(3);
+        if !title.is_empty() {
+            segments.push(title);
+        }
+        if !capture.is_empty() {
+            segments.push(capture);
+        }
+        segments.push(summary);
+        let text = segments.join("\n\n");
         work.push(EmbedWork {
             note_path: t.note_path.clone(),
             text,
@@ -596,6 +648,143 @@ fn process_transcript_batch(
     }
     Ok(stats)
 }
+
+/// Phase 9: one batch of claim embeddings. Reads `notes.claims` from the
+/// column (carried in `StaleTarget.summary` by the Claim arm of
+/// `stale_embedding_targets` - NO file I/O, same discipline as the summary
+/// path), groups the newline-joined claims into token-window-sized chunks,
+/// embeds them in one flat sub-batched call, and flushes each note's chunk
+/// set atomically via `swap_kind_chunks`.
+///
+/// The grouping is load-bearing: a note can carry up to 24 claims, whose
+/// joined text can exceed bge-small's 512-token window. Passing that as one
+/// string would make the model silently truncate the tail - dropping the
+/// late claims, the exact defect this design removes. Splitting into
+/// sub-window groups guarantees every claim is embedded.
+fn process_claim_batch(
+    index: &mut SearchIndex,
+    model: &dyn EmbeddingModel,
+    model_version: &str,
+    batch_size: usize,
+    max_chunks_per_call: usize,
+) -> Result<EmbedStats> {
+    let mut stats = EmbedStats::default();
+
+    // ---- 1. READ PHASE (auto-commit, no transaction; no file I/O). ----
+    let targets = index.stale_embedding_targets(EmbeddingKind::Claim, model_version, batch_size as u32)?;
+    if targets.is_empty() {
+        return Ok(stats);
+    }
+    log::debug!("cortex::embed::process_claim_batch: scanned={}", targets.len());
+
+    let mut work: Vec<TranscriptWork> = Vec::with_capacity(targets.len());
+    for t in &targets {
+        stats.scanned += 1;
+        // The Claim arm selects `notes.claims` into the `summary` field.
+        let groups = group_claims(&t.summary, CLAIM_GROUP_MAX_WORDS);
+        if groups.is_empty() {
+            // Defensive: the SQL filter already excludes empty-claims notes,
+            // but keep the skip path so a schema drift cannot reintroduce the
+            // infinite-loop bug (a scanned-but-never-embedded note).
+            log::warn!("cortex::embed: skipping {} (no claims text)", t.note_path);
+            stats.skipped_empty += 1;
+            continue;
+        }
+        work.push(TranscriptWork {
+            note_path: t.note_path.clone(),
+            chunks: groups,
+            source_modified_at: t.modified_at,
+        });
+    }
+    if work.is_empty() {
+        return Ok(stats);
+    }
+
+    // ---- 2. INFERENCE PHASE (no SQLite contact). ----
+    let flat: Vec<&str> = work.iter().flat_map(|w| w.chunks.iter().map(|s| s.as_str())).collect();
+    let flat_vectors = match embed_in_sub_batches(model, &flat, max_chunks_per_call) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("cortex::embed: embed_batch failed for claims: {e}");
+            stats.failed += flat.len() as u64;
+            return Ok(stats);
+        }
+    };
+    if flat_vectors.len() != flat.len() {
+        log::error!(
+            "cortex::embed: embed_batch returned {} vectors for {} claim inputs",
+            flat_vectors.len(),
+            flat.len(),
+        );
+        stats.failed += flat.len() as u64;
+        return Ok(stats);
+    }
+
+    // ---- 3. WRITE PHASE (one short transaction per note). ----
+    let mut cursor = 0;
+    for w in &work {
+        let n = w.chunks.len();
+        let mut pairs: Vec<(String, Vec<f32>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            pairs.push((w.chunks[i].clone(), flat_vectors[cursor + i].clone()));
+        }
+        cursor += n;
+        if let Err(e) = index.swap_kind_chunks(
+            &w.note_path,
+            EmbeddingKind::Claim,
+            &pairs,
+            model_version,
+            w.source_modified_at,
+        ) {
+            log::error!("cortex::embed: claim chunk swap failed for {}: {e}", w.note_path);
+            stats.failed += n as u64;
+            continue;
+        }
+        stats.embedded += n as u64;
+    }
+    Ok(stats)
+}
+
+/// Group a note's newline-joined claim text into chunks whose word count
+/// stays under `max_words`, so no single embedding input overruns the
+/// model's token window (bge-small: 512 tokens ≈ 400 words at the ~0.75
+/// word:token ratio the chunker assumes). Each returned chunk is its member
+/// claims re-joined with `\n`.
+///
+/// A single claim that alone exceeds the budget becomes its own chunk: the
+/// model truncates that one pathological claim, but no *later* claim is
+/// silently dropped - which is the whole point (dropping tail claims is the
+/// Phase 9 defect; truncating one overlong sentence is acceptable and rare).
+/// Returns an empty Vec when the input is blank.
+fn group_claims(claims_text: &str, max_words: usize) -> Vec<String> {
+    let claims: Vec<&str> = claims_text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if claims.is_empty() {
+        return Vec::new();
+    }
+    let mut groups: Vec<String> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    let mut current_words = 0usize;
+    for claim in claims {
+        let words = claim.split_whitespace().count();
+        if !current.is_empty() && current_words + words > max_words {
+            groups.push(current.join("\n"));
+            current.clear();
+            current_words = 0;
+        }
+        current.push(claim);
+        current_words += words;
+    }
+    if !current.is_empty() {
+        groups.push(current.join("\n"));
+    }
+    groups
+}
+
+/// Word budget per claim embedding group. Matches [`CHUNK_MAX_TOKENS`] (the
+/// transcript chunker's per-chunk word budget) so both paths share the same
+/// "what fits in one embedding input" notion against bge-small's 512-token
+/// window.
+const CLAIM_GROUP_MAX_WORDS: usize = 400;
 
 /// Chunk window defaults. The design pins these; future tuning happens
 /// here, not via per-call args, because the stale-target query and the

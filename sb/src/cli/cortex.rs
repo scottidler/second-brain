@@ -264,6 +264,10 @@ pub struct EmbedArgs {
     pub backfill: bool,
     #[arg(long)]
     pub kind: Option<String>,
+    /// Rollback verb: delete every embedding row of this kind
+    /// (summary | transcript-chunk | claim) and exit.
+    #[arg(long)]
+    pub drop_kind: Option<String>,
     #[arg(long)]
     pub model: Option<String>,
     #[arg(long, default_value_t = cortex::embed::DEFAULT_BATCH_SIZE)]
@@ -278,6 +282,7 @@ impl From<EmbedArgs> for opts::EmbedOpts {
         Self {
             backfill: a.backfill,
             kind: a.kind,
+            drop_kind: a.drop_kind,
             model: a.model,
             batch_size: a.batch_size,
             prefetch_model: a.prefetch_model,
@@ -466,6 +471,9 @@ impl CortexCli {
                 if opts_struct.prefetch_model {
                     let resolved = cortex::embed::prefetch(opts_struct.model.as_deref())?;
                     println!("Prefetched embedding model {resolved}.");
+                } else if let Some(kind) = opts_struct.drop_kind.as_deref() {
+                    let deleted = cortex::embed::drop_kind(&config, kind)?;
+                    println!("dropped {deleted} embedding rows for kind={kind}");
                 } else {
                     let stats = cortex::embed::run(&vault_root, &config, &opts_struct)?;
                     println!(

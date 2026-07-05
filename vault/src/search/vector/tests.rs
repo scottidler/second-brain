@@ -667,3 +667,178 @@ fn weighted_rrf_higher_weight_dominates_ranking() {
     let pos = |p: &str| fused.iter().position(|h| h.note_path == p).expect("present");
     assert!(pos("strong-top") < pos("weak-top"), "vector hit must outrank bm25 hit");
 }
+
+// ---- Phase 9: claim embeddings ----
+
+#[test]
+fn stale_claim_targets_selects_notes_with_claims_and_carries_claim_text() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-claim-test");
+    index
+        .set_active_embedding(m.model_version(), m.dim())
+        .expect("set model");
+
+    // Note WITH claims -> candidate; the claim text rides in `summary`.
+    index
+        .insert_test_note_full("notes/withclaims.md", "article", "body", "summary", 100)
+        .expect("note");
+    index
+        .set_test_claims("notes/withclaims.md", "claim one\nclaim two\nclaim three")
+        .expect("claims");
+
+    // Note WITHOUT claims -> excluded by the SQL filter.
+    index
+        .insert_test_note_full("notes/noclaims.md", "article", "body", "summary", 100)
+        .expect("note");
+
+    let targets = index
+        .stale_embedding_targets(EmbeddingKind::Claim, m.model_version(), 10)
+        .expect("targets");
+    assert_eq!(targets.len(), 1, "only the note carrying claims is a candidate");
+    assert_eq!(targets[0].note_path, "notes/withclaims.md");
+    assert_eq!(
+        targets[0].summary, "claim one\nclaim two\nclaim three",
+        "the Claim arm carries notes.claims in the summary field (no file I/O)"
+    );
+}
+
+#[test]
+fn stale_claim_targets_skips_when_claim_row_current() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-claim-test");
+    index
+        .set_active_embedding(m.model_version(), m.dim())
+        .expect("set model");
+
+    index
+        .insert_test_note_full("notes/x.md", "article", "body", "summary", 100)
+        .expect("note");
+    index.set_test_claims("notes/x.md", "a claim").expect("claims");
+
+    // Write a claim embedding whose source watermark matches the note's
+    // modified_at -> not stale.
+    let v = m.embed_one("a claim").expect("embed");
+    index
+        .upsert_embedding(
+            "notes/x.md",
+            EmbeddingKind::Claim,
+            0,
+            "a claim",
+            &v,
+            m.model_version(),
+            100,
+        )
+        .expect("upsert claim");
+
+    let targets = index
+        .stale_embedding_targets(EmbeddingKind::Claim, m.model_version(), 10)
+        .expect("targets");
+    assert!(targets.is_empty(), "a current claim row must not re-appear as stale");
+}
+
+#[test]
+fn delete_embeddings_of_kind_removes_only_that_kind() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-drop-test");
+    index
+        .set_active_embedding(m.model_version(), m.dim())
+        .expect("set model");
+
+    index
+        .insert_test_note_full("notes/a.md", "article", "body", "summary", 100)
+        .expect("note");
+    let v = m.embed_one("t").expect("embed");
+    index
+        .upsert_embedding("notes/a.md", EmbeddingKind::Summary, 0, "s", &v, m.model_version(), 100)
+        .expect("summary");
+    index
+        .upsert_embedding(
+            "notes/a.md",
+            EmbeddingKind::TranscriptChunk,
+            0,
+            "c",
+            &v,
+            m.model_version(),
+            100,
+        )
+        .expect("transcript");
+    index
+        .upsert_embedding("notes/a.md", EmbeddingKind::Claim, 0, "cl", &v, m.model_version(), 100)
+        .expect("claim");
+
+    let deleted = index.delete_embeddings_of_kind(EmbeddingKind::Claim).expect("drop");
+    assert_eq!(deleted, 1, "exactly the one claim row is deleted");
+    assert_eq!(index.count_embeddings(Some(EmbeddingKind::Claim)).expect("count"), 0);
+    assert_eq!(
+        index.count_embeddings(Some(EmbeddingKind::Summary)).expect("count"),
+        1,
+        "summary rows are untouched"
+    );
+    assert_eq!(
+        index
+            .count_embeddings(Some(EmbeddingKind::TranscriptChunk))
+            .expect("count"),
+        1,
+        "transcript rows are untouched"
+    );
+}
+
+#[test]
+fn semantic_neighbors_ignores_claim_rows() {
+    // semantic_neighbors reads kind='summary' ONLY. A note that has a claim
+    // row but no summary row must never surface as a neighbor.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-neighbor-test");
+    index
+        .set_active_embedding(m.model_version(), m.dim())
+        .expect("set model");
+
+    insert_note(&index, "notes/a.md", "tech", "article", 100);
+    insert_note(&index, "notes/b.md", "tech", "article", 100);
+    insert_note(&index, "notes/claimonly.md", "tech", "article", 100);
+
+    let va = m.embed_one("shared topic").expect("embed");
+    index
+        .upsert_embedding(
+            "notes/a.md",
+            EmbeddingKind::Summary,
+            0,
+            "shared topic",
+            &va,
+            m.model_version(),
+            100,
+        )
+        .expect("summary a");
+    index
+        .upsert_embedding(
+            "notes/b.md",
+            EmbeddingKind::Summary,
+            0,
+            "shared topic",
+            &va,
+            m.model_version(),
+            100,
+        )
+        .expect("summary b");
+    // claimonly has ONLY a claim row - with the same vector, so if the query
+    // erroneously scanned claim rows it would surface as a top neighbor.
+    index
+        .upsert_embedding(
+            "notes/claimonly.md",
+            EmbeddingKind::Claim,
+            0,
+            "shared topic",
+            &va,
+            m.model_version(),
+            100,
+        )
+        .expect("claim");
+
+    let neighbors = index.semantic_neighbors("notes/a.md", 10, -1.0).expect("neighbors");
+    let paths: Vec<&str> = neighbors.iter().map(|(p, _)| p.as_str()).collect();
+    assert!(paths.contains(&"notes/b.md"), "the summary-bearing note is a neighbor");
+    assert!(
+        !paths.contains(&"notes/claimonly.md"),
+        "a claim-only note must NOT appear (semantic_neighbors stays summary-only)"
+    );
+}

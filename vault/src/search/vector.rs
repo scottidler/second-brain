@@ -33,12 +33,20 @@ pub struct VectorHit {
     pub distance: f32,
 }
 
-/// Discriminates summary and transcript-chunk rows in `note_embeddings`.
-/// Maps 1:1 to the `kind TEXT CHECK (...)` column.
+/// Discriminates summary, transcript-chunk, and claim rows in
+/// `note_embeddings`. Maps 1:1 to the `kind TEXT CHECK (...)` column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingKind {
     Summary,
     TranscriptChunk,
+    /// One embedding per group of a note's extracted claims (Phase 9 of
+    /// `docs/design/2026-07-05-distillation-knowledge-extraction.md`).
+    /// Added so the default vector-only retrieval pipeline reaches claim
+    /// text, which is otherwise only FTS-indexed. `search_vector` scans
+    /// this kind automatically (no kind filter); it must only *add
+    /// recall*, never displace summary precision - see the max-pool
+    /// contingency note in `search_vector`.
+    Claim,
 }
 
 impl EmbeddingKind {
@@ -48,6 +56,7 @@ impl EmbeddingKind {
         match self {
             EmbeddingKind::Summary => "summary",
             EmbeddingKind::TranscriptChunk => "transcript-chunk",
+            EmbeddingKind::Claim => "claim",
         }
     }
 }
@@ -79,16 +88,27 @@ pub struct StaleTarget {
     /// the next scan sees a consistent watermark even if the note is
     /// re-modified between read and write.
     pub modified_at: i64,
-    /// Snapshot of `notes.summary` at query time. For Summary embeddings
-    /// cortex uses this directly as the input text (no file I/O on hot
-    /// path; no skip-without-write loop on notes missing a `## Summary`
-    /// heading). For TranscriptChunk this is always an empty string;
-    /// cortex reads the `## Transcript` section from disk for those.
+    /// Snapshot of the text-carrying column at query time. For Summary
+    /// embeddings this is `notes.summary`; cortex uses it directly as the
+    /// input text (no file I/O on hot path; no skip-without-write loop on
+    /// notes missing a `## Summary` heading). For Claim embeddings this is
+    /// `notes.claims` (the newline-joined claim text, also no file I/O);
+    /// cortex groups it into token-window-sized chunks. For TranscriptChunk
+    /// this is always an empty string; cortex reads the `## Transcript`
+    /// section from disk for those.
     pub summary: String,
     /// Snapshot of `notes.title` at query time. Cortex prepends it to the
     /// summary before embedding (the title carries strong topical signal);
     /// may be empty.
     pub title: String,
+    /// Snapshot of `notes.capture_note` at query time (the operator's
+    /// "why I captured this" annotation, Phase 8/9). For Summary embeddings
+    /// cortex splices it between the title and summary so the annotation is
+    /// semantically searchable; empty for notes without one, in which case
+    /// the assembled embed text is byte-identical to the pre-Phase-9 form
+    /// (title + summary), so staleness detection re-embeds nothing
+    /// retroactively. Empty for the TranscriptChunk and Claim arms.
+    pub capture_note: String,
 }
 
 /// Validate that a stored embedding BLOB matches its declared `dim`.
@@ -138,12 +158,24 @@ fn dot_product_from_bytes(query_vec: &[f32], stored: &[u8]) -> f32 {
 impl SearchIndex {
     /// Brute-force cosine-similarity search over `note_embeddings`.
     ///
-    /// Reads every row (`summary` and `transcript-chunk`) for the
-    /// active model and aggregates by note via max-pool: a note's
+    /// Reads every row (`summary`, `transcript-chunk`, and `claim`) for
+    /// the active model and aggregates by note via max-pool: a note's
     /// score is `min(distances across all rows for that note)` - the
     /// single best-matching representation wins. In cosine-distance
     /// space smaller is closer, so the minimum over the rows is the
     /// max-pool similarity.
+    ///
+    /// NAMED CONTINGENCY (Phase 9, retrieval invariant "claim rows add
+    /// recall, never displace precision"): the max-pool below is
+    /// kind-agnostic, so a note's up-to-24 narrow `claim` vectors get the
+    /// same weight as its `summary` vector and can let it win on a
+    /// tangential sentence. If the Phase 9 operator eval shows a per-query
+    /// nDCG regression on the calibration set, the fix is **kind-weighted
+    /// pooling here**: pull `e.kind` in the SELECT and apply a per-kind
+    /// distance penalty (e.g. add a small epsilon to claim-row distances)
+    /// so claims can only rescue a note the summary missed, never outrank
+    /// a note whose summary answered the query. Not implemented until the
+    /// eval demands it - see the Phase 9 measurement step.
     ///
     /// The note-side filters (`domain`, `note_type`, `status`) are
     /// pushed into SQL so the scan only visits rows that pass them;
@@ -395,10 +427,35 @@ impl SearchIndex {
     /// chunk boundaries shift, so there is no stable per-chunk identity
     /// to preserve. Wiping the existing chunks and writing the new ones
     /// in one transaction means hybrid search never sees a half-replaced
-    /// chunk set.
+    /// chunk set. Thin wrapper over [`SearchIndex::swap_kind_chunks`].
     pub fn swap_transcript_chunks(
         &mut self,
         note_path: &str,
+        chunks: &[(String, Vec<f32>)],
+        model_version: &str,
+        source_modified_at: i64,
+    ) -> Result<()> {
+        self.swap_kind_chunks(
+            note_path,
+            EmbeddingKind::TranscriptChunk,
+            chunks,
+            model_version,
+            source_modified_at,
+        )
+    }
+
+    /// Atomic swap of every row of one `kind` for a single note, inside
+    /// one short write transaction (`BEGIN IMMEDIATE` → DELETE → INSERTs
+    /// → `COMMIT`). Generalizes the transcript-chunk swap to any
+    /// multi-row kind whose per-chunk identity is not stable across
+    /// re-embeds - the Phase 9 `claim` kind reuses it: when a note's
+    /// claims change the group boundaries shift, so wipe-and-rewrite in
+    /// one transaction keeps hybrid search from seeing a half-replaced
+    /// chunk set.
+    pub fn swap_kind_chunks(
+        &mut self,
+        note_path: &str,
+        kind: EmbeddingKind,
         chunks: &[(String, Vec<f32>)],
         model_version: &str,
         source_modified_at: i64,
@@ -410,7 +467,7 @@ impl SearchIndex {
         tx.execute(
             "DELETE FROM note_embeddings
              WHERE note_path = ?1 AND kind = ?2",
-            params![note_path, EmbeddingKind::TranscriptChunk.as_str()],
+            params![note_path, kind.as_str()],
         )?;
         let now = chrono::Utc::now().timestamp();
         for (idx, (text, embedding)) in chunks.iter().enumerate() {
@@ -422,7 +479,7 @@ impl SearchIndex {
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     note_path,
-                    EmbeddingKind::TranscriptChunk.as_str(),
+                    kind.as_str(),
                     idx as i64,
                     text,
                     bytes,
@@ -435,6 +492,18 @@ impl SearchIndex {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Delete every embedding row of a single `kind`, returning the number
+    /// of rows removed. This is the first-class rollback verb behind
+    /// `sb cortex embed --drop-kind claim` (Phase 9): reverting cortex code
+    /// does NOT stop oracle reading claim rows, because `search_vector`
+    /// scans all kinds, so removing the rows is the only real rollback.
+    pub fn delete_embeddings_of_kind(&self, kind: EmbeddingKind) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM note_embeddings WHERE kind = ?1", params![kind.as_str()])?;
+        Ok(n)
     }
 
     /// Update `embedding_config.active_model` and `active_dim` inside a
@@ -483,6 +552,11 @@ impl SearchIndex {
     /// and the cortex daemon spins. Driving the filter from the schema
     /// enum (rather than a hand-typed SQL string list) means a future
     /// `NoteType` variant rename cannot silently re-break this path.
+    ///
+    /// Claim rows (Phase 9): every note with non-empty `notes.claims` is a
+    /// candidate. The claim text is carried in the `summary` field of the
+    /// returned `StaleTarget` (no file I/O); cortex groups it into
+    /// token-window-sized chunks before embedding.
     pub fn stale_embedding_targets(
         &self,
         kind: EmbeddingKind,
@@ -496,7 +570,11 @@ impl SearchIndex {
             .join(", ");
 
         let sql = match kind {
-            EmbeddingKind::Summary => "SELECT n.path, n.note_type, n.modified_at, n.summary, n.title
+            // Summary: the text carrier is `notes.summary`; `notes.capture_note`
+            // is threaded through so the embed text becomes title + capture-note
+            // + summary (Phase 9). Notes without a capture note carry '' and the
+            // assembled text stays byte-identical to the pre-Phase-9 form.
+            EmbeddingKind::Summary => "SELECT n.path, n.note_type, n.modified_at, n.summary, n.title, n.capture_note
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -509,7 +587,7 @@ impl SearchIndex {
                  LIMIT ?3"
                 .to_string(),
             EmbeddingKind::TranscriptChunk => format!(
-                "SELECT n.path, n.note_type, n.modified_at, '', n.title
+                "SELECT n.path, n.note_type, n.modified_at, '', n.title, ''
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -521,6 +599,24 @@ impl SearchIndex {
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
             ),
+            // Claim: the text carrier is `notes.claims` (already populated by
+            // the indexer from the `## Claims` body section, no file I/O). Any
+            // note with non-empty claims text is a candidate. Cortex groups the
+            // newline-joined claims into token-window-sized chunks before
+            // embedding so a note's tail claims are never dropped by silent
+            // model-side truncation (the Phase 9 defect).
+            EmbeddingKind::Claim => "SELECT n.path, n.note_type, n.modified_at, n.claims, n.title, ''
+                 FROM notes n
+                 LEFT JOIN note_embeddings e
+                   ON e.note_path = n.path
+                  AND e.kind = ?1
+                  AND e.model_version = ?2
+                 WHERE (n.claims IS NOT NULL AND n.claims != '')
+                   AND (e.id IS NULL
+                        OR e.source_modified_at < n.modified_at)
+                 ORDER BY n.modified_at DESC
+                 LIMIT ?3"
+                .to_string(),
         };
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -532,6 +628,7 @@ impl SearchIndex {
                     modified_at: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
                     summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                     title: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    capture_note: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
                 })
             })?
             .filter_map(warn_row)
@@ -595,6 +692,27 @@ impl SearchIndex {
                 "[]", "", "", body, summary, modified_at,
             ],
         )?;
+        Ok(())
+    }
+
+    /// Set the `notes.capture_note` column for a test row (Phase 9). Lets
+    /// tests in other crates exercise the title + capture-note + summary
+    /// embed-text assembly without reaching into the private `conn`.
+    pub fn set_test_capture_note(&self, path: &str, capture_note: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE notes SET capture_note = ?2 WHERE path = ?1",
+            params![path, capture_note],
+        )?;
+        Ok(())
+    }
+
+    /// Set the `notes.claims` column for a test row (Phase 9). Claims are
+    /// stored as newline-joined text (the shape the indexer writes); lets
+    /// tests in other crates drive the claim-embedding arm without reaching
+    /// into the private `conn`.
+    pub fn set_test_claims(&self, path: &str, claims: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE notes SET claims = ?2 WHERE path = ?1", params![path, claims])?;
         Ok(())
     }
 

@@ -374,3 +374,166 @@ fn embed_in_sub_batches_treats_zero_cap_as_no_cap() {
     let calls = m.calls();
     assert_eq!(calls, vec![30], "cap=0 means one call with the full input");
 }
+
+// ---- Phase 9: capture-note embed text + claim embeddings ----
+
+#[test]
+fn summary_embed_text_is_byte_identical_when_no_capture_note() {
+    // BYTE-IDENTICAL INVARIANT: a note without a capture note must embed the
+    // exact pre-Phase-9 text (title + blank line + summary), so the staleness
+    // watermark does not treat the whole vault as changed and re-embed it.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-batch-test");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    let tmp = TempDir::new().expect("tmp");
+    // insert_test_note_row seeds title "T", summary "summary", capture_note "".
+    index.insert_test_note_row("notes/a.md", "article", 100).expect("note");
+
+    process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::Summary,
+        m.model_version(),
+        tmp.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("process");
+
+    let text = index
+        .embedding_text("notes/a.md", EmbeddingKind::Summary)
+        .expect("query")
+        .expect("row");
+    assert_eq!(
+        text, "T\n\nsummary",
+        "no capture note must yield the pre-Phase-9 title+summary text byte-identical"
+    );
+}
+
+#[test]
+fn summary_embed_text_splices_capture_note_when_present() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-batch-test");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    let tmp = TempDir::new().expect("tmp");
+    index.insert_test_note_row("notes/a.md", "article", 100).expect("note");
+    index
+        .set_test_capture_note("notes/a.md", "this is how we should fix borg")
+        .expect("capture");
+
+    process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::Summary,
+        m.model_version(),
+        tmp.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("process");
+
+    let text = index
+        .embedding_text("notes/a.md", EmbeddingKind::Summary)
+        .expect("query")
+        .expect("row");
+    assert_eq!(
+        text, "T\n\nthis is how we should fix borg\n\nsummary",
+        "embed text must be title + capture-note + summary"
+    );
+}
+
+#[test]
+fn process_claim_batch_embeds_notes_with_claims() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-batch-test");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    let tmp = TempDir::new().expect("tmp");
+    index.insert_test_note_row("notes/a.md", "article", 100).expect("note");
+    index
+        .set_test_claims(
+            "notes/a.md",
+            "the harness matters more than the model\nagents need orchestration",
+        )
+        .expect("claims");
+    // A note with no claims must not be embedded.
+    index
+        .insert_test_note_row("notes/b.md", "article", 100)
+        .expect("note b");
+
+    let stats = process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::Claim,
+        m.model_version(),
+        tmp.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("process");
+
+    assert_eq!(stats.scanned, 1, "only the note carrying claims is scanned");
+    assert_eq!(stats.embedded, 1, "two short claims fit in one group -> one row");
+    assert_eq!(stats.skipped_empty, 0);
+    assert_eq!(stats.failed, 0);
+    assert_eq!(index.count_embeddings(Some(EmbeddingKind::Claim)).expect("count"), 1);
+}
+
+#[test]
+fn process_claim_batch_splits_oversized_claim_sets_into_multiple_rows() {
+    // A claim set whose joined word count exceeds CLAIM_GROUP_MAX_WORDS (400)
+    // must split into multiple embedding rows so no tail claim is dropped by
+    // silent model-side truncation.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-batch-test");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    let tmp = TempDir::new().expect("tmp");
+    index
+        .insert_test_note_row("notes/big.md", "article", 100)
+        .expect("note");
+    // 500 single-word claims: budget 400 -> 400 + 100 -> two groups.
+    let claims: String = (0..500).map(|i| format!("claim{i}")).collect::<Vec<_>>().join("\n");
+    index.set_test_claims("notes/big.md", &claims).expect("claims");
+
+    let stats = process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::Claim,
+        m.model_version(),
+        tmp.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("process");
+
+    assert_eq!(stats.scanned, 1);
+    assert_eq!(stats.embedded, 2, "500 one-word claims at budget 400 -> two groups");
+    assert_eq!(index.count_embeddings(Some(EmbeddingKind::Claim)).expect("count"), 2);
+}
+
+#[test]
+fn group_claims_splits_by_word_budget() {
+    // Empty input -> no groups.
+    assert!(group_claims("", 400).is_empty());
+    assert!(group_claims("   \n  \n", 400).is_empty());
+
+    // Two short claims fit in one group.
+    let one = group_claims("alpha beta\ngamma delta", 400);
+    assert_eq!(one, vec!["alpha beta\ngamma delta".to_string()]);
+
+    // Budget forces a split: each claim is two words; budget 3 -> claim1 alone
+    // (2 words), adding claim2 (4 > 3) starts a new group.
+    let split = group_claims("aa bb\ncc dd\nee ff", 3);
+    assert_eq!(
+        split,
+        vec!["aa bb".to_string(), "cc dd".to_string(), "ee ff".to_string()]
+    );
+
+    // A single claim that alone exceeds the budget becomes its own group (the
+    // model truncates that one claim, but no LATER claim is dropped).
+    let overlong = group_claims("one two three four five\nsix", 3);
+    assert_eq!(overlong, vec!["one two three four five".to_string(), "six".to_string()]);
+}

@@ -160,8 +160,16 @@ pub struct EmbedOpts {
     pub backfill: bool,
 
     /// Restrict the pass to a single embedding kind. Accepts
-    /// `summary` (Phase A default) or `transcript-chunk` (Phase B).
+    /// `summary` (Phase A), `transcript-chunk` (Phase B), or `claim`
+    /// (Phase 9). Omit to embed all three.
     pub kind: Option<String>,
+
+    /// Rollback verb (Phase 9): delete every embedding row of this kind
+    /// (`summary` | `transcript-chunk` | `claim`) and exit without
+    /// embedding. This is the real rollback for a kind - reverting cortex
+    /// code does not stop oracle reading the rows, since `search_vector`
+    /// scans all kinds.
+    pub drop_kind: Option<String>,
 
     /// Override the active model. Omit to use whatever
     /// `embedding_config.active_model` holds in the DB.
