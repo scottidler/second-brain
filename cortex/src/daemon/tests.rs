@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::{Config, DaemonConfig, EnvBootstrapConfig};
+use crate::testutil::ENV_LOCK;
 use chrono::Datelike;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -313,6 +314,14 @@ fn sweep_config_without_digest(assets_dir: &Path) -> crate::config::SweepConfig 
 /// across two runs), and the second intel run is a byte-for-byte no-op.
 #[test]
 fn intel_sweep_two_writer_fight_no_longer_reproduces() {
+    // `intel::run` and `sweep::migrate` both call
+    // `crate::startup::validate_canonical_assets()`, which resolves the REAL
+    // `XDG_CONFIG_HOME`-relative canonical-tags/tag-mapping files (not this
+    // test's own `sweep_config_without_digest` assets) - acquire the
+    // suite-wide lock so this can't race `startup/tests.rs`'s env mutation
+    // under parallel `cargo test` (2026-07-05 cortex-daemon-oscillation-loop
+    // design doc, Phase 1/7).
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");
     let vault_root = vault_dir.path();
     let assets_dir = tempfile::tempdir().expect("assets tmpdir");
@@ -402,6 +411,10 @@ fn intel_sweep_two_writer_fight_no_longer_reproduces() {
 /// Phase 2. Phase 7 still owns the full-action-set empty-fingerprint invariant.
 #[test]
 fn periodic_sweep_fingerprint_converges_after_phase2() {
+    // See the lock comment on `intel_sweep_two_writer_fight_no_longer_reproduces` -
+    // this fixture's "intel" and "sweep" arms both hit
+    // `validate_canonical_assets()` against the REAL env.
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");
     let vault_root = vault_dir.path();
     let assets_dir = tempfile::tempdir().expect("assets tmpdir");
@@ -432,6 +445,238 @@ fn periodic_sweep_fingerprint_converges_after_phase2() {
         fp2.is_empty(),
         "expected the intel<->sweep steady state to converge to an EMPTY fingerprint after Phase 2 \
          (fp1={fp1:?} fp2={fp2:?})"
+    );
+}
+
+/// Phase 7 (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`), the
+/// structural guard the whole doc exists to enforce: two consecutive
+/// periodic sweeps with the FULL default action set enabled - classify,
+/// link, duplicates, intel, auto-tag, sweep, broken-links, lint, state,
+/// quality - must produce an EMPTY `SweepFingerprint` on the second sweep.
+///
+/// `periodic_sweep_fingerprint_converges_after_phase2` (above) only proves
+/// this for the narrow intel+sweep fixture; that test's own doc comment
+/// explains why the FULL action-set invariant needed Phase 4 (link
+/// detection/mutation reconciliation) before it could converge too, and
+/// defers ownership of that broader claim to Phase 7. This is that test.
+///
+/// The fixture deliberately exercises a REAL fixable violation per action
+/// where the action can produce one (classify promotes an inbox note; lint's
+/// naming/frontmatter/tags rules rename/fill-title/alias-rewrite; link
+/// inserts a glossary-concept wikilink; duplicates/quality/auto-tag stamp
+/// idempotent `cortex-*` frontmatter fields; sweep strips one deliberately
+/// non-canonical, non-aliased tag). `broken-links` and `state` never
+/// contribute to the fingerprint by design (the first is read-only, the
+/// second never touches vault notes) and are included only because the
+/// design doc names them among the default action set - see `cortex/AGENTS.md`
+/// and the design doc's Background section for the full list.
+///
+/// BITES (documented per the task's explicit ask, since `cargo test` has no
+/// mechanism to assert "this test used to fail"): reverting Phases 1-4 makes
+/// this test fail. Concretely, on pre-Phase-1 `main`, verified directly
+/// against commit `803255e` (the Phase 0 repro commit, immediately before
+/// Phase 1's fix): this exact fixture and assertion, run against that
+/// commit's `configured_actions`, panics with a non-empty `fp2` - the
+/// `lint` arm still fingerprints permanently-unfixable violation paths (a
+/// literal `"(vault-wide)"` phantom entry plus `k8s-notes.md`,
+/// `no-title-note.md`, `notes/thing.md`) and the `sweep` arm re-migrates the
+/// daily digest note every cycle (`notes/ai/daily/<date>.md`, predating
+/// Phase 2's tagless-digest fix). Two defects drive this:
+///
+/// 1. The `lint` arm fingerprinted `report.violations` paths (every
+///    `tags.non-canonical`/`frontmatter.date-format`/etc. violation,
+///    including permanently-unfixable ones), so `lint` alone kept both
+///    fingerprints non-empty forever -
+///    `configured_actions_lint_fingerprint_excludes_unfixable_violations`
+///    (Phase 1) pins exactly this defect on a single-rule fixture.
+/// 2. The `link` arm fingerprinted `lint_linking`'s pre-apply suggestion
+///    paths rather than `apply_linking`'s real applied paths - before
+///    Phase 4's matcher reconciliation, `find_mention` (detection) and
+///    `insert_first_wikilink` (mutation) could disagree, so a reported
+///    suggestion was not guaranteed appliable.
+///
+/// Both defects are independently pinned by their own Phase 1/4 regression
+/// tests (`configured_actions_lint_fingerprint_excludes_unfixable_violations`,
+/// `linking::tests::two_consecutive_link_passes_converge_to_zero_writes`,
+/// `linking::tests::every_lint_linking_suggestion_is_appliable`); this
+/// test's job is to prove the FULL action set converges together, not to
+/// re-litigate each fix in isolation.
+#[test]
+fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
+    // The "sweep" arm calls `validate_canonical_assets()` against the REAL
+    // env - see the lock comment on
+    // `intel_sweep_two_writer_fight_no_longer_reproduces`.
+    let _lock = ENV_LOCK.lock().expect("env lock");
+
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let vault_root = vault_dir.path();
+    let assets_dir = tempfile::tempdir().expect("assets tmpdir");
+
+    // Sweep's canonical vocabulary covers every tag this fixture legitimately
+    // uses (rust, programming, kubernetes) - unlike `sweep_config_without_digest`
+    // elsewhere in this file (an EMPTY canonical set, chosen there specifically
+    // to make the digest tagless), a real, populated vocabulary here means
+    // `sweep::migrate` only strips the ONE deliberately-foreign,
+    // non-aliased tag below, not every tag in the vault - so sweep's
+    // contribution to cycle 1 is a real, targeted, observable write.
+    std::fs::write(
+        assets_dir.path().join("canonical-tags.yml"),
+        "max-per-note: 7\ntags:\n  tech:\n    - rust\n    - programming\n    - kubernetes\n",
+    )
+    .expect("write canonical-tags.yml");
+    std::fs::write(assets_dir.path().join("tag-mapping.yml"), "{}\n").expect("write tag-mapping.yml");
+    std::fs::write(assets_dir.path().join("tag-proposals.yml"), "proposals: []\n").expect("write tag-proposals.yml");
+
+    let config = Config {
+        sweep: crate::config::SweepConfig {
+            canonical_path: assets_dir.path().join("canonical-tags.yml"),
+            mapping_path: assets_dir.path().join("tag-mapping.yml"),
+            proposals_path: assets_dir.path().join("tag-proposals.yml"),
+            ..crate::config::SweepConfig::default()
+        },
+        actions: crate::config::ActionsConfig {
+            tags: crate::config::TagsConfig {
+                aliases: [("k8s".to_string(), "kubernetes".to_string())].into_iter().collect(),
+                ..crate::config::TagsConfig::default()
+            },
+            linking: crate::config::LinkingConfig {
+                scan_for: vec!["concepts".to_string()],
+                entities: crate::config::LinkingEntities {
+                    concepts: vec!["langchain".to_string()],
+                    ..crate::config::LinkingEntities::default()
+                },
+                min_word_length: 3,
+                ..crate::config::LinkingConfig::default()
+            },
+            auto_tag: crate::config::AutoTagConfig {
+                enabled: true,
+                canonical_tags: vec!["kubernetes".to_string()],
+                ..crate::config::AutoTagConfig::default()
+            },
+            ..crate::config::ActionsConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let mut daemon_config = DaemonConfig::default();
+    daemon_config.actions.clear();
+    for name in [
+        "classify",
+        "lint",
+        "link",
+        "duplicates",
+        "intel",
+        "auto-tag",
+        "sweep",
+        "broken-links",
+        "state",
+        "quality",
+    ] {
+        daemon_config
+            .actions
+            .insert(name.to_string(), crate::config::DaemonAction { enable: true });
+    }
+
+    // -- classify: an inbox note that gets promoted to notes/ (real move). --
+    let inbox_dir = vault_root.join("inbox");
+    std::fs::create_dir_all(&inbox_dir).expect("mkdir inbox");
+    std::fs::write(
+        inbox_dir.join("thing.md"),
+        "---\ntags:\n  - rust\n---\nSome inbox content about rust tooling.\n",
+    )
+    .expect("write inbox note");
+
+    // -- link: a glossary-concept hub note (self-link-excluded by its own
+    // stem) plus a note whose prose mentions the concept and gets a wikilink
+    // inserted at first mention. --
+    std::fs::write(
+        vault_root.join("langchain.md"),
+        "---\ntitle: LangChain\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - programming\n---\nThe LangChain hub note.\n",
+    )
+    .expect("write langchain hub note");
+    std::fs::write(
+        vault_root.join("mentions-langchain.md"),
+        "---\ntitle: Mentions LangChain\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - programming\n---\nWe use LangChain daily in production for retrieval workflows.\n",
+    )
+    .expect("write mentions-langchain note");
+
+    // -- duplicates: an exact-body-hash pair (non-authored, so eligible). --
+    // Body carries an outbound wikilink from the START (not inserted mid-cycle
+    // by the "link" action) so `quality`'s "no-outbound-links" issue is
+    // never VOLATILE across actions within one cycle - `quality`'s own arm
+    // runs once per cycle and stamps whatever `lint_quality` reports AT THAT
+    // MOMENT; if a later action in the same cycle (or an unrelated
+    // glossary-concept match against the real, machine-local
+    // `~/.config/sb/glossary.yml` `link_with_notes` also consults) added a
+    // wikilink to this body AFTER quality's write, cycle 2 would recompute a
+    // different issue list and rewrite - a real flake this fixture hit
+    // during authoring. Pre-baking the link keeps every quality-eligible
+    // note's issue set constant regardless of daemon action ordering.
+    let dup_body = "This exact body text appears twice on purpose for duplicate detection testing, see [[langchain]] for reference.\n";
+    std::fs::write(
+        vault_root.join("dup-a.md"),
+        format!("---\ntitle: Duplicate A\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - programming\n---\n{dup_body}"),
+    )
+    .expect("write dup-a note");
+    std::fs::write(
+        vault_root.join("dup-b.md"),
+        format!("---\ntitle: Duplicate B\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - programming\n---\n{dup_body}"),
+    )
+    .expect("write dup-b note");
+
+    // -- auto-tag: few tags, assisted origin, body mentions the one
+    // configured canonical tag ("kubernetes") verbatim. --
+    std::fs::write(
+        vault_root.join("k8s-notes.md"),
+        "---\ntitle: K8s Notes\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - programming\n---\nNotes about kubernetes clusters and pods for the on-call rotation, see [[langchain]] too.\n",
+    )
+    .expect("write k8s-notes");
+
+    // -- lint tags.alias + sweep: tagged with the alias "k8s" (not the
+    // canonical form) AND not present in sweep's own canonical vocabulary
+    // above under that exact spelling - whichever of lint's alias-rewrite or
+    // sweep's canonical-migration runs first in this cycle resolves it (lint
+    // rewrites to "kubernetes" and sweep then keeps it, since "kubernetes" IS
+    // canonical; or sweep strips the unmapped "k8s" first and lint then has
+    // nothing left to alias-fix) - both orders converge by cycle 2. --
+    std::fs::write(
+        vault_root.join("alias-note.md"),
+        "---\ntitle: Alias Note\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - k8s\n---\nNotes about container orchestration and clusters at scale, see [[langchain]] too.\n",
+    )
+    .expect("write alias-note");
+
+    // -- naming: a badly-named file lint renames to lowercase-hyphenated. --
+    std::fs::write(
+        vault_root.join("My Badly Named Note.md"),
+        "---\ntitle: My Badly Named Note\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - programming\n---\nThis filename violates the naming convention on purpose.\n",
+    )
+    .expect("write badly-named note");
+
+    // -- frontmatter: missing title (auto_title fills it in); broken-links:
+    // a dangling wikilink (read-only, never fingerprinted, included only
+    // because the design doc names broken-links among the default set). --
+    std::fs::write(
+        vault_root.join("no-title-note.md"),
+        "---\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - programming\n---\nSee [[nonexistent-target]] for background reading on this topic.\n",
+    )
+    .expect("write no-title-note");
+
+    // First periodic sweep: baseline. Every writable violation above gets
+    // fixed exactly once; whichever cycle-1 ordering the daemon's
+    // HashMap-iteration picks, every write this cycle makes is idempotent on
+    // its own inputs, so it cannot recur.
+    let fp1 = configured_actions(vault_root, &config, &daemon_config, &[]);
+
+    // Second periodic sweep over the SAME, now-fixed-up vault: every action
+    // that wrote in cycle 1 finds its own fix already in place and writes
+    // nothing more. This is the structural invariant the whole design doc
+    // exists to enforce.
+    let fp2 = configured_actions(vault_root, &config, &daemon_config, &[]);
+
+    assert!(
+        fp2.is_empty(),
+        "expected the full default action set to converge to an EMPTY fingerprint on the \
+         second periodic sweep (fp1={fp1:?} fp2={fp2:?})"
     );
 }
 
@@ -480,7 +725,15 @@ async fn scheduled_intel_write_under_applying_guard_does_not_clear_latch() {
     // while the flag is still set - mirroring `block_in_place` holding the flag
     // for the entire duration of `intel::run`.
     applying.store(true, Ordering::Relaxed);
-    crate::intel::run(vault_root, &config, &intel_opts).expect("scheduled intel run");
+    {
+        // `intel::run` calls `validate_canonical_assets()` against the REAL
+        // env - see the lock comment on
+        // `intel_sweep_two_writer_fight_no_longer_reproduces`. Scoped to drop
+        // BEFORE the `.await` below - a `std::sync::Mutex` guard must never
+        // span an `.await` point.
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        crate::intel::run(vault_root, &config, &intel_opts).expect("scheduled intel run");
+    }
     tokio::time::sleep(Duration::from_millis(300)).await;
     applying.store(false, Ordering::Relaxed);
 
@@ -512,6 +765,11 @@ async fn scheduled_intel_write_under_applying_guard_does_not_clear_latch() {
 /// ran; the shared cache collapses that to exactly one call.
 #[test]
 fn configured_actions_no_mutation_scans_vault_exactly_once() {
+    // The "sweep" arm always calls `sweep::scan_proposals` (regardless of its
+    // `enable` flag), which calls `validate_canonical_assets()` against the
+    // REAL env - see the lock comment on
+    // `intel_sweep_two_writer_fight_no_longer_reproduces`.
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");
     let vault_root = vault_dir.path();
 

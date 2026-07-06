@@ -1,5 +1,5 @@
 use super::*;
-use crate::testutil::NoteBuilder;
+use crate::testutil::{ENV_LOCK, NoteBuilder};
 
 fn make_config(dir: &Path) -> SweepConfig {
     let canonical_path = dir.join("canonical-tags.yml");
@@ -362,6 +362,12 @@ fn render_cold_report_handles_missing_title() {
 
 #[test]
 fn test_scan_proposals_finds_non_canonical() {
+    // `scan_proposals` calls `crate::startup::validate_canonical_assets()`,
+    // which resolves the REAL `XDG_CONFIG_HOME`-relative canonical-tags/
+    // tag-mapping files (not this test's own `make_config` paths) - acquire
+    // the suite-wide lock so this can't race `startup/tests.rs`'s env
+    // mutation under parallel `cargo test`.
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let dir = tempfile::tempdir().expect("tmpdir");
     let config = make_config(dir.path());
 
@@ -380,6 +386,8 @@ fn test_scan_proposals_finds_non_canonical() {
 
 #[test]
 fn test_scan_proposals_mapped_tags_not_proposed() {
+    // See the lock comment on `test_scan_proposals_finds_non_canonical`.
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let dir = tempfile::tempdir().expect("tmpdir");
     let config = make_config(dir.path());
 
@@ -403,6 +411,10 @@ fn test_scan_proposals_mapped_tags_not_proposed() {
 /// that content, so no write ever lands.
 #[test]
 fn migrate_excludes_paths_rewrite_note_tags_could_not_write() {
+    // `migrate` calls `crate::startup::validate_canonical_assets()`, which
+    // resolves the REAL `XDG_CONFIG_HOME`-relative assets - see the lock
+    // comment on `test_scan_proposals_finds_non_canonical`.
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let dir = tempfile::tempdir().expect("assets tmpdir");
     let config = make_config(dir.path());
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");
@@ -431,6 +443,8 @@ fn migrate_excludes_paths_rewrite_note_tags_could_not_write() {
 /// really lands and `migrate` reports it.
 #[test]
 fn migrate_includes_paths_actually_rewritten() {
+    // See the lock comment on `migrate_excludes_paths_rewrite_note_tags_could_not_write`.
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let dir = tempfile::tempdir().expect("assets tmpdir");
     let config = make_config(dir.path());
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");

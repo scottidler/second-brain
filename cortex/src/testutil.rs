@@ -10,6 +10,26 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Suite-wide lock for every test (in ANY module of this crate's test
+/// binary) that either mutates the process-global `XDG_CONFIG_HOME` env var,
+/// or calls a code path that resolves the REAL `XDG_CONFIG_HOME`-relative
+/// canonical-tag/tag-mapping assets - `crate::startup::validate_canonical_assets`
+/// and everything that calls it (`intel::run`, `sweep::run`/`migrate`/
+/// `scan_proposals`, `classify::run`, and `daemon::configured_actions` when
+/// `intel`/`sweep` are among the enabled actions).
+///
+/// `cargo test` runs a crate's unit tests on multiple threads by default.
+/// `startup/tests.rs` previously guarded its own env mutation with a
+/// *private* `static ENV_LOCK` that nothing outside that file could acquire,
+/// so any other test resolving the same env var mid-mutation raced it: a
+/// transient `validate_canonical_assets` failure with no relation to the
+/// code under test (2026-07-05 cortex-daemon-oscillation-loop design doc,
+/// Phase 1/7). Every affected test - in `startup/tests.rs`, `sweep/tests.rs`,
+/// and `daemon/tests.rs` - now acquires THIS shared lock instead of a
+/// per-file private one, closing the race suite-wide.
+pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 use crate::config::{
     ActionsConfig, AutoTagConfig, BackfillConfig, BrokenLinksConfig, Config, DaemonConfig, DuplicatesConfig,

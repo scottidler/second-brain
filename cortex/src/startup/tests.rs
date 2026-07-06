@@ -1,7 +1,12 @@
 use super::*;
-use std::sync::Mutex;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+// Suite-wide lock (not a private-to-this-file one): every test anywhere in
+// this crate's test binary that mutates `XDG_CONFIG_HOME`, or resolves it
+// indirectly via `validate_canonical_assets`, acquires the SAME
+// `crate::testutil::ENV_LOCK` before touching the env var. See that static's
+// doc comment for the race this closes (2026-07-05
+// cortex-daemon-oscillation-loop design doc, Phase 7).
+use crate::testutil::ENV_LOCK;
 
 struct EnvGuard {
     key: &'static str,
