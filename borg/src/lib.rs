@@ -39,6 +39,7 @@ pub mod ocr;
 pub mod opts;
 pub mod pipeline;
 pub mod quality;
+pub mod readability;
 pub mod receipts;
 pub mod replay;
 pub mod retention;
