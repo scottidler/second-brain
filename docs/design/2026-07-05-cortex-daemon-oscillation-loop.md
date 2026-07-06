@@ -152,6 +152,13 @@ Deterministic/cheap first; LLM/inference-bearing last. Each phase is independent
 - Verify the Phase 0 empty-fingerprint test now passes (after Phases 1-4), and that the scheduled-intel/watcher self-trigger test (Phase 2c) passes.
 - **Success criteria:** two consecutive periodic sweeps on a fixture vault produce an empty fingerprint; the test bit on pre-Phase-1 code and passes now.
 
+#### Phase 8: Fix-forward — classify writes (implementation-audit finding)
+**Model:** opus
+- The implementation audit (Mode 2) found the classify arm reopened the core defect: `mark_needs_review` (`classify.rs`) rewrites no-signal inbox notes every cycle (unguarded, unfingerprinted, never marked done), and catch-up writes unconditionally without fingerprinting or setting `dirty`. Both bypassed the Phase 1 fingerprint and the Phase 5 rescan boundary, and the Phase 7 guard couldn't catch them because it asserted only `fp2.is_empty()`, never observing the filesystem.
+- Make `mark_needs_review` idempotent (skip if already `cortex-needs-review: true`; byte-guard the write) and guard the catch-up write on byte-change; have `classify::run_with_notes` return actual written paths; fingerprint those + set `dirty` in the daemon arm.
+- Strengthen the full-action-set regression test to snapshot the filesystem around cycle 2 and assert ZERO writes (fixture includes a no-signal inbox note and a domainless `notes/` note).
+- **Success criteria:** (a) two steady-state sweeps over a vault containing a no-signal inbox note write ZERO files in cycle 2 (assert on file bytes/mtimes, not just fingerprint); (b) the zero-writes assertion bit on pre-Phase-8 classify code; (c) the classify fingerprint reflects only actually-written paths.
+
 ## Acceptance Criteria
 
 - [ ] Two consecutive steady-state periodic sweeps over an unchanged vault: the second produces an empty `SweepFingerprint` and writes zero note files.
@@ -171,6 +178,16 @@ Deterministic/cheap first; LLM/inference-bearing last. Each phase is independent
 - **2026-07-05 — harden the watcher narrowly (OQ2 closed).** Wrap the scheduled daily/weekly intel arms in the existing `applying` guard + a notify-after-flip test; do NOT redesign the latch. The Phase 7 periodic-sweep test alone does not cover the scheduled-intel self-trigger. (Codex remedy; Gemini's "don't over-engineer the latch" caution honored.) *Scott may override.*
 - **2026-07-05 — Phase 3 sentinel only; embedding-kind redesign deferred (OQ3 closed).** The sentinel stops the churn. Whether article body should embed via a dedicated `BodyChunk` is a retrieval-semantics follow-up, not this bug. (Both reviewers.)
 - **2026-07-05 — systemd unit drift discovered.** The live cortex (and borg) units are hand-customized beyond the install template; a naive re-install clobbers secrets + rayon cap. Phase 6 completes the template so re-install is safe. (Both reviewers, verified against the live units.)
+
+## Post-Implementation Audit (2026-07-05)
+
+Cross-model review panel, Mode 2, against commits `803255e..6f8847b`. Reviewers diverged; the reconciliation was verified against code by the author.
+
+- **Finding #1 — MUST-FIX, CONFIRMED, undisclosed (Codex; Gemini missed it).** The classify arm reopened the core defect: `mark_needs_review` rewrote no-signal inbox notes every cycle, and catch-up wrote unconditionally; both bypassed the fingerprint and the rescan boundary. Disposition: fixed in **Phase 8**. Author independently verified against `classify.rs`/`daemon.rs`/`scope.rs`.
+- **Finding #2 — MUST-FIX (test), CONFIRMED.** The full-action-set regression asserted only `fp2.is_empty()`, never observing writes, so a fingerprint-bypass write passed. Disposition: strengthened in **Phase 8** (snapshot filesystem, assert zero writes, no-signal fixture).
+- **Finding #3 — DEFER, operator action, disclosed.** Phase 6's live acceptance (criterion #6) is unmet until the rollout re-install; the code is complete and the rollout hazard (populate `cortex.yml` first) is documented. Rides as the approval-gated finalization step.
+- **Finding #4 — DEFER, disclosed.** Mid-cycle rescan I/O failure continues with the stale note list (unhappy path); initial-scan failure safely aborts the cycle. Acceptable, documented.
+- **Convergent clean (both reviewers, spot-verified):** Phase 2 intel idempotency + both scheduled arms wrapped; Phase 3 side-table sentinel + `search_vector` unaffected; Phase 4 single `is_clean_mention` matcher via real `split_raw`, char-boundary-safe; Phase 1 fingerprint-of-written-paths; no new `.unwrap()`/`DefaultHasher`/`#[allow(dead_code)]`; cortex still the only embedding-table writer.
 
 ## Alternatives Considered
 
