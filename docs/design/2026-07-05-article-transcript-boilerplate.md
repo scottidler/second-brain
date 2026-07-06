@@ -2,8 +2,8 @@
 
 **Author:** Scott Idler
 **Date:** 2026-07-05
-**Status:** In Review
-**Review Passes Completed:** 2/5 (draft + correctness; clarity/edge-cases/review-panel pending)
+**Status:** Implemented
+**Review Passes Completed:** draft + correctness + review-panel implementation audit (findings #1 source-gate, #2 GPL->htmd, #3 test — all folded in)
 
 > **Supersedes the defuddle approach.** An earlier draft of this design shelled the
 > external `defuddle` Node CLI (installed under mise) as the preferred extractor.
