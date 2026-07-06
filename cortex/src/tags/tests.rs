@@ -68,8 +68,8 @@ fn test_apply_tags_resolves_aliases() {
     let notes = v.scan();
     let config = v.config().actions.tags;
 
-    let count = apply_tags(v.root(), &notes, &config).expect("apply");
-    assert!(count > 0);
+    let written = apply_tags(v.root(), &notes, &config).expect("apply");
+    assert!(!written.is_empty());
 
     // ai-research.md should now have ai-llm and kubernetes instead of ai and k8s
     let content = v.read("ai-research.md");

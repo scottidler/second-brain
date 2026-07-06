@@ -252,9 +252,21 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
 }
 
 /// Apply link suggestions: insert [[wikilinks]] at first mention.
-pub fn apply_linking(vault_root: &Path, notes: &[Note], config: &LinkingConfig) -> eyre::Result<usize> {
+///
+/// Returns the real, byte-changed paths this call actually wrote. This is
+/// the ONLY source the daemon's oscillation fingerprint may draw from for
+/// the `link` action: `lint_linking`'s suggestion paths are NOT all
+/// appliable - `find_mention` (detection) and `insert_first_wikilink`
+/// (mutation) can disagree on a differently-sliced body, so a reported
+/// suggestion can leave `new_content == content` and never write.
+pub fn apply_linking(vault_root: &Path, notes: &[Note], config: &LinkingConfig) -> eyre::Result<Vec<String>> {
+    log::debug!(
+        "linking::apply_linking: vault_root={} notes={}",
+        vault_root.display(),
+        notes.len()
+    );
     let report = lint_linking(notes, config);
-    let mut fixed_count = 0;
+    let mut written = Vec::new();
 
     // Group fixes by file, carrying (target, surface) so the apply step can
     // emit a piped link that preserves the prose wording.
@@ -284,11 +296,12 @@ pub fn apply_linking(vault_root: &Path, notes: &[Note], config: &LinkingConfig) 
         if new_content != content {
             vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             log::info!("inserted wikilinks: {}", path.display());
-            fixed_count += 1;
+            written.push(path.to_string_lossy().to_string());
         }
     }
 
-    Ok(fixed_count)
+    log::debug!("linking::apply_linking: written={}", written.len());
+    Ok(written)
 }
 
 /// Extract all existing wikilink targets from body (lowercased).

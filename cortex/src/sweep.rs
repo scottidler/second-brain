@@ -129,8 +129,14 @@ pub struct ProposalsFile {
 
 /// Run tag sweep migration on all notes in the vault.
 ///
-/// Rewrites each note's tags using the canonical mapping.
-/// Returns the number of notes modified.
+/// Rewrites each note's tags using the canonical mapping. In `dry_run`,
+/// returns the notes that WOULD be rewritten (a prediction - nothing is
+/// written). Otherwise returns only the notes `rewrite_note_tags` actually
+/// wrote: `new_tags != tags` alone is not sufficient - `replace_tags_in_frontmatter`
+/// can return `None` (e.g. malformed/missing frontmatter) and leave the file
+/// untouched, so counting on the tag-diff alone would fingerprint a path
+/// whose bytes never changed, tripping the daemon's oscillation detector on
+/// phantom churn.
 pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run: bool) -> Result<Vec<String>> {
     crate::startup::validate_canonical_assets()?;
     let canonical_file = CanonicalTagsFile::load(&config.canonical_path).wrap_err("failed to load canonical tags")?;
@@ -138,8 +144,9 @@ pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run:
     let canonical_set = canonical_file.all_tags();
     let max_per_note = canonical_file.max_per_note;
 
-    // Real changed-path list (would-rewrite in dry-run, rewritten otherwise) so
-    // the daemon's oscillation fingerprint compares consecutive sweeps by file.
+    // Real changed-path list (would-rewrite in dry-run, actually-rewritten
+    // otherwise) so the daemon's oscillation fingerprint compares consecutive
+    // sweeps by file.
     let mut modified = Vec::new();
 
     for note in notes {
@@ -161,17 +168,24 @@ pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run:
                     new_tags.len(),
                     dropped
                 );
+                modified.push(note.path.to_string_lossy().to_string());
             } else {
                 let full_path = vault_root.join(&note.path);
-                rewrite_note_tags(&full_path, &new_tags)?;
-                log::info!(
-                    "rewrote {}: {} -> {} tags",
-                    note.path.display(),
-                    tags.len(),
-                    new_tags.len()
-                );
+                if rewrite_note_tags(&full_path, &new_tags)? {
+                    log::info!(
+                        "rewrote {}: {} -> {} tags",
+                        note.path.display(),
+                        tags.len(),
+                        new_tags.len()
+                    );
+                    modified.push(note.path.to_string_lossy().to_string());
+                } else {
+                    log::warn!(
+                        "skipping tag rewrite for {}: frontmatter block not found or unparseable",
+                        note.path.display()
+                    );
+                }
             }
-            modified.push(note.path.to_string_lossy().to_string());
         }
     }
 
@@ -247,12 +261,19 @@ fn load_proposals(path: &Path) -> Result<ProposalsFile> {
     Ok(file)
 }
 
-fn rewrite_note_tags(path: &Path, new_tags: &[String]) -> Result<()> {
+/// Rewrite `path`'s frontmatter `tags:` entry to `new_tags`. Returns `true`
+/// only when a write actually landed - `false` when `replace_tags_in_frontmatter`
+/// found no rewriteable frontmatter block (the caller must not count this as
+/// a modified file).
+fn rewrite_note_tags(path: &Path, new_tags: &[String]) -> Result<bool> {
     let content = std::fs::read_to_string(path).wrap_err("failed to read note")?;
-    if let Some(new_content) = replace_tags_in_frontmatter(&content, new_tags) {
-        vault::note::write_atomic(path, new_content.as_bytes()).wrap_err("failed to write note")?;
+    match replace_tags_in_frontmatter(&content, new_tags) {
+        Some(new_content) => {
+            vault::note::write_atomic(path, new_content.as_bytes()).wrap_err("failed to write note")?;
+            Ok(true)
+        }
+        None => Ok(false),
     }
-    Ok(())
 }
 
 /// Entry point invoked by the cortex daemon's `cold_interval` tick.

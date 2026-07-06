@@ -248,13 +248,24 @@ fn title_from_filename(path: &Path) -> String {
 }
 
 /// Apply frontmatter fixes to notes.
+///
+/// Returns the real, byte-changed paths this call actually wrote - the
+/// daemon's oscillation fingerprint draws only from this, never from the
+/// lint report's violation paths (most frontmatter violations, e.g.
+/// `date-format`/`enum.*`/`deprecated.*`, carry `fix: None` and are never
+/// written here).
 pub fn apply_frontmatter(
     vault_root: &Path,
     notes: &[Note],
     config: &FrontmatterConfig,
     schema: &SchemaConfig,
-) -> eyre::Result<usize> {
-    let mut fixed_count = 0;
+) -> eyre::Result<Vec<String>> {
+    log::debug!(
+        "frontmatter::apply_frontmatter: vault_root={} notes={}",
+        vault_root.display(),
+        notes.len()
+    );
+    let mut written = Vec::new();
 
     for note in notes {
         let mut report = Report::default();
@@ -284,7 +295,7 @@ pub fn apply_frontmatter(
                 continue;
             }
             log::info!("inserted frontmatter block: {} (slug={})", note.path.display(), slug);
-            fixed_count += 1;
+            written.push(note.path.to_string_lossy().to_string());
         } else {
             // Apply individual field fixes via targeted string replacement
             let abs_path = vault_root.join(&note.path);
@@ -317,12 +328,13 @@ pub fn apply_frontmatter(
                     continue;
                 }
                 log::info!("applied frontmatter fixes: {}", note.path.display());
-                fixed_count += 1;
+                written.push(note.path.to_string_lossy().to_string());
             }
         }
     }
 
-    Ok(fixed_count)
+    log::debug!("frontmatter::apply_frontmatter: written={}", written.len());
+    Ok(written)
 }
 
 #[cfg(test)]

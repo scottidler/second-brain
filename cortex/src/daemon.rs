@@ -492,20 +492,27 @@ fn configured_actions(
                     path: None,
                 };
                 match crate::lint(vault_root, config, &opts) {
-                    Ok(report) => {
+                    Ok((report, lint_apply)) => {
                         if auto {
-                            // Record the touched files (real list, not a placeholder),
-                            // so the daemon's oscillation fingerprint can compare
-                            // consecutive sweeps by file.
-                            if !report.is_empty() {
-                                let paths: Vec<String> = report
-                                    .violations
-                                    .iter()
-                                    .map(|v| v.path.to_string_lossy().to_string())
-                                    .collect();
-                                let remaining = report.violations.len();
-                                log::info!("lint: applied fixes ({remaining} unfixable violation(s) remain)");
-                                fingerprint.add("lint", paths);
+                            // Fingerprint ONLY the paths the four appliers actually
+                            // wrote (`LintApplyReport.written_paths`) - NEVER
+                            // `report.violations` paths. Most violations
+                            // (`tags.non-canonical`, `frontmatter.date-format`,
+                            // etc.) carry `fix: None` and are never written; a
+                            // detections-based fingerprint is byte-identical every
+                            // cycle and permanently latches oscillation detection.
+                            if !lint_apply.written_paths.is_empty() {
+                                log::info!(
+                                    "lint: applied fixes to {} file(s) ({} unfixable violation(s) remain)",
+                                    lint_apply.written_paths.len(),
+                                    lint_apply.remaining_violations
+                                );
+                                fingerprint.add("lint", lint_apply.written_paths);
+                            } else if lint_apply.remaining_violations > 0 {
+                                log::info!(
+                                    "[daemon] lint: {} violation(s), none writable this cycle",
+                                    lint_apply.remaining_violations
+                                );
                             }
                         } else if !report.is_empty() {
                             log::info!("[daemon] lint: {} violation(s)", report.violations.len());
@@ -530,30 +537,38 @@ fn configured_actions(
             "link" => {
                 let auto = daemon_config.is_enabled("link");
                 if auto {
-                    // Lint first to check if there's work, then apply only if needed.
-                    // Previously fingerprinted unconditionally, permanently triggering cycle detection.
+                    // Lint first to check if there's work, then apply only if needed -
+                    // a cheap gate to skip the apply pass entirely when there is
+                    // nothing to check. The gate's suggestion paths are NEVER the
+                    // fingerprint: `find_mention` (detection) and
+                    // `insert_first_wikilink` (mutation) can disagree, so a
+                    // suggestion can be unappliable and never actually write.
                     let lint_opts = crate::opts::LinkOpts {
                         apply: false,
                         scan: crate::opts::ScanScope::All,
                     };
                     match crate::link(vault_root, config, &lint_opts) {
                         Ok(report) if !report.is_empty() => {
-                            // The lint report's violation paths are the files the
-                            // apply will touch - record them as the real fingerprint.
-                            let paths: Vec<String> = report
-                                .violations
-                                .iter()
-                                .map(|v| v.path.to_string_lossy().to_string())
-                                .collect();
                             let apply_opts = crate::opts::LinkOpts {
                                 apply: true,
                                 scan: crate::opts::ScanScope::All,
                             };
                             match crate::link(vault_root, config, &apply_opts) {
-                                Ok(_) => {
-                                    log::info!("link: applied wikilink fixes");
-                                    log::info!("[daemon] link: applied wikilink fixes");
-                                    fingerprint.add("link", paths);
+                                Ok(applied_report) => {
+                                    // `applied_report.applied_paths` is `apply_linking`'s
+                                    // real written-path return - the ONLY thing that may
+                                    // feed the fingerprint here.
+                                    if !applied_report.applied_paths.is_empty() {
+                                        log::info!(
+                                            "link: applied wikilink fixes to {} file(s)",
+                                            applied_report.applied_paths.len()
+                                        );
+                                        log::info!(
+                                            "[daemon] link: applied wikilink fixes to {} file(s)",
+                                            applied_report.applied_paths.len()
+                                        );
+                                        fingerprint.add("link", applied_report.applied_paths);
+                                    }
                                 }
                                 Err(e) => log::error!("link apply failed: {e}"),
                             }

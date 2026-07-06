@@ -52,8 +52,17 @@ pub fn lint_scope(notes: &[Note], config: &ScopeConfig) -> Report {
 }
 
 /// Apply scope fixes: set frontmatter fields.
-pub fn apply_scope(vault_root: &Path, notes: &[Note], config: &ScopeConfig) -> eyre::Result<usize> {
-    let mut fixed_count = 0;
+///
+/// Returns the real, byte-changed paths this call actually wrote - the
+/// daemon's oscillation fingerprint draws only from this, never from the
+/// lint report's violation paths.
+pub fn apply_scope(vault_root: &Path, notes: &[Note], config: &ScopeConfig) -> eyre::Result<Vec<String>> {
+    log::debug!(
+        "scope::apply_scope: vault_root={} notes={}",
+        vault_root.display(),
+        notes.len()
+    );
+    let mut written = Vec::new();
 
     for note in notes {
         let mut fields_to_set: Vec<(String, serde_yaml::Value)> = Vec::new();
@@ -90,11 +99,12 @@ pub fn apply_scope(vault_root: &Path, notes: &[Note], config: &ScopeConfig) -> e
                 continue;
             }
             log::info!("applied scope fields: {}", note.path.display());
-            fixed_count += 1;
+            written.push(note.path.to_string_lossy().to_string());
         }
     }
 
-    Ok(fixed_count)
+    log::debug!("scope::apply_scope: written={}", written.len());
+    Ok(written)
 }
 
 fn matches_rule(note: &Note, rule: &crate::config::ScopeRule) -> bool {

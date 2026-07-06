@@ -78,8 +78,18 @@ pub fn lint_tags(notes: &[Note], config: &TagsConfig) -> Report {
 }
 
 /// Apply tag fixes: rewrite tag lists in frontmatter.
-pub fn apply_tags(vault_root: &Path, notes: &[Note], config: &TagsConfig) -> eyre::Result<usize> {
-    let mut fixed_count = 0;
+///
+/// Returns the real, byte-changed paths this call actually wrote - the
+/// daemon's oscillation fingerprint draws only from this, never from the
+/// lint report's violation paths (`tags.non-canonical`/`tags.orphan` carry
+/// `fix: None` and are never written here).
+pub fn apply_tags(vault_root: &Path, notes: &[Note], config: &TagsConfig) -> eyre::Result<Vec<String>> {
+    log::debug!(
+        "tags::apply_tags: vault_root={} notes={}",
+        vault_root.display(),
+        notes.len()
+    );
+    let mut written = Vec::new();
 
     for note in notes {
         let tags = match &note.frontmatter.tags {
@@ -133,12 +143,13 @@ pub fn apply_tags(vault_root: &Path, notes: &[Note], config: &TagsConfig) -> eyr
                     continue;
                 }
                 log::info!("updated tags: {}", note.path.display());
-                fixed_count += 1;
+                written.push(note.path.to_string_lossy().to_string());
             }
         }
     }
 
-    Ok(fixed_count)
+    log::debug!("tags::apply_tags: written={}", written.len());
+    Ok(written)
 }
 
 /// Check if a tag is valid lowercase-hyphenated format (unicode-aware).

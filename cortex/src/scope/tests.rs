@@ -70,8 +70,8 @@ fn test_apply_scope_on_vault() {
     let notes = v.scan();
     let config = v.config().actions.scope;
 
-    let count = apply_scope(v.root(), &notes, &config).expect("apply");
-    assert!(count > 0);
+    let written = apply_scope(v.root(), &notes, &config).expect("apply");
+    assert!(!written.is_empty());
 
     // daily-standup.md should now have scope: work
     let content = v.read("daily-standup.md");

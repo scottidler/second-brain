@@ -392,3 +392,92 @@ fn test_scan_proposals_mapped_tags_not_proposed() {
     // ai-agents maps to "ai" in the mapping file, so it should NOT be proposed
     assert!(proposals.is_empty());
 }
+
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`, Phase 1: the
+/// sweep arm's fingerprint may only include paths `rewrite_note_tags`
+/// actually wrote, never every `new_tags != tags` diff (sweep.rs:174 in the
+/// pre-fix code). This note's IN-MEMORY frontmatter carries a non-canonical
+/// tag (so `new_tags != tags`), but its ON-DISK content has no frontmatter
+/// block at all - simulating a note whose frontmatter vanished between scan
+/// and this migrate call. `replace_tags_in_frontmatter` returns `None` for
+/// that content, so no write ever lands.
+#[test]
+fn migrate_excludes_paths_rewrite_note_tags_could_not_write() {
+    let dir = tempfile::tempdir().expect("assets tmpdir");
+    let config = make_config(dir.path());
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let vault_root = vault_dir.path();
+
+    let note_path = "no-frontmatter.md";
+    let original = "Just body text, no frontmatter.\n";
+    std::fs::write(vault_root.join(note_path), original).expect("write note");
+
+    let notes = vec![NoteBuilder::new(note_path).tags(&["unknown-tag"]).build()];
+
+    let modified = migrate(vault_root, &notes, &config, false).expect("migrate");
+    assert!(
+        modified.is_empty(),
+        "migrate must not report a path whose write never landed: {modified:?}"
+    );
+
+    let content = std::fs::read_to_string(vault_root.join(note_path)).expect("read note");
+    assert_eq!(
+        content, original,
+        "bytes must be unchanged when rewrite_note_tags could not write"
+    );
+}
+
+/// Companion happy-path: when the frontmatter block IS present, the write
+/// really lands and `migrate` reports it.
+#[test]
+fn migrate_includes_paths_actually_rewritten() {
+    let dir = tempfile::tempdir().expect("assets tmpdir");
+    let config = make_config(dir.path());
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let vault_root = vault_dir.path();
+
+    let note_path = "has-frontmatter.md";
+    std::fs::write(
+        vault_root.join(note_path),
+        "---\ntitle: T\ntags: [unknown-tag]\n---\nBody.\n",
+    )
+    .expect("write note");
+
+    let notes = vec![NoteBuilder::new(note_path).tags(&["unknown-tag"]).build()];
+
+    let modified = migrate(vault_root, &notes, &config, false).expect("migrate");
+    assert_eq!(modified, vec![note_path.to_string()]);
+
+    let content = std::fs::read_to_string(vault_root.join(note_path)).expect("read note");
+    assert!(
+        !content.contains("unknown-tag"),
+        "non-canonical tag should have been dropped: {content}"
+    );
+}
+
+#[test]
+fn rewrite_note_tags_returns_false_when_frontmatter_missing() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let path = dir.path().join("no-frontmatter.md");
+    let original = "Just body text, no frontmatter delimiters.\n";
+    std::fs::write(&path, original).expect("write note");
+
+    let wrote = rewrite_note_tags(&path, &["rust".to_string()]).expect("rewrite_note_tags should not error");
+    assert!(!wrote, "expected false when there is no frontmatter block to rewrite");
+
+    let content = std::fs::read_to_string(&path).expect("read note");
+    assert_eq!(content, original, "bytes must be unchanged when nothing was written");
+}
+
+#[test]
+fn rewrite_note_tags_returns_true_and_writes_when_frontmatter_present() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let path = dir.path().join("note.md");
+    std::fs::write(&path, "---\ntitle: T\ntags: [old]\n---\nBody.\n").expect("write note");
+
+    let wrote = rewrite_note_tags(&path, &["new".to_string()]).expect("rewrite_note_tags should not error");
+    assert!(wrote);
+
+    let content = std::fs::read_to_string(&path).expect("read note");
+    assert!(content.contains("tags: [new]"), "expected rewritten tags: {content}");
+}

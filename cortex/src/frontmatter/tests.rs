@@ -124,8 +124,8 @@ fn test_apply_inserts_frontmatter() {
     let config = v.config().actions.frontmatter;
     let schema = test_schema();
 
-    let count = apply_frontmatter(v.root(), &notes, &config, &schema).expect("apply");
-    assert!(count > 0);
+    let written = apply_frontmatter(v.root(), &notes, &config, &schema).expect("apply");
+    assert!(!written.is_empty());
 
     // bare-note.md should now have frontmatter
     let content = v.read("bare-note.md");

@@ -91,6 +91,43 @@ fn test_sweep_fingerprint_empty_files_ignored() {
     assert!(fp.is_empty());
 }
 
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`, Phase 1,
+/// success criterion (a) exercised through the real daemon seam: a note
+/// whose ONLY lint violation is `frontmatter.date-format` (Severity::Warning,
+/// `fix: None` - a regex check, independent of canonical-tag config) must
+/// produce an empty `configured_actions` fingerprint for the `lint` action,
+/// and the note's bytes must be untouched on disk. Before Phase 1 this arm
+/// fingerprinted `report.violations` paths directly, so this exact case
+/// (a real violation, zero real writes) would have latched oscillation
+/// detection on phantom churn.
+#[test]
+fn configured_actions_lint_fingerprint_excludes_unfixable_violations() {
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let vault_root = vault_dir.path();
+    let note_path = vault_root.join("only-unfixable.md");
+    let original = "---\ntitle: Only Unfixable\ndate: March 2026\ntype: note\ntags:\n  - ok\n---\nBody.\n";
+    std::fs::write(&note_path, original).expect("write note");
+
+    let config = Config::default();
+    let mut daemon_config = DaemonConfig::default();
+    daemon_config.actions.clear();
+    daemon_config
+        .actions
+        .insert("lint".to_string(), crate::config::DaemonAction { enable: true });
+
+    let fingerprint = configured_actions(vault_root, &config, &daemon_config, &[]);
+    assert!(
+        fingerprint.is_empty(),
+        "expected an empty fingerprint - the only violation present carries fix: None: {fingerprint:?}"
+    );
+
+    let after = std::fs::read_to_string(&note_path).expect("read note after cycle");
+    assert_eq!(
+        after, original,
+        "lint detected the violation but must never have written the note"
+    );
+}
+
 #[test]
 fn test_duration_until_daily_future_today() {
     // If we ask for a time that hasn't passed yet today, it should be today (on weekdays)

@@ -39,7 +39,7 @@ use std::path::Path;
 
 use config::Config;
 use opts::{LinkOpts, LintOpts};
-use report::Report;
+use report::{LintApplyReport, Report};
 use vault::{Note, scan_vault};
 
 /// Check if a note's path matches any glob pattern in the list.
@@ -83,7 +83,7 @@ fn parse_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
         .collect()
 }
 
-pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Report> {
+pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<(Report, LintApplyReport)> {
     log::info!("starting lint run (vault_root={})", vault_root.display());
     let all_notes = scan_vault(vault_root, &config.vault)?;
 
@@ -111,6 +111,13 @@ pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Repor
     );
 
     let mut report = Report::default();
+    // Written-paths accumulator for the apply path ONLY - fed exclusively by
+    // each rule's `apply_*` return value (real byte-changed paths), never by
+    // `report.violations` (which includes every `fix: None` violation - the
+    // permanently-unfixable majority - and would fingerprint identically
+    // every cycle). This is the seam `LintApplyReport` surfaces to callers
+    // like the daemon's oscillation detector.
+    let mut written_paths: Vec<String> = Vec::new();
 
     let rules: Vec<&str> = if opts.rule.is_empty() {
         vec!["naming", "frontmatter", "tags", "scope", "broken-links"]
@@ -123,7 +130,11 @@ pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Repor
     if rules.contains(&"naming") {
         report.merge(naming::lint_naming(&lintable_notes, &config.actions.naming));
         if opts.apply {
-            naming::apply_naming(vault_root, &lintable_notes, &config.actions.naming)?;
+            written_paths.extend(naming::apply_naming(
+                vault_root,
+                &lintable_notes,
+                &config.actions.naming,
+            )?);
         }
     }
 
@@ -134,21 +145,26 @@ pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Repor
             &config.schema,
         ));
         if opts.apply {
-            frontmatter::apply_frontmatter(vault_root, &lintable_notes, &config.actions.frontmatter, &config.schema)?;
+            written_paths.extend(frontmatter::apply_frontmatter(
+                vault_root,
+                &lintable_notes,
+                &config.actions.frontmatter,
+                &config.schema,
+            )?);
         }
     }
 
     if rules.contains(&"tags") {
         report.merge(tags::lint_tags(&lintable_notes, &config.actions.tags));
         if opts.apply {
-            tags::apply_tags(vault_root, &lintable_notes, &config.actions.tags)?;
+            written_paths.extend(tags::apply_tags(vault_root, &lintable_notes, &config.actions.tags)?);
         }
     }
 
     if rules.contains(&"scope") {
         report.merge(scope::lint_scope(&lintable_notes, &config.actions.scope));
         if opts.apply {
-            scope::apply_scope(vault_root, &lintable_notes, &config.actions.scope)?;
+            written_paths.extend(scope::apply_scope(vault_root, &lintable_notes, &config.actions.scope)?);
         }
     }
 
@@ -163,14 +179,22 @@ pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Repor
     if rules.contains(&"duplicates") {
         report.merge(duplicates::lint_duplicates(&lintable_notes, &config.actions.duplicates));
         if opts.apply {
-            duplicates::apply_duplicates(vault_root, &lintable_notes, &config.actions.duplicates)?;
+            written_paths.extend(duplicates::apply_duplicates(
+                vault_root,
+                &lintable_notes,
+                &config.actions.duplicates,
+            )?);
         }
     }
 
     if rules.contains(&"quality") {
         report.merge(quality::lint_quality(&lintable_notes, &config.actions.quality));
         if opts.apply {
-            quality::apply_quality(vault_root, &lintable_notes, &config.actions.quality)?;
+            written_paths.extend(quality::apply_quality(
+                vault_root,
+                &lintable_notes,
+                &config.actions.quality,
+            )?);
         }
     }
 
@@ -181,18 +205,34 @@ pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Repor
             &config.actions.auto_tag,
         ));
         if opts.apply {
-            autotag::apply_autotag(
+            written_paths.extend(autotag::apply_autotag(
                 vault_root,
                 &lintable_notes,
                 &all_notes,
                 &config.actions.auto_tag,
                 &config.fabric,
-            )?;
+            )?);
         }
     }
 
+    written_paths.sort();
+    written_paths.dedup();
+    let lint_apply = LintApplyReport {
+        written_paths,
+        remaining_violations: report.violations.len(),
+    };
+    report.applied = lint_apply.written_paths.len();
+    report.applied_paths = lint_apply.written_paths.clone();
+
+    log::debug!(
+        "lib::lint: apply={} written={} remaining_violations={}",
+        opts.apply,
+        lint_apply.written_paths.len(),
+        lint_apply.remaining_violations
+    );
+
     // Output formatting is the caller's responsibility (see sb/src/cli/cortex.rs).
-    Ok(report)
+    Ok((report, lint_apply))
 }
 
 pub fn link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Report> {
@@ -225,9 +265,14 @@ pub fn link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Repor
     linking_config.aliases.extend(glossary.aliases);
 
     if opts.apply {
-        let count = linking::apply_linking(vault_root, &notes, &linking_config)?;
+        // `applied_paths` carries the real, byte-changed paths - the ONLY
+        // thing a caller (the daemon's oscillation fingerprint) may use.
+        // `applied` (a plain count) stays for CLI text that only needs "N
+        // file(s)"; both derive from the same `apply_linking` return.
+        let written = linking::apply_linking(vault_root, &notes, &linking_config)?;
         Ok(Report {
-            applied: count,
+            applied: written.len(),
+            applied_paths: written,
             ..Default::default()
         })
     } else {

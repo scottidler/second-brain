@@ -404,7 +404,7 @@ impl CortexCli {
             }
             Command::Lint(a) => {
                 let opts: cortex::opts::LintOpts = a.into();
-                let report = cortex::lint(&vault_root, &config, &opts)?;
+                let (report, _lint_apply) = cortex::lint(&vault_root, &config, &opts)?;
                 if opts.format == cortex::opts::LintFormat::Json {
                     println!("{}", report.format_json()?);
                 } else {

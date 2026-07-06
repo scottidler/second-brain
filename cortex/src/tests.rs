@@ -1,5 +1,6 @@
 use super::*;
 use crate::testutil::NoteBuilder;
+use std::path::PathBuf;
 
 fn note(path: &str) -> Note {
     NoteBuilder::new(path).title(path).build()
@@ -124,4 +125,122 @@ fn link_scan_concepts_is_strict_subset_of_all() {
     assert!(concepts.contains("linking.concept"));
     assert!(!concepts.contains("linking.person"));
     assert!(!concepts.contains("linking.project"));
+}
+
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`, Phase 1,
+/// success criterion (b): the lint apply fingerprint must exclude every
+/// `fix: None` violation. `hobby-project.md` (TestVault fixture) carries a
+/// single `tags.non-canonical` violation - Severity::Info, `fix: None` - and
+/// no other lint issue (valid filename, all required frontmatter present,
+/// tag format already lowercase-hyphenated). The lint REPORT must still flag
+/// it; the apply-path fingerprint must not.
+#[test]
+fn lint_apply_report_excludes_fix_none_violations() {
+    use crate::testutil::TestVault;
+
+    let v = TestVault::new();
+    let config = v.config();
+    let opts = crate::opts::LintOpts {
+        apply: true,
+        format: crate::opts::LintFormat::Human,
+        rule: Vec::new(),
+        path: Some("hobby-project.md".to_string()),
+    };
+
+    let (report, lint_apply) = crate::lint(v.root(), &config, &opts).expect("lint apply");
+
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|viol| viol.rule == "tags.non-canonical" && viol.fix.is_none()),
+        "expected the lint report to still flag the unfixable violation: {:?}",
+        report.violations
+    );
+    assert!(
+        lint_apply.written_paths.is_empty(),
+        "a note with ONLY a fix:None violation must never appear in written_paths: {:?}",
+        lint_apply.written_paths
+    );
+    assert_eq!(lint_apply.remaining_violations, report.violations.len());
+}
+
+/// Success criterion (a): a lint pass with zero writable fixes produces an
+/// empty fingerprint. Scoping the same single-violation note above through
+/// the full lint dispatch (all four appliers) demonstrates the aggregate
+/// `LintApplyReport.written_paths` - not just one applier's return - stays
+/// empty when nothing in scope is fixable.
+#[test]
+fn lint_apply_zero_writable_fixes_yields_empty_fingerprint() {
+    use crate::testutil::TestVault;
+
+    let v = TestVault::new();
+    let config = v.config();
+    let opts = crate::opts::LintOpts {
+        apply: true,
+        format: crate::opts::LintFormat::Human,
+        rule: Vec::new(),
+        path: Some("hobby-project.md".to_string()),
+    };
+
+    let (_report, lint_apply) = crate::lint(v.root(), &config, &opts).expect("lint apply");
+    assert!(lint_apply.written_paths.is_empty());
+}
+
+/// Success criterion (c): a unit test asserts `fingerprint ⊆ files whose
+/// bytes changed`. Runs the full default lint apply (naming/frontmatter/
+/// tags/scope) over the whole fixture vault - which contains BOTH fixable
+/// violations (renames, missing frontmatter, alias tags, scope fields) and
+/// unfixable ones (non-canonical tags, bad enums) - then verifies every path
+/// `LintApplyReport` names actually has different bytes on disk, and that at
+/// least one write really happened (the invariant is not vacuously true).
+#[test]
+fn lint_apply_written_paths_are_subset_of_bytes_changed() {
+    use crate::testutil::TestVault;
+    use std::fs;
+
+    let v = TestVault::new();
+
+    // Snapshot every markdown file's bytes before the apply pass.
+    let mut before: std::collections::HashMap<PathBuf, Vec<u8>> = std::collections::HashMap::new();
+    for note in v.scan() {
+        let abs = v.root().join(&note.path);
+        if let Ok(bytes) = fs::read(&abs) {
+            before.insert(note.path.clone(), bytes);
+        }
+    }
+
+    let config = v.config();
+    let opts = crate::opts::LintOpts {
+        apply: true,
+        format: crate::opts::LintFormat::Human,
+        rule: Vec::new(),
+        path: None,
+    };
+    let (_report, lint_apply) = crate::lint(v.root(), &config, &opts).expect("lint apply");
+
+    assert!(
+        !lint_apply.written_paths.is_empty(),
+        "expected at least one real write across the fixable violations in the fixture vault"
+    );
+
+    for written in &lint_apply.written_paths {
+        let rel = PathBuf::from(written);
+        let abs = v.root().join(&rel);
+        let after = fs::read(&abs).unwrap_or_else(|e| panic!("written path {written} unreadable after apply: {e}"));
+        let prior = before.get(&rel);
+        assert_ne!(
+            prior.map(|b| b.as_slice()),
+            Some(after.as_slice()),
+            "fingerprint named {written} but its bytes did not change"
+        );
+    }
+
+    // The unfixable-only note must never appear, even though it was
+    // in-scope for this unfiltered pass.
+    assert!(
+        !lint_apply.written_paths.iter().any(|p| p.contains("hobby-project.md")),
+        "unfixable-only note leaked into the fingerprint: {:?}",
+        lint_apply.written_paths
+    );
 }

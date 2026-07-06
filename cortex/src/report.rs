@@ -70,10 +70,35 @@ pub struct Report {
     /// Zero when the run was lint-only.
     #[serde(default, skip_serializing_if = "usize_is_zero")]
     pub applied: usize,
+    /// The real, byte-changed paths an `apply` path wrote - `applied` is
+    /// this list's length. Empty when the run was lint-only or nothing
+    /// wrote. Consumers that need a write-only fingerprint (the daemon's
+    /// oscillation detector) MUST use this field, never `violations` paths
+    /// (those include every unappliable suggestion / `fix: None` entry).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied_paths: Vec<String>,
 }
 
 fn usize_is_zero(n: &usize) -> bool {
     *n == 0
+}
+
+/// Aggregated result of the lint apply path (`lib::lint` with `opts.apply`).
+///
+/// `written_paths` is the ONLY thing the daemon's oscillation fingerprint may
+/// use for the lint action: it is the union of the real, byte-changed paths
+/// each of the four appliers (`apply_naming`/`apply_frontmatter`/`apply_tags`/
+/// `apply_scope`) returned - never the lint report's `violations` paths,
+/// which include every `fix: None` violation (non-canonical tags, orphan
+/// tags, date-format, enum, deprecated-field) that is permanently unfixable
+/// and would otherwise fingerprint identically every cycle, latching the
+/// daemon's oscillation detector forever. `remaining_violations` is a
+/// diagnostic count (total violations still reported after the apply pass)
+/// for logging, not part of the fingerprint invariant.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LintApplyReport {
+    pub written_paths: Vec<String>,
+    pub remaining_violations: usize,
 }
 
 impl Report {

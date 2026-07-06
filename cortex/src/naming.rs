@@ -127,8 +127,19 @@ pub fn lint_naming(notes: &[Note], config: &NamingConfig) -> Report {
 }
 
 /// Apply naming fixes: rename files and update wikilinks.
-/// Returns a list of (old_path, new_path) renames performed.
-pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) -> eyre::Result<Vec<(PathBuf, PathBuf)>> {
+///
+/// Returns the real, byte-changed paths this call actually wrote: the NEW
+/// path of every rename that landed, plus every other note whose wikilinks
+/// were rewritten to follow a rename. This is the seam the daemon's
+/// oscillation fingerprint (`LintApplyReport.written_paths`) draws from -
+/// callers must never substitute the lint report's violation paths, which
+/// include renames skipped as would-clobber.
+pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) -> eyre::Result<Vec<String>> {
+    log::debug!(
+        "naming::apply_naming: vault_root={} notes={}",
+        vault_root.display(),
+        notes.len()
+    );
     let report = lint_naming(notes, config);
     let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
 
@@ -140,7 +151,7 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
     }
 
     if renames.is_empty() {
-        return Ok(renames);
+        return Ok(Vec::new());
     }
 
     // Execute renames. Skip (never clobber) when the destination already
@@ -171,9 +182,16 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
     }
 
     // Batch update all wikilinks across the vault for the renames that landed.
-    update_wikilinks_batch(vault_root, notes, &applied)?;
+    let relinked = update_wikilinks_batch(vault_root, notes, &applied)?;
 
-    Ok(applied)
+    let mut written: Vec<String> = applied.iter().map(|(_, to)| to.to_string_lossy().to_string()).collect();
+    written.extend(relinked);
+    log::debug!(
+        "naming::apply_naming: renamed={} relinked={}",
+        applied.len(),
+        written.len()
+    );
+    Ok(written)
 }
 
 /// Update wikilinks in all vault files for a batch of renames.
@@ -181,13 +199,16 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
 /// case-insensitive, handles `[[link]]` and `[[link|alias]]`, skips renamed
 /// files, writes atomically. classify and migrate both delegate here (Phase 9
 /// consolidation; replaced two weaker copies).
+///
+/// Returns the paths of the notes it actually rewrote (real byte changes
+/// only) - the caller folds this into its own written-paths return.
 pub(crate) fn update_wikilinks_batch(
     vault_root: &Path,
     notes: &[Note],
     renames: &[(PathBuf, PathBuf)],
-) -> eyre::Result<()> {
+) -> eyre::Result<Vec<String>> {
     if renames.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // Build a map of old stem -> new stem (case-insensitive matching)
@@ -200,6 +221,7 @@ pub(crate) fn update_wikilinks_batch(
         })
         .collect();
 
+    let mut written = Vec::new();
     for note in notes {
         let abs_path = vault_root.join(&note.path);
         // Skip files that were renamed (they no longer exist at old path)
@@ -231,10 +253,11 @@ pub(crate) fn update_wikilinks_batch(
         if new_content != content {
             vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             log::info!("updated wikilinks: {}", note.path.display());
+            written.push(note.path.to_string_lossy().to_string());
         }
     }
 
-    Ok(())
+    Ok(written)
 }
 
 #[cfg(test)]
