@@ -390,7 +390,7 @@ impl CortexCli {
         match self.command {
             Command::Classify(a) => {
                 let apply = a.apply;
-                let report = cortex::classify::run(&vault_root, &config, &a.into())?;
+                let (report, _written) = cortex::classify::run(&vault_root, &config, &a.into())?;
                 if apply {
                     println!("Classified {} note(s).", report.applied);
                     for line in report.format_human(true) {

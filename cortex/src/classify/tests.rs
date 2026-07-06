@@ -263,7 +263,7 @@ fn test_catchup_classify_enriches_in_place() {
 
     let notes = vault.scan();
     let config = vault.config();
-    let report = apply_classify(
+    let (report, written) = apply_classify(
         vault.root(),
         &notes,
         &config.actions.classify,
@@ -274,6 +274,12 @@ fn test_catchup_classify_enriches_in_place() {
         None,
     )
     .unwrap();
+
+    // The orphan was actually written, so it is in the written-paths list.
+    assert!(
+        written.iter().any(|p| p.contains("reingest-orphan")),
+        "catch-up write should be surfaced in written_paths: {written:?}"
+    );
 
     // The orphan should have been catch-up classified
     let content = vault.read("notes/reingest-orphan.md");

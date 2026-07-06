@@ -555,6 +555,17 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
             },
             ..crate::config::ActionsConfig::default()
         },
+        // Point fabric at a binary that does not exist so classify's Tier-2 LLM
+        // path (`classify_by_llm` -> `fabric::is_available`) is deterministically
+        // OFF on every machine. Without this, a dev host that happens to have a
+        // populated oracle index AND a real `fabric` binary would LLM-classify
+        // the no-signal inbox note below instead of exercising `mark_needs_review`
+        // - the exact path this test must pin. The fixture's auto-tag never uses
+        // fabric (its `fabric_pattern` is None), so this only disables Tier-2.
+        fabric: crate::config::FabricConfig {
+            binary: "cortex-test-no-fabric-binary".to_string(),
+            ..crate::config::FabricConfig::default()
+        },
         ..Config::default()
     };
 
@@ -585,6 +596,33 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
         "---\ntags:\n  - rust\n---\nSome inbox content about rust tooling.\n",
     )
     .expect("write inbox note");
+
+    // -- classify (mark_needs_review path, Phase 8 audit finding #1): a
+    // NO-SIGNAL inbox note - no tags, no source, Tier-2 disabled via the bogus
+    // fabric binary above. classify returns None, so cycle 1 stamps
+    // `cortex-needs-review: true`. It is NEVER marked `cortex-classified`, so
+    // `filter_inbox_notes` re-selects it every cycle; the pre-Phase-8 code
+    // rewrote it (byte-identically, new mtime) on EVERY cycle - the perpetual
+    // self-write the zero-writes assertion below now catches. `origin: authored`
+    // keeps quality/link/auto-tag/duplicates off it, so classify is the ONLY
+    // action that ever touches it. --
+    std::fs::write(
+        inbox_dir.join("mystery.md"),
+        "---\ntitle: Mystery Fragment\ndate: 2020-01-01\ntype: note\norigin: authored\n---\nA brief personal reflection with no classifiable signal whatsoever.\n",
+    )
+    .expect("write no-signal inbox note");
+
+    // -- classify (catch-up path, Phase 8 audit finding #2): a domainless note
+    // already in notes/ with a Tier-1-classifiable tag (`rust` -> tech). Cycle 1
+    // enriches it in place (writes `domain: tech` + classified markers); once it
+    // has a domain it leaves the unclassified target set, so cycle 2 leaves it
+    // alone. `origin: authored` keeps every other action off it. Its catch-up
+    // write was previously invisible to the fingerprint (finding #2). --
+    std::fs::write(
+        vault_root.join("orphan.md"),
+        "---\ntitle: Orphan Note\ndate: 2020-01-01\ntype: note\norigin: authored\ntags:\n  - rust\n---\nAn orphaned note that lost its domain during a reingest.\n",
+    )
+    .expect("write domainless catch-up note");
 
     // -- link: a glossary-concept hub note (self-link-excluded by its own
     // stem) plus a note whose prose mentions the concept and gets a wikilink
@@ -667,17 +705,77 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     // its own inputs, so it cannot recur.
     let fp1 = configured_actions(vault_root, &config, &daemon_config, &[]);
 
+    // Snapshot the on-disk state of every note file AFTER cycle 1 has fully
+    // settled. This is the Phase 8 strengthening (audit finding #2: the old
+    // `fp2.is_empty()` assertion never observed the filesystem, so a
+    // write-without-fingerprint - exactly what `mark_needs_review` and catch-up
+    // did - passed silently). We capture bytes AND mtime: the no-signal inbox
+    // note's perpetual rewrite is BYTE-IDENTICAL, so only the mtime moves - and
+    // an mtime bump is precisely what fires the daemon's own vault watcher.
+    let before = snapshot_note_files(vault_root);
+
     // Second periodic sweep over the SAME, now-fixed-up vault: every action
     // that wrote in cycle 1 finds its own fix already in place and writes
     // nothing more. This is the structural invariant the whole design doc
     // exists to enforce.
     let fp2 = configured_actions(vault_root, &config, &daemon_config, &[]);
 
+    let after = snapshot_note_files(vault_root);
+
+    // ZERO note files may be added, removed, or touched in cycle 2 - not merely
+    // an empty fingerprint. This assertion BITES on the pre-Phase-8 classify
+    // code: `mark_needs_review` rewrote `inbox/mystery.md` every cycle
+    // (byte-identical, new mtime), tripping this exact check.
+    assert_eq!(
+        before.keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>(),
+        "cycle 2 must not add or remove any note file (before={:?} after={:?})",
+        before.keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>()
+    );
+    for (path, before_state) in &before {
+        let after_state = after.get(path).expect("file present in both snapshots");
+        assert_eq!(
+            before_state.0,
+            after_state.0,
+            "cycle 2 rewrote the BYTES of {} - a non-idempotent write",
+            path.display()
+        );
+        assert_eq!(
+            before_state.1,
+            after_state.1,
+            "cycle 2 TOUCHED {} (mtime moved even if bytes are identical) - this is the \
+             byte-identical self-write the daemon watcher fires on; a write happened without a \
+             fingerprint entry",
+            path.display()
+        );
+    }
+
     assert!(
         fp2.is_empty(),
         "expected the full default action set to converge to an EMPTY fingerprint on the \
          second periodic sweep (fp1={fp1:?} fp2={fp2:?})"
     );
+}
+
+/// Snapshot every `*.md` file under `root` as `path -> (bytes, mtime)`. Used by
+/// the full-action-set convergence test to assert cycle 2 touches ZERO note
+/// files - not just that the fingerprint is empty. Scoped to `*.md` on purpose:
+/// the `state` action rewrites its own `.cortex/manifest.yml` cache (a
+/// timestamped, non-note artifact) every cycle by design, which is not a vault
+/// note and not part of the "writes zero note files" invariant.
+fn snapshot_note_files(root: &Path) -> std::collections::BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)> {
+    let mut map = std::collections::BTreeMap::new();
+    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let bytes = std::fs::read(path).expect("read note file for snapshot");
+        let mtime = entry.metadata().expect("note metadata").modified().expect("note mtime");
+        map.insert(path.to_path_buf(), (bytes, mtime));
+    }
+    map
 }
 
 /// Phase 2 success criterion (c) (design doc

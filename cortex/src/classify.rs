@@ -21,7 +21,13 @@ use ::vault::search::SearchIndex;
 /// Top-level orchestrator for `sb cortex classify`. Scans the vault, opens the
 /// oracle search index (best-effort, Tier-2 LLM context), and dispatches to
 /// `apply_classify` or `lint_classify` based on `opts.apply`.
-pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Report> {
+///
+/// Returns `(Report, written_paths)`. `written_paths` is the concrete list of
+/// vault-relative paths this call ACTUALLY wrote (promotions + catch-up
+/// enrichment + needs-review marks) - the daemon's oscillation fingerprint
+/// draws only from this, never from the report's violation messages. This
+/// mirrors the Phase 1 lint seam (`lint_with_notes` -> `LintApplyReport`).
+pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<(Report, Vec<String>)> {
     crate::startup::validate_canonical_assets()?;
     log::info!("starting classify command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
@@ -34,7 +40,12 @@ pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Re
 /// once per cycle and shares the result across every action - `run` stays
 /// the scan-then-delegate entry point every other caller (CLI, tests) keeps
 /// using unmodified.
-pub fn run_with_notes(notes: &[Note], vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Report> {
+pub fn run_with_notes(
+    notes: &[Note],
+    vault_root: &Path,
+    config: &Config,
+    opts: &ClassifyOpts,
+) -> Result<(Report, Vec<String>)> {
     log::debug!(
         "classify::run_with_notes: vault_root={} note_count={} apply={}",
         vault_root.display(),
@@ -61,11 +72,10 @@ pub fn run_with_notes(notes: &[Note], vault_root: &Path, config: &Config, opts: 
             search_ref,
         )
     } else {
-        Ok(lint_classify(
-            notes,
-            &config.actions.classify,
-            &config.fabric,
-            search_ref,
+        // Dry-run writes nothing, so the written-paths list is always empty.
+        Ok((
+            lint_classify(notes, &config.actions.classify, &config.fabric, search_ref),
+            Vec::new(),
         ))
     }
 }
@@ -360,6 +370,13 @@ pub fn lint_classify(
 
 /// Apply: classify and move notes from inbox/ to notes/
 /// If `reclassify_domain` is set, reclassifies notes already in notes/ that have that domain.
+///
+/// Returns `(Report, written_paths)`. `written_paths` is the union of the real,
+/// vault-relative paths this call actually WROTE - promotions, catch-up
+/// enrichment, reclassify rewrites, and needs-review marks - never the paths of
+/// notes merely inspected. It is the classify equivalent of
+/// `LintApplyReport.written_paths` and is the ONLY thing the daemon's
+/// oscillation fingerprint may draw from for the classify action.
 pub fn apply_classify(
     vault_root: &Path,
     notes: &[Note],
@@ -369,7 +386,7 @@ pub fn apply_classify(
     review_only: bool,
     reclassify_domain: Option<&str>,
     search_index: Option<&SearchIndex>,
-) -> Result<Report> {
+) -> Result<(Report, Vec<String>)> {
     let target_notes: Vec<&Note> = if let Some(domain) = reclassify_domain {
         filter_domain_notes(notes, domain)
     } else {
@@ -380,6 +397,11 @@ pub fn apply_classify(
     let is_reclassify = reclassify_domain.is_some();
     let mut report = Report::default();
     let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // Real, byte-changed paths this call wrote - the daemon fingerprints this,
+    // never `report.violations` (which named catch-up/needs-review notes that
+    // may not have changed on disk, or promotions the daemon used to sniff by
+    // matching the substring "promoted" in a violation message).
+    let mut written: Vec<String> = Vec::new();
 
     for note in &target_notes {
         let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
@@ -387,8 +409,8 @@ pub fn apply_classify(
         let result = match classify_note(note, config, fabric, search_index) {
             Some(r) => r,
             None => {
-                if !is_reclassify && !already_in_notes {
-                    mark_needs_review(vault_root, note)?;
+                if !is_reclassify && !already_in_notes && mark_needs_review(vault_root, note)? {
+                    written.push(note.path.to_string_lossy().to_string());
                 }
                 log::info!("held for review (no signal): {}", note.path.display());
                 continue;
@@ -396,8 +418,8 @@ pub fn apply_classify(
         };
 
         if result.confidence == ClassifyConfidence::Low {
-            if !is_reclassify && !already_in_notes {
-                mark_needs_review(vault_root, note)?;
+            if !is_reclassify && !already_in_notes && mark_needs_review(vault_root, note)? {
+                written.push(note.path.to_string_lossy().to_string());
             }
             log::info!("held for review (low confidence): {}", note.path.display());
             continue;
@@ -416,31 +438,42 @@ pub fn apply_classify(
                 }
             };
             let fields = build_enrichment_fields(&result);
-            if let Some(new_content) = insert_frontmatter_fields(&content, &fields)
-                && let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes())
-            {
-                log::warn!("skipping catch-up classify for {}: {e}", note.path.display());
-                continue;
-            }
+            // Byte guard: only write when the enrichment actually changes bytes.
+            // `insert_frontmatter_fields` does remove-then-reappend with no value
+            // comparison, so it can re-emit identical content; an unconditional
+            // write there fires the daemon watcher for nothing.
+            let wrote = match insert_frontmatter_fields(&content, &fields) {
+                Some(new_content) if new_content != content => {
+                    if let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes()) {
+                        log::warn!("skipping catch-up classify for {}: {e}", note.path.display());
+                        continue;
+                    }
+                    true
+                }
+                _ => false,
+            };
 
-            report.add(Violation {
-                path: note.path.clone(),
-                rule: "classify".to_string(),
-                severity: Severity::Info,
-                message: format!(
-                    "catch-up classified domain={} (method={})",
+            if wrote {
+                written.push(note.path.to_string_lossy().to_string());
+                report.add(Violation {
+                    path: note.path.clone(),
+                    rule: "classify".to_string(),
+                    severity: Severity::Info,
+                    message: format!(
+                        "catch-up classified domain={} (method={})",
+                        result.domain.as_str(),
+                        result.method.as_str(),
+                    ),
+                    fix: None,
+                });
+
+                log::info!(
+                    "catch-up classified {} (domain={}, method={})",
+                    note.path.display(),
                     result.domain.as_str(),
                     result.method.as_str(),
-                ),
-                fix: None,
-            });
-
-            log::info!(
-                "catch-up classified {} (domain={}, method={})",
-                note.path.display(),
-                result.domain.as_str(),
-                result.method.as_str(),
-            );
+                );
+            }
             continue;
         }
 
@@ -455,32 +488,40 @@ pub fn apply_classify(
                 }
             };
             let fields = build_enrichment_fields(&result);
-            if let Some(new_content) = insert_frontmatter_fields(&content, &fields)
-                && let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes())
-            {
-                log::warn!("skipping reclassify for {}: {e}", note.path.display());
-                continue;
-            }
+            // Byte guard (same rationale as catch-up above).
+            let wrote = match insert_frontmatter_fields(&content, &fields) {
+                Some(new_content) if new_content != content => {
+                    if let Err(e) = vault::note::write_atomic(&abs_path, new_content.as_bytes()) {
+                        log::warn!("skipping reclassify for {}: {e}", note.path.display());
+                        continue;
+                    }
+                    true
+                }
+                _ => false,
+            };
 
-            report.add(Violation {
-                path: note.path.clone(),
-                rule: "classify".to_string(),
-                severity: Severity::Info,
-                message: format!(
-                    "reclassified domain={} (method={})",
+            if wrote {
+                written.push(note.path.to_string_lossy().to_string());
+                report.add(Violation {
+                    path: note.path.clone(),
+                    rule: "classify".to_string(),
+                    severity: Severity::Info,
+                    message: format!(
+                        "reclassified domain={} (method={})",
+                        result.domain.as_str(),
+                        result.method.as_str(),
+                    ),
+                    fix: None,
+                });
+
+                log::info!(
+                    "reclassified {} (domain={}, confidence={}, method={})",
+                    note.path.display(),
                     result.domain.as_str(),
+                    result.confidence.as_str(),
                     result.method.as_str(),
-                ),
-                fix: None,
-            });
-
-            log::info!(
-                "reclassified {} (domain={}, confidence={}, method={})",
-                note.path.display(),
-                result.domain.as_str(),
-                result.confidence.as_str(),
-                result.method.as_str(),
-            );
+                );
+            }
             continue;
         }
 
@@ -543,6 +584,10 @@ pub fn apply_classify(
             );
         }
 
+        // A promotion always mutates the vault (the inbox file is removed and a
+        // notes/ file created), independent of whether the enrichment write
+        // above changed bytes - so it is always a real write to fingerprint.
+        written.push(note.path.to_string_lossy().to_string());
         report.add(Violation {
             path: note.path.clone(),
             rule: "classify".to_string(),
@@ -572,8 +617,17 @@ pub fn apply_classify(
         crate::naming::update_wikilinks_batch(vault_root, &all_notes, &moves)?;
     }
 
+    written.sort();
+    written.dedup();
+    // Surface the real write count/paths on the report too, matching the Phase 1
+    // lint seam (`report.applied` / `report.applied_paths`); sb prints this.
+    report.applied = written.len();
+    report.applied_paths = written.clone();
+
+    log::debug!("classify::apply_classify: written={}", written.len());
+
     // Caller (sb) formats the report; classify::run returns it directly.
-    Ok(report)
+    Ok((report, written))
 }
 
 /// Classify a single note using the tiered pipeline
@@ -883,18 +937,44 @@ fn ensure_origin(fields: &mut Vec<(String, serde_yaml::Value)>, note: &Note) {
     }
 }
 
-/// Mark a note as needing manual review
-fn mark_needs_review(vault_root: &Path, note: &Note) -> Result<()> {
+/// Mark a note as needing manual review. Returns `true` iff it wrote to disk.
+///
+/// Idempotent by construction - this is the Phase 8 audit fix. A no-signal or
+/// low-confidence INBOX note is never marked `cortex-classified`, so
+/// `filter_inbox_notes` re-selects it on EVERY classify cycle; the previous
+/// unconditional `insert_frontmatter_fields` + `write_atomic` therefore
+/// rewrote it every cycle with an empty oscillation fingerprint - the exact
+/// perpetual self-write this design doc exists to eliminate. Two guards:
+///
+/// 1. Semantic guard: an inbox note already holding `cortex-needs-review: true`
+///    is not reprocessed at all.
+/// 2. Byte guard (defense in depth): even on the first mark,
+///    `insert_frontmatter_fields` does remove-then-reappend with no value
+///    comparison, so only touch disk when the bytes actually change.
+fn mark_needs_review(vault_root: &Path, note: &Note) -> Result<bool> {
+    log::debug!("mark_needs_review: note={}", note.path.display());
+    if note.frontmatter.extra.get("cortex-needs-review") == Some(&serde_yaml::Value::Bool(true)) {
+        log::debug!(
+            "mark_needs_review: {} already held for review, skipping",
+            note.path.display()
+        );
+        return Ok(false);
+    }
+
     let abs_path = vault_root.join(&note.path);
     let content = std::fs::read_to_string(&abs_path)?;
 
     let fields = vec![("cortex-needs-review".to_string(), serde_yaml::Value::Bool(true))];
 
-    if let Some(new_content) = insert_frontmatter_fields(&content, &fields) {
+    if let Some(new_content) = insert_frontmatter_fields(&content, &fields)
+        && new_content != content
+    {
         vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
+        log::debug!("mark_needs_review: marked {}", note.path.display());
+        return Ok(true);
     }
 
-    Ok(())
+    Ok(false)
 }
 
 /// Resolve filename collision. If the existing note has the same source URL,

@@ -442,15 +442,10 @@ fn classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonConfi
         reclassify_domain: None,
     };
     match crate::classify::run(vault_root, config, &opts) {
-        Ok(report) => {
-            let promoted = report
-                .violations
-                .iter()
-                .filter(|v| v.message.contains("promoted"))
-                .count();
-            if promoted > 0 {
-                log::info!("classify (cycle-exempt): promoted {promoted} note(s)");
-                log::info!("[daemon] classify: promoted {promoted} note(s) from inbox/");
+        Ok((_report, written)) => {
+            if !written.is_empty() {
+                log::info!("classify (cycle-exempt): wrote {} note(s)", written.len());
+                log::info!("[daemon] classify: wrote {} note(s)", written.len());
             }
         }
         Err(e) => log::error!("classify action failed: {e}"),
@@ -562,19 +557,22 @@ where
                     reclassify_domain: None,
                 };
                 match crate::classify::run_with_notes(&notes, vault_root, config, &opts) {
-                    Ok(report) => {
-                        let promoted: Vec<String> = report
-                            .violations
-                            .iter()
-                            .filter(|v| v.message.contains("promoted"))
-                            .map(|v| v.path.to_string_lossy().to_string())
-                            .collect();
-                        if !promoted.is_empty() {
-                            log::info!("classify: promoted {} note(s)", promoted.len());
-                            log::info!("[daemon] classify: promoted {} note(s) from inbox/", promoted.len());
-                            fingerprint.add("classify", promoted);
-                            // classify MOVES files - every reader after it in this
-                            // cycle needs the final locations. Rescan boundary.
+                    Ok((_report, written)) => {
+                        // Fingerprint the paths classify ACTUALLY wrote - the
+                        // Phase 1 lint/sweep shape - never a `"promoted"`
+                        // substring sniff of violation messages. That old sniff
+                        // ignored the two other write paths (`mark_needs_review`
+                        // for no-signal/low-confidence inbox notes and catch-up
+                        // enrichment for domainless notes/), so those writes
+                        // fired the daemon watcher while being invisible to the
+                        // fingerprint - reopening the oscillation defect through
+                        // the classify arm.
+                        if !written.is_empty() {
+                            log::info!("classify: wrote {} note(s)", written.len());
+                            log::info!("[daemon] classify: wrote {} note(s)", written.len());
+                            fingerprint.add("classify", written);
+                            // classify MOVES/rewrites notes - every reader after it
+                            // in this cycle needs the final state. Rescan boundary.
                             dirty = true;
                         }
                     }
