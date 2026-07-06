@@ -263,7 +263,15 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     output: None,
                     as_of: None,
                 };
-                if let Err(e) = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts)) {
+                // Wrap in the `applying` guard just like the periodic sweep so
+                // the digest write does not fire the watcher, land after the
+                // flag flips false, and clear the oscillation latch (the
+                // scheduled arms were previously unguarded - a self-write here
+                // was one of the paths that re-triggered the watcher).
+                applying.store(true, Ordering::Relaxed);
+                let intel_result = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts));
+                applying.store(false, Ordering::Relaxed);
+                if let Err(e) = intel_result {
                     log::error!("scheduled daily intel failed: {e}");
                 }
                 // Reschedule for next day
@@ -281,7 +289,13 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     output: None,
                     as_of: None,
                 };
-                if let Err(e) = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts)) {
+                // Wrap in the `applying` guard just like the periodic sweep (see
+                // the daily arm above) so the review write cannot re-trigger the
+                // watcher and clear the oscillation latch.
+                applying.store(true, Ordering::Relaxed);
+                let intel_result = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts));
+                applying.store(false, Ordering::Relaxed);
+                if let Err(e) = intel_result {
                     log::error!("scheduled weekly intel failed: {e}");
                 }
                 // Reschedule for next week

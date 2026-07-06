@@ -276,16 +276,16 @@ fn sweep_config_without_digest(assets_dir: &Path) -> crate::config::SweepConfig 
     }
 }
 
-/// Phase 0 repro (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`):
-/// scripted two-cycle reproduction of the intel<->sweep two-writer fight on a
-/// temp fixture vault. `intel::generate_daily_digest` unconditionally stamps
-/// `tags: [digest]` on the daily digest note every time it runs; `digest` is
-/// not in the canonical tag vocabulary, so `sweep::migrate` unconditionally
-/// strips it back to `tags: []` on the very next sweep. Neither side is
-/// individually buggy (both are idempotent in isolation) - the fight is two
-/// writers disagreeing about the note's tags forever.
+/// Phase 2 (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`):
+/// the inversion of the Phase 0 repro. Phase 0 pinned the intel<->sweep
+/// two-writer fight - intel stamped `tags: [digest]`, `sweep::migrate` stripped
+/// it, forever. Phase 2 ends the fight at its source: intel emits NO tag on the
+/// digest (`digest` is a `NoteType`, not a canonical tag) and is input-side
+/// idempotent. This test asserts the fight NO LONGER reproduces: the digest is
+/// tagless, `sweep::migrate` never touches it (criterion b: 0 for digest notes
+/// across two runs), and the second intel run is a byte-for-byte no-op.
 #[test]
-fn intel_sweep_two_writer_fight_reproduces_across_two_cycles() {
+fn intel_sweep_two_writer_fight_no_longer_reproduces() {
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");
     let vault_root = vault_dir.path();
     let assets_dir = tempfile::tempdir().expect("assets tmpdir");
@@ -304,49 +304,77 @@ fn intel_sweep_two_writer_fight_reproduces_across_two_cycles() {
         as_of: chrono::NaiveDate::from_ymd_opt(2026, 1, 1),
     };
 
-    // Cycle 1: intel writes the digest with the hardcoded, non-canonical tag.
+    // Cycle 1: intel writes the digest WITHOUT any tag.
     let report = crate::intel::run(vault_root, &config, &intel_opts).expect("intel cycle 1");
     let digest_path = report.output_path.clone();
     let after_intel_1 = std::fs::read_to_string(&digest_path).expect("read digest after intel cycle 1");
     assert!(
-        after_intel_1.contains("tags: [digest]"),
-        "cycle-1 intel must leave tags: [digest]; got:\n{after_intel_1}"
+        !after_intel_1.contains("tags:"),
+        "cycle-1 intel must emit NO tags on the digest; got:\n{after_intel_1}"
     );
-
-    // Cycle 1: sweep's canonical-tag migration strips the non-canonical tag.
-    let notes = crate::vault::scan_vault(vault_root, &config.vault).expect("scan after intel cycle 1");
-    crate::sweep::migrate(vault_root, &notes, &config.sweep, false).expect("sweep migrate cycle 1");
-    let after_sweep_1 = std::fs::read_to_string(&digest_path).expect("read digest after sweep cycle 1");
     assert!(
-        after_sweep_1.contains("tags: []"),
-        "cycle-1 sweep must rewrite to tags: []; got:\n{after_sweep_1}"
+        after_intel_1.contains("intel-input-hash:"),
+        "cycle-1 intel must persist the input hash; got:\n{after_intel_1}"
     );
 
-    // Cycle 2: intel regenerates the digest from scratch and re-stamps
-    // `tags: [digest]`, restoring exactly what cycle-1 sweep just stripped.
+    // Cycle 1: sweep's canonical-tag migration has nothing to strip - the
+    // digest is tagless, so it is NOT among the migrated paths (criterion b).
+    let notes = crate::vault::scan_vault(vault_root, &config.vault).expect("scan after intel cycle 1");
+    let migrated_1 = crate::sweep::migrate(vault_root, &notes, &config.sweep, false).expect("sweep migrate cycle 1");
+    let digest_rel = digest_path
+        .strip_prefix(vault_root)
+        .unwrap_or(&digest_path)
+        .to_string_lossy()
+        .to_string();
+    assert!(
+        !migrated_1.iter().any(|p| p == &digest_rel),
+        "sweep::migrate must report 0 for the digest note; migrated={migrated_1:?}"
+    );
+    let after_sweep_1 = std::fs::read_to_string(&digest_path).expect("read digest after sweep cycle 1");
+    assert_eq!(
+        after_intel_1, after_sweep_1,
+        "sweep must leave the tagless digest byte-for-byte unchanged"
+    );
+
+    // Cycle 2: intel sees unchanged inputs (persisted input-hash matches) and
+    // skips regeneration entirely - the digest is byte-for-byte identical, so
+    // there is nothing left for sweep to fight over.
     crate::intel::run(vault_root, &config, &intel_opts).expect("intel cycle 2");
     let after_intel_2 = std::fs::read_to_string(&digest_path).expect("read digest after intel cycle 2");
+    assert_eq!(
+        after_intel_1, after_intel_2,
+        "cycle-2 intel must be a no-op on unchanged inputs; got:\n{after_intel_2}"
+    );
+
+    // Cycle 2 sweep: still nothing to migrate.
+    let notes2 = crate::vault::scan_vault(vault_root, &config.vault).expect("scan after intel cycle 2");
+    let migrated_2 = crate::sweep::migrate(vault_root, &notes2, &config.sweep, false).expect("sweep migrate cycle 2");
     assert!(
-        after_intel_2.contains("tags: [digest]"),
-        "cycle-2 intel must restore tags: [digest]; got:\n{after_intel_2}"
+        !migrated_2.iter().any(|p| p == &digest_rel),
+        "sweep::migrate must report 0 for the digest note across two runs; migrated={migrated_2:?}"
     );
 }
 
 /// Phase 0/7 regression guard (design doc, "structural invariant"): two
 /// consecutive periodic sweeps over an unchanged, steady-state vault must
-/// eventually produce an EMPTY `SweepFingerprint`. On today's code (pre
-/// Phase 1/2) it never converges: the intel<->sweep two-writer fight above
-/// is a genuine, non-idempotent-across-cycles write, so the daemon's own
-/// `configured_actions` fingerprint is non-empty on every single cycle,
-/// forever - which is exactly what permanently latches `oscillating = true`
-/// in `start_watching`.
+/// eventually produce an EMPTY `SweepFingerprint`.
 ///
-/// This test PINS that current buggy (non-converging) behavior so it bites
-/// now. Phase 7 inverts the assertion (`!fp2.is_empty()` -> `fp2.is_empty()`)
-/// once Phases 1-2 land and re-purposes this test as the passing regression
-/// guard the design doc calls for.
+/// This fixture enables ONLY `intel` + `sweep` - the exact two writers whose
+/// fight Phase 2 ends. Before Phase 2 it never converged (intel re-stamped
+/// `tags: [digest]`, sweep re-stripped it, so cycle-2's fingerprint was always
+/// non-empty). As of Phase 2 the digest is tagless and intel is input-side
+/// idempotent, so the fight is gone and both cycles converge to an EMPTY
+/// fingerprint.
+///
+/// NOTE: the doc's Phase 7 plan schedules this inversion (`!fp2.is_empty()` ->
+/// `fp2.is_empty()`) after Phases 1-4, on the reasoning that the FULL
+/// action-set fixture (lint/link/etc.) only converges once Phase 4 reconciles
+/// the link matchers. This narrow intel+sweep-only fixture, however, converges
+/// as soon as Phase 2 removes the digest-tag fight - the mandated tag removal
+/// leaves nothing for cycle-2's fingerprint. So the inversion is forced here in
+/// Phase 2. Phase 7 still owns the full-action-set empty-fingerprint invariant.
 #[test]
-fn periodic_sweep_fingerprint_does_not_converge_pre_phase1_and_2() {
+fn periodic_sweep_fingerprint_converges_after_phase2() {
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");
     let vault_root = vault_dir.path();
     let assets_dir = tempfile::tempdir().expect("assets tmpdir");
@@ -365,21 +393,81 @@ fn periodic_sweep_fingerprint_does_not_converge_pre_phase1_and_2() {
         .actions
         .insert("sweep".to_string(), crate::config::DaemonAction { enable: true });
 
-    // First periodic sweep: baseline. (May be empty or non-empty depending on
-    // HashMap iteration order between "intel" and "sweep" - not asserted on.)
+    // First periodic sweep: baseline (writes the tagless digest once).
     let fp1 = configured_actions(vault_root, &config, &daemon_config, &[]);
-    // Second periodic sweep over the SAME, otherwise-unchanged vault: this is
-    // the "two consecutive steady-state sweeps" the design doc's acceptance
-    // criterion targets. It must be non-empty on current code regardless of
-    // action-iteration order: whichever of intel/sweep ran second in cycle 1
-    // leaves the digest note in a state the OTHER one rewrites in cycle 2.
+    // Second periodic sweep over the SAME, otherwise-unchanged vault: intel now
+    // skips regeneration (unchanged inputs) and the tagless digest gives sweep
+    // nothing to migrate, so the fingerprint is EMPTY - the daemon's oscillation
+    // detector will never latch on this steady state.
     let fp2 = configured_actions(vault_root, &config, &daemon_config, &[]);
 
     assert!(
-        !fp2.is_empty(),
-        "expected today's code to phantom-oscillate via the intel<->sweep digest-tag fight \
-         (fp1={fp1:?} fp2={fp2:?}); if this now passes, Phases 1-2 have landed - invert this \
-         assertion to `fp2.is_empty()` per the Phase 7 plan in \
-         docs/design/2026-07-05-cortex-daemon-oscillation-loop.md"
+        fp2.is_empty(),
+        "expected the intel<->sweep steady state to converge to an EMPTY fingerprint after Phase 2 \
+         (fp1={fp1:?} fp2={fp2:?})"
     );
+}
+
+/// Phase 2 success criterion (c) (design doc
+/// `2026-07-05-cortex-daemon-oscillation-loop.md`): a scheduled-intel write
+/// performed under the `applying` guard (as the daemon's daily/weekly arms now
+/// do) must NOT clear a latched `oscillating` state. The guard makes the
+/// watcher callback drop the write's own events while `applying` is true; once
+/// the flag flips false, no further event is delivered, so the latch - which is
+/// only cleared by a delivered watcher event - stays set.
+///
+/// This exercises the real `VaultWatcher` wired exactly as the daemon wires it
+/// (shared `applying` `AtomicBool`), a real `intel::run` write, and models the
+/// daemon's watcher arm (`oscillating = false` on a delivered `VaultChange`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_intel_write_under_applying_guard_does_not_clear_latch() {
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let vault_root = vault_dir.path();
+    let assets_dir = tempfile::tempdir().expect("assets tmpdir");
+    let config = Config {
+        sweep: sweep_config_without_digest(assets_dir.path()),
+        ..Config::default()
+    };
+
+    // Mirror the daemon: an `applying` flag shared with the watcher, and a
+    // latched oscillation state that a delivered watcher event would clear.
+    let applying = Arc::new(AtomicBool::new(false));
+    let watcher_config = WatcherConfig {
+        debounce_secs: 1,
+        ignore_dirs: config.vault.ignore.clone(),
+    };
+    let (watcher, mut watch_rx) =
+        VaultWatcher::start(vault_root, watcher_config, Some(Arc::clone(&applying))).expect("start watcher");
+    let mut oscillating = true;
+
+    let intel_opts = crate::opts::IntelOpts {
+        mode: crate::intel::IntelMode::Daily,
+        output: None,
+        // Empty-input branch: deterministic, no LLM/network call.
+        as_of: chrono::NaiveDate::from_ymd_opt(2026, 1, 1),
+    };
+
+    // Scheduled intel write, wrapped in the guard exactly like the daemon's
+    // daily/weekly arms. We hold `applying` true across the write AND briefly
+    // after so the write's inotify events flush to the (dropping) callback
+    // while the flag is still set - mirroring `block_in_place` holding the flag
+    // for the entire duration of `intel::run`.
+    applying.store(true, Ordering::Relaxed);
+    crate::intel::run(vault_root, &config, &intel_opts).expect("scheduled intel run");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    applying.store(false, Ordering::Relaxed);
+
+    // Wait past the debounce window: any event that had slipped through would
+    // be emitted now. Model the daemon's watcher arm - a delivered event clears
+    // the latch.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    while watch_rx.try_recv().is_ok() {
+        oscillating = false;
+    }
+
+    assert!(
+        oscillating,
+        "a scheduled-intel write under the `applying` guard must NOT clear the oscillation latch"
+    );
+    drop(watcher);
 }

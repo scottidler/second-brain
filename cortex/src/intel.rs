@@ -1,11 +1,112 @@
 use chrono::{Datelike, Local, NaiveDate};
 use eyre::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use crate::config::{Config, FabricConfig, IntelConfig, LlmConfig};
 use crate::opts::IntelOpts;
 use crate::vault::{Note, scan_vault};
 use vault::schema::NoteType;
+
+/// Byte separator folded between hashed fields so that concatenation can never
+/// alias (e.g. title "ab" + body "c" must not hash the same as title "a" +
+/// body "bc"). `0x1f` (ASCII unit separator) never appears in the vault's
+/// UTF-8 note text.
+const HASH_FIELD_SEP: u8 = 0x1f;
+
+/// Frontmatter key under which the input-side idempotency hash is persisted on
+/// the digest/review note itself. Read back at the start of generation; when
+/// the freshly-computed input hash matches, generation (and the LLM call) is
+/// skipped entirely.
+const INTEL_INPUT_HASH_KEY: &str = "intel-input-hash";
+
+/// Port for the one-shot LLM completion the intel digests need. Extracted so a
+/// test can inject a counting fake and assert that an unchanged-input run makes
+/// ZERO LLM calls (the input-side idempotency contract). Production threads the
+/// real Anthropic client (`AnthropicLlm`) through `run`.
+pub trait IntelLlm {
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        model: &str,
+        max_tokens: u32,
+        timeout_secs: u64,
+        api_key: &str,
+    ) -> Result<String>;
+}
+
+/// Production adapter over the Anthropic Messages API (`crate::llm::complete`).
+pub struct AnthropicLlm;
+
+impl IntelLlm for AnthropicLlm {
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        model: &str,
+        max_tokens: u32,
+        timeout_secs: u64,
+        api_key: &str,
+    ) -> Result<String> {
+        crate::llm::complete(system, user, model, max_tokens, timeout_secs, api_key)
+    }
+}
+
+/// Stable per-note contribution to the input-side idempotency hash. Captures
+/// every field the digest/review derives from (path, date, type, tags, title,
+/// body) so any change that would alter the rendered note also changes the key.
+fn note_signature(note: &Note) -> String {
+    let sep = HASH_FIELD_SEP as char;
+    format!(
+        "{path}{sep}{date}{sep}{ntype}{sep}{tags}{sep}{title}{sep}{body}",
+        path = note.path.display(),
+        date = note.frontmatter.date.as_deref().unwrap_or(""),
+        ntype = note.frontmatter.note_type.as_deref().unwrap_or(""),
+        tags = note.frontmatter.tags.as_ref().map(|t| t.join(",")).unwrap_or_default(),
+        title = note.frontmatter.title.as_deref().unwrap_or(""),
+        body = note.body,
+    )
+}
+
+/// Compute the input-side idempotency key: a stable SHA-256 over the input note
+/// set plus the extra scalars (model id + system prompt, and for weekly the
+/// total vault size). Notes are sorted by their signature so scan order cannot
+/// perturb the key. SHA-256 is used deliberately (NOT `DefaultHasher`, which is
+/// not stable across Rust releases and would silently invalidate every
+/// persisted hash on a toolchain bump).
+fn compute_input_hash(notes: &[&Note], extra: &[&str]) -> String {
+    log::debug!(
+        "compute_input_hash: note_count={} extra_count={}",
+        notes.len(),
+        extra.len()
+    );
+    let mut hasher = Sha256::new();
+    for e in extra {
+        hasher.update(e.as_bytes());
+        hasher.update([HASH_FIELD_SEP]);
+    }
+    let mut parts: Vec<String> = notes.iter().map(|n| note_signature(n)).collect();
+    parts.sort();
+    for part in &parts {
+        hasher.update(part.as_bytes());
+        hasher.update([HASH_FIELD_SEP]);
+    }
+    hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Read the persisted `intel-input-hash` off an existing digest/review note.
+/// Returns `None` when the file is absent, unparseable, or carries no such key
+/// (a fresh note, or one written before this field existed) - all of which
+/// correctly force regeneration.
+fn persisted_input_hash(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let (frontmatter, _body) = vault::frontmatter::parse_frontmatter(&content).ok()?;
+    match frontmatter.extra.get(INTEL_INPUT_HASH_KEY) {
+        Some(serde_yaml::Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
 
 /// Which intel artifact a single `run`/`generate` invocation produces.
 /// Daily and weekly are exclusive at the report level; if a caller wants
@@ -39,6 +140,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<Intel
         &config.llm,
         &config.fabric,
         opts,
+        &AnthropicLlm,
     )
 }
 
@@ -109,17 +211,18 @@ nothing else; do not copy any structure from the notes.";
 
 /// Generate intelligence output for the requested mode. Returns the path
 /// that was written so sb can announce it.
-pub fn generate(
+pub fn generate<L: IntelLlm>(
     vault_root: &Path,
     notes: &[Note],
     config: &IntelConfig,
     llm_config: &LlmConfig,
     fabric: &FabricConfig,
     opts: &IntelOpts,
+    llm: &L,
 ) -> Result<IntelReport> {
     let output_path = match opts.mode {
-        IntelMode::Daily => generate_daily_digest(vault_root, notes, config, llm_config, opts)?,
-        IntelMode::Weekly => generate_weekly_review(vault_root, notes, config, llm_config, fabric, opts)?,
+        IntelMode::Daily => generate_daily_digest(vault_root, notes, config, llm_config, opts, llm)?,
+        IntelMode::Weekly => generate_weekly_review(vault_root, notes, config, llm_config, fabric, opts, llm)?,
     };
     Ok(IntelReport {
         mode: opts.mode,
@@ -201,12 +304,13 @@ fn build_note_callout(recent_notes: &[&Note]) -> String {
 ///
 /// Collects notes from the previous day (yesterday's ingestions) and synthesizes
 /// themes, highlights, and breadcrumbs via the Anthropic API.
-fn generate_daily_digest(
+fn generate_daily_digest<L: IntelLlm>(
     vault_root: &Path,
     notes: &[Note],
     config: &IntelConfig,
     llm_config: &LlmConfig,
     opts: &IntelOpts,
+    llm: &L,
 ) -> Result<PathBuf> {
     let today_date = opts.as_of.unwrap_or_else(|| Local::now().date_naive());
     let yesterday = today_date - chrono::Duration::days(1);
@@ -226,10 +330,31 @@ fn generate_daily_digest(
         })
         .collect();
 
-    // Build frontmatter + heading
+    let model = config.model.as_deref().unwrap_or(&llm_config.model);
+    let output_path = resolve_output_path(vault_root, config, opts, &format!("daily/{today}.md"));
+
+    // Input-side idempotency: if the exact input set (notes + model + prompt)
+    // that produced the existing digest is unchanged, skip regeneration
+    // entirely - NO LLM call, NO write. A post-render byte compare cannot
+    // converge because the LLM output spliced into the body is nondeterministic;
+    // the key is computed BEFORE the call.
+    let input_hash = compute_input_hash(&recent_notes, &[model, DAILY_SYSTEM_PROMPT]);
+    if persisted_input_hash(&output_path).as_deref() == Some(input_hash.as_str()) {
+        log::info!(
+            "daily digest inputs unchanged (input-hash={input_hash}); skipping regeneration (no LLM call, no write): {}",
+            output_path.display()
+        );
+        return Ok(output_path);
+    }
+
+    // Build frontmatter + heading. NO `tags:` are emitted: `digest` is a
+    // `NoteType` variant, not a canonical tag; stamping it into `tags:` was a
+    // category error that `sweep::migrate` stripped every cycle (the
+    // intel<->sweep two-writer fight). The input-hash rides frontmatter so the
+    // next run can detect unchanged inputs.
     let mut digest = String::new();
     digest.push_str(&format!(
-        "---\ntitle: Daily Digest {today}\ndate: {today}\ntype: {}\ntags: [digest]\n---\n\n",
+        "---\ntitle: Daily Digest {today}\ndate: {today}\ntype: {}\n{INTEL_INPUT_HASH_KEY}: {input_hash}\n---\n\n",
         NoteType::Digest.as_str()
     ));
     digest.push_str(&format!("# Daily Digest - {today}\n\n"));
@@ -238,11 +363,9 @@ fn generate_daily_digest(
         digest.push_str(&format!("No notes ingested on {yesterday_str}.\n"));
     } else {
         // Try LLM synthesis
-        let model = config.model.as_deref().unwrap_or(&llm_config.model);
-
         let user_prompt = build_daily_prompt(&recent_notes, config.max_input_tokens);
 
-        match crate::llm::complete(
+        match llm.complete(
             DAILY_SYSTEM_PROMPT,
             &user_prompt,
             model,
@@ -266,8 +389,6 @@ fn generate_daily_digest(
         digest.push_str(&build_note_callout(&recent_notes));
     }
 
-    // Write to output path
-    let output_path = resolve_output_path(vault_root, config, opts, &format!("daily/{today}.md"));
     write_intel_output(&output_path, &digest)?;
 
     log::info!("generated daily digest: {}", output_path.display());
@@ -275,13 +396,14 @@ fn generate_daily_digest(
 }
 
 /// Generate a weekly review note.
-fn generate_weekly_review(
+fn generate_weekly_review<L: IntelLlm>(
     vault_root: &Path,
     notes: &[Note],
     config: &IntelConfig,
     llm_config: &LlmConfig,
     fabric: &FabricConfig,
     opts: &IntelOpts,
+    llm: &L,
 ) -> Result<PathBuf> {
     let today = opts.as_of.unwrap_or_else(|| Local::now().date_naive());
     let week_start = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
@@ -300,6 +422,22 @@ fn generate_weekly_review(
                 .is_some_and(|d| d >= week_start && d <= today)
         })
         .collect();
+
+    let model = config.model.as_deref().unwrap_or(&llm_config.model);
+    let output_path = resolve_output_path(vault_root, config, opts, &format!("weekly/{week_str}.md"));
+
+    // Input-side idempotency (see `generate_daily_digest`). The review also
+    // renders the total vault size, so `notes.len()` folds into the key even
+    // though only `week_notes` feed the LLM.
+    let total_notes = notes.len().to_string();
+    let input_hash = compute_input_hash(&week_notes, &[model, WEEKLY_SYSTEM_PROMPT, &total_notes]);
+    if persisted_input_hash(&output_path).as_deref() == Some(input_hash.as_str()) {
+        log::info!(
+            "weekly review inputs unchanged (input-hash={input_hash}); skipping regeneration (no LLM call, no write): {}",
+            output_path.display()
+        );
+        return Ok(output_path);
+    }
 
     // Group by type
     let mut by_type: std::collections::HashMap<&str, Vec<&Note>> = std::collections::HashMap::new();
@@ -324,10 +462,12 @@ fn generate_weekly_review(
 
     let today_str = today.format("%Y-%m-%d").to_string();
 
-    // Generate review
+    // Generate review. NO `tags:` are emitted: `review` is a `NoteType`
+    // variant, not a canonical tag; the input-hash rides frontmatter for
+    // idempotency (see `generate_daily_digest`).
     let mut review = String::new();
     review.push_str(&format!(
-        "---\ntitle: Weekly Review {week_str}\ndate: {today_str}\ntype: {}\ntags: [review]\n---\n\n",
+        "---\ntitle: Weekly Review {week_str}\ndate: {today_str}\ntype: {}\n{INTEL_INPUT_HASH_KEY}: {input_hash}\n---\n\n",
         NoteType::Review.as_str()
     ));
     review.push_str(&format!("# Weekly Review - Week of {week_str}\n\n"));
@@ -341,7 +481,6 @@ fn generate_weekly_review(
     // Rich cross-week synthesis, placed up top right after the stats so the
     // reader gets the narrative before the raw by-type/by-tag listings.
     if !week_notes.is_empty() {
-        let model = config.model.as_deref().unwrap_or(&llm_config.model);
         let concatenated: String = week_notes
             .iter()
             .map(|n| {
@@ -351,7 +490,7 @@ fn generate_weekly_review(
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
         let user_prompt = crate::llm::truncate_input(&concatenated, config.max_input_tokens).to_string();
-        match crate::llm::complete(
+        match llm.complete(
             WEEKLY_SYSTEM_PROMPT,
             &user_prompt,
             model,
@@ -408,7 +547,6 @@ fn generate_weekly_review(
         review.push('\n');
     }
 
-    let output_path = resolve_output_path(vault_root, config, opts, &format!("weekly/{week_str}.md"));
     write_intel_output(&output_path, &review)?;
 
     log::info!("generated weekly review: {}", output_path.display());

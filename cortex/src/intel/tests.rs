@@ -1,5 +1,152 @@
 use super::*;
 use crate::testutil::{NoteBuilder, TestVault};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Fake `IntelLlm` that counts `complete` calls and returns a fixed, non-empty
+/// synthesis. Lets the idempotency test assert that an unchanged-input second
+/// run makes ZERO LLM calls (the core Phase 2 contract).
+struct CountingLlm {
+    calls: AtomicUsize,
+    reply: String,
+}
+
+impl CountingLlm {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            reply: "## Themes\nSynthetic reply.\n\n## Highlights\n- x\n\n## Breadcrumbs\n- y".to_string(),
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+}
+
+impl IntelLlm for CountingLlm {
+    fn complete(
+        &self,
+        _system: &str,
+        _user: &str,
+        _model: &str,
+        _max_tokens: u32,
+        _timeout_secs: u64,
+        _api_key: &str,
+    ) -> Result<String> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Ok(self.reply.clone())
+    }
+}
+
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`, Phase 2 success
+/// criterion (a): a second `generate` on UNCHANGED inputs makes ZERO LLM calls
+/// and writes ZERO files. The input-side idempotency key (hash of input notes +
+/// model + prompt) is persisted as `intel-input-hash` frontmatter and read back
+/// before the LLM call; when it matches, generation is skipped entirely.
+#[test]
+fn daily_digest_second_run_on_unchanged_inputs_makes_zero_llm_calls_and_zero_writes() {
+    let v = TestVault::new();
+    let yesterday = Local::now().date_naive() - chrono::Duration::days(1);
+    let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
+    v.add_note(
+        "yesterday-note.md",
+        &format!(
+            "---\ntitle: Yesterday Note\ndate: {yesterday_str}\ntype: note\ndomain: tech\norigin: authored\ntags: [rust]\n---\nSome content from yesterday.\n"
+        ),
+    );
+    let notes = v.scan();
+    let config = v.config().actions.intel;
+    let llm_config = v.config().llm;
+    let fabric = FabricConfig::default();
+    let opts = IntelOpts {
+        mode: IntelMode::Daily,
+        output: None,
+        as_of: None,
+    };
+    let llm = CountingLlm::new();
+
+    // First run: notes present -> exactly one LLM call, digest written.
+    let report = generate(v.root(), &notes, &config, &llm_config, &fabric, &opts, &llm).expect("generate 1");
+    assert_eq!(llm.count(), 1, "first run must make exactly one LLM call");
+    let digest_path = report.output_path.clone();
+    assert!(digest_path.exists(), "first run must write the digest");
+    let after_1 = std::fs::read_to_string(&digest_path).expect("read after run 1");
+    assert!(
+        after_1.contains(&format!("{INTEL_INPUT_HASH_KEY}:")),
+        "digest must persist the input hash: {after_1}"
+    );
+    assert!(
+        !after_1.contains("tags:"),
+        "digest must emit NO tags (digest is a NoteType, not a tag): {after_1}"
+    );
+    let mtime_1 = std::fs::metadata(&digest_path)
+        .expect("meta 1")
+        .modified()
+        .expect("mtime 1");
+
+    // Ensure any rewrite would be observable as a distinct mtime.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // Second run: identical inputs -> ZERO additional LLM calls, ZERO writes.
+    generate(v.root(), &notes, &config, &llm_config, &fabric, &opts, &llm).expect("generate 2");
+    assert_eq!(
+        llm.count(),
+        1,
+        "second run on unchanged inputs must make ZERO additional LLM calls"
+    );
+    let mtime_2 = std::fs::metadata(&digest_path)
+        .expect("meta 2")
+        .modified()
+        .expect("mtime 2");
+    assert_eq!(
+        mtime_1, mtime_2,
+        "second run on unchanged inputs must NOT rewrite the digest file"
+    );
+}
+
+/// Complements criterion (a): when the input note set changes, the digest DOES
+/// regenerate (a new LLM call fires). Proves the idempotency key is
+/// input-sensitive, not a blanket skip.
+#[test]
+fn daily_digest_regenerates_when_inputs_change() {
+    let v = TestVault::new();
+    let yesterday = Local::now().date_naive() - chrono::Duration::days(1);
+    let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
+    v.add_note(
+        "yesterday-note.md",
+        &format!(
+            "---\ntitle: Yesterday Note\ndate: {yesterday_str}\ntype: note\ndomain: tech\norigin: authored\ntags: [rust]\n---\nSome content from yesterday.\n"
+        ),
+    );
+    let config = v.config().actions.intel;
+    let llm_config = v.config().llm;
+    let fabric = FabricConfig::default();
+    let opts = IntelOpts {
+        mode: IntelMode::Daily,
+        output: None,
+        as_of: None,
+    };
+    let llm = CountingLlm::new();
+
+    let notes1 = v.scan();
+    generate(v.root(), &notes1, &config, &llm_config, &fabric, &opts, &llm).expect("generate 1");
+    assert_eq!(llm.count(), 1);
+
+    // Change the input set: add another note dated yesterday.
+    v.add_note(
+        "another-yesterday-note.md",
+        &format!(
+            "---\ntitle: Another Note\ndate: {yesterday_str}\ntype: note\ndomain: tech\norigin: authored\ntags: [python]\n---\nDifferent content.\n"
+        ),
+    );
+    let notes2 = v.scan();
+    generate(v.root(), &notes2, &config, &llm_config, &fabric, &opts, &llm).expect("generate 2");
+    assert_eq!(
+        llm.count(),
+        2,
+        "changed inputs must trigger regeneration (a fresh LLM call)"
+    );
+}
 
 #[test]
 fn test_daily_digest_on_vault() {
@@ -14,7 +161,7 @@ fn test_daily_digest_on_vault() {
     };
 
     let fabric = FabricConfig::default();
-    generate(v.root(), &notes, &config, &llm_config, &fabric, &opts).expect("generate");
+    generate(v.root(), &notes, &config, &llm_config, &fabric, &opts, &AnthropicLlm).expect("generate");
 
     let today = Local::now().format("%Y-%m-%d").to_string();
     let digest_path = v.root().join("notes/ai/daily").join(format!("{today}.md"));
@@ -41,7 +188,7 @@ fn test_weekly_review_on_vault() {
     };
 
     let fabric = FabricConfig::default();
-    generate(v.root(), &notes, &config, &llm_config, &fabric, &opts).expect("generate");
+    generate(v.root(), &notes, &config, &llm_config, &fabric, &opts, &AnthropicLlm).expect("generate");
 
     let output_dir = v.root().join("notes/ai/weekly");
     assert!(output_dir.exists());
@@ -152,7 +299,7 @@ fn test_daily_digest_fallback_on_llm_failure() {
     };
 
     let fabric = FabricConfig::default();
-    generate(v.root(), &notes, &config, &llm_config, &fabric, &opts).expect("generate");
+    generate(v.root(), &notes, &config, &llm_config, &fabric, &opts, &AnthropicLlm).expect("generate");
 
     let today = Local::now().format("%Y-%m-%d").to_string();
     let digest_path = v.root().join("notes/ai/daily").join(format!("{today}.md"));
