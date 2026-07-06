@@ -221,3 +221,128 @@ async fn scan_vault_inside_block_in_place_does_not_panic() {
         .expect("scan_vault should succeed");
     assert_eq!(notes.len(), 2, "expected 2 notes from tempdir scan");
 }
+
+/// Build a `SweepConfig` whose canonical vocabulary + tag mapping do NOT
+/// contain `digest` (or anything else) - mirrors the real
+/// `config/canonical-tags.yml` / `tag-mapping.yml` state the design doc
+/// documents (no `digest` entry anywhere), so `canonical::filter_and_cap`
+/// drops the tag `intel::generate_daily_digest` hardcodes.
+fn sweep_config_without_digest(assets_dir: &Path) -> crate::config::SweepConfig {
+    std::fs::write(assets_dir.join("canonical-tags.yml"), "tags: {}\n").expect("write canonical-tags.yml");
+    std::fs::write(assets_dir.join("tag-mapping.yml"), "{}\n").expect("write tag-mapping.yml");
+    std::fs::write(assets_dir.join("tag-proposals.yml"), "proposals: []\n").expect("write tag-proposals.yml");
+    crate::config::SweepConfig {
+        canonical_path: assets_dir.join("canonical-tags.yml"),
+        mapping_path: assets_dir.join("tag-mapping.yml"),
+        proposals_path: assets_dir.join("tag-proposals.yml"),
+        ..crate::config::SweepConfig::default()
+    }
+}
+
+/// Phase 0 repro (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`):
+/// scripted two-cycle reproduction of the intel<->sweep two-writer fight on a
+/// temp fixture vault. `intel::generate_daily_digest` unconditionally stamps
+/// `tags: [digest]` on the daily digest note every time it runs; `digest` is
+/// not in the canonical tag vocabulary, so `sweep::migrate` unconditionally
+/// strips it back to `tags: []` on the very next sweep. Neither side is
+/// individually buggy (both are idempotent in isolation) - the fight is two
+/// writers disagreeing about the note's tags forever.
+#[test]
+fn intel_sweep_two_writer_fight_reproduces_across_two_cycles() {
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let vault_root = vault_dir.path();
+    let assets_dir = tempfile::tempdir().expect("assets tmpdir");
+
+    let config = Config {
+        sweep: sweep_config_without_digest(assets_dir.path()),
+        ..Config::default()
+    };
+
+    let intel_opts = crate::opts::IntelOpts {
+        mode: crate::intel::IntelMode::Daily,
+        output: None,
+        // Fixed date with no ingested notes dated "yesterday" relative to it,
+        // so `generate_daily_digest` takes the empty-input branch and never
+        // calls the LLM (deterministic, network-free).
+        as_of: chrono::NaiveDate::from_ymd_opt(2026, 1, 1),
+    };
+
+    // Cycle 1: intel writes the digest with the hardcoded, non-canonical tag.
+    let report = crate::intel::run(vault_root, &config, &intel_opts).expect("intel cycle 1");
+    let digest_path = report.output_path.clone();
+    let after_intel_1 = std::fs::read_to_string(&digest_path).expect("read digest after intel cycle 1");
+    assert!(
+        after_intel_1.contains("tags: [digest]"),
+        "cycle-1 intel must leave tags: [digest]; got:\n{after_intel_1}"
+    );
+
+    // Cycle 1: sweep's canonical-tag migration strips the non-canonical tag.
+    let notes = crate::vault::scan_vault(vault_root, &config.vault).expect("scan after intel cycle 1");
+    crate::sweep::migrate(vault_root, &notes, &config.sweep, false).expect("sweep migrate cycle 1");
+    let after_sweep_1 = std::fs::read_to_string(&digest_path).expect("read digest after sweep cycle 1");
+    assert!(
+        after_sweep_1.contains("tags: []"),
+        "cycle-1 sweep must rewrite to tags: []; got:\n{after_sweep_1}"
+    );
+
+    // Cycle 2: intel regenerates the digest from scratch and re-stamps
+    // `tags: [digest]`, restoring exactly what cycle-1 sweep just stripped.
+    crate::intel::run(vault_root, &config, &intel_opts).expect("intel cycle 2");
+    let after_intel_2 = std::fs::read_to_string(&digest_path).expect("read digest after intel cycle 2");
+    assert!(
+        after_intel_2.contains("tags: [digest]"),
+        "cycle-2 intel must restore tags: [digest]; got:\n{after_intel_2}"
+    );
+}
+
+/// Phase 0/7 regression guard (design doc, "structural invariant"): two
+/// consecutive periodic sweeps over an unchanged, steady-state vault must
+/// eventually produce an EMPTY `SweepFingerprint`. On today's code (pre
+/// Phase 1/2) it never converges: the intel<->sweep two-writer fight above
+/// is a genuine, non-idempotent-across-cycles write, so the daemon's own
+/// `configured_actions` fingerprint is non-empty on every single cycle,
+/// forever - which is exactly what permanently latches `oscillating = true`
+/// in `start_watching`.
+///
+/// This test PINS that current buggy (non-converging) behavior so it bites
+/// now. Phase 7 inverts the assertion (`!fp2.is_empty()` -> `fp2.is_empty()`)
+/// once Phases 1-2 land and re-purposes this test as the passing regression
+/// guard the design doc calls for.
+#[test]
+fn periodic_sweep_fingerprint_does_not_converge_pre_phase1_and_2() {
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let vault_root = vault_dir.path();
+    let assets_dir = tempfile::tempdir().expect("assets tmpdir");
+
+    let config = Config {
+        sweep: sweep_config_without_digest(assets_dir.path()),
+        ..Config::default()
+    };
+
+    let mut daemon_config = DaemonConfig::default();
+    daemon_config.actions.clear();
+    daemon_config
+        .actions
+        .insert("intel".to_string(), crate::config::DaemonAction { enable: true });
+    daemon_config
+        .actions
+        .insert("sweep".to_string(), crate::config::DaemonAction { enable: true });
+
+    // First periodic sweep: baseline. (May be empty or non-empty depending on
+    // HashMap iteration order between "intel" and "sweep" - not asserted on.)
+    let fp1 = configured_actions(vault_root, &config, &daemon_config, &[]);
+    // Second periodic sweep over the SAME, otherwise-unchanged vault: this is
+    // the "two consecutive steady-state sweeps" the design doc's acceptance
+    // criterion targets. It must be non-empty on current code regardless of
+    // action-iteration order: whichever of intel/sweep ran second in cycle 1
+    // leaves the digest note in a state the OTHER one rewrites in cycle 2.
+    let fp2 = configured_actions(vault_root, &config, &daemon_config, &[]);
+
+    assert!(
+        !fp2.is_empty(),
+        "expected today's code to phantom-oscillate via the intel<->sweep digest-tag fight \
+         (fp1={fp1:?} fp2={fp2:?}); if this now passes, Phases 1-2 have landed - invert this \
+         assertion to `fp2.is_empty()` per the Phase 7 plan in \
+         docs/design/2026-07-05-cortex-daemon-oscillation-loop.md"
+    );
+}
