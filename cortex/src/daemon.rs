@@ -822,20 +822,27 @@ where
     fingerprint
 }
 
-/// Install a systemd user service for the daemon. Returns the lines sb
-/// should print (paths written, follow-up systemctl commands).
-fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<String>> {
-    let mut lines = Vec::new();
-    let service_dir = vault::paths::xdg_config_dir()
-        .expect("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
-        .join("systemd")
-        .join("user");
+/// Render the `cortex.service` unit content. Pure - no filesystem or
+/// environment access beyond the args given - so `install_systemd_service`
+/// and its tests share one seam: tests assert on the returned string instead
+/// of touching the real `~/.config/systemd/user/`.
+///
+/// Emits the secret-bootstrap `ExecStartPre` + `EnvironmentFile` and the
+/// rayon cap from `config.daemon` when configured (2026-07-05
+/// cortex-daemon-oscillation-loop design doc, Phase 6: the live unit had
+/// drifted to carry both by hand because this template omitted them). Both
+/// are optional - a host with neither still gets a valid, complete unit.
+fn render_systemd_unit(home: &Path, binary: &Path, vault_root: &Path, config: &Config) -> String {
+    log::debug!(
+        "render_systemd_unit: vault_root={} log_level={} rayon_threads={} env_bootstrap={}",
+        vault_root.display(),
+        config.log_level,
+        config.daemon.rayon_threads,
+        config.daemon.env_bootstrap.is_some(),
+    );
 
-    std::fs::create_dir_all(&service_dir).context("failed to create systemd user dir")?;
-
-    let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
-    let binary = std::env::current_exe().context("failed to get current executable path")?;
     let vault = vault_root.display();
+    let log_level = &config.log_level;
 
     let mut config_flag = String::new();
     let config_path = vault::paths::cortex_config();
@@ -843,17 +850,39 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<Str
         config_flag = format!(" --config {}", config_path.display());
     }
 
-    let log_level = &config.log_level;
-
-    let service = format!(
+    let mut service = String::from(
         "[Unit]\n\
          Description=cortex - Obsidian vault governance daemon (second-brain)\n\
          After=default.target\n\
          \n\
          [Service]\n\
-         Type=simple\n\
-         Environment=\"PATH={home}/.local/bin:{home}/.cargo/bin:{home}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n\
-         ExecStart={binary} cortex{config_flag} --vault {vault} --log-level {log_level} daemon --start\n\
+         Type=simple\n",
+    );
+
+    if let Some(bootstrap) = &config.daemon.env_bootstrap {
+        service.push_str(&format!(
+            "ExecStartPre=/bin/sh -c '{command} > {env_file}'\n",
+            command = bootstrap.command,
+            env_file = bootstrap.env_file.display(),
+        ));
+        service.push_str(&format!("EnvironmentFile=-{}\n", bootstrap.env_file.display()));
+    }
+
+    service.push_str(&format!(
+        "Environment=\"PATH={home}/.local/bin:{home}/.cargo/bin:{home}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n",
+        home = home.display(),
+    ));
+
+    if config.daemon.rayon_threads > 0 {
+        service.push_str("# Cap rayon's global thread pool (candle's gemm degree reads the same var)\n");
+        service.push_str(&format!(
+            "Environment=\"RAYON_NUM_THREADS={}\"\n",
+            config.daemon.rayon_threads
+        ));
+    }
+
+    service.push_str(&format!(
+        "ExecStart={binary} cortex{config_flag} --vault {vault} --log-level {log_level} daemon --start\n\
          Restart=on-failure\n\
          RestartSec=5\n\
          WorkingDirectory={home}\n\
@@ -867,13 +896,34 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<Str
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        home = home.display(),
         binary = binary.display(),
-    );
+        home = home.display(),
+    ));
+
+    service
+}
+
+/// Install a systemd user service for the daemon. Returns the lines sb
+/// should print (paths written, follow-up systemctl commands).
+fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<String>> {
+    log::debug!("install_systemd_service: vault_root={}", vault_root.display());
+    let mut lines = Vec::new();
+    let service_dir = vault::paths::xdg_config_dir()
+        .expect("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
+        .join("systemd")
+        .join("user");
+
+    std::fs::create_dir_all(&service_dir).context("failed to create systemd user dir")?;
+
+    let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
+    let binary = std::env::current_exe().context("failed to get current executable path")?;
+
+    let service = render_systemd_unit(&home, &binary, vault_root, config);
 
     let service_path = service_dir.join("cortex.service");
     std::fs::write(&service_path, &service)?;
     lines.push(format!("Installed: {}", service_path.display()));
+    log::debug!("install_systemd_service: wrote unit -> {}", service_path.display());
 
     // NOTE: no cortex-daily / cortex-weekly intel timers are installed. The
     // long-running daemon (`daemon --start`) schedules daily/weekly intel

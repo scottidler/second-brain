@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::DaemonConfig;
+use crate::config::{Config, DaemonConfig, EnvBootstrapConfig};
 use chrono::Datelike;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -48,6 +48,31 @@ fn test_daemon_config_deserialize_actions() {
     assert!(!config.is_enabled("link"));
     assert!(!config.is_enabled("nonexistent"));
     assert_eq!(config.actions.len(), 3);
+}
+
+#[test]
+fn test_daemon_config_default_omits_rayon_and_bootstrap() {
+    // Fail-closed defaults: a host with no explicit config gets no rayon cap
+    // and no secret bootstrap, never a value baked into Rust source.
+    let config = DaemonConfig::default();
+    assert_eq!(config.rayon_threads, 0);
+    assert!(config.env_bootstrap.is_none());
+}
+
+#[test]
+fn test_daemon_config_deserialize_rayon_and_bootstrap() {
+    let yaml = "rayon-threads: 8\n\
+                env-bootstrap:\n  \
+                command: manifest age decrypt /path/.secrets -f env\n  \
+                env-file: /run/user/1000/cortex.env\n";
+    let config: DaemonConfig = serde_yaml::from_str(yaml).expect("deserialize");
+    assert_eq!(config.rayon_threads, 8);
+    let bootstrap = config.env_bootstrap.expect("env-bootstrap must deserialize");
+    assert_eq!(bootstrap.command, "manifest age decrypt /path/.secrets -f env");
+    assert_eq!(
+        bootstrap.env_file,
+        std::path::PathBuf::from("/run/user/1000/cortex.env")
+    );
 }
 
 #[test]
@@ -587,4 +612,123 @@ fn configured_actions_rescans_once_after_classify_promotion() {
         "expected exactly 2 scan_vault calls: the initial scan + one rescan boundary after classify's promotion \
          (fingerprint={fingerprint:?})"
     );
+}
+
+/// Success criterion (a): a config with the secret bootstrap, rayon cap, and
+/// `log-level: info` set must render a unit string containing every one of
+/// those directives plus `--log-level info`.
+#[test]
+fn test_render_systemd_unit_includes_bootstrap_rayon_and_log_level() {
+    let config = Config {
+        log_level: "info".to_string(),
+        daemon: DaemonConfig {
+            rayon_threads: 8,
+            env_bootstrap: Some(EnvBootstrapConfig {
+                command: "manifest age decrypt /home/user/secrets/.secrets -f env".to_string(),
+                env_file: std::path::PathBuf::from("/run/user/1000/cortex.env"),
+            }),
+            ..DaemonConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let home = std::path::Path::new("/home/user");
+    let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
+    let vault_root = std::path::Path::new("/home/user/vault");
+
+    let unit = render_systemd_unit(home, binary, vault_root, &config);
+
+    assert!(
+        unit.contains(
+            "ExecStartPre=/bin/sh -c 'manifest age decrypt /home/user/secrets/.secrets -f env > /run/user/1000/cortex.env'"
+        ),
+        "missing secret ExecStartPre:\n{unit}"
+    );
+    assert!(
+        unit.contains("EnvironmentFile=-/run/user/1000/cortex.env"),
+        "missing EnvironmentFile:\n{unit}"
+    );
+    assert!(
+        unit.contains("Environment=\"RAYON_NUM_THREADS=8\""),
+        "missing rayon cap:\n{unit}"
+    );
+    assert!(unit.contains("--log-level info"), "missing --log-level info:\n{unit}");
+}
+
+/// Success criterion (b), the "no debug" half: with `log-level: info`
+/// configured, the generated unit must never contain `--log-level debug`.
+#[test]
+fn test_render_systemd_unit_excludes_debug_when_config_is_info() {
+    // Config::default() already carries log_level="info" (config.rs);
+    // asserted explicitly here rather than reassigned, to avoid a
+    // no-op field-reassign-with-default clippy hit.
+    let config = Config::default();
+    assert_eq!(config.log_level, "info");
+
+    let home = std::path::Path::new("/home/user");
+    let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
+    let vault_root = std::path::Path::new("/home/user/vault");
+
+    let unit = render_systemd_unit(home, binary, vault_root, &config);
+
+    assert!(
+        !unit.contains("--log-level debug"),
+        "unit must not contain --log-level debug when config.log_level=info:\n{unit}"
+    );
+    assert!(unit.contains("--log-level info"), "expected --log-level info:\n{unit}");
+}
+
+/// Success criterion (b), the "still there when configured" half: bootstrap
+/// and rayon cap survive even with a non-default log level.
+#[test]
+fn test_render_systemd_unit_keeps_bootstrap_and_rayon_regardless_of_log_level() {
+    let config = Config {
+        log_level: "warn".to_string(),
+        daemon: DaemonConfig {
+            rayon_threads: 4,
+            env_bootstrap: Some(EnvBootstrapConfig {
+                command: "manifest age decrypt /path/.secrets -f env".to_string(),
+                env_file: std::path::PathBuf::from("/run/user/1000/cortex.env"),
+            }),
+            ..DaemonConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let home = std::path::Path::new("/home/user");
+    let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
+    let vault_root = std::path::Path::new("/home/user/vault");
+
+    let unit = render_systemd_unit(home, binary, vault_root, &config);
+
+    assert!(
+        unit.contains(
+            "ExecStartPre=/bin/sh -c 'manifest age decrypt /path/.secrets -f env > /run/user/1000/cortex.env'"
+        )
+    );
+    assert!(unit.contains("EnvironmentFile=-/run/user/1000/cortex.env"));
+    assert!(unit.contains("Environment=\"RAYON_NUM_THREADS=4\""));
+}
+
+/// Absent config (no rayon cap, no bootstrap) must still render a valid unit
+/// with neither directive - environments with no secret bootstrap are not
+/// left with a broken/incomplete unit.
+#[test]
+fn test_render_systemd_unit_omits_bootstrap_and_rayon_when_unset() {
+    let config = Config::default();
+
+    let home = std::path::Path::new("/home/user");
+    let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
+    let vault_root = std::path::Path::new("/home/user/vault");
+
+    let unit = render_systemd_unit(home, binary, vault_root, &config);
+
+    assert!(!unit.contains("ExecStartPre"), "no bootstrap configured:\n{unit}");
+    assert!(!unit.contains("EnvironmentFile"), "no bootstrap configured:\n{unit}");
+    assert!(!unit.contains("RAYON_NUM_THREADS"), "no rayon cap configured:\n{unit}");
+    // Still a complete, well-formed unit.
+    assert!(unit.contains("[Unit]"));
+    assert!(unit.contains("[Service]"));
+    assert!(unit.contains("[Install]"));
+    assert!(unit.contains("ExecStart="));
 }

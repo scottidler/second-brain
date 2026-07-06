@@ -52,6 +52,21 @@ graph:
 daemon:
   embed-interval-secs: 600
   sweep-interval-secs: 3600
+  # Rayon thread-pool cap emitted into the installed systemd unit as
+  # Environment="RAYON_NUM_THREADS=N" (candle's gemm degree reads the same
+  # var, so this also bounds embedding fan-out). 0 (default) omits the line
+  # entirely and lets rayon pick its own platform default. Set this to a
+  # per-host tuning value (e.g. nproc/4) if bulk sweeps/embeds are pegging
+  # every core.
+  # rayon-threads: 8
+  # Optional secret/env bootstrap for the installed systemd unit: `command`'s
+  # stdout is captured into `env-file` via an `ExecStartPre` shell redirect,
+  # then the unit loads it with `EnvironmentFile=-<env-file>`. Omit this
+  # whole block on a host with no secrets to bootstrap - the generated unit
+  # is still valid without it.
+  # env-bootstrap:
+  #   command: manifest age decrypt ~/repos/scottidler/secrets/.secrets -f env
+  #   env-file: /run/user/1000/cortex.env
 
 # LLM used by intel / classify. Provider: claude | openai.
 llm:

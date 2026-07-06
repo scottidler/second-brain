@@ -714,6 +714,40 @@ pub struct DaemonConfig {
     /// reviewing more often than weekly out-paces the user.
     #[serde(rename = "cold-interval-secs")]
     pub cold_interval_secs: u64,
+    /// Rayon thread-pool cap emitted into the installed systemd unit as
+    /// `Environment="RAYON_NUM_THREADS=N"` (candle's gemm degree reads the
+    /// same var, so this also bounds embedding fan-out). 0 (the default)
+    /// omits the line entirely, letting rayon pick its own platform default.
+    /// A cap is a per-host tuning knob (this fleet runs it at 8, ~nproc/4 on
+    /// a 32-core box), never a value baked into Rust source.
+    #[serde(rename = "rayon-threads")]
+    pub rayon_threads: usize,
+    /// Optional secret/environment bootstrap for the installed systemd unit.
+    /// `None` (the default) omits both the `ExecStartPre` and
+    /// `EnvironmentFile` directives, so a host with no secret bootstrap
+    /// still gets a valid, complete unit. See [`EnvBootstrapConfig`].
+    #[serde(rename = "env-bootstrap")]
+    pub env_bootstrap: Option<EnvBootstrapConfig>,
+}
+
+/// Secret/environment bootstrap for the installed systemd unit: `command`'s
+/// stdout is captured into `env_file` via
+/// `ExecStartPre=/bin/sh -c '<command> > <env_file>'`, then the unit loads it
+/// with `EnvironmentFile=-<env_file>` (the leading `-` makes a missing file
+/// non-fatal). Lets a `sb cortex daemon --install` re-run reproduce a live
+/// unit's `manifest age decrypt ... > /run/user/<uid>/cortex.env` secret
+/// bootstrap without baking any UID or secrets path into Rust source - the
+/// defect this phase closes (2026-07-05 cortex-daemon-oscillation-loop design
+/// doc, Problem Statement defect 5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct EnvBootstrapConfig {
+    /// Shell command whose stdout is redirected into `env_file`.
+    pub command: String,
+    /// Destination path for the captured environment, e.g.
+    /// `/run/user/1000/cortex.env`. Tilde-expanded at load time.
+    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
+    pub env_file: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -750,6 +784,8 @@ impl Default for DaemonConfig {
             daily_at: None,
             weekly_at: None,
             cold_interval_secs: 604_800,
+            rayon_threads: 0,
+            env_bootstrap: None,
         }
     }
 }
