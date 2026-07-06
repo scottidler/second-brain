@@ -389,6 +389,139 @@ fn guard_blocks_nested_inside_piped_display() {
     assert_blocked("Using [[claude-code|Claude Code]] daily", "claude", "claude");
 }
 
+// --- Phase 4: detection <-> mutation matcher convergence ---
+//
+// Before this phase, `find_mention` (detection, ASCII-only boundary) and
+// `insert_first_wikilink` (mutation, regex `\b` + an independently-sliced
+// body) could disagree on whether a mention was clean/appliable. A
+// suggestion the daemon reported but could never apply left
+// `new_content == content` -> no write -> the same suggestion re-reported
+// forever (the perpetual `link: N files` phantom). These tests pin the
+// convergence: both sides now call the SAME `is_clean_mention` predicate on
+// the SAME (shared-splitter-derived) body text.
+
+#[test]
+fn find_mention_and_insert_agree_on_underscore_boundary() {
+    // "bar" here is not a standalone word - it's embedded in "foo_bar".
+    // The old ASCII-only boundary check in `find_mention` treated `_` as a
+    // non-alphanumeric boundary and would have reported this as a clean
+    // mention; the old regex `\bbar\b` in `insert_first_wikilink` treats `_`
+    // as a word char (Unicode `\w`) and would never match here at all. Both
+    // now agree: NOT a clean mention.
+    let body = "note: foo_bar here";
+    assert_eq!(LoweredBody::new(body).find_mention("bar", "bar", 3), None);
+    assert_eq!(insert_first_wikilink(body, "bar", "bar"), None);
+}
+
+#[test]
+fn find_mention_and_insert_agree_on_clean_occurrence() {
+    // Sanity companion: a genuinely clean, word-bounded mention still agrees
+    // (both find it) after routing through the shared predicate.
+    let body = "note: a clean bar mention here";
+    let found = LoweredBody::new(body).find_mention("bar", "bar", 3);
+    assert_eq!(found.map(|(_, s)| s), Some("bar".to_string()));
+    assert!(insert_first_wikilink(body, "bar", "bar").is_some());
+}
+
+#[test]
+fn insert_first_wikilink_uses_shared_splitter_for_a_false_delimiter_line() {
+    // A frontmatter value can itself contain a literal "---" line that is
+    // NOT the real closing delimiter. The old ad hoc `find("\n---")` in this
+    // function stopped at that FIRST match, mis-splitting mid-frontmatter and
+    // leaking leftover frontmatter text ("type: article") into what it
+    // thought was the body. The shared splitter
+    // (`vault::frontmatter::split_raw`, which also produces `Note::body`)
+    // requires the closing delimiter to be a full, otherwise-blank line, so
+    // it correctly finds the SECOND "---" as the real close.
+    let content = "---\ntitle: t\n---not-a-real-delimiter here\ntype: article\n---\n\nBody text is short.\n";
+    // "article" appears only inside frontmatter under the correct split - it
+    // must NOT be linked.
+    assert_eq!(insert_first_wikilink(content, "article", "article"), None);
+}
+
+#[test]
+fn every_lint_linking_suggestion_is_appliable() {
+    // Success criterion (a): every `linking.*` violation, when applied,
+    // changes bytes - `insert_first_wikilink` must return `Some` for every
+    // (target, surface) pair `lint_linking` emits a `Fix::AddWikilink` for.
+    let cfg = glossary_config(&["langchain", "rag"], &[("Retrieval-Augmented Generation", "rag")]);
+    let notes = vec![
+        note_with_body(
+            "notes/a.md",
+            "We use LangChain daily and rely on Retrieval-Augmented Generation for search.",
+        ),
+        note_with_body("notes/b.md", "A note with the word foo_langchain_bar embedded oddly."),
+    ];
+    let report = lint_linking(&notes, &cfg);
+    assert!(
+        !report.violations.is_empty(),
+        "fixture should produce at least one suggestion"
+    );
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|v| v.path.to_string_lossy() == "notes/b.md"),
+        "an underscore-bounded mention must not be suggested (detection/mutation must agree it's unclean)"
+    );
+
+    for violation in &report.violations {
+        if let Some(Fix::AddWikilink { target, surface, .. }) = &violation.fix {
+            let note = notes.iter().find(|n| n.path == violation.path).expect("note exists");
+            assert!(
+                insert_first_wikilink(&note.raw, target, surface).is_some(),
+                "suggestion for {surface:?} in {} must be appliable",
+                violation.path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn two_consecutive_link_passes_converge_to_zero_writes() {
+    // Success criterion (b): two consecutive link passes over an unchanged
+    // vault produce zero writes the second time - the exact structural
+    // invariant the daemon's oscillation fingerprint depends on.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    std::fs::write(
+        root.join("langchain.md"),
+        "---\ntitle: LangChain\ntype: note\n---\nThe LangChain hub note.\n",
+    )
+    .expect("write note");
+    std::fs::write(
+        root.join("a.md"),
+        "---\ntitle: A\ntype: note\n---\nWe use LangChain daily in production.\n",
+    )
+    .expect("write note");
+
+    let cfg = glossary_config(&["langchain"], &[]);
+    let vault_config = crate::config::VaultConfig {
+        root_path: None,
+        ignore: vec![".git".to_string(), ".obsidian".to_string()],
+        exclude: Vec::new(),
+        include: Vec::new(),
+    };
+
+    let notes = crate::vault::scan_vault(root, &vault_config).expect("scan vault");
+    let written_first = apply_linking(root, &notes, &cfg).expect("apply linking");
+    assert_eq!(
+        written_first,
+        vec!["a.md".to_string()],
+        "first pass links the mention exactly once"
+    );
+
+    // Re-scan to observe the newly-written bytes (mirrors the daemon's
+    // per-cycle rescan), then run the SAME pass again with no edits in
+    // between.
+    let notes2 = crate::vault::scan_vault(root, &vault_config).expect("scan vault");
+    let written_second = apply_linking(root, &notes2, &cfg).expect("apply linking");
+    assert!(
+        written_second.is_empty(),
+        "steady state: second pass writes nothing, got {written_second:?}"
+    );
+}
+
 #[test]
 fn guard_links_clean_prose_occurrence_after_one_inside_a_wikilink() {
     // Iterate-to-clean: the surface appears inside an existing wikilink AND later

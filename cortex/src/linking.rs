@@ -371,29 +371,11 @@ impl<'a> LoweredBody<'a> {
                 let pos = self.to_body(lpos);
                 let after_pos = self.to_body(lpos + term_lower.len());
 
-                // Skip if match is inside an existing wikilink
-                let before_slice = &body[..pos];
-                if let (Some(open), Some(close)) = (before_slice.rfind("[["), before_slice.rfind("]]"))
-                    && open > close
-                {
-                    continue;
-                }
-                if before_slice.ends_with("[[") {
-                    continue;
-                }
-
-                // Verify it's a word boundary (not inside another word)
-                let before_char = body[..pos].chars().last().unwrap_or(' ');
-                let after_char = body[after_pos..].chars().next().unwrap_or(' ');
-
-                if before_char.is_ascii_alphanumeric() || after_char.is_ascii_alphanumeric() {
-                    continue;
-                }
-
-                // Skip matches inside structural constructs (URLs, HTML tags,
-                // code, math, link destinations) - linking syntax corrupts it.
-                if inside_structure(body, pos, after_pos) {
-                    log::trace!("skipping mention inside structural span: {term}");
+                // Detection and mutation must agree on what is a clean,
+                // appliable mention - `is_clean_mention` is the single
+                // arbiter both sides call (see its doc comment).
+                if !is_clean_mention(body, pos, after_pos) {
+                    log::trace!("skipping unclean mention: {term}");
                     continue;
                 }
 
@@ -545,47 +527,89 @@ fn inside_structure(text: &str, start: usize, end: usize) -> bool {
         || in_link_destination(text, start)
 }
 
+/// Word-char definition matching the Unicode-aware `\w`/`\b` semantics the
+/// `regex` crate uses by default: alphanumeric or underscore. Detection used
+/// to test only `is_ascii_alphanumeric` while mutation used a regex `\b` -
+/// they disagreed on an underscore or non-ASCII-letter boundary (`foo_bar`,
+/// `café`), so a mention detection reported could never be re-matched by
+/// mutation. Both sides now share this one definition.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// True if the byte range `[start, end)` in `body` is a clean, appliable
+/// mention: word-bounded on both sides, not inside an existing wikilink (nor
+/// immediately before one's closing `]]`), and not inside a structural
+/// construct (`inside_structure`).
+///
+/// THE single arbiter of "is this surface linkable here", shared by
+/// detection (`LoweredBody::find_mention`, used by `lint_linking`) and
+/// mutation (`insert_first_wikilink`). The two previously disagreed - an
+/// ASCII-only boundary check in detection vs. a Unicode `\b` in mutation,
+/// each also independently re-deriving the wikilink/structure guard - which
+/// let `lint_linking` report a mention `insert_first_wikilink` could never
+/// re-match: `new_content == content`, no write, and the same suggestion
+/// re-reported forever (the perpetual `link: N files` phantom). Both call
+/// sites now pass the SAME body slice (see `insert_first_wikilink`, which
+/// now derives its body via `vault::frontmatter::split_raw`, the same
+/// splitter that produces `Note::body`).
+fn is_clean_mention(body: &str, start: usize, end: usize) -> bool {
+    let before_is_word = body[..start].chars().next_back().is_some_and(is_word_char);
+    let after_is_word = body[end..].chars().next().is_some_and(is_word_char);
+    if before_is_word || after_is_word {
+        return false;
+    }
+    if in_wikilink(body, start) || body[end..].starts_with("]]") {
+        return false;
+    }
+    !inside_structure(body, start, end)
+}
+
 /// Insert a wikilink at the first CLEAN mention of `surface` in content,
 /// pointing at `target`. Only searches the body (after frontmatter) to avoid
 /// corrupting YAML fields. Emits a piped link `[[target|matched]]` when the
 /// matched text differs from `target` (an alias surface form, or a title whose
 /// stem differs); a plain `[[matched]]` otherwise.
 fn insert_first_wikilink(content: &str, target: &str, surface: &str) -> Option<String> {
-    // Find the end of frontmatter so we only search the body
-    let body_start = if let Some(after_open) = content.strip_prefix("---") {
-        after_open.find("\n---").map(|pos| 3 + pos + "\n---".len()).unwrap_or(0)
-    } else {
-        0
+    log::debug!(
+        "insert_first_wikilink: target={target} surface={surface} content_len={}",
+        content.len()
+    );
+    // Find the end of frontmatter so we only search the body - via the SAME
+    // shared splitter (`vault::frontmatter::split_raw`) that produces
+    // `Note::body`, so detection and mutation see identical body text. The
+    // previous ad hoc `find("\n---")` search here was a second, buggier
+    // reimplementation of exactly the split `split_raw` already owns (a bare
+    // `find` can mis-split on a frontmatter value containing a literal
+    // `---` line; `split_raw` requires the closing delimiter to be a full
+    // line).
+    let body_start = match vault::frontmatter::split_raw(content) {
+        Some((_, body)) => body.as_ptr() as usize - content.as_ptr() as usize,
+        None => 0,
     };
-
     let body = &content[body_start..];
+
     // Match the surface form (the text that actually appears) rather than the
     // target slug, so an alias like "Retrieval-Augmented Generation" is found
-    // even though it points at the slug "rag".
-    let pattern = format!(r"(?i)\b{}\b", regex::escape(surface));
+    // even though it points at the slug "rag". No `\b` here - boundary is
+    // decided by the shared `is_clean_mention` below, the same predicate
+    // detection uses.
+    let pattern = format!(r"(?i){}", regex::escape(surface));
     let re = Regex::new(&pattern).ok()?;
 
-    // Wrap the FIRST occurrence that is neither inside an existing wikilink nor
-    // inside a structural construct. Detection (`find_mention`) and mutation
-    // (here) locate matches independently, so the structural guard MUST be
-    // applied here too - this is the load-bearing point that actually prevents
-    // URL / HTML / code corruption. `inside_structure` is given the `body`
-    // slice + body-relative offsets (NOT the content-absolute ones).
+    // Wrap the FIRST occurrence that `is_clean_mention` accepts. Detection
+    // (`find_mention`) and mutation (here) locate candidate positions
+    // independently (substring scan vs. regex), but both hand every
+    // candidate to the SAME clean/appliable predicate, so they can no
+    // longer disagree on which mentions are linkable.
     for mat in re.find_iter(body) {
+        if !is_clean_mention(body, mat.start(), mat.end()) {
+            continue;
+        }
+
         let abs_start = body_start + mat.start();
         let abs_end = body_start + mat.end();
-
         let before = &content[..abs_start];
-
-        // Don't insert if already inside a wikilink.
-        if before.ends_with("[[") || content[abs_end..].starts_with("]]") {
-            continue;
-        }
-        // Don't insert inside a structural span.
-        if inside_structure(body, mat.start(), mat.end()) {
-            continue;
-        }
-
         let matched = &content[abs_start..abs_end];
         let after = &content[abs_end..];
         // Plain link only when the matched text is exactly the slug; otherwise
@@ -596,8 +620,10 @@ fn insert_first_wikilink(content: &str, target: &str, surface: &str) -> Option<S
         } else {
             format!("[[{target}|{matched}]]")
         };
+        log::debug!("insert_first_wikilink: matched at body-relative offset {}", mat.start());
         return Some(format!("{before}{link}{after}"));
     }
+    log::debug!("insert_first_wikilink: no clean mention found");
     None
 }
 
