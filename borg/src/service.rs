@@ -194,15 +194,8 @@ pub(crate) async fn install_systemd(exe_path: &str, config: &Config) -> Result<P
     let data_path = vault::receipts::receipts_dir()
         .map(|d| d.parent().map(|p| p.to_path_buf()).unwrap_or(d))
         .unwrap_or_else(|_| home.join(".local/share/sb"));
-    let secrets_path = home.join("repos/scottidler/keep/.secrets");
-    let manifest_bin = home.join(".cargo/bin/manifest");
-    let uid = std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| "1000".to_string());
-    let env_file = format!("/run/user/{}/borg.env", uid);
-    let unit_content = format!(
+
+    let mut service = String::from(
         r#"[Unit]
 Description=borg - Obsidian ingestion daemon (second-brain)
 After=network-online.target
@@ -212,9 +205,20 @@ StartLimitIntervalSec=60
 
 [Service]
 Type=simple
-ExecStartPre=/bin/sh -c '{manifest} age decrypt {secrets} -f env > {env_file}'
-EnvironmentFile=-{env_file}
-Environment="PATH={home}/.local/bin:{home}/.cargo/bin:{home}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+"#,
+    );
+
+    if let Some(bootstrap) = &config.daemon.env_bootstrap {
+        service.push_str(&format!(
+            "ExecStartPre=/bin/sh -c '{command} > {env_file}'\n",
+            command = bootstrap.command,
+            env_file = bootstrap.env_file.display(),
+        ));
+        service.push_str(&format!("EnvironmentFile=-{}\n", bootstrap.env_file.display()));
+    }
+
+    service.push_str(&format!(
+        r#"Environment="PATH={home}/.local/bin:{home}/.cargo/bin:{home}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart={exe_path} borg --log-level debug daemon --start
 Restart=always
 RestartSec=5
@@ -233,10 +237,9 @@ WantedBy=default.target
         home = home.display(),
         vault = vault_path.display(),
         data = data_path.display(),
-        manifest = manifest_bin.display(),
-        secrets = secrets_path.display(),
-        env_file = env_file,
-    );
+    ));
+
+    let unit_content = service;
 
     // Stop the running service if active (ignore errors - may not be running)
     systemctl(&["stop", "borg"]).await.ok();

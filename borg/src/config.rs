@@ -181,7 +181,41 @@ pub struct Config {
     pub pipeline: PipelineConfig,
     #[serde(default)]
     pub distill: DistillConfig,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
     pub log_level: Option<String>,
+}
+
+/// Systemd-unit-install settings for the borg daemon. Currently just the
+/// secret/environment bootstrap; other install-time knobs (log level, rayon
+/// cap) stay hardcoded in `service::install_systemd` until they also need to
+/// vary per-machine.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct DaemonConfig {
+    /// Optional secret/environment bootstrap for the installed systemd unit.
+    /// `None` (the default) omits both the `ExecStartPre` and
+    /// `EnvironmentFile` directives, so a host with no secret bootstrap still
+    /// gets a valid, complete unit. Mirrors cortex.yml's `daemon.env-bootstrap`
+    /// (`cortex/src/config.rs::EnvBootstrapConfig`) so the secrets path lives
+    /// in config, not baked into Rust source.
+    pub env_bootstrap: Option<EnvBootstrapConfig>,
+}
+
+/// Secret/environment bootstrap for the installed systemd unit: `command`'s
+/// stdout is captured into `env_file` via
+/// `ExecStartPre=/bin/sh -c '<command> > <env_file>'`, then the unit loads it
+/// with `EnvironmentFile=-<env_file>` (the leading `-` makes a missing file
+/// non-fatal).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct EnvBootstrapConfig {
+    /// Shell command whose stdout is redirected into `env_file`.
+    pub command: String,
+    /// Destination path for the captured environment, e.g.
+    /// `/run/user/1000/borg.env`. Tilde-expanded at load time.
+    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
+    pub env_file: PathBuf,
 }
 
 /// Distillation feature toggles. Each flag turns off one distillation feature
