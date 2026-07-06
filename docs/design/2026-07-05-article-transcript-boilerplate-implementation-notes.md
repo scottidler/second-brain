@@ -108,7 +108,35 @@ Running record of how the implementation diverges from or interprets
 
 Operator step, not code: `otto deploy` -> `sb borg replay tg-1a0305` -> `sb borg
 eval`. No daemon config change (in-process; no `defuddle-path`). Verifies acceptance
-criteria 1 and 6 (the live eval). Pending.
+criteria 1 and 6 (the live eval). Done (2026-07-05, live on v0.9.3).
+
+### Results
+- `sb borg replay tg-1a0305` re-fetches from source, so it minted a new trace
+  (`tg-171d6f`) rather than reusing the original. `fetched.yml` for the new trace:
+  `extractor: readable` (dom_smoothie won cleanly, 4.2 KB HTML vs. the original
+  52 KB boilerplate-heavy fetch). Published note
+  (`obsidian/notes/claude-sonnet-5-launch.md`): 0 `Afghanistan` hits, 57 lines,
+  **no `## Transcript` section**.
+- **AC #1: PASS**, with a caveat. The staged `distilled.yml` for the new trace
+  contains a genuinely clean, readable-extracted `transcript` field - the
+  `clean_source` gate would keep it. It never reaches the note because
+  `~/.config/sb/borg.yml` has `distill.article-transcript: false` (operator
+  override; code default is `true`), which unconditionally clears the transcript
+  before `clean_source` is ever evaluated. So this run demonstrates "no chrome
+  ever leaks" but not the transcript-publishing path end-to-end - that requires
+  flipping the toggle on. Confirmed with the author that the toggle being off is
+  a known, currently-intentional operator state, not a regression.
+- `sb borg eval`: article coverage **1.200** (n=5), exactly matching the recorded
+  baseline. **AC #6: PASS** (holds). `sb doctor`: no crashes in 24h,
+  `fetch-failed=2` (stable, not elevated).
+- Cortex runaway watch (the daemon's vault-write inotify loop, tracked separately
+  in the fix-cortex-oscillation-loop branch): log held at 3.3 MB, action-cycle
+  count held at 9, no `sb` process CPU-pegged across the replay. Calm.
+
+### Open question carried forward
+- Re-run Phase 4 with `distill.article-transcript: true` to verify the
+  transcript-publishing path (not just the drop path) end-to-end before
+  considering the feature fully exercised in production.
 
 ## Review-panel audit response (post-reshape)
 
