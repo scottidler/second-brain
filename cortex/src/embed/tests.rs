@@ -197,6 +197,67 @@ fn process_transcript_batch_embeds_article_and_slide_youtube_notes() {
 }
 
 #[test]
+fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
+    // Phase 3 (docs/design/2026-07-05-cortex-daemon-oscillation-loop.md): a
+    // transcript-eligible note with no `## Transcript` section is scanned,
+    // skipped (no row written), and MUST be marked examined so the next tick
+    // does not re-scan it. Without the sentinel, `e.id` stays NULL and the note
+    // is re-selected every tick forever (the ~127-note oscillation).
+    //
+    // process_batch(TranscriptChunk) is the exact body of
+    // daemon_tick_with_model's inner loop; oracle_db_path is a fixed global
+    // path so the tick itself cannot be redirected to temp SQLite - this is the
+    // hermetic seam for the convergence check.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-batch-test");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    let tmp = TempDir::new().expect("tmp");
+    // Article (transcript-eligible) note carrying a ## Summary but NO
+    // ## Transcript section - exactly the ~127-note shape.
+    write_note_with_summary(tmp.path(), "notes/a.md", "an essay with no transcript section");
+    index.insert_test_note_row("notes/a.md", "article", 100).expect("note");
+
+    // Tick 1: scanned + skipped, nothing embedded, sentinel persisted.
+    let t1 = process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::TranscriptChunk,
+        m.model_version(),
+        tmp.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("tick1");
+    assert_eq!(t1.scanned, 1);
+    assert_eq!(t1.skipped_empty, 1);
+    assert_eq!(t1.embedded, 0);
+    assert_eq!(
+        index
+            .examined_watermark("notes/a.md", EmbeddingKind::TranscriptChunk, m.model_version())
+            .expect("watermark"),
+        Some(100),
+        "the skip must persist an examined sentinel at the note's indexed modified_at"
+    );
+
+    // Tick 2 on the unchanged vault: the sentinel excludes the note, so it is
+    // no longer even scanned. This is the convergence Phase 3 exists for.
+    let t2 = process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::TranscriptChunk,
+        m.model_version(),
+        tmp.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("tick2");
+    assert_eq!(t2.scanned, 0, "tick-2 must not re-scan the previously-skipped note");
+    assert_eq!(t2.skipped_empty, 0);
+    assert_eq!(t2.embedded, 0);
+}
+
+#[test]
 fn process_batch_skips_notes_with_empty_summary() {
     // Notes whose `notes.summary` column is empty are filtered out at
     // the SQL level by `stale_embedding_targets`, so the embed loop

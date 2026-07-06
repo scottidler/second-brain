@@ -246,3 +246,34 @@ fn migration_no_ops_on_fresh_schema() {
         .expect("claim insert on fresh DB");
     assert_eq!(index.count_embeddings(Some(EmbeddingKind::Claim)).expect("count"), 1);
 }
+
+/// Phase 3 (docs/design/2026-07-05-cortex-daemon-oscillation-loop.md): the
+/// `embedding_examined` sentinel side table is created by `ensure_vec_schema`
+/// on a fresh DB, and re-running the idempotent schema-ensure path over an
+/// existing DB is a no-op (the `CREATE TABLE IF NOT EXISTS` cannot half-apply,
+/// matching the crate's established no-`user_version` migration discipline).
+#[test]
+fn embedding_examined_table_created_and_schema_ensure_is_idempotent() {
+    let index = SearchIndex::open_memory().expect("open");
+    let exists: i64 = index
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedding_examined'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("query sqlite_master");
+    assert_eq!(exists, 1, "ensure_vec_schema must create embedding_examined");
+
+    // Re-ensuring the schema over the already-created table must not error.
+    index.ensure_schema().expect("re-ensure schema idempotent");
+    let still: i64 = index
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedding_examined'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("query sqlite_master again");
+    assert_eq!(still, 1, "re-ensure must leave exactly one embedding_examined table");
+}

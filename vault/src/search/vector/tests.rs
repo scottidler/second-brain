@@ -402,6 +402,137 @@ fn stale_embedding_targets_transcript_kind_covers_all_transcript_eligible_kinds(
     );
 }
 
+// ---- Phase 3: examined sentinel (cortex-daemon-oscillation-loop) ----
+
+#[test]
+fn stale_transcript_targets_exclude_examined_until_modified_at_bumps() {
+    // Phase 3: a transcript-eligible note marked "examined, nothing to embed"
+    // must leave the stale set until its indexed modified_at advances past the
+    // recorded watermark. This is the convergence guarantee that stops the
+    // ~127-note transcript re-scan every daemon tick.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-test-v1");
+    insert_note(&index, "notes/skip.md", "tech", "article", 100);
+    insert_note(&index, "notes/live.md", "tech", "article", 100);
+
+    // Before any sentinel: both notes are stale (neither embedded).
+    let before = index
+        .stale_embedding_targets(EmbeddingKind::TranscriptChunk, m.model_version(), 100)
+        .expect("before");
+    let bpaths: std::collections::HashSet<&str> = before.iter().map(|t| t.note_path.as_str()).collect();
+    assert!(bpaths.contains("notes/skip.md") && bpaths.contains("notes/live.md"));
+
+    // Mark skip.md examined at its current indexed modified_at (100).
+    index
+        .mark_embedding_examined_batch(
+            EmbeddingKind::TranscriptChunk,
+            m.model_version(),
+            &[("notes/skip.md".to_string(), 100)],
+        )
+        .expect("mark examined");
+    assert_eq!(
+        index
+            .examined_watermark("notes/skip.md", EmbeddingKind::TranscriptChunk, m.model_version())
+            .expect("watermark"),
+        Some(100),
+    );
+
+    // skip.md's sentinel is current (examined_at 100 >= modified_at 100) -> excluded.
+    let after = index
+        .stale_embedding_targets(EmbeddingKind::TranscriptChunk, m.model_version(), 100)
+        .expect("after");
+    let apaths: Vec<&str> = after.iter().map(|t| t.note_path.as_str()).collect();
+    assert!(apaths.contains(&"notes/live.md"), "the unexamined note is still stale");
+    assert!(
+        !apaths.contains(&"notes/skip.md"),
+        "an examined note must be excluded while its sentinel is current"
+    );
+
+    // Bump skip.md's indexed modified_at past the sentinel -> it re-qualifies.
+    index
+        .conn
+        .execute("UPDATE notes SET modified_at = 300 WHERE path = 'notes/skip.md'", [])
+        .expect("bump");
+    let requal = index
+        .stale_embedding_targets(EmbeddingKind::TranscriptChunk, m.model_version(), 100)
+        .expect("requal");
+    let rpaths: Vec<&str> = requal.iter().map(|t| t.note_path.as_str()).collect();
+    assert!(
+        rpaths.contains(&"notes/skip.md"),
+        "bumping modified_at past examined_at re-qualifies the note for a fresh embed attempt"
+    );
+}
+
+#[test]
+fn search_vector_returns_no_row_for_examined_sentinel_note() {
+    // Phase 3 anti-poison guarantee: the sentinel lives in a side table, NOT a
+    // note_embeddings row, so a note that was examined-and-skipped never
+    // surfaces in vector search (no BLOB to score) and cannot dilute cosine
+    // similarity.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-test-v1");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    // sentinel.md: examined (side-table row) but NO note_embeddings row.
+    insert_note(&index, "notes/sentinel.md", "tech", "article", 100);
+    index
+        .mark_embedding_examined_batch(
+            EmbeddingKind::TranscriptChunk,
+            m.model_version(),
+            &[("notes/sentinel.md".to_string(), 100)],
+        )
+        .expect("mark examined");
+
+    // real.md: a genuine summary embedding so search has something to return.
+    insert_note(&index, "notes/real.md", "tech", "article", 100);
+    upsert_summary(&index, &m, "notes/real.md", "durable execution temporal", 100);
+
+    let q = m.embed_one("durable execution").expect("q");
+    let hits = index.search_vector(&q, 10, None, None, None).expect("search");
+    let paths: Vec<&str> = hits.iter().map(|h| h.note_path.as_str()).collect();
+    assert!(paths.contains(&"notes/real.md"), "the embedded note must be found");
+    assert!(
+        !paths.contains(&"notes/sentinel.md"),
+        "an examined-sentinel note must never surface in vector search"
+    );
+}
+
+#[test]
+fn mark_embedding_examined_batch_upsert_advances_watermark() {
+    // Re-examining the same note is idempotent: the watermark advances to the
+    // latest examined_at rather than erroring on the PK conflict.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-test-v1");
+    insert_note(&index, "notes/a.md", "tech", "article", 100);
+
+    index
+        .mark_embedding_examined_batch(
+            EmbeddingKind::TranscriptChunk,
+            m.model_version(),
+            &[("notes/a.md".into(), 100)],
+        )
+        .expect("first mark");
+    index
+        .mark_embedding_examined_batch(
+            EmbeddingKind::TranscriptChunk,
+            m.model_version(),
+            &[("notes/a.md".into(), 250)],
+        )
+        .expect("second mark");
+
+    assert_eq!(
+        index
+            .examined_watermark("notes/a.md", EmbeddingKind::TranscriptChunk, m.model_version())
+            .expect("watermark"),
+        Some(250),
+        "re-examining upserts the watermark to the latest value"
+    );
+    // An empty batch is a no-op (no transaction, no error).
+    index
+        .mark_embedding_examined_batch(EmbeddingKind::TranscriptChunk, m.model_version(), &[])
+        .expect("empty batch is a no-op");
+}
+
 #[test]
 fn rrf_fuses_two_rank_lists_correctly() {
     let bm25 = vec![

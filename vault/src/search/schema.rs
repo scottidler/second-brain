@@ -129,6 +129,28 @@ impl super::SearchIndex {
             CREATE INDEX IF NOT EXISTS idx_note_embeddings_kind_model
                 ON note_embeddings(kind, model_version);
 
+            -- Phase 3 (docs/design/2026-07-05-cortex-daemon-oscillation-loop.md):
+            -- the 'examined, nothing to embed' sentinel. A transcript-eligible
+            -- note with no `## Transcript` section is scanned by cortex's embed
+            -- loop, produces no `note_embeddings` row, and would therefore be
+            -- re-selected as stale on every tick forever. This side table (NOT
+            -- a `note_embeddings` row - that table's NOT NULL embedding/dim
+            -- columns and the sentinel-blind `search_vector` scan mean a
+            -- tombstone there would poison cosine similarity) records the note's
+            -- indexed `notes.modified_at` at examine time. `stale_embedding_targets`
+            -- excludes the note until `notes.modified_at` advances past
+            -- `examined_at`, mirroring the `note_embeddings.source_modified_at`
+            -- staleness watermark and the `edge_build_state` incremental pattern.
+            -- FK CASCADE drops the row natively when the note leaves `notes`.
+            CREATE TABLE IF NOT EXISTS embedding_examined (
+                note_path     TEXT NOT NULL,
+                kind          TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                examined_at   INTEGER NOT NULL,
+                PRIMARY KEY (note_path, kind, model_version),
+                FOREIGN KEY (note_path) REFERENCES notes(path) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS embedding_config (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL

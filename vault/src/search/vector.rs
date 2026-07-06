@@ -553,6 +553,19 @@ impl SearchIndex {
     /// enum (rather than a hand-typed SQL string list) means a future
     /// `NoteType` variant rename cannot silently re-break this path.
     ///
+    /// **Examined sentinel (Phase 3,
+    /// `docs/design/2026-07-05-cortex-daemon-oscillation-loop.md`).** A
+    /// transcript-eligible note with no `## Transcript` section is scanned,
+    /// found unembeddable, and writes no `note_embeddings` row - so `e.id`
+    /// stays NULL and it re-qualifies every tick forever (~127 notes in the
+    /// live vault). Cortex records such a note in `embedding_examined` with
+    /// the note's indexed `modified_at`; every arm here LEFT JOINs that side
+    /// table and excludes a note whose `examined_at >= n.modified_at`. The
+    /// note re-qualifies the moment its indexed `modified_at` advances past
+    /// the recorded watermark (keyed on the indexed value, NOT raw filesystem
+    /// mtime), exactly like the `note_embeddings.source_modified_at` staleness
+    /// watermark above it.
+    ///
     /// Claim rows (Phase 9): every note with non-empty `notes.claims` is a
     /// candidate. The claim text is carried in the `summary` field of the
     /// returned `StaleTarget` (no file I/O); cortex groups it into
@@ -580,9 +593,15 @@ impl SearchIndex {
                    ON e.note_path = n.path
                   AND e.kind = ?1
                   AND e.model_version = ?2
+                 LEFT JOIN embedding_examined x
+                   ON x.note_path = n.path
+                  AND x.kind = ?1
+                  AND x.model_version = ?2
                  WHERE (n.summary IS NOT NULL AND n.summary != '')
                    AND (e.id IS NULL
                         OR e.source_modified_at < n.modified_at)
+                   AND (x.note_path IS NULL
+                        OR x.examined_at < n.modified_at)
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
                 .to_string(),
@@ -593,9 +612,15 @@ impl SearchIndex {
                    ON e.note_path = n.path
                   AND e.kind = ?1
                   AND e.model_version = ?2
+                 LEFT JOIN embedding_examined x
+                   ON x.note_path = n.path
+                  AND x.kind = ?1
+                  AND x.model_version = ?2
                  WHERE n.note_type IN ({transcript_eligible_in_clause})
                    AND (e.id IS NULL
                         OR e.source_modified_at < n.modified_at)
+                   AND (x.note_path IS NULL
+                        OR x.examined_at < n.modified_at)
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
             ),
@@ -611,9 +636,15 @@ impl SearchIndex {
                    ON e.note_path = n.path
                   AND e.kind = ?1
                   AND e.model_version = ?2
+                 LEFT JOIN embedding_examined x
+                   ON x.note_path = n.path
+                  AND x.kind = ?1
+                  AND x.model_version = ?2
                  WHERE (n.claims IS NOT NULL AND n.claims != '')
                    AND (e.id IS NULL
                         OR e.source_modified_at < n.modified_at)
+                   AND (x.note_path IS NULL
+                        OR x.examined_at < n.modified_at)
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
                 .to_string(),
@@ -634,6 +665,62 @@ impl SearchIndex {
             .filter_map(warn_row)
             .collect();
         Ok(rows)
+    }
+
+    /// Record that a batch of notes were examined for `kind` embedding and
+    /// found to have nothing to embed (e.g. a transcript-eligible note with no
+    /// `## Transcript` section). Each item is `(note_path, examined_at)` where
+    /// `examined_at` is the note's indexed `notes.modified_at` at examine time;
+    /// [`stale_embedding_targets`](Self::stale_embedding_targets) then excludes
+    /// the note until its indexed `modified_at` advances past that value.
+    ///
+    /// The write is ONE short `BEGIN IMMEDIATE` transaction (upsert per row),
+    /// so it stays well under the 200 ms budget even for the full ~127-note
+    /// skip set and never holds the write lock across CPU work - mirroring
+    /// [`upsert_embeddings_batch`](Self::upsert_embeddings_batch). Cortex is the
+    /// only writer; oracle only reads the exclusion in `stale_embedding_targets`
+    /// (which oracle does not call). An `ON CONFLICT` upsert keeps re-examining
+    /// the same note idempotent (the watermark advances to the latest value).
+    pub fn mark_embedding_examined_batch(
+        &mut self,
+        kind: EmbeddingKind,
+        model_version: &str,
+        items: &[(String, i64)],
+    ) -> Result<()> {
+        log::debug!(
+            "search::mark_embedding_examined_batch: kind={:?} model_version={} count={}",
+            kind,
+            model_version,
+            items.len(),
+        );
+        if items.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (note_path, examined_at) in items {
+            tx.execute(
+                "INSERT INTO embedding_examined (note_path, kind, model_version, examined_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(note_path, kind, model_version)
+                 DO UPDATE SET examined_at = excluded.examined_at",
+                params![note_path, kind.as_str(), model_version, examined_at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The recorded `examined_at` watermark for one note/kind/model, or `None`
+    /// when the note has never been marked examined. The note re-qualifies for
+    /// a fresh embed attempt once its indexed `notes.modified_at` exceeds this
+    /// value. Exposed for tests in other crates and for diagnostics.
+    pub fn examined_watermark(&self, note_path: &str, kind: EmbeddingKind, model_version: &str) -> Result<Option<i64>> {
+        optional_row(self.conn.query_row(
+            "SELECT examined_at FROM embedding_examined
+             WHERE note_path = ?1 AND kind = ?2 AND model_version = ?3",
+            params![note_path, kind.as_str(), model_version],
+            |row| row.get(0),
+        ))
     }
 
     /// Count embedding rows matching an optional kind. Used by tests

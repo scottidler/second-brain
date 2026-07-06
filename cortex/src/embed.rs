@@ -466,6 +466,11 @@ fn process_summary_batch(
     // "skipped without writing" loop on notes that lack a ## Summary
     // heading in the markdown body.
     let mut work: Vec<EmbedWork> = Vec::with_capacity(targets.len());
+    // Defensive examined-sentinel accumulator (Phase 3): the SQL filter already
+    // excludes empty-summary notes, so this is normally empty, but recording a
+    // skip here keeps the "examined, nothing to embed" mechanism coherent
+    // across every kind should a future schema drift reintroduce the skip path.
+    let mut examined: Vec<(String, i64)> = Vec::new();
     for t in &targets {
         stats.scanned += 1;
         let summary = t.summary.trim();
@@ -475,6 +480,7 @@ fn process_summary_batch(
             // drift cannot reintroduce the infinite-loop bug.
             log::warn!("cortex::embed: skipping note {} (empty summary)", t.note_path);
             stats.skipped_empty += 1;
+            examined.push((t.note_path.clone(), t.modified_at));
             continue;
         }
         // Phase 7a + Phase 9: assemble the embed text as
@@ -505,6 +511,9 @@ fn process_summary_batch(
             text,
             source_modified_at: t.modified_at,
         });
+    }
+    if !examined.is_empty() {
+        index.mark_embedding_examined_batch(EmbeddingKind::Summary, model_version, &examined)?;
     }
     if work.is_empty() {
         return Ok(stats);
@@ -589,6 +598,12 @@ fn process_transcript_batch(
     log::debug!("cortex::embed::process_transcript_batch: scanned={}", targets.len());
 
     let mut work: Vec<TranscriptWork> = Vec::with_capacity(targets.len());
+    // Notes scanned but found unembeddable (no `## Transcript` section, or a
+    // section that chunks to nothing). Recording their indexed modified_at in
+    // the examined sentinel is what stops the ~127-note transcript re-scan
+    // every tick (Phase 3): without it, `e.id` stays NULL and the note is
+    // re-selected forever.
+    let mut examined: Vec<(String, i64)> = Vec::new();
     for t in &targets {
         stats.scanned += 1;
         let abs = vault_root.join(&t.note_path);
@@ -600,6 +615,7 @@ fn process_transcript_batch(
                     t.note_path
                 );
                 stats.skipped_empty += 1;
+                examined.push((t.note_path.clone(), t.modified_at));
                 continue;
             }
         };
@@ -607,6 +623,7 @@ fn process_transcript_batch(
         if chunks.is_empty() {
             log::warn!("cortex::embed: chunk_transcript produced 0 chunks for {}", t.note_path);
             stats.skipped_empty += 1;
+            examined.push((t.note_path.clone(), t.modified_at));
             continue;
         }
         work.push(TranscriptWork {
@@ -614,6 +631,11 @@ fn process_transcript_batch(
             chunks,
             source_modified_at: t.modified_at,
         });
+    }
+    // Persist the examined sentinel before any early return so the skipped
+    // notes leave the stale set until their indexed modified_at advances.
+    if !examined.is_empty() {
+        index.mark_embedding_examined_batch(EmbeddingKind::TranscriptChunk, model_version, &examined)?;
     }
     if work.is_empty() {
         return Ok(stats);
@@ -699,6 +721,10 @@ fn process_claim_batch(
     log::debug!("cortex::embed::process_claim_batch: scanned={}", targets.len());
 
     let mut work: Vec<TranscriptWork> = Vec::with_capacity(targets.len());
+    // Defensive examined-sentinel accumulator (Phase 3), symmetric with the
+    // summary and transcript arms; normally empty because the SQL filter
+    // already excludes empty-claims notes.
+    let mut examined: Vec<(String, i64)> = Vec::new();
     for t in &targets {
         stats.scanned += 1;
         // The Claim arm selects `notes.claims` into the `summary` field.
@@ -709,6 +735,7 @@ fn process_claim_batch(
             // infinite-loop bug (a scanned-but-never-embedded note).
             log::warn!("cortex::embed: skipping {} (no claims text)", t.note_path);
             stats.skipped_empty += 1;
+            examined.push((t.note_path.clone(), t.modified_at));
             continue;
         }
         work.push(TranscriptWork {
@@ -716,6 +743,9 @@ fn process_claim_batch(
             chunks: groups,
             source_modified_at: t.modified_at,
         });
+    }
+    if !examined.is_empty() {
+        index.mark_embedding_examined_batch(EmbeddingKind::Claim, model_version, &examined)?;
     }
     if work.is_empty() {
         return Ok(stats);
