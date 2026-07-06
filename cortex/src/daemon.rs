@@ -7,8 +7,9 @@ use std::time::Duration;
 use tokio::time::Instant;
 use vault::watcher::{VaultWatcher, WatcherConfig};
 
-use crate::config::{Config, DaemonConfig};
+use crate::config::{Config, DaemonConfig, VaultConfig};
 use crate::opts::DaemonOpts;
+use crate::vault::Note;
 
 /// Fingerprint of a single sweep's apply results.
 /// Used to detect oscillation between consecutive sweeps.
@@ -457,19 +458,99 @@ fn classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonConfi
 }
 
 /// Run the configured on-change actions, returning a fingerprint of what was applied.
+/// Production entry point: always scans with the real `crate::vault::scan_vault`.
+/// See `configured_actions_with_scanner` for the single-scan-per-cycle logic and
+/// the injectable scanner seam tests use to count scan calls.
 fn configured_actions(
     vault_root: &Path,
     config: &Config,
     daemon_config: &DaemonConfig,
     changed_files: &[PathBuf],
 ) -> SweepFingerprint {
+    configured_actions_with_scanner(
+        vault_root,
+        config,
+        daemon_config,
+        changed_files,
+        crate::vault::scan_vault,
+    )
+}
+
+/// Run the configured on-change actions, returning a fingerprint of what was applied.
+///
+/// Phase 5 (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`): scan the
+/// vault ONCE at the top of the cycle via the injected `scan` and share the
+/// resulting `&[Note]` across every action that reads vault-wide state, instead
+/// of each action independently re-scanning (previously up to 6+ redundant
+/// `scan_vault` calls per cycle over 2500+ notes).
+///
+/// RESCAN BOUNDARY RULE (explicit, not "behavior unchanged"): a `dirty` flag
+/// tracks whether any action run so far in THIS cycle actually wrote to disk.
+/// Before any subsequent action consumes the shared note list, if `dirty` is
+/// set the list is rescanned and the flag cleared; if not, the cached list is
+/// reused. This reproduces the pre-Phase-5 behavior exactly - every action
+/// always saw the freshest on-disk state, because every action always
+/// re-scanned unconditionally - while skipping the rescan whenever nothing
+/// changed. `classify` runs first by design (it MOVES notes to their final
+/// locations via promotion), so a non-empty `promoted` list marks the cache
+/// dirty before any reader (lint/link/broken-links/duplicates/auto-tag/
+/// quality/sweep) runs.
+///
+/// Scoped to the actions that actually read vault-wide `&[Note]` state today:
+/// classify, lint, link, broken-links, duplicates, auto-tag, quality, sweep.
+/// `intel` and `state` are deliberately NOT wired into the shared cache here -
+/// `intel` keeps its own independent scan (its idempotency/skip-regeneration
+/// logic is Phase 2's concern, not this phase's, and folding it in risks a
+/// regression there); `state` never calls `scan_vault` at all. If `intel`
+/// writes during a cycle that also runs a cache-consuming action, the cache is
+/// conservatively marked dirty (see the `"intel"` arm) so a later reader in
+/// the same cycle cannot see a stale list.
+fn configured_actions_with_scanner<S>(
+    vault_root: &Path,
+    config: &Config,
+    daemon_config: &DaemonConfig,
+    changed_files: &[PathBuf],
+    mut scan: S,
+) -> SweepFingerprint
+where
+    S: FnMut(&Path, &VaultConfig) -> Result<Vec<Note>>,
+{
     let mut action_names: Vec<&str> = daemon_config.configured_actions();
     // Ensure classify runs first - it moves files, other actions need the final locations
     action_names.sort_by_key(|a| if *a == "classify" { 0 } else { 1 });
     log::info!("running configured actions: {:?}", action_names);
+    log::debug!(
+        "configured_actions_with_scanner: vault_root={} action_count={} changed_file_count={}",
+        vault_root.display(),
+        action_names.len(),
+        changed_files.len()
+    );
     let mut fingerprint = SweepFingerprint::default();
 
+    // Single scan at the top of the cycle - the Phase 5 seam.
+    let mut notes: Vec<Note> = match scan(vault_root, &config.vault) {
+        Ok(n) => n,
+        Err(e) => {
+            log::error!("failed to scan vault at top of action cycle: {e}");
+            return fingerprint;
+        }
+    };
+    // The cache is fresh as of the scan above; nothing has written yet.
+    let mut dirty = false;
+
     for action in &action_names {
+        // Rescan boundary: a prior action in this cycle wrote to disk, so the
+        // cached `notes` is stale for every reader from here on until refreshed.
+        if dirty {
+            match scan(vault_root, &config.vault) {
+                Ok(n) => notes = n,
+                Err(e) => {
+                    log::error!("failed to rescan vault mid-cycle: {e}; continuing with the last-known note list");
+                }
+            }
+            dirty = false;
+        }
+
         match *action {
             "classify" => {
                 // Classify runs first - moves inbox notes to notes/ before other actions
@@ -480,7 +561,7 @@ fn configured_actions(
                     review_only: false,
                     reclassify_domain: None,
                 };
-                match crate::classify::run(vault_root, config, &opts) {
+                match crate::classify::run_with_notes(&notes, vault_root, config, &opts) {
                     Ok(report) => {
                         let promoted: Vec<String> = report
                             .violations
@@ -492,6 +573,9 @@ fn configured_actions(
                             log::info!("classify: promoted {} note(s)", promoted.len());
                             log::info!("[daemon] classify: promoted {} note(s) from inbox/", promoted.len());
                             fingerprint.add("classify", promoted);
+                            // classify MOVES files - every reader after it in this
+                            // cycle needs the final locations. Rescan boundary.
+                            dirty = true;
                         }
                     }
                     Err(e) => log::error!("classify action failed: {e}"),
@@ -505,7 +589,7 @@ fn configured_actions(
                     rule: Vec::new(),
                     path: None,
                 };
-                match crate::lint(vault_root, config, &opts) {
+                match crate::lint_with_notes(&notes, vault_root, config, &opts) {
                     Ok((report, lint_apply)) => {
                         if auto {
                             // Fingerprint ONLY the paths the four appliers actually
@@ -522,6 +606,9 @@ fn configured_actions(
                                     lint_apply.remaining_violations
                                 );
                                 fingerprint.add("lint", lint_apply.written_paths);
+                                // lint's four appliers rewrite notes in place - the
+                                // next reader in this cycle needs those bytes.
+                                dirty = true;
                             } else if lint_apply.remaining_violations > 0 {
                                 log::info!(
                                     "[daemon] lint: {} violation(s), none writable this cycle",
@@ -536,13 +623,7 @@ fn configured_actions(
                 }
             }
             "broken-links" => {
-                let notes = match crate::vault::scan_vault(vault_root, &config.vault) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        log::error!("failed to scan vault for broken links: {e}");
-                        continue;
-                    }
-                };
+                // Read-only lint - no apply path, so it never dirties the cache.
                 let report = crate::links::lint_broken_links(&notes, &notes, &config.actions.broken_links);
                 if !report.is_empty() {
                     log::info!("[daemon] broken-links: {} violation(s)", report.violations.len());
@@ -561,13 +642,13 @@ fn configured_actions(
                         apply: false,
                         scan: crate::opts::ScanScope::All,
                     };
-                    match crate::link(vault_root, config, &lint_opts) {
+                    match crate::link_with_notes(&notes, vault_root, config, &lint_opts) {
                         Ok(report) if !report.is_empty() => {
                             let apply_opts = crate::opts::LinkOpts {
                                 apply: true,
                                 scan: crate::opts::ScanScope::All,
                             };
-                            match crate::link(vault_root, config, &apply_opts) {
+                            match crate::link_with_notes(&notes, vault_root, config, &apply_opts) {
                                 Ok(applied_report) => {
                                     // `applied_report.applied_paths` is `apply_linking`'s
                                     // real written-path return - the ONLY thing that may
@@ -582,6 +663,8 @@ fn configured_actions(
                                             applied_report.applied_paths.len()
                                         );
                                         fingerprint.add("link", applied_report.applied_paths);
+                                        // apply_linking rewrote notes in place.
+                                        dirty = true;
                                     }
                                 }
                                 Err(e) => log::error!("link apply failed: {e}"),
@@ -595,7 +678,7 @@ fn configured_actions(
                         apply: false,
                         scan: crate::opts::ScanScope::All,
                     };
-                    match crate::link(vault_root, config, &opts) {
+                    match crate::link_with_notes(&notes, vault_root, config, &opts) {
                         Ok(report) if !report.is_empty() => {
                             log::info!("[daemon] link: {} suggestion(s)", report.violations.len());
                         }
@@ -606,80 +689,68 @@ fn configured_actions(
             }
             "duplicates" => {
                 let auto = daemon_config.is_enabled("duplicates");
-                match crate::vault::scan_vault(vault_root, &config.vault) {
-                    Ok(notes) => {
-                        if auto {
-                            match crate::duplicates::apply_duplicates(vault_root, &notes, &config.actions.duplicates) {
-                                Ok(paths) if !paths.is_empty() => {
-                                    log::info!("auto-applied duplicates: {} fix(es)", paths.len());
-                                    log::info!("[daemon] auto-applied duplicates: {} fix(es)", paths.len());
-                                    fingerprint.add("duplicates", paths);
-                                }
-                                Ok(_) => {}
-                                Err(e) => log::error!("duplicates apply failed: {e}"),
-                            }
-                        } else {
-                            let report = crate::duplicates::lint_duplicates(&notes, &config.actions.duplicates);
-                            if !report.is_empty() {
-                                log::info!("[daemon] duplicates: {} violation(s)", report.violations.len());
-                            }
+                if auto {
+                    match crate::duplicates::apply_duplicates(vault_root, &notes, &config.actions.duplicates) {
+                        Ok(paths) if !paths.is_empty() => {
+                            log::info!("auto-applied duplicates: {} fix(es)", paths.len());
+                            log::info!("[daemon] auto-applied duplicates: {} fix(es)", paths.len());
+                            fingerprint.add("duplicates", paths);
+                            dirty = true;
                         }
+                        Ok(_) => {}
+                        Err(e) => log::error!("duplicates apply failed: {e}"),
                     }
-                    Err(e) => log::error!("failed to scan vault for duplicates: {e}"),
+                } else {
+                    let report = crate::duplicates::lint_duplicates(&notes, &config.actions.duplicates);
+                    if !report.is_empty() {
+                        log::info!("[daemon] duplicates: {} violation(s)", report.violations.len());
+                    }
                 }
             }
             "auto-tag" => {
                 let auto = daemon_config.is_enabled("auto-tag");
-                match crate::vault::scan_vault(vault_root, &config.vault) {
-                    Ok(notes) => {
-                        if auto {
-                            match crate::autotag::apply_autotag(
-                                vault_root,
-                                &notes,
-                                &notes,
-                                &config.actions.auto_tag,
-                                &config.fabric,
-                            ) {
-                                Ok(paths) if !paths.is_empty() => {
-                                    log::info!("auto-applied auto-tag: {} fix(es)", paths.len());
-                                    log::info!("[daemon] auto-applied auto-tag: {} fix(es)", paths.len());
-                                    fingerprint.add("auto-tag", paths);
-                                }
-                                Ok(_) => {}
-                                Err(e) => log::error!("auto-tag apply failed: {e}"),
-                            }
-                        } else {
-                            let report = crate::autotag::lint_autotag(&notes, &notes, &config.actions.auto_tag);
-                            if !report.is_empty() {
-                                log::info!("[daemon] auto-tag: {} suggestion(s)", report.violations.len());
-                            }
+                if auto {
+                    match crate::autotag::apply_autotag(
+                        vault_root,
+                        &notes,
+                        &notes,
+                        &config.actions.auto_tag,
+                        &config.fabric,
+                    ) {
+                        Ok(paths) if !paths.is_empty() => {
+                            log::info!("auto-applied auto-tag: {} fix(es)", paths.len());
+                            log::info!("[daemon] auto-applied auto-tag: {} fix(es)", paths.len());
+                            fingerprint.add("auto-tag", paths);
+                            dirty = true;
                         }
+                        Ok(_) => {}
+                        Err(e) => log::error!("auto-tag apply failed: {e}"),
                     }
-                    Err(e) => log::error!("failed to scan vault for auto-tag: {e}"),
+                } else {
+                    let report = crate::autotag::lint_autotag(&notes, &notes, &config.actions.auto_tag);
+                    if !report.is_empty() {
+                        log::info!("[daemon] auto-tag: {} suggestion(s)", report.violations.len());
+                    }
                 }
             }
             "quality" => {
                 let auto = daemon_config.is_enabled("quality");
-                match crate::vault::scan_vault(vault_root, &config.vault) {
-                    Ok(notes) => {
-                        if auto {
-                            match crate::quality::apply_quality(vault_root, &notes, &config.actions.quality) {
-                                Ok(paths) if !paths.is_empty() => {
-                                    log::info!("auto-applied quality: {} fix(es)", paths.len());
-                                    log::info!("[daemon] auto-applied quality: {} fix(es)", paths.len());
-                                    fingerprint.add("quality", paths);
-                                }
-                                Ok(_) => {}
-                                Err(e) => log::error!("quality apply failed: {e}"),
-                            }
-                        } else {
-                            let report = crate::quality::lint_quality(&notes, &config.actions.quality);
-                            if !report.is_empty() {
-                                log::info!("[daemon] quality: {} violation(s)", report.violations.len());
-                            }
+                if auto {
+                    match crate::quality::apply_quality(vault_root, &notes, &config.actions.quality) {
+                        Ok(paths) if !paths.is_empty() => {
+                            log::info!("auto-applied quality: {} fix(es)", paths.len());
+                            log::info!("[daemon] auto-applied quality: {} fix(es)", paths.len());
+                            fingerprint.add("quality", paths);
+                            dirty = true;
                         }
+                        Ok(_) => {}
+                        Err(e) => log::error!("quality apply failed: {e}"),
                     }
-                    Err(e) => log::error!("failed to scan vault for quality: {e}"),
+                } else {
+                    let report = crate::quality::lint_quality(&notes, &config.actions.quality);
+                    if !report.is_empty() {
+                        log::info!("[daemon] quality: {} violation(s)", report.violations.len());
+                    }
                 }
             }
             "intel" => {
@@ -688,11 +759,20 @@ fn configured_actions(
                     output: None,
                     as_of: None,
                 };
-                if let Err(e) = crate::intel::run(vault_root, config, &opts) {
-                    log::error!("intel action failed: {e}");
+                // intel keeps its own independent scan_vault call - deliberately
+                // NOT wired into the shared cache (see the function doc comment).
+                // It CAN write the digest note, so conservatively mark the shared
+                // cache dirty on success: `daemon_config.configured_actions()`
+                // order comes from a HashMap and is not guaranteed, so intel may
+                // run before a cache-consuming reader in this very cycle.
+                match crate::intel::run(vault_root, config, &opts) {
+                    Ok(_) => dirty = true,
+                    Err(e) => log::error!("intel action failed: {e}"),
                 }
             }
             "state" => {
+                // Never touches vault notes (writes only its own manifest cache
+                // under `config.state.cache_dir`) - never dirties the shared cache.
                 let opts = crate::opts::StateOpts {
                     refresh: true,
                     diff: false,
@@ -703,33 +783,33 @@ fn configured_actions(
             }
             "sweep" => {
                 let auto = daemon_config.is_enabled("sweep");
-                match crate::vault::scan_vault(vault_root, &config.vault) {
-                    Ok(notes) => {
-                        if auto {
-                            // Run migration (rewrite non-canonical tags)
-                            match crate::sweep::migrate(vault_root, &notes, &config.sweep, false) {
-                                Ok(paths) if !paths.is_empty() => {
-                                    log::info!("sweep: migrated tags in {} note(s)", paths.len());
-                                    log::info!("[daemon] sweep: migrated tags in {} note(s)", paths.len());
-                                    fingerprint.add("sweep", paths);
-                                }
-                                Ok(_) => {}
-                                Err(e) => log::error!("sweep migrate failed: {e}"),
-                            }
+                if auto {
+                    // Run migration (rewrite non-canonical tags)
+                    match crate::sweep::migrate(vault_root, &notes, &config.sweep, false) {
+                        Ok(paths) if !paths.is_empty() => {
+                            log::info!("sweep: migrated tags in {} note(s)", paths.len());
+                            log::info!("[daemon] sweep: migrated tags in {} note(s)", paths.len());
+                            fingerprint.add("sweep", paths);
+                            dirty = true;
                         }
-                        // Always scan for proposals (even if not auto-applying)
-                        match crate::sweep::scan_proposals(&notes, &config.sweep) {
-                            Ok(proposals) if !proposals.is_empty() => {
-                                log::info!("sweep: {} tag(s) needing review", proposals.len());
-                                if let Err(e) = crate::sweep::write_proposals(&config.sweep, proposals) {
-                                    log::error!("sweep: failed to write proposals: {e}");
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(e) => log::error!("sweep proposals scan failed: {e}"),
+                        Ok(_) => {}
+                        Err(e) => log::error!("sweep migrate failed: {e}"),
+                    }
+                }
+                // Always scan for proposals (even if not auto-applying). Matches
+                // pre-Phase-5 behavior: proposals are scanned from the SAME
+                // pre-migrate note list migrate() just read (migrate() does not
+                // mutate `notes` in place - only the on-disk bytes), not a
+                // freshly rescanned one.
+                match crate::sweep::scan_proposals(&notes, &config.sweep) {
+                    Ok(proposals) if !proposals.is_empty() => {
+                        log::info!("sweep: {} tag(s) needing review", proposals.len());
+                        if let Err(e) = crate::sweep::write_proposals(&config.sweep, proposals) {
+                            log::error!("sweep: failed to write proposals: {e}");
                         }
                     }
-                    Err(e) => log::error!("failed to scan vault for sweep: {e}"),
+                    Ok(_) => {}
+                    Err(e) => log::error!("sweep proposals scan failed: {e}"),
                 }
             }
             other => {

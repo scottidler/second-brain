@@ -1,6 +1,8 @@
 use super::*;
 use crate::config::DaemonConfig;
 use chrono::Datelike;
+use std::cell::Cell;
+use std::rc::Rc;
 
 #[test]
 fn test_is_enabled_default_is_false() {
@@ -470,4 +472,119 @@ async fn scheduled_intel_write_under_applying_guard_does_not_clear_latch() {
         "a scheduled-intel write under the `applying` guard must NOT clear the oscillation latch"
     );
     drop(watcher);
+}
+
+/// Phase 5 (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`), success
+/// criterion (a): a cycle in which no action mutates the vault performs
+/// exactly ONE `scan_vault` call. Injects a counting fake through
+/// `configured_actions_with_scanner` (the Phase 5 seam) in place of the real
+/// scanner, over an empty vault with every scan-consuming action enabled in
+/// report-only mode (`enable: false` -> `is_enabled` false -> `apply`/`auto`
+/// false in every arm that checks it), which guarantees zero writes
+/// regardless of what a scan would find. Before Phase 5 this cycle issued one
+/// independent `scan_vault` call per scanning action (classify, lint, link,
+/// duplicates, auto-tag, quality, sweep - broken-links included) every time it
+/// ran; the shared cache collapses that to exactly one call.
+#[test]
+fn configured_actions_no_mutation_scans_vault_exactly_once() {
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let vault_root = vault_dir.path();
+
+    let config = Config::default();
+    let mut daemon_config = DaemonConfig::default();
+    daemon_config.actions.clear();
+    for name in [
+        "classify",
+        "lint",
+        "link",
+        "broken-links",
+        "duplicates",
+        "auto-tag",
+        "quality",
+        "sweep",
+    ] {
+        daemon_config
+            .actions
+            .insert(name.to_string(), crate::config::DaemonAction { enable: false });
+    }
+
+    let calls = Rc::new(Cell::new(0usize));
+    let calls_clone = Rc::clone(&calls);
+    let counting_scan = move |root: &Path, vault_config: &VaultConfig| {
+        calls_clone.set(calls_clone.get() + 1);
+        crate::vault::scan_vault(root, vault_config)
+    };
+
+    let fingerprint = configured_actions_with_scanner(vault_root, &config, &daemon_config, &[], counting_scan);
+
+    assert!(
+        fingerprint.is_empty(),
+        "expected zero writes on an empty vault with every action in report-only mode: {fingerprint:?}"
+    );
+    assert_eq!(
+        calls.get(),
+        1,
+        "expected exactly one scan_vault call for a cycle where no action mutates the vault"
+    );
+}
+
+/// Phase 5 (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`), success
+/// criterion (b): a cycle with a mutation rescans exactly at the defined
+/// boundary - right before the next action that reads the shared note list,
+/// never before an action that does not need fresher state. `classify` runs
+/// first by design and MOVES an inbox note here (a real, on-disk mutation);
+/// `lint` is the only other configured action and runs in report-only mode
+/// (`enable: false`) so it cannot itself write and confound the count. Total
+/// scan_vault calls must be exactly 2: the single scan at the top of the
+/// cycle, plus the one rescan the design doc mandates after
+/// "classify-with-promotions", before lint consumes the (now stale) cache.
+#[test]
+fn configured_actions_rescans_once_after_classify_promotion() {
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let vault_root = vault_dir.path();
+    let inbox_dir = vault_root.join("inbox");
+    std::fs::create_dir_all(&inbox_dir).expect("mkdir inbox");
+    std::fs::write(
+        inbox_dir.join("thing.md"),
+        "---\ntags:\n  - rust\n---\nSome inbox content about rust tooling.\n",
+    )
+    .expect("write inbox note");
+
+    let config = Config::default();
+    let mut daemon_config = DaemonConfig::default();
+    daemon_config.actions.clear();
+    daemon_config
+        .actions
+        .insert("classify".to_string(), crate::config::DaemonAction { enable: true });
+    daemon_config
+        .actions
+        .insert("lint".to_string(), crate::config::DaemonAction { enable: false });
+
+    let calls = Rc::new(Cell::new(0usize));
+    let calls_clone = Rc::clone(&calls);
+    let counting_scan = move |root: &Path, vault_config: &VaultConfig| {
+        calls_clone.set(calls_clone.get() + 1);
+        crate::vault::scan_vault(root, vault_config)
+    };
+
+    let fingerprint = configured_actions_with_scanner(vault_root, &config, &daemon_config, &[], counting_scan);
+
+    assert!(
+        fingerprint.results.iter().any(|(action, _)| action == "classify"),
+        "expected classify to have promoted the inbox note: {fingerprint:?}"
+    );
+    assert!(
+        !vault_root.join("inbox/thing.md").exists(),
+        "expected the inbox note to have been moved out of inbox/"
+    );
+    assert!(
+        vault_root.join("notes/thing.md").exists(),
+        "expected the promoted note at notes/thing.md"
+    );
+    assert_eq!(
+        calls.get(),
+        2,
+        "expected exactly 2 scan_vault calls: the initial scan + one rescan boundary after classify's promotion \
+         (fingerprint={fingerprint:?})"
+    );
 }

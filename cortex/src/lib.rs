@@ -86,13 +86,37 @@ fn parse_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
 pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<(Report, LintApplyReport)> {
     log::info!("starting lint run (vault_root={})", vault_root.display());
     let all_notes = scan_vault(vault_root, &config.vault)?;
+    lint_with_notes(&all_notes, vault_root, config, opts)
+}
 
+/// Same as `lint`, but takes an already-scanned note list instead of scanning
+/// the vault itself. Phase 5 (design doc
+/// `2026-07-05-cortex-daemon-oscillation-loop.md`) seam: the daemon scans
+/// once per cycle and shares the result across every action - `lint` stays
+/// the scan-then-delegate entry point every other caller (CLI, tests) keeps
+/// using unmodified.
+pub fn lint_with_notes(
+    all_notes: &[Note],
+    vault_root: &Path,
+    config: &Config,
+    opts: &LintOpts,
+) -> Result<(Report, LintApplyReport)> {
+    log::debug!(
+        "lint_with_notes: vault_root={} note_count={} apply={}",
+        vault_root.display(),
+        all_notes.len(),
+        opts.apply
+    );
     // Apply --path glob filter if provided
-    let all_notes: Vec<_> = if let Some(ref pattern) = opts.path {
+    let all_notes: Vec<Note> = if let Some(ref pattern) = opts.path {
         let glob = glob::Pattern::new(pattern).map_err(|e| eyre::eyre!("invalid glob pattern '{}': {}", pattern, e))?;
-        all_notes.into_iter().filter(|n| glob.matches_path(&n.path)).collect()
-    } else {
         all_notes
+            .iter()
+            .filter(|n| glob.matches_path(&n.path))
+            .cloned()
+            .collect()
+    } else {
+        all_notes.to_vec()
     };
 
     // Split into all_notes (for link indexes) and lintable_notes (for violations)
@@ -242,6 +266,23 @@ pub fn link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Repor
         opts.scan
     );
     let all_notes = scan_vault(vault_root, &config.vault)?;
+    link_with_notes(&all_notes, vault_root, config, opts)
+}
+
+/// Same as `link`, but takes an already-scanned note list instead of scanning
+/// the vault itself. Phase 5 (design doc
+/// `2026-07-05-cortex-daemon-oscillation-loop.md`) seam: the daemon scans
+/// once per cycle and shares the result across every action - `link` stays
+/// the scan-then-delegate entry point every other caller (CLI, tests) keeps
+/// using unmodified.
+pub fn link_with_notes(all_notes: &[Note], vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Report> {
+    log::debug!(
+        "link_with_notes: vault_root={} note_count={} scan={:?} apply={}",
+        vault_root.display(),
+        all_notes.len(),
+        opts.scan,
+        opts.apply
+    );
     let exclude_patterns = parse_patterns(&config.vault.exclude);
     let include_patterns = parse_patterns(&config.vault.include);
     let notes: Vec<Note> = all_notes

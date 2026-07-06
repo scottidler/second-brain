@@ -25,7 +25,22 @@ pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Re
     crate::startup::validate_canonical_assets()?;
     log::info!("starting classify command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
+    run_with_notes(&notes, vault_root, config, opts)
+}
 
+/// Same as `run`, but takes an already-scanned note list instead of scanning
+/// the vault itself. Phase 5 (design doc
+/// `2026-07-05-cortex-daemon-oscillation-loop.md`) seam: the daemon scans
+/// once per cycle and shares the result across every action - `run` stays
+/// the scan-then-delegate entry point every other caller (CLI, tests) keeps
+/// using unmodified.
+pub fn run_with_notes(notes: &[Note], vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Report> {
+    log::debug!(
+        "classify::run_with_notes: vault_root={} note_count={} apply={}",
+        vault_root.display(),
+        notes.len(),
+        opts.apply
+    );
     // Open the oracle index READ-ONLY for Tier-2 similar-note context. We do
     // NOT call `index_vault` here: cortex must never write oracle's `notes`
     // table (one-way data flow; oracle's VaultWatcher owns index refresh).
@@ -37,7 +52,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Re
     if opts.apply {
         apply_classify(
             vault_root,
-            &notes,
+            notes,
             &config.actions.classify,
             &config.fabric,
             opts.force,
@@ -47,7 +62,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<Re
         )
     } else {
         Ok(lint_classify(
-            &notes,
+            notes,
             &config.actions.classify,
             &config.fabric,
             search_ref,
