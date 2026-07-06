@@ -491,6 +491,76 @@ pub(crate) async fn process_article_fabric(
     Ok((title, article_md, None))
 }
 
+/// Minimum char count for readable-extracted output to be accepted. Below this
+/// the extraction is treated as too-thin (a stub / near-empty page) and the
+/// caller falls through to the fabric-u -> Jina chain. Tunable on fixtures.
+const READABLE_MIN_CHARS: usize = 200;
+
+/// Returns `(title, article_md, byline)` - same shape as
+/// `process_article_fabric` so `process_url_inner` can pipe either source
+/// uniformly. The in-process readability extractor exposes no author, so the
+/// byline is always `None`.
+///
+/// Any `ReadableError` (fetch / status / extraction / empty), too-thin output
+/// (`< READABLE_MIN_CHARS`), or a detected block page is surfaced as `Err` so the
+/// caller falls through to the existing fabric-u -> Jina -> browser-UA chain. On
+/// success the clean markdown is persisted through the shared staging seam
+/// (`<trace>/fetched.html` + `fetched.yml` with `extractor: readable`),
+/// byte-symmetric with how fabric-u/jina persist.
+pub(crate) async fn process_article_readable(
+    url: &str,
+    config: &Config,
+    trace_id: &str,
+) -> Result<(String, String, Option<String>)> {
+    log::debug!("process_article_readable[{trace_id}]: url={url}");
+    // Reuse the Jina HTTP-scrape timeout class: this is the same shape of fetch,
+    // now done in-process instead of via a remote API or a shelled binary.
+    let article_md = crate::readability::fetch_article_readable(url, config.pipeline.jina_timeout_secs).await?;
+
+    // Reject too-thin output or a block page (caller falls through to the
+    // fabric-u -> Jina chain).
+    let article_md = accept_readable_output(url, article_md)?;
+
+    // Happy path only: persist the clean markdown through the same seam
+    // fabric-u/jina use, so `<trace>/fetched.html` holds the readable output.
+    if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
+        config,
+        trace_id,
+        url,
+        article_md.as_bytes(),
+        "readable",
+        200,
+        Some("text/markdown"),
+    ) {
+        log::warn!("[{trace_id}] persist_fetched (readable) failed: {e:#}");
+    }
+
+    let title = extract_article_title(&article_md, url);
+    log::debug!(
+        "process_article_readable[{trace_id}]: accepted {} chars",
+        article_md.chars().count()
+    );
+    Ok((title, article_md, None))
+}
+
+/// Validate the readable-extracted markdown before acceptance: too-thin output
+/// (`< READABLE_MIN_CHARS`) or a detected block page returns `Err` so the caller
+/// falls through to fabric-u -> Jina. Pure over the extracted string, so it is
+/// unit tested directly without a Config or network.
+pub(crate) fn accept_readable_output(url: &str, article_md: String) -> Result<String> {
+    let char_count = article_md.chars().count();
+    if char_count < READABLE_MIN_CHARS {
+        eyre::bail!("readable output too thin ({char_count} chars < {READABLE_MIN_CHARS}) for {url}; falling through");
+    }
+    // Extraction can still yield a Cloudflare/consent body; run the existing
+    // Gate-1 block-page check (same call shape as the fabric handler) before
+    // acceptance so a bot-wall body falls through rather than publishing.
+    if crate::stages::classify::detect_block_page(article_md.as_bytes(), 200, chrono::Utc::now()).is_some() {
+        eyre::bail!("readable extraction returned a block page ({char_count} chars) for {url}; falling through");
+    }
+    Ok(article_md)
+}
+
 /// Returns `(title, article_md, byline)` - same shape as
 /// `process_article_fabric` so callers can pipe either source into the
 /// post-Phase-6 distillation step uniformly. Gate-1 still runs against

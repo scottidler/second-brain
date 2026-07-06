@@ -99,23 +99,93 @@ pub(crate) fn append_distilled_below_slides(mut slide_body: String, distilled_bo
     slide_body
 }
 
-/// Apply the `distill.article-transcript` toggle to an ARTICLE's `Distilled`.
-/// When the toggle is off the raw-fetch `## Transcript` section is dropped so
-/// the published article note matches its pre-Phase-7 shape. Invoked ONLY on
-/// the article distiller path in `process_url_inner`; video, thread,
-/// voicenote, and image transcripts flow through their own paths and are never
-/// touched by this gate.
+/// Below this, a transcript is too short to be a real article body.
+const MIN_TRANSCRIPT_CHARS: usize = 200;
+/// A non-blank line shorter than this reads as "chrome" (nav item, country-
+/// dropdown entry, form label, bare link) rather than article prose. Length,
+/// not link-detection, is the coarse signal: a legit roundup's link lines carry
+/// a real title + context and clear this bar, while country names / form labels
+/// do not.
+const MIN_PROSE_LINE_CHARS: usize = 40;
+/// Drop the transcript only when MORE than this fraction of non-blank lines are
+/// chrome-ish. Deliberately GENEROUS so a legitimately link-dense article
+/// (HN roundup, link blog) passes; only a ~90%+-chrome trainwreck trips it.
+const MAX_CHROME_RATIO: f64 = 0.9;
+
+/// COARSE transcript quality gate: a pathological-input circuit breaker, NOT a
+/// chrome classifier, and NOT the thing that makes "never publish boilerplate"
+/// true - the SOURCE gate in `gate_article_transcript` is (only cleanly-extracted
+/// output is stored at all). This is defense-in-depth on the clean-source path:
+/// it drops output the readable extractor mis-picked (too short, or overwhelmingly
+/// short/chrome lines). The thresholds are generous by design (both panel reviewers
+/// flagged a fine-grained chrome ratio as brittle on link-dense-but-legit articles),
+/// so on its own it does NOT catch a chrome-heavy-but-mixed-line fallback page -
+/// which is exactly why the source gate, not this ratio, is load-bearing.
+fn transcript_quality_ok(transcript: &str) -> bool {
+    if transcript.chars().count() < MIN_TRANSCRIPT_CHARS {
+        return false;
+    }
+    let non_blank: Vec<&str> = transcript.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if non_blank.is_empty() {
+        return false;
+    }
+    let chrome = non_blank
+        .iter()
+        .filter(|l| l.chars().count() < MIN_PROSE_LINE_CHARS)
+        .count();
+    let ratio = chrome as f64 / non_blank.len() as f64;
+    ratio <= MAX_CHROME_RATIO
+}
+
+/// Gate an ARTICLE's `Distilled.transcript` through, in order: the
+/// `distill.article-transcript` toggle, a SOURCE gate, and the coarse quality
+/// gate. Invoked ONLY on the article distiller path in `process_url_inner`, on the
+/// single FINAL `Distilled`, so it covers BOTH the success and `fallback_distilled`
+/// paths (finding #1). Video/thread/voicenote/image flow through their own paths
+/// and are never touched.
+///
+/// - `enabled == false`: drop the transcript unconditionally (pre-Phase-7 shape).
+/// - `clean_source == false`: drop it. A stored `## Transcript` is trustworthy only
+///   when the in-process readable extractor produced it; any fallthrough
+///   (fabric-u / Jina / browser-UA) is raw, non-readability markdown that must not
+///   be published as a transcript. This SOURCE gate - not the ratio below - is what
+///   makes "chrome is never stored" true (the coarse ratio keeps a
+///   chrome-heavy-but-mixed-line fallback page; the source gate never lets it in).
+///   The distiller still ran, so Summary/Claims publish and the origin URL remains
+///   the archive.
+/// - otherwise (clean source, toggle on): run the coarse `transcript_quality_ok`
+///   as defense-in-depth against a readable mis-extraction.
 pub(crate) fn gate_article_transcript(
     mut distilled: vault::distilled::Distilled,
     enabled: bool,
+    clean_source: bool,
 ) -> vault::distilled::Distilled {
-    log::debug!(
-        "gate_article_transcript: enabled={enabled} has_transcript={}",
-        distilled.transcript.is_some()
-    );
+    let had_transcript = distilled.transcript.is_some();
     if !enabled {
         distilled.transcript = None;
+        log::debug!("gate_article_transcript: enabled=false had_transcript={had_transcript} -> cleared");
+        return distilled;
     }
+    if !clean_source {
+        if had_transcript {
+            log::debug!("gate_article_transcript: non-clean fetch source -> transcript cleared");
+        }
+        distilled.transcript = None;
+        return distilled;
+    }
+    if let Some(t) = distilled.transcript.as_deref()
+        && !transcript_quality_ok(t)
+    {
+        log::warn!(
+            "gate_article_transcript: clean-source transcript failed coarse quality gate ({} chars) -> cleared",
+            t.chars().count()
+        );
+        distilled.transcript = None;
+    }
+    log::debug!(
+        "gate_article_transcript: enabled=true clean_source=true had_transcript={had_transcript} kept={}",
+        distilled.transcript.is_some()
+    );
     distilled
 }
 
@@ -639,21 +709,52 @@ async fn process_url_inner(
             yt_result.yt_tags,
         )
     } else {
-        // `byline` is the article author surfaced by whichever fetcher could
-        // see the source markup: `fabric -u` (the default) exposes no HTML and
-        // yields `None`; the Jina markdown path also yields `None`; only the
-        // browser-UA fallback inside `process_article_jina` carries one. It is
-        // folded into `ContentType::Article { author }` below.
-        let (scraped_title, article_md, byline) = if use_fabric {
-            match process_article_fabric(&url_match.url, config, trace_id).await {
+        // URL-kind predicates HOISTED above the fetch (finding #5): in-process
+        // readability extraction is the preferred fetcher for PLAIN articles
+        // ONLY. github roots and X/Reddit/HN threads keep the fabric-u -> Jina
+        // chain and never invoke it; youtube was already dispatched above.
+        let github_repo = crate::github::parse_repo_url(&url_match.url);
+        let is_thread = crate::stages::raw::is_thread_url(&url_match.url);
+        let is_plain_article = github_repo.is_none() && !is_thread;
+        // `byline` is the article author surfaced by whichever fetcher could see
+        // the source markup: `fabric -u`, readability extraction, and the Jina
+        // markdown path all yield `None`; only the browser-UA fallback inside
+        // `process_article_jina` carries one. It is folded into
+        // `ContentType::Article { author }` below.
+        // Preferred: in-process readability extraction (clean article markdown),
+        // plain articles only. On Err / too-thin / block-page it logs the reason
+        // and falls through to fabric-u -> Jina -> browser-UA.
+        let readable_triple = if is_plain_article {
+            match process_article_readable(&url_match.url, config, trace_id).await {
+                Ok(triple) => Some(triple),
+                Err(e) => {
+                    log::warn!(
+                        "[{trace_id}] readable extraction fell through for {}: {e:#}",
+                        url_match.url
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // Provenance for the transcript source gate: a stored `## Transcript` is
+        // trustworthy ONLY when the in-process readable extractor produced it. Any
+        // fallthrough (fabric-u / Jina / browser-UA) yields raw, non-readability
+        // markdown that must NOT be stored as a transcript - the coarse ratio gate
+        // alone keeps chrome-heavy-but-mixed-line fallback pages (measured on the
+        // tg-1a0305 trainwreck: 0.61 short-line ratio, below the 0.90 threshold).
+        let transcript_clean_source = readable_triple.is_some();
+        let (scraped_title, article_md, byline) = match readable_triple {
+            Some(triple) => triple,
+            None if use_fabric => match process_article_fabric(&url_match.url, config, trace_id).await {
                 Ok(triple) => triple,
                 Err(e) => {
                     log::warn!("Fabric article fetch failed: {e:#}, falling back to Jina");
                     process_article_jina(&url_match.url, config, trace_id).await?
                 }
-            }
-        } else {
-            process_article_jina(&url_match.url, config, trace_id).await?
+            },
+            None => process_article_jina(&url_match.url, config, trace_id).await?,
         };
         // For github repo URLs, the HTML <title> is unreliable: auth-walled
         // pages collapse to a generic login title, so distinct repos slug to
@@ -661,8 +762,7 @@ async fn process_url_inner(
         // canonical name, so derive `title` from parse_repo_url. The original
         // `scraped_title` is preserved so the quality gate below can still
         // see what the fetcher actually returned (and bail on auth-wall
-        // bodies via BLOCKED_TITLE_INDICATORS).
-        let github_repo = crate::github::parse_repo_url(&url_match.url);
+        // bodies via BLOCKED_TITLE_INDICATORS). `github_repo` is computed above.
         let title = match &github_repo {
             Some((owner, repo)) => format!("{owner}/{repo}"),
             None => scraped_title.clone(),
@@ -697,7 +797,7 @@ async fn process_url_inner(
                 capture_note,
             )
             .await
-        } else if crate::stages::raw::is_thread_url(&url_match.url) {
+        } else if is_thread {
             crate::stages::distill::distill_for_publish_thread(
                 &config.fabric,
                 &config.staging,
@@ -720,7 +820,11 @@ async fn process_url_inner(
             // Gate: distill.article-transcript. Article-only — clears the
             // raw-fetch `## Transcript` section when the toggle is off, so
             // video/thread/voicenote/image transcripts are untouched.
-            gate_article_transcript(article_distilled, config.distill.article_transcript)
+            gate_article_transcript(
+                article_distilled,
+                config.distill.article_transcript,
+                transcript_clean_source,
+            )
         };
         // Gate-2 runs against the concise Distilled summary, which is what
         // we now display to users; it is also what `fabric::generate_tags`
