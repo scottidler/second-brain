@@ -32,3 +32,21 @@ Design doc: `docs/design/2026-07-07-distillation-output-restore.md`
 - The recovered-legacy-body run reported 10/10 anchors, but that input has no `[HH:MM:SS]` transcript lines - the model lifted anchors from the video description's `M:SS`-format timestamp list and normalized them. Phase 4's anchor-honesty rule should decide whether description-derived anchors are acceptable or must be stripped.
 - Whisper mishears "Claude Code" as "Cloud Code" throughout the real transcript; item names came through correctly regardless. If Phase 7 fixtures use ytx-recovered transcripts, expect that dirt in fixture text.
 
+## Phase 1: Fix parse_vtt_segments
+
+### Design decisions
+- Replaced the literal `.replace("<c>", "").replace("</c>", ...)` chain with a shared `VTT_TAG_REGEX` (`</?c[^>]*>|<\d{2}:\d{2}:\d{2}\.\d{3}>`) in a new `strip_vtt_tags` helper (`borg/src/youtube.rs`), matching the doc's exact regex ask. `<i>`/`</i>` stay a literal replace inside the same helper (unchanged behavior, not itemized in the doc but present in the original code - kept so italic markup does not regress).
+- Extracted the rolling-overlap decision (`extends -> replace, covered-by -> skip, dup -> skip`) that already lived inline in `clean_vtt` into a standalone `rolling_dedupe_action(last: Option<&str>, candidate: &str) -> RollingAction` function, and call it from both `clean_vtt` and `parse_vtt_segments`. This is the "port... reuse/share it rather than reinventing" instruction: one function now owns the collapse rule instead of two independently-maintained copies (which is exactly how `parse_vtt_segments` fell behind `clean_vtt` in the first place per the doc's compounding-bug paragraph).
+- In `parse_vtt_segments`, a `Replace` action keeps the *earliest* start timestamp (the first cue where the growing line began) rather than the latest cue's start - the replacement text is the same utterance, just more complete, so its earliest-known start time is the semantically correct anchor for `slides::bind_transcript` callers.
+- Added function-level debug logging to `parse_vtt_segments` (entry: byte length; exit: segment count) and `clean_vtt` (entry: byte length; exit: collapsed line count / result length), matching the file's existing instrumentation pattern; neither had any logging before.
+
+### Deviations
+- None. Implemented at the seam the doc named (`borg/src/youtube.rs`, `parse_vtt_segments` + `clean_vtt`), no new crate, no behavior change to unrelated functions.
+
+### Tradeoffs
+- Shared `rolling_dedupe_action` returns an enum (`Push`/`Replace`/`Skip`) rather than mutating the caller's `Vec` directly - chosen so the same decision function serves `clean_vtt`'s `Vec<String>` and `parse_vtt_segments`'s `Vec<(f64, String)>` without either one adapting its data shape to the other.
+- Kept the pre-existing match-arm ordering where `candidate.starts_with(last)` is checked before the exact-equality arm (so an exact-duplicate candidate takes the `Replace` branch, not the dead `Skip` arm below it) - this mirrors `clean_vtt`'s original code exactly (the equality arm was already unreachable there) and is a no-op in practice since replacing identical text with itself does not change the accumulated value.
+
+### Open questions
+- None.
+

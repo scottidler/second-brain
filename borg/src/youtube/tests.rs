@@ -71,6 +71,90 @@ fn test_parse_vtt_segments_dedupes_consecutive_duplicates() {
 }
 
 #[test]
+fn test_parse_vtt_segments_strips_classed_tags() {
+    // Auto-generated captions wrap each word in a classed span, not the
+    // bare `<c>`/`</c>` the old literal-string replace handled.
+    let vtt = "00:00:00.000 --> 00:00:02.000\n<c.colorE5E5E5>tagged</c> plain";
+    let segs = parse_vtt_segments(vtt);
+    assert_eq!(segs.len(), 1);
+    assert_eq!(segs[0].1, "tagged plain");
+    assert!(!segs[0].1.contains("<c"), "classed tag leaked: {}", segs[0].1);
+}
+
+#[test]
+fn test_parse_vtt_segments_strips_timing_tags() {
+    // Rolling captions stamp per-word timing tags inside a growing cue.
+    let vtt = "00:00:00.000 --> 00:00:02.000\nwelcome<00:00:00.500> back<00:00:01.000> home";
+    let segs = parse_vtt_segments(vtt);
+    assert_eq!(segs.len(), 1);
+    assert_eq!(segs[0].1, "welcome back home");
+    assert!(!segs[0].1.contains('<'), "timing tag leaked: {}", segs[0].1);
+}
+
+/// Negative case proving the compounding bug is fixed: a segment carrying
+/// an untouched classed or timing tag would fail this on the raw literal
+/// forms the old `.replace("<c>", "")` string-replace missed entirely.
+#[test]
+fn test_parse_vtt_segments_no_tag_substrings_survive() {
+    let vtt = "00:00:00.000 --> 00:00:02.000\n<c.colorE5E5E5>hello</c> world<00:00:01.500><c> today</c>";
+    let segs = parse_vtt_segments(vtt);
+    assert_eq!(segs.len(), 1);
+    assert_eq!(segs[0].1, "hello world today");
+    for (_, text) in &segs {
+        assert!(!text.contains("<c"), "classed tag survived: {text}");
+        assert!(!text.contains('<'), "timing tag survived: {text}");
+    }
+}
+
+/// Fixture modeled on a real YouTube rolling auto-caption VTT: each settling
+/// line is followed by a "collapse" cue repeating it verbatim, then the next
+/// cue re-emits the settled line joined with a growing continuation carrying
+/// classed and per-word timing tags. Before the fix this produced every
+/// spoken line twice; the rolling-overlap collapse must yield each once.
+#[test]
+fn test_parse_vtt_segments_rolling_caption_yields_each_line_once() {
+    let vtt = concat!(
+        "WEBVTT\n",
+        "Kind: captions\n",
+        "Language: en\n",
+        "\n",
+        "00:00:00.080 --> 00:00:02.780 align:start position:0%\n",
+        "welcome<00:00:00.560><c> back</c><c> to</c><c> the</c><c> channel</c>\n",
+        "\n",
+        "00:00:02.780 --> 00:00:02.790 align:start position:0%\n",
+        "welcome back to the channel\n",
+        "\n",
+        "00:00:02.790 --> 00:00:05.500 align:start position:0%\n",
+        "welcome back to the channel\n",
+        "everyone<00:00:03.200><c> today</c><c> we're</c>\n",
+        "\n",
+        "00:00:05.500 --> 00:00:05.510 align:start position:0%\n",
+        "welcome back to the channel everyone today we're\n",
+        "\n",
+        "00:00:05.510 --> 00:00:08.000 align:start position:0%\n",
+        "welcome back to the channel everyone today we're\n",
+        "going<00:00:06.000><c> to</c><c> talk</c><c> about</c><c> rust</c>\n",
+        "\n",
+        "00:00:08.000 --> 00:00:08.010 align:start position:0%\n",
+        "welcome back to the channel everyone today we're going to talk about rust\n",
+    );
+    let segs = parse_vtt_segments(vtt);
+    assert_eq!(
+        segs.len(),
+        1,
+        "rolling caption should collapse to one segment, got {segs:?}"
+    );
+    assert_eq!(
+        segs[0].1,
+        "welcome back to the channel everyone today we're going to talk about rust"
+    );
+    // Earliest cue's start time is kept as the line grows.
+    assert_eq!(segs[0].0, 0.08);
+    assert!(!segs[0].1.contains("<c"), "classed tag leaked: {}", segs[0].1);
+    assert!(!segs[0].1.contains('<'), "timing tag leaked: {}", segs[0].1);
+}
+
+#[test]
 fn test_clean_vtt_rolling_prefix_keeps_distinct_lines() {
     let vtt = "00:00:00.000 --> 00:00:01.000\nhello world\n\n00:00:01.000 --> 00:00:02.000\nhow are you\n\n00:00:02.000 --> 00:00:03.000\nhow are you doing today";
     let result = clean_vtt(vtt);

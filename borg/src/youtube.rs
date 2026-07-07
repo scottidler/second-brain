@@ -24,6 +24,53 @@ static VIDEO_ID_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
     .expect("valid regex")
 });
 
+/// Matches VTT inline markup that auto-generated captions embed in cue text:
+/// classed/plain caption tags (`<c>`, `</c>`, `<c.colorE5E5E5>`) and per-word
+/// timing tags (`<00:00:00.360>`) that rolling captions use to mark timing
+/// within a growing cue. Neither is literal `<c>`/`</c>` only - the classed
+/// and timing forms slipped through the old literal-string replace and
+/// leaked into staged transcripts and note bodies.
+static VTT_TAG_REGEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"</?c[^>]*>|<\d{2}:\d{2}:\d{2}\.\d{3}>").expect("valid regex"));
+
+/// Strip VTT inline markup from a cue's raw text: classed/timing tags via
+/// regex, plus the italic tags VTT also emits.
+fn strip_vtt_tags(text: &str) -> String {
+    let stripped = VTT_TAG_REGEX.replace_all(text, "");
+    stripped.replace("<i>", "").replace("</i>", "")
+}
+
+/// Outcome of comparing a newly-cleaned cue/line against the last accumulated
+/// one, for the rolling-caption dedupe shared by `clean_vtt` and
+/// `parse_vtt_segments`.
+enum RollingAction {
+    /// No overlap with the prior line; accept as a new entry.
+    Push,
+    /// The candidate extends the prior line (rolling caption grew by a word
+    /// or two); replace the prior entry with the more complete candidate.
+    Replace,
+    /// The candidate is already covered by the prior line (a regression,
+    /// silence-fill duplicate, or the settled repeat of a growing line);
+    /// drop it.
+    Skip,
+}
+
+/// Decide how a new cue's cleaned text merges into the rolling-caption
+/// dedupe accumulator, given the previously accumulated text (if any).
+/// Auto-generated "rolling" captions emit each spoken line multiple times as
+/// it is built up word-by-word cue-to-cue, then repeat the settled line
+/// verbatim once it stops growing - this collapses the extends/covered-by/
+/// duplicate cases into a single accepted line. Both observations are from
+/// `claude-video/scripts/transcribe.py:55-67`.
+fn rolling_dedupe_action(last: Option<&str>, candidate: &str) -> RollingAction {
+    match last {
+        Some(last) if candidate.starts_with(last) => RollingAction::Replace,
+        Some(last) if last.starts_with(candidate) => RollingAction::Skip,
+        Some(last) if last == candidate => RollingAction::Skip,
+        _ => RollingAction::Push,
+    }
+}
+
 pub fn extract_video_id(url: &str) -> Option<String> {
     VIDEO_ID_REGEX
         .captures(url)
@@ -186,27 +233,30 @@ pub async fn fetch_subtitles_raw(url: &str, pipeline: &PipelineConfig) -> Result
 /// Parse a raw VTT subtitle file into `(start_secs, text)` segments. Each
 /// VTT cue begins with a `HH:MM:SS.mmm --> HH:MM:SS.mmm` line followed by
 /// one or more text lines; we keep only the start time and concatenate the
-/// text. HTML tags (`<c>`, `<i>`) are stripped. Returns segments in the
-/// shape that `slides::bind_transcript` consumes after format-rendering.
+/// text. Classed/plain caption tags (`<c>`, `<c.colorE5E5E5>`), per-word
+/// timing tags (`<00:00:00.360>`), and italic tags (`<i>`) are stripped, and
+/// rolling-caption overlap is collapsed (see `rolling_dedupe_action`) so a
+/// spoken line that grows cue-to-cue is emitted once. Returns segments in
+/// the shape that `slides::bind_transcript` consumes after format-rendering.
 pub fn parse_vtt_segments(vtt: &str) -> Vec<(f64, String)> {
+    log::debug!("parse_vtt_segments: parsing vtt ({} bytes)", vtt.len());
     let mut segments: Vec<(f64, String)> = Vec::new();
     let mut current_start: Option<f64> = None;
     let mut current_text = String::new();
 
     let push_current = |segments: &mut Vec<(f64, String)>, start: &mut Option<f64>, text: &mut String| {
         if let Some(s) = start.take() {
-            let cleaned = text
-                .replace("<c>", "")
-                .replace("</c>", "")
-                .replace("<i>", "")
-                .replace("</i>", "")
-                .trim()
-                .to_string();
+            let cleaned = strip_vtt_tags(text).trim().to_string();
             if !cleaned.is_empty() {
-                // Drop verbatim duplicates of the previous segment (rolling
-                // captions emit the same words multiple times).
-                if !segments.last().map(|(_, t)| t == &cleaned).unwrap_or(false) {
-                    segments.push((s, cleaned));
+                match rolling_dedupe_action(segments.last().map(|(_, t)| t.as_str()), &cleaned) {
+                    RollingAction::Replace => {
+                        // Keep the earliest start time for the growing line;
+                        // the candidate is the same utterance, just more complete.
+                        let (prev_start, _) = segments.pop().expect("last existed for Replace action");
+                        segments.push((prev_start, cleaned));
+                    }
+                    RollingAction::Skip => {}
+                    RollingAction::Push => segments.push((s, cleaned)),
                 }
             }
             text.clear();
@@ -237,6 +287,7 @@ pub fn parse_vtt_segments(vtt: &str) -> Vec<(f64, String)> {
         current_text.push_str(line);
     }
     push_current(&mut segments, &mut current_start, &mut current_text);
+    log::debug!("parse_vtt_segments: parsed {} segments", segments.len());
     segments
 }
 
@@ -522,6 +573,7 @@ pub async fn extract_frames(
 /// previous line already covers it (regression / silence-fill duplicate).
 /// Both observations are from `claude-video/scripts/transcribe.py:55-67`.
 fn clean_vtt(vtt: &str) -> String {
+    log::debug!("clean_vtt: cleaning vtt ({} bytes)", vtt.len());
     let mut lines: Vec<String> = Vec::new();
 
     for line in vtt.lines() {
@@ -539,35 +591,25 @@ fn clean_vtt(vtt: &str) -> String {
             continue;
         }
 
-        let cleaned = line
-            .replace("<c>", "")
-            .replace("</c>", "")
-            .replace("<i>", "")
-            .replace("</i>", "");
+        let cleaned = strip_vtt_tags(line);
 
         if cleaned.is_empty() {
             continue;
         }
 
-        match lines.last() {
-            Some(last) if cleaned.starts_with(last) => {
-                // New line extends the previous one; replace.
+        match rolling_dedupe_action(lines.last().map(|s| s.as_str()), &cleaned) {
+            RollingAction::Replace => {
                 lines.pop();
                 lines.push(cleaned);
             }
-            Some(last) if last.starts_with(&cleaned) => {
-                // Previous line already covers this; skip.
-            }
-            Some(last) if last == &cleaned => {
-                // Exact duplicate; skip.
-            }
-            _ => {
-                lines.push(cleaned);
-            }
+            RollingAction::Skip => {}
+            RollingAction::Push => lines.push(cleaned),
         }
     }
 
-    lines.join(" ")
+    let result = lines.join(" ");
+    log::debug!("clean_vtt: collapsed to {} lines ({} bytes)", lines.len(), result.len());
+    result
 }
 
 #[cfg(test)]
