@@ -7327,6 +7327,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "strip-transcripts"
+version = "0.9.4"
+dependencies = [
+ "chrono",
+ "clap",
+ "env_logger",
+ "eyre",
+ "log",
+ "tempfile",
+ "vault",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

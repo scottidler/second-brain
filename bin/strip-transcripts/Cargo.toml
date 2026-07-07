@@ -1,0 +1,20 @@
+[package]
+name = "strip-transcripts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "One-shot backfill: strip ## Transcript-to-EOF from Video/Article notes ingested since 2026-06-28 (Phase 6, docs/design/2026-07-07-distillation-output-restore.md)"
+
+[dependencies]
+vault = { path = "../../vault" }
+chrono = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+eyre = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
