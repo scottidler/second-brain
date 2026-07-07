@@ -2,7 +2,7 @@
 
 **Author:** Scott A. Idler
 **Date:** 2026-07-07
-**Status:** In Review
+**Status:** Implemented
 **Review Passes Completed:** 5/5
 
 ## Summary
@@ -142,6 +142,12 @@ pub struct EnumeratedItem {
   - **listicle-survival**: `items.len() == declared_count` per enumeration fixture; partial credit `items/declared`.
   - **note-size**: render the fixture's Distilled, assert bytes < ceiling.
 - Judge axes (claim-coverage, anchor-validity, summary-faithfulness) unchanged; re-run recorded as the new baseline (prior: composite 1.952, video 0.467).
+
+**Implemented baseline (2026-07-07).** Deterministic metrics wired into `sb borg eval` (Phase 7 + 7b), computed over the 22 committed fixtures with zero new judge calls:
+- listicle-survival: **1.000** over 1 applicable fixture (`video/top-10-claude-code-skills-plugins-clis-april-2026`); all other fixtures are N/A (no expected `declared_count`) and excluded from the aggregate, not scored 0.
+- note-size: **22/22** fixtures within the 65,536-byte ceiling.
+- Break-the-code check confirmed: a listicle fixture that loses its enumeration items scores 0.0 and drags the aggregate.
+- The composite **judge** re-run (the `1.952 / 0.467` successor) is an operator live-fabric step, run after the post-Phase-5 `otto deploy`; not yet recorded.
 
 ### Implementation Plan
 
