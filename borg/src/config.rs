@@ -221,7 +221,7 @@ pub struct EnvBootstrapConfig {
 /// Distillation feature toggles. Each flag turns off one distillation feature
 /// on the borg ingest path. The daemon has no per-invocation CLI surface, so a
 /// config toggle is the right home (the "methodology selection is legitimate
-/// config" carve-out). All four DEFAULT TO TRUE so an existing
+/// config" carve-out). All three DEFAULT TO TRUE so an existing
 /// `~/.config/sb/borg.yml` with no `distill:` section — or a partial one —
 /// keeps today's shipped behavior (back-compat, mirroring the cortex embed
 /// kinds and `youtube.slides.content-filter.enabled` patterns).
@@ -235,13 +235,17 @@ pub struct EnvBootstrapConfig {
 /// from to fill missing fields, so both an absent `distill:` block and a
 /// partial one land the unspecified flags TRUE. `test_distill_config_*` pins
 /// this.
+///
+/// `article-transcript` was removed in the 2026-07-07
+/// distillation-output-restore design (Phase 3): once `## Transcript` is no
+/// longer rendered for ANY video/article note (the section is gone from
+/// `render.rs` for those kinds regardless of any toggle), there was nothing
+/// left for the flag to configure. `deny_unknown_fields` below turns a stale
+/// `article-transcript:` key in an existing `borg.yml` into a loud config-load
+/// error naming the field, rather than a silently-ignored no-op.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct DistillConfig {
-    /// Store the fetched article markdown as the note's `## Transcript` section.
-    /// When false, article notes carry no `## Transcript` (pre-Phase-7 shape).
-    /// Article-only: video/voicenote/thread/image transcripts are unaffected.
-    pub article_transcript: bool,
     /// Append the distilled sections below the slide body on slide-published
     /// videos (Phase 7). When false, the slide body stands alone.
     pub slide_append: bool,
@@ -258,7 +262,6 @@ pub struct DistillConfig {
 impl Default for DistillConfig {
     fn default() -> Self {
         Self {
-            article_transcript: true,
             slide_append: true,
             capture_note: true,
             propose_tags: true,
@@ -299,6 +302,28 @@ const DEFAULT_FABRIC_URL_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_FABRIC_TRANSCRIPT_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_MARKITDOWN_TIMEOUT_SECS: u64 = 60;
 
+/// Hard ceiling on the FINAL composed note body, checked at
+/// `pipeline.rs`'s atomic-write chokepoint just before publish
+/// (2026-07-07 distillation-output-restore, Phase 3). With `## Transcript`
+/// gone from video/article/repo notes (Phase 2), an oversize note is a bug -
+/// a verbatim leak the render/gate seams above this should have already
+/// caught - so this is a hard fail (`FailureStage::QualityBlocked`), not a
+/// WARN+degraded publish: a degraded-but-published fat note would still land
+/// in the synced vault, which is the exact failure this gate exists to stop.
+///
+/// MEASURED, not guessed (panel condition): the largest live slide-heavy /
+/// video/article note in the vault, re-measured with its `## Transcript`
+/// section stripped (simulating the new transcript-free render), is 9,213
+/// bytes (`mcp-vs-api-why-traditional-apis-are-failing-ai-agents.md`) - every
+/// other candidate lands under 10 KB once its transcript section is removed.
+/// The design's floor of 65_536 already sits ~7x above that measured max,
+/// comfortably absorbing the not-yet-landed Phase 4 sections (tldr,
+/// `## Enumerated Points`, `## Key Ideas`) and denser map-reduce claim output
+/// on long chunked videos, so the floor IS the chosen ceiling - no further
+/// headroom needed above it. A false positive is recoverable: visible in
+/// receipts, bump `pipeline.max-note-bytes`, `sb borg replay <trace>`.
+const MAX_NOTE_BYTES: usize = 65_536;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct PipelineConfig {
@@ -312,6 +337,9 @@ pub struct PipelineConfig {
     pub markitdown_timeout_secs: u64,
     pub max_concurrent_traces: usize,
     pub max_concurrent_heavy_traces: usize,
+    /// Hard ceiling on the final composed note body in bytes. See
+    /// `MAX_NOTE_BYTES` for the measurement behind the default.
+    pub max_note_bytes: usize,
 }
 
 impl Default for PipelineConfig {
@@ -327,6 +355,7 @@ impl Default for PipelineConfig {
             markitdown_timeout_secs: DEFAULT_MARKITDOWN_TIMEOUT_SECS,
             max_concurrent_traces: DEFAULT_MAX_CONCURRENT_TRACES,
             max_concurrent_heavy_traces: DEFAULT_MAX_CONCURRENT_HEAVY_TRACES,
+            max_note_bytes: MAX_NOTE_BYTES,
         }
     }
 }

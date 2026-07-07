@@ -927,54 +927,13 @@ fn distilled_with_transcript(kind: Option<vault::distilled::KindPayload>) -> vau
 }
 
 #[test]
-fn gate_article_transcript_off_drops_transcript_section() {
-    // Article-transcript OFF: the raw-fetch `## Transcript` section must be
-    // gone from the rendered note (pre-Phase-7 article shape).
-    let gated = gate_article_transcript(distilled_with_transcript(None), false, true);
-    assert!(
-        gated.transcript.is_none(),
-        "transcript must be cleared when the toggle is off"
-    );
-    let rendered = distillers::render(&gated, distillers::RenderOptions::for_url_publish(&gated));
-    assert!(
-        !rendered.body_markdown.contains("## Transcript"),
-        "article note must have NO ## Transcript when gate is off:\n{}",
-        rendered.body_markdown
-    );
-}
-
-#[test]
-fn gate_article_transcript_on_keeps_field_but_publish_omits_section() {
-    // Article-transcript ON: a clean, long-enough body keeps its transcript
-    // FIELD (which feeds staging + embeddings). (Phase 4: a thin stub is now
-    // cleared even with the toggle on, so this fixture must be real article
-    // prose, not the 25-char shared stub.) But the article PUBLISH render
-    // (`for_url_publish`) omits the `## Transcript` section regardless
-    // (2026-07-07 distillation-output-restore): the verbatim text lives in
-    // staging, never the note body.
-    let clean = "This is a genuine article body with several sentences of real \
-        prose that comfortably exceeds the coarse quality gate's minimum length \
-        and reads as content rather than navigation chrome, so it survives.";
-    let gated = gate_article_transcript(distilled_with(clean), true, true);
-    assert!(
-        gated.transcript.is_some(),
-        "transcript FIELD must survive when the toggle is on"
-    );
-    let rendered = distillers::render(&gated, distillers::RenderOptions::for_url_publish(&gated));
-    assert!(
-        !rendered.body_markdown.contains("## Transcript"),
-        "article publish body must omit ## Transcript even when the field survives:\n{}",
-        rendered.body_markdown
-    );
-}
-
-#[test]
 fn article_transcript_gate_is_article_only_video_field_unaffected() {
-    // The gate is invoked ONLY on the article distiller path in
-    // process_url_inner. A VIDEO Distilled never passes through it, so its
-    // transcript FIELD survives untouched (feeding staging + embeddings). The
-    // video PUBLISH render still omits the `## Transcript` section, per the
-    // 2026-07-07 policy (`for_url_publish` -> false for Video).
+    // The source/quality gate is invoked ONLY inside
+    // distill_for_publish_article (borg/src/stages/distill.rs). A VIDEO
+    // Distilled never passes through it, so its transcript FIELD survives
+    // untouched (feeding staging + embeddings). The video PUBLISH render
+    // still omits the `## Transcript` section, per the 2026-07-07 policy
+    // (`for_url_publish` -> false for Video).
     let video = distilled_with_transcript(Some(vault::distilled::KindPayload::Video(
         vault::distilled::VideoPayload::default(),
     )));
@@ -1096,6 +1055,43 @@ fn merge_proposed_tags_on_merges_distiller_tags() {
     );
 }
 
+// --- Note-size hard gate (2026-07-07 distillation-output-restore, Phase 3) -
+
+#[test]
+fn note_size_gate_passes_under_ceiling() {
+    assert_eq!(note_size_gate(100, 65_536), None, "well under the ceiling must pass");
+}
+
+#[test]
+fn note_size_gate_passes_at_exact_ceiling() {
+    // Boundary: exactly at the ceiling passes (only strictly-over fails).
+    assert_eq!(note_size_gate(65_536, 65_536), None, "exactly at the ceiling must pass");
+}
+
+#[test]
+fn note_size_gate_fails_one_byte_over_ceiling() {
+    // Boundary: one byte over the ceiling fails.
+    let reason = note_size_gate(65_537, 65_536).expect("one byte over must fail");
+    assert!(
+        reason.contains("65537") && reason.contains("65536"),
+        "reason must name both the actual and configured sizes: {reason}"
+    );
+}
+
+#[test]
+fn note_size_gate_respects_configured_ceiling_not_just_the_default() {
+    // An operator-lowered ceiling (pipeline.max-note-bytes) is honored, not
+    // just the built-in MAX_NOTE_BYTES default.
+    assert!(
+        note_size_gate(2_000, 1_000).is_some(),
+        "must fail against a lowered ceiling"
+    );
+    assert!(
+        note_size_gate(2_000, 4_096).is_none(),
+        "must pass against a raised ceiling"
+    );
+}
+
 // --- Phase 3: readable preferred-fetch wiring -----------------------------
 
 /// Criterion (a): clean article markdown (a real body carrying a known article
@@ -1167,167 +1163,5 @@ fn readable_gated_to_plain_articles_only() {
     assert!(
         is_plain("https://thenewstack.io/claude-sonnet-5-launch/"),
         "an ordinary article IS a plain article"
-    );
-}
-
-// --- Phase 4: borg-layer transcript quality gate --------------------------
-
-fn distilled_with(transcript: &str) -> vault::distilled::Distilled {
-    vault::distilled::Distilled {
-        transcript: Some(transcript.to_string()),
-        ..Default::default()
-    }
-}
-
-/// A clean article body (long prose lines) passes the coarse quality gate.
-#[test]
-fn transcript_quality_keeps_clean_article() {
-    let clean = "Anthropic today announced its most agentic Sonnet model yet, with \
-        substantial gains on real-world coding and agentic tool-use benchmarks.\n\n\
-        The model is available immediately across the API and Claude Code, and the \
-        company published evaluations covering software engineering and retrieval.\n\n\
-        Early testers report meaningfully fewer wrong-tool calls on long tasks.";
-    assert!(transcript_quality_ok(clean), "clean prose must pass");
-}
-
-/// Criterion (d): a link-heavy-but-legit article (HN-style roundup: real titles
-/// + editorial context per line) PASSES - the false-positive guard.
-#[test]
-fn transcript_quality_keeps_link_heavy_legit() {
-    let roundup = (0..12)
-        .map(|i| {
-            format!(
-                "- [A Substantial Article Title Number {i} About Systems](https://example.com/{i}) - one line of real editorial context"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        transcript_quality_ok(&roundup),
-        "link-dense-but-legit article must pass (chrome guard)"
-    );
-}
-
-/// A legitimately short article (real prose, above the min) passes.
-#[test]
-fn transcript_quality_keeps_short_legit() {
-    let short = "This is a short but legitimate article. It has a couple of real \
-        sentences of prose that comfortably clear the minimum length, and its lines \
-        are long enough to read as article body rather than navigation chrome.";
-    assert!(transcript_quality_ok(short), "short-but-legit prose must pass");
-}
-
-/// A prose-like page is NOT dropped by the coarse gate - bot-walls are Phase-3's
-/// `detect_block_page` job; this gate must not overreach onto prose.
-#[test]
-fn transcript_quality_keeps_prose_like_content() {
-    let prose = "Please verify you are a human to continue reading this article. \
-        We use a short verification step to protect the site from automated abuse, \
-        and normal readers are let through within a few seconds without any action.";
-    assert!(
-        transcript_quality_ok(prose),
-        "prose-like content must not be dropped by the coarse gate"
-    );
-}
-
-/// Criteria (a)/(b): a chrome-heavy transcript (country-dropdown / nav wall of
-/// short lines) FAILS the coarse gate.
-#[test]
-fn transcript_quality_drops_chrome_heavy() {
-    let chrome = [
-        "Afghanistan",
-        "Albania",
-        "Algeria",
-        "Andorra",
-        "Angola",
-        "Argentina",
-        "Armenia",
-        "Australia",
-        "Austria",
-        "Azerbaijan",
-        "Bahamas",
-        "Bahrain",
-        "Bangladesh",
-        "Barbados",
-        "Belarus",
-        "Belgium",
-        "Belize",
-        "Benin",
-        "Bhutan",
-        "Bolivia",
-        "Botswana",
-        "Brazil",
-        "Subscribe",
-        "Sign in",
-        "Menu",
-        "Home",
-        "About",
-        "Contact",
-        "Newsletter",
-        "Follow us",
-    ]
-    .join("\n");
-    assert!(
-        chrome.chars().count() >= 200,
-        "fixture must clear the min-length check first"
-    );
-    assert!(
-        !transcript_quality_ok(&chrome),
-        "a wall of short chrome lines must fail"
-    );
-}
-
-/// Too-thin content fails on the length floor.
-#[test]
-fn transcript_quality_drops_too_short() {
-    assert!(
-        !transcript_quality_ok("# Hi\n\nnot enough"),
-        "below the min-length floor must fail"
-    );
-}
-
-/// gate_article_transcript, toggle ON: a clean transcript is KEPT (criterion c),
-/// a chrome-heavy transcript is CLEARED (criteria a/b - one borg-layer gate on
-/// the final Distilled covers both the success and fallback paths).
-#[test]
-fn gate_keeps_clean_and_clears_chrome_when_enabled() {
-    let clean = "This is a genuine article body with several sentences of real prose \
-        that clearly exceeds the minimum length and reads as content, not chrome, so \
-        the coarse quality gate leaves the transcript in place for publication.";
-    let kept = gate_article_transcript(distilled_with(clean), true, true);
-    assert!(kept.transcript.is_some(), "clean transcript must be kept when enabled");
-
-    let chrome = vec!["Afghanistan"; 40].join("\n");
-    let cleared = gate_article_transcript(distilled_with(&chrome), true, true);
-    assert!(
-        cleared.transcript.is_none(),
-        "chrome-heavy transcript must be cleared when enabled"
-    );
-}
-
-/// gate_article_transcript, toggle OFF: the transcript is dropped
-/// unconditionally, even a clean one (pre-Phase-7 shape, existing behavior).
-#[test]
-fn gate_clears_when_toggle_off_regardless_of_quality() {
-    let clean = "A perfectly clean article body with plenty of real prose sentences \
-        that would otherwise pass the coarse quality gate without any trouble at all.";
-    let out = gate_article_transcript(distilled_with(clean), false, true);
-    assert!(out.transcript.is_none(), "toggle off must drop even a clean transcript");
-}
-
-/// Source gate (finding #1 fix): a clean-LOOKING transcript from a NON-clean fetch
-/// source (fallthrough to fabric-u/Jina/browser-UA) is dropped even though it would
-/// pass the coarse quality gate - only cleanly-extracted output is ever stored.
-/// This is what makes "chrome is never published on the fallback path" true; the
-/// coarse ratio alone keeps a 0.61-short-line trainwreck.
-#[test]
-fn gate_clears_transcript_from_non_clean_source() {
-    let clean = "A perfectly clean-looking article body with several real sentences \
-        of prose that easily clears the coarse quality gate, but it came from a \
-        non-readable fallback fetch, so it must not be stored as a transcript.";
-    let out = gate_article_transcript(distilled_with(clean), true, false);
-    assert!(
-        out.transcript.is_none(),
-        "a non-clean fetch source must drop the transcript even when the toggle is on and the text looks clean"
     );
 }

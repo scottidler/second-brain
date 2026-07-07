@@ -517,6 +517,25 @@ fn test_pipeline_config_split_fetch_timeouts_independent_of_fabric_pattern_timeo
 }
 
 #[test]
+fn test_pipeline_config_max_note_bytes_defaults_to_measured_ceiling() {
+    // 2026-07-07 distillation-output-restore, Phase 3: the ceiling defaults
+    // to MAX_NOTE_BYTES (65_536, the design's floor - the measured largest
+    // transcript-free note in the live vault is 9,213 bytes, well under it).
+    let p = PipelineConfig::default();
+    assert_eq!(p.max_note_bytes, MAX_NOTE_BYTES);
+    assert_eq!(p.max_note_bytes, 65_536);
+}
+
+#[test]
+fn test_pipeline_config_max_note_bytes_yaml_override() {
+    let yaml = "max-note-bytes: 131072\n";
+    let p: PipelineConfig = serde_yaml::from_str(yaml).expect("parse pipeline yaml");
+    assert_eq!(p.max_note_bytes, 131_072);
+    // Other defaults untouched.
+    assert_eq!(p.hard_timeout_secs, 1800);
+}
+
+#[test]
 fn host_matches_fails_closed_when_hostname_unreadable() {
     // No pin: runs everywhere regardless of hostname readability.
     assert!(host_matches(&None, None));
@@ -724,7 +743,6 @@ fn content_filter_serde_default_matches_struct_default() {
 #[test]
 fn test_distill_config_default_all_true() {
     let d = DistillConfig::default();
-    assert!(d.article_transcript);
     assert!(d.slide_append);
     assert!(d.capture_note);
     assert!(d.propose_tags);
@@ -733,7 +751,7 @@ fn test_distill_config_default_all_true() {
 #[test]
 fn test_distill_config_absent_block_defaults_all_true() {
     // CRITICAL back-compat: a borg.yml with NO `distill:` section must
-    // deserialize to all four flags = TRUE (guards the bool-serde-default
+    // deserialize to all three flags = TRUE (guards the bool-serde-default
     // footgun — container `#[serde(default)]` fills from the struct Default).
     let yaml = r#"
 server:
@@ -741,7 +759,6 @@ server:
   port: 8181
 "#;
     let config: Config = serde_yaml::from_str(yaml).expect("should parse");
-    assert!(config.distill.article_transcript);
     assert!(config.distill.slide_append);
     assert!(config.distill.capture_note);
     assert!(config.distill.propose_tags);
@@ -751,7 +768,6 @@ server:
 fn test_distill_config_empty_block_defaults_all_true() {
     // An empty `distill: {}` block must also default every flag TRUE.
     let from_yaml: DistillConfig = serde_yaml::from_str("{}").expect("parse empty");
-    assert!(from_yaml.article_transcript);
     assert!(from_yaml.slide_append);
     assert!(from_yaml.capture_note);
     assert!(from_yaml.propose_tags);
@@ -759,16 +775,15 @@ fn test_distill_config_empty_block_defaults_all_true() {
 
 #[test]
 fn test_distill_config_partial_block_defaults_unspecified_true() {
-    // Explicit `article-transcript: false` flips ONLY that flag; the other
-    // three stay TRUE (container default fills the missing fields from the
-    // struct Default, not from bool::default()).
+    // Explicit `slide-append: false` flips ONLY that flag; the other two
+    // stay TRUE (container default fills the missing fields from the struct
+    // Default, not from bool::default()).
     let yaml = r#"
 distill:
-  article-transcript: false
+  slide-append: false
 "#;
     let config: Config = serde_yaml::from_str(yaml).expect("should parse");
-    assert!(!config.distill.article_transcript);
-    assert!(config.distill.slide_append);
+    assert!(!config.distill.slide_append);
     assert!(config.distill.capture_note);
     assert!(config.distill.propose_tags);
 }
@@ -777,16 +792,33 @@ distill:
 fn test_distill_config_all_false_yaml_override() {
     let yaml = r#"
 distill:
-  article-transcript: false
   slide-append: false
   capture-note: false
   propose-tags: false
 "#;
     let config: Config = serde_yaml::from_str(yaml).expect("should parse");
-    assert!(!config.distill.article_transcript);
     assert!(!config.distill.slide_append);
     assert!(!config.distill.capture_note);
     assert!(!config.distill.propose_tags);
+}
+
+#[test]
+fn test_distill_config_stale_article_transcript_key_fails_loudly() {
+    // 2026-07-07 distillation-output-restore, Phase 3: `article-transcript`
+    // was removed (nothing left to configure once `## Transcript` is gone
+    // from render for every article/video note). `deny_unknown_fields` turns
+    // a stale key left over in an existing borg.yml into a loud, named error
+    // at config-load time rather than a silently-ignored no-op.
+    let yaml = r#"
+distill:
+  article-transcript: false
+"#;
+    let err = serde_yaml::from_str::<Config>(yaml).expect_err("stale key must fail to deserialize");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("article-transcript") || msg.contains("article_transcript"),
+        "error must name the unknown field: {msg}"
+    );
 }
 
 #[test]

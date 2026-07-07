@@ -217,18 +217,14 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
 /// (Phases 3-4) and the future Stage-2 cutover write the structured payload.
 pub const DISTILLED_FILENAME: &str = "distilled.yml";
 
-/// Post-Phase-6 cutover: run the article distiller against the raw article
-/// markdown and return the `Distilled`. Persists `distilled.yml` to the
-/// staging directory on success for forensics and `borg replay` support.
-/// On any error (dispatch failure, etc.) returns a `fallback_distilled`
-/// with the appropriate reason tag so the caller always gets a usable
-/// payload - publish never blocks on distillation.
-/// Shared core for the simple single-call publish distillers (article, image,
+/// Shared core for the simple single-call publish distillers (image,
 /// voicenote, idea, vocab): dispatch the kind, fall back on error, log the
 /// outcome, persist `distilled.yml`. The per-kind wrappers below supply the
-/// label / kind / fallback-id. The map-reduce / payload-building distillers
-/// (video, repo, thread) keep bespoke bodies because they do more than this
-/// core.
+/// label / kind / fallback-id. `distill_for_publish_article` keeps its own
+/// bespoke body (below) because the source/quality gate must run on the
+/// `Distilled` BEFORE the staged write, not after; the map-reduce /
+/// payload-building distillers (video, repo, thread) are bespoke for the same
+/// reason - they do more than this core.
 #[allow(clippy::too_many_arguments)]
 async fn run_distiller(
     fabric: &FabricConfig,
@@ -281,6 +277,122 @@ async fn run_distiller(
     distilled
 }
 
+/// Below this, a transcript is too short to be a real article body.
+const MIN_TRANSCRIPT_CHARS: usize = 200;
+/// A non-blank line shorter than this reads as "chrome" (nav item, country-
+/// dropdown entry, form label, bare link) rather than article prose. Length,
+/// not link-detection, is the coarse signal: a legit roundup's link lines carry
+/// a real title + context and clear this bar, while country names / form labels
+/// do not.
+const MIN_PROSE_LINE_CHARS: usize = 40;
+/// Drop the transcript only when MORE than this fraction of non-blank lines are
+/// chrome-ish. Deliberately GENEROUS so a legitimately link-dense article
+/// (HN roundup, link blog) passes; only a ~90%+-chrome trainwreck trips it.
+const MAX_CHROME_RATIO: f64 = 0.9;
+
+/// COARSE transcript quality gate: a pathological-input circuit breaker, NOT a
+/// chrome classifier, and NOT the thing that makes "never publish boilerplate"
+/// true - the SOURCE gate in `gate_article_transcript` is (only cleanly-extracted
+/// output is stored at all). This is defense-in-depth on the clean-source path:
+/// it drops output the readable extractor mis-picked (too short, or overwhelmingly
+/// short/chrome lines). The thresholds are generous by design (both panel reviewers
+/// flagged a fine-grained chrome ratio as brittle on link-dense-but-legit articles),
+/// so on its own it does NOT catch a chrome-heavy-but-mixed-line fallback page -
+/// which is exactly why the source gate, not this ratio, is load-bearing.
+fn transcript_quality_ok(transcript: &str) -> bool {
+    if transcript.chars().count() < MIN_TRANSCRIPT_CHARS {
+        return false;
+    }
+    let non_blank: Vec<&str> = transcript.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if non_blank.is_empty() {
+        return false;
+    }
+    let chrome = non_blank
+        .iter()
+        .filter(|l| l.chars().count() < MIN_PROSE_LINE_CHARS)
+        .count();
+    let ratio = chrome as f64 / non_blank.len() as f64;
+    ratio <= MAX_CHROME_RATIO
+}
+
+/// Gate an ARTICLE's `Distilled.transcript` through, in order: a SOURCE gate,
+/// then the coarse quality gate. Runs on the single FINAL `Distilled` produced
+/// by `distill_for_publish_article`, BEFORE `write_distilled_yml` persists it
+/// (2026-07-07 distillation-output-restore, Phase 3 re-scope) - so chrome junk
+/// never reaches the staged `distilled.yml` or the transcript-chunk embedding
+/// source, not just the rendered note. Covers both the dispatch-success and
+/// `fallback_distilled` paths, since both flow through the same `Distilled`
+/// before this call. Video/thread/voicenote/image flow through their own
+/// paths and are never touched.
+///
+/// - `clean_source == false`: drop it unconditionally. A stored `## Transcript`
+///   is trustworthy only when the in-process readable extractor produced it;
+///   any fallthrough (fabric-u / Jina / browser-UA) is raw, non-readability
+///   markdown that must not be stored as a transcript. This SOURCE gate - not
+///   the ratio below - is what makes "chrome is never stored" true (the coarse
+///   ratio alone would keep a chrome-heavy-but-mixed-line fallback page; the
+///   source gate never lets it in). The distiller still ran, so Summary/Claims
+///   publish and the origin URL remains the archive.
+/// - otherwise (clean source): run the coarse `transcript_quality_ok` as
+///   defense-in-depth against a readable mis-extraction.
+///
+/// The pre-Phase-3 `distill.article-transcript` config toggle (an `enabled`
+/// bool here) is gone: with `## Transcript` no longer rendered for articles at
+/// all (Phase 2's `RenderOptions::for_url_publish`), there was nothing left
+/// for the toggle to configure. Every article transcript now flows through
+/// this same two-stage quality gate before landing in staging.
+fn gate_article_transcript(mut distilled: Distilled, clean_source: bool) -> Distilled {
+    let had_transcript = distilled.transcript.is_some();
+    if !clean_source {
+        if had_transcript {
+            log::debug!("gate_article_transcript: non-clean fetch source -> transcript cleared");
+        }
+        distilled.transcript = None;
+        return distilled;
+    }
+    if let Some(t) = distilled.transcript.as_deref()
+        && !transcript_quality_ok(t)
+    {
+        log::warn!(
+            "gate_article_transcript: clean-source transcript failed coarse quality gate ({} chars) -> cleared",
+            t.chars().count()
+        );
+        distilled.transcript = None;
+    }
+    log::debug!(
+        "gate_article_transcript: clean_source=true had_transcript={had_transcript} kept={}",
+        distilled.transcript.is_some()
+    );
+    distilled
+}
+
+/// Apply the article source/quality gate and persist the result. Split out of
+/// `distill_for_publish_article` so the gate-before-persist ORDERING invariant
+/// is unit-testable against a hand-built `Distilled` without invoking the live
+/// Fabric dispatch.
+fn gate_and_persist_article(
+    staging: &StagingConfig,
+    trace_id: &str,
+    distilled: Distilled,
+    clean_source: bool,
+) -> Distilled {
+    let distilled = gate_article_transcript(distilled, clean_source);
+    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
+        log::warn!("[{trace_id}] distill_for_publish_article: persist distilled.yml failed: {e:#}");
+    }
+    distilled
+}
+
+/// Post-Phase-6 cutover: run the article distiller against the raw article
+/// markdown and return the `Distilled`. `clean_source` mirrors the caller's
+/// fetch provenance (true only for the in-process readable extractor's
+/// output); the source/quality gate (`gate_article_transcript`) runs on the
+/// raw dispatch output BEFORE `distilled.yml` is persisted (Phase 3
+/// re-scope), so a non-clean fetch source or a chrome-heavy body never
+/// reaches staging or embeddings - not just the rendered note. On any error
+/// (dispatch failure, etc.) the same gate still runs against the
+/// `fallback_distilled` payload, so publish never blocks on distillation and
+/// the gate never has a bypass path.
 pub async fn distill_for_publish_article(
     fabric: &FabricConfig,
     staging: &StagingConfig,
@@ -288,20 +400,42 @@ pub async fn distill_for_publish_article(
     url: &str,
     article_md: &str,
     capture_note: Option<&str>,
+    clean_source: bool,
 ) -> Distilled {
-    run_distiller(
-        fabric,
-        staging,
-        trace_id,
-        "distill_for_publish_article",
-        IngestKind::ArticleUrl,
-        "distill-article-v1",
-        article_md,
-        Some(url),
-        None,
-        capture_note,
-    )
-    .await
+    log::debug!(
+        "distill_for_publish_article: trace={trace_id} url={url} clean_source={clean_source} transcript_len={}",
+        article_md.len()
+    );
+    let stage = DistillStage::from_fabric_config(fabric);
+    let started = std::time::Instant::now();
+    let distilled = match stage
+        .distill(IngestKind::ArticleUrl, article_md, Some(url), None, capture_note)
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("[{trace_id}] distill_for_publish_article: dispatch error: {e:#}; using fallback");
+            distillers::fallback_distilled("distill-article-v1", "dispatch-error", article_md, None, &fabric.model)
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    let fallback = distilled
+        .meta
+        .validation
+        .fallback_reason
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    log::info!(
+        "[{trace_id}] distill_for_publish_article: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
+        distilled.meta.extractor,
+        distilled.meta.model,
+        distilled.claims.len(),
+        distilled.tags.len(),
+        distilled.links.len(),
+        fallback,
+        elapsed_ms,
+    );
+    gate_and_persist_article(staging, trace_id, distilled, clean_source)
 }
 
 /// Phase 9c-voicenote cutover: run the VoiceNote distiller against a Groq ASR

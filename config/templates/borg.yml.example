@@ -120,10 +120,9 @@ youtube:
 # Distillation feature toggles (all default-on; set false to disable a feature).
 # Omitting this section (or any individual key) keeps today's shipped behavior.
 distill:
-  article-transcript: true   # store fetched article markdown as the ## Transcript section
-  slide-append:       true   # append distilled sections below the slide body on slide-published videos
-  capture-note:       true   # thread the capture note into ## Why Captured + capture-note frontmatter + distiller context
-  propose-tags:       true   # merge distiller-proposed candidate tags into the tag pipeline
+  slide-append:  true   # append distilled sections below the slide body on slide-published videos
+  capture-note:  true   # thread the capture note into ## Why Captured + capture-note frontmatter + distiller context
+  propose-tags:  true   # merge distiller-proposed candidate tags into the tag pipeline
 
 # Log level: trace | debug | info | warn | error
 log-level: info

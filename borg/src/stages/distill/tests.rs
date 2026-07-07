@@ -454,6 +454,216 @@ fn persist_github_stage_0_1_no_op_when_staging_disabled() {
     assert!(!tmp.path().join("trace-9b-off").exists());
 }
 
+// ---------------------------------------------------------------------------
+// Article source/quality gate. Moved here from pipeline/tests.rs (2026-07-07
+// distillation-output-restore, Phase 3): the gate now lives in this module
+// and runs BEFORE `write_distilled_yml`, not just before render, so a
+// non-clean or chrome-heavy transcript never reaches staging or embeddings.
+// The pre-Phase-3 `enabled` toggle (`distill.article-transcript`) is gone
+// entirely, so these tests exercise only `clean_source`.
+// ---------------------------------------------------------------------------
+
+fn distilled_with(transcript: &str) -> vault::distilled::Distilled {
+    vault::distilled::Distilled {
+        transcript: Some(transcript.to_string()),
+        ..Default::default()
+    }
+}
+
+/// A clean article body (long prose lines) passes the coarse quality gate.
+#[test]
+fn transcript_quality_keeps_clean_article() {
+    let clean = "Anthropic today announced its most agentic Sonnet model yet, with \
+        substantial gains on real-world coding and agentic tool-use benchmarks.\n\n\
+        The model is available immediately across the API and Claude Code, and the \
+        company published evaluations covering software engineering and retrieval.\n\n\
+        Early testers report meaningfully fewer wrong-tool calls on long tasks.";
+    assert!(transcript_quality_ok(clean), "clean prose must pass");
+}
+
+/// Criterion (d): a link-heavy-but-legit article (HN-style roundup: real titles
+/// + editorial context per line) PASSES - the false-positive guard.
+#[test]
+fn transcript_quality_keeps_link_heavy_legit() {
+    let roundup = (0..12)
+        .map(|i| {
+            format!(
+                "- [A Substantial Article Title Number {i} About Systems](https://example.com/{i}) - one line of real editorial context"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        transcript_quality_ok(&roundup),
+        "link-dense-but-legit article must pass (chrome guard)"
+    );
+}
+
+/// A legitimately short article (real prose, above the min) passes.
+#[test]
+fn transcript_quality_keeps_short_legit() {
+    let short = "This is a short but legitimate article. It has a couple of real \
+        sentences of prose that comfortably clear the minimum length, and its lines \
+        are long enough to read as article body rather than navigation chrome.";
+    assert!(transcript_quality_ok(short), "short-but-legit prose must pass");
+}
+
+/// A prose-like page is NOT dropped by the coarse gate - bot-walls are Phase-3's
+/// `detect_block_page` job; this gate must not overreach onto prose.
+#[test]
+fn transcript_quality_keeps_prose_like_content() {
+    let prose = "Please verify you are a human to continue reading this article. \
+        We use a short verification step to protect the site from automated abuse, \
+        and normal readers are let through within a few seconds without any action.";
+    assert!(
+        transcript_quality_ok(prose),
+        "prose-like content must not be dropped by the coarse gate"
+    );
+}
+
+/// Criteria (a)/(b): a chrome-heavy transcript (country-dropdown / nav wall of
+/// short lines) FAILS the coarse gate.
+#[test]
+fn transcript_quality_drops_chrome_heavy() {
+    let chrome = [
+        "Afghanistan",
+        "Albania",
+        "Algeria",
+        "Andorra",
+        "Angola",
+        "Argentina",
+        "Armenia",
+        "Australia",
+        "Austria",
+        "Azerbaijan",
+        "Bahamas",
+        "Bahrain",
+        "Bangladesh",
+        "Barbados",
+        "Belarus",
+        "Belgium",
+        "Belize",
+        "Benin",
+        "Bhutan",
+        "Bolivia",
+        "Botswana",
+        "Brazil",
+        "Subscribe",
+        "Sign in",
+        "Menu",
+        "Home",
+        "About",
+        "Contact",
+        "Newsletter",
+        "Follow us",
+    ]
+    .join("\n");
+    assert!(
+        chrome.chars().count() >= 200,
+        "fixture must clear the min-length check first"
+    );
+    assert!(
+        !transcript_quality_ok(&chrome),
+        "a wall of short chrome lines must fail"
+    );
+}
+
+/// Too-thin content fails on the length floor.
+#[test]
+fn transcript_quality_drops_too_short() {
+    assert!(
+        !transcript_quality_ok("# Hi\n\nnot enough"),
+        "below the min-length floor must fail"
+    );
+}
+
+/// gate_article_transcript, clean source: a clean transcript is KEPT
+/// (criterion c), a chrome-heavy transcript is CLEARED (criteria a/b - one
+/// borg-layer gate on the final Distilled covers both the success and
+/// fallback paths).
+#[test]
+fn gate_keeps_clean_and_clears_chrome_heavy() {
+    let clean = "This is a genuine article body with several sentences of real prose \
+        that clearly exceeds the minimum length and reads as content, not chrome, so \
+        the coarse quality gate leaves the transcript in place for publication.";
+    let kept = gate_article_transcript(distilled_with(clean), true);
+    assert!(
+        kept.transcript.is_some(),
+        "clean transcript must be kept for a clean source"
+    );
+
+    let chrome = vec!["Afghanistan"; 40].join("\n");
+    let cleared = gate_article_transcript(distilled_with(&chrome), true);
+    assert!(
+        cleared.transcript.is_none(),
+        "chrome-heavy transcript must be cleared even for a clean source"
+    );
+}
+
+/// Source gate (finding #1 fix): a clean-LOOKING transcript from a NON-clean fetch
+/// source (fallthrough to fabric-u/Jina/browser-UA) is dropped even though it would
+/// pass the coarse quality gate - only cleanly-extracted output is ever stored.
+/// This is what makes "chrome is never published on the fallback path" true; the
+/// coarse ratio alone keeps a 0.61-short-line trainwreck.
+#[test]
+fn gate_clears_transcript_from_non_clean_source() {
+    let clean = "A perfectly clean-looking article body with several real sentences \
+        of prose that easily clears the coarse quality gate, but it came from a \
+        non-readable fallback fetch, so it must not be stored as a transcript.";
+    let out = gate_article_transcript(distilled_with(clean), false);
+    assert!(
+        out.transcript.is_none(),
+        "a non-clean fetch source must drop the transcript even when the text looks clean"
+    );
+}
+
+/// Ordering regression (2026-07-07 distillation-output-restore, Phase 3): the
+/// source gate must clear a non-clean transcript BEFORE `distilled.yml` is
+/// persisted, not after - otherwise chrome junk from a non-clean fetch would
+/// land in staging and the transcript-chunk embedding source even though the
+/// rendered note looks clean. Exercises the exact seam
+/// `distill_for_publish_article` calls (`gate_and_persist_article`) without
+/// invoking the live Fabric dispatch.
+#[test]
+fn gate_and_persist_article_clears_before_staged_write() {
+    use crate::config::{StagingConfig, StagingLayout};
+    use tempfile::TempDir;
+    use vault::distilled::{Distilled, DistilledMeta, ValidationMeta};
+
+    let tmp = TempDir::new().expect("tempdir");
+    let staging = StagingConfig {
+        enabled: true,
+        root: tmp.path().to_path_buf(),
+        layout: StagingLayout::PerTrace,
+        ..StagingConfig::default()
+    };
+    let dirty = Distilled {
+        summary: "s".to_string(),
+        transcript: Some("Raw fallback-fetch chrome that must never reach staging.".to_string()),
+        meta: DistilledMeta {
+            extractor: "distill-article-v1".to_string(),
+            model: "test".to_string(),
+            produced_at: "2026-07-07T00:00:00Z".to_string(),
+            validation: ValidationMeta::default(),
+            ..DistilledMeta::default()
+        },
+        ..Default::default()
+    };
+
+    let gated = gate_and_persist_article(&staging, "trace-gate-order", dirty, false);
+    assert!(
+        gated.transcript.is_none(),
+        "returned Distilled must have the transcript cleared"
+    );
+
+    let staged_path = tmp.path().join("trace-gate-order").join(DISTILLED_FILENAME);
+    let staged = std::fs::read_to_string(&staged_path).expect("staged distilled.yml must exist");
+    assert!(
+        !staged.contains("transcript:"),
+        "staged distilled.yml must not carry a transcript when the source gate cleared it: {staged}"
+    );
+}
+
 #[test]
 fn persist_thread_transcript_writes_md_and_yml() {
     use crate::config::{StagingConfig, StagingLayout};
