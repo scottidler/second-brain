@@ -322,7 +322,10 @@ const DEFAULT_MARKITDOWN_TIMEOUT_SECS: u64 = 60;
 /// on long chunked videos, so the floor IS the chosen ceiling - no further
 /// headroom needed above it. A false positive is recoverable: visible in
 /// receipts, bump `pipeline.max-note-bytes`, `sb borg replay <trace>`.
-const MAX_NOTE_BYTES: usize = 65_536;
+///
+/// `pub(crate)` (not private) so `eval::calc`'s Phase 7 note-size metric
+/// reuses this exact ceiling rather than redefining it.
+pub(crate) const MAX_NOTE_BYTES: usize = 65_536;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
