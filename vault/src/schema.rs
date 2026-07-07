@@ -225,6 +225,21 @@ impl NoteType {
             Self::Reddit,
         ]
     }
+
+    /// Transcript-eligible kinds whose verbatim transcript lives in the staged
+    /// `distilled.yml` (resolved via `notes.trace`), NOT in the published note
+    /// body. As of the 2026-07-07 distillation-output-restore, Video / Youtube /
+    /// Article notes no longer carry a `## Transcript` body section — the
+    /// verbatim text is a consumed intermediate kept in borg's staging, and
+    /// cortex embeds transcript chunks by reading it out of staging. The
+    /// remaining transcript-eligible kinds (Image / Audio / Note / Vocab /
+    /// Social / Reddit — the verbatim-preservation kinds and threads) keep their
+    /// in-note `## Transcript` section as the embedding source. A subset of
+    /// [`transcript_eligible`](Self::transcript_eligible); every variant here is
+    /// also there.
+    pub fn transcript_from_staging(&self) -> bool {
+        matches!(self, Self::Youtube | Self::Video | Self::Article)
+    }
 }
 
 impl fmt::Display for NoteType {

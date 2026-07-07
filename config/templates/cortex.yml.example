@@ -32,6 +32,13 @@ embed:
     # to keep the claim-free baseline; flip to true only for the guard-first
     # claim experiment.
     claim: false
+  # Root of borg's per-trace staging directories. cortex reads the staged
+  # distilled.yml (read-only) as the transcript-embedding source for
+  # Video/Article notes, which no longer carry a `## Transcript` body section
+  # (2026-07-07-distillation-output-restore). Defaults to borg's own staging
+  # default (~/.local/share/sb/borg/stages); only set this if you overrode
+  # borg's `staging.root` in borg.yml -- it must point at the SAME directory.
+  # staging-root: ~/.local/share/sb/borg/stages
 
 # Graph-augmented-memory edge layer (oracle reads; cortex writes). All fields
 # optional; defaults live in cortex/src/config.rs GraphConfig.

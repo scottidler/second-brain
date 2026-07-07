@@ -197,6 +197,17 @@ pub struct EmbedConfig {
     /// Which embedding kinds the default (no-`--kind`) `cortex embed`/`--backfill`
     /// pass and the daemon embed tick generate. See [`EmbedKindsConfig`].
     pub kinds: EmbedKindsConfig,
+    /// Root of borg's per-trace staging directories. cortex reads the staged
+    /// `distilled.yml` (read-only) at `<staging-root>/<trace>/distilled.yml` as
+    /// the transcript-embedding source for Video/Article notes
+    /// (2026-07-07-distillation-output-restore Phase 5): those notes no longer
+    /// carry a `## Transcript` body section, so the verbatim text is read from
+    /// staging via the `notes.trace` join. Defaults to borg's own staging
+    /// default (`vault::paths::borg_stages_dir()`); an operator who overrode
+    /// borg's `staging.root` must point this at the same directory. borg remains
+    /// the sole staging writer; cortex only reads. Tilde-expanded at load.
+    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
+    pub staging_root: PathBuf,
 }
 
 impl Default for EmbedConfig {
@@ -206,6 +217,7 @@ impl Default for EmbedConfig {
             max_chunks_per_call: crate::embed::DEFAULT_MAX_CHUNKS_PER_CALL,
             cadence_secs: crate::embed::DEFAULT_CADENCE_SECS,
             kinds: EmbedKindsConfig::default(),
+            staging_root: vault::paths::borg_stages_dir(),
         }
     }
 }

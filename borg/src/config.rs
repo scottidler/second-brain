@@ -785,14 +785,9 @@ pub struct StagingConfig {
 
 impl Default for StagingConfig {
     fn default() -> Self {
-        let root = vault::paths::xdg_data_dir()
-            .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
-            .join("sb")
-            .join("borg")
-            .join("stages");
         Self {
             enabled: false,
-            root,
+            root: vault::paths::borg_stages_dir(),
             retention_days: 60,
             rejected_retention_days: 90,
             layout: StagingLayout::default(),

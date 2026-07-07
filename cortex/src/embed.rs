@@ -34,13 +34,16 @@
 //! the write transaction wall-clock stays under 200 ms for batch = 64.
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 
 use eyre::{Context, Result};
 use fs2::FileExt;
+use vault::distilled::Distilled;
 use vault::embedding::{
     ACTIVE_MODEL_VERSION, EmbeddingModel, MockEmbedder, load_model_version, prefetch_model_version,
 };
+use vault::schema::NoteType;
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
 use crate::config::{Config, EmbedKindsConfig};
@@ -180,6 +183,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
                 kind,
                 model.model_version(),
                 vault_root,
+                &config.embed.staging_root,
                 opts.batch_size,
                 config.embed.max_chunks_per_call,
             )?;
@@ -311,6 +315,7 @@ pub fn daemon_tick_with_model(vault_root: &Path, config: &Config, model: &dyn Em
                 kind,
                 model.model_version(),
                 vault_root,
+                &config.embed.staging_root,
                 DEFAULT_BATCH_SIZE,
                 config.embed.max_chunks_per_call,
             )?;
@@ -366,6 +371,7 @@ pub fn process_batch(
     kind: EmbeddingKind,
     model_version: &str,
     vault_root: &Path,
+    staging_root: &Path,
     batch_size: usize,
     max_chunks_per_call: usize,
 ) -> Result<EmbedStats> {
@@ -373,9 +379,15 @@ pub fn process_batch(
         EmbeddingKind::Summary => {
             process_summary_batch(index, model, model_version, vault_root, batch_size, max_chunks_per_call)
         }
-        EmbeddingKind::TranscriptChunk => {
-            process_transcript_batch(index, model, model_version, vault_root, batch_size, max_chunks_per_call)
-        }
+        EmbeddingKind::TranscriptChunk => process_transcript_batch(
+            index,
+            model,
+            model_version,
+            vault_root,
+            staging_root,
+            batch_size,
+            max_chunks_per_call,
+        ),
         EmbeddingKind::Claim => process_claim_batch(index, model, model_version, batch_size, max_chunks_per_call),
     }
 }
@@ -582,9 +594,16 @@ fn process_transcript_batch(
     model: &dyn EmbeddingModel,
     model_version: &str,
     vault_root: &Path,
+    staging_root: &Path,
     batch_size: usize,
     max_chunks_per_call: usize,
 ) -> Result<EmbedStats> {
+    log::debug!(
+        "cortex::embed::process_transcript_batch: vault_root={} staging_root={} batch_size={}",
+        vault_root.display(),
+        staging_root.display(),
+        batch_size,
+    );
     let mut stats = EmbedStats::default();
 
     // ---- 1. READ PHASE. ----
@@ -606,12 +625,30 @@ fn process_transcript_batch(
     let mut examined: Vec<(String, i64)> = Vec::new();
     for t in &targets {
         stats.scanned += 1;
-        let abs = vault_root.join(&t.note_path);
-        let transcript = match read_section_text(&abs, "## Transcript") {
+        // Video/Youtube/Article transcripts live in the staged distilled.yml
+        // (resolved via notes.trace), NOT the note body — those notes no longer
+        // render a `## Transcript` section (2026-07-07-distillation-output-restore
+        // Phase 5). The verbatim-preservation kinds (Image/Audio/Note/Vocab) and
+        // threads (Social/Reddit) keep their in-note `## Transcript` section.
+        let from_staging = NoteType::from_str(&t.note_type)
+            .map(|nt| nt.transcript_from_staging())
+            .unwrap_or(false);
+        let transcript = if from_staging {
+            read_staged_transcript(staging_root, &t.trace, &t.note_path)
+        } else {
+            let abs = vault_root.join(&t.note_path);
+            read_section_text(&abs, "## Transcript")
+        };
+        let transcript = match transcript {
             Some(s) if !s.trim().is_empty() => s,
             _ => {
+                // Missing/expired/malformed staged file OR absent in-note section:
+                // record the examined sentinel keyed on the NOTE's indexed
+                // modified_at (never on the staged file) so the note leaves the
+                // stale set until it is re-modified or the model version bumps.
+                // The per-source WARN was already emitted at the resolution site.
                 log::warn!(
-                    "cortex::embed: skipping {} (no ## Transcript section or empty)",
+                    "cortex::embed: skipping {} (no transcript source; from_staging={from_staging})",
                     t.note_path
                 );
                 stats.skipped_empty += 1;
@@ -891,6 +928,70 @@ struct TranscriptWork {
     note_path: String,
     chunks: Vec<String>,
     source_modified_at: i64,
+}
+
+/// Resolve a Video/Youtube/Article note's verbatim transcript from borg's
+/// staged `distilled.yml` at `<staging_root>/<trace>/distilled.yml`, reading
+/// the `transcript` field. Cortex reads borg-owned staging strictly read-only
+/// (precedented: oracle reads borg's receipts DB read-only); borg remains the
+/// sole staging writer.
+///
+/// Returns `None` — and the caller records the examined sentinel — on every
+/// failure mode, all fail-closed (never a silent empty embed, never an error
+/// that spins the loop):
+/// - empty `trace` (note predates the trace column, or was never staged)
+/// - the staged file is missing or expired (swept by retention)
+/// - the staged file is unreadable or malformed YAML
+/// - `transcript` is absent/empty (e.g. the article source-quality gate cleared it)
+///
+/// A sentinel skip is final until the note's indexed `modified_at` advances or
+/// the model version bumps; the staged `distilled.yml` is immutable after
+/// publish, so keying re-selection on the note (not the staged file) is correct
+/// by construction (2026-07-07-distillation-output-restore, Resolved Decision).
+/// Recovery for a late-appearing staged file: modify the note to bump
+/// `modified_at`.
+fn read_staged_transcript(staging_root: &Path, trace: &str, note_path: &str) -> Option<String> {
+    log::debug!(
+        "cortex::embed::read_staged_transcript: note={note_path} trace={trace} staging_root={}",
+        staging_root.display(),
+    );
+    if trace.is_empty() {
+        log::warn!("cortex::embed: {note_path} has no trace; cannot resolve staged transcript");
+        return None;
+    }
+    let path = staging_root.join(trace).join("distilled.yml");
+    let yaml = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            // Missing (never staged / swept by retention) or otherwise unreadable.
+            log::warn!(
+                "cortex::embed: {note_path} staged distilled.yml unreadable at {}: {e}",
+                path.display(),
+            );
+            return None;
+        }
+    };
+    let distilled: Distilled = match serde_yaml::from_str(&yaml) {
+        Ok(d) => d,
+        Err(e) => {
+            // Fail closed on malformed staged YAML: skip, never a partial embed.
+            log::warn!(
+                "cortex::embed: {note_path} staged distilled.yml at {} is malformed: {e}",
+                path.display(),
+            );
+            return None;
+        }
+    };
+    match distilled.transcript {
+        Some(t) if !t.trim().is_empty() => Some(t),
+        _ => {
+            log::warn!(
+                "cortex::embed: {note_path} staged distilled.yml at {} has no transcript text",
+                path.display(),
+            );
+            None
+        }
+    }
 }
 
 /// Read a single `## Heading` section out of a vault file. Returns

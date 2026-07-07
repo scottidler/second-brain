@@ -280,6 +280,25 @@ pub fn borg_signal_bootstrap_marker() -> PathBuf {
         .join("signal-bootstrap.json")
 }
 
+/// Default root for borg's per-trace staging directories, under the
+/// `sb/borg/` data namespace. Each ingest's staged artifacts (`fetched.html`,
+/// `transcript.md`, `distilled.yml`) live at `<this>/<trace_id>/`. borg's
+/// `StagingConfig.root` defaults to this, and cortex's `embed.staging-root`
+/// defaults to the same value so the two subsystems resolve the identical
+/// path without hardcoding it twice: cortex reads the staged `distilled.yml`
+/// (read-only) as the transcript-embedding source for Video/Article notes
+/// (2026-07-07-distillation-output-restore Phase 5). borg remains the sole
+/// staging WRITER.
+///
+/// `~/.local/share/sb/borg/stages/` on Linux. Panics only when
+/// `xdg_data_dir()` returns `None` (see [`borg_signal_state_dir`]).
+pub fn borg_stages_dir() -> PathBuf {
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("sb/borg")
+        .join("stages")
+}
+
 /// cortex's embed/graph file-lock path, under the `sb/cortex/` data
 /// namespace. The lock serializes the embed and graph passes (they share
 /// it). Lives under `sb/cortex/` like borg's data, NOT the legacy

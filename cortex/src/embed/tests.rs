@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tempfile::TempDir;
 
+use vault::distilled::Distilled;
 use vault::embedding::MockEmbedder;
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
@@ -32,6 +33,7 @@ fn process_batch_returns_zero_when_no_stale_targets() {
         &m,
         EmbeddingKind::Summary,
         m.model_version(),
+        tmp.path(),
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
@@ -65,6 +67,7 @@ fn process_batch_embeds_stale_summary_rows() {
         EmbeddingKind::Summary,
         m.model_version(),
         tmp.path(),
+        tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
     )
@@ -94,6 +97,7 @@ fn process_batch_prefixes_title_to_summary() {
         &m,
         EmbeddingKind::Summary,
         m.model_version(),
+        tmp.path(),
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
@@ -125,15 +129,31 @@ fn write_note_with_transcript(vault: &std::path::Path, rel: &str, note_type: &st
     std::fs::write(abs, body).expect("write note");
 }
 
+/// Stage a `distilled.yml` under `<staging_root>/<trace>/distilled.yml` carrying
+/// the given transcript, mirroring what borg's `write_distilled_yml` produces.
+/// The 2026-07-07 distillation-output-restore re-points cortex's transcript
+/// embedding at this staged file (via `notes.trace`) for Video/Article notes.
+fn stage_distilled_transcript(staging_root: &std::path::Path, trace: &str, transcript: &str) {
+    let dir = staging_root.join(trace);
+    std::fs::create_dir_all(&dir).expect("mkdir trace dir");
+    let distilled = Distilled {
+        transcript: Some(transcript.to_string()),
+        ..Default::default()
+    };
+    let yaml = serde_yaml::to_string(&distilled).expect("serialize distilled");
+    std::fs::write(dir.join("distilled.yml"), yaml).expect("write distilled.yml");
+}
+
 #[test]
-fn process_transcript_batch_embeds_article_and_slide_youtube_notes() {
-    // Phase 7 embedding-CREATION path (distinct from the FTS-parsing path
-    // asserted in borg's pipeline tests). This exercises the
-    // `transcript_eligible()` amendment end-to-end: an `article` note and a
-    // slide-path `youtube` note must now surface as transcript targets and
-    // produce `transcript-chunk` rows. Before the amendment neither note type
-    // was eligible, so `stale_embedding_targets(TranscriptChunk)` returned
-    // nothing and no rows were ever written.
+fn process_transcript_batch_embeds_video_article_from_staging_ignoring_in_note_section() {
+    // 2026-07-07 distillation-output-restore Phase 5. Video/Youtube/Article
+    // transcripts now come from the staged distilled.yml (resolved via
+    // notes.trace), NOT the note body. This test proves both halves: a video
+    // note with a STAGED transcript embeds even though its body has no
+    // ## Transcript section, AND an article note whose body still carries an
+    // in-note ## Transcript (but has no staged file) is NOT embedded from the
+    // body -- it is sentinel-skipped. The old behavior (embed from the in-note
+    // section for these kinds) is inverted here on purpose.
     let mut index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-batch-test");
     index
@@ -141,29 +161,36 @@ fn process_transcript_batch_embeds_article_and_slide_youtube_notes() {
         .expect("set model");
 
     let tmp = TempDir::new().expect("tmp");
-    // Article note: fetched markdown persisted verbatim under ## Transcript.
+    let staging = TempDir::new().expect("staging");
+
+    // Video note: body has ONLY summary/claims (no ## Transcript), transcript
+    // lives in staging keyed by trace "video-trace".
+    write_note_with_summary(tmp.path(), "notes/video.md", "Orchestration beats raw capability.");
+    index
+        .insert_test_note_row("notes/video.md", "video", 100)
+        .expect("video row");
+    index.set_test_trace("notes/video.md", "video-trace").expect("trace");
+    stage_distilled_transcript(
+        staging.path(),
+        "video-trace",
+        "Full spoken transcript of the video, staged as the embedding source.",
+    );
+
+    // Article note: body DOES carry an in-note ## Transcript, but there is NO
+    // staged file (trace points nowhere). The in-note section must be ignored.
     write_note_with_transcript(
         tmp.path(),
         "notes/article.md",
         "article",
         "## Summary\n\nAn essay on consensus.\n\n",
-        "The full fetched article markdown, preserved in-note past staging retention.",
-    );
-    // Slide-path youtube note: slide sections FIRST, distilled ## Transcript
-    // appended below (the Phase 7 splice shape).
-    write_note_with_transcript(
-        tmp.path(),
-        "notes/yt.md",
-        "youtube",
-        "## Opening\n\n![[yt-slide-001.jpg]]\n\nThe speaker opens.\n\n## Summary\n\nOrchestration beats capability.\n\n",
-        "Full spoken transcript of the slide-published video.",
+        "This in-note transcript must NOT be embedded for an article kind.",
     );
     index
         .insert_test_note_row("notes/article.md", "article", 100)
         .expect("article row");
     index
-        .insert_test_note_row("notes/yt.md", "youtube", 100)
-        .expect("youtube row");
+        .set_test_trace("notes/article.md", "missing-trace")
+        .expect("trace");
 
     let stats = process_batch(
         &mut index,
@@ -171,28 +198,175 @@ fn process_transcript_batch_embeds_article_and_slide_youtube_notes() {
         EmbeddingKind::TranscriptChunk,
         m.model_version(),
         tmp.path(),
+        staging.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
     )
     .expect("process");
 
+    assert_eq!(stats.scanned, 2, "both notes are transcript-eligible and scanned");
+    assert!(stats.embedded >= 1, "the video note's staged transcript must embed");
     assert_eq!(
-        stats.scanned, 2,
-        "both the article and the slide-path youtube note must be scanned"
+        stats.skipped_empty, 1,
+        "the article with no staged file is sentinel-skipped, not embedded from its body"
     );
-    assert!(
-        stats.embedded >= 2,
-        "each note produces at least one transcript-chunk row"
-    );
-    assert_eq!(stats.skipped_empty, 0);
     assert_eq!(stats.failed, 0);
 
-    let count = index
-        .count_embeddings(Some(EmbeddingKind::TranscriptChunk))
-        .expect("count");
+    // Only the video note produced chunk rows; the article produced none.
+    let video_chunks = index
+        .transcript_chunk_count("notes/video.md")
+        .expect("video chunk count");
     assert!(
-        count >= 2,
-        "transcript-chunk rows must exist for both notes; got {count}"
+        video_chunks >= 1,
+        "video note has staged-sourced chunks; got {video_chunks}"
+    );
+    let article_chunks = index
+        .transcript_chunk_count("notes/article.md")
+        .expect("article chunk count");
+    assert_eq!(
+        article_chunks, 0,
+        "article body transcript must not be embedded (staged-source only)"
+    );
+}
+
+#[test]
+fn process_transcript_batch_missing_staged_file_degrades_to_sentinel_skip() {
+    // A Video/Article note whose staged distilled.yml is missing (never staged,
+    // or the trace column is empty) degrades to the examined-sentinel skip with
+    // a WARN and never spins the loop. Success criterion: "deleting the trace
+    // dir then re-running embed degrades to sentinel-skip with a WARN".
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-batch-test");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    let tmp = TempDir::new().expect("tmp");
+    let staging = TempDir::new().expect("staging");
+
+    write_note_with_summary(tmp.path(), "notes/video.md", "a video with no staged transcript");
+    index.insert_test_note_row("notes/video.md", "video", 100).expect("row");
+    index.set_test_trace("notes/video.md", "gone-trace").expect("trace");
+    // Deliberately do NOT stage a distilled.yml for "gone-trace".
+
+    // Tick 1: scanned + skipped, sentinel persisted at the note's modified_at.
+    let t1 = process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::TranscriptChunk,
+        m.model_version(),
+        tmp.path(),
+        staging.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("tick1");
+    assert_eq!(t1.scanned, 1);
+    assert_eq!(t1.skipped_empty, 1);
+    assert_eq!(t1.embedded, 0);
+    assert_eq!(
+        index
+            .examined_watermark("notes/video.md", EmbeddingKind::TranscriptChunk, m.model_version())
+            .expect("watermark"),
+        Some(100),
+        "the missing-staged-file skip must persist an examined sentinel keyed on the NOTE"
+    );
+
+    // Tick 2 on the unchanged vault: the sentinel excludes the note -- no
+    // re-scan, no error loop.
+    let t2 = process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::TranscriptChunk,
+        m.model_version(),
+        tmp.path(),
+        staging.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("tick2");
+    assert_eq!(t2.scanned, 0, "sentinel must stop the re-scan; no error loop");
+    assert_eq!(t2.embedded, 0);
+}
+
+#[test]
+fn process_transcript_batch_expired_staged_file_degrades_to_sentinel_skip() {
+    // "Expired" = the staged distilled.yml existed but was swept by retention.
+    // Behaviorally identical to missing: the note sentinel-skips. This mirrors
+    // the doc's Testing Strategy ("present / missing / expired") and confirms a
+    // deleted trace dir does not spin the loop.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-batch-test");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    let tmp = TempDir::new().expect("tmp");
+    let staging = TempDir::new().expect("staging");
+
+    write_note_with_summary(tmp.path(), "notes/video.md", "a video whose staged transcript expired");
+    index.insert_test_note_row("notes/video.md", "video", 100).expect("row");
+    index.set_test_trace("notes/video.md", "expired-trace").expect("trace");
+    // Stage it, then delete the whole trace dir to simulate retention sweep.
+    stage_distilled_transcript(staging.path(), "expired-trace", "transcript that will be swept");
+    std::fs::remove_dir_all(staging.path().join("expired-trace")).expect("sweep trace dir");
+
+    let stats = process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::TranscriptChunk,
+        m.model_version(),
+        tmp.path(),
+        staging.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("process");
+    assert_eq!(stats.scanned, 1);
+    assert_eq!(stats.skipped_empty, 1, "expired staged file -> sentinel skip");
+    assert_eq!(stats.embedded, 0);
+    assert_eq!(stats.failed, 0);
+}
+
+#[test]
+fn process_transcript_batch_verbatim_kind_still_reads_in_note_section() {
+    // Verbatim-preservation kinds (Image/Audio/Note/Vocab) and threads
+    // (Social/Reddit) keep the in-note ## Transcript section as their embedding
+    // source -- the re-point touches only Video/Youtube/Article. This proves
+    // the unchanged path: an `audio` note (VoiceNote) with an in-note transcript
+    // and NO staged file still embeds from the body.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-batch-test");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+
+    let tmp = TempDir::new().expect("tmp");
+    let staging = TempDir::new().expect("staging");
+
+    write_note_with_transcript(
+        tmp.path(),
+        "notes/voice.md",
+        "audio",
+        "## Summary\n\nA voice memo.\n\n",
+        "The verbatim voice-memo transcription, kept in the note body.",
+    );
+    index.insert_test_note_row("notes/voice.md", "audio", 100).expect("row");
+    // No trace, no staged file: the verbatim path must not consult staging.
+
+    let stats = process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::TranscriptChunk,
+        m.model_version(),
+        tmp.path(),
+        staging.path(),
+        16,
+        DEFAULT_MAX_CHUNKS_PER_CALL,
+    )
+    .expect("process");
+
+    assert_eq!(stats.scanned, 1);
+    assert!(stats.embedded >= 1, "verbatim-kind in-note transcript must still embed");
+    assert_eq!(stats.skipped_empty, 0);
+    assert_eq!(stats.failed, 0);
+    assert!(
+        index.transcript_chunk_count("notes/voice.md").expect("count") >= 1,
+        "audio note keeps embedding from its in-note ## Transcript section"
     );
 }
 
@@ -225,6 +399,7 @@ fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
         EmbeddingKind::TranscriptChunk,
         m.model_version(),
         tmp.path(),
+        tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
     )
@@ -247,6 +422,7 @@ fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
         &m,
         EmbeddingKind::TranscriptChunk,
         m.model_version(),
+        tmp.path(),
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
@@ -279,6 +455,7 @@ fn process_batch_skips_notes_with_empty_summary() {
         &m,
         EmbeddingKind::Summary,
         m.model_version(),
+        tmp.path(),
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
@@ -457,6 +634,7 @@ fn summary_embed_text_is_byte_identical_when_no_capture_note() {
         EmbeddingKind::Summary,
         m.model_version(),
         tmp.path(),
+        tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
     )
@@ -489,6 +667,7 @@ fn summary_embed_text_splices_capture_note_when_present() {
         &m,
         EmbeddingKind::Summary,
         m.model_version(),
+        tmp.path(),
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
@@ -530,6 +709,7 @@ fn process_claim_batch_embeds_notes_with_claims() {
         EmbeddingKind::Claim,
         m.model_version(),
         tmp.path(),
+        tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
     )
@@ -564,6 +744,7 @@ fn process_claim_batch_splits_oversized_claim_sets_into_multiple_rows() {
         &m,
         EmbeddingKind::Claim,
         m.model_version(),
+        tmp.path(),
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,

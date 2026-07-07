@@ -94,8 +94,9 @@ pub struct StaleTarget {
     /// notes missing a `## Summary` heading). For Claim embeddings this is
     /// `notes.claims` (the newline-joined claim text, also no file I/O);
     /// cortex groups it into token-window-sized chunks. For TranscriptChunk
-    /// this is always an empty string; cortex reads the `## Transcript`
-    /// section from disk for those.
+    /// this is always an empty string; cortex reads the transcript from the
+    /// staged `distilled.yml` (via `trace`) for Video/Article kinds and from
+    /// the in-note `## Transcript` section for the verbatim kinds.
     pub summary: String,
     /// Snapshot of `notes.title` at query time. Cortex prepends it to the
     /// summary before embedding (the title carries strong topical signal);
@@ -109,6 +110,14 @@ pub struct StaleTarget {
     /// (title + summary), so staleness detection re-embeds nothing
     /// retroactively. Empty for the TranscriptChunk and Claim arms.
     pub capture_note: String,
+    /// Snapshot of `notes.trace` at query time — the borg staged-source handle
+    /// (the per-trace directory name under the staging root). For the
+    /// TranscriptChunk arm, cortex resolves Video/Article transcripts from
+    /// `<staging-root>/<trace>/distilled.yml` rather than the note body
+    /// (2026-07-07-distillation-output-restore Phase 5). Empty for notes
+    /// ingested before the trace column existed, and for the Summary/Claim arms
+    /// (which carry their text in `summary`).
+    pub trace: String,
 }
 
 /// Validate that a stored embedding BLOB matches its declared `dim`.
@@ -587,7 +596,8 @@ impl SearchIndex {
             // is threaded through so the embed text becomes title + capture-note
             // + summary (Phase 9). Notes without a capture note carry '' and the
             // assembled text stays byte-identical to the pre-Phase-9 form.
-            EmbeddingKind::Summary => "SELECT n.path, n.note_type, n.modified_at, n.summary, n.title, n.capture_note
+            EmbeddingKind::Summary => {
+                "SELECT n.path, n.note_type, n.modified_at, n.summary, n.title, n.capture_note, n.trace
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -604,9 +614,10 @@ impl SearchIndex {
                         OR x.examined_at < n.modified_at)
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
-                .to_string(),
+                    .to_string()
+            }
             EmbeddingKind::TranscriptChunk => format!(
-                "SELECT n.path, n.note_type, n.modified_at, '', n.title, ''
+                "SELECT n.path, n.note_type, n.modified_at, '', n.title, '', n.trace
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -630,7 +641,7 @@ impl SearchIndex {
             // newline-joined claims into token-window-sized chunks before
             // embedding so a note's tail claims are never dropped by silent
             // model-side truncation (the Phase 9 defect).
-            EmbeddingKind::Claim => "SELECT n.path, n.note_type, n.modified_at, n.claims, n.title, ''
+            EmbeddingKind::Claim => "SELECT n.path, n.note_type, n.modified_at, n.claims, n.title, '', n.trace
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -660,6 +671,7 @@ impl SearchIndex {
                     summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                     title: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                     capture_note: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    trace: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
                 })
             })?
             .filter_map(warn_row)
@@ -741,6 +753,19 @@ impl SearchIndex {
         Ok(count)
     }
 
+    /// Count the TranscriptChunk embedding rows for a single note. Lets tests in
+    /// other crates assert that the staged-source re-point (2026-07-07
+    /// distillation-output-restore) produced chunks for the intended note and
+    /// zero for a note it must skip, without reaching into the private `conn`.
+    pub fn transcript_chunk_count(&self, note_path: &str) -> Result<i64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM note_embeddings WHERE note_path = ?1 AND kind = ?2",
+            params![note_path, EmbeddingKind::TranscriptChunk.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// The `text` actually embedded for a note's `kind` row (chunk 0). `None`
     /// when no such row exists. Lets tests in other crates assert what was fed
     /// to the model (e.g. cortex's title+summary prefix) without reaching into
@@ -800,6 +825,16 @@ impl SearchIndex {
     pub fn set_test_claims(&self, path: &str, claims: &str) -> Result<()> {
         self.conn
             .execute("UPDATE notes SET claims = ?2 WHERE path = ?1", params![path, claims])?;
+        Ok(())
+    }
+
+    /// Set the `notes.trace` column for a test row (2026-07-07 distillation
+    /// output restore). The trace is the per-trace staging directory name; lets
+    /// tests in other crates drive the staged-transcript embedding arm without
+    /// reaching into the private `conn`.
+    pub fn set_test_trace(&self, path: &str, trace: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE notes SET trace = ?2 WHERE path = ?1", params![path, trace])?;
         Ok(())
     }
 

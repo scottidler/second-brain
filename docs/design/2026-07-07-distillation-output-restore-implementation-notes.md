@@ -133,3 +133,26 @@ Design doc: `docs/design/2026-07-07-distillation-output-restore.md`
 
 ### Draft-patterns scratch dir
 - `docs/design/2026-07-07-distillation-output-restore-patterns/` (the Phase 0 drafts) was NOT deleted in this phase. The landed `borg/patterns/` video files are the production evolution of those drafts (with the anchor-honesty rule added), so the drafts are now redundant with the shipped files, but they remain useful provenance for the Phase 0 spike. A later cleanup step (or the parent's finalization) may remove the scratch dir; it is left in place here rather than deleted mid-phase.
+
+## Phase 5: Embeddings re-point
+
+### Design decisions
+- Video/Youtube/Article transcript chunks now embed from the staged `distilled.yml` (`cortex::embed::read_staged_transcript` — new helper in `cortex/src/embed.rs`), resolved as `<staging-root>/<trace>/distilled.yml` via the `notes.trace` join. Verbatim kinds (Image/Audio/Note/Vocab) and threads (Social/Reddit) keep the in-note `## Transcript` path (`read_section_text`). The split key is the typed `NoteType::transcript_from_staging()` (new method, `vault/src/schema.rs`), matched against `Youtube | Video | Article` — a typed seam, not an extractor-string sniff.
+- Staging-root resolution is config-driven: added `EmbedConfig.staging_root` (cortex.yml `embed.staging-root`, `cortex/src/config.rs`), tilde-expanded at load via `vault::paths::deserialize_tilde_pathbuf`, defaulting to the new `vault::paths::borg_stages_dir()` — borg's own staging default. Refactored `borg::config::StagingConfig::default()` to use the same helper, so the two subsystems resolve the identical path from ONE source of truth (`vault::paths`). An operator who overrode borg's `staging.root` sets `embed.staging-root` to match.
+- `StaleTarget` gained a `trace: String` field (`vault/src/search/vector.rs`); all three `stale_embedding_targets` SQL arms now select `n.trace` (the TranscriptChunk arm consumes it; Summary/Claim carry it harmlessly). The `notes.trace` column has been indexed and populated since the 2026-06-20 oracle-trace design, so this is a read of an existing column, no schema migration.
+- Fail-closed on every unreadable/malformed/absent staged source: empty trace, missing/expired (swept) file, unreadable file, malformed YAML, or empty `transcript` field all return `None` with a WARN and route into the EXISTING examined-sentinel skip — never a silent empty embed and never an error loop. Function-level DEBUG entry logging on `read_staged_transcript` and `process_transcript_batch` per the logging rule.
+- Staleness invariant left untouched (design line 132, Resolved Decision line 212): both the stale-source predicate and sentinel re-selection still key on the NOTE's `modified_at` (`embed.rs` examined push, `vector.rs` SQL), never on the staged file. The staged `distilled.yml` is immutable after publish, so this is correct-by-construction; a sentinel skip is final until note-modification or a model bump.
+- `NoteType::transcript_eligible()` unchanged (Article+Youtube stay): only the text SOURCE moved; the SQL staleness filter still selects those kinds. Confirmed, not changed.
+- CLAUDE.md one-way-data-flow paragraph updated with the new read-only edge (cortex reads borg's staged `distilled.yml`); borg stays sole staging writer, cortex sole embeddings writer.
+
+### Deviations
+- The task named `cortex/src/embed.rs::process_transcript_batch` as the seam; implemented there, plus a small `read_staged_transcript` helper beside `read_section_text` in the same file, and the `staging_root: &Path` parameter threaded through `process_batch` -> `process_transcript_batch` (both production call sites in `run` and `daemon_tick_with_model` pass `&config.embed.staging_root`). Same effect, correct seam.
+- The doc's Embeddings-Re-point text does not spell out HOW cortex learns the staging root; implemented it as a config field defaulting to a shared `vault::paths` helper (config drives behavior + single source of truth), rather than hardcoding borg's default path in cortex. Recorded here as the mechanism the doc left to the implementer.
+
+### Tradeoffs
+- Added `EmbedConfig.staging_root` config field vs hardcoding `vault::paths::borg_stages_dir()` in cortex: chose the config field so an operator who moved borg's staging root can realign cortex, matching borg's own `staging.root` being configurable. Default keeps zero-config parity via the shared helper.
+- `read_staged_transcript` returns `Option<String>` (WARN-on-failure inside) rather than a `Result`: keeps the caller's existing `match Some(non-empty) / _ => skip+examined` shape intact and routes every failure through the one sentinel path, matching how `read_section_text` already behaves. The distinct failure reasons are still logged individually at the resolution site.
+- "Expired" staged file is behaviorally identical to "missing" (file-not-found after a retention sweep); tested both explicitly (create-then-delete vs never-create) to mirror the doc's present/missing/expired matrix even though they share the code path.
+
+### Open questions
+- None.
