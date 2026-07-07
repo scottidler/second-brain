@@ -115,6 +115,9 @@ pub fn fallback_distilled(
     };
     Distilled {
         summary,
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: Vec::new(),
         tags: Vec::new(),
         links: Vec::new(),

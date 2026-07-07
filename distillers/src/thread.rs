@@ -221,6 +221,9 @@ impl<F: FabricCaller + Clone> ThreadDistiller<F> {
 
         let distilled = Distilled {
             summary,
+            tldr: None,
+            enumeration: None,
+            key_ideas: Vec::new(),
             claims,
             tags,
             links,
@@ -416,6 +419,9 @@ impl<F: FabricCaller + Clone> ThreadDistiller<F> {
         let output_tokens = approx_tokens(output_chars) as u32;
         let distilled = Distilled {
             summary,
+            tldr: None,
+            enumeration: None,
+            key_ideas: Vec::new(),
             claims,
             tags: combined_tags,
             links: combined_links,

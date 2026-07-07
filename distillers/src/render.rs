@@ -5,7 +5,41 @@
 //! `index_vault` later parses these sections back into the FTS5 index.
 
 use std::collections::BTreeMap;
-use vault::distilled::{Claim, ClaimKind, Distilled, KindPayload};
+use vault::distilled::{Claim, ClaimKind, Distilled, Enumeration, KindPayload};
+
+/// Caller policy for [`render`]. Transcript emission is the caller's decision,
+/// not a global kind rule (2026-07-07 distillation-output-restore): borg
+/// publish suppresses `## Transcript` for Video/Article/Repo (the staged
+/// `distilled.yml` keeps the verbatim text and cortex embeds it from staging),
+/// while the verbatim-preservation kinds (VoiceNote/Idea/Vocabulary/Image/
+/// Thread) and cortex `summarize --backfill` still emit it. The choice is
+/// carried as this typed value at the render seam — never inferred from an
+/// extractor string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderOptions {
+    /// Emit the `## Transcript` body section when `Distilled.transcript` is
+    /// `Some`. `false` for Video/Article/Repo publish; `true` for the verbatim
+    /// kinds and cortex summarize backfill (which re-renders the legacy note
+    /// body from the transcript field and would destroy it otherwise).
+    pub include_transcript: bool,
+}
+
+impl RenderOptions {
+    /// Transcript policy for borg's single URL render site (Video, Article,
+    /// Repo, and Thread all render there). Only Thread — a
+    /// verbatim-preservation kind — keeps its in-note `## Transcript`;
+    /// Video/Article/Repo publish transcript-free (the verbatim text lives in
+    /// the staged `distilled.yml`, embedded from there). Keyed on the typed
+    /// `KindPayload`, never on an extractor string. Note that at this site an
+    /// absent payload (`None`) is the Article case, which is correctly `false`;
+    /// the other transcript-keeping kinds (Idea/Vocabulary/Image/VoiceNote) do
+    /// NOT pass through this site — they have their own always-`true` seams.
+    pub fn for_url_publish(distilled: &Distilled) -> Self {
+        Self {
+            include_transcript: matches!(distilled.kind_specific, Some(KindPayload::Thread(_))),
+        }
+    }
+}
 
 /// Output of the renderer. The caller (Stage 3) is responsible for splicing
 /// `body_markdown` into the published note's body and merging
@@ -30,13 +64,25 @@ pub struct RenderedDistilled {
 
 /// Render a Distilled into the body + frontmatter additions Stage 3 writes
 /// to the vault file. Pure function (no I/O); the file system writer is the
-/// caller's responsibility.
-pub fn render(distilled: &Distilled) -> RenderedDistilled {
+/// caller's responsibility. `options` carries the caller's transcript-emission
+/// policy (see [`RenderOptions`]).
+///
+/// Body section order (April `obsidian-note.md` shape restored): the `> [!tldr]`
+/// callout, `## Summary`, `## Enumerated Points` (listicles only), `## Key
+/// Ideas` (omitted when empty), `## Claims`, `## Links`, then `## Transcript`
+/// last (only when `options.include_transcript`). `## Why Captured`, when
+/// present, is prepended by the borg markdown layer above this body.
+pub fn render(distilled: &Distilled, options: RenderOptions) -> RenderedDistilled {
     let mut body = String::new();
+    push_tldr(&mut body, distilled.tldr.as_deref());
     push_summary(&mut body, &distilled.summary);
+    push_enumeration(&mut body, distilled.enumeration.as_ref());
+    push_key_ideas(&mut body, &distilled.key_ideas);
     push_claims(&mut body, &distilled.claims);
     push_links(&mut body, &distilled.links);
-    push_transcript(&mut body, distilled.transcript.as_deref());
+    if options.include_transcript {
+        push_transcript(&mut body, distilled.transcript.as_deref());
+    }
 
     let mut fm: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
     fm.insert("distilled".to_string(), serde_yaml::Value::Bool(true));
@@ -140,6 +186,80 @@ fn push_summary(body: &mut String, summary: &str) {
     // heading rather than colliding with the note's section structure.
     body.push_str(&crate::text::demote_headings(trimmed, 2));
     body.push_str("\n\n");
+}
+
+fn push_tldr(body: &mut String, tldr: Option<&str>) {
+    let Some(text) = tldr else {
+        return;
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    // Obsidian `[!tldr]` callout. `cortex::quality` keys on the literal
+    // `> [!tldr]` marker as a summary signal. Flatten so a multi-sentence hook
+    // can't break the callout syntax into stray blockquote continuation lines.
+    body.push_str("> [!tldr]\n> ");
+    body.push_str(&crate::text::flatten_lines(trimmed));
+    body.push_str("\n\n");
+}
+
+fn push_enumeration(body: &mut String, enumeration: Option<&Enumeration>) {
+    let Some(enumeration) = enumeration else {
+        return;
+    };
+    if enumeration.items.is_empty() {
+        return;
+    }
+    body.push_str("## Enumerated Points\n\n");
+    if let Some(lead_in) = &enumeration.lead_in {
+        let trimmed = lead_in.trim();
+        if !trimmed.is_empty() {
+            body.push_str(&crate::text::flatten_lines(trimmed));
+            body.push_str("\n\n");
+        }
+    }
+    // Numbered, bold-named, one line each. The anchor (timestamp/section) is
+    // rendered in the same `[anchor]` shape as a claim anchor — the improvement
+    // over the April shape, which carried no per-item anchors.
+    for (idx, item) in enumeration.items.iter().enumerate() {
+        body.push_str(&(idx + 1).to_string());
+        body.push_str(". **");
+        body.push_str(&crate::text::flatten_lines(item.name.trim()));
+        body.push_str("**");
+        let text = item.text.trim();
+        if !text.is_empty() {
+            body.push_str(": ");
+            body.push_str(&crate::text::flatten_lines(text));
+        }
+        if let Some(anchor) = &item.anchor
+            && !anchor.trim().is_empty()
+        {
+            body.push_str(" [");
+            body.push_str(anchor.trim());
+            body.push(']');
+        }
+        body.push('\n');
+    }
+    body.push('\n');
+}
+
+fn push_key_ideas(body: &mut String, key_ideas: &[String]) {
+    let ideas: Vec<&str> = key_ideas
+        .iter()
+        .map(|idea| idea.trim())
+        .filter(|idea| !idea.is_empty())
+        .collect();
+    if ideas.is_empty() {
+        return;
+    }
+    body.push_str("## Key Ideas\n\n");
+    for idea in ideas {
+        body.push_str("- ");
+        body.push_str(&crate::text::flatten_lines(idea));
+        body.push('\n');
+    }
+    body.push('\n');
 }
 
 fn push_claims(body: &mut String, claims: &[Claim]) {

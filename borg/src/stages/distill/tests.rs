@@ -299,6 +299,9 @@ fn write_distilled_yml_no_op_when_staging_disabled() {
     };
     let distilled = Distilled {
         summary: "s".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: Vec::new(),
         tags: Vec::new(),
         links: Vec::new(),
@@ -332,6 +335,9 @@ fn write_distilled_yml_persists_to_per_trace_dir() {
     };
     let distilled = Distilled {
         summary: "Hello.".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: Vec::new(),
         tags: Vec::new(),
         links: Vec::new(),

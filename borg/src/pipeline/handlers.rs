@@ -767,7 +767,14 @@ pub(crate) async fn process_image_inner(
     }
     finalize_tags(&mut all_tags, config).await;
 
-    let rendered_distilled = distillers::render(&distilled);
+    // Image is a verbatim-preservation kind: the Vision+OCR text is the note's
+    // only persistent source, so it keeps its in-note `## Transcript`.
+    let rendered_distilled = distillers::render(
+        &distilled,
+        distillers::RenderOptions {
+            include_transcript: true,
+        },
+    );
     let note = NoteContent {
         title: title.clone(),
         source_url: None,
@@ -984,7 +991,14 @@ pub(crate) async fn process_audio_inner(
     }
     finalize_tags(&mut all_tags, config).await;
 
-    let rendered_distilled = distillers::render(&distilled);
+    // Audio/VoiceNote is a verbatim-preservation kind: the transcript is the
+    // note's only persistent source, so it keeps its in-note `## Transcript`.
+    let rendered_distilled = distillers::render(
+        &distilled,
+        distillers::RenderOptions {
+            include_transcript: true,
+        },
+    );
     let note = NoteContent {
         title: title.clone(),
         source_url: None,

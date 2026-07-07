@@ -335,6 +335,9 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
         let output_tokens = approx_tokens(output_chars) as u32;
         Ok(Distilled {
             summary,
+            tldr: None,
+            enumeration: None,
+            key_ideas: Vec::new(),
             claims,
             tags: combined_tags,
             links: combined_links,
@@ -427,6 +430,9 @@ fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str
 
     Distilled {
         summary,
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims,
         tags,
         links,

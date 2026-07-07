@@ -15,6 +15,9 @@ fn sample_meta() -> DistilledMeta {
 fn roundtrip_article_distilled() {
     let original = Distilled {
         summary: "Two-sentence article summary.".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: vec![
             Claim {
                 text: "First claim.".to_string(),
@@ -54,6 +57,9 @@ fn roundtrip_article_distilled() {
 fn roundtrip_repo_payload() {
     let original = Distilled {
         summary: "A Rust CLI for X.".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: vec![],
         tags: vec![],
         links: vec![],
@@ -87,6 +93,9 @@ fn roundtrip_repo_payload() {
 fn roundtrip_video_payload() {
     let original = Distilled {
         summary: "A talk on distributed systems.".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: vec![Claim {
             text: "Consensus is hard.".to_string(),
             anchor: Some("12:34".to_string()),
@@ -121,6 +130,9 @@ fn roundtrip_video_payload() {
 fn roundtrip_thread_payload() {
     let original = Distilled {
         summary: "Twitter thread about Rust async.".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: vec![],
         tags: vec![],
         links: vec![],
@@ -171,6 +183,9 @@ meta:
 fn kebab_case_keys_on_serialize() {
     let original = Distilled {
         summary: "X".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: vec![],
         tags: vec![],
         links: vec![],

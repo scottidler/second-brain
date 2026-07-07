@@ -34,7 +34,7 @@ pub use fabric::{FabricCaller, FabricRequest, FabricShell, FakeFabric};
 pub use idea::IdeaDistiller;
 pub use image::{ImageConfig, ImageDistiller};
 pub use passthrough::PassthroughDistiller;
-pub use render::{RenderedDistilled, render};
+pub use render::{RenderOptions, RenderedDistilled, render};
 pub use repo::{RepoConfig, RepoDistiller, RepoMetadata};
 pub use text::demote_headings;
 pub use thread::{ThreadConfig, ThreadDistiller, infer_platform};

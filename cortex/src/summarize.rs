@@ -20,7 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ::vault::distilled::Distilled;
 use distillers::{
-    ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, demote_headings, render,
+    ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, RenderOptions,
+    demote_headings, render,
 };
 
 use crate::config::Config;
@@ -274,7 +275,18 @@ async fn process_one<F: FabricCaller + Clone>(
 /// `<path>.tmp` and renames into place so a crash mid-write never leaves a
 /// half-rewritten file.
 pub fn rewrite_note_file(path: &Path, base_frontmatter: &Frontmatter, distilled: &Distilled) -> Result<()> {
-    let rendered = render(distilled);
+    // Backfill re-renders the ENTIRE legacy note body (which it fed in as the
+    // transcript input) back out. It MUST always emit the `## Transcript`
+    // section — dropping it here would destroy the legacy body it just read,
+    // including the April baseline this design exists to protect. This is the
+    // load-bearing reason RenderOptions exists (2026-07-07
+    // distillation-output-restore).
+    let rendered = render(
+        distilled,
+        RenderOptions {
+            include_transcript: true,
+        },
+    );
     let mut merged = clone_frontmatter(base_frontmatter);
     for (k, v) in rendered.frontmatter_additions {
         merged.extra.insert(k, v);

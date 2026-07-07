@@ -825,7 +825,11 @@ fn append_distilled_below_slides_keeps_both_slide_and_distilled_sections() {
     // carry the slide sections AND the distilled `## Claims` (previously lost
     // wholesale on the slide path).
     let slide_body = phase7_slide_body();
-    let distilled_body = distillers::render(&phase7_distilled()).body_markdown;
+    // Slide notes are video (URL) publishes: transcript-free per the 2026-07-07
+    // policy (`for_url_publish`), so the appended distilled body carries the
+    // knowledge sections minus `## Transcript`.
+    let d = phase7_distilled();
+    let distilled_body = distillers::render(&d, distillers::RenderOptions::for_url_publish(&d)).body_markdown;
 
     let composed = append_distilled_below_slides(slide_body.clone(), &distilled_body);
 
@@ -839,8 +843,8 @@ fn append_distilled_below_slides_keeps_both_slide_and_distilled_sections() {
     assert!(composed.contains("## Claims"), "distilled ## Claims must be appended");
     assert!(composed.contains("## Summary"), "distilled ## Summary must be appended");
     assert!(
-        composed.contains("## Transcript"),
-        "distilled ## Transcript must be appended"
+        !composed.contains("## Transcript"),
+        "slide/video publish must NOT append a ## Transcript section (2026-07-07 policy)"
     );
     // Ordering: the slide body comes first, distilled sections follow.
     let slide_pos = composed.find("## Opening Thesis").expect("slide heading");
@@ -872,9 +876,10 @@ fn slide_path_composed_body_yields_claims_fts_text() {
     // `index_vault`/`index_one` runs to populate `notes.claims`). The
     // slide-path composed body must yield the distilled claims as FTS text -
     // exactly what the pre-Phase-7 replace behavior destroyed.
+    let d = phase7_distilled();
     let composed = append_distilled_below_slides(
         phase7_slide_body(),
-        &distillers::render(&phase7_distilled()).body_markdown,
+        &distillers::render(&d, distillers::RenderOptions::for_url_publish(&d)).body_markdown,
     );
     let claims = vault::search::parse_body_claims(&composed);
     assert_eq!(claims.len(), 2, "both claims must be parseable for FTS: {composed}");
@@ -883,16 +888,21 @@ fn slide_path_composed_body_yields_claims_fts_text() {
 }
 
 #[test]
-fn article_rendered_body_carries_transcript_and_yields_claims_fts_text() {
-    // Article durability + FTS reach. The rendered article body must carry the
-    // full fetched markdown under `## Transcript` AND expose its claims to the
-    // same FTS parse the indexer runs.
-    let rendered = distillers::render(&phase7_distilled());
+fn article_published_body_omits_transcript_but_yields_claims_fts_text() {
+    // 2026-07-07 distillation-output-restore: the article PUBLISH body must NOT
+    // carry `## Transcript` (the verbatim text lives in the staged distilled.yml
+    // and is embedded from there), while its claims still expose to the same FTS
+    // parse the indexer runs. Article renders via `for_url_publish` (no payload
+    // -> transcript-free). The transcript FIELD stays populated for staging.
+    let d = phase7_distilled();
     assert!(
-        rendered
-            .body_markdown
-            .contains("## Transcript\n\nFull spoken transcript of the video goes here."),
-        "article body must carry the full fetched markdown under ## Transcript: {}",
+        d.transcript.is_some(),
+        "the field stays populated for staging/embeddings"
+    );
+    let rendered = distillers::render(&d, distillers::RenderOptions::for_url_publish(&d));
+    assert!(
+        !rendered.body_markdown.contains("## Transcript"),
+        "article publish body must NOT carry a ## Transcript section: {}",
         rendered.body_markdown
     );
     let claims = vault::search::parse_body_claims(&rendered.body_markdown);
@@ -925,7 +935,7 @@ fn gate_article_transcript_off_drops_transcript_section() {
         gated.transcript.is_none(),
         "transcript must be cleared when the toggle is off"
     );
-    let rendered = distillers::render(&gated);
+    let rendered = distillers::render(&gated, distillers::RenderOptions::for_url_publish(&gated));
     assert!(
         !rendered.body_markdown.contains("## Transcript"),
         "article note must have NO ## Transcript when gate is off:\n{}",
@@ -934,40 +944,48 @@ fn gate_article_transcript_off_drops_transcript_section() {
 }
 
 #[test]
-fn gate_article_transcript_on_keeps_transcript_section() {
-    // Article-transcript ON: a clean, long-enough body keeps its `## Transcript`
-    // section. (Phase 4: a thin stub is now cleared even with the toggle on, so
-    // this fixture must be real article prose, not the 25-char shared stub.)
+fn gate_article_transcript_on_keeps_field_but_publish_omits_section() {
+    // Article-transcript ON: a clean, long-enough body keeps its transcript
+    // FIELD (which feeds staging + embeddings). (Phase 4: a thin stub is now
+    // cleared even with the toggle on, so this fixture must be real article
+    // prose, not the 25-char shared stub.) But the article PUBLISH render
+    // (`for_url_publish`) omits the `## Transcript` section regardless
+    // (2026-07-07 distillation-output-restore): the verbatim text lives in
+    // staging, never the note body.
     let clean = "This is a genuine article body with several sentences of real \
         prose that comfortably exceeds the coarse quality gate's minimum length \
         and reads as content rather than navigation chrome, so it survives.";
     let gated = gate_article_transcript(distilled_with(clean), true, true);
     assert!(
         gated.transcript.is_some(),
-        "transcript must survive when the toggle is on"
+        "transcript FIELD must survive when the toggle is on"
     );
-    let rendered = distillers::render(&gated);
+    let rendered = distillers::render(&gated, distillers::RenderOptions::for_url_publish(&gated));
     assert!(
-        rendered.body_markdown.contains("## Transcript"),
-        "article note must carry ## Transcript when gate is on:\n{}",
+        !rendered.body_markdown.contains("## Transcript"),
+        "article publish body must omit ## Transcript even when the field survives:\n{}",
         rendered.body_markdown
     );
 }
 
 #[test]
-fn article_transcript_gate_is_article_only_video_unaffected() {
+fn article_transcript_gate_is_article_only_video_field_unaffected() {
     // The gate is invoked ONLY on the article distiller path in
     // process_url_inner. A VIDEO Distilled never passes through it, so its
-    // transcript survives to render regardless of the article toggle. Render
-    // is kind-agnostic, so a video-kind Distilled with a transcript always
-    // yields `## Transcript`.
+    // transcript FIELD survives untouched (feeding staging + embeddings). The
+    // video PUBLISH render still omits the `## Transcript` section, per the
+    // 2026-07-07 policy (`for_url_publish` -> false for Video).
     let video = distilled_with_transcript(Some(vault::distilled::KindPayload::Video(
         vault::distilled::VideoPayload::default(),
     )));
-    let rendered = distillers::render(&video);
     assert!(
-        rendered.body_markdown.contains("## Transcript"),
-        "video note must keep its ## Transcript (article gate does not apply):\n{}",
+        video.transcript.is_some(),
+        "the article gate does not apply to video: its transcript field survives"
+    );
+    let rendered = distillers::render(&video, distillers::RenderOptions::for_url_publish(&video));
+    assert!(
+        !rendered.body_markdown.contains("## Transcript"),
+        "video publish body omits ## Transcript (2026-07-07 policy):\n{}",
         rendered.body_markdown
     );
 }

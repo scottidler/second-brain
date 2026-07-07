@@ -580,6 +580,9 @@ fn rewrite_note_file_is_atomic_and_merges_frontmatter() {
 
     let distilled = Distilled {
         summary: "Rewritten.".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: Vec::new(),
         tags: Vec::new(),
         links: Vec::new(),
@@ -604,4 +607,42 @@ fn rewrite_note_file_is_atomic_and_merges_frontmatter() {
     assert!(raw.contains("Rewritten."));
     let tmp = path.with_extension("md.tmp");
     assert!(!tmp.exists(), "atomic write left a .tmp file: {}", tmp.display());
+}
+
+#[test]
+fn backfill_render_keeps_transcript_section() {
+    // Render call site 6 (cortex/src/summarize.rs backfill) policy: backfill
+    // ALWAYS emits `## Transcript`. It feeds the ENTIRE legacy note body in as
+    // the transcript input and re-renders it; dropping the section here would
+    // destroy the legacy body (including the April baseline this design
+    // protects). This is the load-bearing reason RenderOptions exists.
+    let v = MiniVault::new();
+    v.add(
+        "y.md",
+        "---\ntitle: y\ntype: youtube\nsource: https://youtu.be/abc\n---\nold body.\n",
+    );
+    let path = v.root().join("y.md");
+    let parsed = crate::vault::parse_note(v.root(), &path).expect("parse");
+
+    let distilled = Distilled {
+        summary: "Backfilled summary.".to_string(),
+        transcript: Some("The legacy note body being re-rendered as the transcript.".to_string()),
+        meta: ::vault::distilled::DistilledMeta {
+            extractor: "distill-video-v1".to_string(),
+            model: "test".to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            produced_at: "2026-05-16T00:00:00Z".to_string(),
+            validation: ::vault::distilled::ValidationMeta::default(),
+        },
+        ..Default::default()
+    };
+
+    rewrite_note_file(&path, &parsed.frontmatter, &distilled).expect("rewrite");
+    let raw = v.read("y.md");
+    assert!(
+        raw.contains("## Transcript"),
+        "backfill MUST keep the ## Transcript section or it destroys the legacy body:\n{raw}"
+    );
+    assert!(raw.contains("The legacy note body being re-rendered as the transcript."));
 }

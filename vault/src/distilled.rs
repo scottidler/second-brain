@@ -15,6 +15,27 @@ pub struct Distilled {
     /// human display.
     pub summary: String,
 
+    /// One-sentence hook rendered as a `> [!tldr]` Obsidian callout at the top
+    /// of the note body (April `obsidian-note.md` shape restored, 2026-07-07
+    /// distillation-output-restore). `cortex::quality` accepts the callout as a
+    /// summary marker. `#[serde(default)]` keeps legacy staged `distilled.yml`
+    /// files (no `tldr:` key) deserializable unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tldr: Option<String>,
+
+    /// Enumerated points harvested when the source is a listicle ("Top N X").
+    /// `None` when the content is not enumerable — no forced enumeration.
+    /// Rendered as `## Enumerated Points`; rides the body FTS column only,
+    /// never parsed back into `notes.claims` (Resolved Decision 2026-07-07).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enumeration: Option<Enumeration>,
+
+    /// Thematic insights distinct from the enumerated items (April Key Ideas
+    /// rule: must not repeat the enumerated points). Empty by default; the
+    /// `## Key Ideas` section is omitted entirely when empty.
+    #[serde(default)]
+    pub key_ideas: Vec<String>,
+
     /// Structured claims extracted from the source. Order is significant
     /// (chronological for YouTube/Thread, narrative for articles).
     #[serde(default)]
@@ -43,15 +64,26 @@ pub struct Distilled {
     /// whose published note is the only persistent source (Image, VoiceNote,
     /// Idea, Vocabulary) so the verbatim content is searchable in Obsidian
     /// months later, AND — as of Phase B2 — for Video and Thread, whose
-    /// transcripts power chunked semantic recall (regression-guarded; do not
-    /// revert to `None`), AND, as of the 2026-07-05 distillation overhaul,
-    /// for Article, whose fetched markdown is now kept in-note so it survives
-    /// the 60-day staging retention. Repo still leaves this `None`: the
+    /// transcripts power chunked semantic recall, AND, as of the 2026-07-05
+    /// distillation overhaul, for Article, whose fetched markdown is kept as the
+    /// durable staged record. Repo still leaves this `None`: the
     /// structurally-summarized README plus origin URL is the recoverable archive.
     ///
-    /// Rendered by `distillers::render` as a `## Transcript` body section
-    /// when `Some`. Indexed via the existing FTS5 `body` column (no new
-    /// schema column required).
+    /// FIELD invariant (regression-guarded; do NOT revert to `None`): every
+    /// distiller with source text keeps populating this field. The staged
+    /// `distilled.yml` carries it as the durable record and the embedding
+    /// source; for Video/Article, cortex embeds transcript chunks by reading
+    /// this out of staging via the `notes.trace` join.
+    ///
+    /// RENDER, by contrast, is caller-gated (2026-07-07
+    /// distillation-output-restore): `distillers::render` emits a `## Transcript`
+    /// body section only when `RenderOptions.include_transcript` is set. The
+    /// verbatim kinds (VoiceNote/Idea/Vocabulary/Image/Thread) and cortex
+    /// summarize backfill set it; Video and Article publish do NOT. So a
+    /// video/article note carries this field `Some(...)` with no `## Transcript`
+    /// section, and that is correct by design — the verbatim text lives in
+    /// staging, not the vault body. When present the section is indexed via the
+    /// existing FTS5 `body` column (no new schema column required).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<String>,
 }
@@ -156,6 +188,48 @@ pub struct Claim {
     /// indented blockquote line beneath the claim bullet when present.
     #[serde(default)]
     pub quote: Option<String>,
+}
+
+/// A detected enumeration ("Top 10 X"). Present on `Distilled` only when the
+/// source is a listicle; `None` otherwise (the distiller never forces one).
+/// These are cross-kind body content rendered as `## Enumerated Points`, not a
+/// per-kind frontmatter payload — hence a typed field on `Distilled`, not a
+/// `KindPayload` variant.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Enumeration {
+    /// Lead-in sentence introducing the list, e.g. "The creator covers 10
+    /// essential tools:". `None` when the source states the items without a
+    /// framing sentence.
+    #[serde(default)]
+    pub lead_in: Option<String>,
+
+    /// The count N declared in the title/intro when stated. Drives the
+    /// listicle-survival eval metric (`items.len() == declared_count`). `None`
+    /// when the source implies a list without a stated count.
+    #[serde(default)]
+    pub declared_count: Option<u32>,
+
+    /// The enumerated items, in the source's own (creator) order.
+    #[serde(default)]
+    pub items: Vec<EnumeratedItem>,
+}
+
+/// One item in an `Enumeration`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct EnumeratedItem {
+    /// The item's short name / title, e.g. "Codex Plugin".
+    pub name: String,
+
+    /// One-line description of the item.
+    pub text: String,
+
+    /// Optional timestamp/section anchor pointing back into the source. Same
+    /// semantics as `Claim.anchor` ("12:34", "752s", or a section heading).
+    /// `None` when no precise anchor is available.
+    #[serde(default)]
+    pub anchor: Option<String>,
 }
 
 /// An outbound link discovered in the source.

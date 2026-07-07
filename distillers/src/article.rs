@@ -218,6 +218,9 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
 
         Ok(Distilled {
             summary,
+            tldr: None,
+            enumeration: None,
+            key_ideas: Vec::new(),
             claims,
             tags,
             links,
@@ -416,6 +419,9 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
         let output_tokens = approx_tokens(output_chars) as u32;
         Ok(Distilled {
             summary,
+            tldr: None,
+            enumeration: None,
+            key_ideas: Vec::new(),
             claims,
             tags: combined_tags,
             links: combined_links,

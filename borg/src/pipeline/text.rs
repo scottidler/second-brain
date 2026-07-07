@@ -136,7 +136,14 @@ pub(crate) async fn process_text_inner(
     }
     finalize_tags(&mut all_tags, config).await;
 
-    let rendered_distilled = distillers::render(&distilled);
+    // Text/idea is a verbatim-preservation kind: the full input is the note's
+    // only persistent source, so it keeps its in-note `## Transcript`.
+    let rendered_distilled = distillers::render(
+        &distilled,
+        distillers::RenderOptions {
+            include_transcript: true,
+        },
+    );
     let note = NoteContent {
         title: title.clone(),
         source_url: None,
@@ -284,7 +291,13 @@ pub(crate) async fn process_vocab(
     all_tags.push(hygiene::sanitize_tag(&vocab_tag));
     finalize_tags(&mut all_tags, config).await;
 
-    let rendered_distilled = distillers::render(&distilled);
+    // Vocabulary is a verbatim-preservation kind: keeps its in-note transcript.
+    let rendered_distilled = distillers::render(
+        &distilled,
+        distillers::RenderOptions {
+            include_transcript: true,
+        },
+    );
     let note = NoteContent {
         title: title.clone(),
         source_url: None,

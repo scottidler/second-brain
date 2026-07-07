@@ -24,6 +24,9 @@ fn enforce_bounds_truncates_excess_claims() {
         .collect();
     let distilled = Distilled {
         summary: "ok".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims,
         tags: Vec::new(),
         links: Vec::new(),
@@ -49,6 +52,9 @@ fn enforce_bounds_truncates_excess_tags() {
     let tags = (0..MAX_TAGS + 2).map(|i| format!("tag{i}")).collect();
     let distilled = Distilled {
         summary: "ok".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: Vec::new(),
         tags,
         links: Vec::new(),
@@ -77,6 +83,9 @@ fn enforce_bounds_truncates_summary_at_sentence() {
     }
     let distilled = Distilled {
         summary: summary.clone(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: Vec::new(),
         tags: Vec::new(),
         links: Vec::new(),
@@ -98,6 +107,9 @@ fn enforce_bounds_truncates_summary_at_sentence() {
 fn enforce_bounds_leaves_within_limit_payload_untouched() {
     let distilled = Distilled {
         summary: "short".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
         claims: vec![Claim {
             text: "one".to_string(),
             anchor: None,

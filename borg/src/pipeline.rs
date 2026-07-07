@@ -892,7 +892,13 @@ async fn process_url_inner(
     // additions (cortex-video-*, distilled flag) still apply.
     let filename_stub = hygiene::sanitize_filename(&title);
     let vault_root_resolved: PathBuf = config.vault_root()?;
-    let rendered_distilled = distillers::render(&distilled);
+    // Transcript-emission policy (2026-07-07 distillation-output-restore). Every
+    // URL kind renders here: Video, Repo, and Article publish transcript-free
+    // (the verbatim text lives in the staged `distilled.yml` and is embedded
+    // from there), while Thread is a verbatim-preservation kind that keeps its
+    // in-note `## Transcript`. The choice is a typed policy keyed on the
+    // `KindPayload` seam, not on any extractor string.
+    let rendered_distilled = distillers::render(&distilled, distillers::RenderOptions::for_url_publish(&distilled));
     let (distilled_body, slide_paths) = if let Some(payload) = slide_payload.as_ref() {
         let published = match crate::slides::publish::publish_slides(
             &vault_root_resolved,

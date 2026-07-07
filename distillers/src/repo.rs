@@ -185,6 +185,9 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
 
         let distilled = Distilled {
             summary,
+            tldr: None,
+            enumeration: None,
+            key_ideas: Vec::new(),
             claims,
             tags,
             links,

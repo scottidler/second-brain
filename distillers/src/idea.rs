@@ -50,6 +50,9 @@ impl DistillExtractor for IdeaDistiller {
 
         Ok(Distilled {
             summary: trimmed.to_string(),
+            tldr: None,
+            enumeration: None,
+            key_ideas: Vec::new(),
             claims: Vec::new(),
             tags: Vec::new(),
             links,

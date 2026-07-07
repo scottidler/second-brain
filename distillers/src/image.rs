@@ -163,6 +163,9 @@ impl<F: FabricCaller + Clone> DistillExtractor for ImageDistiller<F> {
 
         let distilled = Distilled {
             summary,
+            tldr: None,
+            enumeration: None,
+            key_ideas: Vec::new(),
             claims,
             tags,
             links,
