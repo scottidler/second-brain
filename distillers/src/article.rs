@@ -12,8 +12,8 @@
 //! prompt; the parser is here.
 
 use crate::parse::{
-    PatternYaml, ReduceYaml, approx_tokens, build_reduce_input, input_truncation_tag, select_reduce_claims,
-    strip_fences,
+    EnumCandidate, PatternYaml, ReduceYaml, approx_tokens, build_reduce_input, input_truncation_tag,
+    resolve_reduce_enumeration, select_reduce_claims, strip_fences,
 };
 use crate::video::{CHUNK_TOKEN_TARGET, SINGLE_CALL_TOKEN_THRESHOLD, chunk_transcript};
 use async_trait::async_trait;
@@ -23,8 +23,8 @@ use futures::stream::{self, StreamExt};
 use vault::distilled::{Claim, Distilled, DistilledMeta, Link, ValidationMeta};
 
 use crate::{
-    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled, max_claims,
-    validate::MAX_SUMMARY_CHARS,
+    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled,
+    mark_enumeration_shortfall, max_claims, validate::MAX_SUMMARY_CHARS,
 };
 
 const ID: &str = "distill-article-v1";
@@ -114,6 +114,10 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
 
         let mut bounded = enforce_bounds(distilled, max_claims(chunk_count));
         debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
+        // Enumeration shortfall (Resolved Decision 2026-07-07): publishes
+        // degraded, never blocks. Flagged post-enforce_bounds so the item-count
+        // cap cannot fabricate a false shortfall.
+        mark_enumeration_shortfall(&mut bounded);
         // We do NOT canonicalise tags here; the canonical tag filter lives
         // in borg's `hygiene::sanitize_tag` and is applied at the publish
         // step (alongside autotag pipeline output). Distillers emit raw tags.
@@ -216,11 +220,27 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
         let input_tokens = approx_tokens(transcript.len()) as u32;
         let output_tokens = approx_tokens(raw.len()) as u32;
 
+        // Phase 4: single-call enumeration/tldr/key-ideas off the parsed output.
+        // Articles carry no timestamps, so any anchor the model emits on an item
+        // is not a real position; strip it (the article prompt sets it null).
+        let tldr = parsed.tldr.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let enumeration = parsed
+            .enumeration
+            .and_then(|e| e.into_enumeration())
+            .map(strip_item_anchors);
+        let key_ideas: Vec<String> = parsed
+            .key_ideas
+            .unwrap_or_default()
+            .into_iter()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .collect();
+
         Ok(Distilled {
             summary,
-            tldr: None,
-            enumeration: None,
-            key_ideas: Vec::new(),
+            tldr,
+            enumeration,
+            key_ideas,
             claims,
             tags,
             links,
@@ -301,6 +321,11 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
         let mut combined_claims: Vec<Claim> = Vec::new();
         let mut combined_links: Vec<Link> = Vec::new();
         let mut combined_tags: Vec<String> = Vec::new();
+        // Phase 4: pool enumeration candidates for the reduce step (an
+        // awesome-list article is a listicle too). Articles carry no anchors, so
+        // candidate anchors are null.
+        let mut combined_candidates: Vec<EnumCandidate> = Vec::new();
+        let mut declared_count: Option<u32> = None;
         let mut any_chunk_failed = false;
         let mut output_chars: usize = 0;
 
@@ -349,6 +374,18 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty()),
             );
+            // Phase 4: pool enumeration candidates + adopt the first declared count.
+            if declared_count.is_none() {
+                declared_count = parsed.declared_count;
+            }
+            combined_candidates.extend(
+                parsed
+                    .enumeration_candidates
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|c| c.into_candidate())
+                    .filter(|c| !c.name.is_empty()),
+            );
         }
 
         // Dedup tags, first-seen order.
@@ -367,8 +404,11 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
         }
 
         let joined = chunk_summaries.join("\n\n");
-        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims);
+        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims, &combined_candidates, declared_count);
         let mut anchors_stripped: u32 = 0;
+        let mut tldr: Option<String> = None;
+        let mut enumeration: Option<vault::distilled::Enumeration> = None;
+        let mut key_ideas: Vec<String> = Vec::new();
         let (summary, claims, reduce_selection_failed) = match self.call_fabric(PATTERN_REDUCE, &reduce_input).await {
             Ok(raw) => match parse_reduce_yaml(&raw) {
                 Ok(parsed) => {
@@ -378,6 +418,20 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| joined.clone());
+                    tldr = parsed.tldr.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                    // Articles have anchorless candidates, so
+                    // `resolve_reduce_enumeration` strips any item anchor the
+                    // model invented (candidate pool has no anchors to match).
+                    enumeration = parsed
+                        .enumeration
+                        .and_then(|e| resolve_reduce_enumeration(e, &combined_candidates, &mut anchors_stripped));
+                    key_ideas = parsed
+                        .key_ideas
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|k| k.trim().to_string())
+                        .filter(|k| !k.is_empty())
+                        .collect();
                     match parsed
                         .claims
                         .and_then(|c| select_reduce_claims(c, &combined_claims, &mut anchors_stripped))
@@ -419,9 +473,9 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
         let output_tokens = approx_tokens(output_chars) as u32;
         Ok(Distilled {
             summary,
-            tldr: None,
-            enumeration: None,
-            key_ideas: Vec::new(),
+            tldr,
+            enumeration,
+            key_ideas,
             claims,
             tags: combined_tags,
             links: combined_links,
@@ -479,6 +533,19 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
 /// subordinate to the note's section structure.
 fn article_transcript(transcript: &str) -> Option<String> {
     if transcript.trim().is_empty() { None } else { Some(transcript.to_string()) }
+}
+
+/// Strip every enumerated-item anchor (Phase 4 anchor-honesty rule for the
+/// single-call article path). Articles carry no timestamps or positional
+/// anchors, so any anchor the model attaches to an item is not a real source
+/// position; drop it rather than render a fabricated `[anchor]`. The long path
+/// gets the same effect for free via `resolve_reduce_enumeration` (an anchorless
+/// candidate pool strips every item anchor).
+fn strip_item_anchors(mut enumeration: vault::distilled::Enumeration) -> vault::distilled::Enumeration {
+    for item in &mut enumeration.items {
+        item.anchor = None;
+    }
+    enumeration
 }
 
 fn parse_article_yaml(raw: &str) -> Result<PatternYaml> {

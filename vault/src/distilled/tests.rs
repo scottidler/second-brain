@@ -206,6 +206,7 @@ fn kebab_case_keys_on_serialize() {
                 fallback_reason: None,
                 bounds_truncations: vec!["claims:10>7".to_string()],
                 anchors_stripped: 2,
+                enumeration_shortfall: false,
                 raw_output: None,
             },
         },

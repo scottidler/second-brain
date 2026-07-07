@@ -706,3 +706,237 @@ async fn no_metadata_leaves_kind_specific_unset() {
 
     assert!(distilled.kind_specific.is_none());
 }
+
+#[tokio::test]
+async fn single_call_populates_enumeration_tldr_and_key_ideas() {
+    // Phase 4: a single-call "Top 3" video yields the enumeration, tldr, and
+    // key ideas straight off the pattern output, items in creator order.
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN_SHORT,
+        "summary: \"A tools roundup.\"\n\
+         tldr: \"Three tools worth knowing.\"\n\
+         enumeration:\n  lead_in: \"Three tools:\"\n  declared_count: 3\n  items:\n\
+         \x20   - name: \"Alpha\"\n      text: \"first tool\"\n      anchor: \"00:00:01\"\n\
+         \x20   - name: \"Bravo\"\n      text: \"second tool\"\n      anchor: \"00:00:02\"\n\
+         \x20   - name: \"Charlie\"\n      text: \"third tool\"\n      anchor: \"00:00:03\"\n\
+         key_ideas:\n  - \"**Ergonomics** - all three cut keystrokes\"\n\
+         claims: []\ntags: []\nlinks: []\n",
+    );
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: "[00:00:01] alpha [00:00:02] bravo [00:00:03] charlie",
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+            capture_note: None,
+        })
+        .await
+        .expect("distill");
+
+    assert_eq!(distilled.tldr.as_deref(), Some("Three tools worth knowing."));
+    let enumeration = distilled.enumeration.expect("enumeration populated");
+    assert_eq!(enumeration.declared_count, Some(3));
+    let names: Vec<&str> = enumeration.items.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, vec!["Alpha", "Bravo", "Charlie"], "creator order preserved");
+    assert_eq!(distilled.key_ideas.len(), 1);
+    // Count met -> not degraded.
+    assert!(!distilled.meta.validation.enumeration_shortfall);
+}
+
+/// Build a reduce YAML listing `n` enumerated items in order, anchors
+/// `00:00:0N`, with the given declared count.
+fn reduce_yaml_with_items(declared: u32, n: u32) -> String {
+    let mut yaml = String::from("summary: \"Reduced.\"\ntldr: \"The whole video hook.\"\n");
+    yaml.push_str(&format!(
+        "enumeration:\n  lead_in: \"The creator covers {declared} tools:\"\n"
+    ));
+    yaml.push_str(&format!("  declared_count: {declared}\n  items:\n"));
+    for i in 1..=n {
+        yaml.push_str(&format!(
+            "    - name: \"Item {i}\"\n      text: \"desc {i}\"\n      anchor: \"00:00:0{i}\"\n"
+        ));
+    }
+    yaml.push_str("key_ideas:\n  - \"**Theme** - a cross-cutting idea\"\n");
+    // Select the pooled chunk claim (anchor present in the pool) so claim
+    // selection succeeds and the only possible degradation signal is the
+    // enumeration shortfall, not a reduce-selection fallback.
+    yaml.push_str("claims:\n  - text: \"Chunk claim.\"\n    anchor: \"00:00:01\"\n");
+    yaml
+}
+
+/// Build a chunk YAML emitting `n` enumeration candidates (anchors `00:00:0N`,
+/// ordinals 1..n) plus the declared count, so the reduce input carries a pool
+/// covering every item's anchor.
+fn chunk_yaml_with_candidates(declared: u32, n: u32) -> String {
+    let mut yaml = String::from("summary: \"Chunk summary.\"\n");
+    yaml.push_str(&format!("declared_count: {declared}\nenumeration_candidates:\n"));
+    for i in 1..=n {
+        yaml.push_str(&format!(
+            "  - name: \"Item {i}\"\n    text: \"desc {i}\"\n    anchor: \"00:00:0{i}\"\n    ordinal: {i}\n"
+        ));
+    }
+    yaml.push_str("claims:\n  - text: \"Chunk claim.\"\n    anchor: \"00:00:01\"\ntags: []\nlinks: []\n");
+    yaml
+}
+
+#[tokio::test]
+async fn chunked_transcript_enumeration_survives_reduce_with_all_items_in_order() {
+    // Success criterion: a chunked transcript survives reduce with all N items
+    // in creator order. Chunks emit candidates covering all 9 anchors; the
+    // reduce restores 9 items in order; declared 9 == recovered 9 (no shortfall).
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    assert!(approx_tokens(transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+
+    let fake = FakeFabric::new();
+    fake.set_response(PATTERN_CHUNK, chunk_yaml_with_candidates(9, 9));
+    fake.set_response(PATTERN_REDUCE, reduce_yaml_with_items(9, 9));
+
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+            capture_note: None,
+        })
+        .await
+        .expect("distill");
+
+    let enumeration = distilled.enumeration.expect("enumeration survived reduce");
+    assert_eq!(enumeration.declared_count, Some(9));
+    let names: Vec<String> = enumeration.items.iter().map(|i| i.name.clone()).collect();
+    let expected: Vec<String> = (1..=9).map(|i| format!("Item {i}")).collect();
+    assert_eq!(names, expected, "all 9 items present in creator order");
+    // Anchors present in the candidate pool are kept, none stripped.
+    assert!(
+        enumeration.items.iter().all(|i| i.anchor.is_some()),
+        "candidate anchors kept"
+    );
+    assert_eq!(distilled.meta.validation.anchors_stripped, 0);
+    assert_eq!(distilled.tldr.as_deref(), Some("The whole video hook."));
+    assert!(
+        !distilled.meta.validation.enumeration_shortfall,
+        "9 of 9 -> not degraded"
+    );
+}
+
+#[tokio::test]
+async fn chunked_reduce_input_carries_enumeration_candidates_section() {
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    let fake = std::sync::Arc::new(FakeFabric::new());
+    fake.set_response(PATTERN_CHUNK, chunk_yaml_with_candidates(3, 3));
+    fake.set_response(PATTERN_REDUCE, reduce_yaml_with_items(3, 3));
+
+    let distiller = VideoDistiller::new(fake.clone(), VideoConfig::default());
+    distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+            capture_note: None,
+        })
+        .await
+        .expect("distill");
+
+    let reduce_call = fake
+        .calls()
+        .into_iter()
+        .find(|c| c.pattern == PATTERN_REDUCE)
+        .expect("reduce call recorded");
+    assert!(
+        reduce_call.input.contains("## Enumeration Candidates"),
+        "reduce input has candidates section: {:?}",
+        reduce_call.input
+    );
+    assert!(
+        reduce_call.input.contains("Declared count: 3"),
+        "{:?}",
+        reduce_call.input
+    );
+    assert!(
+        reduce_call.input.contains("[00:00:01] #1 Item 1 - desc 1"),
+        "candidate line format: {:?}",
+        reduce_call.input
+    );
+}
+
+#[tokio::test]
+async fn chunked_enumeration_shortfall_marks_degraded() {
+    // Success criterion: declared 10, reduce returns only 7 -> publishes with
+    // enumeration_shortfall (the receipt-degraded signal), never blocks.
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    let fake = FakeFabric::new();
+    fake.set_response(PATTERN_CHUNK, chunk_yaml_with_candidates(10, 7));
+    fake.set_response(PATTERN_REDUCE, reduce_yaml_with_items(10, 7));
+
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+            capture_note: None,
+        })
+        .await
+        .expect("distill");
+
+    let enumeration = distilled.enumeration.expect("enumeration present");
+    assert_eq!(enumeration.declared_count, Some(10));
+    assert_eq!(enumeration.items.len(), 7, "only 7 recovered");
+    assert!(
+        distilled.meta.validation.enumeration_shortfall,
+        "7 of 10 must mark the receipt degraded"
+    );
+    assert!(
+        distilled.meta.validation.is_degraded(),
+        "shortfall makes is_degraded true"
+    );
+    // Not a hard failure: it still published (no fallback reason from shortfall).
+    assert!(distilled.meta.validation.fallback_reason.is_none());
+}
+
+#[test]
+fn validate_anchors_strips_out_of_range_enumeration_item_anchor() {
+    // Anchor-honesty rule (single-call path): an item anchor past the video
+    // duration is not a real transcript position (e.g. lifted from a chapter
+    // list) — stripped, item text retained, counted.
+    let mut distilled = crate::fallback_distilled(ID, "test", "t", None, "m");
+    distilled.enumeration = Some(vault::distilled::Enumeration {
+        lead_in: None,
+        declared_count: Some(2),
+        items: vec![
+            vault::distilled::EnumeratedItem {
+                name: "In range".to_string(),
+                text: "kept".to_string(),
+                anchor: Some("00:01:00".to_string()),
+            },
+            vault::distilled::EnumeratedItem {
+                name: "Out of range".to_string(),
+                text: "kept text".to_string(),
+                anchor: Some("99:00:00".to_string()),
+            },
+        ],
+    });
+    let metadata = VideoMetadata {
+        duration_seconds: Some(600), // 10 minutes
+        ..Default::default()
+    };
+    validate_anchors(&mut distilled, Some(&metadata));
+    let items = &distilled.enumeration.as_ref().expect("enumeration").items;
+    assert_eq!(items[0].anchor.as_deref(), Some("00:01:00"), "in-range anchor kept");
+    assert!(items[1].anchor.is_none(), "out-of-range anchor stripped");
+    assert_eq!(items[1].text, "kept text", "item text retained");
+    assert_eq!(distilled.meta.validation.anchors_stripped, 1);
+}

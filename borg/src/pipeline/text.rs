@@ -183,7 +183,7 @@ pub(crate) async fn process_text_inner(
         title,
         all_tags,
         trace_id,
-        distilled.meta.validation.fallback_reason.is_some(),
+        distilled.meta.validation.is_degraded(),
     )
 }
 
@@ -334,7 +334,7 @@ pub(crate) async fn process_vocab(
         title,
         all_tags,
         trace_id,
-        distilled.meta.validation.fallback_reason.is_some(),
+        distilled.meta.validation.is_degraded(),
     )
 }
 

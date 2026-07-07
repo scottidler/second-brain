@@ -629,3 +629,44 @@ async fn sub_threshold_oversize_input_records_loud_truncation() {
     // Distinct from the reduce-selection-failed signal.
     assert!(distilled.meta.validation.fallback_reason.is_none());
 }
+
+#[tokio::test]
+async fn single_call_article_populates_enumeration_and_strips_item_anchors() {
+    // Phase 4: an awesome-list article yields the enumeration; article items
+    // carry no honest anchor, so any anchor the model emits is stripped.
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN,
+        "summary: \"A curated list of tools.\"\n\
+         tldr: \"Two tools worth bookmarking.\"\n\
+         enumeration:\n  lead_in: \"Two tools:\"\n  declared_count: 2\n  items:\n\
+         \x20   - name: \"Alpha\"\n      text: \"first\"\n      anchor: \"00:01:00\"\n\
+         \x20   - name: \"Bravo\"\n      text: \"second\"\n      anchor: null\n\
+         key_ideas:\n  - \"**Curation** - hand-picked beats exhaustive\"\n\
+         claims: []\ntags: []\nlinks: []\n",
+    );
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: "An awesome list of two tools: Alpha and Bravo.",
+            source_url: Some("https://example.com/awesome"),
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+            capture_note: None,
+        })
+        .await
+        .expect("distill");
+
+    assert_eq!(distilled.tldr.as_deref(), Some("Two tools worth bookmarking."));
+    let enumeration = distilled.enumeration.expect("enumeration populated");
+    assert_eq!(enumeration.declared_count, Some(2));
+    let names: Vec<&str> = enumeration.items.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, vec!["Alpha", "Bravo"]);
+    assert!(
+        enumeration.items.iter().all(|i| i.anchor.is_none()),
+        "article item anchors stripped (no honest positional anchor for prose)"
+    );
+    assert_eq!(distilled.key_ideas.len(), 1);
+    assert!(!distilled.meta.validation.enumeration_shortfall);
+}

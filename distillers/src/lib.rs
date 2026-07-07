@@ -38,7 +38,7 @@ pub use render::{RenderOptions, RenderedDistilled, render};
 pub use repo::{RepoConfig, RepoDistiller, RepoMetadata};
 pub use text::demote_headings;
 pub use thread::{ThreadConfig, ThreadDistiller, infer_platform};
-pub use validate::{enforce_bounds, fallback_distilled, max_claims};
+pub use validate::{enforce_bounds, fallback_distilled, mark_enumeration_shortfall, max_claims};
 pub use video::{VideoConfig, VideoDistiller, VideoMetadata};
 pub use voicenote::{VoiceNoteConfig, VoiceNoteDistiller};
 

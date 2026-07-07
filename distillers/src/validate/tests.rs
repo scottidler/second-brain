@@ -1,5 +1,33 @@
 use super::*;
-use vault::distilled::{Claim, Link};
+use vault::distilled::{Claim, EnumeratedItem, Enumeration, Link};
+
+/// Build a minimal Distilled carrying an enumeration for the Phase 4 bounds /
+/// shortfall tests.
+fn with_enumeration(declared_count: Option<u32>, item_count: usize) -> Distilled {
+    let items = (0..item_count)
+        .map(|i| EnumeratedItem {
+            name: format!("Item {i}"),
+            text: "one line".to_string(),
+            anchor: None,
+        })
+        .collect();
+    Distilled {
+        summary: "ok".to_string(),
+        tldr: None,
+        enumeration: Some(Enumeration {
+            lead_in: None,
+            declared_count,
+            items,
+        }),
+        key_ideas: Vec::new(),
+        claims: Vec::new(),
+        tags: Vec::new(),
+        links: Vec::new(),
+        kind_specific: None,
+        meta: meta("distill-video-v1"),
+        transcript: None,
+    }
+}
 
 fn meta(extractor: &str) -> DistilledMeta {
     DistilledMeta {
@@ -189,4 +217,126 @@ fn fallback_distilled_empty_transcript_stays_none() {
     // section entirely. Prevents a stray empty-headed block on truly empty inputs.
     let fb = fallback_distilled("distill-article-v1", "empty-transcript", "", None, "model-x");
     assert_eq!(fb.transcript, None);
+}
+
+#[test]
+fn enforce_bounds_caps_enumeration_item_count() {
+    let distilled = with_enumeration(None, MAX_ENUMERATION_ITEMS + 5);
+    let bounded = enforce_bounds(distilled, max_claims(1));
+    assert_eq!(
+        bounded.enumeration.as_ref().expect("enumeration").items.len(),
+        MAX_ENUMERATION_ITEMS
+    );
+    assert!(
+        bounded
+            .meta
+            .validation
+            .bounds_truncations
+            .iter()
+            .any(|t| t.starts_with("enumeration-items:")),
+        "{:?}",
+        bounded.meta.validation.bounds_truncations
+    );
+}
+
+#[test]
+fn enforce_bounds_truncates_long_enumeration_item_text() {
+    let mut distilled = with_enumeration(None, 1);
+    let item = &mut distilled.enumeration.as_mut().expect("enumeration").items[0];
+    item.name = "Short name".to_string();
+    let mut long = String::new();
+    for _ in 0..200 {
+        long.push_str("word here. ");
+    }
+    item.text = long;
+    let bounded = enforce_bounds(distilled, max_claims(1));
+    let combined = {
+        let it = &bounded.enumeration.as_ref().expect("enumeration").items[0];
+        it.name.chars().count() + it.text.chars().count()
+    };
+    assert!(combined <= MAX_ENUM_ITEM_CHARS, "combined length {combined} over cap");
+    assert!(
+        bounded
+            .meta
+            .validation
+            .bounds_truncations
+            .iter()
+            .any(|t| t.starts_with("enum-item-text:")),
+        "{:?}",
+        bounded.meta.validation.bounds_truncations
+    );
+}
+
+#[test]
+fn enforce_bounds_caps_key_ideas() {
+    let mut distilled = with_enumeration(None, 0);
+    distilled.key_ideas = (0..MAX_KEY_IDEAS + 3)
+        .map(|i| format!("**Theme {i}** - idea"))
+        .collect();
+    let bounded = enforce_bounds(distilled, max_claims(1));
+    assert_eq!(bounded.key_ideas.len(), MAX_KEY_IDEAS);
+    assert!(
+        bounded
+            .meta
+            .validation
+            .bounds_truncations
+            .iter()
+            .any(|t| t.starts_with("key-ideas:"))
+    );
+}
+
+#[test]
+fn enforce_bounds_truncates_long_tldr() {
+    let mut distilled = with_enumeration(None, 0);
+    let mut long = String::new();
+    for _ in 0..200 {
+        long.push_str("hook. ");
+    }
+    distilled.tldr = Some(long);
+    let bounded = enforce_bounds(distilled, max_claims(1));
+    assert!(bounded.tldr.as_ref().expect("tldr").chars().count() <= MAX_TLDR_CHARS);
+    assert!(
+        bounded
+            .meta
+            .validation
+            .bounds_truncations
+            .iter()
+            .any(|t| t.starts_with("tldr:"))
+    );
+}
+
+#[test]
+fn mark_enumeration_shortfall_flags_when_below_declared() {
+    // Declared 10, recovered 7 -> degraded flag set.
+    let mut distilled = with_enumeration(Some(10), 7);
+    mark_enumeration_shortfall(&mut distilled);
+    assert!(distilled.meta.validation.enumeration_shortfall);
+}
+
+#[test]
+fn mark_enumeration_shortfall_silent_when_count_met_or_exceeded() {
+    // Exactly N -> no shortfall.
+    let mut exact = with_enumeration(Some(10), 10);
+    mark_enumeration_shortfall(&mut exact);
+    assert!(!exact.meta.validation.enumeration_shortfall);
+    // More than N (over-recovery) -> no shortfall either.
+    let mut over = with_enumeration(Some(3), 5);
+    mark_enumeration_shortfall(&mut over);
+    assert!(!over.meta.validation.enumeration_shortfall);
+}
+
+#[test]
+fn mark_enumeration_shortfall_silent_without_declared_count() {
+    // An enumeration with no declared count can never be short.
+    let mut distilled = with_enumeration(None, 2);
+    mark_enumeration_shortfall(&mut distilled);
+    assert!(!distilled.meta.validation.enumeration_shortfall);
+}
+
+#[test]
+fn mark_enumeration_shortfall_silent_without_enumeration() {
+    let mut distilled = with_enumeration(None, 0);
+    distilled.enumeration = None;
+    mark_enumeration_shortfall(&mut distilled);
+    assert!(!distilled.meta.validation.enumeration_shortfall);
 }

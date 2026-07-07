@@ -334,9 +334,31 @@ pub struct ValidationMeta {
     /// validation (e.g. timestamp outside `duration_seconds`).
     #[serde(default)]
     pub anchors_stripped: u32,
+    /// The distiller populated an `enumeration` whose item count fell short of
+    /// its declared count (`items.len() < declared_count`). LLM variance on the
+    /// all-N rule must NOT block ingestion (Resolved Decision 2026-07-07), so a
+    /// shortfall publishes but marks the receipt degraded. This is a DISTINCT
+    /// degradation signal from `fallback_reason`: a shortfall is not a fallback,
+    /// so the borg pipeline ORs this into its `degraded` receipt flag rather
+    /// than piggybacking on `fallback_reason.is_some()`. `#[serde(default)]`
+    /// (false) keeps legacy staged `distilled.yml` files deserializable.
+    #[serde(default)]
+    pub enumeration_shortfall: bool,
     /// Raw Fabric stdout, populated only on parse failure for forensics.
     #[serde(default)]
     pub raw_output: Option<String>,
+}
+
+impl ValidationMeta {
+    /// Whether this distillation should mark its receipt `degraded` (surfaced by
+    /// `sb borg log --degraded` and `sb doctor` `degraded_24h`). Single source of
+    /// truth for the receipt-degraded rule so every terminal pipeline site
+    /// (URL/text/image/audio) computes it identically: a distiller FALLBACK, OR
+    /// an enumeration SHORTFALL. A shortfall is not a fallback — both are
+    /// silent-quality signals a published note carries, so they OR together.
+    pub fn is_degraded(&self) -> bool {
+        self.fallback_reason.is_some() || self.enumeration_shortfall
+    }
 }
 
 #[cfg(test)]

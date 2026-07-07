@@ -12,6 +12,23 @@ pub const MAX_SUMMARY_CHARS: usize = 2000;
 /// Hard cap on tags. Canonical-tag filtering happens upstream.
 pub const MAX_TAGS: usize = 7;
 
+/// Maximum enumerated items kept before truncation. A genuine listicle rarely
+/// exceeds a "Top 25"; anything past this is either LLM runaway or the section
+/// being mistaken for the whole transcript. Bounds the `## Enumerated Points`
+/// section so it can never approach the note-size ceiling (Phase 3 gate).
+pub const MAX_ENUMERATION_ITEMS: usize = 30;
+/// Per-item length cap (name + text combined) before that item's `text` is
+/// truncated at a sentence boundary. Each item is meant to be one line.
+pub const MAX_ENUM_ITEM_CHARS: usize = 400;
+/// Maximum thematic key-idea bullets kept before truncation (April rule: 5-7,
+/// with headroom for a rich source).
+pub const MAX_KEY_IDEAS: usize = 10;
+/// Per-key-idea length cap before sentence-boundary truncation.
+pub const MAX_KEY_IDEA_CHARS: usize = 400;
+/// The `> [!tldr]` callout is a single hook sentence; cap it so a runaway model
+/// can't smuggle paragraphs into the callout.
+pub const MAX_TLDR_CHARS: usize = 400;
+
 /// Base claim budget for a single-call (unchunked) distillation.
 const CLAIMS_BASE: usize = 10;
 /// Additional claims allowed per chunk beyond the first.
@@ -66,7 +83,110 @@ pub fn enforce_bounds(mut distilled: Distilled, max_claims: usize) -> Distilled 
             .bounds_truncations
             .push(format!("summary:{original}>{MAX_SUMMARY_CHARS}"));
     }
+    enforce_tldr_bound(&mut distilled);
+    enforce_enumeration_bounds(&mut distilled);
+    enforce_key_idea_bounds(&mut distilled);
     distilled
+}
+
+/// Cap the `tldr` callout hook (Phase 4). A one-sentence hook that runs long is
+/// truncated at a sentence boundary; the truncation is recorded so an operator
+/// sees the model produced an over-length tldr.
+fn enforce_tldr_bound(distilled: &mut Distilled) {
+    let Some(tldr) = distilled.tldr.as_ref() else {
+        return;
+    };
+    let original = tldr.chars().count();
+    if original > MAX_TLDR_CHARS {
+        let truncated = truncate_at_sentence_boundary(tldr, MAX_TLDR_CHARS);
+        distilled.tldr = Some(truncated);
+        distilled
+            .meta
+            .validation
+            .bounds_truncations
+            .push(format!("tldr:{original}>{MAX_TLDR_CHARS}"));
+    }
+}
+
+/// Cap the enumeration item count and each item's combined length (Phase 4).
+/// The item count is capped at [`MAX_ENUMERATION_ITEMS`]; per-item overflow
+/// truncates the item's `text` (never its `name`) at a sentence boundary. A
+/// count cap that trips is recorded as `enumeration-items:N>MAX`; a per-item
+/// text cut as `enum-item-text:idx:orig>MAX`.
+fn enforce_enumeration_bounds(distilled: &mut Distilled) {
+    let Some(enumeration) = distilled.enumeration.as_mut() else {
+        return;
+    };
+    if enumeration.items.len() > MAX_ENUMERATION_ITEMS {
+        let original = enumeration.items.len();
+        enumeration.items.truncate(MAX_ENUMERATION_ITEMS);
+        distilled
+            .meta
+            .validation
+            .bounds_truncations
+            .push(format!("enumeration-items:{original}>{MAX_ENUMERATION_ITEMS}"));
+    }
+    let mut item_cuts: Vec<String> = Vec::new();
+    for (idx, item) in enumeration.items.iter_mut().enumerate() {
+        let combined = item.name.chars().count() + item.text.chars().count();
+        if combined > MAX_ENUM_ITEM_CHARS {
+            // The name is a short title; keep it whole and trim the text so the
+            // combined length fits, never cutting below zero.
+            let text_budget = MAX_ENUM_ITEM_CHARS.saturating_sub(item.name.chars().count());
+            let original = item.text.chars().count();
+            item.text = truncate_at_sentence_boundary(&item.text, text_budget);
+            item_cuts.push(format!("enum-item-text:{idx}:{original}>{text_budget}"));
+        }
+    }
+    distilled.meta.validation.bounds_truncations.extend(item_cuts);
+}
+
+/// Cap the key-idea bullet count and each bullet's length (Phase 4).
+fn enforce_key_idea_bounds(distilled: &mut Distilled) {
+    if distilled.key_ideas.len() > MAX_KEY_IDEAS {
+        let original = distilled.key_ideas.len();
+        distilled.key_ideas.truncate(MAX_KEY_IDEAS);
+        distilled
+            .meta
+            .validation
+            .bounds_truncations
+            .push(format!("key-ideas:{original}>{MAX_KEY_IDEAS}"));
+    }
+    let mut idea_cuts: Vec<String> = Vec::new();
+    for (idx, idea) in distilled.key_ideas.iter_mut().enumerate() {
+        let original = idea.chars().count();
+        if original > MAX_KEY_IDEA_CHARS {
+            *idea = truncate_at_sentence_boundary(idea, MAX_KEY_IDEA_CHARS);
+            idea_cuts.push(format!("key-idea:{idx}:{original}>{MAX_KEY_IDEA_CHARS}"));
+        }
+    }
+    distilled.meta.validation.bounds_truncations.extend(idea_cuts);
+}
+
+/// Mark an enumeration shortfall (Resolved Decision 2026-07-07): when the source
+/// declared N items (`enumeration.declared_count == Some(n)`) but the distiller
+/// recovered fewer (`items.len() < n`), the note still publishes but the receipt
+/// is marked degraded so the miss surfaces via `sb doctor` (`degraded_24h`) and
+/// `sb borg log --degraded`. A shortfall is NOT a fallback, so this sets its own
+/// `validation.enumeration_shortfall` flag rather than reusing `fallback_reason`.
+/// Idempotent; call after the enumeration is finalized (post-`enforce_bounds`,
+/// so the count cap cannot itself manufacture a false shortfall — the cap only
+/// trims a count ABOVE `declared_count`, never below it).
+pub fn mark_enumeration_shortfall(distilled: &mut Distilled) {
+    let Some(enumeration) = distilled.enumeration.as_ref() else {
+        return;
+    };
+    let Some(declared) = enumeration.declared_count else {
+        return;
+    };
+    let recovered = enumeration.items.len() as u32;
+    if recovered < declared {
+        log::warn!(
+            "enumeration shortfall: declared_count={declared} recovered={recovered} \
+             (publishing degraded; enumeration items fell short of the declared total)"
+        );
+        distilled.meta.validation.enumeration_shortfall = true;
+    }
 }
 
 /// Truncate at the latest sentence-ending punctuation within `max_chars`,
@@ -134,6 +254,7 @@ pub fn fallback_distilled(
                 fallback_reason: Some(reason.to_string()),
                 bounds_truncations: Vec::new(),
                 anchors_stripped: 0,
+                enumeration_shortfall: false,
                 raw_output: raw_output.map(|s| s.to_string()),
             },
         },

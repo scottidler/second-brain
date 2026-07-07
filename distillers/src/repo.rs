@@ -7,16 +7,16 @@
 //! API at fetch time; the LLM only contributes `summary`, `claims`, and the
 //! `install` hint.
 
-use crate::parse::{PatternClaim, PatternLink, approx_tokens, strip_fences};
+use crate::parse::{PatternClaim, PatternEnumeration, PatternLink, approx_tokens, strip_fences};
 use async_trait::async_trait;
 use chrono::Utc;
 use eyre::Result;
 use serde::{Deserialize, Serialize};
-use vault::distilled::{Claim, Distilled, DistilledMeta, KindPayload, Link, RepoPayload, ValidationMeta};
+use vault::distilled::{Claim, Distilled, DistilledMeta, Enumeration, KindPayload, Link, RepoPayload, ValidationMeta};
 
 use crate::{
-    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled, max_claims,
-    validate::MAX_SUMMARY_CHARS,
+    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled,
+    mark_enumeration_shortfall, max_claims, validate::MAX_SUMMARY_CHARS,
 };
 
 const ID: &str = "distill-repo-v1";
@@ -183,11 +183,26 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
         let input_tokens = approx_tokens(inputs.transcript.len()) as u32;
         let output_tokens = approx_tokens(raw.len()) as u32;
 
+        // Phase 4: repos get tldr/enumeration/key-ideas too. READMEs carry no
+        // positional anchors, so any item anchor is stripped for honesty.
+        let tldr = parsed.tldr.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let enumeration = parsed
+            .enumeration
+            .and_then(|e| e.into_enumeration())
+            .map(strip_item_anchors);
+        let key_ideas: Vec<String> = parsed
+            .key_ideas
+            .unwrap_or_default()
+            .into_iter()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .collect();
+
         let distilled = Distilled {
             summary,
-            tldr: None,
-            enumeration: None,
-            key_ideas: Vec::new(),
+            tldr,
+            enumeration,
+            key_ideas,
             claims,
             tags,
             links,
@@ -211,6 +226,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
         // Single-call kind: chunk_count = 1, so the cap stays 10.
         let mut bounded = enforce_bounds(distilled, max_claims(1));
         debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
+        mark_enumeration_shortfall(&mut bounded);
         bounded.tags.iter_mut().for_each(|t| *t = t.to_lowercase());
         Ok(attach_metadata(bounded, inputs.repo_metadata, install))
     }
@@ -238,6 +254,16 @@ fn attach_metadata(mut distilled: Distilled, metadata: Option<&RepoMetadata>, in
     distilled
 }
 
+/// Strip every enumerated-item anchor (Phase 4 anchor-honesty rule). A repo
+/// README carries no timestamps or positional anchors, so any anchor the model
+/// attaches to an item is fabricated; drop it.
+fn strip_item_anchors(mut enumeration: Enumeration) -> Enumeration {
+    for item in &mut enumeration.items {
+        item.anchor = None;
+    }
+    enumeration
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct PatternYaml {
     #[serde(default)]
@@ -250,6 +276,14 @@ struct PatternYaml {
     links: Option<Vec<PatternLink>>,
     #[serde(default)]
     install: Option<String>,
+    /// Phase 4: repos get the April note shape too (an awesome-list README is a
+    /// listicle). Serde-defaulted so a pre-Phase-4 `distill-repo` output parses.
+    #[serde(default)]
+    tldr: Option<String>,
+    #[serde(default)]
+    enumeration: Option<PatternEnumeration>,
+    #[serde(default)]
+    key_ideas: Option<Vec<String>>,
 }
 #[cfg(test)]
 mod tests;

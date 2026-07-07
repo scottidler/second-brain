@@ -63,12 +63,7 @@ impl DistillExtractor for IdeaDistiller {
                 input_tokens: 0,
                 output_tokens: 0,
                 produced_at: Utc::now().to_rfc3339(),
-                validation: ValidationMeta {
-                    fallback_reason: None,
-                    bounds_truncations: Vec::new(),
-                    anchors_stripped: 0,
-                    raw_output: None,
-                },
+                validation: ValidationMeta::default(),
             },
             transcript: Some(trimmed.to_string()),
         })

@@ -278,7 +278,9 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
         // fallback silently reintroduces head-bias, so it is recorded as a
         // distinct `reduce-selection-failed` reason for the eval harness.
         let joined = chunk_summaries.join("\n\n");
-        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims);
+        // Voice notes are not a listicle kind: no enumeration candidates, no
+        // declared count reach the reduce input.
+        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims, &[], None);
         let mut anchors_stripped: u32 = 0;
         let (summary, claims, reduce_selection_failed) = match self.call_fabric(PATTERN_REDUCE, &reduce_input).await {
             Ok(raw) => match parse_reduce_yaml(&raw) {

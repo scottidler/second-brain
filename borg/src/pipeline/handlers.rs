@@ -814,7 +814,7 @@ pub(crate) async fn process_image_inner(
         title,
         all_tags,
         trace_id,
-        distilled.meta.validation.fallback_reason.is_some(),
+        distilled.meta.validation.is_degraded(),
     )
 }
 
@@ -1038,7 +1038,7 @@ pub(crate) async fn process_audio_inner(
         title,
         all_tags,
         trace_id,
-        distilled.meta.validation.fallback_reason.is_some(),
+        distilled.meta.validation.is_degraded(),
     )
 }
 

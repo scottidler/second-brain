@@ -8,6 +8,16 @@ explain what you are doing.
 
 ```yaml
 summary: "2-4 sentence prose summary"
+tldr: "one-sentence takeaway that captures the essential insight"
+enumeration:
+  lead_in: "The author covers 10 essential tools:"
+  declared_count: 10
+  items:
+    - name: "Item name"
+      text: "one-line description of what it is or why it matters"
+      anchor: null
+key_ideas:
+  - "**Theme name** - a sentence explaining the idea and why it matters."
 claims:
   - text: "single sentence stating one assertion"
     anchor: null
@@ -28,6 +38,33 @@ links:
 - `summary`: 2-4 sentences. State the article's thesis and its strongest
   takeaway first, then any supporting context. Report the article's own
   thesis; do not state what you think about it.
+- `tldr`: ONE sentence. The essential insight a reader takes away without
+  reading anything else. Not a restatement of the title; the takeaway.
+- `enumeration`: detect whether the article explicitly enumerates a set
+  of items (an "awesome list", a "Top 10 X" listicle, "7 patterns", a
+  numbered how-to with N steps). Look for a direct count or a numbered
+  range in the title, introduction, OR body. If a count or range is
+  present AND the article is structured around those items, extract ALL
+  N items in the author's order. If not detected, set `enumeration: null`
+  - do NOT force one. A prose essay, a single-argument piece, or an
+  article that merely mentions a few things in passing has no
+  enumeration.
+  - `lead_in`: one sentence stating what the author enumerates and how
+    many (e.g. "The author covers 10 CLI tools:").
+  - `declared_count`: the N the author states. `null` if the article
+    enumerates without declaring a total.
+  - `items`: ALL N items, in the author's own order - do not skip,
+    group, reorder, or summarize multiple items into one entry. Each:
+    - `name`: the item's name as the author gives it.
+    - `text`: one line describing what it is or why it matters.
+    - `anchor`: always `null` for articles. Articles carry no timestamps
+      or positional anchors; never fabricate one.
+- `key_ideas`: 3-7 thematic insights, each one line, formatted
+  `**Theme name** - explanation`. These MUST NOT repeat enumerated
+  items - key ideas are cross-cutting themes, meta-observations, or
+  insights that go beyond the author's list. If the article offers
+  fewer than 3 real insights, emit fewer; do not pad. Empty list when
+  the content is too shallow for any.
 - `claims`: maximum 10. Each is a single sentence stating one assertion,
   position, or recommendation the article makes. The author's positions
   and arguments ARE the value of an article - capture them attributed

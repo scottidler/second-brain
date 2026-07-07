@@ -287,3 +287,44 @@ async fn lowercases_tag_strings() {
         .expect("distill");
     assert_eq!(distilled.tags, vec!["rust", "distributedsystems"]);
 }
+
+#[tokio::test]
+async fn single_call_repo_populates_enumeration_and_strips_item_anchors() {
+    // Phase 4: an awesome-list README yields the enumeration; repos carry no
+    // positional anchor, so any item anchor the model emits is stripped.
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN,
+        "summary: \"A curated catalogue of CLI tools.\"\n\
+         tldr: \"Twelve CLIs worth installing.\"\n\
+         enumeration:\n  lead_in: \"The README lists 2 tools:\"\n  declared_count: 2\n  items:\n\
+         \x20   - name: \"ripgrep\"\n      text: \"fast search\"\n      anchor: \"1\"\n\
+         \x20   - name: \"fd\"\n      text: \"fast find\"\n      anchor: null\n\
+         key_ideas:\n  - \"**Speed** - all are Rust rewrites\"\n\
+         claims: []\ntags: []\nlinks: []\ninstall: null\n",
+    );
+    let distiller = make_distiller(fake);
+    let distilled = distiller
+        .distill(DistillInputs {
+            transcript: "An awesome list of CLI tools.",
+            source_url: Some("https://github.com/owner/awesome-cli"),
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+            capture_note: None,
+        })
+        .await
+        .expect("distill");
+
+    assert_eq!(distilled.tldr.as_deref(), Some("Twelve CLIs worth installing."));
+    let enumeration = distilled.enumeration.expect("enumeration populated");
+    assert_eq!(enumeration.declared_count, Some(2));
+    let names: Vec<&str> = enumeration.items.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, vec!["ripgrep", "fd"]);
+    assert!(
+        enumeration.items.iter().all(|i| i.anchor.is_none()),
+        "repo item anchors stripped"
+    );
+    assert_eq!(distilled.key_ideas.len(), 1);
+    assert!(!distilled.meta.validation.enumeration_shortfall);
+}

@@ -14,7 +14,8 @@
 //! and increments `meta.validation.anchors_stripped`.
 
 use crate::parse::{
-    PatternYaml, ReduceYaml, approx_tokens, build_reduce_input, find_boundary, select_reduce_claims, strip_fences,
+    EnumCandidate, PatternYaml, ReduceYaml, approx_tokens, build_reduce_input, find_boundary,
+    resolve_reduce_enumeration, select_reduce_claims, strip_fences,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -23,8 +24,8 @@ use futures::stream::{self, StreamExt};
 use vault::distilled::{Claim, Distilled, DistilledMeta, KindPayload, Link, ValidationMeta, VideoPayload};
 
 use crate::{
-    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled, max_claims,
-    validate::MAX_SUMMARY_CHARS,
+    DistillExtractor, DistillInputs, FabricCaller, FabricRequest, enforce_bounds, fallback_distilled,
+    mark_enumeration_shortfall, max_claims, validate::MAX_SUMMARY_CHARS,
 };
 
 const ID: &str = "distill-video-v1";
@@ -135,6 +136,11 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
         // passes chunk_count = 1, holding the cap at 10 as before).
         let mut bounded = enforce_bounds(distilled, max_claims(chunk_count));
         debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
+        // Enumeration shortfall (Resolved Decision 2026-07-07): flag AFTER
+        // enforce_bounds so the item-count cap (which only trims counts ABOVE
+        // declared_count) can never manufacture a false shortfall. Publishes
+        // degraded, never blocks.
+        mark_enumeration_shortfall(&mut bounded);
         bounded.tags.iter_mut().for_each(|t| *t = t.to_lowercase());
         attach_payload(&mut bounded, inputs.video_metadata);
         // Defensive re-set after enforce_bounds and attach_payload in case
@@ -228,6 +234,11 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
         let mut combined_claims: Vec<Claim> = Vec::new();
         let mut combined_links: Vec<Link> = Vec::new();
         let mut combined_tags: Vec<String> = Vec::new();
+        // Phase 4: pool enumeration candidates across chunks for the reduce step,
+        // and carry the first declared count any chunk saw (stated once, in the
+        // intro chunk).
+        let mut combined_candidates: Vec<EnumCandidate> = Vec::new();
+        let mut declared_count: Option<u32> = None;
         let mut any_chunk_failed = false;
         let mut output_chars: usize = 0;
 
@@ -279,6 +290,19 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty()),
             );
+            // Phase 4: pool this chunk's enumeration candidates and adopt the
+            // first declared count seen (the intro states it once).
+            if declared_count.is_none() {
+                declared_count = parsed.declared_count;
+            }
+            combined_candidates.extend(
+                parsed
+                    .enumeration_candidates
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|c| c.into_candidate())
+                    .filter(|c| !c.name.is_empty()),
+            );
         }
 
         // Dedup tags, first-seen order.
@@ -305,8 +329,14 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
         // `reduce-selection-failed` reason (never folded into
         // bounds_truncations) for the eval harness to watch.
         let joined = chunk_summaries.join("\n\n");
-        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims);
+        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims, &combined_candidates, declared_count);
         let mut anchors_stripped: u32 = 0;
+        // tldr / enumeration / key_ideas are reduce-only outputs; the fallback
+        // arms (parse/call failure) leave them empty because those arms never
+        // saw the reduce pattern's structured output.
+        let mut tldr: Option<String> = None;
+        let mut enumeration: Option<vault::distilled::Enumeration> = None;
+        let mut key_ideas: Vec<String> = Vec::new();
         let (summary, claims, reduce_selection_failed) = match self.call_fabric(PATTERN_REDUCE, &reduce_input).await {
             Ok(raw) => match parse_reduce_yaml(&raw) {
                 Ok(parsed) => {
@@ -316,6 +346,19 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| joined.clone());
+                    tldr = parsed.tldr.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                    // Restore the enumeration from the pooled candidates, applying
+                    // the anchor-honesty rule against the candidate anchors.
+                    enumeration = parsed
+                        .enumeration
+                        .and_then(|e| resolve_reduce_enumeration(e, &combined_candidates, &mut anchors_stripped));
+                    key_ideas = parsed
+                        .key_ideas
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|k| k.trim().to_string())
+                        .filter(|k| !k.is_empty())
+                        .collect();
                     match parsed
                         .claims
                         .and_then(|c| select_reduce_claims(c, &combined_claims, &mut anchors_stripped))
@@ -357,9 +400,9 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
         let output_tokens = approx_tokens(output_chars) as u32;
         Ok(Distilled {
             summary,
-            tldr: None,
-            enumeration: None,
-            key_ideas: Vec::new(),
+            tldr,
+            enumeration,
+            key_ideas,
             claims,
             tags: combined_tags,
             links: combined_links,
@@ -450,11 +493,24 @@ fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str
         log::warn!("VideoDistiller: empty claims for transcript with {word_count} words (possible pattern drift)");
     }
 
+    // Phase 4: single-call enumeration/tldr/key-ideas straight off the parsed
+    // pattern output. `into_enumeration` returns None for an empty `items:`
+    // list so a stray `enumeration:` header never renders an empty section.
+    let tldr = parsed.tldr.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let enumeration = parsed.enumeration.and_then(|e| e.into_enumeration());
+    let key_ideas: Vec<String> = parsed
+        .key_ideas
+        .unwrap_or_default()
+        .into_iter()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+
     Distilled {
         summary,
-        tldr: None,
-        enumeration: None,
-        key_ideas: Vec::new(),
+        tldr,
+        enumeration,
+        key_ideas,
         claims,
         tags,
         links,
@@ -481,24 +537,42 @@ pub fn validate_anchors(distilled: &mut Distilled, metadata: Option<&VideoMetada
     let duration_cap = metadata.and_then(|m| m.duration_seconds);
     let mut stripped: u32 = 0;
     for claim in &mut distilled.claims {
-        let Some(anchor) = claim.anchor.clone() else {
-            continue;
-        };
-        match parse_anchor_seconds(&anchor) {
-            Some(secs) => match duration_cap {
-                Some(cap) if secs > cap => {
-                    claim.anchor = None;
-                    stripped += 1;
-                }
-                _ => {}
-            },
-            None => {
-                claim.anchor = None;
+        if strip_dishonest_anchor(&mut claim.anchor, duration_cap) {
+            stripped += 1;
+        }
+    }
+    // Enumeration item anchors ride the same anchor-honesty rule (Phase 4): a
+    // malformed timestamp, or one past the video duration, is not a real
+    // transcript position, so strip it (item text retained). Reduce-path items
+    // already passed the candidate-pool gate; this catches the single-call path
+    // (no pool) where the model may lift an in-format but out-of-range anchor
+    // from the description's chapter list.
+    if let Some(enumeration) = distilled.enumeration.as_mut() {
+        for item in &mut enumeration.items {
+            if strip_dishonest_anchor(&mut item.anchor, duration_cap) {
                 stripped += 1;
             }
         }
     }
     distilled.meta.validation.anchors_stripped = distilled.meta.validation.anchors_stripped.saturating_add(stripped);
+}
+
+/// Strip an anchor that fails the video anchor-honesty rule: unparseable as
+/// `HH:MM:SS`/`MM:SS`, or (when a duration cap is known) past the video's end.
+/// Returns `true` when it stripped an anchor. Shared by claim and enumeration
+/// anchor validation so both apply exactly the same rule.
+fn strip_dishonest_anchor(anchor: &mut Option<String>, duration_cap: Option<u32>) -> bool {
+    let Some(value) = anchor.as_deref() else {
+        return false;
+    };
+    let dishonest = match parse_anchor_seconds(value) {
+        Some(secs) => matches!(duration_cap, Some(cap) if secs > cap),
+        None => true,
+    };
+    if dishonest {
+        *anchor = None;
+    }
+    dishonest
 }
 
 /// Parse `HH:MM:SS` or `MM:SS` into seconds. Returns None on unparseable

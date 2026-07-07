@@ -1039,9 +1039,10 @@ async fn process_url_inner(
         trace_id: None,
         obsidian_url,
         failure_stage: None,
-        // Degraded when the L2 distiller fell back instead of producing a
-        // clean structured artifact (queryable via `sb borg log --degraded`).
-        degraded: distilled.meta.validation.fallback_reason.is_some(),
+        // Degraded when the L2 distiller fell back OR an enumeration fell short
+        // of its declared count (Phase 4, Resolved Decision 2026-07-07). Single
+        // source of truth: `ValidationMeta::is_degraded`.
+        degraded: distilled.meta.validation.is_degraded(),
     })
 }
 

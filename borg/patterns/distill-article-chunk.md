@@ -5,13 +5,18 @@ article was split into pieces because it is too long to summarize in one
 call; you are given one piece. Output YAML matching the schema below. You do
 not write a prose preamble. You do not explain what you are doing.
 
-Articles carry no timestamps or post IDs, so every claim's `anchor` is
-`null`.
+Articles carry no timestamps or post IDs, so every `anchor` is `null`.
 
 # SCHEMA
 
 ```yaml
 summary: "1-2 sentence summary of THIS CHUNK"
+declared_count: null
+enumeration_candidates:
+  - name: "Item name"
+    text: "one-line description"
+    anchor: null
+    ordinal: 3
 claims:
   - text: "single sentence stating one assertion"
     anchor: null
@@ -32,6 +37,24 @@ links:
 - `summary`: 1-2 sentences describing what THIS CHUNK covers specifically. A
   later reduce step combines chunk summaries into the whole-article summary;
   don't try to summarize the whole article.
+- `declared_count`: if THIS CHUNK contains an explicit statement of how many
+  items the article covers ("10 tools", "7 patterns", "these 5 steps", a
+  range like "levels 1-5"), emit that N. Otherwise `null`. Do not infer a
+  count that is not stated.
+- `enumeration_candidates`: items of an explicit enumeration that THIS CHUNK
+  introduces (an entry in an awesome list, an item in a numbered listicle, a
+  step of a numbered how-to). A candidate exists when the item is a member
+  of a numbered or counted list the article's CONTENT is organized around.
+  Passing mentions and prose asides are NOT candidates - do not invent
+  candidates from topics that merely come up. An empty list when the chunk
+  enumerates nothing. A later reduce step merges candidates across chunks
+  and decides whether they form a real enumeration; report only what this
+  chunk actually saw.
+  - `name`: the item's name as the author gives it.
+  - `text`: one line describing what it is or why it matters.
+  - `anchor`: always `null` for articles (no timestamps or positions).
+  - `ordinal`: the item's position number when the article numbers it ("3.",
+    "third"); `null` when it is unnumbered.
 - `claims`: maximum 5 per chunk. Each is a single sentence stating one
   assertion, position, or recommendation the article makes IN THIS CHUNK.
   The author's positions and arguments ARE the value of an article - capture
