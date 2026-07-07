@@ -2,9 +2,19 @@
 
 use super::*;
 use chrono::{Duration, Utc};
+use std::sync::Mutex;
+
+// `cooldown_map()` is a process-global map and `reset_cooldowns()` wipes ALL of
+// it, so the cooldown tests below cannot run in parallel: one test's reset can
+// fire between another's two `should_alert` calls and drop a just-recorded
+// entry. Serialize every cooldown-touching test behind this lock (same pattern
+// as the ENV_LOCK guard used for env-var tests). The `format_*` tests do not
+// touch the map and are exempt.
+static COOLDOWN_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn first_alert_fires_then_is_suppressed() {
+    let _guard = COOLDOWN_LOCK.lock().unwrap();
     reset_cooldowns();
     let now = Utc::now();
     assert!(should_alert("xda-developers.com", GateId::BlockPage, now, 60));
@@ -14,6 +24,7 @@ fn first_alert_fires_then_is_suppressed() {
 
 #[test]
 fn different_gates_share_domain_but_have_independent_cooldown() {
+    let _guard = COOLDOWN_LOCK.lock().unwrap();
     reset_cooldowns();
     let now = Utc::now();
     assert!(should_alert("example.com", GateId::BlockPage, now, 60));
@@ -23,6 +34,7 @@ fn different_gates_share_domain_but_have_independent_cooldown() {
 
 #[test]
 fn different_domains_have_independent_cooldown() {
+    let _guard = COOLDOWN_LOCK.lock().unwrap();
     reset_cooldowns();
     let now = Utc::now();
     assert!(should_alert("a.com", GateId::BlockPage, now, 60));
@@ -31,6 +43,7 @@ fn different_domains_have_independent_cooldown() {
 
 #[test]
 fn cooldown_expires_after_window() {
+    let _guard = COOLDOWN_LOCK.lock().unwrap();
     reset_cooldowns();
     let now = Utc::now();
     assert!(should_alert("c.com", GateId::BlockPage, now, 60));
