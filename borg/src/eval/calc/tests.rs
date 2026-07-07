@@ -182,3 +182,21 @@ fn note_size_within_ceiling_passes_on_april_shape_fixture_render() {
         rendered.body_markdown.len()
     );
 }
+
+// --- listicle-aggregate (Phase 7b: sb borg eval report wiring) -------------
+
+#[test]
+fn listicle_aggregate_is_none_when_no_fixture_is_applicable() {
+    assert_eq!(listicle_aggregate(&[]), None);
+}
+
+#[test]
+fn listicle_aggregate_is_the_mean_of_applicable_scores() {
+    let agg = listicle_aggregate(&[1.0, 0.5]).expect("two applicable fixtures");
+    assert!((agg - 0.75).abs() < 1e-9);
+}
+
+#[test]
+fn listicle_aggregate_single_fixture_at_one() {
+    assert_eq!(listicle_aggregate(&[1.0]), Some(1.0));
+}

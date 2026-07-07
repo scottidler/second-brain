@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use distillers::RenderOptions;
 use eyre::{Context, Result, bail};
 use vault::distilled::Distilled;
 
@@ -116,6 +117,26 @@ pub fn judge_note_text(distilled: &Distilled) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The `RenderOptions` a real publish/backfill call site would apply to a
+/// fixture of this `kind` (2026-07-07 distillation-output-restore, Phase 7b:
+/// `sb borg eval` note-size wiring). Video/Article/Repo/Thread all render at
+/// borg's single URL site (`RenderOptions::for_url_publish`, keyed on the
+/// typed `KindPayload` so only Thread keeps its transcript); the
+/// verbatim-preservation kinds (Image/VoiceNote/Idea/Vocabulary) render at
+/// their own always-`true` seams in `text.rs`/`handlers.rs`. A fixture only
+/// carries the kind label (its directory name), so this maps that label to
+/// the same per-kind policy production uses - never a fixture-specific guess,
+/// and never a blanket `include_transcript: false` that would understate a
+/// verbatim kind's true published size.
+pub fn render_options_for_kind(kind: &str, distilled: &Distilled) -> RenderOptions {
+    match kind {
+        "video" | "article" | "repo" | "thread" => RenderOptions::for_url_publish(distilled),
+        _ => RenderOptions {
+            include_transcript: true,
+        },
+    }
 }
 
 #[cfg(test)]

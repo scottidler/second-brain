@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 
 use eyre::{Context, Result};
 
-pub use fixtures::{Fixture, judge_note_text, load};
+pub use fixtures::{Fixture, judge_note_text, load, render_options_for_kind};
 pub use judge::{AxisScores, DistillationJudge, FabricJudge, MockJudge};
-pub use report::{CalibrationPanel, EvalReport, KindReport};
+pub use report::{CalibrationPanel, EvalReport, KindReport, ListicleMetric, NoteSizeMetric};
 
 /// Char budget for the source text shown to the judge. Larger than the oracle
 /// eval's note budget (8K) because claim coverage requires the judge to see the
@@ -162,11 +162,41 @@ pub fn evaluate(
     let mut fallback_fixtures = 0usize;
     let mut calib_pairs: Vec<(u8, u8)> = Vec::new();
     let mut sheet: Vec<CalibrationRow> = Vec::new();
+    // Deterministic metrics (zero judge calls, Phase 7b): computed once per
+    // fixture alongside the judge axes, never gated by cache/judge failure.
+    let mut listicle: Vec<report::ListicleMetric> = Vec::new();
+    let mut note_size: Vec<report::NoteSizeMetric> = Vec::new();
 
     for fx in fixtures {
         if fx.distilled.meta.validation.fallback_reason.is_some() {
             fallback_fixtures += 1;
         }
+
+        // listicle-survival: applicability gate is the fixture's OWN expected
+        // `declared_count` - present means "this is a listicle and must
+        // survive", absent means N/A (excluded from the aggregate, not 0.0).
+        if fx
+            .distilled
+            .enumeration
+            .as_ref()
+            .and_then(|e| e.declared_count)
+            .is_some()
+        {
+            listicle.push(report::ListicleMetric {
+                fixture: fx.id.clone(),
+                score: calc::listicle_survival(fx.distilled.enumeration.as_ref()),
+            });
+        }
+
+        // note-size: enforced across every fixture, rendered with the same
+        // per-kind transcript policy a real publish/backfill call site uses.
+        let render_options = fixtures::render_options_for_kind(&fx.kind, &fx.distilled);
+        let rendered_bytes = distillers::render(&fx.distilled, render_options).body_markdown.len();
+        note_size.push(report::NoteSizeMetric {
+            fixture: fx.id.clone(),
+            rendered_bytes,
+            within_ceiling: calc::note_size_within_ceiling(rendered_bytes),
+        });
 
         let note = judge_note_text(&fx.distilled);
         let (source, truncated) = truncate_source(&fx.source, JUDGE_SOURCE_MAX_CHARS);
@@ -237,6 +267,8 @@ pub fn evaluate(
         .collect();
     let overall = KindReport::aggregate(OVERALL_LABEL, &all);
     let calibration_panel = report::calibration_panel(&calib_pairs);
+    let listicle_scores: Vec<f64> = listicle.iter().map(|m| m.score).collect();
+    let listicle_aggregate = calc::listicle_aggregate(&listicle_scores);
 
     let report = EvalReport {
         judge_model: opts.judge_model.clone(),
@@ -248,12 +280,16 @@ pub fn evaluate(
         kinds,
         overall,
         calibration: calibration_panel,
+        listicle,
+        listicle_aggregate,
+        note_size,
     };
     log::debug!(
-        "eval::evaluate: done fixtures={} new_judgments={} composite={:.4}",
+        "eval::evaluate: done fixtures={} new_judgments={} composite={:.4} listicle_aggregate={:?}",
         report.total_fixtures,
         report.new_judgments,
-        report.overall.composite
+        report.overall.composite,
+        report.listicle_aggregate,
     );
     Ok(EvalOutcome::Report(Box::new(report)))
 }

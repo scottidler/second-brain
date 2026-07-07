@@ -1,5 +1,5 @@
 use super::*;
-use vault::distilled::{Claim, Distilled};
+use vault::distilled::{Claim, Distilled, KindPayload, ThreadPayload};
 
 fn write_fixture(root: &std::path::Path, kind: &str, slug: &str, source: &str, distilled: &str) {
     let dir = root.join(kind).join(slug);
@@ -81,4 +81,35 @@ fn judge_note_text_renders_summary_and_anchored_claims() {
     assert!(text.contains("- bare claim\n"));
     // a bare claim must not render an empty anchor bracket
     assert!(!text.contains("bare claim ["));
+}
+
+// --- render_options_for_kind (Phase 7b: sb borg eval note-size wiring) -----
+
+#[test]
+fn render_options_video_article_repo_are_transcript_free() {
+    let d = Distilled::default();
+    for kind in ["video", "article", "repo"] {
+        let opts = render_options_for_kind(kind, &d);
+        assert!(!opts.include_transcript, "{kind} publish must be transcript-free");
+    }
+}
+
+#[test]
+fn render_options_thread_keeps_its_transcript() {
+    let d = Distilled {
+        kind_specific: Some(KindPayload::Thread(ThreadPayload::default())),
+        ..Default::default()
+    };
+    assert!(render_options_for_kind("thread", &d).include_transcript);
+}
+
+#[test]
+fn render_options_verbatim_kinds_keep_their_transcript() {
+    let d = Distilled::default();
+    for kind in ["image", "voicenote", "idea", "vocabulary"] {
+        assert!(
+            render_options_for_kind(kind, &d).include_transcript,
+            "{kind} is a verbatim-preservation kind"
+        );
+    }
 }

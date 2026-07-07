@@ -2,6 +2,7 @@
 //! summary (total / new / truncated / fallback), and the judge calibration
 //! panel — plus a plain-text renderer for `sb` to print.
 
+use crate::config::MAX_NOTE_BYTES;
 use crate::eval::calc;
 use crate::eval::judge::{AxisScores, HIT_THRESHOLD};
 
@@ -86,6 +87,28 @@ pub fn calibration_panel(pairs: &[(u8, u8)]) -> Option<CalibrationPanel> {
     })
 }
 
+/// Per-fixture listicle-survival result (2026-07-07 distillation-output-restore,
+/// Phase 7b). Scored ONLY for fixtures whose EXPECTED `distilled.yml` declares
+/// a `declared_count` - that declared count IS the authored assertion "this
+/// fixture is a listicle and must survive". Fixtures without one are N/A for
+/// this axis and never appear here (excluded from the aggregate, not folded
+/// in as a 0.0 - see [`calc::listicle_aggregate`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListicleMetric {
+    pub fixture: String,
+    pub score: f64,
+}
+
+/// Per-fixture note-size gate result: does the fixture's rendered body stay
+/// under the Phase 3 publish-path ceiling (`crate::config::MAX_NOTE_BYTES`).
+/// Enforced across every fixture, regardless of kind.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoteSizeMetric {
+    pub fixture: String,
+    pub rendered_bytes: usize,
+    pub within_ceiling: bool,
+}
+
 /// The full distillation eval result.
 #[derive(Debug, Clone)]
 pub struct EvalReport {
@@ -103,6 +126,14 @@ pub struct EvalReport {
     pub kinds: Vec<KindReport>,
     pub overall: KindReport,
     pub calibration: Option<CalibrationPanel>,
+    /// Per-applicable-fixture listicle-survival scores (Phase 7b). Empty when
+    /// no fixture in the set declares a `declared_count`.
+    pub listicle: Vec<ListicleMetric>,
+    /// Mean of `listicle` scores. `None` when `listicle` is empty (nothing
+    /// applicable this run) - distinct from `Some(0.0)`, a genuine failure.
+    pub listicle_aggregate: Option<f64>,
+    /// Per-fixture note-size gate result, one row per fixture in the set.
+    pub note_size: Vec<NoteSizeMetric>,
 }
 
 impl EvalReport {
@@ -141,6 +172,32 @@ impl EvalReport {
             "\njudgments: {} scored, {} new (cache misses), {} from truncated sources, {} fixtures on a distill fallback\n",
             self.total_judgments, self.new_judgments, self.truncated_judgments, self.fallback_fixtures,
         ));
+
+        o.push_str("\ndeterministic metrics (zero judge calls):\n");
+        match self.listicle_aggregate {
+            Some(agg) => {
+                o.push_str(&format!(
+                    "  listicle-survival: {:.3}  ({} applicable fixture{})\n",
+                    agg,
+                    self.listicle.len(),
+                    if self.listicle.len() == 1 { "" } else { "s" },
+                ));
+                for m in &self.listicle {
+                    o.push_str(&format!("    {:<60} {:.3}\n", m.fixture, m.score));
+                }
+            }
+            None => o.push_str("  listicle-survival: N/A (no fixture declares a declared-count)\n"),
+        }
+        let failing: Vec<&NoteSizeMetric> = self.note_size.iter().filter(|m| !m.within_ceiling).collect();
+        o.push_str(&format!(
+            "  note-size: {}/{} within the {}-byte ceiling\n",
+            self.note_size.len() - failing.len(),
+            self.note_size.len(),
+            MAX_NOTE_BYTES,
+        ));
+        for m in &failing {
+            o.push_str(&format!("    FAIL {:<55} {} bytes\n", m.fixture, m.rendered_bytes));
+        }
 
         match &self.calibration {
             Some(c) => {

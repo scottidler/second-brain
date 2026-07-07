@@ -94,5 +94,19 @@ pub fn note_size_within_ceiling(rendered_bytes: usize) -> bool {
     rendered_bytes < MAX_NOTE_BYTES
 }
 
+/// Mean of the applicable per-fixture listicle-survival scores (Phase 7b, the
+/// `sb borg eval` report wiring). `None` when no fixture is applicable -
+/// distinct from `Some(0.0)`, which means every applicable fixture scored a
+/// genuine failure. "Applicable" is decided by the caller (report.rs): a
+/// fixture whose EXPECTED `distilled.yml` declares a `declared_count` is the
+/// authored assertion "this is a listicle and must survive"; fixtures without
+/// one are excluded from this aggregate entirely, never folded in as 0.0.
+pub fn listicle_aggregate(scores: &[f64]) -> Option<f64> {
+    if scores.is_empty() {
+        return None;
+    }
+    Some(scores.iter().sum::<f64>() / scores.len() as f64)
+}
+
 #[cfg(test)]
 mod tests;

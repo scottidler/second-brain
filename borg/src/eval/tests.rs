@@ -175,6 +175,107 @@ fn emit_calibration_writes_sheet_and_short_circuits() {
     assert!(written.contains("human-claim-coverage"));
 }
 
+// --- deterministic metrics wiring (Phase 7b) -------------------------------
+
+/// Design-doc acceptance criterion #4 against the real committed fixture set:
+/// `sb borg eval` (here, its `evaluate()` core) reports listicle-survival =
+/// 1.0 on the April fixture, and enforces note-size across every fixture. The
+/// per-fixture is-listicle gate (an expected `declared-count`) excludes every
+/// non-listicle fixture from the aggregate - it does not fold them in as 0.0.
+#[test]
+fn evaluate_gates_listicle_to_declared_count_fixtures_on_real_fixture_set() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../config/eval/distill-fixtures");
+    let fixtures = load(&dir).expect("load committed fixtures");
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let judge = MockJudge::new(scores(2, 2, 2));
+    let report =
+        unwrap_report(evaluate(&fixtures, &BTreeMap::new(), &cache, &judge, &EvalOpts::default()).expect("evaluate"));
+
+    // Exactly one committed fixture declares a declared-count today: the
+    // April-shape fixture. It is the only row in the listicle aggregate.
+    assert_eq!(
+        report.listicle.len(),
+        1,
+        "only the April fixture declares a declared-count"
+    );
+    assert_eq!(
+        report.listicle[0].fixture,
+        "video/top-10-claude-code-skills-plugins-clis-april-2026"
+    );
+    assert_eq!(report.listicle[0].score, 1.0);
+    assert_eq!(report.listicle_aggregate, Some(1.0));
+
+    // A non-listicle video fixture (no enumeration at all) must be EXCLUDED
+    // from the aggregate, not present scored at 0.0.
+    assert!(
+        !report
+            .listicle
+            .iter()
+            .any(|m| m.fixture == "video/there-are-only-5-safe-places-to-build-in-ai-right-now-are-yo"),
+        "a fixture with no declared-count is N/A, not a 0.0 row"
+    );
+
+    // note-size is enforced across every fixture in the set (all committed
+    // fixtures - full kind span - stay under the ceiling today).
+    assert_eq!(report.note_size.len(), fixtures.len());
+    assert!(
+        report.note_size.iter().all(|m| m.within_ceiling),
+        "every committed fixture must render under the ceiling"
+    );
+}
+
+/// Break-the-code guarantee: a listicle fixture whose distilled artifact LOST
+/// its enumeration items (declared 10, delivered 0 - the exact regression
+/// class this design exists to catch) scores 0.0 and drags the aggregate down
+/// alongside a genuinely-full listicle fixture, proving the metric bites.
+#[test]
+fn evaluate_scores_zero_and_drags_aggregate_when_enumeration_items_are_lost() {
+    use vault::distilled::Enumeration;
+
+    let mut intact = distilled("a top-10 video, fully survived", &[("item one", None)], None);
+    intact.enumeration = Some(Enumeration {
+        lead_in: None,
+        declared_count: Some(10),
+        items: (1..=10)
+            .map(|n| vault::distilled::EnumeratedItem {
+                name: format!("item {n}"),
+                text: "text".to_string(),
+                anchor: None,
+            })
+            .collect(),
+    });
+
+    let mut regressed = distilled("a top-10 video that lost its list", &[("item one", None)], None);
+    regressed.enumeration = Some(Enumeration {
+        lead_in: None,
+        declared_count: Some(10),
+        items: Vec::new(), // the enumeration survived as a shell but every item vanished
+    });
+
+    let fixtures = vec![
+        fixture("video", "intact-listicle", "source a", intact),
+        fixture("video", "regressed-listicle", "source b", regressed),
+    ];
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let judge = MockJudge::new(scores(2, 2, 2));
+    let report =
+        unwrap_report(evaluate(&fixtures, &BTreeMap::new(), &cache, &judge, &EvalOpts::default()).expect("evaluate"));
+
+    assert_eq!(report.listicle.len(), 2, "both fixtures declare a declared-count");
+    let regressed_score = report
+        .listicle
+        .iter()
+        .find(|m| m.fixture == "video/regressed-listicle")
+        .expect("regressed fixture present")
+        .score;
+    assert_eq!(
+        regressed_score, 0.0,
+        "an emptied enumeration must score zero, not vacuous credit"
+    );
+    // Aggregate is the mean of 1.0 (intact) and 0.0 (regressed) - the drop is visible.
+    assert_eq!(report.listicle_aggregate, Some(0.5));
+}
+
 /// Success-criterion guard: the committed fixture set has >= 20 fixtures
 /// spanning all content kinds. Located via `CARGO_MANIFEST_DIR` so the test is
 /// independent of the process working directory.
