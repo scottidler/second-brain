@@ -52,6 +52,7 @@ pub mod slides;
 pub mod stages;
 pub mod startup;
 pub mod telegram;
+pub mod thread;
 pub mod trace;
 pub mod transcription;
 pub mod triage;
