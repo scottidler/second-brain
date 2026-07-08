@@ -1,4 +1,5 @@
 use super::*;
+use vault::distilled::{Distilled, DistilledMeta, ThreadPayload, ValidationMeta};
 
 // --- platform_label ---
 
@@ -121,4 +122,155 @@ fn title_for_thread_is_pure_and_deterministic() {
     let a = title_for_thread("x", Some("@tom_doerr"), Some("stable snippet"), "...");
     let b = title_for_thread("x", Some("@tom_doerr"), Some("stable snippet"), "...");
     assert_eq!(a, b);
+}
+
+// --- thread_title / resolve_title (Phase 2 seam success criteria a-c) ---
+
+/// A purely-numeric title is the exact bug this design exists to eliminate.
+fn is_purely_numeric(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Build a synthetic thread `Distilled` at the shape the pipeline seam sees.
+fn thread_distilled(
+    payload: Option<ThreadPayload>,
+    tldr: Option<&str>,
+    summary: &str,
+    fallback_reason: Option<&str>,
+) -> Distilled {
+    Distilled {
+        summary: summary.to_string(),
+        tldr: tldr.map(str::to_string),
+        kind_specific: payload.map(KindPayload::Thread),
+        meta: DistilledMeta {
+            validation: ValidationMeta {
+                fallback_reason: fallback_reason.map(str::to_string),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn thread_title_success_path_matches_builder_and_is_non_numeric() {
+    // (a) synthetic success-path Distilled with author + tldr -> the resulting
+    // title is non-numeric and byte-identical to `title_for_thread`'s output.
+    let payload = ThreadPayload {
+        author: Some("@tom_doerr".into()),
+        platform: "x".into(),
+        ..Default::default()
+    };
+    let distilled = thread_distilled(
+        Some(payload),
+        Some("Fjall is a Rust KV store"),
+        "a longer summary body",
+        None,
+    );
+
+    let title = thread_title(&distilled, "test-trace");
+    let expected = title_for_thread(
+        "x",
+        Some("@tom_doerr"),
+        Some("Fjall is a Rust KV store"),
+        "a longer summary body",
+    )
+    .expect("builder title");
+    assert_eq!(title, expected);
+    assert_eq!(title, "@tom_doerr on X: \"Fjall is a Rust KV store\"");
+    assert!(!is_purely_numeric(&title));
+}
+
+#[test]
+fn thread_title_fabric_timeout_fallback_is_generic_platform_and_never_leaks() {
+    // (b) A fabric-timeout thread fallback. The design doc claims this shape
+    // carries `kind_specific: None`, but that is FACTUALLY WRONG:
+    // `ThreadDistiller::distill` calls `attach_platform` UNCONDITIONALLY, so the
+    // real fabric-timeout Distilled exits with `kind_specific = Some(Thread{..})`
+    // (author None, platform "x"), `fallback_reason = Some("fabric-timeout")`,
+    // and a `"[fabric-timeout]\n\n<snippet>"` summary (from `fallback_distilled`).
+    // Reproduce exactly that shape and assert the title is "X thread", not the
+    // leaked internal reason string.
+    let mut distilled = distillers::fallback_distilled(
+        "distill-thread-v1",
+        "fabric-timeout",
+        "some tweet body about rust",
+        None,
+        "gpt-4o",
+    );
+    distilled.kind_specific = Some(KindPayload::Thread(ThreadPayload {
+        platform: "x".into(),
+        ..Default::default()
+    }));
+    assert!(
+        distilled.summary.starts_with("[fabric-timeout]"),
+        "fallback summary shape changed"
+    );
+
+    let title = thread_title(&distilled, "test-trace");
+    assert_eq!(title, "X thread");
+    assert!(!is_purely_numeric(&title));
+    assert!(
+        !title.contains("[fabric-timeout]"),
+        "internal reason string leaked into title"
+    );
+    assert!(
+        !title.contains('['),
+        "no bracketed internal token may appear in a title"
+    );
+}
+
+#[test]
+fn thread_title_dispatch_error_kind_specific_none_is_generic_thread() {
+    // The ONE path that actually yields `kind_specific: None`: the outer
+    // `dispatch-error` fallback in `distill_for_publish_thread` (the dispatcher
+    // itself errored, so `attach_platform` never ran). No platform is known ->
+    // "Thread thread", still non-leaking.
+    let distilled = distillers::fallback_distilled("distill-thread-v1", "dispatch-error", "body", None, "gpt-4o");
+    assert!(distilled.kind_specific.is_none());
+
+    let title = thread_title(&distilled, "test-trace");
+    assert_eq!(title, "Thread thread");
+    assert!(!title.contains("[dispatch-error]"));
+    assert!(!title.contains('['));
+}
+
+#[test]
+fn resolve_title_non_thread_passes_article_title_through_byte_identical() {
+    // (c) A non-thread note (github repo `owner/repo`, plain article scraped
+    // title, or even a numeric one) is byte-identical to the title it arrived
+    // with -- `thread_title` is never consulted outside the `is_thread` arm.
+    // The payload is deliberately populated to prove it is IGNORED for non-threads.
+    let distilled = thread_distilled(
+        Some(ThreadPayload {
+            author: Some("@should_be_ignored".into()),
+            platform: "x".into(),
+            ..Default::default()
+        }),
+        Some("ignored tldr"),
+        "ignored summary",
+        None,
+    );
+    for original in ["owner/repo", "Some Scraped Article Title", "2067473155988332909"] {
+        let out = resolve_title(false, original.to_string(), &distilled, "test-trace");
+        assert_eq!(out, original, "non-thread title must pass through unchanged");
+    }
+}
+
+#[test]
+fn resolve_title_thread_replaces_numeric_article_title() {
+    // The end-to-end point of the fix: a thread whose article-path title WAS
+    // the bare numeric post ID gets it replaced by the built thread title.
+    let payload = ThreadPayload {
+        author: Some("@tom_doerr".into()),
+        platform: "x".into(),
+        ..Default::default()
+    };
+    let distilled = thread_distilled(Some(payload), Some("Fjall is a Rust KV store"), "body", None);
+
+    let out = resolve_title(true, "2067473155988332909".to_string(), &distilled, "test-trace");
+    assert_ne!(out, "2067473155988332909");
+    assert!(!is_purely_numeric(&out));
+    assert_eq!(out, "@tom_doerr on X: \"Fjall is a Rust KV store\"");
 }

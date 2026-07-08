@@ -756,6 +756,14 @@ async fn process_url_inner(
         // we now display to users; it is also what `fabric::generate_tags`
         // consumes below.
         crate::stages::raw::run_gate_2(config, trace_id, Some(&url_match.url), &distilled.summary)?;
+        // Thread/social title override (design doc
+        // `docs/design/2026-07-08-thread-title-generation.md`, Phase 2). Threads
+        // NEVER consult the scraped page title (Strategy 3 degenerates to a bare
+        // numeric post ID on the browser-UA fallback fetcher); the title is
+        // rebuilt from the distilled author/tldr, with a generic
+        // "<Platform> thread" floor on the fallback path so no `[reason]` string
+        // can leak. Non-thread `title` (owner/repo, scraped article) is untouched.
+        let title = crate::thread::resolve_title(is_thread, title, &distilled, trace_id);
         (title, scraped_title, distilled, ct, None, Vec::new())
     };
 

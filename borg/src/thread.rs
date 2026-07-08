@@ -7,6 +7,8 @@
 //! a bare numeric post ID (see design doc
 //! `docs/design/2026-07-08-thread-title-generation.md`).
 
+use vault::distilled::{Distilled, KindPayload};
+
 /// Longest snippet quoted in a title before truncating at a word boundary.
 const SNIPPET_MAX_CHARS: usize = 80;
 
@@ -90,6 +92,76 @@ pub fn title_for_thread(platform: &str, author: Option<&str>, tldr: Option<&str>
         (None, Some(snippet)) => Some(format!("{label} thread: \"{snippet}\"")),
         (None, None) => None,
     }
+}
+
+/// Resolve a thread/social note's title from its distilled output.
+///
+/// Threads NEVER consult the scraped page title: `extract_article_title`'s
+/// Strategy 3 degenerates to a bare numeric post ID for X/Reddit/HN status
+/// URLs served by the browser-UA fallback fetcher (design doc
+/// `docs/design/2026-07-08-thread-title-generation.md`). Instead:
+///
+/// - A successful distillation builds [`title_for_thread`] from the
+///   LLM-extracted author plus the distilled `tldr`/`summary`.
+/// - A fallback distillation goes straight to a generic `"<Platform> thread"`
+///   (or `"Thread thread"` when the platform is unknown), logged at `warn!`.
+///
+/// The fallback branch is keyed on `meta.validation.fallback_reason` being set,
+/// NOT on `kind_specific` being `None`. The design doc's original wiring assumed
+/// a distiller fallback leaves `kind_specific` absent, but
+/// `ThreadDistiller::distill` calls `attach_platform` UNCONDITIONALLY, so a
+/// fabric-timeout / yaml-parse-error / missing-summary fallback exits with
+/// `kind_specific = Some(Thread { author: None, platform, .. })` and a
+/// `"[reason]\n\n<snippet>"` summary. `fallback_reason` is the typed,
+/// authoritative "degraded distillation" signal; keying on it both (a) never
+/// reads that summary, so the internal `[reason]` string can never leak into a
+/// title, and (b) still recovers the platform label from the attached payload
+/// so an x-platform fallback titles as `"X thread"`, not `"Thread thread"`.
+pub fn thread_title(distilled: &Distilled, trace_id: &str) -> String {
+    let payload = match &distilled.kind_specific {
+        Some(KindPayload::Thread(t)) => Some(t),
+        _ => None,
+    };
+    let is_fallback = distilled.meta.validation.fallback_reason.is_some();
+    log::debug!(
+        "thread_title: trace={trace_id} has_payload={} platform={:?} has_author={} has_tldr={} is_fallback={is_fallback}",
+        payload.is_some(),
+        payload.map(|t| t.platform.as_str()),
+        payload.is_some_and(|t| t.author.is_some()),
+        distilled.tldr.is_some(),
+    );
+
+    let built = if is_fallback {
+        None
+    } else {
+        payload.and_then(|t| {
+            title_for_thread(
+                &t.platform,
+                t.author.as_deref(),
+                distilled.tldr.as_deref(),
+                &distilled.summary,
+            )
+        })
+    };
+
+    built.unwrap_or_else(|| {
+        let label = payload
+            .map(|t| platform_label(&t.platform))
+            .unwrap_or_else(|| "Thread".to_string());
+        log::warn!(
+            "[{trace_id}] thread_title: no usable author/snippet (is_fallback={is_fallback}); using generic '{label} thread' title"
+        );
+        format!("{label} thread")
+    })
+}
+
+/// Title-selection seam at the end of the non-YouTube URL branch of the
+/// pipeline. Threads route through [`thread_title`]; every other kind keeps the
+/// `article_title` it arrived with (`owner/repo` for github repos, the scraped
+/// title for plain articles) byte-identically -- no behavior change outside the
+/// `is_thread` arm.
+pub fn resolve_title(is_thread: bool, article_title: String, distilled: &Distilled, trace_id: &str) -> String {
+    if is_thread { thread_title(distilled, trace_id) } else { article_title }
 }
 
 #[cfg(test)]
