@@ -146,13 +146,16 @@ fn listicle_survival_full_marks_against_april_shape_fixture() {
 // --- note-size -------------------------------------------------------------
 
 #[test]
-fn note_size_within_ceiling_passes_below_the_limit() {
+fn note_size_within_ceiling_passes_up_to_and_including_the_limit() {
+    // Must agree with the live publish gate, which allows a note EXACTLY at the
+    // ceiling (note_size_gate fails only when bytes > max). Both now share
+    // config::within_note_size_ceiling, so the exact-ceiling byte agrees.
     assert!(note_size_within_ceiling(MAX_NOTE_BYTES - 1));
+    assert!(note_size_within_ceiling(MAX_NOTE_BYTES));
 }
 
 #[test]
-fn note_size_within_ceiling_fails_at_and_above_the_limit() {
-    assert!(!note_size_within_ceiling(MAX_NOTE_BYTES));
+fn note_size_within_ceiling_fails_above_the_limit() {
     assert!(!note_size_within_ceiling(MAX_NOTE_BYTES + 1));
 }
 
@@ -163,6 +166,24 @@ fn note_size_within_ceiling_fails_at_and_above_the_limit() {
 fn note_size_within_ceiling_fails_on_a_simulated_transcript_leak() {
     let leaked = "x".repeat(MAX_NOTE_BYTES + 1);
     assert!(!note_size_within_ceiling(leaked.len()));
+}
+
+/// Regression guard for the audit's boundary off-by-one finding: the eval
+/// metric must agree with the live publish gate at EVERY boundary byte,
+/// including the exact ceiling. Before both were routed through the shared
+/// `config::within_note_size_ceiling` predicate they disagreed at exactly
+/// `MAX_NOTE_BYTES` (gate allowed it, metric rejected it); this test bites on
+/// that divergence.
+#[test]
+fn note_size_metric_agrees_with_publish_gate_at_the_boundary() {
+    for bytes in [MAX_NOTE_BYTES - 1, MAX_NOTE_BYTES, MAX_NOTE_BYTES + 1] {
+        let gate_allows = crate::pipeline::note_size_gate(bytes, MAX_NOTE_BYTES).is_none();
+        assert_eq!(
+            gate_allows,
+            note_size_within_ceiling(bytes),
+            "eval note-size metric must mirror the live publish gate at {bytes} bytes",
+        );
+    }
 }
 
 /// Positive counterpart: rendering the committed April-shape fixture's

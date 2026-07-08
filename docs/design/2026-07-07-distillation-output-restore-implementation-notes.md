@@ -246,3 +246,26 @@ deterministic metrics (zero judge calls):
 
 ### Open questions
 - None. The judge-baseline re-run (composite metric alongside these two) remains the operator's live-fabric step, per the task scope; not performed here.
+
+## Audit remediation (2026-07-07): note-size boundary off-by-one
+
+Implementation audit (review-panel, Mode 2) found the note-size gate and the
+eval metric disagreed at the exact ceiling: the live publish gate
+(`pipeline::note_size_gate`) fails only on `bytes > max` (a note of exactly
+`MAX_NOTE_BYTES` PUBLISHES), while the Phase 7 eval metric used `bytes < MAX`
+(a note of exactly `MAX_NOTE_BYTES` FAILED the metric). The Phase 7 note's
+claim that they "share the constant, so they cannot drift apart" was wrong:
+they shared the constant but used opposite operators.
+
+Fix: extracted a single shared predicate `config::within_note_size_ceiling(bytes, max) -> bool { bytes <= max }`.
+Both the live gate and the eval metric now call it, so they agree at every
+byte including the exact ceiling (both allow it). Added a cross-check test
+(`note_size_metric_agrees_with_publish_gate_at_the_boundary`) that asserts the
+metric mirrors the gate across `MAX-1 / MAX / MAX+1`, which bites on the
+original divergence. The "cannot drift apart" claim is now true by construction
+(shared predicate), not merely by a shared constant.
+
+The other two audit findings were dispositioned, not fixed: Phase 0 spike
+evidence uncommitted (superseded by the committed, reproducible April eval
+fixture); "Implemented" is code-complete not live-done (disclosed status
+caveat, closed by the operator deploy steps).

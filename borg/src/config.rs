@@ -327,6 +327,16 @@ const DEFAULT_MARKITDOWN_TIMEOUT_SECS: u64 = 60;
 /// reuses this exact ceiling rather than redefining it.
 pub(crate) const MAX_NOTE_BYTES: usize = 65_536;
 
+/// Single source of truth for the note-size ceiling predicate. Both the live
+/// publish gate (`pipeline::note_size_gate`) and the eval regression metric
+/// (`eval::calc::note_size_within_ceiling`) call THIS, so they cannot drift
+/// apart at the boundary. A note EXACTLY at the ceiling is allowed (`<=`),
+/// which matches the publish gate's `>` failure condition - the eval metric
+/// must mirror the live gate, not diverge one byte from it.
+pub(crate) fn within_note_size_ceiling(bytes: usize, max_bytes: usize) -> bool {
+    bytes <= max_bytes
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct PipelineConfig {

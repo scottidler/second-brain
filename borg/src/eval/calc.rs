@@ -84,14 +84,15 @@ pub fn listicle_survival(enumeration: Option<&Enumeration>) -> f64 {
     (enumeration.items.len() as f64 / declared as f64).min(1.0)
 }
 
-/// Note-size: does the fixture's rendered body stay under the publish-path
+/// Note-size: does the fixture's rendered body stay within the publish-path
 /// hard ceiling (`config::MAX_NOTE_BYTES`, Phase 3)? Deterministic - the
 /// caller renders the fixture's `Distilled` via `distillers::render` and
-/// passes the resulting `body_markdown` byte length; this function only
-/// applies the same `<` boundary `pipeline::note_size_gate` enforces at
-/// publish, so the eval metric and the live gate can never drift apart.
+/// passes the resulting `body_markdown` byte length. Delegates to the shared
+/// `config::within_note_size_ceiling` predicate that `pipeline::note_size_gate`
+/// also uses, so the eval metric and the live gate agree at every byte,
+/// including the exact ceiling (both allow it).
 pub fn note_size_within_ceiling(rendered_bytes: usize) -> bool {
-    rendered_bytes < MAX_NOTE_BYTES
+    crate::config::within_note_size_ceiling(rendered_bytes, MAX_NOTE_BYTES)
 }
 
 /// Mean of the applicable per-fixture listicle-survival scores (Phase 7b, the

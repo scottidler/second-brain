@@ -150,7 +150,7 @@ pub(crate) fn merge_proposed_tags(all_tags: &mut Vec<String>, proposed: &[String
 /// function - mirroring `quality::detect_blocked_content` - so the boundary
 /// is unit-testable without a live publish.
 pub(crate) fn note_size_gate(note_bytes: usize, max_bytes: usize) -> Option<String> {
-    if note_bytes > max_bytes {
+    if !crate::config::within_note_size_ceiling(note_bytes, max_bytes) {
         Some(format!(
             "Composed note is {note_bytes} bytes, exceeding the configured ceiling of {max_bytes} bytes \
              (pipeline.max-note-bytes) - likely a verbatim transcript leak"
