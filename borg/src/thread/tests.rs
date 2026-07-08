@@ -274,3 +274,69 @@ fn resolve_title_thread_replaces_numeric_article_title() {
     assert!(!is_purely_numeric(&out));
     assert_eq!(out, "@tom_doerr on X: \"Fjall is a Rust KV store\"");
 }
+
+// --- Phase 3: regression test (break-the-code, numeric-ID fallback) ---
+
+/// Header-less markdown body shaped exactly like what `BrowserUaFetcher`
+/// serves when the Jina rung fails: no `Title:` metadata line, no top-level
+/// `# ` heading -- just the raw scraped body content, with the author's
+/// handle inline (the shape `ThreadDistiller`'s LLM call still reads
+/// correctly regardless of the missing Jina preamble). This is the exact
+/// fixture shape that made `extract_article_title` fall through to Strategy 3
+/// (URL path segment) for the two live-vault notes this design fixes
+/// (`notes/2067473155988332909.md`, `notes/2069342679251452268.md`).
+const BROWSER_UA_THREAD_BODY: &str = "\
+[@tom_doerr](https://x.com/tom_doerr)
+
+Fjall is a Rust KV store I've been hacking on. Embedded, no server, LSM-based.
+
+[Reply](https://x.com/tom_doerr/status/2067473155988332909) [Like]";
+
+const THREAD_URL: &str = "https://x.com/tom_doerr/status/2067473155988332909";
+const THREAD_NUMERIC_ID: &str = "2067473155988332909";
+
+#[test]
+fn break_the_code_extract_article_title_degenerates_to_numeric_id() {
+    // WITHOUT the Phase 2 override, `extract_article_title` is exactly what
+    // the pipeline used to bind directly to `title` for every thread note --
+    // Strategies 1 and 2 both miss on this header-less fixture, so Strategy 3
+    // (URL path segment) fires and returns the bare numeric post ID verbatim.
+    // This proves the fixture reproduces the ORIGINAL bug, not a strawman.
+    let scraped = crate::pipeline::extract_article_title(BROWSER_UA_THREAD_BODY, THREAD_URL);
+    assert_eq!(scraped, THREAD_NUMERIC_ID);
+    assert!(is_purely_numeric(&scraped), "fixture must reproduce the numeric-ID bug");
+}
+
+#[test]
+fn resolve_title_override_prevents_the_numeric_id_from_becoming_the_title() {
+    // Same fixture routed through the real Phase 2 seam. `extract_article_title`
+    // still degenerates identically (confirmed below as the precondition) --
+    // the fix is that the pipeline no longer trusts that value for threads at
+    // all. `resolve_title` overrides it with the thread-aware title before it
+    // ever reaches frontmatter/filename.
+    let scraped = crate::pipeline::extract_article_title(BROWSER_UA_THREAD_BODY, THREAD_URL);
+    assert!(
+        is_purely_numeric(&scraped),
+        "precondition: fixture must still reproduce the bug at the scrape step"
+    );
+
+    let payload = ThreadPayload {
+        author: Some("@tom_doerr".into()),
+        platform: "x".into(),
+        ..Default::default()
+    };
+    let distilled = thread_distilled(
+        Some(payload),
+        Some("Fjall is a Rust KV store"),
+        "a longer summary body",
+        None,
+    );
+
+    let title = resolve_title(true, scraped, &distilled, "test-trace");
+
+    assert!(
+        !is_purely_numeric(&title),
+        "the Phase 2 override must prevent the numeric ID from becoming the title"
+    );
+    assert_eq!(title, "@tom_doerr on X: \"Fjall is a Rust KV store\"");
+}
