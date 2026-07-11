@@ -192,3 +192,193 @@ fn test_filter_lets_connect() {
     assert!(!filtered.contains("connect"));
     assert!(!filtered.contains("Twitter"));
 }
+
+// ── extract_urls tests ──
+
+#[test]
+fn test_extract_urls_empty() {
+    assert!(extract_urls("").is_empty());
+}
+
+#[test]
+fn test_extract_urls_no_urls() {
+    assert!(extract_urls("Just a normal description with no links at all.").is_empty());
+}
+
+/// Success criterion (a): a filtered description listing 10 tools returns
+/// all 10 URLs, including the non-github `https://python.useinstructor.com/`.
+/// This is a CONSTRUCTED fixture, not the real ht-4cbdf8 filtered
+/// description -- the staged artifact only persists `distilled.yml`
+/// (`links: []`), not the raw/filtered description text, so the real string
+/// was unavailable. The fixture mirrors the real video's staged
+/// `kind-specific.repos` list (9 github repos) plus Instructor's actual
+/// non-github doc site, matching the concrete data-loss case cited in the
+/// design doc. See implementation notes for detail.
+#[test]
+fn test_extract_urls_ht_4cbdf8_representative_fixture() {
+    let desc = "Tools covered in this video:\n\
+                10. Chunky: https://github.com/chonkie-ai/chonkie\n\
+                9. Marker: https://github.com/VikParuchuri/marker\n\
+                8. LangFuse: https://github.com/langfuse/langfuse\n\
+                7. Qdrant: https://github.com/qdrant/qdrant\n\
+                6. Ollama: https://github.com/ollama/ollama\n\
+                5. DSPy: https://github.com/stanfordnlp/dspy\n\
+                4. Crawl4AI: https://github.com/unclecode/crawl4ai\n\
+                3. Outlines: https://github.com/dottxt-ai/outlines\n\
+                2. LiteLLM: https://github.com/BerriAI/litellm\n\
+                1. Instructor: https://python.useinstructor.com/";
+    let links = extract_urls(desc);
+    assert_eq!(links.len(), 10, "expected all 10 description urls, got {links:?}");
+    let urls: Vec<&str> = links.iter().map(|l| l.url.as_str()).collect();
+    assert!(
+        urls.contains(&"https://python.useinstructor.com/"),
+        "non-github url must survive: {urls:?}"
+    );
+    assert!(urls.contains(&"https://github.com/BerriAI/litellm"));
+    // Sanity: the list-shape label rule fired for every line here.
+    assert_eq!(links[0].label.as_deref(), Some("Chunky"));
+    assert_eq!(
+        links.last().expect("10 links extracted above").label.as_deref(),
+        Some("Instructor")
+    );
+}
+
+/// Success criterion (b): proves extraction ordering -- the seam must run
+/// `filter_description` BEFORE `extract_urls`, not extract from the raw
+/// description directly.
+#[test]
+fn test_extract_urls_ordering_requires_filter_first() {
+    let raw = "Great video about tools\n\
+               \n\
+               Support me: https://patreon.com/foo\n\
+               \n\
+               More content here";
+
+    // Sanity: the patreon url is really there in the raw text, so a missing
+    // assertion below would be a false negative, not a tautology.
+    let direct = extract_urls(raw);
+    assert!(
+        direct.iter().any(|l| l.url.contains("patreon")),
+        "sanity check: raw description contains the url"
+    );
+
+    let filtered = filter_description(raw).expect("should produce filtered output");
+    let links = extract_urls(&filtered);
+    assert!(
+        !links.iter().any(|l| l.url.contains("patreon")),
+        "patreon url must be stripped by filter_description before extraction: {links:?}"
+    );
+}
+
+/// Success criterion (c): urls differing only in path case are distinct
+/// (dedup is EXACT, not case-insensitive like `extract_repo_slugs`).
+#[test]
+fn test_extract_urls_dedup_is_case_sensitive() {
+    let desc = "https://example.com/Foo\nhttps://example.com/foo";
+    let links = extract_urls(desc);
+    assert_eq!(links.len(), 2);
+    assert_eq!(links[0].url, "https://example.com/Foo");
+    assert_eq!(links[1].url, "https://example.com/foo");
+}
+
+/// Break-the-code angle for (c): the exact same url repeated verbatim DOES
+/// collapse to one entry, keeping the first-seen label.
+#[test]
+fn test_extract_urls_dedup_exact_duplicate_collapses() {
+    let desc = "[First](https://example.com/foo)\nhttps://example.com/foo";
+    let links = extract_urls(desc);
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].url, "https://example.com/foo");
+    assert_eq!(links[0].label.as_deref(), Some("First"));
+}
+
+/// Success criterion (d): the three label shapes.
+#[test]
+fn test_extract_urls_label_rules() {
+    let desc = "[Instructor](https://useinstructor.com)\n\
+                - LiteLLM: https://litellm.ai\n\
+                https://example.com";
+    let links = extract_urls(desc);
+    assert_eq!(links.len(), 3);
+    assert_eq!(links[0].url, "https://useinstructor.com");
+    assert_eq!(links[0].label.as_deref(), Some("Instructor"));
+    assert_eq!(links[1].url, "https://litellm.ai");
+    assert_eq!(links[1].label.as_deref(), Some("LiteLLM"));
+    assert_eq!(links[2].url, "https://example.com");
+    assert_eq!(links[2].label, None);
+}
+
+/// Multiple urls on one line: per the Data Model rule, ALL become bare (the
+/// label rule only applies when a url is the sole url on its line), even
+/// when the line shape would otherwise look labelable.
+#[test]
+fn test_extract_urls_multiple_per_line_all_bare() {
+    let desc = "Repo: https://github.com/a/b and also https://github.com/c/d";
+    let links = extract_urls(desc);
+    assert_eq!(links.len(), 2);
+    assert!(
+        links.iter().all(|l| l.label.is_none()),
+        "multi-url lines must not derive a label: {links:?}"
+    );
+}
+
+/// Success criterion (e): balanced-paren keep, unbalanced trim, scheme-less
+/// drop.
+#[test]
+fn test_extract_urls_trim_and_scheme_rules() {
+    let desc = "Check out https://en.wikipedia.org/wiki/Rust_(programming_language) for background.\n\
+                see https://x.com/.\n\
+                also see www.x.com for more";
+    let links = extract_urls(desc);
+    let urls: Vec<&str> = links.iter().map(|l| l.url.as_str()).collect();
+    assert_eq!(
+        urls,
+        vec![
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            "https://x.com/"
+        ]
+    );
+}
+
+// ── merge_description_links tests ──
+
+#[test]
+fn test_merge_description_links_empty() {
+    let mut links: Vec<Link> = Vec::new();
+    let (added, dropped) = merge_description_links(&mut links, "");
+    assert_eq!((added, dropped), (0, 0));
+    assert!(links.is_empty());
+}
+
+#[test]
+fn test_merge_description_links_dedup_against_existing() {
+    let mut links = vec![Link {
+        url: "https://github.com/a/b".to_string(),
+        label: Some("A/B".to_string()),
+    }];
+    let filtered = "See also https://github.com/a/b and https://github.com/c/d";
+
+    let (added, dropped) = merge_description_links(&mut links, filtered);
+
+    assert_eq!(added, 1);
+    assert_eq!(dropped, 1);
+    assert_eq!(links.len(), 2);
+    // The pre-existing (LLM-emitted) link's label is untouched by the merge.
+    assert_eq!(links[0].url, "https://github.com/a/b");
+    assert_eq!(links[0].label.as_deref(), Some("A/B"));
+    assert_eq!(links[1].url, "https://github.com/c/d");
+}
+
+/// Break-the-code angle: a description with only urls already present in
+/// `links` adds nothing and drops everything found.
+#[test]
+fn test_merge_description_links_all_duplicates_adds_nothing() {
+    let mut links = vec![Link {
+        url: "https://example.com/foo".to_string(),
+        label: None,
+    }];
+    let (added, dropped) = merge_description_links(&mut links, "https://example.com/foo");
+    assert_eq!(added, 0);
+    assert_eq!(dropped, 1);
+    assert_eq!(links.len(), 1);
+}
