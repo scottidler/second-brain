@@ -382,3 +382,91 @@ fn test_merge_description_links_all_duplicates_adds_nothing() {
     assert_eq!(dropped, 1);
     assert_eq!(links.len(), 1);
 }
+
+// ── merge_description_links -> distillers::render regression (Phase 3) ──
+//
+// Phase 1/2's unit tests above prove `extract_urls`/`merge_description_links`
+// in isolation. This exercises the seam's actual output shape: a mixed
+// github/non-github filtered description merges into the `Vec<Link>` a video
+// distill would carry, and that `Vec<Link>` renders `## Links` correctly via
+// `distillers::render`. Deleting the `merge_description_links` call at the
+// `distill_for_publish_video` seam (`stages/distill.rs`) would leave
+// `distilled.links` empty here too -- the positive test below asserts on the
+// merge's actual effect (the non-github url reaching the rendered body), not
+// merely that `render` behaves, so it bites that regression.
+
+fn video_distilled_meta() -> vault::distilled::DistilledMeta {
+    vault::distilled::DistilledMeta {
+        extractor: "distill-video-v1".to_string(),
+        model: "test".to_string(),
+        produced_at: "2026-07-10T00:00:00Z".to_string(),
+        ..Default::default()
+    }
+}
+
+/// Positive: a mixed github/non-github filtered description, merged into the
+/// distiller's (empty, transcript-only) `links`, ends up in the rendered
+/// `## Links` section with the non-github url present.
+#[test]
+fn test_merge_description_links_renders_non_github_url() {
+    let filtered_description = "1. LiteLLM: https://github.com/BerriAI/litellm\n\
+                                 2. Instructor: https://python.useinstructor.com/";
+
+    // What the transcript-only video distiller produces before the merge:
+    // no URLs, since the transcript carries none (the design's root cause).
+    let mut distilled = vault::distilled::Distilled {
+        summary: "A video about LLM tooling.".to_string(),
+        meta: video_distilled_meta(),
+        ..Default::default()
+    };
+    assert!(distilled.links.is_empty(), "sanity: distiller starts with no links");
+
+    let (added, dropped) = merge_description_links(&mut distilled.links, filtered_description);
+    assert_eq!((added, dropped), (2, 0));
+    assert!(
+        distilled
+            .links
+            .iter()
+            .any(|l| l.url == "https://python.useinstructor.com/"),
+        "merged links must include the non-github url: {:?}",
+        distilled.links
+    );
+
+    let rendered = distillers::render(&distilled, distillers::RenderOptions::for_url_publish(&distilled));
+    let body = &rendered.body_markdown;
+    assert!(
+        body.contains("## Links"),
+        "rendered body must have a Links section: {body}"
+    );
+    assert!(
+        body.contains("https://python.useinstructor.com/"),
+        "rendered Links section must contain the non-github url: {body}"
+    );
+    assert!(
+        body.contains("https://github.com/BerriAI/litellm"),
+        "rendered Links section must also carry the github url (April-parity, all urls listed): {body}"
+    );
+}
+
+/// Negative: an empty description merges nothing, and render emits no
+/// `## Links` heading at all (matching acceptance criterion "no description ->
+/// no panic, no heading").
+#[test]
+fn test_merge_description_links_empty_description_renders_no_links_heading() {
+    let mut distilled = vault::distilled::Distilled {
+        summary: "A video with no description.".to_string(),
+        meta: video_distilled_meta(),
+        ..Default::default()
+    };
+
+    let (added, dropped) = merge_description_links(&mut distilled.links, "");
+    assert_eq!((added, dropped), (0, 0));
+    assert!(distilled.links.is_empty());
+
+    let rendered = distillers::render(&distilled, distillers::RenderOptions::for_url_publish(&distilled));
+    assert!(
+        !rendered.body_markdown.contains("## Links"),
+        "empty description must not produce a Links heading: {}",
+        rendered.body_markdown
+    );
+}
