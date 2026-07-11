@@ -21,3 +21,20 @@
 
 ### Open questions
 None.
+
+## Phase 2: Wire the merge at the video distill seam
+
+### Design decisions
+- The merge is wired inside `distill_for_publish_video` (`borg/src/stages/distill.rs`) immediately after `distilled` is built from the distiller/fallback and BEFORE the existing `links=` info log and `write_distilled_yml`. `distilled` was changed from `let` to `let mut`. This ordering is the staging-fidelity invariant: the staged `distilled.yml` and the rendered note now carry the identical merged `links`.
+- The filtered description is sourced from the SAME `metadata.description` already fetched at the seam and already consumed by `crate::github::extract_repo_slugs` (`distill.rs:685`). No new fetch is introduced; `## Links` and the `github:` block ride the same second yt-dlp fetch, symmetric with the pre-existing repo-slug harvest (design finding 6).
+- `filter_description` returns `Option<String>`, so `.unwrap_or_default()` collapses the None/empty-description case to an empty string, which `merge_description_links` -> `extract_urls` iterates as zero lines and adds nothing -- no `## Links` heading, no panic (criterion (d)).
+- Added a function-scoped `debug!` reporting added/dropped/post-merge total counts, carrying the `trace_id` scope key per the logging rule. The pre-existing `info!` at the seam now reports `distilled.links.len()` post-merge because the merge runs above it (criterion (c), finding 1).
+
+### Deviations
+- The design's API-Design snippet writes the call as `description::filter_description(...)` / `description::merge_description_links(...)` (bare `description::`). The actual code uses the fully-qualified `crate::description::...` path, matching the existing sibling call `crate::github::extract_repo_slugs` at the same seam (`distill.rs` has no `use crate::description` import). Same effect, correct seam.
+
+### Tradeoffs
+- Fully-qualified `crate::description::...` calls at the two call sites vs. adding a `use crate::description;` import. Chose fully-qualified to match the adjacent `crate::github::extract_repo_slugs` call two lines above and avoid a single-use import; keeps the seam's style uniform.
+
+### Open questions
+None.

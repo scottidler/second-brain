@@ -711,7 +711,7 @@ pub async fn distill_for_publish_video(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| metadata.title.clone());
-    let distilled = match stage
+    let mut distilled = match stage
         .distill_with_video_metadata(
             IngestKind::YoutubeUrl,
             &transcript,
@@ -728,6 +728,18 @@ pub async fn distill_for_publish_video(
             distillers::fallback_distilled("distill-video-v1", "dispatch-error", &transcript, None, &fabric.model)
         }
     };
+    // Restore the video's `## Links` source: the description carries the
+    // curated URLs, but the transcript-only distiller cannot see them, so
+    // merge the filtered-description URLs into `distilled.links` here. This
+    // MUST run before both the info log (so `links=` reports the post-merge
+    // count) and write_distilled_yml (so the staged distilled.yml and the
+    // rendered note carry the same links -- the staging-fidelity invariant).
+    let filtered = crate::description::filter_description(&metadata.description).unwrap_or_default();
+    let (added, dropped) = crate::description::merge_description_links(&mut distilled.links, &filtered);
+    log::debug!(
+        "[{trace_id}] distill_for_publish_video: description links added={added} dropped={dropped} total={}",
+        distilled.links.len()
+    );
     let elapsed_ms = started.elapsed().as_millis();
     let fallback = distilled
         .meta
