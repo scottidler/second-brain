@@ -1009,3 +1009,44 @@ None.
   documented), `collect_stubs_mints_repo_hub_deterministically_and_disjoint_from_concepts`
   (sweep-twice byte-identical, one hub for two same-repo notes, concept
   coexists), `collect_stubs_skips_malformed_repo`.
+
+## Phase 11: Concept-promote command
+
+### Design decisions
+
+- `sb cortex concept-promote <slug> [--apply]` (`cortex::entities::promote_concept`)
+  is the inverse of `write_proposals`: it moves a pending `entity-proposals.yml`
+  concept into `glossary.yml`. REVIEWABLE DIFF - dry-run by default (prints the
+  diff, writes nothing); `--apply` writes the glossary and drops the promoted
+  proposal. Never a silent write.
+- Promotion must TRACE to a pending proposal: an unknown slug errors (not
+  invented from thin air). An already-glossary concept is a no-op.
+- `write_glossary` serializes deterministically (concepts sorted+deduped;
+  aliases via a BTreeMap view) so the on-disk YAML is diffable and round-trips
+  stably. `Glossary` gained `Serialize + Clone`.
+- Repo-track `config/entity-proposals.yml` (empty seed, mirroring
+  `config/tag-proposals.yml`) so the review history is version-controlled.
+
+### Deviations / Tradeoffs
+
+- `overwrite_proposals` (drop the promoted one) is a distinct helper from
+  `write_proposals` (which MERGES) - promotion needs a truthful overwrite, not
+  a merge.
+
+### Open questions
+
+None.
+
+### Validation
+
+- `otto ci`: `✅ All CI checks passed!`.
+- Test: `promote_concept_is_a_reviewable_diff_not_a_silent_write` (dry-run adds
+  nothing to the glossary; apply adds the concept + preserves existing + drops
+  the proposal; unknown slug errors).
+
+### Process note
+
+Two background otto ci runs were killed mid-build by lock contention + high
+load on the shared host (load ~12; other sessions building) - NOT a code
+failure (the compile had already succeeded). Diagnosed via the run logs +
+`ps`/`uptime` rather than blind retry; a clean no-overlap run passed.

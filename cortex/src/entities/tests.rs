@@ -180,3 +180,43 @@ fn write_proposals_merges_without_clobbering_existing() {
     let gr = file.proposals.iter().find(|p| p.slug == "graphrag").unwrap();
     assert_eq!(gr.frequency, 1, "existing proposal not clobbered");
 }
+
+#[test]
+fn promote_concept_is_a_reviewable_diff_not_a_silent_write() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let proposals = dir.path().join("entity-proposals.yml");
+    let glossary = dir.path().join("glossary.yml");
+    std::fs::write(
+        &proposals,
+        "proposals:\n  - slug: graphrag\n    surface: GraphRAG\n    frequency: 4\n    notes: []\n",
+    )
+    .expect("seed proposals");
+    std::fs::write(&glossary, "concepts:\n  - rag\naliases: {}\n").expect("seed glossary");
+
+    // Dry-run: returns a diff, writes NOTHING.
+    let report = promote_concept(&proposals, &glossary, "graphrag", false).expect("dry-run");
+    assert!(!report.applied);
+    assert!(!report.already_present);
+    assert!(report.diff.contains("graphrag"));
+    let g = crate::linking::load_glossary(&glossary).expect("load");
+    assert!(
+        !g.concepts.contains(&"graphrag".to_string()),
+        "dry-run must not write the glossary"
+    );
+
+    // Apply: glossary gains the concept, existing concept preserved, proposal dropped.
+    let report = promote_concept(&proposals, &glossary, "graphrag", true).expect("apply");
+    assert!(report.applied);
+    let g = crate::linking::load_glossary(&glossary).expect("load");
+    assert!(g.concepts.contains(&"graphrag".to_string()), "apply adds the concept");
+    assert!(g.concepts.contains(&"rag".to_string()), "existing concept preserved");
+    let pf: EntityProposalsFile =
+        serde_yaml::from_str(&std::fs::read_to_string(&proposals).expect("read")).expect("parse");
+    assert!(
+        !pf.proposals.iter().any(|p| p.slug == "graphrag"),
+        "promoted proposal is dropped from entity-proposals.yml"
+    );
+
+    // Unknown slug errors - a promotion must trace to a pending proposal.
+    assert!(promote_concept(&proposals, &glossary, "nonexistent", false).is_err());
+}

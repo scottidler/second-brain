@@ -1,5 +1,5 @@
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -11,7 +11,7 @@ use crate::vault::Note;
 /// The concept glossary + alias table, loaded from `glossary.yml` (Phase 2 of
 /// graph-augmented-memory). Mirrors `canonical-tags.yml`: kebab-case concept
 /// slugs plus an `aliases` map of surface form → canonical slug.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Glossary {
     pub concepts: Vec<String>,

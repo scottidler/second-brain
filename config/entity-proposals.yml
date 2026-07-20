@@ -1,0 +1,11 @@
+# Candidate glossary concepts discovered by `sb cortex entities --discover`.
+# Mirrors tag-proposals.yml: this file is NEVER auto-promoted. A human reviews
+# the proposals and promotes the good ones with:
+#
+#   sb cortex concept-promote <slug>          # dry-run: print the diff
+#   sb cortex concept-promote <slug> --apply  # write it into glossary.yml
+#
+# Promotion moves the slug into glossary.yml's `concepts:` and drops it here.
+# Repo-tracked (harvest-clyde-sessions design, Phase 11) so the review history
+# is version-controlled, like tag-proposals.yml.
+proposals: []

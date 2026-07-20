@@ -135,6 +135,14 @@ pub struct HarvestCliArgs {
     /// contract surface, not a hidden flag.
     #[arg(long)]
     pub force: bool,
+    /// Install the nightly systemd user timer (writes sb-harvest.{service,timer}
+    /// to ~/.config/systemd/user/) and exit. OnCalendar comes from
+    /// harvest.schedule; every other knob stays in borg.yml.
+    #[arg(long)]
+    pub install: bool,
+    /// Remove the harvest systemd user timer units and exit.
+    #[arg(long)]
+    pub uninstall: bool,
 }
 
 #[derive(Args)]
@@ -586,12 +594,24 @@ impl BorgCli {
                 Ok(())
             }
             Some(Command::Harvest(args)) => {
-                // `--dry-run` forces dry-run; otherwise the harvest.mode config
-                // default decides (DryRun out of the box, per Rollout Plan).
-                let dry_run = args.dry_run || matches!(config.harvest.mode, borg::config::HarvestMode::DryRun);
-                let report = borg::harvest::run(&config, args.since, args.limit, args.force, dry_run).await?;
-                print_harvest_report(&report);
-                Ok(())
+                if args.install {
+                    for line in borg::harvest::timer::install(&config)? {
+                        println!("{line}");
+                    }
+                    Ok(())
+                } else if args.uninstall {
+                    for line in borg::harvest::timer::uninstall()? {
+                        println!("{line}");
+                    }
+                    Ok(())
+                } else {
+                    // `--dry-run` forces dry-run; otherwise the harvest.mode config
+                    // default decides (DryRun out of the box, per Rollout Plan).
+                    let dry_run = args.dry_run || matches!(config.harvest.mode, borg::config::HarvestMode::DryRun);
+                    let report = borg::harvest::run(&config, args.since, args.limit, args.force, dry_run).await?;
+                    print_harvest_report(&report);
+                    Ok(())
+                }
             }
             Some(Command::Blocklist(args)) => match args.action {
                 BlocklistAction::List => {

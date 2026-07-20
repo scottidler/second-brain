@@ -81,6 +81,18 @@ pub enum Command {
     Hub(HubArgs),
     /// Discover candidate glossary entities from ingested notes (LLM)
     Entities(EntitiesArgs),
+    /// Promote a proposed concept from entity-proposals.yml into glossary.yml
+    /// (reviewable diff; dry-run unless --apply)
+    ConceptPromote(ConceptPromoteArgs),
+}
+
+#[derive(Args)]
+pub struct ConceptPromoteArgs {
+    /// The proposal slug to promote (must be a pending entity-proposals.yml entry).
+    pub slug: String,
+    /// Write the change. Without it, prints the diff and writes nothing.
+    #[arg(long)]
+    pub apply: bool,
 }
 
 #[derive(Args)]
@@ -509,6 +521,26 @@ impl CortexCli {
                         "entities discover: scanned {} note(s), no new proposals",
                         report.notes_scanned,
                     ),
+                }
+            }
+            Command::ConceptPromote(a) => {
+                let report = cortex::entities::promote_concept(
+                    &vault::paths::entity_proposals(),
+                    &vault::paths::glossary(),
+                    &a.slug,
+                    a.apply,
+                )?;
+                if report.already_present {
+                    println!(
+                        "concept-promote: `{}` is already a glossary concept; nothing to do",
+                        report.slug
+                    );
+                } else if report.applied {
+                    println!("concept-promote: promoted `{}`", report.slug);
+                    println!("{}", report.diff);
+                } else {
+                    println!("concept-promote (dry-run - pass --apply to write):");
+                    println!("{}", report.diff);
                 }
             }
             Command::Hub(a) => {

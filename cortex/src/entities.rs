@@ -11,7 +11,7 @@
 //! fan unbounded LLM calls (the no-unbounded-fanout rule). Extraction runs
 //! sequentially (concurrency = 1).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use eyre::{Result, WrapErr};
@@ -197,6 +197,111 @@ fn write_proposals(path: &Path, fresh: Vec<EntityProposal>) -> Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     let yaml = serde_yaml::to_string(&existing)?;
+    std::fs::write(path, yaml).wrap_err_with(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+/// Outcome of a concept promotion (harvest-clyde-sessions design, Phase 11).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromoteReport {
+    pub slug: String,
+    /// True when `--apply` wrote the files; false on a dry run (the default).
+    pub applied: bool,
+    /// The slug was already a glossary concept - a no-op, no diff.
+    pub already_present: bool,
+    /// Human-readable diff of what would change / changed.
+    pub diff: String,
+}
+
+/// Promote a proposed concept from `entity-proposals.yml` into `glossary.yml`
+/// (the inverse of `write_proposals`), as a REVIEWABLE DIFF: dry-run by default
+/// (writes nothing, returns the diff); `apply` writes the glossary and drops
+/// the promoted proposal. Never a silent write. Errors if the slug is not a
+/// pending proposal (a promotion must be traceable to a proposal).
+pub fn promote_concept(proposals_path: &Path, glossary_path: &Path, slug: &str, apply: bool) -> Result<PromoteReport> {
+    log::debug!(
+        "cortex::entities::promote_concept: slug={slug} apply={apply} proposals={} glossary={}",
+        proposals_path.display(),
+        glossary_path.display()
+    );
+    let pf: EntityProposalsFile = if proposals_path.exists() {
+        serde_yaml::from_str(&std::fs::read_to_string(proposals_path)?)
+            .wrap_err_with(|| format!("parse {}", proposals_path.display()))?
+    } else {
+        EntityProposalsFile::default()
+    };
+    if !pf.proposals.iter().any(|p| p.slug == slug) {
+        eyre::bail!(
+            "no proposal with slug {slug:?} in {} - promotion must trace to a pending proposal",
+            proposals_path.display()
+        );
+    }
+
+    let glossary = crate::linking::load_glossary(glossary_path)?;
+    if glossary.concepts.iter().any(|c| c == slug) {
+        log::info!("cortex::entities::promote_concept: {slug} already a glossary concept; no-op");
+        return Ok(PromoteReport {
+            slug: slug.to_string(),
+            applied: false,
+            already_present: true,
+            diff: String::new(),
+        });
+    }
+
+    let mut concepts = glossary.concepts.clone();
+    concepts.push(slug.to_string());
+    concepts.sort();
+    concepts.dedup();
+
+    let diff =
+        format!("glossary.yml:          + concept `{slug}`\nentity-proposals.yml:  - proposal `{slug}` (promoted)");
+
+    if apply {
+        write_glossary(glossary_path, &concepts, &glossary.aliases)?;
+        let remaining: Vec<EntityProposal> = pf.proposals.into_iter().filter(|p| p.slug != slug).collect();
+        overwrite_proposals(proposals_path, &EntityProposalsFile { proposals: remaining })?;
+        log::info!(
+            "cortex::entities::promote_concept: promoted {slug} into {}",
+            glossary_path.display()
+        );
+    }
+
+    Ok(PromoteReport {
+        slug: slug.to_string(),
+        applied: apply,
+        already_present: false,
+        diff,
+    })
+}
+
+/// Serialize the glossary deterministically (concepts already sorted; aliases
+/// via a BTreeMap so the on-disk YAML is diffable and round-trips stably).
+fn write_glossary(path: &Path, concepts: &[String], aliases: &HashMap<String, String>) -> Result<()> {
+    #[derive(Serialize)]
+    struct GlossaryOut<'a> {
+        concepts: &'a [String],
+        aliases: std::collections::BTreeMap<&'a str, &'a str>,
+    }
+    let ordered: std::collections::BTreeMap<&str, &str> =
+        aliases.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let yaml = serde_yaml::to_string(&GlossaryOut {
+        concepts,
+        aliases: ordered,
+    })?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(path, yaml).wrap_err_with(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+/// Overwrite `entity-proposals.yml` with the given set (used by promotion to
+/// drop the promoted proposal). Distinct from `write_proposals`, which MERGES.
+fn overwrite_proposals(path: &Path, file: &EntityProposalsFile) -> Result<()> {
+    let yaml = serde_yaml::to_string(file)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
     std::fs::write(path, yaml).wrap_err_with(|| format!("write {}", path.display()))?;
     Ok(())
 }
