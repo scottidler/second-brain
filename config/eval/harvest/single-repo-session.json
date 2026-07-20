@@ -1,0 +1,32 @@
+{
+  "schema-version": 1,
+  "generated-at": "2026-07-19T00:00:00.000000000+00:00",
+  "host": "desk",
+  "cursor": 1800,
+  "sessions": [
+    {
+      "session-id": "2dda6936-3fb5-47bc-9c88-9306416bdb11",
+      "host": "desk",
+      "scope": "work",
+      "cwd": "/home/saidler/repos/tatari-tv/marquee",
+      "project-dir": "/home/saidler/.claude/projects/-home-saidler-repos-tatari-tv-marquee",
+      "repo": "tatari-tv/marquee",
+      "git-branch": "main",
+      "created": "2026-06-19T17:58:14.870+00:00",
+      "modified": "2026-06-20T06:09:35.911127018+00:00",
+      "updated-at": 72,
+      "duration-secs": 43881,
+      "dormant": true,
+      "title": "Address CodeRabbit comments on PR #23",
+      "first-prompt": "create a neighboring worktree and address the coderabbit comments",
+      "n-msgs": 70,
+      "model": "claude-opus-4-8",
+      "summary": "[redacted benign summary]",
+      "tags": ["git-worktree", "code-review", "rust"],
+      "enrich-status": "ok",
+      "redaction-count": 0,
+      "staged-path": "/home/saidler/.local/share/clyde/staged/2dda6936-3fb5-47bc-9c88-9306416bdb11",
+      "archived": false
+    }
+  ]
+}

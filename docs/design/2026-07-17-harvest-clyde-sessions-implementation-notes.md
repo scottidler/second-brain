@@ -241,3 +241,194 @@ verified and adopted as-is.
   (the checked-in 2026-07-02 catalog slice) is the natural place to tune
   these against real selection behavior; flagging so Phase 3 doesn't assume
   they are load-bearing constants.
+
+## Phase 3: Export reader + selection gate + watermark
+
+### Design decisions
+
+- New `borg::harvest` module, side-by-side per the house source-addition
+  pattern (nearest precedent: `signal.rs`), split into five submodules so no
+  file approaches the size limit and each seam is independently testable:
+  - `harvest/contract.rs` - the clyde `session export` schema-version-1 types +
+    `parse_export` (the ONE loud boundary: schema-version mismatch and
+    unparseable JSON both `bail!`, never an empty result).
+  - `harvest/reader.rs` - `ExportReader` trait (port) + `ClydeExportReader`
+    (shells out to the configured binary, mirroring `youtube.rs` subprocess
+    hygiene: `kill_on_drop(true)` + wall-clock timeout + `wait_with_output`
+    concurrent drain). Never reads `sessions.db`/`.jsonl`.
+  - `harvest/select.rs` - `evaluate_selection` (the real gate; Gate-0 is a
+    no-op for sessions), signals dormant+enrich-ok+real-repo+min-msgs+exclude.
+  - `harvest/cluster.rs` - deterministic `(cwd, git-branch) + gap` clustering.
+  - `harvest/watermark.rs` - state file, exclusive lock, body hashing,
+    re-appearance classification.
+  - `harvest.rs` - orchestration (`plan_harvest`, `write_rejections`,
+    `apply_plan_to_state`, `record_published`).
+- `plan_harvest` is disk-side-effect-free: it computes a `HarvestPlan`
+  (thread decisions + rejections + new cursor). Writing reject artifacts
+  (`write_rejections`) and advancing state (`apply_plan_to_state`) are separate
+  explicit steps - `harvest::plan_harvest` returns data, the thin steps do I/O
+  (return-data-not-side-effects). Body fetch happens ONLY on the deep-check
+  path (published id whose `n-msgs` changed), via the injected reader.
+- Watermark state at `vault::paths::borg_harvest_state()`
+  (`~/.local/share/sb/borg/harvest-state.json`), a new path fn beside the
+  existing borg data-dir fns. Exclusive advisory lock via `fs2` on a dedicated
+  sibling `.lock` file (survives the atomic temp+rename of the JSON), mirroring
+  cortex's `embed.lock`; contention is a typed `HarvestLockHeld` (not a message
+  substring), so the timer-vs-hand-run collision fails loudly.
+- Durable identity anchors on the INPUT body hash (SHA-256 of the canonical
+  role-labeled thread body), never a distillation output. `canonical_body_text`
+  / `thread_body_text` are defined here as the single source of truth Phase 4/5
+  reuse, so the hash a re-appearance compares equals the bytes the note was
+  built from. Sub-agent turns and member boundaries are encoded so a resume
+  that only re-runs a sub-agent, or a different member split, still changes the
+  hash.
+- Three-state `repos-touched` modeled as `Option<Vec<String>>` with
+  `#[serde(default)]` (None=omitted/unknowable, Some(vec![])=parsed-no-repo,
+  Some(xs)=set) and proven distinct by test. `repo`/`git-branch` are
+  present-null `Option<String>`. `enrich-status` is a `#[serde]` enum over the
+  frozen vocabulary; `null`/omitted -> `None`. The record type is deliberately
+  NOT `deny_unknown_fields` (forward-compatible-envelope carve-out): the
+  contract gains fields additively within schema-version 1 (clyde's
+  files-touched branch), so the version assertion is the real gate.
+- Reject path (`GateId::Selection`): each rejected candidate gets a trace at
+  SELECTION TIME (`trace::generate(IngestMethod::Harvest)`, before any body
+  fetch), a `received`->`rejected` receipts row (`ReceiptKind::Session`,
+  `ReceiptStatus::Rejected` via the Phase 1 `record_received`/`mark_rejected`),
+  and a `rejection.yml` written through the existing `FsArtifactStore`.
+
+### Golden-fixture provenance + the "4 sessions" correction
+
+- The 07-02 golden fixture (`config/eval/harvest/golden-2026-07-02.json`) was
+  captured from the LIVE clyde catalog via `clyde session export --id <id>` on
+  `desk` (2026-07-19, `clyde v0.10.1`). Every SELECTION-RELEVANT field is real
+  and verbatim (session-id, cwd, repo, git-branch, created, modified, n-msgs,
+  dormant, enrich-status, scope); the free-text title/first-prompt/summary are
+  REDACTED to benign placeholders (the doc's "pick benign sessions or redact" -
+  the real work prompts carry internals and are not load-bearing for
+  selection).
+- The doc's original premise "07-02 token-broker arc: 4 sessions = 1 note" does
+  NOT survive contact with the real data. `9521f589` (29 msgs) and `4e55a52c`
+  (389) have cwd `/home/saidler` and `enrich-status: skipped-personal` - both
+  correctly REJECTED (personal enrichment + non-repo cwd, two counts).
+  `871f6428` (486) and `4ae69e3a` (320) are cwd `tatari-tv/slack-cli/main`,
+  branch main, `ok`, ~15s apart - both SELECTED, clustering to ONE note.
+  Deterministic truth = **2 selected -> 1 note, 2 rejected**. Surfaced to the
+  parent immediately; the parent accepted the deterministic outcome and
+  corrected the design doc's Acceptance Criterion #1 + added a 2026-07-20
+  Resolved Decision. The hand-note's "4" was a human cross-cwd SUBJECT grouping
+  that crossed the selection bar - exactly the repo-hub layer's job
+  (Phases 9-13), never the selection gate's.
+- Edge fixtures (`config/eval/harvest/`): `same-cwd-unrelated.json` (two
+  sessions ~4h apart in one repo -> 2 notes, proving the window),
+  `reject-cases.json` (one session per rejection reason), `single-repo-session.json`
+  (real marquee PR#23 structural fields, benign prose - the re-appearance
+  base). The constructed fixtures are labeled as such in the README.
+
+### Retuned config defaults
+
+- `min-msgs` 4 -> **6**. The real fixtures show a clean gap: one-shots cluster
+  at <=3 messages (the canonical `"what"` reject is 3), every substantive
+  engineering thread is >=29. 6 sits inside that gap with margin against 4-5
+  message near-one-shots. (4 also separated the fixtures; 6 adds headroom.)
+- `thread-window` stays **2h**: validated by the golden (the two survivors are
+  15s apart -> merge) and `same-cwd-unrelated` (4h apart -> split). Documented
+  as the tunable knob if real noise later disproves it.
+- `token-cap` stays **12000**: NOT tunable from selection fixtures - it governs
+  the distiller's head+tail windowing (Phase 4), which has no signal at Phase 3.
+  Deferred to Phase 4 honestly rather than tuned against data that can't
+  inform it.
+
+### Deviations
+
+- **Divergence from a WRITTEN acceptance criterion (#1), fully traceable.** The
+  doc originally required the golden fixture to reproduce the hand-written
+  summary's "4 sessions = 1 note" for the 07-02 token-broker arc. The golden
+  fixture instead asserts the DETERMINISTIC outcome **2 selected -> 1 note, 2
+  rejected**, because the real live-catalog metadata makes "4 -> 1 note"
+  impossible under the doc's own Selection rules. Exact evidence (captured via
+  `clyde session export --id <id>`, `desk`, 2026-07-19):
+
+  | session id | n-msgs | cwd | git-branch | enrich-status | scope | outcome |
+  |---|---|---|---|---|---|---|
+  | `9521f589-1243-4264-8302-ce28d9e524ff` | 29 | `/home/saidler` | HEAD | `skipped-personal` | personal | REJECTED |
+  | `4e55a52c-f0be-40eb-88a7-3184c7640738` | 389 | `/home/saidler` | HEAD | `skipped-personal` | personal | REJECTED |
+  | `871f6428-92d8-4035-a66c-87f6d1edee83` | 486 | `.../tatari-tv/slack-cli/main` | main | `ok` | work | selected |
+  | `4ae69e3a-6bde-47d3-946d-c9757f810610` | 320 | `.../tatari-tv/slack-cli/main` | main | `ok` | work | selected |
+
+  Two-count rejection of the personal pair: (1) `enrich-status: skipped-personal`
+  fails the `enrich-status == ok` signal, and (2) cwd `/home/saidler` is not a
+  `~/repos/<org>/<repo>` anchor (`repo: null`) so it fails the real-repo signal.
+  The two work survivors share `(cwd, git-branch)` and are ~15s apart
+  (`871f6428.modified` 06:08:39 -> `4ae69e3a.created` 06:08:54) so they cluster
+  to one note (primary `871f6428`, 486 > 320 msgs). Preserving the literal "4"
+  would require harvesting personal/non-repo sessions - loosening the selection
+  gate in direct contradiction of the Selection section and the reaffirmed
+  "harvest must SELECT" principle. The hand-note's "4" was a human cross-cwd
+  SUBJECT grouping that crossed the selection bar - the repo-hub layer's job
+  (Phases 9-13), never the selection gate's. Surfaced to the parent before
+  building; approved. **Acceptance criterion #1 corrected 2026-07-20 (see the
+  design doc's Resolved Decisions); this fixture asserts that corrected ground
+  truth.**
+- `evaluate_selection` returns `Result<(), Box<RejectionRecord>>`, not the
+  doc's literal `Result<(), RejectionRecord>` - clippy's `result_large_err`
+  (`-D warnings`) denies the 176-byte unboxed Err. Same effect, correct seam
+  (clippy's own suggested fix); the raw.rs gates sidestep this by returning
+  `Result<()>` + writing the record as a side effect, but returning the record
+  keeps the trace generated at the orchestrator (selection time) as the doc
+  requires.
+- "Trace per candidate" is realized as trace-per-reject (each rejected session)
+  + trace-per-thread (the note's trace = the primary member's selection-time
+  trace). A selected non-primary member session does not carry an independent
+  staging trace in Phase 3 because it has no independent note; Phase 5 owns the
+  received-row/sidecar for the note's trace. This matches "one note = one
+  trace" (the rest of borg staging) while still giving every REJECTED candidate
+  its own trace + receipts key, which is the concrete Phase 3 requirement.
+- Selection rejects write `rejection.yml` + the `rejected` receipts row, but no
+  raw-input sidecar. The sidecar is the accepted-input durability record
+  (Phase 5's door); for a reject the `rejection.yml` IS the forensic artifact.
+- Added `#[derive(PartialEq)]` to `types::RejectionRecord` (was Debug/Clone/
+  serde only) so `RejectionOutcome`/`HarvestPlan` can derive it for test
+  assertions. Harmless (all fields already PartialEq).
+
+### Tradeoffs
+
+- Async `ExportReader` trait (the only async surface) vs a fully-sync reader:
+  chose async to inherit borg's subprocess-hygiene pattern (timeout +
+  kill_on_drop via tokio) exactly. Selection/clustering/watermark stay pure and
+  sync-testable; only the reader and `plan_harvest` are async, and tests inject
+  a `FakeReader` so no test needs the clyde binary.
+- Body hash keyed under the thread's PRIMARY session id (with a hash over ALL
+  members' bodies) rather than a per-member scheme: threads never span runs and
+  Day-2 same-cwd is a new note, so the single-session re-appearance is the
+  common case and this generalizes cleanly without a composite key.
+- Reused the existing `FsArtifactStore` for `rejection.yml` rather than a
+  harvest-specific writer: the per-trace layout + atomic write are already
+  correct, and `read_rejection` gives the test a clean round-trip.
+
+### Success criteria (Phase 3) - all verified by passing tests
+
+- golden fixture selects EXACT ids / cluster / note count: PASS
+  (`golden_fixture_selects_expected_ids_and_one_note` - selected
+  `{871f6428, 4ae69e3a}`, 1 thread, 1 note, primary 871f6428, 2 rejects) -
+  asserting the corrected deterministic outcome (2->1), not the retracted "4".
+- same-cwd-unrelated does NOT merge: PASS (`same_cwd_unrelated_does_not_merge`
+  -> 2 threads).
+- rerun with unchanged catalog is a no-op: PASS
+  (`rerun_with_unchanged_catalog_is_a_no_op` - cheap-filter Skip, zero body
+  fetches, nothing publishable).
+- resumed-session (body hash changed) -> follow-up: PASS
+  (`resumed_session_body_hash_changed_is_follow_up`).
+- unchanged-body skips WITHOUT re-distilling: PASS
+  (`unchanged_body_skips_and_advances_without_redistilling` - Skip + snapshot
+  advance, then cheap-filter with no re-fetch).
+- rejects leave `rejection.yml` + a `rejected` receipts row keyed by a
+  selection-time trace: PASS (`write_rejections_leaves_yaml_and_a_rejected_receipts_row`
+  - kind `session`, gate `selection`, trace-keyed).
+
+### Open questions
+
+- None blocking Phase 3. For the parent to note: Phase 5 must record the
+  `NewNote`/`FollowUp` published snapshot AFTER publish (it needs the landed
+  note path) via `harvest::record_published`; `apply_plan_to_state` intentionally
+  only advances the cursor + `Skip` in-place snapshot updates. The Phase-2 open
+  question on `min-msgs`/`token-cap` starter values is resolved above.

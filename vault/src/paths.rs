@@ -327,6 +327,23 @@ pub fn borg_eval_cache_path() -> PathBuf {
         .join("eval-cache.db")
 }
 
+/// `sb borg harvest`'s watermark + durable-identity state file, under the
+/// `sb/borg/` data namespace (per-host, beside the receipts DB). Holds the
+/// export cursor plus, per published session id, the note path, `n-msgs` at
+/// publish, and the input-body hash (harvest-clyde-sessions design,
+/// Architecture > Watermark + durable identity). The harvest job takes an
+/// exclusive lock on this file so a nightly timer run and a hand-run cannot
+/// race the cursor. Panics only when `xdg_data_dir()` returns `None`, same as
+/// [`borg_signal_state_dir`].
+///
+/// `~/.local/share/sb/borg/harvest-state.json` on Linux.
+pub fn borg_harvest_state() -> PathBuf {
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("sb/borg")
+        .join("harvest-state.json")
+}
+
 /// The single source of truth for the oracle SQLite DB path. Both oracle
 /// (the reader / FTS5+vector indexer) and cortex (the sole embeddings
 /// writer) resolve here so the two crates can never desync on the file

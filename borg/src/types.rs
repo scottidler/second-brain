@@ -224,7 +224,7 @@ pub struct TraceFilter {
 }
 
 /// A gate rejection record. Written to `<trace_id>/rejection.yml` in per-trace layout.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct RejectionRecord {
     pub trace: String,

@@ -26,8 +26,13 @@ const DEFAULT_THREAD_WINDOW: &str = "2h";
 
 /// Selection floor on `n-msgs` (design doc: Selection signals): a session
 /// with fewer messages than this is a one-shot, not substantive enough to
-/// earn a note.
-const DEFAULT_MIN_MSGS: usize = 4;
+/// earn a note. Tuned (Phase 3) against the real 2026-07-02 catalog slice:
+/// one-shots cluster at <=3 messages (the canonical `"what"` reject is 3),
+/// while every substantive engineering thread is >=29, so a floor of 6 sits
+/// well inside that empty gap with margin. (Phase 2's starter value of 4 also
+/// separated the fixtures, but left less headroom against 4-5 message
+/// near-one-shots the "not a one-shot" intent excludes.)
+const DEFAULT_MIN_MSGS: usize = 6;
 
 /// Head+tail windowing cap in tokens fed to the distiller per thread (design
 /// doc: Distillation > Input), independent of the selection thresholds above.

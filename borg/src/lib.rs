@@ -26,6 +26,7 @@ pub mod extension;
 pub mod extraction;
 pub mod fabric;
 pub mod github;
+pub mod harvest;
 pub mod health;
 pub mod hygiene;
 pub mod intake;

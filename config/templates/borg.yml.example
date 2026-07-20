@@ -147,8 +147,10 @@ harvest:
   # always overrides this, regardless of setting.
   mode: dry-run
   # Selection floor: a session with fewer than this many messages is a
-  # one-shot, not substantive enough to earn a note.
-  min-msgs: 4
+  # one-shot, not substantive enough to earn a note. Tuned against the real
+  # 2026-07-02 catalog: one-shots are <=3 messages, substantive threads >=29,
+  # so 6 sits inside that gap with margin.
+  min-msgs: 6
   # Regex patterns matched against a session's title/first-prompt; a match
   # excludes the candidate before scoring (e.g. auto-fired security reviews,
   # bare "sure"/empty prompts, navigational lookups). Space/repeated-flag

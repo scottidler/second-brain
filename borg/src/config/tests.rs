@@ -840,7 +840,9 @@ fn test_harvest_config_default_values() {
     assert_eq!(h.mode, HarvestMode::DryRun);
     assert_eq!(h.initial_since, "7d");
     assert_eq!(h.thread_window, "2h");
-    assert_eq!(h.min_msgs, 4);
+    // Retuned in Phase 3 against the real 2026-07-02 catalog (one-shots <=3,
+    // substantive threads >=29); 6 sits in that gap.
+    assert_eq!(h.min_msgs, 6);
     assert_eq!(h.token_cap, 12_000);
     assert!(h.exclude_patterns.is_empty());
     assert_eq!(h.model, "");
@@ -915,7 +917,7 @@ harvest:
     assert_eq!(config.harvest.mode, HarvestMode::Live);
     assert_eq!(config.harvest.initial_since, "7d");
     assert_eq!(config.harvest.thread_window, "2h");
-    assert_eq!(config.harvest.min_msgs, 4);
+    assert_eq!(config.harvest.min_msgs, 6);
     assert_eq!(config.harvest.token_cap, 12_000);
     assert!(config.harvest.exclude_patterns.is_empty());
 }
