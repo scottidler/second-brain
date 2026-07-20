@@ -38,6 +38,9 @@ const DEFAULT_MIN_MSGS: usize = 6;
 /// doc: Distillation > Input), independent of the selection thresholds above.
 const DEFAULT_TOKEN_CAP: usize = 12_000;
 
+/// Nightly harvest, off-peak (design doc: not real-time, nightly reflection).
+const DEFAULT_SCHEDULE: &str = "*-*-* 03:00:00";
+
 /// What the nightly timer runs (design doc: API Design > Config). `DryRun`
 /// lists selections/rejections and writes nothing; `Live` publishes notes.
 /// Defaults to `DryRun` so a fresh install never lands notes unattended
@@ -94,6 +97,12 @@ pub struct HarvestConfig {
     /// default) inherits `llm.model`, mirroring `vision.model` and
     /// `youtube.slides.content_filter.model`.
     pub model: String,
+    /// systemd `OnCalendar` expression for the nightly timer (Phase 8). This
+    /// is the ONE value baked into the `.timer` unit - every behavioral
+    /// tunable stays in this config, read by the service's `sb borg harvest`
+    /// ExecStart at fire time. A standard systemd calendar spec (`daily`,
+    /// `*-*-* 03:00:00`, `Mon *-*-* 06:00:00`).
+    pub schedule: String,
 }
 
 impl Default for HarvestConfig {
@@ -107,6 +116,7 @@ impl Default for HarvestConfig {
             thread_window: DEFAULT_THREAD_WINDOW.to_string(),
             token_cap: DEFAULT_TOKEN_CAP,
             model: String::new(),
+            schedule: DEFAULT_SCHEDULE.to_string(),
         }
     }
 }

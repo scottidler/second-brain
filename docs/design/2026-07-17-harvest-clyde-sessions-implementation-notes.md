@@ -864,3 +864,56 @@ exit codes (a `| grep | head` pipeline's exit masked cargo's). Corrected to:
 `otto ci` is the single authoritative gate (right features, honest exit), and
 `cargo fmt` runs before every validation. No code impact - all four Phase 7
 tests pass.
+
+## Phase 8: Timer
+
+### Design decisions
+
+- `borg/src/harvest/timer.rs`: `render_units(home, binary, config) -> (service,
+  timer)` (pure/testable) + `install`/`uninstall`. `sb borg harvest --install`
+  writes `sb-harvest.service` (Type=oneshot, `ExecStart=<abs binary> borg
+  harvest`) and `sb-harvest.timer` (`OnCalendar=<harvest.schedule>`,
+  `Persistent=true`) to `~/.config/systemd/user/`. `--uninstall` removes them
+  (idempotent).
+- The timer bakes in ONLY `OnCalendar`; every behavioral knob stays in
+  `borg.yml`, read by the service's `sb borg harvest` at fire time (which goes
+  through the same `harvest::run` core as an on-demand run - "on-demand and
+  scheduled share one core"). New config key `harvest.schedule` (default
+  `*-*-* 03:00:00`, nightly off-peak) + example template entry.
+- Stripped-PATH safety: the service sets an explicit `Environment="PATH=..."`
+  AND uses the absolute `current_exe()` binary in ExecStart; `harvest.clyde_binary`
+  is already an absolute tilde-expanded default. So the unit resolves under a
+  systemd timer's empty inherited environment.
+- Light hardening only (`NoNewPrivileges`, `PrivateTmp`) - harvest writes the
+  vault + `~/.local/share/sb`, so a `ProtectHome`/`ProtectSystem` lockdown
+  (which cortex's daemon uses with an enumerated `ReadWritePaths`) would block
+  the writes; omitted deliberately rather than enumerate every write path.
+
+### Deviations
+
+- Install lives on `sb borg harvest --install/--uninstall` flags (mirroring the
+  daemon's install pattern) rather than a separate subcommand - the design said
+  "bootstrap-installed like existing units" without pinning the exact verb.
+
+### Tradeoffs
+
+- "Two consecutive timer runs double-ingest nothing" is satisfied by the
+  watermark (already tested: `publish_plan_publishes_and_rerun_is_idempotent`),
+  not re-tested here - the timer is a thin scheduled wrapper over the same
+  `harvest::run` core, so there is no new dedup logic to test at the timer
+  layer. The timer tests instead assert the unit-structure criteria.
+- "Runs with an empty inherited PATH" is asserted structurally (absolute
+  ExecStart binary + explicit PATH env in the rendered unit) rather than by
+  actually exec'ing the unit with `PATH=""` (which would run a real harvest with
+  side effects) - the render properties are the right unit-test proxy.
+
+### Open questions
+
+None.
+
+### Validation
+
+- `otto ci`: `✅ All CI checks passed!`.
+- Tests: `service_uses_absolute_binary_and_explicit_path`,
+  `timer_bakes_only_oncalendar_from_config` (asserts no behavioral tunable
+  leaks into the .timer), `schedule_change_is_the_only_timer_difference`.

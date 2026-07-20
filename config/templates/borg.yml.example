@@ -167,6 +167,10 @@ harvest:
   # Model override for the harvest distillation pass. Empty string (the
   # default) inherits llm.model above.
   model: ""
+  # systemd OnCalendar for the nightly timer (`sb borg harvest --install`).
+  # The ONE value baked into the .timer unit; every knob above stays here in
+  # config. Standard systemd calendar spec (daily | *-*-* 03:00:00 | ...).
+  schedule: "*-*-* 03:00:00"
 
 # Log level: trace | debug | info | warn | error
 log-level: info

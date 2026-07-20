@@ -26,6 +26,7 @@ pub mod contract;
 pub mod publish;
 pub mod reader;
 pub mod select;
+pub mod timer;
 pub mod watermark;
 
 use std::collections::BTreeMap;
