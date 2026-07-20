@@ -104,6 +104,11 @@ pub enum ReceiptKind {
     /// `raw_input` is a short structured descriptor; the actual bytes live
     /// in the `system/intake/<trace_id>.txt` sidecar.
     Binary,
+    /// A clyde session/thread candidate pulled by `sb borg harvest`
+    /// (harvest-clyde-sessions design). Kept distinct from `Text`: calling a
+    /// session `text` would be a lying identifier - `raw_input` for this kind
+    /// is the concatenated parsed body, staged like `Binary`'s sidecar.
+    Session,
 }
 
 impl ReceiptKind {
@@ -112,6 +117,7 @@ impl ReceiptKind {
             Self::Url => "url",
             Self::Text => "text",
             Self::Binary => "binary",
+            Self::Session => "session",
         }
     }
 }
@@ -129,6 +135,7 @@ impl FromStr for ReceiptKind {
             "url" => Ok(Self::Url),
             "text" => Ok(Self::Text),
             "binary" => Ok(Self::Binary),
+            "session" => Ok(Self::Session),
             _ => Err(format!("unknown receipt kind: {s}")),
         }
     }
@@ -140,6 +147,12 @@ pub enum ReceiptStatus {
     Received,
     Succeeded,
     Failed,
+    /// Below the harvest selection bar (`sb borg harvest`,
+    /// harvest-clyde-sessions design, `GateId::Selection`). Distinct from
+    /// `Failed`: a rejected candidate is not a broken ingest, it is the
+    /// selection gate correctly declining to publish - auditable via
+    /// `sb borg log --status rejected` without lying as a failure.
+    Rejected,
 }
 
 impl ReceiptStatus {
@@ -148,6 +161,7 @@ impl ReceiptStatus {
             Self::Received => "received",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
+            Self::Rejected => "rejected",
         }
     }
 }
@@ -165,6 +179,7 @@ impl FromStr for ReceiptStatus {
             "received" => Ok(Self::Received),
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
+            "rejected" => Ok(Self::Rejected),
             _ => Err(format!("unknown receipt status: {s}")),
         }
     }

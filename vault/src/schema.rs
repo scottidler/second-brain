@@ -130,6 +130,9 @@ pub enum NoteType {
     Digest,
     /// Review note produced by `cortex intel`.
     Review,
+    /// Distilled Claude Code session/thread note produced by `sb borg harvest`
+    /// (harvest-clyde-sessions design, Phase 1).
+    Session,
 }
 
 impl NoteType {
@@ -159,6 +162,7 @@ impl NoteType {
             Self::Entity => "entity",
             Self::Digest => "digest",
             Self::Review => "review",
+            Self::Session => "session",
         }
     }
 
@@ -188,6 +192,7 @@ impl NoteType {
             Self::Entity,
             Self::Digest,
             Self::Review,
+            Self::Session,
         ]
     }
 
@@ -276,6 +281,7 @@ impl FromStr for NoteType {
             "entity" => Ok(Self::Entity),
             "digest" => Ok(Self::Digest),
             "review" => Ok(Self::Review),
+            "session" => Ok(Self::Session),
             _ => Err(format!("unknown note type: {s}")),
         }
     }
@@ -378,6 +384,9 @@ pub enum Method {
     Ntfy,
     Signal,
     Manual,
+    /// Nightly/on-demand `sb borg harvest` pull from clyde's session export
+    /// contract (harvest-clyde-sessions design, Phase 1).
+    Harvest,
 }
 
 impl Method {
@@ -391,6 +400,7 @@ impl Method {
             Self::Ntfy => "ntfy",
             Self::Signal => "signal",
             Self::Manual => "manual",
+            Self::Harvest => "harvest",
         }
     }
 
@@ -404,6 +414,7 @@ impl Method {
             Self::Ntfy,
             Self::Signal,
             Self::Manual,
+            Self::Harvest,
         ]
     }
 }
@@ -426,6 +437,7 @@ impl FromStr for Method {
             "ntfy" => Ok(Self::Ntfy),
             "signal" => Ok(Self::Signal),
             "manual" => Ok(Self::Manual),
+            "harvest" => Ok(Self::Harvest),
             _ => Err(format!("unknown method: {s}")),
         }
     }

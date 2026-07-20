@@ -17,6 +17,7 @@ fn test_method_prefixes() {
     assert_eq!(method_prefix(Method::Ntfy), "nf");
     assert_eq!(method_prefix(Method::Signal), "sg");
     assert_eq!(method_prefix(Method::Manual), "mn");
+    assert_eq!(method_prefix(Method::Harvest), "hv");
 }
 
 #[test]

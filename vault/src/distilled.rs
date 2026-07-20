@@ -249,6 +249,7 @@ pub enum KindPayload {
     Repo(RepoPayload),
     Video(VideoPayload),
     Thread(ThreadPayload),
+    Session(SessionPayload),
 }
 
 /// GitHub repository metadata frozen at ingest time.
@@ -296,6 +297,31 @@ pub struct ThreadPayload {
     pub post_count: u32,
     /// Platform identifier: "x", "reddit", "hn".
     pub platform: String,
+}
+
+/// Claude Code session/thread metadata (harvest-clyde-sessions design, Phase
+/// 1 schema seam; populated by `SessionDistiller` in Phase 4).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct SessionPayload {
+    /// `<org>/<repo>` anchor for the thread's primary session, verbatim from
+    /// clyde's export contract `repo` field. `None` when the session's cwd
+    /// has no `~/repos/<org>/<repo>` anchor.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// clyde session ids composing this thread note (the primary session
+    /// first, per the `source: clyde://<id>` frontmatter pointer).
+    #[serde(default)]
+    pub session_ids: Vec<String>,
+    /// Total messages across every member session.
+    #[serde(default)]
+    pub msg_count: u32,
+    /// ISO 8601 UTC timestamp of the thread's earliest session.
+    #[serde(default)]
+    pub date_start: Option<String>,
+    /// ISO 8601 UTC timestamp of the thread's latest session.
+    #[serde(default)]
+    pub date_end: Option<String>,
 }
 
 /// Extractor-side bookkeeping recorded for each distilled artifact.

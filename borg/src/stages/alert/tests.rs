@@ -83,3 +83,11 @@ fn format_gate_2_uses_from_stage_2_replay_hint() {
     );
     assert!(msg.contains("--from-stage 2"));
 }
+
+#[test]
+fn format_selection_gate_has_no_replay_hint() {
+    let msg = format_gate_alert("hv-abc123", 0, GateId::Selection, None, "below selection bar", None);
+    assert!(msg.contains("gate=selection"));
+    assert!(msg.contains("no replay"));
+    assert!(!msg.contains("--from-stage"));
+}

@@ -83,6 +83,10 @@ pub enum ContentType {
     Code {
         language: String,
     },
+    /// Distilled Claude Code session/thread note (harvest-clyde-sessions
+    /// design). Fields land in Phase 5's pipeline handler; Phase 1 wires the
+    /// `type:` frontmatter mapping only.
+    Session,
 }
 
 pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -> String {
@@ -120,6 +124,7 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         ContentType::VocabDefine { .. } | ContentType::VocabClarify { .. } => vault::schema::NoteType::Vocab,
         ContentType::Document { .. } => vault::schema::NoteType::Document,
         ContentType::Code { .. } => vault::schema::NoteType::Code,
+        ContentType::Session => vault::schema::NoteType::Session,
     }
     .as_str();
 

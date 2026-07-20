@@ -47,6 +47,7 @@ fn method_prefix(method: Method) -> &'static str {
         Method::Ntfy => "nf",
         Method::Signal => "sg",
         Method::Manual => "mn",
+        Method::Harvest => "hv",
     }
 }
 

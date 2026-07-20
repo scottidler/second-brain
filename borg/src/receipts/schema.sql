@@ -18,10 +18,10 @@ CREATE TABLE IF NOT EXISTS receipts (
   received_at     TEXT NOT NULL,
   method          TEXT NOT NULL,
   kind            TEXT NOT NULL
-                    CHECK (kind IN ('url', 'text', 'binary')),
+                    CHECK (kind IN ('url', 'text', 'binary', 'session')),
   raw_input       TEXT NOT NULL,
   status          TEXT NOT NULL
-                    CHECK (status IN ('received', 'succeeded', 'failed')),
+                    CHECK (status IN ('received', 'succeeded', 'failed', 'rejected')),
   terminal_at     TEXT,
   note_path       TEXT,
   failure_stage   TEXT

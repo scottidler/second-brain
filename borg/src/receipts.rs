@@ -39,7 +39,7 @@ pub const POOL_SIZE: u32 = 8;
 
 /// Schema version recorded in the `schema_version` table. Bump when the
 /// schema changes.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA_SQL: &str = include_str!("receipts/schema.sql");
 
@@ -196,6 +196,58 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )
         .context("add degraded column")?;
+    }
+    // v3 (harvest-clyde-sessions design, Phase 1): widen the `kind` and
+    // `status` CHECK constraints to add 'session' and 'rejected'. SQLite has
+    // no ALTER-CHECK-CONSTRAINT, so this rebuilds the table: create a copy
+    // with the widened constraints, copy every row, drop the old table,
+    // rename the copy into place. Idempotency is probed directly against the
+    // live table definition (not the schema_version counter) so this is a
+    // no-op both on a DB already migrated to v3 AND on a brand new DB whose
+    // baseline `schema.sql` was created with the widened constraint already.
+    let receipts_sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='receipts'",
+            [],
+            |row| row.get(0),
+        )
+        .context("read receipts table definition")?;
+    if !receipts_sql.contains("'rejected'") {
+        conn.execute_batch(
+            "CREATE TABLE receipts_v3 (
+               trace_id        TEXT NOT NULL PRIMARY KEY,
+               received_at     TEXT NOT NULL,
+               method          TEXT NOT NULL,
+               kind            TEXT NOT NULL
+                                CHECK (kind IN ('url', 'text', 'binary', 'session')),
+               raw_input       TEXT NOT NULL,
+               status          TEXT NOT NULL
+                                CHECK (status IN ('received', 'succeeded', 'failed', 'rejected')),
+               terminal_at     TEXT,
+               note_path       TEXT,
+               failure_stage   TEXT
+                                CHECK (failure_stage IS NULL OR failure_stage IN (
+                                  'intake-rejected', 'classify-failed', 'fetch-failed',
+                                  'quality-blocked', 'pipeline-timed-out', 'publish-failed',
+                                  'crashed'
+                                )),
+               failure_reason  TEXT,
+               replay_of       TEXT,
+               degraded        INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO receipts_v3
+               (trace_id, received_at, method, kind, raw_input, status,
+                terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded)
+               SELECT trace_id, received_at, method, kind, raw_input, status,
+                      terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded
+               FROM receipts;
+             DROP TABLE receipts;
+             ALTER TABLE receipts_v3 RENAME TO receipts;
+             CREATE INDEX IF NOT EXISTS idx_receipts_status ON receipts(status);
+             CREATE INDEX IF NOT EXISTS idx_receipts_received_at ON receipts(received_at);
+             CREATE INDEX IF NOT EXISTS idx_receipts_method_status ON receipts(method, status);",
+        )
+        .context("rebuild receipts table for v3 CHECK constraint widen")?;
     }
     // MAX() over an empty table returns one row whose value is NULL, which
     // rusqlite cannot decode straight into i64; bind through Option to read
@@ -367,6 +419,26 @@ pub fn mark_succeeded(conn: &Connection, trace_id: &str, note_path: &str, degrad
         .with_context(|| format!("Failed to mark succeeded trace_id={trace_id}"))?;
     if rows == 0 {
         log::warn!("receipts::mark_succeeded: trace_id={trace_id} not in 'received' state (already terminal)");
+    }
+    Ok(rows > 0)
+}
+
+/// Promote a `received` row to `rejected` (the harvest selection gate
+/// declining to publish, `GateId::Selection` - harvest-clyde-sessions
+/// design). Distinct from [`mark_failed`]: a rejection is the gate correctly
+/// declining, not a broken ingest, so it gets its own status rather than
+/// riding `failed` with a stage that would lie about what happened.
+pub fn mark_rejected(conn: &Connection, trace_id: &str, reason: &str) -> Result<bool> {
+    log::debug!("receipts::mark_rejected: trace={trace_id} reason_len={}", reason.len());
+    let rows = conn
+        .execute(
+            "UPDATE receipts SET status='rejected', failure_reason=?, terminal_at=? \
+             WHERE trace_id=? AND status='received'",
+            params![reason, now_iso8601(), trace_id],
+        )
+        .with_context(|| format!("Failed to mark rejected trace_id={trace_id}"))?;
+    if rows == 0 {
+        log::warn!("receipts::mark_rejected: trace_id={trace_id} not in 'received' state (already terminal)");
     }
     Ok(rows > 0)
 }
@@ -578,14 +650,19 @@ pub fn row_count(conn: &Connection) -> Result<i64> {
         .context("count receipts rows")
 }
 
-/// Count receipts by status. Returns `(received, succeeded, failed)`.
-pub fn count_by_status(conn: &Connection) -> Result<(i64, i64, i64)> {
+/// Count receipts by status. Returns `(received, succeeded, failed, rejected)`.
+/// `rejected` is the harvest selection gate's outcome (`GateId::Selection`,
+/// harvest-clyde-sessions design) - written starting Phase 3, plumbed here in
+/// Phase 1 so this aggregate never hard-errors the moment the first rejected
+/// row lands.
+pub fn count_by_status(conn: &Connection) -> Result<(i64, i64, i64, i64)> {
     let mut stmt = conn
         .prepare("SELECT status, COUNT(*) FROM receipts GROUP BY status")
         .context("prepare count_by_status")?;
     let mut received = 0_i64;
     let mut succeeded = 0_i64;
     let mut failed = 0_i64;
+    let mut rejected = 0_i64;
     let iter = stmt
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
         .context("query_map count_by_status")?;
@@ -595,10 +672,11 @@ pub fn count_by_status(conn: &Connection) -> Result<(i64, i64, i64)> {
             "received" => received = count,
             "succeeded" => succeeded = count,
             "failed" => failed = count,
+            "rejected" => rejected = count,
             other => return Err(eyre!("unexpected status value in receipts: {other}")),
         }
     }
-    Ok((received, succeeded, failed))
+    Ok((received, succeeded, failed, rejected))
 }
 
 /// Count failed receipts grouped by failure_stage. Returns a list of

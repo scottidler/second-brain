@@ -35,6 +35,10 @@ pub enum DistillKind {
     Repo,
     Video,
     Thread,
+    /// Claude Code session/thread (harvest-clyde-sessions design). Enum arm
+    /// added in Phase 1 (schema seam); `SessionDistiller` is wired in Phase 4
+    /// - `Dispatcher::distill` fails loudly for this kind until then.
+    Session,
 }
 
 impl DistillKind {
@@ -48,6 +52,7 @@ impl DistillKind {
             Self::Repo => "repo",
             Self::Video => "video",
             Self::Thread => "thread",
+            Self::Session => "session",
         }
     }
 }
@@ -158,6 +163,11 @@ impl<F: FabricCaller + Clone> Dispatch for Dispatcher<F> {
             DistillKind::Repo => self.repo.distill(inputs).await,
             DistillKind::Video => self.video.distill(inputs).await,
             DistillKind::Thread => self.thread.distill(inputs).await,
+            // Phase 1 schema seam only: no distiller is wired for this kind
+            // yet. `SessionDistiller` lands in Phase 4 of the
+            // harvest-clyde-sessions design; fail loudly rather than fake a
+            // result in the meantime.
+            DistillKind::Session => Err(eyre::eyre!("DistillKind::Session has no distiller wired yet (Phase 4)")),
         }
     }
 }

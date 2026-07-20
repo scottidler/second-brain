@@ -526,8 +526,17 @@ fn count_by_status_groups_correctly() {
     record_received(&conn, "f", Method::Http, ReceiptKind::Url, "u").expect("ins");
     mark_succeeded(&conn, "s", "n.md", false).expect("s");
     mark_failed(&conn, "f", FailureStage::FetchFailed, "x").expect("f");
-    let (recv, succ, fail) = count_by_status(&conn).expect("count");
-    assert_eq!((recv, succ, fail), (2, 1, 1));
+    let (recv, succ, fail, rejected) = count_by_status(&conn).expect("count");
+    assert_eq!((recv, succ, fail, rejected), (2, 1, 1, 0));
+}
+
+#[test]
+fn count_by_status_includes_rejected() {
+    let conn = fresh();
+    record_received(&conn, "r1", Method::Cli, ReceiptKind::Session, "body").expect("ins");
+    mark_rejected(&conn, "r1", "below selection bar").expect("reject");
+    let (recv, succ, fail, rejected) = count_by_status(&conn).expect("count");
+    assert_eq!((recv, succ, fail, rejected), (0, 0, 0, 1));
 }
 
 #[test]
@@ -586,6 +595,87 @@ fn open_at_is_idempotent_across_two_opens() {
         let r = get(&conn, "persist").expect("get").expect("row");
         assert_eq!(r.trace_id, "persist");
     }
+}
+
+#[test]
+fn session_rejected_row_roundtrips() {
+    let conn = fresh();
+    record_received(
+        &conn,
+        "hv-001",
+        Method::Cli,
+        ReceiptKind::Session,
+        "human: hi\nassistant: hello",
+    )
+    .expect("record_received");
+    mark_rejected(&conn, "hv-001", "below selection bar").expect("mark_rejected");
+    let r = get(&conn, "hv-001").expect("get").expect("row present");
+    assert_eq!(r.kind, "session");
+    assert_eq!(r.status, "rejected");
+    assert_eq!(r.failure_reason.as_deref(), Some("below selection bar"));
+    assert!(r.terminal_at.is_some());
+}
+
+#[test]
+fn mark_rejected_is_noop_on_already_terminal_row() {
+    let conn = fresh();
+    record_received(&conn, "hv-002", Method::Cli, ReceiptKind::Session, "body").expect("record_received");
+    mark_succeeded(&conn, "hv-002", "n.md", false).expect("mark_succeeded");
+    let promoted = mark_rejected(&conn, "hv-002", "too late").expect("mark_rejected no-op");
+    assert!(!promoted, "already-succeeded row must not flip to rejected");
+    let r = get(&conn, "hv-002").expect("get").expect("row present");
+    assert_eq!(r.status, "succeeded");
+}
+
+#[test]
+fn v3_migration_widens_check_constraint_on_legacy_db() {
+    // Simulate a pre-v3 DB: create the table with the ORIGINAL (narrower)
+    // CHECK constraints, insert a row, then run migrations and confirm the
+    // widened constraint accepts 'session'/'rejected' and the pre-existing
+    // row survives the rebuild untouched.
+    let conn = Connection::open_in_memory().expect("open_in_memory");
+    apply_pragmas(&conn).expect("pragmas");
+    conn.execute_batch(
+        "CREATE TABLE receipts (
+           trace_id        TEXT NOT NULL PRIMARY KEY,
+           received_at     TEXT NOT NULL,
+           method          TEXT NOT NULL,
+           kind            TEXT NOT NULL
+                            CHECK (kind IN ('url', 'text', 'binary')),
+           raw_input       TEXT NOT NULL,
+           status          TEXT NOT NULL
+                            CHECK (status IN ('received', 'succeeded', 'failed')),
+           terminal_at     TEXT,
+           note_path       TEXT,
+           failure_stage   TEXT,
+           failure_reason  TEXT,
+           replay_of       TEXT,
+           degraded        INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE schema_version (version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL);
+         INSERT INTO schema_version (version, applied_at) VALUES (2, '2026-01-01T00:00:00Z');
+         INSERT INTO receipts (trace_id, received_at, method, kind, raw_input, status)
+           VALUES ('legacy-1', '2026-01-01T00:00:00Z', 'http', 'url', 'https://x.com', 'succeeded');",
+    )
+    .expect("seed legacy schema");
+
+    run_migrations(&conn).expect("migrate legacy db to v3");
+
+    // The pre-existing row survived the rebuild.
+    let r = get(&conn, "legacy-1").expect("get").expect("legacy row present");
+    assert_eq!(r.status, "succeeded");
+    assert_eq!(r.kind, "url");
+
+    // The widened constraint now accepts 'session'/'rejected'.
+    record_received(&conn, "hv-legacy", Method::Cli, ReceiptKind::Session, "body").expect("session insert accepted");
+    mark_rejected(&conn, "hv-legacy", "below bar").expect("rejected status accepted");
+
+    // Re-running migrations on the now-v3 DB is a no-op (idempotent).
+    run_migrations(&conn).expect("second migrate is a no-op");
+    let row_count_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM receipts", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(row_count_after, 2, "rerun must not duplicate or drop rows");
 }
 
 #[test]

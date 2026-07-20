@@ -165,6 +165,23 @@ pub fn render(distilled: &Distilled, options: RenderOptions) -> RenderedDistille
                 );
             }
         }
+        // Bare schema seam for Phase 1 (harvest-clyde-sessions); the
+        // session-specific body footer (member sessions, thread membership)
+        // is Phase 4's `render()` extension, not this frontmatter tagging arm.
+        Some(KindPayload::Session(p)) => {
+            if p.msg_count > 0 {
+                fm.insert(
+                    "cortex-session-msg-count".to_string(),
+                    serde_yaml::Value::Number(p.msg_count.into()),
+                );
+            }
+            if !p.session_ids.is_empty() {
+                fm.insert(
+                    "cortex-session-ids".to_string(),
+                    serde_yaml::Value::Sequence(p.session_ids.iter().cloned().map(serde_yaml::Value::String).collect()),
+                );
+            }
+        }
         None => {}
     }
 

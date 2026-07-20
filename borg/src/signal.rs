@@ -708,6 +708,7 @@ fn display_for_attachment(content: &ContentKind, filename: &str) -> String {
         ContentKind::Document { .. } => "document",
         ContentKind::Url { .. } => "url",
         ContentKind::Text(_) => "text",
+        ContentKind::Session { .. } => "session",
     };
     format!("[{label}: {filename}]")
 }

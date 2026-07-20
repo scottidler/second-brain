@@ -86,3 +86,69 @@ Design doc: `docs/design/2026-07-17-harvest-clyde-sessions.md`
 ### Open questions
 
 None.
+
+## Phase 1: Schema seams
+
+### Design decisions
+
+- New enum arms landed across every enumerated site; each carries an `as_str`
+  arm, an `all()` arm, a `FromStr` arm, and a round-trip test:
+  - `NoteType::Session` and `Method::Harvest` - `vault/src/schema.rs`
+    (`:135`/`:389`) + `vault/src/schema/tests.rs`.
+  - `IngestKind::Session` and `ContentKind::Session { .. }` -
+    `borg/src/types.rs` (`:62`/`:40`) - both live in borg, not vault, as the
+    doc's round-2 correction noted.
+  - `GateId::Selection` - `borg/src/types.rs:119` (the selection gate's id),
+    wired through `borg/src/stages/alert.rs:73` so a selection rejection
+    formats a real alert.
+- Match sites wired to compile: `vault/src/trace.rs`, `borg/src/markdown.rs`
+  (frontmatter renderer), `vault/src/distilled.rs`, `distillers/src/render.rs`,
+  `distillers/src/dispatcher.rs`, `borg/src/triage.rs`, `borg/src/pipeline.rs`,
+  `borg/src/stages/{raw,distill}.rs`, `borg/src/signal.rs`,
+  `sb/src/cli/checks.rs`. The compiler drove the list; the earlier
+  rust-analyzer E0308 diagnostics were a mid-edit snapshot and are fully
+  resolved (`cargo check --workspace` clean).
+- Receipts migration (`borg/src/receipts.rs`, `borg/src/receipts/schema.sql`):
+  `SCHEMA_VERSION` bumped to `3`; both CHECK constraints widened -
+  `kind IN ('url','text','binary','session')` and
+  `status IN ('received','succeeded','failed','rejected')`. SQLite cannot
+  `ALTER` a CHECK, so the migration rebuilds the live `receipts` table only
+  when the existing SQL lacks `'rejected'` (idempotent guard at
+  `receipts.rs:215`), then records the version row.
+- New receipts vocabulary in `vault/src/receipts.rs`: `ReceiptKind::Session`
+  (`:111`, an honest kind - NOT reusing `text`, per the doc's "lying
+  identifier" note) and `ReceiptStatus::Rejected` (`:155`, distinct from
+  `Failed`: a below-bar candidate is a clean decline, not a broken ingest).
+- `borg::receipts::mark_rejected` (`:431`) promotes a `received` row to
+  `rejected` with a reason; `count_by_status` (`:665`) now returns the
+  `rejected` bucket so `sb doctor`/`GET /health/audit` aggregate it without
+  hard-erroring once the first rejected row lands (CLI surface itself is
+  Phase 6).
+
+### Deviations
+
+- None from the doc's spec. The enumerated site list in the doc used stale
+  line numbers (round-2 acknowledged this); I grepped each enum rather than
+  trusting the exact lines, which is what the doc's own correction instructs.
+
+### Tradeoffs
+
+- Table-rebuild migration vs a fresh `CREATE TABLE` on version mismatch:
+  chose the in-place rebuild guarded by a substring check on the live schema
+  so existing daemon-host receipts rows survive the widening (the receipts DB
+  is authoritative for ingest state and must not be dropped). The guard makes
+  it a genuine no-op on an already-migrated DB.
+
+### Open questions
+
+None.
+
+### Orchestration note
+
+Phase 1 was implemented by the `phase1` delegated agent, which completed all
+edits but stalled before running `otto ci`/committing (no build process, no
+commit). The orchestrator took over inline: verified every required arm and
+the migration by grep, ran `cargo check` (clean), `cargo test --workspace`
+(all green), and `otto ci` (`✅ All CI checks passed!`), then authored these
+notes and committed. No code was re-written - the stalled agent's edits were
+verified and adopted as-is.

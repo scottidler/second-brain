@@ -100,3 +100,17 @@ fn test_note_type_digest_review_variants() {
     assert!(NoteType::all().contains(&NoteType::Digest));
     assert!(NoteType::all().contains(&NoteType::Review));
 }
+
+#[test]
+fn test_note_type_session_variant() {
+    assert_eq!("session".parse::<NoteType>(), Ok(NoteType::Session));
+    assert_eq!(NoteType::Session.as_str(), "session");
+    assert!(NoteType::all().contains(&NoteType::Session));
+}
+
+#[test]
+fn test_method_includes_harvest() {
+    assert_eq!("harvest".parse::<Method>(), Ok(Method::Harvest));
+    assert_eq!(Method::Harvest.as_str(), "harvest");
+    assert!(Method::all().contains(&Method::Harvest));
+}

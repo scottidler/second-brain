@@ -89,6 +89,14 @@ fn classify_image_and_audio() {
 }
 
 #[test]
+fn classify_session() {
+    let kind = classify(&ContentKind::Session {
+        body: "human: hi\nassistant: hello".to_string(),
+    });
+    assert_eq!(kind, IngestKind::Session);
+}
+
+#[test]
 fn classify_text_with_embedded_url() {
     let body = "Interesting: https://example.com/article thoughts later.";
     let kind = classify(&ContentKind::Text(body.to_string()));

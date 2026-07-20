@@ -70,6 +70,9 @@ pub fn format_gate_alert(
         GateId::StructuralQuality => {
             out.push_str(&format!("replay: borg replay {trace_id} --from-stage 2"));
         }
+        GateId::Selection => {
+            out.push_str("no replay: below the harvest selection bar (sb borg harvest --force to reconsider)");
+        }
     }
     out
 }

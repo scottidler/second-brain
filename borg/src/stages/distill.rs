@@ -100,6 +100,7 @@ pub fn distill_kind_from_ingest(kind: IngestKind) -> Result<DistillKind> {
         IngestKind::VoiceNote => Ok(DistillKind::VoiceNote),
         IngestKind::Idea => Ok(DistillKind::Idea),
         IngestKind::VocabularyEn | IngestKind::VocabularyEs => Ok(DistillKind::Vocabulary),
+        IngestKind::Session => Ok(DistillKind::Session),
     }
 }
 

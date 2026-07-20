@@ -64,6 +64,19 @@ fn test_content_kind_text() {
 }
 
 #[test]
+fn test_content_kind_session() {
+    let kind = ContentKind::Session {
+        body: "human: hi\nassistant: hello".to_string(),
+    };
+    assert!(matches!(kind, ContentKind::Session { ref body } if body.starts_with("human:")));
+}
+
+#[test]
+fn test_ingest_kind_session_display() {
+    assert_eq!(IngestKind::Session.to_string(), "session");
+}
+
+#[test]
 fn test_ingest_result_with_failed_status() {
     let result = IngestResult {
         status: IngestStatus::Failed {

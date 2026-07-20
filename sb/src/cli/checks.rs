@@ -623,7 +623,7 @@ fn receipts_summary() -> Result<String, String> {
         return Err(format!("DB not yet created at {}", path.display()));
     }
     let conn = borg::receipts::open_at(&path).map_err(|e| e.to_string())?;
-    let (received, succeeded, failed) = borg::receipts::count_by_status(&conn).map_err(|e| e.to_string())?;
+    let (received, succeeded, failed, rejected) = borg::receipts::count_by_status(&conn).map_err(|e| e.to_string())?;
     let by_stage = borg::receipts::count_failed_by_stage(&conn).map_err(|e| e.to_string())?;
     let stage_summary = if by_stage.is_empty() {
         String::new()
@@ -631,8 +631,9 @@ fn receipts_summary() -> Result<String, String> {
         let parts: Vec<String> = by_stage.iter().map(|(s, n)| format!("{s}={n}")).collect();
         format!(" [{}]", parts.join(", "))
     };
+    let rejected_summary = if rejected > 0 { format!(", {rejected} rejected") } else { String::new() };
     Ok(format!(
-        "receipts: {received} received, {succeeded} succeeded, {failed} failed{stage_summary}"
+        "receipts: {received} received, {succeeded} succeeded, {failed} failed{rejected_summary}{stage_summary}"
     ))
 }
 

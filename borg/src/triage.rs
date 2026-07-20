@@ -27,7 +27,7 @@ pub fn audit_health_stats() -> Result<crate::routes::AuditHealth> {
 
 /// Conn-injectable core of [`audit_health_stats`].
 fn audit_health_stats_conn(conn: &Connection) -> Result<crate::routes::AuditHealth> {
-    let (received, succeeded, failed) = receipts::count_by_status(conn)?;
+    let (received, succeeded, failed, _) = receipts::count_by_status(conn)?;
     let crashed = receipts::count_failed_by_stage(conn)?
         .into_iter()
         .find(|(stage, _)| *stage == FailureStage::Crashed)

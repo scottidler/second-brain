@@ -40,7 +40,12 @@ fn failure_stage_parse_is_case_insensitive() {
 
 #[test]
 fn receipt_kind_roundtrip() {
-    for kind in [ReceiptKind::Url, ReceiptKind::Text, ReceiptKind::Binary] {
+    for kind in [
+        ReceiptKind::Url,
+        ReceiptKind::Text,
+        ReceiptKind::Binary,
+        ReceiptKind::Session,
+    ] {
         let parsed: ReceiptKind = kind.as_str().parse().expect("ReceiptKind parse roundtrip");
         assert_eq!(kind, parsed);
     }
@@ -48,10 +53,25 @@ fn receipt_kind_roundtrip() {
 
 #[test]
 fn receipt_status_roundtrip() {
-    for status in [ReceiptStatus::Received, ReceiptStatus::Succeeded, ReceiptStatus::Failed] {
+    for status in [
+        ReceiptStatus::Received,
+        ReceiptStatus::Succeeded,
+        ReceiptStatus::Failed,
+        ReceiptStatus::Rejected,
+    ] {
         let parsed: ReceiptStatus = status.as_str().parse().expect("ReceiptStatus parse roundtrip");
         assert_eq!(status, parsed);
     }
+}
+
+#[test]
+fn receipt_kind_session_as_str() {
+    assert_eq!(ReceiptKind::Session.as_str(), "session");
+}
+
+#[test]
+fn receipt_status_rejected_as_str() {
+    assert_eq!(ReceiptStatus::Rejected.as_str(), "rejected");
 }
 
 #[test]

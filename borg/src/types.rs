@@ -32,6 +32,14 @@ pub enum ContentKind {
         data: Vec<u8>,
         filename: String,
     },
+    /// A clyde session/thread export, pre-fetched by the harvest reader
+    /// (harvest-clyde-sessions design). `body` is the concatenated
+    /// role-labeled transcript text for every member session; Phase 3's
+    /// export reader constructs this, Phase 5's pipeline handler dispatches
+    /// on it.
+    Session {
+        body: String,
+    },
 }
 
 /// Content-kind classification for staged pipeline dispatch.
@@ -49,6 +57,9 @@ pub enum IngestKind {
     Idea,
     VocabularyEn,
     VocabularyEs,
+    /// A clyde session/thread selected by `sb borg harvest`
+    /// (harvest-clyde-sessions design).
+    Session,
 }
 
 impl fmt::Display for IngestKind {
@@ -63,6 +74,7 @@ impl fmt::Display for IngestKind {
             Self::Idea => write!(f, "idea"),
             Self::VocabularyEn => write!(f, "vocabulary-en"),
             Self::VocabularyEs => write!(f, "vocabulary-es"),
+            Self::Session => write!(f, "session"),
         }
     }
 }
@@ -100,6 +112,11 @@ pub enum GateId {
     FailedFetchParaphrase,
     /// Structural quality (word count, summary section, etc.) on the final note.
     StructuralQuality,
+    /// Harvest's selection gate (`sb borg harvest`, harvest-clyde-sessions
+    /// design): scores a clyde session candidate and rejects those below the
+    /// selection bar. The real gate for sessions - Gate-0 (domain blocklist)
+    /// is a structural no-op for this source.
+    Selection,
 }
 
 impl fmt::Display for GateId {
@@ -109,6 +126,7 @@ impl fmt::Display for GateId {
             Self::BlockPage => write!(f, "block-page"),
             Self::FailedFetchParaphrase => write!(f, "failed-fetch-paraphrase"),
             Self::StructuralQuality => write!(f, "structural-quality"),
+            Self::Selection => write!(f, "selection"),
         }
     }
 }

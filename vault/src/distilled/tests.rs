@@ -159,6 +159,42 @@ fn roundtrip_thread_payload() {
 }
 
 #[test]
+fn roundtrip_session_payload() {
+    let original = Distilled {
+        summary: "Debugged the token-broker refresh race.".to_string(),
+        tldr: None,
+        enumeration: None,
+        key_ideas: Vec::new(),
+        claims: vec![],
+        tags: vec![],
+        links: vec![],
+        kind_specific: Some(KindPayload::Session(SessionPayload {
+            repo: Some("scottidler/loopr".to_string()),
+            session_ids: vec!["abc123".to_string(), "def456".to_string()],
+            msg_count: 214,
+            date_start: Some("2026-07-01T09:00:00Z".to_string()),
+            date_end: Some("2026-07-02T17:30:00Z".to_string()),
+        })),
+        meta: sample_meta(),
+        transcript: None,
+    };
+
+    let yaml = serde_yaml::to_string(&original).expect("serialize");
+    let decoded: Distilled = serde_yaml::from_str(&yaml).expect("deserialize");
+
+    match decoded.kind_specific {
+        Some(KindPayload::Session(p)) => {
+            assert_eq!(p.repo.as_deref(), Some("scottidler/loopr"));
+            assert_eq!(p.session_ids, vec!["abc123".to_string(), "def456".to_string()]);
+            assert_eq!(p.msg_count, 214);
+            assert_eq!(p.date_start.as_deref(), Some("2026-07-01T09:00:00Z"));
+            assert_eq!(p.date_end.as_deref(), Some("2026-07-02T17:30:00Z"));
+        }
+        other => panic!("expected Session payload, got {other:?}"),
+    }
+}
+
+#[test]
 fn missing_optional_fields_deserialize_as_defaults() {
     let yaml = r#"
 summary: "Just a summary."

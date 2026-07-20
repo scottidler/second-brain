@@ -308,6 +308,19 @@ pub async fn process_content(
                 )
                 .await
             }
+            // Schema seam only (harvest-clyde-sessions design, Phase 1): the
+            // real dispatch (staged artifacts, SessionDistiller, atomic
+            // publish) is Phase 5's pipeline handler. `sb borg harvest`
+            // (Phase 3) does not yet construct this variant.
+            ContentKind::Session { .. } => IngestResult {
+                status: IngestStatus::Failed {
+                    reason: "ContentKind::Session pipeline dispatch not yet wired (Phase 5)".to_string(),
+                },
+                trace_id: Some(trace_id.clone()),
+                method: Some(method),
+                failure_stage: Some(FailureStage::ClassifyFailed),
+                ..Default::default()
+            },
         }
     };
     result.trace_id = Some(trace_id.clone());

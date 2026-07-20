@@ -18,6 +18,7 @@ pub fn classify(content: &ContentKind) -> IngestKind {
         ContentKind::Url { url, .. } => classify_url(url),
         ContentKind::Image { .. } | ContentKind::Pdf { .. } | ContentKind::Document { .. } => IngestKind::Image,
         ContentKind::Audio { .. } => IngestKind::VoiceNote,
+        ContentKind::Session { .. } => IngestKind::Session,
     }
 }
 
@@ -128,6 +129,9 @@ pub fn write_capture<S: ArtifactStore>(
         }
         ContentKind::Audio { data, filename } => {
             store.write_attachment(trace_id, filename, data)?;
+        }
+        ContentKind::Session { body } => {
+            store.write_body(trace_id, body.as_bytes())?;
         }
     }
     Ok(envelope)
