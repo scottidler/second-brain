@@ -764,6 +764,28 @@ fn trace_block_unparseable_expires_is_null_window() {
     assert_eq!(block["within-window"], json!(null));
 }
 
+/// Regression guard for the harvest-clyde-sessions design, Phase 1:
+/// `schema_info` derives `note_types` from `NoteType::all()`, so a new
+/// schema variant (`NoteType::Session`) must appear here with zero
+/// oracle-side wiring. If this ever fails, `schema_info` stopped deriving
+/// from the schema enum and started hardcoding a list.
+#[tokio::test]
+async fn schema_info_includes_session_note_type() {
+    let db = SearchIndex::open_memory().expect("open db");
+    let server = OracleMcpServer::new(Config::default(), db);
+    let result = server
+        .dispatch("schema_info", json!({}))
+        .await
+        .expect("schema_info dispatch");
+    assert_ne!(result.is_error, Some(true), "schema_info returned an error");
+    let parsed = first_content_as_json(&result);
+    let note_types = parsed["note_types"].as_array().expect("note_types array");
+    assert!(
+        note_types.iter().any(|v| v == "session"),
+        "note_types must include 'session': {note_types:?}"
+    );
+}
+
 #[test]
 fn format_note_carries_trace_block_at_every_level() {
     let row = trace_note_row("ht-95aa4e", "2026-06-20", "2999-12-31");
