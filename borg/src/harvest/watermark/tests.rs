@@ -65,13 +65,13 @@ fn lock_releases_on_drop() {
 #[test]
 fn body_hash_is_stable_and_content_sensitive() {
     let a = vec![BodyMessage {
-        role: "user".into(),
-        text: "hello".into(),
+        role: Some("user".into()),
+        text: Some("hello".into()),
         subagent: false,
     }];
     let b = vec![BodyMessage {
-        role: "user".into(),
-        text: "hello world".into(),
+        role: Some("user".into()),
+        text: Some("hello world".into()),
         subagent: false,
     }];
     let ha = body_hash(&canonical_body_text(&a));
@@ -83,13 +83,13 @@ fn body_hash_is_stable_and_content_sensitive() {
 #[test]
 fn subagent_flag_changes_the_hash() {
     let plain = vec![BodyMessage {
-        role: "assistant".into(),
-        text: "x".into(),
+        role: Some("assistant".into()),
+        text: Some("x".into()),
         subagent: false,
     }];
     let sub = vec![BodyMessage {
-        role: "assistant".into(),
-        text: "x".into(),
+        role: Some("assistant".into()),
+        text: Some("x".into()),
         subagent: true,
     }];
     assert_ne!(
@@ -101,13 +101,13 @@ fn subagent_flag_changes_the_hash() {
 #[test]
 fn thread_body_distinguishes_member_splits() {
     let m = vec![BodyMessage {
-        role: "user".into(),
-        text: "one".into(),
+        role: Some("user".into()),
+        text: Some("one".into()),
         subagent: false,
     }];
     let n = vec![BodyMessage {
-        role: "user".into(),
-        text: "two".into(),
+        role: Some("user".into()),
+        text: Some("two".into()),
         subagent: false,
     }];
     // [a: one][b: two] must not hash like [a: one two] (same concatenated text,
@@ -117,13 +117,13 @@ fn thread_body_distinguishes_member_splits() {
         "a".into(),
         vec![
             BodyMessage {
-                role: "user".into(),
-                text: "one".into(),
+                role: Some("user".into()),
+                text: Some("one".into()),
                 subagent: false,
             },
             BodyMessage {
-                role: "user".into(),
-                text: "two".into(),
+                role: Some("user".into()),
+                text: Some("two".into()),
                 subagent: false,
             },
         ],

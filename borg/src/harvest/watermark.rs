@@ -167,10 +167,18 @@ fn lock_path_for(state_path: &Path) -> PathBuf {
 pub fn canonical_body_text(messages: &[BodyMessage]) -> String {
     let mut out = String::new();
     for msg in messages {
-        let role = if msg.subagent { format!("{}[subagent]", msg.role) } else { msg.role.clone() };
+        // `role`/`text` are defensively `Option` (future-malformed tolerance,
+        // see `BodyMessage` docs); an absent field degrades to empty rather
+        // than aborting the re-appearance hash.
+        let role_text = msg.role.as_deref().unwrap_or("");
+        let role = if msg.subagent {
+            format!("{role_text}[subagent]")
+        } else {
+            role_text.to_string()
+        };
         out.push_str(&role);
         out.push_str(": ");
-        out.push_str(&msg.text);
+        out.push_str(msg.text.as_deref().unwrap_or(""));
         out.push('\n');
     }
     out

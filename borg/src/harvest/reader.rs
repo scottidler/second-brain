@@ -17,7 +17,7 @@ use std::time::Duration;
 use eyre::{Context, Result, bail};
 use tokio::process::Command as TokioCommand;
 
-use super::contract::{SessionExport, SessionRecord, parse_export};
+use super::contract::{ParsedExport, SessionRecord, parse_export};
 
 /// Wall-clock cap on any single `clyde session export` invocation. A bulk
 /// metadata page is fast; a `--with-body` read of a very long transcript is
@@ -34,12 +34,8 @@ pub trait ExportReader {
     /// `limit` caps rows per page (clyde guarantees consecutive pages
     /// concatenate with no gap/overlap), so `--limit` is lossless: the cursor
     /// advances only over the returned rows and the next run continues.
-    async fn export_bulk(
-        &self,
-        cursor: Option<i64>,
-        since: Option<&str>,
-        limit: Option<usize>,
-    ) -> Result<SessionExport>;
+    async fn export_bulk(&self, cursor: Option<i64>, since: Option<&str>, limit: Option<usize>)
+    -> Result<ParsedExport>;
 
     /// One session's full record WITH its parsed transcript body. The identity
     /// anchor for re-appearance: harvest hashes the returned body.
@@ -121,7 +117,7 @@ impl ExportReader for ClydeExportReader {
         cursor: Option<i64>,
         since: Option<&str>,
         limit: Option<usize>,
-    ) -> Result<SessionExport> {
+    ) -> Result<ParsedExport> {
         log::debug!(
             "harvest::ClydeExportReader::export_bulk: cursor={:?} since={:?} limit={:?}",
             cursor,
@@ -149,11 +145,23 @@ impl ExportReader for ClydeExportReader {
         log::debug!("harvest::ClydeExportReader::export_with_body: id={id}");
         let args = vec!["--id".to_string(), id.to_string(), "--with-body".to_string()];
         let bytes = self.run(&args).await?;
-        let mut export = parse_export(&bytes)?;
-        if export.sessions.is_empty() {
-            bail!("clyde session export --id {id} --with-body returned no session");
+        let mut parsed = parse_export(&bytes)?;
+        // A single-session `--with-body` export whose one record is malformed
+        // surfaces as an empty `sessions` + a parse-rejection. WARN and bail
+        // loudly (this path is a targeted deep re-check fetch, not the batch
+        // path where a durable receipt matters).
+        for rej in &parsed.rejections {
+            log::warn!(
+                "harvest::ClydeExportReader::export_with_body: id={id} skipped malformed record index={} session_id={:?}: {}",
+                rej.index,
+                rej.session_id,
+                rej.reason
+            );
         }
-        Ok(export.sessions.remove(0))
+        if parsed.export.sessions.is_empty() {
+            bail!("clyde session export --id {id} --with-body returned no parseable session");
+        }
+        Ok(parsed.export.sessions.remove(0))
     }
 }
 

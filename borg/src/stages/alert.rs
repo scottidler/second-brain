@@ -73,6 +73,9 @@ pub fn format_gate_alert(
         GateId::Selection => {
             out.push_str("no replay: below the harvest selection bar (sb borg harvest --force to reconsider)");
         }
+        GateId::Parse => {
+            out.push_str("no replay: malformed clyde export record skipped (fix the contract, then re-run harvest)");
+        }
     }
     out
 }

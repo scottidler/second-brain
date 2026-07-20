@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, FixedOffset};
-use eyre::{Context, Result};
+use eyre::{Context, Result, eyre};
 
 use super::contract::SessionRecord;
 
@@ -45,7 +45,11 @@ impl Thread {
     }
 }
 
-fn parse_ts(session: &SessionRecord, which: &str, raw: &str) -> Result<DateTime<FixedOffset>> {
+fn parse_ts(session: &SessionRecord, which: &str, raw: Option<&str>) -> Result<DateTime<FixedOffset>> {
+    // A null `created` is guarded at the selection stage (`select.rs`) and
+    // never reaches clustering; this `None` arm is the fail-loud backstop for a
+    // caller that bypassed selection, never a silent drop.
+    let raw = raw.ok_or_else(|| eyre!("session {} has a null {which} timestamp", session.session_id))?;
     DateTime::parse_from_rfc3339(raw).with_context(|| {
         format!(
             "session {} has an unparseable {which} timestamp {raw:?}",
@@ -55,10 +59,12 @@ fn parse_ts(session: &SessionRecord, which: &str, raw: &str) -> Result<DateTime<
 }
 
 /// The cluster key. `git-branch` present-null collapses to a stable sentinel
-/// so branch-less sessions still cluster on cwd alone.
+/// so branch-less sessions still cluster on cwd alone. A null `cwd` (a record
+/// that bypassed the selection gate's repo check) collapses to the empty
+/// string so clustering never panics.
 fn cluster_key(record: &SessionRecord) -> (String, String) {
     let branch = record.git_branch.clone().unwrap_or_else(|| "\u{0}none".to_string());
-    (record.cwd.clone(), branch)
+    (record.cwd.clone().unwrap_or_default(), branch)
 }
 
 /// Pick the primary index: most messages, ties broken by session id (stable).
@@ -93,8 +99,8 @@ pub fn cluster_threads(records: &[SessionRecord], window: Duration) -> Result<Ve
         let mut keyed: Vec<(DateTime<FixedOffset>, DateTime<FixedOffset>, SessionRecord)> =
             Vec::with_capacity(group.len());
         for r in group.drain(..) {
-            let created = parse_ts(&r, "created", &r.created)?;
-            let modified = parse_ts(&r, "modified", &r.modified)?;
+            let created = parse_ts(&r, "created", r.created.as_deref())?;
+            let modified = parse_ts(&r, "modified", Some(&r.modified))?;
             keyed.push((created, modified, r));
         }
         keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.session_id.cmp(&b.2.session_id)));

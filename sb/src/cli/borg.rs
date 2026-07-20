@@ -758,6 +758,17 @@ fn print_harvest_report(report: &borg::harvest::HarvestReport) {
         for r in &report.plan.rejections {
             println!("  {} - {}", r.session_id, r.record.reason);
         }
+        if !report.parse_rejections.is_empty() {
+            println!();
+            println!(
+                "Skipped {} unparseable record(s) (would receipt as rejected on a live run):",
+                report.parse_rejections.len()
+            );
+            for r in &report.parse_rejections {
+                let id = r.session_id.as_deref().unwrap_or("<unreadable session-id>");
+                println!("  {id} (index {}) - {}", r.index, r.reason);
+            }
+        }
         return;
     }
 
@@ -782,8 +793,9 @@ fn print_harvest_report(report: &borg::harvest::HarvestReport) {
     }
     println!();
     println!(
-        "Rejected {} candidate(s); cursor -> {}",
+        "Rejected {} candidate(s); skipped {} unparseable record(s); cursor -> {}",
         report.plan.rejections.len(),
+        report.parse_rejections.len(),
         report.plan.new_cursor
     );
 }

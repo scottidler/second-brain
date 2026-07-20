@@ -128,6 +128,12 @@ pub enum GateId {
     /// selection bar. The real gate for sessions - Gate-0 (domain blocklist)
     /// is a structural no-op for this source.
     Selection,
+    /// Harvest's per-record PARSE gate (`sb borg harvest`, harvest-completion
+    /// design Phase 1): a single `sessions[]` element that failed contract
+    /// deserialization is skipped and receipted here (rather than aborting the
+    /// whole batch), keyed by the `session-id` recovered from the malformed
+    /// element. The durable-skip defense against a future clyde contract drift.
+    Parse,
 }
 
 impl fmt::Display for GateId {
@@ -138,6 +144,7 @@ impl fmt::Display for GateId {
             Self::FailedFetchParaphrase => write!(f, "failed-fetch-paraphrase"),
             Self::StructuralQuality => write!(f, "structural-quality"),
             Self::Selection => write!(f, "selection"),
+            Self::Parse => write!(f, "parse"),
         }
     }
 }

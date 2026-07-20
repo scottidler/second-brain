@@ -12,7 +12,7 @@
 //! 4. `n-msgs >= min_msgs` (substantive, not a one-shot)
 //! 5. title/first-prompt match no exclusion pattern
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use regex::Regex;
 
 use super::contract::{EnrichStatus, SessionRecord};
@@ -132,7 +132,10 @@ pub fn evaluate_selection(
             return Err(reject(
                 record,
                 trace_id,
-                format!("cwd {:?} is not a repo (no <org>/<repo> anchor)", record.cwd),
+                format!(
+                    "cwd {:?} is not a repo (no <org>/<repo> anchor)",
+                    record.cwd.as_deref().unwrap_or("<null>")
+                ),
             ));
         }
     }
@@ -145,8 +148,37 @@ pub fn evaluate_selection(
         ));
     }
 
+    // A null/unparseable `created` is rejected HERE, at the selection stage,
+    // so it never reaches `cluster::parse_ts` (which errors the WHOLE plan on
+    // an absent/unparseable created). `modified` stays non-null in the
+    // contract, so only `created` needs this guard (harvest-completion design,
+    // Data Model). `None` matches no exclusion pattern below, so this guard
+    // runs first.
+    match record.created.as_deref() {
+        Some(created) if DateTime::parse_from_rfc3339(created).is_ok() => {}
+        Some(created) => {
+            return Err(reject(
+                record,
+                trace_id,
+                format!("created timestamp {created:?} is not valid RFC-3339"),
+            ));
+        }
+        None => {
+            return Err(reject(
+                record,
+                trace_id,
+                "created timestamp is null (empty/never-touched session)".to_string(),
+            ));
+        }
+    }
+
+    // A `None` title/first-prompt matches no pattern (an absent field cannot be
+    // excluded); `.as_deref().unwrap_or("")` keeps the non-null behavior
+    // byte-identical.
     for re in &config.exclude_patterns {
-        if re.is_match(&record.title) || re.is_match(&record.first_prompt) {
+        if re.is_match(record.title.as_deref().unwrap_or(""))
+            || re.is_match(record.first_prompt.as_deref().unwrap_or(""))
+        {
             return Err(reject(
                 record,
                 trace_id,

@@ -82,3 +82,95 @@ Design doc: `docs/design/2026-07-20-harvest-completion.md`
 
 ### Open questions
 - None.
+
+## Phase 1: Contract null-tolerance + per-record resilience + created guard
+
+### Design decisions
+- Relaxed `cwd`/`created`/`title`/`first_prompt` to present-null
+  `Option<String>` (`#[serde(default)]`) in `SessionRecord`
+  (`borg/src/harvest/contract.rs`). `host`/`scope` left NON-null per the
+  code-verified Resolved Decision. `BodyMessage.role`/`text` got a DEFENSIVE
+  `Option<String>`, labeled in-code as future-malformed tolerance (clyde
+  constructs them non-null today).
+- `parse_export` (`contract.rs`) rewritten from one whole-array
+  `serde_json::from_slice` to an envelope parse (`RawExport`, `sessions:
+  Vec<serde_json::Value>`) + per-element `serde_json::from_value`. A malformed
+  element is SKIPPED, logged WARN, and carried out as a `ParseRejection`
+  (`session_id` recovered from the element's `session-id` Value BEFORE the
+  record is consumed; `index` fallback when the id is unreadable). New return
+  type `ParsedExport { export, rejections }`. The schema-version check stays
+  FAIL-CLOSED (wrong MAJOR still bails the whole run before any per-record work).
+- Durable receipt discipline wired at the run seam
+  (`harvest.rs::run_with`): `reader.export_bulk` now returns `ParsedExport`; on
+  the LIVE path the parse rejections are converted to `RejectionOutcome`
+  (`parse_rejection_to_outcome`, `GateId::Parse`, `StageKind::Raw`, `source:
+  clyde://<id>`) and flow through the EXISTING `write_rejections`
+  (`received->rejected` receipt + `rejection.yml`) BEFORE `state.save` advances
+  the cursor. Dry-run persists nothing and only WARNs (surfaced in
+  `HarvestReport.parse_rejections` and the CLI report for the operator's soak
+  review).
+- Selection-stage `created` guard added in
+  `select.rs::evaluate_selection`: a null OR non-RFC-3339 `created` is rejected
+  (`GateId::Selection`) so it never reaches `cluster.rs::parse_ts` (which errors
+  the whole plan). `modified` stays non-null, so only `created` is guarded.
+- Call sites fixed behavior-preserving: `select.rs:149` exclusion match ->
+  `.as_deref().unwrap_or("")` on `title`/`first_prompt` (a `None` matches no
+  pattern); `select.rs` non-repo message -> `cwd.as_deref().unwrap_or("<null>")`;
+  `cluster.rs::cluster_key` -> `cwd.clone().unwrap_or_default()`;
+  `cluster.rs::parse_ts` signature -> `Option<&str>` with a fail-loud `None`
+  backstop; `pipeline/session.rs:160` title fallback -> `match
+  primary.title.as_deref()` (null OR empty -> `Session <id>`);
+  `pipeline/session.rs::earliest_created` -> `Option`-guards `created` (warn +
+  skip); `render_member_details` -> `title.as_deref().unwrap_or("")`;
+  `watermark.rs::canonical_body_text` -> `role`/`text` `as_deref().unwrap_or("")`;
+  `stages/alert.rs::format_gate_alert` -> new `GateId::Parse` arm.
+- New `GateId::Parse` variant (`types.rs`) so a parse-skip's `rejection.yml`
+  tells the truth about which gate declined (not `Selection`).
+
+### Deviations
+- `ParseRejection` carries the element `index`, not a raw byte offset, as the
+  fallback identifier when `session-id` is unreadable. The doc says "byte-offset
+  fallback"; the per-element `serde_json::from_value` seam exposes no byte
+  offset (byte offsets only exist for the old whole-slice parse). The element
+  index is the equivalent durable positional key - same effect, correct seam.
+- Added a `parse_rejections: Vec<ParseRejection>` field to `HarvestReport` and
+  two CLI report lines (`sb/src/cli/borg.rs`) beyond the strict Phase 1 bullet
+  list, so a parse skip is visible in dry-run output too (the doc calls dry-run
+  WARN-only; this is additive visibility, not a persisted receipt, consistent
+  with "never limp along silently").
+- Consolidated the two per-file XDG_DATA_HOME test locks into ONE shared
+  `crate::harvest::TEST_XDG_LOCK` (`harvest.rs`, used by both `harvest::tests`
+  and `harvest::publish::tests`). The new live-run test redirects XDG the same
+  way `publish::tests` does; a per-file lock let them race the redirected
+  receipts DB (caught by `otto ci`: `publish_plan_publishes_and_rerun_is_idempotent`
+  flaked once under the full parallel suite). Not called out in the spec, but
+  required to keep the suite deterministic.
+
+### Tradeoffs
+- The live-path "receipt before cursor advance" test
+  (`harvest::tests::live_run_writes_parse_skip_receipt_before_cursor_advances`)
+  asserts BOTH the durable `received->rejected` receipt exists AND the state
+  file cursor advanced, after a live `run_with`. The strict temporal ordering is
+  structural in `run_with` (`write_rejections` precedes `state.save`); the test
+  proves both effects landed in the one live run. Chosen over refactoring
+  `run_with` to inject a connection purely for a finer ordering probe - the
+  existing `publish::tests` XDG pattern is the precedent, and `write_rejections`
+  itself is separately unit-tested for the durable-receipt half.
+- Per-element `serde_json::from_value` re-parses each already-parsed `Value`
+  into a `SessionRecord` (a second pass over the element). At tens-to-low-
+  thousands of sessions per run this is negligible, and it buys per-record
+  resilience the whole-slice parse cannot give.
+
+### Open questions
+- **`sb borg harvest --dry-run --since 7d` success criterion is structurally
+  unverifiable under clyde's defaults.** clyde `session export` defaults
+  `--dormant-after 7d` and computes `dormant = now - modified > 7d`
+  (`clyde/sessions/src/db/query.rs:316`, `clyde/clyde/src/cli.rs:225`).
+  Harvest's `--since 7d` returns only sessions with `now - modified <= 7d`, which
+  are by definition NOT dormant - the dormancy gate is the FIRST selection
+  check, so a 7d window can never select a session. Confirmed live:
+  `clyde session export --since 7d` reports 0 dormant of 174. The `--since 60d`
+  criterion PASSES (exit 0, 209 publishable, previously aborted by the null-string
+  bug). The 7d publishable>0 criterion is reported UNVERIFIED (mis-specified);
+  it needs the parent/Scott to either drop it or restate it (e.g. the steady-
+  state cursor window, or a `--since` longer than `--dormant-after`).

@@ -7,17 +7,17 @@ fn base() -> SessionRecord {
         session_id: "s1".to_string(),
         host: "desk".to_string(),
         scope: "work".to_string(),
-        cwd: "/home/saidler/repos/tatari-tv/marquee".to_string(),
+        cwd: Some("/home/saidler/repos/tatari-tv/marquee".to_string()),
         project_dir: None,
         repo: Some("tatari-tv/marquee".to_string()),
         git_branch: Some("main".to_string()),
-        created: "2026-07-01T00:00:00+00:00".to_string(),
+        created: Some("2026-07-01T00:00:00+00:00".to_string()),
         modified: "2026-07-01T01:00:00+00:00".to_string(),
         updated_at: None,
         duration_secs: None,
         dormant: true,
-        title: "substantive engineering work".to_string(),
-        first_prompt: "do the thing".to_string(),
+        title: Some("substantive engineering work".to_string()),
+        first_prompt: Some("do the thing".to_string()),
         n_msgs: 50,
         model: None,
         summary: None,
@@ -86,7 +86,7 @@ fn enrichment_does_not_imply_dormancy() {
 fn rejects_non_repo_cwd() {
     let mut r = base();
     r.repo = None;
-    r.cwd = "/home/saidler".to_string();
+    r.cwd = Some("/home/saidler".to_string());
     let rec = evaluate_selection(&r, &cfg(6, &[]), "hv-000001").unwrap_err();
     assert!(rec.reason.contains("is not a repo"), "{}", rec.reason);
 }
@@ -110,7 +110,7 @@ fn rejects_below_message_threshold() {
 #[test]
 fn rejects_excluded_title_pattern() {
     let mut r = base();
-    r.title = "security-review: workflow audit".to_string();
+    r.title = Some("security-review: workflow audit".to_string());
     let rec = evaluate_selection(&r, &cfg(6, &["security-review"]), "hv-000001").unwrap_err();
     assert!(rec.reason.contains("excluded by pattern"), "{}", rec.reason);
 }
@@ -118,9 +118,41 @@ fn rejects_excluded_title_pattern() {
 #[test]
 fn rejects_excluded_first_prompt_pattern() {
     let mut r = base();
-    r.first_prompt = "sure".to_string();
+    r.first_prompt = Some("sure".to_string());
     let rec = evaluate_selection(&r, &cfg(6, &["^sure$"]), "hv-000001").unwrap_err();
     assert!(rec.reason.contains("excluded by pattern"), "{}", rec.reason);
+}
+
+#[test]
+fn rejects_null_created() {
+    // A present-null `created` (empty/never-touched session) is rejected at the
+    // selection stage so it never reaches `cluster::parse_ts` (which would
+    // error the WHOLE plan). harvest-completion Phase 1 created guard.
+    let mut r = base();
+    r.created = None;
+    let rec = evaluate_selection(&r, &cfg(6, &[]), "hv-000001").unwrap_err();
+    assert!(rec.reason.contains("created timestamp is null"), "{}", rec.reason);
+    assert_eq!(rec.gate, crate::types::GateId::Selection);
+}
+
+#[test]
+fn rejects_unparseable_created() {
+    // A non-null-but-garbage `created` is rejected at selection too, so a bad
+    // timestamp can never abort clustering.
+    let mut r = base();
+    r.created = Some("not-a-timestamp".to_string());
+    let rec = evaluate_selection(&r, &cfg(6, &[]), "hv-000001").unwrap_err();
+    assert!(rec.reason.contains("not valid RFC-3339"), "{}", rec.reason);
+}
+
+#[test]
+fn happy_path_selects_with_null_title_and_first_prompt() {
+    // A null title/first-prompt matches no exclusion pattern (an absent field
+    // cannot be excluded) and must not block selection.
+    let mut r = base();
+    r.title = None;
+    r.first_prompt = None;
+    assert!(evaluate_selection(&r, &cfg(6, &["security-review"]), "hv-000001").is_ok());
 }
 
 #[test]

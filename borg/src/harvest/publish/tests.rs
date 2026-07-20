@@ -1,10 +1,9 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
 use tempfile::TempDir;
-use tokio::sync::Mutex;
 
 use crate::config::Config;
-use crate::harvest::contract::{BodyMessage, EnrichStatus, SessionExport, SessionRecord};
+use crate::harvest::contract::{BodyMessage, EnrichStatus, ParsedExport, SessionExport, SessionRecord};
 use crate::harvest::select::SelectionConfig;
 use crate::harvest::watermark::WatermarkState;
 use crate::harvest::{HarvestOpts, plan_harvest};
@@ -13,27 +12,27 @@ use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
 
 // Env-var mutation isn't safe under parallel tests (rust.md "Platform path
 // testing"): serialize every test that points XDG_DATA_HOME at a tempdir. The
-// lock is held across `.await` (this test drives real async pipeline work
-// while XDG_DATA_HOME must stay pinned), so it's a `tokio::sync::Mutex`, not
-// `std::sync::Mutex` (which clippy::await_holding_lock correctly rejects here).
-static ENV_LOCK: Mutex<()> = Mutex::const_new(());
+// ONE shared lock (`crate::harvest::TEST_XDG_LOCK`) also serializes against
+// `harvest::tests`'s live-run test, which redirects the same env var - a
+// per-file lock would let those two race the receipts DB.
+use crate::harvest::TEST_XDG_LOCK as ENV_LOCK;
 
 fn session_record(id: &str, created: &str, modified: &str, n_msgs: i64) -> SessionRecord {
     SessionRecord {
         session_id: id.to_string(),
         host: "desk".to_string(),
         scope: "work".to_string(),
-        cwd: "/home/saidler/repos/tatari-tv/slack-cli/main".to_string(),
+        cwd: Some("/home/saidler/repos/tatari-tv/slack-cli/main".to_string()),
         project_dir: None,
         repo: Some("tatari-tv/slack-cli".to_string()),
         git_branch: Some("main".to_string()),
-        created: created.to_string(),
+        created: Some(created.to_string()),
         modified: modified.to_string(),
         updated_at: None,
         duration_secs: Some(600),
         dormant: true,
-        title: format!("session {id}"),
-        first_prompt: "do the thing".to_string(),
+        title: Some(format!("session {id}")),
+        first_prompt: Some("do the thing".to_string()),
         n_msgs,
         model: None,
         summary: None,
@@ -64,8 +63,11 @@ impl ExportReader for FakeReader {
         _cursor: Option<i64>,
         _since: Option<&str>,
         _limit: Option<usize>,
-    ) -> eyre::Result<SessionExport> {
-        Ok(self.bulk.clone())
+    ) -> eyre::Result<ParsedExport> {
+        Ok(ParsedExport {
+            export: self.bulk.clone(),
+            rejections: Vec::new(),
+        })
     }
 
     async fn export_with_body(&self, id: &str) -> eyre::Result<SessionRecord> {
@@ -155,16 +157,16 @@ async fn publish_plan_publishes_and_rerun_is_idempotent() {
             (
                 "871f6428".to_string(),
                 vec![BodyMessage {
-                    role: "human".to_string(),
-                    text: "let's build the thing".to_string(),
+                    role: Some("human".to_string()),
+                    text: Some("let's build the thing".to_string()),
                     subagent: false,
                 }],
             ),
             (
                 "4ae69e3a".to_string(),
                 vec![BodyMessage {
-                    role: "assistant".to_string(),
-                    text: "here's a plan".to_string(),
+                    role: Some("assistant".to_string()),
+                    text: Some("here's a plan".to_string()),
                     subagent: false,
                 }],
             ),

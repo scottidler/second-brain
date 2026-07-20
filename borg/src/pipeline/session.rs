@@ -157,10 +157,12 @@ pub(crate) async fn process_session_inner(
         rendered_distilled.body_markdown.clone()
     };
 
-    let title = if primary.title.trim().is_empty() {
-        format!("Session {primary_id}")
-    } else {
-        primary.title.clone()
+    // `title` is present-null in the contract; a null OR empty title falls back
+    // to `Session <id>` (the null case is new in harvest-completion Phase 1;
+    // the empty-string case is preserved).
+    let title = match primary.title.as_deref() {
+        Some(t) if !t.trim().is_empty() => t.to_string(),
+        _ => format!("Session {primary_id}"),
     };
 
     let tz = config.frontmatter.timezone_tz();
@@ -271,14 +273,23 @@ fn build_session_metadata(members: &[SessionRecord], primary_id: &str, body_trun
 fn earliest_created(members: &[SessionRecord]) -> Option<String> {
     let mut best: Option<(DateTime<FixedOffset>, String)> = None;
     for m in members {
-        match DateTime::parse_from_rfc3339(&m.created) {
+        // `created` is present-null; a null value is guarded at selection, so
+        // reaching here with `None` means a caller bypassed that gate - warn
+        // and skip it from the min/max rather than failing the whole publish.
+        let Some(created) = m.created.as_deref() else {
+            log::warn!(
+                "build_session_metadata: null created timestamp on session {}",
+                m.session_id
+            );
+            continue;
+        };
+        match DateTime::parse_from_rfc3339(created) {
             Ok(dt) => match &best {
                 Some((b, _)) if dt >= *b => {}
-                _ => best = Some((dt, m.created.clone())),
+                _ => best = Some((dt, created.to_string())),
             },
             Err(e) => log::warn!(
-                "build_session_metadata: unparseable created timestamp {:?} on session {}: {e}",
-                m.created,
+                "build_session_metadata: unparseable created timestamp {created:?} on session {}: {e}",
                 m.session_id
             ),
         }
@@ -322,7 +333,7 @@ fn render_member_details(members: &[SessionRecord]) -> String {
         out.push_str(&format!(
             "- clyde://{} - {} - `{repo}` - {duration}\n",
             m.session_id,
-            m.title.trim()
+            m.title.as_deref().unwrap_or("").trim()
         ));
     }
     out.push('\n');

@@ -3,7 +3,7 @@ use super::*;
 use std::sync::Mutex;
 use tempfile::TempDir;
 
-use contract::{BodyMessage, SessionRecord, parse_export};
+use contract::{BodyMessage, ParseRejection, ParsedExport, SessionRecord, parse_export};
 use watermark::{Reappearance, body_hash, thread_body_text};
 
 use crate::config::StagingLayout;
@@ -24,14 +24,19 @@ const SINGLE: &str = concat!(
 );
 
 fn load(path: &str) -> SessionExport {
-    parse_export(&std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"))).unwrap()
+    parse_export(&std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}")))
+        .unwrap()
+        .export
 }
 
 /// In-memory reader so selection/clustering/watermark logic runs without the
 /// clyde binary. Records every `export_with_body` id so tests can assert a
-/// Skip fetched NO body ("skip WITHOUT re-distilling").
+/// Skip fetched NO body ("skip WITHOUT re-distilling"). `parse_rejections` are
+/// carried out of `export_bulk` alongside the good records, exactly as the real
+/// per-record parse boundary does.
 struct FakeReader {
     bulk: SessionExport,
+    parse_rejections: Vec<ParseRejection>,
     bodies: std::collections::BTreeMap<String, Vec<BodyMessage>>,
     with_body_calls: Mutex<Vec<String>>,
 }
@@ -40,9 +45,15 @@ impl FakeReader {
     fn new(bulk: SessionExport) -> Self {
         Self {
             bulk,
+            parse_rejections: Vec::new(),
             bodies: std::collections::BTreeMap::new(),
             with_body_calls: Mutex::new(Vec::new()),
         }
+    }
+
+    fn with_parse_rejections(mut self, rejections: Vec<ParseRejection>) -> Self {
+        self.parse_rejections = rejections;
+        self
     }
 
     fn with_body(mut self, id: &str, body: Vec<BodyMessage>) -> Self {
@@ -61,8 +72,11 @@ impl reader::ExportReader for FakeReader {
         _cursor: Option<i64>,
         _since: Option<&str>,
         _limit: Option<usize>,
-    ) -> eyre::Result<SessionExport> {
-        Ok(self.bulk.clone())
+    ) -> eyre::Result<ParsedExport> {
+        Ok(ParsedExport {
+            export: self.bulk.clone(),
+            rejections: self.parse_rejections.clone(),
+        })
     }
 
     async fn export_with_body(&self, id: &str) -> eyre::Result<SessionRecord> {
@@ -90,8 +104,8 @@ fn opts(min_msgs: usize, patterns: &[&str], force: bool) -> HarvestOpts {
 
 fn msg(text: &str) -> Vec<BodyMessage> {
     vec![BodyMessage {
-        role: "user".into(),
-        text: text.into(),
+        role: Some("user".into()),
+        text: Some(text.into()),
         subagent: false,
     }]
 }
@@ -399,4 +413,116 @@ async fn run_with_dry_run_writes_nothing_and_reports_selection() {
     // all NewNote, so the deep-check body-fetch path never runs at plan time).
     assert!(!state_path.exists(), "dry-run must not write the state file");
     assert_eq!(reader.body_fetch_count(), 0, "dry-run fetches no bodies");
+}
+
+#[tokio::test]
+async fn dry_run_surfaces_parse_rejections_but_writes_no_receipt() {
+    // Dry-run persists nothing and advances no watermark, so a parse skip is
+    // WARN-only there (harvest-completion Phase 1) - the report still surfaces
+    // it for the operator's soak review, but no receipt is forced.
+    let reader = FakeReader::new(load(GOLDEN)).with_parse_rejections(vec![ParseRejection {
+        session_id: Some("malformed-aaaa".to_string()),
+        index: 3,
+        reason: "malformed session record: invalid type".to_string(),
+    }]);
+    let mut config = crate::config::Config::default();
+    config.harvest.min_msgs = 6;
+    let tmp = TempDir::new().unwrap();
+    let state_path = tmp.path().join("harvest-state.json");
+
+    let report = run_with(&reader, &config, &state_path, None, None, false, true)
+        .await
+        .expect("dry-run");
+
+    assert_eq!(report.parse_rejections.len(), 1, "parse skip surfaced in the report");
+    assert_eq!(report.parse_rejections[0].session_id.as_deref(), Some("malformed-aaaa"));
+    assert!(!state_path.exists(), "dry-run must not advance the watermark");
+}
+
+#[tokio::test]
+async fn live_run_writes_parse_skip_receipt_before_cursor_advances() {
+    // Success criterion: a LIVE-path parse skip lands a durable
+    // `received->rejected` receipt keyed by `session_id`, written BEFORE the
+    // watermark advances (harvest-completion Phase 1, Resolved Decision
+    // "Per-record parse skip must be DURABLE"). The export carries ZERO good
+    // records and ONE parse rejection, so nothing publishable runs - the run
+    // reduces to exactly the durable-skip + cursor-advance sequence under test.
+    //
+    // The ONE shared XDG lock (`crate::harvest::TEST_XDG_LOCK`) serializes this
+    // against `harvest::publish::tests`, which redirects the same env var - a
+    // per-file lock would let the two race the receipts DB.
+    let _guard = crate::harvest::TEST_XDG_LOCK.lock().await;
+    let data_home = TempDir::new().unwrap();
+    let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
+    unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+    let staging_dir = TempDir::new().unwrap();
+    let mut config = crate::config::Config::default();
+    config.staging.root = staging_dir.path().to_path_buf();
+
+    let export = SessionExport {
+        schema_version: 1,
+        generated_at: None,
+        host: None,
+        cursor: 4242,
+        sessions: Vec::new(),
+    };
+    let reader = FakeReader::new(export).with_parse_rejections(vec![ParseRejection {
+        session_id: Some("malformed-11112222-3333-4444-5555-666677778888".to_string()),
+        index: 0,
+        reason: "malformed session record: invalid type: string, expected i64".to_string(),
+    }]);
+
+    let tmp = TempDir::new().unwrap();
+    let state_path = tmp.path().join("harvest-state.json");
+    assert!(!state_path.exists(), "no watermark yet");
+
+    let report = run_with(&reader, &config, &state_path, None, None, false, false)
+        .await
+        .expect("live run");
+    assert_eq!(report.parse_rejections.len(), 1);
+
+    // The parse skip is a durable `received->rejected` receipt, keyed by the
+    // recovered session_id (carried as `source: clyde://<id>`, matched by the
+    // raw_input LIKE filter). It exists NOW - and the cursor advanced, so the
+    // receipt was written before the advance (both are in the same live run;
+    // the write precedes `state.save` in run_with).
+    let conn = crate::receipts::open_default().unwrap();
+    let rejected = crate::receipts::query(
+        &conn,
+        &crate::receipts::Filter {
+            status: Some(vault::receipts::ReceiptStatus::Rejected),
+            source_like: Some("clyde://malformed-11112222%".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        rejected.len(),
+        1,
+        "durable received->rejected receipt for the parse skip"
+    );
+    assert_eq!(rejected[0].kind, "session");
+    assert!(
+        rejected[0]
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("malformed session record")
+    );
+
+    // The watermark DID advance (state file written with the export cursor) -
+    // proving the receipt above was persisted first (ordering is structural in
+    // run_with: write_rejections precedes state.save).
+    let saved = watermark::WatermarkState::load(&state_path).unwrap();
+    assert_eq!(
+        saved.cursor,
+        Some(4242),
+        "cursor advanced after the durable receipt landed"
+    );
+
+    match prior_xdg {
+        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
 }

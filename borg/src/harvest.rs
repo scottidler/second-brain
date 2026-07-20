@@ -31,7 +31,7 @@ pub mod watermark;
 
 use std::collections::BTreeMap;
 
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use eyre::{Context, Result};
 use rusqlite::Connection;
 
@@ -39,11 +39,11 @@ use crate::config::HarvestConfig;
 use crate::receipts;
 use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
 use crate::trace;
-use crate::types::{IngestMethod, RejectionRecord};
+use crate::types::{GateId, IngestMethod, RejectionRecord, StageKind};
 use vault::receipts::ReceiptKind;
 
 use cluster::{Thread, cluster_threads};
-use contract::{SessionExport, SessionRecord};
+use contract::{ParseRejection, SessionExport, SessionRecord};
 use reader::ExportReader;
 use select::{SelectionConfig, evaluate_selection};
 use watermark::{PublishedEntry, Reappearance, WatermarkState, classify_reappearance, needs_body_fetch};
@@ -261,11 +261,49 @@ async fn fetch_thread_hash<R: ExportReader>(reader: &R, thread: &Thread) -> Resu
     Ok(watermark::body_hash(&text))
 }
 
+/// Convert a per-record [`ParseRejection`] (minted at the clyde-contract parse
+/// boundary) into the same [`RejectionOutcome`] shape a selection rejection
+/// takes, so both flow through the ONE durable [`write_rejections`] path
+/// (`received->rejected` receipt + `rejection.yml`). The receipt is keyed by
+/// the recovered `session_id` (via `source: clyde://<id>`); when the id itself
+/// was unreadable, the byte-position-equivalent element `index` keys it instead
+/// so a skip is never anonymous. Distinct `GateId::Parse` (not `Selection`) so
+/// the `rejection.yml` tells the truth about which gate declined.
+fn parse_rejection_to_outcome(rej: &ParseRejection) -> RejectionOutcome {
+    let trace_id = trace::generate(IngestMethod::Harvest);
+    let session_id = rej
+        .session_id
+        .clone()
+        .unwrap_or_else(|| format!("parse-index-{}", rej.index));
+    let source = rej.session_id.as_ref().map(|id| format!("clyde://{id}"));
+    log::debug!(
+        "harvest::parse_rejection_to_outcome: trace={trace_id} session={session_id} index={} source={source:?}",
+        rej.index
+    );
+    RejectionOutcome {
+        session_id,
+        trace_id: trace_id.clone(),
+        record: RejectionRecord {
+            trace: trace_id,
+            stage: StageKind::Raw,
+            gate: GateId::Parse,
+            reason: rej.reason.clone(),
+            rejected_at: Utc::now().to_rfc3339(),
+            raw_artifact: None,
+            source,
+            domain: None,
+            blocklist_updated: false,
+            retriable_after: None,
+        },
+    }
+}
+
 /// Commit the reject artifacts: for each rejection, promote a `received`
-/// receipts row to `rejected` (`ReceiptStatus::Rejected`, `GateId::Selection`)
-/// and write its `rejection.yml`. Keyed by the selection-time trace. Both
-/// writes are attempted per rejection; a failure on one is logged and does not
-/// abort the rest (a reject is bookkeeping, never a reason to lose the run).
+/// receipts row to `rejected` (`ReceiptStatus::Rejected`, `GateId::Selection`
+/// or `GateId::Parse`) and write its `rejection.yml`. Keyed by the
+/// selection-time (or parse-time) trace. Both writes are attempted per
+/// rejection; a failure on one is logged and does not abort the rest (a reject
+/// is bookkeeping, never a reason to lose the run).
 pub fn write_rejections(store: &FsArtifactStore, conn: &Connection, rejections: &[RejectionOutcome]) -> Result<()> {
     log::debug!("harvest::write_rejections: count={}", rejections.len());
     for rej in rejections {
@@ -379,6 +417,12 @@ pub struct HarvestReport {
     pub dry_run: bool,
     /// The computed plan (selections, rejections, and the run's cursor).
     pub plan: HarvestPlan,
+    /// Per-record parse rejections skipped at the clyde-contract boundary
+    /// (malformed `sessions[]` elements). On a LIVE run each has a durable
+    /// `received->rejected` receipt written before the watermark advanced; on a
+    /// dry run these are WARN-only (nothing persisted), surfaced here for the
+    /// operator's dry-run soak review.
+    pub parse_rejections: Vec<ParseRejection>,
     /// One publish outcome per publishable thread. Empty on a dry run.
     pub outcomes: Vec<publish::PublishOutcome>,
 }
@@ -440,30 +484,42 @@ pub async fn run_with<R: ExportReader>(
         (None, Some(config.harvest.initial_since.clone()))
     };
     log::debug!("harvest::run: fetching bulk export cursor={cursor:?} since={since_arg:?} limit={limit:?}");
-    let export = reader.export_bulk(cursor, since_arg.as_deref(), limit).await?;
+    let parsed = reader.export_bulk(cursor, since_arg.as_deref(), limit).await?;
+    let parse_rejections = parsed.rejections;
 
     let opts = HarvestOpts::from_config(&config.harvest, force)?;
-    let plan = plan_harvest(reader, export, &opts, &state).await?;
+    let plan = plan_harvest(reader, parsed.export, &opts, &state).await?;
 
     if dry_run {
+        // Dry-run persists NOTHING and advances no watermark, so a WARN-only
+        // parse skip is safe by construction (already logged in parse_export).
+        // No receipt is forced here (design doc Phase 1).
         log::info!(
-            "harvest::run: dry-run - {} publishable / {} rejected (no writes)",
+            "harvest::run: dry-run - {} publishable / {} rejected / {} unparseable (no writes)",
             plan.publishable().count(),
-            plan.rejections.len()
+            plan.rejections.len(),
+            parse_rejections.len()
         );
         return Ok(HarvestReport {
             dry_run: true,
             plan,
+            parse_rejections,
             outcomes: Vec::new(),
         });
     }
 
     // Live: reject artifacts first (rejection.yml + `rejected` receipts row),
-    // then publish, then advance the watermark. publish_plan writes the
-    // NewNote/FollowUp published snapshots; apply_plan_to_state bumps the
-    // cursor and applies Skip snapshot advances.
+    // then publish, then advance the watermark. The DURABLE ordering guarantee
+    // (harvest-completion design, Resolved Decision "Per-record parse skip must
+    // be DURABLE"): every parse-skip receipt is written HERE, before
+    // `state.save` advances the cursor below - so a skipped record can never be
+    // stepped over by an advancing watermark and lost forever. publish_plan
+    // writes the NewNote/FollowUp published snapshots; apply_plan_to_state
+    // bumps the cursor and applies Skip snapshot advances.
     let store = FsArtifactStore::from_config(&config.staging);
     let conn = receipts::open_default()?;
+    let parse_outcomes: Vec<RejectionOutcome> = parse_rejections.iter().map(parse_rejection_to_outcome).collect();
+    write_rejections(&store, &conn, &parse_outcomes)?;
     write_rejections(&store, &conn, &plan.rejections)?;
 
     let (state, outcomes) = publish::publish_plan(reader, config, &plan, state).await;
@@ -471,17 +527,29 @@ pub async fn run_with<R: ExportReader>(
     state.save(state_path)?;
 
     log::info!(
-        "harvest::run: published {} thread(s), {} rejected, cursor -> {}",
+        "harvest::run: published {} thread(s), {} rejected, {} unparseable, cursor -> {}",
         outcomes.len(),
         plan.rejections.len(),
+        parse_rejections.len(),
         plan.new_cursor
     );
     Ok(HarvestReport {
         dry_run: false,
         plan,
+        parse_rejections,
         outcomes,
     })
 }
+
+/// Shared XDG_DATA_HOME serialization lock for harvest tests that redirect the
+/// data dir at a tempdir (env-var mutation is not parallel-safe; rust.md
+/// "Platform path testing"). ONE lock across `harvest::tests` and
+/// `harvest::publish::tests` so those two never redirect XDG - and thus the
+/// receipts DB / staging root - concurrently. Held across `.await` while the
+/// test drives real async work, so it is a `tokio::sync::Mutex` (a std Mutex
+/// across `.await` is a `clippy::await_holding_lock` deny).
+#[cfg(test)]
+pub(crate) static TEST_XDG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 mod tests;

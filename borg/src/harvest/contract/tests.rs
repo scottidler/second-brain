@@ -32,7 +32,7 @@ fn read(path: &str) -> Vec<u8> {
 
 #[test]
 fn parses_golden_fixture() {
-    let export = parse_export(&read(GOLDEN)).unwrap();
+    let export = parse_export(&read(GOLDEN)).unwrap().export;
     assert_eq!(export.schema_version, 1);
     assert_eq!(export.cursor, 1500);
     assert_eq!(export.sessions.len(), 4);
@@ -40,7 +40,7 @@ fn parses_golden_fixture() {
 
 #[test]
 fn parses_phase0_bulk_envelope() {
-    let export = parse_export(&read(PHASE0_BULK)).unwrap();
+    let export = parse_export(&read(PHASE0_BULK)).unwrap().export;
     assert_eq!(export.sessions.len(), 8);
     // present-null repo deserializes to None, not omitted-as-error.
     let personal = export
@@ -63,7 +63,7 @@ fn parses_phase0_bulk_envelope() {
 
 #[test]
 fn enrich_status_null_and_failed_round_trip() {
-    let export = parse_export(&read(PHASE0_BULK)).unwrap();
+    let export = parse_export(&read(PHASE0_BULK)).unwrap().export;
     // enrich-status: null -> None
     let null_status = export
         .sessions
@@ -84,7 +84,7 @@ fn enrich_status_null_and_failed_round_trip() {
 fn repos_touched_is_three_state_none_when_omitted() {
     // Phase 0 fixtures predate files-touched, so repos-touched is OMITTED on
     // every session -> None (unknowable), NOT Some(vec![]) (touched nothing).
-    let export = parse_export(&read(PHASE0_BULK)).unwrap();
+    let export = parse_export(&read(PHASE0_BULK)).unwrap().export;
     for s in &export.sessions {
         assert_eq!(
             s.repos_touched, None,
@@ -142,48 +142,39 @@ fn git_branch_present_null_deserializes_to_none() {
 
 #[test]
 fn with_body_payload_parses_body_array() {
-    let rec = parse_export(&read(PHASE0_BODY)).unwrap().sessions.remove(0);
+    let rec = parse_export(&read(PHASE0_BODY)).unwrap().export.sessions.remove(0);
     let body = rec.body.expect("with-body payload has a body array");
     assert!(!body.is_empty());
-    assert!(body.iter().any(|m| m.role == "user"));
+    assert!(body.iter().any(|m| m.role.as_deref() == Some("user")));
     assert!(!rec.body_truncated);
     assert_eq!(rec.body_error, None);
 }
 
-// ---- harvest-completion Phase 0 spike (docs/design/2026-07-20-harvest-completion.md):
-// real null-bearing fixtures, RED against the current whole-batch, non-Option
-// `cwd`/`created`/`title`/`first_prompt` contract. This test documents and
-// LOCKS the exact production bug (`sb borg harvest --dry-run --since 60d` ->
-// "invalid type: null, expected a string at line 796 column 19") until Phase 1
-// relaxes the types to present-null `Option<String>` and switches to
-// per-record deserialization. Do NOT make this pass by touching contract.rs
-// in this phase - it is SUPPOSED to fail here (the `match` panic below is
-// the point of the spike, not a bug in the test).
-//
-// NOTE: assertions below deliberately stick to fields that are ALREADY
-// `Option<...>` today (`repo`/`git_branch`/`model`/`summary`/`body`/
-// `body_error`) so this test file compiles cleanly against today's
-// `contract.rs` (where `cwd`/`created`/`title`/`first_prompt` are plain,
-// non-Option `String`). Once Phase 1 relaxes those four fields, extend this
-// test with direct `None` assertions on them too.
+// ---- harvest-completion Phase 1 (docs/design/2026-07-20-harvest-completion.md):
+// the Phase 0 spike test, extended from RED to GREEN. Phase 0 asserted only on
+// fields that were already `Option<...>` (so the file compiled against the
+// pre-Phase-1 non-Option `cwd`/`created`/`title`/`first_prompt` contract) and
+// panicked if the batch parse failed. Phase 1 relaxes those four fields to
+// present-null `Option<String>` and switches `parse_export` to per-record
+// deserialize, so this test now asserts all four deserialize to `None` (the
+// assertions Phase 0's note deferred). Reverting any of those four fields to a
+// plain `String` turns this test RED - the regression bite.
 #[test]
 fn parse_tolerates_null_string_fields() {
     // `9b17cdba-...` in this real export carries `cwd`, `created`, `title`,
     // and `first-prompt` all as JSON `null` (a genuinely empty/never-touched
     // session, `n-msgs: 0`), alongside real rows where only some of those
-    // fields are null. Today `cwd`/`created`/`title` are plain `String` and
-    // `first_prompt` is `String` with `#[serde(default)]` (which only
-    // covers an OMITTED key, not present-null) - so this call fails with
-    // clyde's exact production error, not a clean `Ok` result.
-    let result = parse_export(&read(NULL_STRING_FIELDS));
-    let export = match result {
-        Ok(export) => export,
-        Err(err) => panic!(
-            "parse_export must tolerate null cwd/created/title/first-prompt \
-             (locks the docs/design/2026-07-20-harvest-completion.md Problem #1 bug); \
-             currently fails with: {err:#}"
-        ),
-    };
+    // fields are null. Post-Phase-1 all four are `Option<String>`, so the whole
+    // batch parses cleanly instead of aborting on clyde's production error
+    // ("invalid type: null, expected a string").
+    let export = parse_export(&read(NULL_STRING_FIELDS))
+        .unwrap_or_else(|err| {
+            panic!(
+                "parse_export must tolerate null cwd/created/title/first-prompt \
+                 (locks the harvest-completion Problem #1 bug); failed with: {err:#}"
+            )
+        })
+        .export;
     assert_eq!(
         export.sessions.len(),
         5,
@@ -195,8 +186,14 @@ fn parse_tolerates_null_string_fields() {
         .iter()
         .find(|s| s.session_id == "9b17cdba-7995-4be9-a1a4-65af5e7a3250")
         .expect("empty-bomb session present");
-    // Already-Option null classes ride along in the same real record;
-    // these are safe to assert both today and after Phase 1.
+    // The four newly-relaxed fields: all present-null -> None (the Phase 0
+    // deferred assertions, now live - reverting a field to `String` won't
+    // compile this `None`).
+    assert_eq!(empty_bomb.cwd, None);
+    assert_eq!(empty_bomb.created, None);
+    assert_eq!(empty_bomb.title, None);
+    assert_eq!(empty_bomb.first_prompt, None);
+    // Already-Option null classes ride along in the same real record.
     assert_eq!(empty_bomb.repo, None);
     assert_eq!(empty_bomb.git_branch, None);
     assert_eq!(empty_bomb.model, None);
@@ -209,24 +206,75 @@ fn parse_tolerates_null_string_fields() {
         .find(|s| s.session_id == "687368e0-a239-4b66-8a5e-d3c6d3b6af0f")
         .expect("real work session present");
     assert_eq!(work_session.repo.as_deref(), Some("scottidler/claude"));
+    assert_eq!(
+        work_session.title.as_deref(),
+        Some("Review Slack export script for security vulnerabilities")
+    );
+    assert!(work_session.created.is_some(), "a real session has a non-null created");
     assert_eq!(work_session.model, None);
 
     // A real `--id --with-body` export where clyde itself reports an empty
     // transcript (`body: null`, `body-error: "parsed empty"`) - its
-    // title/cwd/created are null too, so it fails the identical way today.
-    let body_export =
-        parse_export(&read(EMPTY_BODY)).unwrap_or_else(|err| panic!("empty-body export must parse: {err:#}"));
+    // title/cwd/created are null too and it parses cleanly post-Phase-1.
+    let body_export = parse_export(&read(EMPTY_BODY))
+        .unwrap_or_else(|err| panic!("empty-body export must parse: {err:#}"))
+        .export;
     let empty_session = &body_export.sessions[0];
+    assert_eq!(empty_session.cwd, None);
+    assert_eq!(empty_session.title, None);
     assert_eq!(empty_session.body, None);
     assert_eq!(empty_session.body_error.as_deref(), Some("parsed empty"));
+}
 
-    // A synthetic-malformed record (real shape, `n-msgs` wrong-typed) -
-    // today's whole-batch parser rejects it outright; Phase 1's per-record
-    // resilience turns this into a per-record skip instead of a batch abort.
-    assert!(
-        parse_export(&read(MALFORMED_RECORD)).is_err(),
-        "current whole-batch parser must reject a malformed element (locks the pre-Phase-1 shape)"
+// ---- harvest-completion Phase 1: per-record parse resilience. The Phase 0
+// spike asserted `parse_export(MALFORMED_RECORD).is_err()` (the whole-batch
+// parser aborted on one wrong-typed element). Phase 1 INVERTS that: the
+// malformed element is SKIPPED and carried out as a `ParseRejection` while the
+// rest of the batch parses. Reverting to whole-batch parsing turns this RED.
+#[test]
+fn malformed_record_is_skipped_and_the_rest_parse() {
+    let parsed = parse_export(&read(MALFORMED_RECORD)).expect("a malformed element must not abort the batch");
+    // The good companion (`28b526fb`, `n-msgs: 3`) survives; the synthetic twin
+    // (`malformed-...`, `n-msgs: "not-a-number"`) is skipped.
+    assert_eq!(parsed.export.sessions.len(), 1, "the well-formed record still parses");
+    assert_eq!(
+        parsed.export.sessions[0].session_id,
+        "28b526fb-7061-477d-8399-bf310671d6b5"
     );
+    // Exactly one parse rejection, keyed by the session-id recovered from the
+    // malformed element via `serde_json::Value` (always present in the contract).
+    assert_eq!(parsed.rejections.len(), 1, "one skipped malformed record");
+    let rej = &parsed.rejections[0];
+    assert_eq!(
+        rej.session_id.as_deref(),
+        Some("malformed-00000000-0000-0000-0000-000000000000"),
+        "session-id recovered even from a malformed record"
+    );
+    assert!(
+        rej.reason.contains("malformed session record"),
+        "reason carries the serde error: {}",
+        rej.reason
+    );
+    // The envelope-level fields (cursor) still parse.
+    assert_eq!(parsed.export.cursor, 1495);
+}
+
+#[test]
+fn unreadable_session_id_falls_back_to_element_index() {
+    // A malformed element whose `session-id` itself is unreadable (wrong type)
+    // still yields a durable, non-anonymous rejection keyed by element index.
+    let payload = br#"{
+        "schema-version": 1,
+        "cursor": 7,
+        "sessions": [
+            {"session-id": 12345, "host": "desk", "scope": "work", "modified": "x", "dormant": true, "n-msgs": 1}
+        ]
+    }"#;
+    let parsed = parse_export(payload).expect("envelope parses; the element is skipped");
+    assert_eq!(parsed.export.sessions.len(), 0);
+    assert_eq!(parsed.rejections.len(), 1);
+    assert_eq!(parsed.rejections[0].session_id, None, "unreadable id -> None");
+    assert_eq!(parsed.rejections[0].index, 0, "keyed by element index instead");
 }
 
 #[test]

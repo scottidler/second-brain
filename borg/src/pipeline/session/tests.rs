@@ -8,17 +8,17 @@ fn session_record(id: &str, created: &str, modified: &str, n_msgs: i64) -> Sessi
         session_id: id.to_string(),
         host: "desk".to_string(),
         scope: "work".to_string(),
-        cwd: "/home/saidler/repos/tatari-tv/marquee".to_string(),
+        cwd: Some("/home/saidler/repos/tatari-tv/marquee".to_string()),
         project_dir: None,
         repo: Some("tatari-tv/marquee".to_string()),
         git_branch: Some("main".to_string()),
-        created: created.to_string(),
+        created: Some(created.to_string()),
         modified: modified.to_string(),
         updated_at: None,
         duration_secs: Some(600),
         dormant: true,
-        title: format!("session {id} work"),
-        first_prompt: "do the thing".to_string(),
+        title: Some(format!("session {id} work")),
+        first_prompt: Some("do the thing".to_string()),
         n_msgs,
         model: None,
         summary: None,
@@ -65,10 +65,22 @@ fn build_session_metadata_repo_is_none_when_primary_has_no_anchor() {
 #[test]
 fn earliest_created_skips_unparseable_timestamps() {
     let mut bad = session_record("bad", "not-a-timestamp", "2026-07-01T01:00:00+00:00", 5);
-    bad.created = "not-a-timestamp".to_string();
+    bad.created = Some("not-a-timestamp".to_string());
     let good = session_record("good", "2026-07-01T00:00:00+00:00", "2026-07-01T01:00:00+00:00", 5);
     let members = vec![bad, good];
     assert_eq!(earliest_created(&members).as_deref(), Some("2026-07-01T00:00:00+00:00"));
+}
+
+#[test]
+fn earliest_created_skips_null_created() {
+    // A present-null `created` (harvest-completion Phase 1 relaxation) is
+    // skipped from the min/max, never panicking - the selection guard rejects
+    // these upstream, so reaching here is a warn-and-skip backstop.
+    let mut null_created = session_record("null", "2026-07-01T00:00:00+00:00", "2026-07-01T01:00:00+00:00", 5);
+    null_created.created = None;
+    let good = session_record("good", "2026-07-02T00:00:00+00:00", "2026-07-02T01:00:00+00:00", 5);
+    let members = vec![null_created, good];
+    assert_eq!(earliest_created(&members).as_deref(), Some("2026-07-02T00:00:00+00:00"));
 }
 
 #[test]
