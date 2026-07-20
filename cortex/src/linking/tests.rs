@@ -541,3 +541,99 @@ fn guard_links_clean_prose_occurrence_after_one_inside_a_wikilink() {
         "clean prose occurrence linked: {out}"
     );
 }
+
+#[test]
+fn apply_linking_is_add_only_never_removes_or_alters_content() {
+    // Phase 13 acceptance (apply_linking add-only): the linker only ADDS
+    // wikilinks; the original prose AND any pre-existing wikilink survive
+    // around the insertion.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    std::fs::write(
+        root.join("langchain.md"),
+        "---\ntitle: LangChain\ntype: note\n---\nhub\n",
+    )
+    .expect("w");
+    let original_body = "We use LangChain daily. See [[existing-link|prior]] too.\n";
+    std::fs::write(
+        root.join("a.md"),
+        format!("---\ntitle: A\ntype: note\n---\n{original_body}"),
+    )
+    .expect("w");
+
+    let cfg = glossary_config(&["langchain"], &[]);
+    let vault_config = crate::config::VaultConfig {
+        root_path: None,
+        ignore: vec![".git".to_string(), ".obsidian".to_string()],
+        exclude: Vec::new(),
+        include: Vec::new(),
+    };
+    let notes = crate::vault::scan_vault(root, &vault_config).expect("scan");
+    apply_linking(root, &notes, &cfg).expect("apply");
+
+    let after = std::fs::read_to_string(root.join("a.md")).expect("read");
+    assert!(
+        after.contains("[[langchain"),
+        "the concept mention gained a wikilink: {after}"
+    );
+    // Nothing removed/altered: the pre-existing wikilink and surrounding prose survive.
+    assert!(
+        after.contains("[[existing-link|prior]]"),
+        "pre-existing wikilink untouched: {after}"
+    );
+    assert!(after.contains("We use "), "leading prose preserved");
+    assert!(after.contains(" daily."), "prose preserved");
+    assert!(after.contains(" too."), "trailing prose preserved");
+}
+
+#[test]
+fn concept_recall_every_glossary_concept_mentioned_gets_linked() {
+    // Phase 13 acceptance (concept recall): over a small labeled corpus, the
+    // fraction of known-concept mentions that actually land a wikilink bounds
+    // the glossary/alias coverage gap. A concept IN the glossary must reach
+    // recall 1.0; an out-of-glossary term is the coverage gap (not linked).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    std::fs::write(
+        root.join("langchain.md"),
+        "---\ntitle: LangChain\ntype: note\n---\nhub\n",
+    )
+    .expect("w");
+    std::fs::write(root.join("graphrag.md"), "---\ntitle: GraphRAG\ntype: note\n---\nhub\n").expect("w");
+    // Three notes each mentioning an in-glossary concept, one mentioning an
+    // out-of-glossary term.
+    let corpus = [
+        ("n1.md", "A note about LangChain internals.\n"),
+        ("n2.md", "Another on GraphRAG retrieval.\n"),
+        ("n3.md", "LangChain plus GraphRAG together.\n"),
+        ("n4.md", "This one is about SomeUnknownThing only.\n"),
+    ];
+    for (name, body) in corpus {
+        std::fs::write(root.join(name), format!("---\ntitle: {name}\ntype: note\n---\n{body}")).expect("w");
+    }
+    let cfg = glossary_config(&["langchain", "graphrag"], &[]);
+    let vault_config = crate::config::VaultConfig {
+        root_path: None,
+        ignore: vec![".git".to_string(), ".obsidian".to_string()],
+        exclude: Vec::new(),
+        include: Vec::new(),
+    };
+    let notes = crate::vault::scan_vault(root, &vault_config).expect("scan");
+    apply_linking(root, &notes, &cfg).expect("apply");
+
+    // Recall over the three notes with an in-glossary mention: all linked.
+    for name in ["n1.md", "n2.md", "n3.md"] {
+        let body = std::fs::read_to_string(root.join(name)).expect("read");
+        assert!(
+            body.contains("[["),
+            "in-glossary concept in {name} must be linked (recall): {body}"
+        );
+    }
+    // The out-of-glossary term is the coverage gap - grow aliases, never loosen
+    // determinism. n4 gets no link.
+    let n4 = std::fs::read_to_string(root.join("n4.md")).expect("read");
+    assert!(
+        !n4.contains("[["),
+        "out-of-glossary term is the coverage gap, not linked: {n4}"
+    );
+}

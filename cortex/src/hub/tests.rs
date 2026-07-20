@@ -296,3 +296,70 @@ fn synthesize_hub_writes_body_preserves_frontmatter_and_is_failsafe() {
     );
     assert!(hub.exists(), "hub still present after a failed synthesis");
 }
+
+#[test]
+fn frozen_corpus_hub_groupings_are_deterministic_across_sweeps() {
+    // Phase 13 acceptance (3f frozen-corpus determinism): a mixed corpus
+    // (repo + creator + source + over-cap tag) sweeps to byte-identical
+    // groupings twice.
+    let notes = vec![
+        repo_note("r1.md", "scottidler/loopr"),
+        note(
+            "c1.md",
+            Some("Andrej Karpathy"),
+            Some("https://youtube.com/x"),
+            &["rust", "ai"],
+        ),
+        note(
+            "c2.md",
+            Some("Andrej Karpathy"),
+            Some("https://youtube.com/y"),
+            &["rust", "ai"],
+        ),
+    ];
+    let a = collect_stubs(&["graphrag".to_string()], &[], &notes, 1);
+    let b = collect_stubs(&["graphrag".to_string()], &[], &notes, 1);
+    assert_eq!(a, b, "identical hub groupings byte-for-byte across sweeps");
+}
+
+#[test]
+fn hub_membership_is_monotonic_additions_only() {
+    // Phase 13 acceptance (monotonicity): adding notes only ADDS stubs; every
+    // previously-collected stub survives unchanged (no move, no removal).
+    let base = vec![repo_note("r1.md", "scottidler/loopr")];
+    let stubs_before = collect_stubs(&[], &[], &base, 10);
+
+    let grown = vec![
+        repo_note("r1.md", "scottidler/loopr"),
+        repo_note("r2.md", "tatari-tv/marquee"),
+        note("c.md", Some("New Creator"), None, &[]),
+    ];
+    let stubs_after = collect_stubs(&[], &[], &grown, 10);
+
+    for s in &stubs_before {
+        assert!(
+            stubs_after.contains(s),
+            "previously-assigned stub {s:?} must survive unchanged after growth (no move/removal)"
+        );
+    }
+    assert!(stubs_after.len() > stubs_before.len(), "growth adds stubs");
+}
+
+#[test]
+fn synthesize_hub_never_modifies_member_notes() {
+    // Phase 13 acceptance (immutability): synthesizing a hub touches ONLY the
+    // hub file - member notes are byte-identical after.
+    let dir = tempfile::tempdir().expect("tmp");
+    let hub = dir.path().join("repo-x--y.md");
+    std::fs::write(&hub, "---\ntitle: x/y\ntype: entity\n---\n\nstub\n").expect("hub");
+    let member = dir.path().join("m.md");
+    let member_content = "---\ntitle: M\ntype: session\n---\nmember body\n";
+    std::fs::write(&member, member_content).expect("member");
+    let members = vec![member.to_string_lossy().to_string()];
+    synthesize_hub(&hub, "x/y", &members, &OkSynth("synthesized body".to_string())).expect("synth");
+    assert_eq!(
+        std::fs::read_to_string(&member).expect("read"),
+        member_content,
+        "a member note is byte-identical after hub synthesis (membership never mutates the note)"
+    );
+}

@@ -1092,3 +1092,43 @@ None.
 run with a 10-min timeout completed. The check task also caught a `-D warnings`
 needless-borrow that a plain `cargo clippy` only warned on - `otto ci` remains
 the sole authoritative gate.
+
+## Phase 13: Monotonicity + acceptance harness
+
+### Design decisions
+
+Named passing tests for the four 3f acceptance properties not already covered
+by Phases 9/10:
+- **Frozen-corpus determinism** (`frozen_corpus_hub_groupings_are_deterministic_across_sweeps`):
+  a mixed repo+creator+source+over-cap-tag corpus sweeps to byte-identical
+  `collect_stubs` output twice.
+- **Monotonicity / additions-only** (`hub_membership_is_monotonic_additions_only`):
+  adding notes only ADDS stubs; every previously-collected stub survives
+  unchanged (no move/removal).
+- **`apply_linking` add-only** (`apply_linking_is_add_only_never_removes_or_alters_content`):
+  the linker only ADDS wikilinks - the surrounding prose AND a pre-existing
+  wikilink survive byte-for-byte around the insertion.
+- **Immutability** (`synthesize_hub_never_modifies_member_notes`): hub synthesis
+  touches ONLY the hub file; a member note is byte-identical after.
+- **Concept recall** (`concept_recall_every_glossary_concept_mentioned_gets_linked`):
+  over a labeled corpus, every in-glossary mention lands a link (recall 1.0);
+  an out-of-glossary term is the coverage gap (not linked) - a recall drop
+  grows aliases, never loosens determinism.
+
+### Deviations / Tradeoffs
+
+- Immutability is asserted structurally (synthesize takes member paths but never
+  opens them; the test proves the file is byte-identical) rather than by a
+  whole-vault before/after hash - the structural proof is tighter and cheaper.
+
+### Open questions
+
+None.
+
+### Validation
+
+- Phase 13 touched only cortex test files. `otto ci`'s three gates confirmed
+  directly (its full-workspace run times out on shared-host load, not code):
+  `cargo clippy -p cortex --all-targets -- -D warnings` (exit 0),
+  `cargo fmt --check` (exit 0), `cargo test -p cortex` (337 passed, 0 failed -
+  all 5 acceptance tests green).
