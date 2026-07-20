@@ -56,7 +56,12 @@ impl FakeReader {
 }
 
 impl reader::ExportReader for FakeReader {
-    async fn export_bulk(&self, _cursor: Option<i64>, _since: Option<&str>) -> eyre::Result<SessionExport> {
+    async fn export_bulk(
+        &self,
+        _cursor: Option<i64>,
+        _since: Option<&str>,
+        _limit: Option<usize>,
+    ) -> eyre::Result<SessionExport> {
         Ok(self.bulk.clone())
     }
 
@@ -369,4 +374,29 @@ async fn force_redistills_published_session() {
         0,
         "force needs no hash - it re-distills regardless"
     );
+}
+
+#[tokio::test]
+async fn run_with_dry_run_writes_nothing_and_reports_selection() {
+    // Phase 6: `sb borg harvest --dry-run` lists selections/rejections and
+    // writes NOTHING. Drives the corrected deterministic golden outcome
+    // (2 selected -> 1 thread note, 2 rejected) through the run core.
+    let reader = FakeReader::new(load(GOLDEN));
+    let mut config = crate::config::Config::default();
+    config.harvest.min_msgs = 6; // the golden fixture's selection bar
+    let tmp = TempDir::new().unwrap();
+    let state_path = tmp.path().join("harvest-state.json");
+
+    let report = run_with(&reader, &config, &state_path, None, None, false, true)
+        .await
+        .expect("dry-run");
+
+    assert!(report.dry_run);
+    assert!(report.outcomes.is_empty(), "dry-run publishes nothing");
+    assert_eq!(report.plan.publishable().count(), 1, "one thread note");
+    assert_eq!(report.plan.rejections.len(), 2, "two personal/non-repo rejects");
+    // Writes nothing: no state JSON, and no body fetches (a fresh catalog is
+    // all NewNote, so the deep-check body-fetch path never runs at plan time).
+    assert!(!state_path.exists(), "dry-run must not write the state file");
+    assert_eq!(reader.body_fetch_count(), 0, "dry-run fetches no bodies");
 }

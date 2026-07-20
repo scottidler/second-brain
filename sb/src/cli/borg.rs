@@ -106,6 +106,35 @@ pub enum Command {
     },
     /// Score distillation quality over golden fixtures (design 2026-07-05)
     Eval(EvalArgs),
+    /// Harvest dormant Claude Code sessions from clyde into vault notes
+    /// (design 2026-07-17). Selects, clusters into threads, distills, and
+    /// publishes to the inbox through the normal borg pipeline.
+    Harvest(HarvestCliArgs),
+}
+
+#[derive(Args)]
+pub struct HarvestCliArgs {
+    /// Scan window override: a relative span (7d, 24h) or a date. Deliberate
+    /// backfill - takes precedence over the stored cursor. Omit for steady
+    /// state (resume from the watermark cursor; first-ever run falls back to
+    /// harvest.initial-since).
+    #[arg(long)]
+    pub since: Option<String>,
+    /// List what would be selected and rejected, then exit WITHOUT writing
+    /// anything (no notes, no receipts rows, no reject artifacts, no watermark
+    /// advance). Forces dry-run regardless of the harvest.mode config default.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Cap the number of candidate sessions pulled this run (clyde export page
+    /// size). Lossless: clyde's paging is gap-free, so the next run resumes
+    /// from the cursor.
+    #[arg(long)]
+    pub limit: Option<usize>,
+    /// Re-distill and re-publish in-scope already-published sessions. Part of
+    /// the watermark invariant ("I want a fresh distillation"), so it is
+    /// contract surface, not a hidden flag.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args)]
@@ -215,13 +244,17 @@ impl From<DaemonArgs> for opts::DaemonOpts {
 
 #[derive(Args)]
 pub struct LogCliArgs {
-    /// Filter by receipt status (received | succeeded | failed | crashed).
+    /// Filter by receipt status (received | succeeded | failed | crashed |
+    /// rejected). `rejected` is the harvest selection gate declining a
+    /// below-bar candidate (distinct from a broken ingest).
     #[arg(long)]
     pub status: Option<String>,
-    /// Filter by method (http | telegram | discord | ntfy | cli | clipboard).
+    /// Filter by method (http | telegram | discord | ntfy | cli | clipboard |
+    /// harvest).
     #[arg(long)]
     pub method: Option<String>,
-    /// Filter failed rows by failure_stage.
+    /// Filter failed/rejected rows by failure_stage (e.g. fetch-failed,
+    /// publish-failed, selection - the harvest selection gate).
     #[arg(long)]
     pub stage: Option<String>,
     /// Lower bound on received_at (inclusive). Accepts a relative duration
@@ -552,6 +585,14 @@ impl BorgCli {
                 }
                 Ok(())
             }
+            Some(Command::Harvest(args)) => {
+                // `--dry-run` forces dry-run; otherwise the harvest.mode config
+                // default decides (DryRun out of the box, per Rollout Plan).
+                let dry_run = args.dry_run || matches!(config.harvest.mode, borg::config::HarvestMode::DryRun);
+                let report = borg::harvest::run(&config, args.since, args.limit, args.force, dry_run).await?;
+                print_harvest_report(&report);
+                Ok(())
+            }
             Some(Command::Blocklist(args)) => match args.action {
                 BlocklistAction::List => {
                     let rows = borg::blocklist::entries()?;
@@ -663,6 +704,68 @@ fn print_receipt_detail(r: &borg::receipts::Receipt) {
     }
     let preview = vault::text::truncate_with_ellipsis(&r.raw_input, 200);
     println!("raw_input:      {preview}");
+}
+
+fn print_harvest_report(report: &borg::harvest::HarvestReport) {
+    use borg::harvest::watermark::Reappearance;
+    use borg::types::IngestStatus;
+
+    let publishable: Vec<_> = report.plan.publishable().collect();
+
+    if report.dry_run {
+        println!("DRY RUN - nothing written (no notes, receipts rows, reject artifacts, or watermark advance)");
+        println!();
+        println!(
+            "Would select {} thread(s) -> {} note(s):",
+            publishable.len(),
+            publishable.len()
+        );
+        for t in &publishable {
+            let kind = match &t.decision {
+                Reappearance::NewNote => "new",
+                Reappearance::FollowUp { .. } => "follow-up",
+                Reappearance::Skip { .. } => "skip",
+            };
+            println!(
+                "  [{kind}] {} ({} session(s), {} msgs)",
+                t.primary_id,
+                t.member_ids.len(),
+                t.total_msgs
+            );
+        }
+        println!();
+        println!("Would reject {} candidate(s):", report.plan.rejections.len());
+        for r in &report.plan.rejections {
+            println!("  {} - {}", r.session_id, r.record.reason);
+        }
+        return;
+    }
+
+    println!("Published {} thread(s):", report.outcomes.len());
+    for o in &report.outcomes {
+        match &o.result.status {
+            IngestStatus::Completed => {
+                let path = o.result.note_path.as_deref().unwrap_or("(no path)");
+                let title = o.result.title.as_deref().unwrap_or("");
+                println!("  ok    {} -> {} \"{}\"", o.primary_id, path, title);
+            }
+            IngestStatus::Duplicate { original_date } => {
+                println!("  dup   {} (already ingested {original_date})", o.primary_id);
+            }
+            IngestStatus::Queued => {
+                println!("  queued {}", o.primary_id);
+            }
+            IngestStatus::Failed { reason } => {
+                eprintln!("  FAIL  {} - {reason}", o.primary_id);
+            }
+        }
+    }
+    println!();
+    println!(
+        "Rejected {} candidate(s); cursor -> {}",
+        report.plan.rejections.len(),
+        report.plan.new_cursor
+    );
 }
 
 fn print_replay_event(event: &borg::replay::ReplayEvent) {

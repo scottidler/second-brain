@@ -349,5 +349,118 @@ pub fn record_published(
     );
 }
 
+/// The outcome of one harvest run, returned to the CLI/timer for display.
+/// Libraries return typed data; only `sb` prints (borg house rule).
+#[derive(Debug)]
+pub struct HarvestReport {
+    /// Whether this was a dry run (nothing written: no notes, no receipts
+    /// mutations, no reject artifacts, no watermark advance).
+    pub dry_run: bool,
+    /// The computed plan (selections, rejections, and the run's cursor).
+    pub plan: HarvestPlan,
+    /// One publish outcome per publishable thread. Empty on a dry run.
+    pub outcomes: Vec<publish::PublishOutcome>,
+}
+
+/// The one core harvest run, shared by `sb borg harvest` and the nightly timer
+/// ("on-demand and scheduled share one core", design doc Architecture).
+/// Acquires the exclusive state lock (loud [`watermark::HarvestLockHeld`] on
+/// contention so a timer run and a hand-run never race the cursor), resolves
+/// the cursor/since window, fetches the bulk export, plans, and - unless
+/// `dry_run` - writes reject artifacts, publishes every publishable thread,
+/// and advances the watermark atomically.
+///
+/// Window precedence (design doc): an explicit `since` (deliberate backfill)
+/// wins; else a stored cursor (steady state); else the first-run
+/// `harvest.initial-since`. `limit` caps the clyde export page - lossless
+/// because clyde's paging is gap-free, so the cursor advances only over the
+/// returned rows.
+pub async fn run(
+    config: &crate::config::Config,
+    since: Option<String>,
+    limit: Option<usize>,
+    force: bool,
+    dry_run: bool,
+) -> Result<HarvestReport> {
+    let state_path = vault::paths::borg_harvest_state();
+    let reader = reader::ClydeExportReader::new(config.harvest.clyde_binary.clone());
+    run_with(&reader, config, &state_path, since, limit, force, dry_run).await
+}
+
+/// The injectable core behind [`run`] (generic over the reader + explicit
+/// state path) so it can be driven with a fake reader and a temp state path in
+/// tests. `run` supplies the production `ClydeExportReader` and the
+/// `vault::paths` state path.
+pub async fn run_with<R: ExportReader>(
+    reader: &R,
+    config: &crate::config::Config,
+    state_path: &std::path::Path,
+    since: Option<String>,
+    limit: Option<usize>,
+    force: bool,
+    dry_run: bool,
+) -> Result<HarvestReport> {
+    log::debug!(
+        "harvest::run_with: state_path={} since={:?} limit={:?} force={force} dry_run={dry_run}",
+        state_path.display(),
+        since,
+        limit
+    );
+    // Exclusive lock held for the whole run (RAII drop on return / process
+    // exit). A second concurrent invocation fails loudly rather than racing.
+    let _lock = watermark::acquire_lock(state_path)?;
+    let state = WatermarkState::load(state_path)?;
+
+    let (cursor, since_arg) = if let Some(s) = since.as_deref() {
+        (None, Some(s.to_string()))
+    } else if let Some(c) = state.cursor {
+        (Some(c), None)
+    } else {
+        (None, Some(config.harvest.initial_since.clone()))
+    };
+    log::debug!("harvest::run: fetching bulk export cursor={cursor:?} since={since_arg:?} limit={limit:?}");
+    let export = reader.export_bulk(cursor, since_arg.as_deref(), limit).await?;
+
+    let opts = HarvestOpts::from_config(&config.harvest, force)?;
+    let plan = plan_harvest(reader, export, &opts, &state).await?;
+
+    if dry_run {
+        log::info!(
+            "harvest::run: dry-run - {} publishable / {} rejected (no writes)",
+            plan.publishable().count(),
+            plan.rejections.len()
+        );
+        return Ok(HarvestReport {
+            dry_run: true,
+            plan,
+            outcomes: Vec::new(),
+        });
+    }
+
+    // Live: reject artifacts first (rejection.yml + `rejected` receipts row),
+    // then publish, then advance the watermark. publish_plan writes the
+    // NewNote/FollowUp published snapshots; apply_plan_to_state bumps the
+    // cursor and applies Skip snapshot advances.
+    let store = FsArtifactStore::from_config(&config.staging);
+    let conn = receipts::open_default()?;
+    write_rejections(&store, &conn, &plan.rejections)?;
+
+    let (state, outcomes) = publish::publish_plan(reader, config, &plan, state).await;
+    let state = apply_plan_to_state(state, &plan);
+    state.save(state_path)?;
+
+    log::info!(
+        "harvest::run: published {} thread(s), {} rejected, cursor -> {}",
+        outcomes.len(),
+        plan.rejections.len(),
+        plan.new_cursor
+    );
+    Ok(HarvestReport {
+        dry_run: false,
+        plan,
+        outcomes,
+    })
+}
+
 #[cfg(test)]
 mod tests;

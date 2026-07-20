@@ -690,3 +690,28 @@ fn schema_version_recorded_once() {
         .expect("max version");
     assert_eq!(v, SCHEMA_VERSION);
 }
+
+#[test]
+fn query_filters_by_harvest_method() {
+    // Phase 6 observability: `sb borg log --method harvest` maps to this
+    // filter. A harvest session row and a non-harvest row coexist; the filter
+    // returns only the harvest one (proves Method::Harvest from Phase 1 flows
+    // through the query end to end).
+    let conn = fresh();
+    record_received(&conn, "hv-1", Method::Harvest, ReceiptKind::Session, "clyde://abc").expect("ins harvest");
+    record_received(&conn, "cli-1", Method::Cli, ReceiptKind::Url, "https://x/y").expect("ins cli");
+    let filter = Filter {
+        status: None,
+        method: Some(Method::Harvest),
+        stage: None,
+        since: None,
+        source_like: None,
+        degraded: None,
+        limit: None,
+    };
+    let rows = query(&conn, &filter).expect("query");
+    assert_eq!(rows.len(), 1, "only the harvest row matches method=harvest");
+    assert_eq!(rows[0].method, "harvest");
+    assert_eq!(rows[0].kind, "session");
+    assert_eq!(rows[0].raw_input, "clyde://abc");
+}

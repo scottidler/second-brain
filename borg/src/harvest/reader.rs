@@ -31,7 +31,15 @@ pub trait ExportReader {
     /// A bulk-metadata page. Steady state passes `cursor` (opaque revision);
     /// a fresh install with no watermark passes `since` (human-time span on
     /// `modified`). clyde ANDs them if both are set; harvest sends one.
-    async fn export_bulk(&self, cursor: Option<i64>, since: Option<&str>) -> Result<SessionExport>;
+    /// `limit` caps rows per page (clyde guarantees consecutive pages
+    /// concatenate with no gap/overlap), so `--limit` is lossless: the cursor
+    /// advances only over the returned rows and the next run continues.
+    async fn export_bulk(
+        &self,
+        cursor: Option<i64>,
+        since: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<SessionExport>;
 
     /// One session's full record WITH its parsed transcript body. The identity
     /// anchor for re-appearance: harvest hashes the returned body.
@@ -108,11 +116,17 @@ impl ClydeExportReader {
 }
 
 impl ExportReader for ClydeExportReader {
-    async fn export_bulk(&self, cursor: Option<i64>, since: Option<&str>) -> Result<SessionExport> {
+    async fn export_bulk(
+        &self,
+        cursor: Option<i64>,
+        since: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<SessionExport> {
         log::debug!(
-            "harvest::ClydeExportReader::export_bulk: cursor={:?} since={:?}",
+            "harvest::ClydeExportReader::export_bulk: cursor={:?} since={:?} limit={:?}",
             cursor,
-            since
+            since,
+            limit
         );
         let mut args = Vec::new();
         if let Some(c) = cursor {
@@ -122,6 +136,10 @@ impl ExportReader for ClydeExportReader {
         if let Some(s) = since {
             args.push("--since".to_string());
             args.push(s.to_string());
+        }
+        if let Some(n) = limit {
+            args.push("--limit".to_string());
+            args.push(n.to_string());
         }
         let bytes = self.run(&args).await?;
         parse_export(&bytes)

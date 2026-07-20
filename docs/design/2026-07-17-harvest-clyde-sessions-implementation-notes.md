@@ -732,3 +732,65 @@ re-written; the stalled agent's edits were verified and adopted as-is.
   just Session) or a second `write_envelope` call from the Session handler
   that races/duplicates the generic one - flagged for the parent to decide
   whether this is worth a follow-up rather than done speculatively here.
+
+## Phase 6: CLI + observability
+
+### Design decisions
+
+- `sb borg harvest [--since <span|date>] [--dry-run] [--limit <n>] [--force]`
+  added as `Command::Harvest(HarvestCliArgs)` (`sb/src/cli/borg.rs`). The arm
+  resolves `dry_run = args.dry_run || config.harvest.mode == DryRun` (CLI flag
+  forces dry-run; otherwise the config default decides, DryRun out of the box),
+  calls `borg::harvest::run`, and prints via `print_harvest_report`.
+- New core `borg::harvest::run` (+ injectable `run_with<R: ExportReader>`) is
+  the ONE shared entry the CLI calls today and the Phase 8 timer will call
+  ("on-demand and scheduled share one core"). It acquires the exclusive state
+  lock (`watermark::acquire_lock`, loud `HarvestLockHeld` on contention), loads
+  the watermark, resolves the window (explicit `--since` > stored cursor >
+  first-run `harvest.initial-since`), fetches the bulk export, plans, and -
+  unless dry-run - writes reject artifacts, publishes, and advances the
+  watermark. Returns a typed `HarvestReport { dry_run, plan, outcomes }`;
+  `sb` does all printing (borg house rule).
+- `--limit` is threaded into `ExportReader::export_bulk` as a `limit` arg (a
+  4th param; trait + `ClydeExportReader` impl + 2 test fakes updated) so it
+  caps the clyde export PAGE, not the post-plan thread set. This is lossless:
+  clyde's paging is gap-free, so the cursor advances only over the returned
+  rows and the next run resumes cleanly. Capping after planning while the
+  cursor still advanced would have silently dropped candidates - rejected.
+- `sb borg log` already filtered on `--method`/`--status`/`--stage` as
+  free-string args parsed to the typed enums by `triage::receipts_log`
+  (`m.parse::<Method>()`, etc.), so `--method harvest` / `--status rejected` /
+  `--stage selection` work via Phase 1's enum arms with no new plumbing - only
+  the help text was updated to advertise the harvest values.
+
+### Deviations
+
+- Split `run` into a thin `run` (builds the production `ClydeExportReader` +
+  `vault::paths::borg_harvest_state()`) and an injectable
+  `run_with<R>(reader, config, state_path, ...)`. Not a spec deviation - it is
+  the house DI pattern (generic reader port + explicit path) that makes the
+  dry-run path unit-testable with a fake reader and a temp state path.
+
+### Tradeoffs
+
+- Chose to extend the `export_bulk` trait signature (4 sites) over a
+  post-plan thread cap for `--limit`, trading a slightly wider change for
+  lossless correctness (no silently-dropped candidates). The trait is
+  internal to borg, so the blast radius is contained.
+
+### Open questions
+
+None.
+
+### Validation
+
+- `otto ci`: `✅ All CI checks passed!`.
+- Unit tests: `run_with_dry_run_writes_nothing_and_reports_selection`
+  (golden fixture -> dry-run report asserts 1 publishable thread + 2 rejects,
+  no state file, zero body fetches) and `query_filters_by_harvest_method`
+  (a `Method::Harvest`/`ReceiptKind::Session` row is the only match for a
+  harvest-method filter).
+- Real shakedown: `sb borg harvest --dry-run --since 3d --limit 15` against the
+  LIVE clyde catalog loaded config, printed the DRY RUN summary (0 selectable /
+  15 "would reject", all "not dormant (still in flight)" - correct for a 3-day
+  window), exited 0, and wrote NO `harvest-state.json`.

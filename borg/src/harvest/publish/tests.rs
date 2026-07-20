@@ -58,7 +58,12 @@ struct FakeReader {
 }
 
 impl ExportReader for FakeReader {
-    async fn export_bulk(&self, _cursor: Option<i64>, _since: Option<&str>) -> eyre::Result<SessionExport> {
+    async fn export_bulk(
+        &self,
+        _cursor: Option<i64>,
+        _since: Option<&str>,
+        _limit: Option<usize>,
+    ) -> eyre::Result<SessionExport> {
         Ok(self.bulk.clone())
     }
 
