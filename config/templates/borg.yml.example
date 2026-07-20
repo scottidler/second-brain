@@ -124,5 +124,47 @@ distill:
   capture-note:  true   # thread the capture note into ## Why Captured + capture-note frontmatter + distiller context
   propose-tags:  true   # merge distiller-proposed candidate tags into the tag pipeline
 
+# Harvest - `sb borg harvest` pulls clyde session-export candidates, selects
+# the sessions worth remembering, distills each into a note, and lands it in
+# the vault inbox through borg's normal pipeline. See
+# docs/design/2026-07-17-harvest-clyde-sessions.md.
+# Omitting this section (or any individual key) keeps the defaults shown below.
+harvest:
+  # Absolute path to the clyde binary. Tilde-expanded at load. Must be
+  # absolute (not just resolvable via PATH): the nightly systemd timer runs
+  # with a stripped PATH, so a bare "clyde" would not resolve there.
+  clyde-binary: ~/.cargo/bin/clyde
+  # First-run backfill bound. When no watermark cursor exists yet (e.g. a
+  # fresh install), `sb borg harvest` scans back this far via
+  # `clyde session export --since <this>` instead of inhaling the whole
+  # catalog unasked. A deliberate deep backfill is `sb borg harvest --since 90d`
+  # on the CLI, which overrides this for that one run.
+  initial-since: 7d
+  # What the nightly timer runs: dry-run (list selections/rejections, write
+  # nothing) or live (publish notes). Defaults to dry-run so a fresh install
+  # never lands notes unattended before the first-week soak; flip to live
+  # once the selection bar looks right. An explicit `--dry-run` on the CLI
+  # always overrides this, regardless of setting.
+  mode: dry-run
+  # Selection floor: a session with fewer than this many messages is a
+  # one-shot, not substantive enough to earn a note.
+  min-msgs: 4
+  # Regex patterns matched against a session's title/first-prompt; a match
+  # excludes the candidate before scoring (e.g. auto-fired security reviews,
+  # bare "sure"/empty prompts, navigational lookups). Space/repeated-flag
+  # semantics on the CLI equivalent; here it is a plain YAML list - never
+  # comma-delimited.
+  exclude-patterns: []
+  # Inter-session gap that splits two sessions sharing the same (cwd,
+  # git-branch) into separate thread notes instead of merging them into one.
+  # A human-time span (e.g. 2h, 90m).
+  thread-window: 2h
+  # Hard cap on tokens fed to the distiller per thread (head+tail windowing
+  # for very long threads), independent of the selection thresholds above.
+  token-cap: 12000
+  # Model override for the harvest distillation pass. Empty string (the
+  # default) inherits llm.model above.
+  model: ""
+
 # Log level: trace | debug | info | warn | error
 log-level: info

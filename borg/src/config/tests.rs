@@ -829,3 +829,108 @@ fn youtube_slides_config_no_longer_has_vision_per_slide() {
     // Verify the new content_filter field is present instead.
     assert!(!cfg.content_filter.enabled);
 }
+
+// ---------------------------------------------------------------------------
+// HarvestConfig (docs/design/2026-07-17-harvest-clyde-sessions.md, Phase 2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_harvest_config_default_values() {
+    let h = HarvestConfig::default();
+    assert_eq!(h.mode, HarvestMode::DryRun);
+    assert_eq!(h.initial_since, "7d");
+    assert_eq!(h.thread_window, "2h");
+    assert_eq!(h.min_msgs, 4);
+    assert_eq!(h.token_cap, 12_000);
+    assert!(h.exclude_patterns.is_empty());
+    assert_eq!(h.model, "");
+    // The default clyde binary is an absolute, tilde-expanded path - never
+    // the literal "~/..." string (the timer's stripped PATH can't resolve
+    // "clyde" bare, and a literal "~" would create a directory named "~").
+    assert!(h.clyde_binary.is_absolute());
+    assert!(!h.clyde_binary.to_string_lossy().starts_with('~'));
+    assert!(h.clyde_binary.ends_with("clyde"));
+}
+
+#[test]
+fn test_harvest_config_absent_section_defaults() {
+    // A borg.yml with NO `harvest:` section at all must still deserialize to
+    // the full default HarvestConfig (container `#[serde(default)]` fills
+    // the whole struct from HarvestConfig::default()).
+    let yaml = r#"
+server:
+  host: "0.0.0.0"
+  port: 8181
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    assert_eq!(config.harvest, HarvestConfig::default());
+}
+
+#[test]
+fn test_harvest_config_empty_block_defaults() {
+    let from_yaml: HarvestConfig = serde_yaml::from_str("{}").expect("parse empty");
+    assert_eq!(from_yaml, HarvestConfig::default());
+}
+
+#[test]
+fn test_harvest_config_full_section_parses() {
+    let yaml = r#"
+harvest:
+  clyde-binary: ~/.cargo/bin/clyde
+  initial-since: 30d
+  mode: live
+  min-msgs: 8
+  exclude-patterns:
+    - "^sure$"
+    - "security review"
+  thread-window: 4h
+  token-cap: 20000
+  model: claude-opus-4-8
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    let h = &config.harvest;
+    assert_eq!(h.mode, HarvestMode::Live);
+    assert_eq!(h.initial_since, "30d");
+    assert_eq!(h.min_msgs, 8);
+    assert_eq!(
+        h.exclude_patterns,
+        vec!["^sure$".to_string(), "security review".to_string()]
+    );
+    assert_eq!(h.thread_window, "4h");
+    assert_eq!(h.token_cap, 20_000);
+    assert_eq!(h.model, "claude-opus-4-8");
+    assert!(h.clyde_binary.is_absolute());
+    assert!(h.clyde_binary.ends_with(".cargo/bin/clyde"));
+}
+
+#[test]
+fn test_harvest_config_partial_block_defaults_unspecified() {
+    // Setting only `mode` must leave every other field at its default -
+    // mirrors the DistillConfig partial-block guarantee above.
+    let yaml = r#"
+harvest:
+  mode: live
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    assert_eq!(config.harvest.mode, HarvestMode::Live);
+    assert_eq!(config.harvest.initial_since, "7d");
+    assert_eq!(config.harvest.thread_window, "2h");
+    assert_eq!(config.harvest.min_msgs, 4);
+    assert_eq!(config.harvest.token_cap, 12_000);
+    assert!(config.harvest.exclude_patterns.is_empty());
+}
+
+#[test]
+fn test_harvest_config_clyde_binary_tilde_expansion() {
+    // A literal "~/..." in YAML must be expanded to a real absolute path at
+    // config-load time, never carried through as the three literal chars.
+    let yaml = r#"
+harvest:
+  clyde-binary: ~/repos/scottidler/clyde/target/release/clyde
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    assert!(config.harvest.clyde_binary.is_absolute());
+    let path = config.harvest.clyde_binary.to_string_lossy();
+    assert!(!path.starts_with('~'), "tilde must be expanded, got {path:?}");
+    assert!(path.ends_with("repos/scottidler/clyde/target/release/clyde"));
+}

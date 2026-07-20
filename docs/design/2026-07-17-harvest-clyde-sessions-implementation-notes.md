@@ -152,3 +152,92 @@ the migration by grep, ran `cargo check` (clean), `cargo test --workspace`
 (all green), and `otto ci` (`✅ All CI checks passed!`), then authored these
 notes and committed. No code was re-written - the stalled agent's edits were
 verified and adopted as-is.
+
+## Phase 2: Config
+
+### Design decisions
+
+- New `HarvestConfig` + `HarvestMode` in a dedicated submodule
+  (`borg/src/config/harvest.rs`), mirroring the existing per-section submodule
+  pattern (`config/{desktop,discord,ntfy,signal,telegram}.rs`) rather than
+  inlining the struct into `config.rs`. Re-exported via `pub use
+  harvest::{HarvestConfig, HarvestMode};` and wired as a new
+  `#[serde(default)] pub harvest: HarvestConfig` field on `Config`
+  (`borg/src/config.rs::Config`), following the exact idiom already used for
+  `distill`/`daemon` (a non-`Option` section with sensible defaults, not an
+  opt-in transport like `telegram`/`signal`).
+- `HarvestMode` (`dry-run | live`) mirrors `StagingLayout`'s enum shape
+  (`Copy, Default, PartialEq, Eq`, `#[serde(rename_all = "kebab-case")]`,
+  `#[default]` on the safe variant). Default is `DryRun`: the design doc's
+  Rollout Plan states the first week runs dry-run via the timer before
+  flipping to live, so the config default must match that, not `Live`
+  (fail-closed default per `rules/taste.md` Security instincts).
+- Every field relies on the container-level `#[serde(default)]` +
+  hand-written `impl Default for HarvestConfig` to fill missing keys - the
+  same mechanism `DistillConfig`'s comment documents in detail (container
+  `#[serde(default)]` on a struct fills each MISSING field from that struct's
+  own `Default::default()`, not from the field type's own `Default`). This
+  means no field needs a separate `#[serde(default = "fn")]`; one
+  `impl Default` block is the single source of truth for every default,
+  including the non-zero/non-empty ones (`initial_since: "7d"`,
+  `thread_window: "2h"`, `min_msgs: 4`, `token_cap: 12_000`,
+  `clyde_binary: ~/.cargo/bin/clyde` expanded).
+- `clyde_binary: PathBuf` carries
+  `#[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]`
+  per the CLAUDE.md path-handling invariant. Its default is built by calling
+  `vault::paths::expand_tilde("~/.cargo/bin/clyde")` directly inside
+  `impl Default` (not through serde, since `Default::default()` never runs
+  the deserializer) - the same pattern `StagingConfig::default` uses for
+  `vault::paths::borg_stages_dir()`.
+- `exclude_patterns: Vec<String>` is a plain YAML list (never comma-split),
+  per `rules/cli.md`; default is an empty vec (no built-in exclusions
+  shipped, unlike `canonicalization`'s built-in rules - the design doc gives
+  illustrative examples of what an operator might exclude, not a fixed
+  built-in list, so defaulting to none is the honest "config drives behavior"
+  reading).
+- `initial-since`/`thread-window` are kept as raw `String` spans (`"7d"`,
+  `"2h"`) rather than a typed duration, matching the existing `--since`
+  convention: `borg::receipts::parse_since` already parses this exact shape
+  (relative duration / RFC-3339 / bare date) for the CLI `--since` flag.
+  Phase 2 is schema + defaults only; Phase 3's export reader and thread
+  clustering own actually parsing/validating these spans.
+- Mirrored the full section into `config/templates/borg.yml.example` with one
+  annotated comment per key, appended just before the `log-level` tail,
+  matching the existing section style (`distill`/`youtube` blocks).
+
+### Deviations
+
+- None from the doc's spec. The doc names the keys generically ("selection
+  thresholds", "exclusion patterns", "thread window", "token cap") without
+  pinning exact field names/defaults; I chose concrete kebab-case names
+  (`min-msgs`, `exclude-patterns`, `thread-window`, `token-cap`) and starter
+  default values (`min-msgs: 4`, `token-cap: 12000`) since none were
+  specified numerically in the doc. These are documented in the example
+  template as tunable and are not load-bearing for Phase 2's success
+  criteria (config parses with/without the section; every key documented);
+  Phase 3 is free to retune the defaults against the golden fixture without
+  touching the schema.
+
+### Tradeoffs
+
+- Non-`Option<HarvestConfig>` (always-present section with defaults) over
+  `Option<HarvestConfig>` (opt-in, like `telegram`/`signal`/`ntfy`): harvest
+  is a batch job that ships with sane defaults and should work out of the
+  box once `sb bootstrap` drops the template, not a transport that must be
+  explicitly wired to a credential/host before it does anything - matches
+  `distill`/`pipeline`'s precedent, not the bot-transport precedent.
+- Kept `initial-since`/`thread-window` as un-parsed strings in this phase
+  rather than introducing a typed `Duration`/span wrapper now: no consumer
+  exists yet (Phase 3 is the first reader), and `borg::receipts::parse_since`
+  already proves the exact parsing shape needed, so adding a wrapper type
+  ahead of its first use would be speculative machinery this phase doesn't
+  need.
+
+### Open questions
+
+- The concrete default values for `min-msgs` (4) and `token-cap` (12000) are
+  starter values, not derived from the design doc or a golden fixture (none
+  existed to derive them from at Phase 2). Phase 3's golden-fixture work
+  (the checked-in 2026-07-02 catalog slice) is the natural place to tune
+  these against real selection behavior; flagging so Phase 3 doesn't assume
+  they are load-bearing constants.
