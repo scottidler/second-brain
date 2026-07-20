@@ -917,3 +917,53 @@ None.
 - Tests: `service_uses_absolute_binary_and_explicit_path`,
   `timer_bakes_only_oncalendar_from_config` (asserts no behavioral tunable
   leaks into the .timer), `schedule_change_is_the_only_timer_difference`.
+
+## Phase 9: `repo:` anchor wiring chain
+
+### Design decisions
+
+- `vault::Frontmatter` gains typed `repo: Option<String>` (present-null/absent
+  -> None, stored verbatim, never re-derived) and `repos_touched:
+  Option<Vec<String>>` (THREE-STATE: None=omitted/unknowable, Some(vec![])=
+  present-empty/definitively-no-bridge, Some(xs)=the set). Parsed in the manual
+  extraction loop, emitted in `to_yaml` (as join keys, so a backfill rewrite
+  never strips them), and added to `is_empty`.
+- `vault::schema::validate_repo_slug` - the ONLY check (exactly one `/`, two
+  non-empty components). A caller that fails it skips the repo hub edge (Phase
+  10) and logs, but the note still publishes.
+- Index: `ensure_repo_columns` adds `notes.repo` via the idempotent
+  `PRAGMA table_info` + `ALTER ADD COLUMN` pattern (mirrors
+  `ensure_trace_columns`); `repo` bound as param `?35` in BOTH the INSERT and
+  the UPDATE upsert branches; `GraphNoteRow` carries `repo` end to end (struct
+  field + SELECT + query_map tuple + construction).
+- Phase 5's session renderer already emits `repo:` (present-null), so this
+  phase is the read/index/validate half; the renderer was not re-touched.
+
+### Deviations
+
+- `clone_frontmatter` (cortex `summarize --backfill`) and the
+  `cortex::testutil` note builder both construct `Frontmatter` field-by-field
+  (no `..Default`), so both gained the two new fields - `clone_frontmatter`
+  MUST carry them (join-key strip trap), the testutil is `None`/`None`.
+- `repos-touched` is frontmatter-only in Phase 9 (no DB column): the single-repo
+  hub slice (Phases 9-10) keys on `repo`; bridging (which consumes
+  `repos-touched`) is deferred on clyde's files-touched release, so no index
+  column is warranted yet.
+
+### Tradeoffs
+
+- `repo` stored as `TEXT DEFAULT ''` (empty = no repo), matching the trace
+  columns' empty-string convention rather than nullable - keeps the graph
+  SELECT's `unwrap_or_default()` uniform.
+
+### Open questions
+
+None.
+
+### Validation
+
+- `otto ci`: `✅ All CI checks passed!`.
+- Tests: `validate_repo_slug_accepts_org_repo_and_rejects_malformed`,
+  `parse_repo_and_three_state_repos_touched` (asserts omitted None is distinct
+  from Some(vec![])), `repo_round_trips_through_index_to_graph_note_row`
+  (frontmatter -> upsert -> notes.repo -> GraphNoteRow, verbatim).

@@ -199,3 +199,30 @@ fn scalar_string_passes_through() {
     assert_eq!(fm.date.as_deref(), Some("2023-01-13"));
     assert_eq!(fm.title.as_deref(), Some("Hello"));
 }
+
+#[test]
+fn parse_repo_and_three_state_repos_touched() {
+    // Populated: repo -> Some, repos-touched -> Some(xs).
+    let (fm, _) =
+        parse_frontmatter("---\nrepo: tatari-tv/slack-cli\nrepos-touched:\n  - a/b\n  - c/d\n---\nx").expect("parse");
+    assert_eq!(fm.repo.as_deref(), Some("tatari-tv/slack-cli"));
+    assert_eq!(fm.repos_touched, Some(vec!["a/b".to_string(), "c/d".to_string()]));
+
+    // Present-null repo -> None (same as omitted); omitted repos-touched ->
+    // None (UNKNOWABLE - never infer "touched nothing").
+    let (fm, _) = parse_frontmatter("---\nrepo: null\n---\nx").expect("parse");
+    assert_eq!(fm.repo, None);
+    assert_eq!(
+        fm.repos_touched, None,
+        "omitted repos-touched is None, never Some(vec![])"
+    );
+
+    // Present-but-empty repos-touched -> Some(vec![]), DISTINCT from None
+    // (definitively no cross-repo bridge vs unknowable).
+    let (fm, _) = parse_frontmatter("---\nrepos-touched: []\n---\nx").expect("parse");
+    assert_eq!(
+        fm.repos_touched,
+        Some(vec![]),
+        "empty list is Some(vec![]), distinct from omitted None"
+    );
+}

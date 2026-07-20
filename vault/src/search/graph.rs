@@ -88,6 +88,9 @@ pub struct GraphNoteRow {
     pub domain: String,
     pub body: String,
     pub modified_at: i64,
+    /// Canonical `<org>/<repo>` anchor (harvest-clyde-sessions Phase 9), empty
+    /// when the note has no repo. Feeds the Phase 10 `repo-member` hub edge.
+    pub repo: String,
 }
 
 /// One entity row's mutable columns: `(kind, hub_path, ontotype)`.
@@ -319,7 +322,7 @@ impl SearchIndex {
     pub fn graph_note_rows(&self) -> Result<Vec<GraphNoteRow>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path, tags, source, creator, domain, body, modified_at FROM notes")?;
+            .prepare("SELECT path, tags, source, creator, domain, body, modified_at, repo FROM notes")?;
         let rows = stmt.query_map([], |row| {
             let path: String = row.get(0)?;
             let tags_json: String = row.get::<_, Option<String>>(1)?.unwrap_or_default();
@@ -328,11 +331,12 @@ impl SearchIndex {
             let domain: String = row.get::<_, Option<String>>(4)?.unwrap_or_default();
             let body: String = row.get::<_, Option<String>>(5)?.unwrap_or_default();
             let modified_at: i64 = row.get::<_, Option<i64>>(6)?.unwrap_or(0);
-            Ok((path, tags_json, source, creator, domain, body, modified_at))
+            let repo: String = row.get::<_, Option<String>>(7)?.unwrap_or_default();
+            Ok((path, tags_json, source, creator, domain, body, modified_at, repo))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (path, tags_json, source, creator, domain, body, modified_at) = r?;
+            let (path, tags_json, source, creator, domain, body, modified_at, repo) = r?;
             let tags: Vec<String> = match serde_json::from_str(&tags_json) {
                 Ok(t) => t,
                 Err(e) => {
@@ -348,6 +352,7 @@ impl SearchIndex {
                 domain,
                 body,
                 modified_at,
+                repo,
             });
         }
         Ok(out)

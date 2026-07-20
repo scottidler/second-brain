@@ -172,3 +172,31 @@ fn validate_le_f32_len(bytes: &[u8], dim: usize) -> eyre::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn repo_round_trips_through_index_to_graph_note_row() {
+    // Phase 9 end-to-end: repo: frontmatter -> upsert bind -> notes.repo
+    // column -> GraphNoteRow.repo, verbatim.
+    use crate::frontmatter::Frontmatter;
+    use std::path::PathBuf;
+    let index = SearchIndex::open_memory().expect("open");
+    let note = Note {
+        path: PathBuf::from("inbox/session.md"),
+        frontmatter: Frontmatter {
+            title: Some("a session".to_string()),
+            note_type: Some("session".to_string()),
+            origin: Some("generated".to_string()),
+            repo: Some("scottidler/loopr".to_string()),
+            ..Frontmatter::default()
+        },
+        body: "body".to_string(),
+        raw: "---\n---\nbody".to_string(),
+    };
+    index.index_one(&note, 1).expect("index");
+    let rows = index.graph_note_rows().expect("rows");
+    let row = rows.iter().find(|r| r.path == "inbox/session.md").expect("row present");
+    assert_eq!(
+        row.repo, "scottidler/loopr",
+        "repo threads verbatim from frontmatter through the upsert to GraphNoteRow"
+    );
+}

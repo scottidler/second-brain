@@ -486,6 +486,8 @@ impl NoteBuilder {
                 trace: None,
                 ingested: None,
                 trace_expires: None,
+                repo: None,
+                repos_touched: None,
                 extra: self.extra,
             },
             body: self.body,

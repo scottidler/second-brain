@@ -44,6 +44,19 @@ pub struct Frontmatter {
     /// Absolute policy expiry (`YYYY-MM-DD`), stamped by borg at publish from
     /// `ingested + retention-days`. Oracle echoes it; it never recomputes it.
     pub trace_expires: Option<String>,
+    /// Canonical `<org>/<repo>` anchor (harvest-clyde-sessions design, Phase 9),
+    /// verbatim from clyde's export `repo` field. `None` when absent OR
+    /// present-as-`null` (a session whose cwd has no `~/repos/<org>/<repo>`).
+    /// Never re-derived here - stored as-is; validation + hub wiring live in
+    /// `vault::schema::validate_repo_slug` / the graph edge.
+    pub repo: Option<String>,
+    /// Every repo the session touched (Phase 9, populated once clyde ships
+    /// files-touched). THREE-STATE, and the distinction is load-bearing for the
+    /// cross-repo bridge: `None` = the key was OMITTED (touched set unknowable,
+    /// never infer "touched nothing"); `Some(vec![])` = present-but-empty (no
+    /// repo path resolved - definitively no bridge); `Some(xs)` = the set. A
+    /// default-empty `Vec` collapsing None into `[]` would be WRONG.
+    pub repos_touched: Option<Vec<String>>,
     pub extra: HashMap<String, serde_yaml::Value>,
 }
 
@@ -69,6 +82,8 @@ impl Frontmatter {
         let mut trace = None;
         let mut ingested = None;
         let mut trace_expires = None;
+        let mut repo = None;
+        let mut repos_touched: Option<Vec<String>> = None;
         let mut extra = HashMap::new();
 
         for (key, val) in mapping {
@@ -136,6 +151,26 @@ impl Frontmatter {
                 "trace-expires" => {
                     trace_expires = scalar_to_string(val);
                 }
+                "repo" => {
+                    // Present-null (`repo: null`) -> None, same as omitted;
+                    // scalar_to_string(Null) already yields None.
+                    repo = scalar_to_string(val);
+                }
+                "repos-touched" => {
+                    // Three-state: only reached when the KEY is present, so a
+                    // present Sequence (even empty) is Some(..); a present
+                    // `null` stays None (unknowable), matching an omitted key.
+                    if let serde_yaml::Value::Sequence(seq) = val {
+                        repos_touched = Some(
+                            seq.into_iter()
+                                .filter_map(|v| match v {
+                                    serde_yaml::Value::String(s) => Some(s),
+                                    _ => None,
+                                })
+                                .collect(),
+                        );
+                    }
+                }
                 "pinned" => {
                     // Strict bool-only: a typo (`pinned: "yes"`, `pinned: 1`)
                     // resolves to None / indexed as 0 rather than breaking
@@ -167,6 +202,8 @@ impl Frontmatter {
             trace,
             ingested,
             trace_expires,
+            repo,
+            repos_touched,
             extra,
         })
     }
@@ -260,6 +297,22 @@ impl Frontmatter {
                 serde_yaml::Value::Bool(pinned),
             );
         }
+        // Promoted repo join keys (Phase 9): emit explicitly so a to_yaml()
+        // round-trip never strips them. `repo` present-null is not preserved
+        // (None on read), which is fine - borg's renderer is the only writer
+        // that emits `repo: null`, never this rewrite path.
+        if let Some(ref repo) = self.repo {
+            mapping.insert(
+                serde_yaml::Value::String("repo".to_string()),
+                serde_yaml::Value::String(repo.clone()),
+            );
+        }
+        if let Some(ref repos) = self.repos_touched {
+            mapping.insert(
+                serde_yaml::Value::String("repos-touched".to_string()),
+                serde_yaml::Value::Sequence(repos.iter().cloned().map(serde_yaml::Value::String).collect()),
+            );
+        }
 
         // Add extra fields alphabetically
         let mut extra_keys: Vec<&String> = self.extra.keys().collect();
@@ -290,6 +343,8 @@ impl Frontmatter {
             && self.trace.is_none()
             && self.ingested.is_none()
             && self.trace_expires.is_none()
+            && self.repo.is_none()
+            && self.repos_touched.is_none()
             && self.extra.is_empty()
     }
 }

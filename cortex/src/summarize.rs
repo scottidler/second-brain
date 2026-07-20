@@ -324,6 +324,11 @@ fn clone_frontmatter(fm: &Frontmatter) -> Frontmatter {
         trace: fm.trace.clone(),
         ingested: fm.ingested.clone(),
         trace_expires: fm.trace_expires.clone(),
+        // Repo anchors (Phase 9) are join keys too - carry them through the
+        // backfill rewrite or it would strip repo:/repos-touched: from every
+        // note it touches.
+        repo: fm.repo.clone(),
+        repos_touched: fm.repos_touched.clone(),
         extra: fm.extra.clone(),
     }
 }

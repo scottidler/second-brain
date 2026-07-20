@@ -443,5 +443,20 @@ impl FromStr for Method {
     }
 }
 
+/// Validate a `<org>/<repo>` repo slug: exactly one `/` splitting two
+/// non-empty components (harvest-clyde-sessions design, Phase 9). Second-brain
+/// NEVER re-derives the slug - clyde ships it canonical - so this is the ONLY
+/// check applied. A value that fails (`""`, no `/`, more than one `/`, an
+/// empty component) SKIPS the repo hub edge and is logged loudly by the caller,
+/// but the note still publishes: a malformed slug implies an upstream clyde
+/// bug, never a reason to discard distilled knowledge.
+pub fn validate_repo_slug(slug: &str) -> bool {
+    let mut parts = slug.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(org), Some(repo), None) => !org.is_empty() && !repo.is_empty(),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests;

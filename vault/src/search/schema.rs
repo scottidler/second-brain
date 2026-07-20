@@ -63,6 +63,7 @@ impl super::SearchIndex {
         self.ensure_governance_columns()?;
         self.ensure_distilled_columns()?;
         self.ensure_trace_columns()?;
+        self.ensure_repo_columns()?;
 
         // FTS5 cannot ALTER, so we detect old (no-claims) schemas and rebuild.
         // Triggers attach to `notes`, not `notes_fts`, so they must be dropped
@@ -361,6 +362,25 @@ impl super::SearchIndex {
                 self.conn
                     .execute_batch(&format!("ALTER TABLE notes ADD COLUMN {col} {col_type};"))?;
             }
+        }
+
+        Ok(())
+    }
+
+    /// Add the `repo` column to existing DBs (harvest-clyde-sessions design,
+    /// Phase 9: the note's canonical `<org>/<repo>` anchor, feeding the repo
+    /// hub edge in Phase 10). Same idempotent `PRAGMA table_info` + single
+    /// `ALTER ADD COLUMN` pattern as `ensure_trace_columns`.
+    fn ensure_repo_columns(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(notes)")?;
+        let existing_columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(warn_row)
+            .collect();
+
+        if !existing_columns.contains(&"repo".to_string()) {
+            self.conn
+                .execute_batch("ALTER TABLE notes ADD COLUMN repo TEXT DEFAULT '';")?;
         }
 
         Ok(())

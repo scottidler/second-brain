@@ -114,3 +114,16 @@ fn test_method_includes_harvest() {
     assert_eq!(Method::Harvest.as_str(), "harvest");
     assert!(Method::all().contains(&Method::Harvest));
 }
+
+#[test]
+fn validate_repo_slug_accepts_org_repo_and_rejects_malformed() {
+    // Well-formed <org>/<repo> passes; everything else fails and the caller
+    // skips the repo hub edge (but still publishes the note).
+    assert!(validate_repo_slug("tatari-tv/slack-cli"));
+    assert!(validate_repo_slug("scottidler/loopr"));
+    assert!(!validate_repo_slug(""), "empty");
+    assert!(!validate_repo_slug("loopr"), "no slash");
+    assert!(!validate_repo_slug("a/b/c"), "more than one slash");
+    assert!(!validate_repo_slug("a/"), "empty repo component");
+    assert!(!validate_repo_slug("/b"), "empty org component");
+}

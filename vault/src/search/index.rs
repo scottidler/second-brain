@@ -158,6 +158,9 @@ impl super::SearchIndex {
         let trace = fm.trace.as_deref().unwrap_or("");
         let ingested = fm.ingested.as_deref().unwrap_or("");
         let trace_expires = fm.trace_expires.as_deref().unwrap_or("");
+        // Canonical `<org>/<repo>` anchor (harvest-clyde-sessions Phase 9);
+        // present-null/absent -> "" (no repo hub edge). Stored verbatim.
+        let repo = fm.repo.as_deref().unwrap_or("");
 
         // `pinned` is vault-derived: the user edits `pinned: true` in their
         // note's frontmatter. None or false -> 0; true -> 1. The flip-test
@@ -185,7 +188,7 @@ impl super::SearchIndex {
                     cortex_thread_author = ?29,
                     pinned = ?30,
                     trace = ?31, ingested = ?32, trace_expires = ?33,
-                    capture_note = ?34
+                    capture_note = ?34, repo = ?35
                  WHERE path = ?1",
                 params![
                     path_str.as_ref(),
@@ -222,6 +225,7 @@ impl super::SearchIndex {
                     ingested,
                     trace_expires,
                     capture_note,
+                    repo,
                 ],
             )?;
             Ok(IndexAction::Updated)
@@ -241,7 +245,7 @@ impl super::SearchIndex {
                     search_hit_count, last_accessed_at, inbound_link_count,
                     pinned,
                     trace, ingested, trace_expires,
-                    capture_note
+                    capture_note, repo
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                     ?15, ?16, ?17, ?18, ?19, ?20,
@@ -249,7 +253,7 @@ impl super::SearchIndex {
                     0, NULL, 0,
                     ?30,
                     ?31, ?32, ?33,
-                    ?34
+                    ?34, ?35
                 )",
                 params![
                     path_str.as_ref(),
@@ -286,6 +290,7 @@ impl super::SearchIndex {
                     ingested,
                     trace_expires,
                     capture_note,
+                    repo,
                 ],
             )?;
             Ok(IndexAction::Inserted)
