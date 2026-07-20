@@ -13,6 +13,18 @@ const PHASE0_BODY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../config/eval/distill-fixtures/session/with-body-envelope.json"
 );
+const NULL_STRING_FIELDS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../config/eval/distill-fixtures/session/null-string-fields.json"
+);
+const EMPTY_BODY: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../config/eval/distill-fixtures/session/empty-body.json"
+);
+const MALFORMED_RECORD: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../config/eval/distill-fixtures/session/malformed-record.json"
+);
 
 fn read(path: &str) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"))
@@ -136,6 +148,85 @@ fn with_body_payload_parses_body_array() {
     assert!(body.iter().any(|m| m.role == "user"));
     assert!(!rec.body_truncated);
     assert_eq!(rec.body_error, None);
+}
+
+// ---- harvest-completion Phase 0 spike (docs/design/2026-07-20-harvest-completion.md):
+// real null-bearing fixtures, RED against the current whole-batch, non-Option
+// `cwd`/`created`/`title`/`first_prompt` contract. This test documents and
+// LOCKS the exact production bug (`sb borg harvest --dry-run --since 60d` ->
+// "invalid type: null, expected a string at line 796 column 19") until Phase 1
+// relaxes the types to present-null `Option<String>` and switches to
+// per-record deserialization. Do NOT make this pass by touching contract.rs
+// in this phase - it is SUPPOSED to fail here (the `match` panic below is
+// the point of the spike, not a bug in the test).
+//
+// NOTE: assertions below deliberately stick to fields that are ALREADY
+// `Option<...>` today (`repo`/`git_branch`/`model`/`summary`/`body`/
+// `body_error`) so this test file compiles cleanly against today's
+// `contract.rs` (where `cwd`/`created`/`title`/`first_prompt` are plain,
+// non-Option `String`). Once Phase 1 relaxes those four fields, extend this
+// test with direct `None` assertions on them too.
+#[test]
+fn parse_tolerates_null_string_fields() {
+    // `9b17cdba-...` in this real export carries `cwd`, `created`, `title`,
+    // and `first-prompt` all as JSON `null` (a genuinely empty/never-touched
+    // session, `n-msgs: 0`), alongside real rows where only some of those
+    // fields are null. Today `cwd`/`created`/`title` are plain `String` and
+    // `first_prompt` is `String` with `#[serde(default)]` (which only
+    // covers an OMITTED key, not present-null) - so this call fails with
+    // clyde's exact production error, not a clean `Ok` result.
+    let result = parse_export(&read(NULL_STRING_FIELDS));
+    let export = match result {
+        Ok(export) => export,
+        Err(err) => panic!(
+            "parse_export must tolerate null cwd/created/title/first-prompt \
+             (locks the docs/design/2026-07-20-harvest-completion.md Problem #1 bug); \
+             currently fails with: {err:#}"
+        ),
+    };
+    assert_eq!(
+        export.sessions.len(),
+        5,
+        "all five real sessions should survive parsing"
+    );
+
+    let empty_bomb = export
+        .sessions
+        .iter()
+        .find(|s| s.session_id == "9b17cdba-7995-4be9-a1a4-65af5e7a3250")
+        .expect("empty-bomb session present");
+    // Already-Option null classes ride along in the same real record;
+    // these are safe to assert both today and after Phase 1.
+    assert_eq!(empty_bomb.repo, None);
+    assert_eq!(empty_bomb.git_branch, None);
+    assert_eq!(empty_bomb.model, None);
+    assert_eq!(empty_bomb.summary, None);
+
+    // Real, non-null classes must survive the relaxation unchanged.
+    let work_session = export
+        .sessions
+        .iter()
+        .find(|s| s.session_id == "687368e0-a239-4b66-8a5e-d3c6d3b6af0f")
+        .expect("real work session present");
+    assert_eq!(work_session.repo.as_deref(), Some("scottidler/claude"));
+    assert_eq!(work_session.model, None);
+
+    // A real `--id --with-body` export where clyde itself reports an empty
+    // transcript (`body: null`, `body-error: "parsed empty"`) - its
+    // title/cwd/created are null too, so it fails the identical way today.
+    let body_export =
+        parse_export(&read(EMPTY_BODY)).unwrap_or_else(|err| panic!("empty-body export must parse: {err:#}"));
+    let empty_session = &body_export.sessions[0];
+    assert_eq!(empty_session.body, None);
+    assert_eq!(empty_session.body_error.as_deref(), Some("parsed empty"));
+
+    // A synthetic-malformed record (real shape, `n-msgs` wrong-typed) -
+    // today's whole-batch parser rejects it outright; Phase 1's per-record
+    // resilience turns this into a per-record skip instead of a batch abort.
+    assert!(
+        parse_export(&read(MALFORMED_RECORD)).is_err(),
+        "current whole-batch parser must reject a malformed element (locks the pre-Phase-1 shape)"
+    );
 }
 
 #[test]

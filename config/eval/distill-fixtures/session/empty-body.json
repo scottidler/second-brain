@@ -1,0 +1,40 @@
+{
+    "schema-version": 1,
+    "generated-at": "2026-07-20T14:56:22.202133924+00:00",
+    "host": "desk",
+    "cursor": 831,
+    "sessions": [
+        {
+            "session-id": "9b17cdba-7995-4be9-a1a4-65af5e7a3250",
+            "host": "desk",
+            "scope": "personal",
+            "cwd": null,
+            "project-dir": "/home/saidler/.claude/projects/-home-saidler",
+            "repo": null,
+            "git-branch": null,
+            "created": null,
+            "modified": "2026-07-03T21:26:51.744914503+00:00",
+            "updated-at": 831,
+            "duration-secs": 0,
+            "dormant": true,
+            "title": null,
+            "first-prompt": null,
+            "n-msgs": 0,
+            "model": null,
+            "summary": null,
+            "tags": [],
+            "tags-source": null,
+            "enriched-at": null,
+            "enrich-status": "skipped-personal",
+            "enrich-model": null,
+            "prompt-version": null,
+            "redaction-count": 0,
+            "transcript-path": "/home/saidler/.claude/projects/-home-saidler/9b17cdba-7995-4be9-a1a4-65af5e7a3250.jsonl",
+            "staged-path": null,
+            "archived": false,
+            "body": null,
+            "body-truncated": false,
+            "body-error": "parsed empty"
+        }
+    ]
+}
