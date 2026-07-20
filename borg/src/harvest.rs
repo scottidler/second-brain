@@ -349,6 +349,26 @@ pub fn record_published(
     );
 }
 
+/// Staged filename holding a session thread's member records, so
+/// `replay --from-stage 2` can re-derive the note from the staged transcript
+/// without re-fetching from clyde. This is the concrete "thread export
+/// metadata" staged artifact the Data Model calls for (Phase 5 staged only a
+/// generic envelope; Phase 7 adds the thread-specific records).
+pub const SESSION_REPLAY_META_FILE: &str = "members.yml";
+
+/// The thread-level metadata staged alongside `body.txt`, sufficient to
+/// reconstruct [`crate::pipeline::session::process_session`]'s inputs on a
+/// stage-2 replay. Full `SessionRecord`s (not just the `SessionPayload` in
+/// `distilled.yml`) because the publish path derives scope + redaction tags
+/// and the thread footer from them.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionReplayMeta {
+    pub members: Vec<SessionRecord>,
+    pub primary_id: String,
+    #[serde(default)]
+    pub body_truncated: bool,
+}
+
 /// The outcome of one harvest run, returned to the CLI/timer for display.
 /// Libraries return typed data; only `sb` prints (borg house rule).
 #[derive(Debug)]

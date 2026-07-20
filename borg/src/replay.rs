@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
-use crate::types::{IngestResult, IngestStatus, TraceFilter};
+use crate::types::{IngestKind, IngestMethod, IngestResult, IngestStatus, TraceFilter};
 
 #[derive(Debug, Default)]
 pub struct ReplayOptions {
@@ -368,17 +368,28 @@ async fn replay_one(
     if !config.staging.enabled {
         bail!("replay: staging.enabled must be true");
     }
-    if from_stage > 0 {
-        bail!(
-            "replay: --from-stage {from_stage} not yet supported; only --from-stage 0 \
-             (full re-fetch) is wired in this release. Skip the flag to re-run from Stage 0."
-        );
-    }
     let store = FsArtifactStore::from_config(&config.staging);
     if !store.has_trace(trace_id)? {
         bail!("replay: trace {trace_id} not found in staging");
     }
     let envelope = store.read_envelope(trace_id)?;
+
+    // Stage-2 replay (re-distill from staged artifacts, NO re-fetch) is wired
+    // for the session/harvest kind ONLY (design doc Phase 7): a `clyde://`
+    // source cannot be re-POSTed to the daemon the way a URL source can, so it
+    // re-derives directly from the staged transcript + member records. Every
+    // other kind's `--from-stage > 0` stays explicitly unsupported.
+    if from_stage == 2 && matches!(envelope.kind, IngestKind::Session) {
+        return replay_session_stage2(config, &store, trace_id, dry_run, progress).await;
+    }
+    if from_stage > 0 {
+        bail!(
+            "replay: --from-stage {from_stage} is only supported for session traces \
+             (harvest, --from-stage 2); trace {trace_id} is kind={}. Skip the flag to \
+             re-run from Stage 0 (full re-fetch).",
+            envelope.kind
+        );
+    }
     let source = String::from_utf8(store.read_body(trace_id)?).context("read body as utf-8")?;
     let source = source.trim().to_string();
     progress(&ReplayEvent::TraceHeader {
@@ -391,6 +402,56 @@ async fn replay_one(
     }
     let method = envelope.method.to_string();
     let result = reingest_via_daemon(config, &source, &method).await?;
+    Ok(emit_result_event(progress, &result.status, &result.title))
+}
+
+/// Stage-2 replay for a harvest session trace: re-derive the note from the
+/// staged transcript (`body.txt`) + member records (`members.yml`), without
+/// touching clyde. Produces a STRUCTURALLY equivalent note (same
+/// `source:`/`trace:`, valid `Distilled`, bounds respected) - byte-identity is
+/// not asserted because the distiller is an LLM pass.
+async fn replay_session_stage2(
+    config: &Config,
+    store: &FsArtifactStore,
+    trace_id: &str,
+    dry_run: bool,
+    progress: &mut (impl FnMut(&ReplayEvent) + ?Sized),
+) -> Result<(usize, usize)> {
+    let body = String::from_utf8(store.read_body(trace_id)?).context("read staged body as utf-8")?;
+    progress(&ReplayEvent::TraceHeader {
+        trace_id: trace_id.to_string(),
+        source: format!("clyde session thread ({} transcript bytes)", body.len()),
+    });
+    if dry_run {
+        progress(&ReplayEvent::DryRunTrace);
+        return Ok((0, 0));
+    }
+    let raw = store
+        .read_attachment(trace_id, crate::harvest::SESSION_REPLAY_META_FILE)?
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "replay: trace {trace_id} has no {} (staged before Phase 7, or not a harvest \
+                 session note); cannot re-derive from stage 2",
+                crate::harvest::SESSION_REPLAY_META_FILE
+            )
+        })?;
+    let meta: crate::harvest::SessionReplayMeta =
+        serde_yaml::from_slice(&raw).context("parse staged session replay metadata (members.yml)")?;
+
+    // force=true: the note already landed, so re-derivation overwrites the
+    // same path in place rather than minting a uniquified sibling.
+    let result = crate::pipeline::session::process_session(
+        &body,
+        &meta.members,
+        &meta.primary_id,
+        meta.body_truncated,
+        Vec::new(),
+        IngestMethod::Harvest,
+        true,
+        config,
+        trace_id,
+    )
+    .await;
     Ok(emit_result_event(progress, &result.status, &result.title))
 }
 

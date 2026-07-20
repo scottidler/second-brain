@@ -794,3 +794,73 @@ None.
   LIVE clyde catalog loaded config, printed the DRY RUN summary (0 selectable /
   15 "would reject", all "not dormant (still in flight)" - correct for a 3-day
   window), exited 0, and wrote NO `harvest-state.json`.
+
+## Phase 7: Eval + replay
+
+### Design decisions
+
+- **Stage-2 replay, session-only.** `replay_one` (`borg/src/replay.rs`) now
+  reads the envelope first and, when `from_stage == 2 && envelope.kind ==
+  IngestKind::Session`, dispatches to `replay_session_stage2` instead of the
+  daemon re-POST path (a `clyde://` source cannot be re-POSTed like a URL).
+  Every other kind's `--from-stage > 0` still bails loudly. The helper reads
+  the staged transcript (`body.txt`) + `members.yml`, reconstructs
+  `process_session`'s inputs, and re-publishes with `force = true` (overwrite
+  the same note path in place). Structurally equivalent, not byte-identical
+  (LLM pass).
+- **`members.yml` staged artifact** (`borg/src/harvest/publish.rs`,
+  `harvest::SessionReplayMeta`): the thread's full `SessionRecord`s +
+  `primary_id` + `body_truncated`, staged via `write_attachment` on a
+  successful publish. This is the concrete "thread export metadata" the Data
+  Model called for and RESOLVES Phase 5's OQ#2: `distilled.yml`'s
+  `SessionPayload` lacks scope/redaction/title, which the publish path needs to
+  reproduce the note, so the full records are staged. Best-effort: a stage
+  failure warns but never fails an already-landed publish.
+- **`read_attachment`** added to the `ArtifactStore` trait + both impls
+  (`FsArtifactStore`, `MemArtifactStore`) - the explicit read counterpart to
+  `write_attachment`, returning `Ok(None)` when absent (a pre-Phase-7 note has
+  no `members.yml` and replay says so loudly).
+- **Eval session kind.** `render_options_for_kind("session")` returns
+  `include_transcript: false` (session notes publish transcript-free, so the
+  eval note-size must exclude the transcript too). The loader is kind-agnostic,
+  so a `session/<slug>/{source.md,distilled.yml}` golden fixture
+  (`slack-cli-release-promote`) is scored automatically by `sb borg eval`.
+- `pipeline::session` promoted from `mod` to `pub(crate) mod` so replay can call
+  `process_session`.
+
+### Deviations
+
+- None from spec. The design assumed the staged artifacts sufficed for stage-2
+  replay; in practice they did not (Phase 5 OQ#2), so Phase 7 adds the
+  `members.yml` artifact. This is the design's own "envelope.yml = the export
+  metadata for the thread" intent, realized as a thread-specific file rather
+  than overloading the shared generic envelope.
+
+### Tradeoffs
+
+- Staged the FULL `SessionRecord`s (not just the `SessionPayload`) so replay
+  reproduces scope/redaction tags and the footer exactly. Slightly larger
+  staged artifact, bought faithful re-derivation.
+
+### Open questions
+
+None.
+
+### Validation
+
+- `otto ci`: `✅ All CI checks passed!` (with `--features vec`, the workspace
+  feature set otto wires).
+- Tests: `publish_plan_publishes_and_rerun_is_idempotent` extended to assert
+  `members.yml` is staged and `replay --from-stage 2` re-derives the note
+  (`report.succeeded == 1`); `session_kind_loads_and_renders_transcript_free`
+  and `real_repo_fixtures_load_and_include_session` (the latter guards that the
+  checked-in session `distilled.yml` parses as a valid `Distilled`).
+
+### Process note (orchestrator)
+
+Burned cycles this phase running bare `cargo test -p borg` (missing the
+`vault/vec` feature -> spurious `vault::search` errors) and misreading piped
+exit codes (a `| grep | head` pipeline's exit masked cargo's). Corrected to:
+`otto ci` is the single authoritative gate (right features, honest exit), and
+`cargo fmt` runs before every validation. No code impact - all four Phase 7
+tests pass.

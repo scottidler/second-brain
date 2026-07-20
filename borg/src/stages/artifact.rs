@@ -27,6 +27,10 @@ pub trait ArtifactStore: Send + Sync {
     /// Write a binary attachment (image, audio, pdf, ...).
     fn write_attachment(&self, trace_id: &str, filename: &str, bytes: &[u8]) -> Result<()>;
 
+    /// Read a named attachment's bytes; `Ok(None)` when absent (harvest's
+    /// `replay --from-stage 2` reads the staged `members.yml` this way).
+    fn read_attachment(&self, trace_id: &str, filename: &str) -> Result<Option<Vec<u8>>>;
+
     /// Write fetched URL response bytes + fetch metadata. Atomic (temp-then-rename).
     fn write_fetched(&self, trace_id: &str, bytes: &[u8], meta: &FetchMeta) -> Result<()>;
 
@@ -188,6 +192,15 @@ impl ArtifactStore for FsArtifactStore {
 
     fn read_body(&self, trace_id: &str) -> Result<Vec<u8>> {
         std::fs::read(self.body_path(trace_id)).with_context(|| format!("read body for trace {trace_id}"))
+    }
+
+    fn read_attachment(&self, trace_id: &str, filename: &str) -> Result<Option<Vec<u8>>> {
+        let path = self.attachment_path(trace_id, filename);
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("read attachment {}", path.display())),
+        }
     }
 
     fn write_attachment(&self, trace_id: &str, filename: &str, bytes: &[u8]) -> Result<()> {
@@ -450,6 +463,14 @@ impl ArtifactStore for MemArtifactStore {
             .get(trace_id)
             .and_then(|t| t.body.clone())
             .ok_or_else(|| missing("body", trace_id))
+    }
+
+    fn read_attachment(&self, trace_id: &str, filename: &str) -> Result<Option<Vec<u8>>> {
+        let inner = self.inner.lock().expect("mem artifact store poisoned");
+        Ok(inner
+            .traces
+            .get(trace_id)
+            .and_then(|t| t.attachments.get(filename).cloned()))
     }
 
     fn write_attachment(&self, trace_id: &str, filename: &str, bytes: &[u8]) -> Result<()> {

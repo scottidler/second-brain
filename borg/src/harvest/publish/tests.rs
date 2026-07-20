@@ -9,6 +9,7 @@ use crate::harvest::select::SelectionConfig;
 use crate::harvest::watermark::WatermarkState;
 use crate::harvest::{HarvestOpts, plan_harvest};
 use crate::receipts;
+use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
 
 // Env-var mutation isn't safe under parallel tests (rust.md "Platform path
 // testing"): serialize every test that points XDG_DATA_HOME at a tempdir. The
@@ -213,6 +214,29 @@ async fn publish_plan_publishes_and_rerun_is_idempotent() {
         0,
         "an unchanged rerun must not re-select the already-published thread"
     );
+
+    // Phase 7: publish staged members.yml, and `replay --from-stage 2`
+    // re-derives the note from the staged transcript + members WITHOUT
+    // touching clyde. Structurally equivalent: the trace re-publishes
+    // successfully (same source:/trace:, valid Distilled) - byte identity is
+    // not asserted over an (here degraded) distill pass.
+    let trace_id = outcomes[0].trace_id.clone();
+    let store = FsArtifactStore::from_config(&config.staging);
+    assert!(
+        store
+            .read_attachment(&trace_id, crate::harvest::SESSION_REPLAY_META_FILE)
+            .unwrap()
+            .is_some(),
+        "publish stages members.yml for stage-2 replay"
+    );
+    let replay_opts = crate::replay::ReplayOptions {
+        trace_id: Some(trace_id.clone()),
+        from_stage: 2,
+        ..Default::default()
+    };
+    let report = crate::replay::run(config, replay_opts, |_| {}).await.unwrap();
+    assert_eq!(report.succeeded, 1, "stage-2 replay re-derives the session note");
+    assert_eq!(report.failed, 0);
 
     match prior_xdg {
         Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },

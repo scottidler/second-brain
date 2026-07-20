@@ -11,6 +11,7 @@ use eyre::{Context, Result};
 use crate::config::Config;
 use crate::intake;
 use crate::pipeline;
+use crate::stages::artifact::ArtifactStore;
 use crate::types::{ContentKind, IngestMethod, IngestResult, IngestStatus};
 use vault::intake::IntakeKind;
 use vault::receipts::FailureStage;
@@ -177,6 +178,36 @@ async fn publish_thread_inner<R: ExportReader>(
         && let Some(note_path) = result.note_path.as_deref()
     {
         super::record_published(state, &thread.primary_id, note_path, thread.total_msgs, &body_hash);
+
+        // Stage the thread's member records so `replay --from-stage 2` can
+        // re-derive the note from the staged transcript without re-fetching
+        // from clyde. Best-effort: a stage-write failure must not fail an
+        // already-landed publish (the note is the durable artifact; replay is
+        // a convenience).
+        let store = crate::stages::artifact::FsArtifactStore::from_config(&config.staging);
+        let meta = super::SessionReplayMeta {
+            members: thread.members.clone(),
+            primary_id: thread.primary_id.clone(),
+            body_truncated,
+        };
+        match serde_yaml::to_string(&meta) {
+            Ok(yaml) => {
+                if let Err(e) =
+                    store.write_attachment(&thread.trace_id, super::SESSION_REPLAY_META_FILE, yaml.as_bytes())
+                {
+                    log::warn!(
+                        "harvest::publish: failed to stage {} for {}: {e:#}",
+                        super::SESSION_REPLAY_META_FILE,
+                        thread.trace_id
+                    );
+                }
+            }
+            Err(e) => log::warn!(
+                "harvest::publish: serialize {} for {}: {e:#}",
+                super::SESSION_REPLAY_META_FILE,
+                thread.trace_id
+            ),
+        }
     }
     Ok(result)
 }

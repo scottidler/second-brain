@@ -113,3 +113,44 @@ fn render_options_verbatim_kinds_keep_their_transcript() {
         );
     }
 }
+
+#[test]
+fn session_kind_loads_and_renders_transcript_free() {
+    // Phase 7: `sb borg eval` must score the session kind. The loader is
+    // kind-agnostic, so a session/<slug>/{source.md,distilled.yml} pair is
+    // picked up; and session notes publish transcript-free, so the eval
+    // note-size excludes the transcript (matching the harvest publish path).
+    let tmp = tempfile::tempdir().expect("tmp");
+    write_fixture(
+        tmp.path(),
+        "session",
+        "s-1",
+        "USER: hi\nASSISTANT: decided X",
+        MINIMAL_DISTILLED,
+    );
+    let fixtures = load(tmp.path()).expect("load");
+    assert!(
+        fixtures.iter().any(|f| f.kind == "session"),
+        "loader picks up the session kind"
+    );
+
+    let distilled: Distilled = serde_yaml::from_str(MINIMAL_DISTILLED).expect("parse");
+    let opts = render_options_for_kind("session", &distilled);
+    assert!(
+        !opts.include_transcript,
+        "session notes publish transcript-free, so eval excludes the transcript too"
+    );
+}
+
+#[test]
+fn real_repo_fixtures_load_and_include_session() {
+    // Guards the checked-in fixture tree (including the Phase 7 session
+    // fixture): every distilled.yml must parse as a valid Distilled, and the
+    // session kind must be present so `sb borg eval` scores it.
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../config/eval/distill-fixtures");
+    let fixtures = load(std::path::Path::new(dir)).expect("real repo fixtures load");
+    assert!(
+        fixtures.iter().any(|f| f.kind == "session"),
+        "the checked-in fixture tree includes a session fixture"
+    );
+}

@@ -1,0 +1,37 @@
+summary: A slack-cli release-promote workflow orphaned its version tags because it tagged the feature branch before the squash-merge rewrote the commit SHA. The session settles the fix - split the bump from the tag (`bump --no-tag` on the branch, `bump --tag-only` on merged main), check both branch-protection gates, push the branch before the tag with `&&` chaining, and guard against tagging non-default branches.
+claims:
+- text: Tagging a feature branch before a squash-merge orphans the tag, because the merge rewrites the commit SHA the tag points at.
+  anchor: null
+- text: The fix is to bump the version inside the feature PR with no tag, then tag the merged commit on main (`bump --no-tag` then `bump --tag-only`).
+  anchor: null
+- text: Branch protection blocks branch pushes but not tag pushes unless a ruleset also covers tags; check both `branches/main/protection` and `rules/branches/main`.
+  anchor: null
+- text: Never use `git push --tags` in release automation - it lands the tag even when the branch push is rejected; push the branch first with `&&` then the tag by explicit name.
+  anchor: null
+- text: Guard the release so it only tags main/master; a tag created on any other branch is burnt once the branch is squash-merged.
+  anchor: null
+tags:
+- git
+- ci-cd
+- release
+links: []
+kind-specific:
+  kind: session
+  repo: tatari-tv/slack-cli
+  session-ids:
+  - 871f6428-0000-0000-0000-000000000000
+  - 4ae69e3a-0000-0000-0000-000000000000
+  msg-count: 806
+  date-start: 2026-07-02T15:30:00Z
+  date-end: 2026-07-02T15:31:00Z
+meta:
+  extractor: distill-session-v1
+  model: default
+  input-tokens: 512
+  output-tokens: 240
+  produced-at: 2026-07-02T16:00:00+00:00
+  validation:
+    fallback-reason: null
+    bounds-truncations: []
+    anchors-stripped: 0
+    raw-output: null

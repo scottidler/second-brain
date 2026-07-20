@@ -133,6 +133,12 @@ pub fn judge_note_text(distilled: &Distilled) -> String {
 pub fn render_options_for_kind(kind: &str, distilled: &Distilled) -> RenderOptions {
     match kind {
         "video" | "article" | "repo" | "thread" => RenderOptions::for_url_publish(distilled),
+        // Session notes publish transcript-free (the verbatim transcript is a
+        // consumed staging intermediate, never in the note body), so the eval
+        // note-size must exclude it too - matching the harvest publish path.
+        "session" => RenderOptions {
+            include_transcript: false,
+        },
         _ => RenderOptions {
             include_transcript: true,
         },

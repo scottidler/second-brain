@@ -32,7 +32,7 @@ use inflight::InflightGuard;
 
 mod handlers;
 mod publish;
-mod session;
+pub(crate) mod session;
 mod tags;
 mod text;
 pub(crate) use handlers::*;
