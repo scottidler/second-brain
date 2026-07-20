@@ -54,6 +54,26 @@ pub enum HarvestMode {
     Live,
 }
 
+impl HarvestMode {
+    /// Resolve whether a `sb borg harvest` invocation runs dry (writes nothing)
+    /// or live, from the two mutually-exclusive CLI overrides and this config
+    /// default. Precedence, fail-safe first: an explicit `--dry-run` always
+    /// wins (never publish when the operator asked not to), then an explicit
+    /// `--live` overrides the config default, then the config `mode` decides
+    /// (`DryRun` out of the box, per Rollout Plan). `--dry-run`/`--live` are
+    /// clap `conflicts_with`, so both-true never reaches here; if it ever did,
+    /// dry-run still wins.
+    pub fn resolve_dry_run(self, cli_dry_run: bool, cli_live: bool) -> bool {
+        if cli_dry_run {
+            return true;
+        }
+        if cli_live {
+            return false;
+        }
+        matches!(self, HarvestMode::DryRun)
+    }
+}
+
 /// Config for `sb borg harvest`
 /// (design doc: `docs/design/2026-07-17-harvest-clyde-sessions.md`). Every
 /// tunable the harvest loop needs lives here so the timer unit (Phase 8)

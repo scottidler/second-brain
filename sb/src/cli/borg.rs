@@ -125,6 +125,12 @@ pub struct HarvestCliArgs {
     /// advance). Forces dry-run regardless of the harvest.mode config default.
     #[arg(long)]
     pub dry_run: bool,
+    /// Force a LIVE run (publish notes, write receipts, advance the watermark)
+    /// regardless of the harvest.mode config default. The symmetric counterpart
+    /// to --dry-run for a deliberate on-demand backfill without flipping the
+    /// timer's harvest.mode. Mutually exclusive with --dry-run.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub live: bool,
     /// Cap the number of candidate sessions pulled this run (clyde export page
     /// size). Lossless: clyde's paging is gap-free, so the next run resumes
     /// from the cursor.
@@ -605,9 +611,10 @@ impl BorgCli {
                     }
                     Ok(())
                 } else {
-                    // `--dry-run` forces dry-run; otherwise the harvest.mode config
-                    // default decides (DryRun out of the box, per Rollout Plan).
-                    let dry_run = args.dry_run || matches!(config.harvest.mode, borg::config::HarvestMode::DryRun);
+                    // `--dry-run` forces dry-run, `--live` forces live; with
+                    // neither, the harvest.mode config default decides (DryRun
+                    // out of the box, per Rollout Plan).
+                    let dry_run = config.harvest.mode.resolve_dry_run(args.dry_run, args.live);
                     let report = borg::harvest::run(&config, args.since, args.limit, args.force, dry_run).await?;
                     print_harvest_report(&report);
                     Ok(())

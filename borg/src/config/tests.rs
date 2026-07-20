@@ -855,6 +855,26 @@ fn test_harvest_config_default_values() {
 }
 
 #[test]
+fn test_harvest_mode_resolve_dry_run() {
+    // Config default DryRun, no CLI flags -> dry-run (fresh install never
+    // publishes unattended).
+    assert!(HarvestMode::DryRun.resolve_dry_run(false, false));
+    // Config default Live, no CLI flags -> live.
+    assert!(!HarvestMode::Live.resolve_dry_run(false, false));
+
+    // --live overrides a DryRun config default (Phase 2's on-demand live run
+    // without flipping harvest.mode).
+    assert!(!HarvestMode::DryRun.resolve_dry_run(false, true));
+    // --dry-run overrides a Live config default.
+    assert!(HarvestMode::Live.resolve_dry_run(true, false));
+
+    // Fail-safe: if both ever arrive (clap conflicts_with normally prevents
+    // it), --dry-run wins over --live regardless of config mode.
+    assert!(HarvestMode::DryRun.resolve_dry_run(true, true));
+    assert!(HarvestMode::Live.resolve_dry_run(true, true));
+}
+
+#[test]
 fn test_harvest_config_absent_section_defaults() {
     // A borg.yml with NO `harvest:` section at all must still deserialize to
     // the full default HarvestConfig (container `#[serde(default)]` fills
