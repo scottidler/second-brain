@@ -43,6 +43,11 @@ const KIND_SHARED_TAG: &str = "shared-tag";
 const KIND_SHARED_CREATOR: &str = "shared-creator";
 const KIND_SHARED_SOURCE: &str = "shared-source";
 const KIND_SHARED_DOMAIN: &str = "shared-domain";
+/// Note -> repo hub membership (harvest-clyde-sessions design, Phase 10).
+const KIND_REPO_MEMBER: &str = "repo-member";
+/// Repo membership is a strong deterministic signal (unlike a rarity-weighted
+/// shared tag), so it rides at full weight.
+const REPO_MEMBER_WEIGHT: f32 = 1.0;
 
 const WIKILINK_WEIGHT: f32 = 1.0;
 
@@ -324,6 +329,31 @@ fn build_edges_for(
         cfg.domain_weight,
         cfg.fanout_cap,
     );
+
+    // --- repo-member (Phase 10): unconditional note -> repo hub edge. Unlike
+    // the shared-* buckets above (note<->note within a bucket, fan-out capped),
+    // this is genuinely new routing: EVERY note with a well-formed `repo:`
+    // joins its repo hub via the shared `repo_hub_slug`. A malformed slug is
+    // skipped + logged (the note is still indexed). The edge resolves once the
+    // hub pass has stubbed `entities/repo-<org>--<repo>.md`; until then
+    // insert_edges skips it (resolve-endpoint-or-skip), and the next sweep
+    // re-adds it - monotonic.
+    if !row.repo.is_empty() {
+        if vault::schema::validate_repo_slug(&row.repo) {
+            let hub_path = format!("{}/{}.md", crate::hub::HUB_DIR, crate::hub::repo_hub_slug(&row.repo));
+            edges.push(Edge::deterministic(
+                src.clone(),
+                hub_path,
+                KIND_REPO_MEMBER,
+                REPO_MEMBER_WEIGHT,
+            ));
+        } else {
+            log::warn!(
+                "graph: note {src} has malformed repo slug {:?} - skipping repo-member edge",
+                row.repo
+            );
+        }
+    }
 
     Ok(edges)
 }

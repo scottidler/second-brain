@@ -967,3 +967,45 @@ None.
   `parse_repo_and_three_state_repos_touched` (asserts omitted None is distinct
   from Some(vec![])), `repo_round_trips_through_index_to_graph_note_row`
   (frontmatter -> upsert -> notes.repo -> GraphNoteRow, verbatim).
+
+## Phase 10: Repo hub kind + deterministic edge
+
+### Design decisions
+
+- `HubKind::Repo` (`cortex/src/hub.rs`) with `as_str`/`ontotype` "repo".
+- `repo_hub_slug("<org>/<repo>") = repo-<slugify(org)>--<slugify(repo)>`,
+  splitting on the single `/`. INJECTIVE on the org/repo split - the `--`
+  boundary can't be forged (slugify collapses runs to a single `-` and trims
+  boundary hyphens), so `a/b-c` -> `repo-a--b-c` and `a-b/c` -> `repo-a-b--c`
+  are distinct. NOT per-component injective (`.`/`_` fold, so `org/.github` ==
+  `org/github`) - accepted, membership-only, `repo:` frontmatter stays truthful,
+  same lossiness Creator/Source already carry. Case-fold inherited + correct.
+- `collect_stubs` mints a repo hub for every note with a well-formed `repo:`
+  (gated by `vault::schema::validate_repo_slug`; malformed -> WARN + skip, note
+  still indexed). The `repo-` prefix makes the namespace disjoint from the
+  bare-token Concept/Creator/Source/Tag slugs, so a concept named "loopr" and
+  repo `scottidler/loopr` never collide.
+- The `repo-member` graph edge (`cortex/src/graph.rs`, `build_edges_for`):
+  UNCONDITIONAL note -> `entities/repo-<org>--<repo>.md` at full weight -
+  genuinely new routing, distinct from the fan-out-capped note<->note shared-*
+  buckets. Rides the resolve-endpoint-or-skip rule (lands once the hub pass
+  stubbed the hub; re-added each sweep - monotonic).
+
+### Deviations / Tradeoffs
+
+- Repo membership rides at `REPO_MEMBER_WEIGHT = 1.0` (a strong deterministic
+  signal), not a rarity weight - repo co-membership is definitional, not
+  incidental like a shared blanket tag.
+
+### Open questions
+
+None.
+
+### Validation
+
+- `otto ci`: `✅ All CI checks passed!`.
+- Tests: `repo_hub_slug_is_injective_on_the_org_repo_split` (the mandatory
+  /-bearing fixture: adversarial pair distinct, case-fold merge, `.`-fold merge
+  documented), `collect_stubs_mints_repo_hub_deterministically_and_disjoint_from_concepts`
+  (sweep-twice byte-identical, one hub for two same-repo notes, concept
+  coexists), `collect_stubs_skips_malformed_repo`.

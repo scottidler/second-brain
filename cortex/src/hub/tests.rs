@@ -172,3 +172,73 @@ fn graph_skips_edges_to_out_of_band_deleted_hub() {
     );
     let _ = stats;
 }
+
+fn repo_note(path: &str, repo: &str) -> Note {
+    Note {
+        path: std::path::PathBuf::from(path),
+        frontmatter: vault::frontmatter::Frontmatter {
+            repo: Some(repo.to_string()),
+            ..Default::default()
+        },
+        body: String::new(),
+        raw: String::new(),
+    }
+}
+
+#[test]
+fn repo_hub_slug_is_injective_on_the_org_repo_split() {
+    // The adversarial pair the generic slugify would collide (both -> a-b-c)
+    // mint DISTINCT hubs via the `--` boundary (mandatory /-bearing fixture:
+    // the bare-token kinds never exercise this path).
+    assert_eq!(repo_hub_slug("a/b-c"), "repo-a--b-c");
+    assert_eq!(repo_hub_slug("a-b/c"), "repo-a-b--c");
+    assert_ne!(repo_hub_slug("a/b-c"), repo_hub_slug("a-b/c"));
+    // Case-insensitive (GitHub names fold): one hub.
+    assert_eq!(repo_hub_slug("Scott/Loopr"), repo_hub_slug("scott/loopr"));
+    assert_eq!(repo_hub_slug("scottidler/loopr"), "repo-scottidler--loopr");
+    // Accepted lossiness: `.`/`_` fold to `-`, so these merge (documented,
+    // membership-only, `repo:` frontmatter stays byte-truthful).
+    assert_eq!(repo_hub_slug("org/.github"), repo_hub_slug("org/github"));
+}
+
+#[test]
+fn collect_stubs_mints_repo_hub_deterministically_and_disjoint_from_concepts() {
+    let notes = vec![
+        repo_note("a.md", "scottidler/loopr"),
+        repo_note("b.md", "scottidler/loopr"),
+    ];
+    // A concept literally named "loopr" must NOT collide with the repo hub.
+    let stubs1 = collect_stubs(&["loopr".to_string()], &[], &notes, 10);
+    let stubs2 = collect_stubs(&["loopr".to_string()], &[], &notes, 10);
+    assert_eq!(
+        stubs1, stubs2,
+        "collect_stubs is deterministic byte-for-byte across sweeps"
+    );
+    let slugs: Vec<&str> = stubs1.iter().map(|s| s.slug.as_str()).collect();
+    assert!(slugs.contains(&"repo-scottidler--loopr"), "repo hub minted: {slugs:?}");
+    assert!(
+        slugs.contains(&"loopr"),
+        "concept hub coexists (disjoint namespace): {slugs:?}"
+    );
+    assert_eq!(
+        stubs1.iter().filter(|s| s.slug == "repo-scottidler--loopr").count(),
+        1,
+        "two same-repo notes mint ONE repo hub"
+    );
+    let repo_stub = stubs1
+        .iter()
+        .find(|s| s.slug == "repo-scottidler--loopr")
+        .expect("repo stub present");
+    assert_eq!(repo_stub.kind, HubKind::Repo);
+    assert_eq!(repo_stub.title, "scottidler/loopr", "title stays byte-truthful");
+}
+
+#[test]
+fn collect_stubs_skips_malformed_repo() {
+    let notes = vec![repo_note("bad.md", "no-slash-here")];
+    let stubs = collect_stubs(&[], &[], &notes, 10);
+    assert!(
+        !stubs.iter().any(|s| matches!(s.kind, HubKind::Repo)),
+        "a malformed repo slug mints no repo hub (edge skipped, note still indexed)"
+    );
+}

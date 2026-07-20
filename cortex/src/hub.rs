@@ -34,6 +34,11 @@ pub enum HubKind {
     Creator,
     Source,
     Tag,
+    /// A `<org>/<repo>` GitHub repo (harvest-clyde-sessions design, Phase 10).
+    /// Minted from a note's `repo:` frontmatter via `repo_hub_slug`, so its
+    /// slug is always `repo-<org>--<repo>` - a namespace disjoint from the
+    /// bare-token Concept/Creator/Source/Tag slugs.
+    Repo,
 }
 
 impl HubKind {
@@ -43,6 +48,7 @@ impl HubKind {
             HubKind::Creator => "creator",
             HubKind::Source => "source",
             HubKind::Tag => "tag",
+            HubKind::Repo => "repo",
         }
     }
 
@@ -53,8 +59,27 @@ impl HubKind {
             HubKind::Creator => "creator",
             HubKind::Source => "source",
             HubKind::Tag => "topic",
+            HubKind::Repo => "repo",
         }
     }
+}
+
+/// Hub slug for a `<org>/<repo>` value (harvest-clyde-sessions design, Phase
+/// 10). Flat hub filenames can't hold the `/`, and the generic `slugify` would
+/// collapse `a/b-c` and `a-b/c` to the same `a-b-c`. So repo hubs get a
+/// dedicated slug: `repo-<slugify(org)>--<slugify(repo)>`, splitting on the
+/// single `/`. INJECTIVE on the org/repo split - the `--` boundary can't be
+/// forged because `slugify` collapses non-alphanumeric runs to a SINGLE `-`
+/// and trims boundary hyphens, so no slugified component ever contains `--` or
+/// a boundary hyphen. NOT fully injective per-component (`slugify` also folds
+/// `.`/`_` to `-`, so `org/.github` and `org/github` collide) - accepted: the
+/// `repo:` frontmatter stays byte-truthful, only hub MEMBERSHIP merges, and it
+/// is the same lossiness Creator/Source hubs already carry. Case-folding is
+/// inherited and correct (GitHub names are case-insensitive). The caller MUST
+/// have passed the value through `validate_repo_slug` first (exactly one `/`).
+pub fn repo_hub_slug(repo: &str) -> String {
+    let (org, name) = repo.split_once('/').unwrap_or((repo, ""));
+    format!("repo-{}--{}", slugify(org), slugify(name))
 }
 
 /// One hub to materialize: its slug (== filename stem), kind, and the display
@@ -154,6 +179,23 @@ pub fn collect_stubs(
             let slug = slugify(&host);
             if !slug.is_empty() {
                 insert(slug, HubKind::Source, host);
+            }
+        }
+        // Repo hub (Phase 10): unconditional - every note carrying a well-formed
+        // `repo:` mints/joins its repo hub. The `repo-<org>--<repo>` slug is a
+        // namespace disjoint from the bare-token kinds above, so it never
+        // collides. A malformed slug skips the edge and logs loudly, but the
+        // note is still indexed (knowledge is never discarded).
+        if let Some(repo) = note.frontmatter.repo.as_deref()
+            && !repo.is_empty()
+        {
+            if vault::schema::validate_repo_slug(repo) {
+                insert(repo_hub_slug(repo), HubKind::Repo, repo.to_string());
+            } else {
+                log::warn!(
+                    "cortex::hub: note {} has malformed repo slug {repo:?} - skipping repo hub edge (note still indexed)",
+                    note.path.display()
+                );
             }
         }
         if let Some(tags) = note.frontmatter.tags.as_ref() {
