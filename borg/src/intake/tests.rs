@@ -34,6 +34,31 @@ fn capture_writes_sidecar_and_received_row() {
     assert_eq!(r.raw_input, url);
 }
 
+/// A harvest session candidate maps to the honest `ReceiptKind::Session`
+/// (never `Text` - "calling a session `text` would be a lying identifier",
+/// harvest-clyde-sessions design).
+#[test]
+fn capture_maps_session_kind_to_receipt_kind_session() {
+    let conn = receipts::open_memory().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let body = "human: hi\nassistant: hello";
+
+    record_received_with_sidecar_to(
+        &conn,
+        root,
+        IngestMethod::Harvest,
+        IntakeKind::Session,
+        body,
+        body.as_bytes(),
+        "tr-session",
+    )
+    .unwrap();
+
+    let r = receipts::get(&conn, "tr-session").unwrap().expect("receipts row");
+    assert_eq!(r.kind, "session");
+}
+
 /// A sidecar-write failure propagates as Err - the door must report Failed,
 /// never silently drop the input. (Vault root is a regular file, so the
 /// sidecar directory cannot be created.)

@@ -67,8 +67,11 @@ fn test_content_kind_text() {
 fn test_content_kind_session() {
     let kind = ContentKind::Session {
         body: "human: hi\nassistant: hello".to_string(),
+        members: Vec::new(),
+        primary_id: "sess-1".to_string(),
+        body_truncated: false,
     };
-    assert!(matches!(kind, ContentKind::Session { ref body } if body.starts_with("human:")));
+    assert!(matches!(kind, ContentKind::Session { ref body, .. } if body.starts_with("human:")));
 }
 
 #[test]

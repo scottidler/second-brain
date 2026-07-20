@@ -506,3 +506,229 @@ Phase 1. The orchestrator took over inline: verified every required arm/marker
 by grep, ran `cargo test --workspace` (0 failures) and `otto ci`
 (`✅ All CI checks passed!`), authored these notes, and committed. No code was
 re-written; the stalled agent's edits were verified and adopted as-is.
+
+## Phase 5: Pipeline handler + publish
+
+### Design decisions
+
+- **Two new modules split along the existing seam** (harvest side vs pipeline
+  side, per `borg/AGENTS.md`'s "add an ingest source" pattern):
+  - `borg/src/harvest/publish.rs` (`publish_plan`/`publish_thread`/
+    `publish_thread_inner`) - for every publishable `ThreadDecision`: fetch
+    every member's `--with-body` transcript (Phase 3 only fetched a body for
+    the deep re-appearance check, so a `NewNote`/cheap-filter `Skip` has none
+    yet and a `FollowUp`'s fetch result was never propagated onto
+    `ThreadDecision` - this always re-fetches, deterministically, from the
+    same reader/ids Phase 3 validated), concatenate via the Phase 3
+    `watermark::thread_body_text`/`body_hash` (the SAME identity-anchor
+    functions, so the hash stored on publish is byte-identical to what a
+    future re-appearance check would recompute), door-capture via
+    `intake::record_received_with_sidecar` (`IntakeKind::Session` - new
+    variant, see below), dispatch through `pipeline::process_content`, and on
+    `Completed` call `harvest::record_published` with the landed note path +
+    `thread.total_msgs` + the body hash. A single thread's failure converts to
+    a `Failed` outcome + `intake::record_failure_at_door` rather than aborting
+    the run (mirrors `write_rejections`'s per-item best-effort policy) - one
+    bad session fetch must not silently drop the rest of the night's harvest.
+  - `borg/src/pipeline/session.rs` (`process_session`/`process_session_inner`)
+    - the `ContentKind::Session` handler wired into `process_content`'s match
+    (mirrors `process_text`'s timing/error-wrapper shape). Builds
+    `SessionMetadata` from the carried `members` (repo from primary, session
+    ids primary-first, summed `msg_count`, min `created`/max `modified` via
+    parsed-timestamp comparison - not string comparison, since RFC3339 strings
+    with differing UTC offsets don't sort lexically), resolves
+    `harvest.model`/`llm.model`/`harvest.token-cap` into a `SessionConfig`,
+    calls `distill_for_publish_session`, renders via
+    `distillers::render(..., RenderOptions { include_transcript: false })`
+    (Article/Repo/Video's transcript-free policy - the design doc's embedding
+    policy: only the distilled note is embedded, the staged transcript stays
+    trace-recallable), appends a richer per-member `## Session Details`
+    footer (id/title/repo/duration) for thread notes (`members.len() > 1`,
+    reusing `pipeline::append_distilled_below_slides` for the splice - the
+    same generic "append a section below a body" helper the slide path
+    already uses), writes full frontmatter (`type: session`, `method:
+    harvest`, `origin: generated`, `status: unread`, `source:
+    clyde://<primary-id>`, `repo:` verbatim/present-null, `trace:`,
+    `ingested:`, `trace-expires:`, tags), and publishes via the shared
+    `atomic::resolve_publish_path` + `vault::note::write_atomic` +
+    `publish_note` path every non-URL kind already uses (no hand-rolled
+    `fs::write`).
+- **`ContentKind::Session` extended from `{ body }` to `{ body, members,
+  primary_id, body_truncated }`** (`borg/src/types.rs`) - the Phase 1 seam
+  carried only the concatenated transcript, but the pipeline handler needs
+  repo/scope/title/duration/redaction-count/dates to build `SessionMetadata`
+  and the note's frontmatter+footer, none of which round-trips through a bare
+  `String`. `members` are the bulk-metadata `SessionRecord`s (no `body` field
+  populated - the concatenated transcript already carries that as `body`, so
+  nothing is duplicated); `primary_id` and `body_truncated` (true if ANY
+  member's `--with-body` fetch flagged clyde-side truncation) ride alongside.
+  Every match site (`stages/raw.rs::write_capture`, `signal.rs`, existing
+  tests) updated to the new shape.
+- **`ThreadDecision` gained a `members: Vec<SessionRecord>` field**
+  (`borg/src/harvest.rs`) - Phase 3's `plan_harvest` already clusters full
+  `SessionRecord`s (via `cluster::Thread`) but only projected `member_ids`/
+  `total_msgs` onto `ThreadDecision`; Phase 5 needs the full records (repo,
+  scope, redaction-count, title, duration) without re-deriving them, so this
+  is additive cross-phase wiring on an already-committed Phase 3 type (the
+  "most-skipped" class the taste rules call out) rather than a re-fetch or a
+  parallel lookup table.
+- **`dispatcher_for_session` + `distill_for_publish_session` signature
+  change** (`borg/src/stages/distill.rs`) - Phase 4's `dispatcher.rs` doc
+  comment explicitly invited this ("borg's harvest handler (Phase 5) rebuilds
+  it via with_configs when harvest.token-cap differs"): `dispatcher_for_session`
+  builds every other kind's config identically to `dispatcher_from_fabric_config`
+  and only substitutes a caller-supplied `SessionConfig` (carrying
+  `harvest.model`-or-`llm.model` + `harvest.token-cap`) for the session
+  distiller, via `Dispatcher::with_configs`. `distill_for_publish_session`
+  gained a `session_config: SessionConfig` parameter and now builds its stage
+  via `DistillStage::with_dispatcher(dispatcher_for_session(...))` instead of
+  the article-default `DistillStage::from_fabric_config(...)`.
+- **`IntakeKind::Session` new variant** (`vault/src/intake.rs` +
+  `borg/src/intake.rs`'s `receipt_kind` mapping) - the harvest door needed to
+  call the SAME `intake::record_received_with_sidecar` every other transport
+  uses (per `borg/AGENTS.md`'s add-a-source pattern), but the existing
+  `IntakeKind` vocabulary only maps to `ReceiptKind::{Url,Text,Binary}`, and
+  `Text` would be the exact "lying identifier" the design doc calls out for
+  sessions. Added `IntakeKind::Session -> ReceiptKind::Session` so the door
+  capture is both reused AND honest.
+- **`NoteContent` gained `origin: Option<Origin>` / `status: Option<Status>`**
+  (`borg/src/markdown.rs`) - every existing kind hardcoded `origin: assisted`
+  and never wrote `status:` at all; harvest notes need `origin: generated` /
+  `status: unread` per the design doc's Data Model. `None` (every existing
+  literal's default) renders byte-identically to the pre-Phase-5 behavior
+  (`origin: assisted`, no `status:` line); only the Session handler sets
+  `Some(...)`.
+- **`repo:` frontmatter emitted now, validated in Phase 9** - per the design
+  doc's explicit Phase 9 note ("write it verbatim; the full validation/hub
+  wiring is Phase 9, but the renderer should emit the field now"), the session
+  handler writes `repo:` straight from `SessionMetadata.repo` (itself the
+  primary member's `SessionRecord.repo`, present-null preserved via
+  `serde_yaml::Value::Null`) into `frontmatter_additions` with NO shape
+  validation. `repos-touched:` is not emitted - Phase 9's addition once
+  clyde ships files-touched.
+- **Scope/redaction tags bypass canonical filtering** - `scope-work`/
+  `scope-personal` (from the primary member's `scope` field) and
+  `redacted-source` (any member's `redaction-count > 0`) are pushed onto
+  `all_tags` AFTER `finalize_tags` runs, not before. None of the three is in
+  the 110-tag canonical interest vocabulary `canonical::filter_and_cap`
+  filters against (confirmed: `scope-work`/`scope-personal`/`redacted-source`
+  absent from `config/canonical-tags.yml`, and no segment of them matches
+  either), so pre-filter placement would silently drop them - the same fate
+  the pre-existing `code-snippet`/`*-vocab` tags already have (pushed before
+  `finalize_tags` in `pipeline/text.rs`, not touched here). Since the design
+  doc states these tags as a REQUIRED frontmatter guarantee on every harvest
+  note (not an optional interest tag), they ride after the filter instead of
+  risking silent loss.
+- **`force` semantics kept intentionally narrow** - the harvest publish loop
+  always calls `pipeline::process_content(..., force=false, ...)` regardless
+  of the CLI's `--force`. Design-level `--force` ("re-distill this in-scope
+  published id") is already expressed upstream as Phase 3's `FollowUp`
+  decision, which lands as a brand-new note (notes are immutable once
+  published - Resolved Decisions). The pipeline's own `force` parameter means
+  "overwrite a same-filename collision in place" - a distinct, narrower
+  concept the harvest loop never wants; documented inline at the call site so
+  Phase 6 doesn't wire `--force` through this parameter by mistake.
+
+### Deviations
+
+- **`ContentKind::Session`'s shape is NOT what Phase 1 shipped** (`{ body }`
+  only). Extending it to `{ body, members, primary_id, body_truncated }` was
+  necessary for the handler to reach repo/scope/title/duration/redaction
+  without a second lookup; same effect (one `ContentKind` variant carrying
+  everything the Session handler needs), correct seam - the exact "spec-gap"
+  pattern the phase-implementer brief calls out (exact signatures in design
+  docs are chronically wrong at the field level; Phase 1's own doc comment on
+  the field literally said "Phase 5's pipeline handler dispatches on it"
+  without committing to a shape).
+- **The design doc's `## Sessions` footer (Phase 4, `SessionPayload`-driven)
+  is supplemented, not replaced, by a richer `## Session Details` block for
+  thread notes** - `distillers::render`'s `push_session_footer` doc comment
+  explicitly defers the id/title/repo/duration footer to "borg's publish
+  layer, which holds the full clustered `SessionRecord`s" (Phase 5). Rather
+  than modifying the already-shipped, tested `render()` function, Phase 5
+  appends a second section below it (`render_member_details` +
+  `append_distilled_below_slides`) only when the thread has more than one
+  member - a single-session note gets no extra section, matching "the design
+  collapses to trivial at N=1".
+- **No fabric/network dependency in Phase 5's tests** - `distill_for_publish_session`
+  (like every other `distill_for_publish_*`) is not generic over `FabricCaller`;
+  it always builds a real `FabricShell`. Every Phase 5 test points
+  `config.fabric.binary` at a guaranteed-absent binary name, so the subprocess
+  spawn fails and the existing `fallback_distilled` path produces a degraded
+  (but valid) `Distilled` - consistent with how every other kind's
+  `distill_for_publish_*` handler already behaves under a missing fabric
+  binary; no new test double was needed or invented.
+- **`config.tags.canonical_path`/`mapping_path` pointed at guaranteed-absent
+  paths in every Phase 5 test, not the real default `~/.config/sb/...` or a
+  fixture file.** `pipeline::tags::get_or_init_canonical` caches the loaded
+  canonical vocabulary in a process-wide slot on first SUCCESS, keyed on
+  nothing (not per-config) - discovered live: an earlier draft of these tests
+  used `Config::default()`'s real default path, which exists on this dev
+  machine, and non-deterministically poisoned the shared cache with the real
+  ~110-tag catalogue for every OTHER test in the same binary run depending on
+  execution order, breaking `pipeline::tags::tests::distiller_proposed_tags_survive_canonical_filter`
+  (which expects its own tempdir fixture to win the race). Pointing at
+  absent paths makes `CanonicalTagsFile::load` fail loudly and return `None`
+  WITHOUT caching (confirmed by reading `get_or_init_canonical`), so
+  `finalize_tags` no-ops for these calls and the shared cache is never
+  touched either way - deterministic regardless of test execution order. Not
+  a fix to the underlying cache design (out of Phase 5's scope); flagged as
+  an open question below.
+
+### Tradeoffs
+
+- **Fetch bodies twice (Phase 3's deep-check path + Phase 5's publish path)
+  rather than threading a fetched body through `ThreadDecision`** - Phase 3
+  only fetches on the `FollowUp`-candidate path, and even then the result
+  isn't retained on the `Reappearance`/`ThreadDecision` value (by design:
+  `plan_harvest` is meant to be side-effect/fetch-cheap for the common `Skip`
+  case). Re-fetching in Phase 5 for every publishable thread is simpler and
+  keeps `plan_harvest`'s "pure w.r.t. disk except the identity-check fetch"
+  contract from Phase 3 unchanged, at the cost of one extra `clyde session
+  export --id --with-body` call per already-fetched `FollowUp` member. At
+  harvest's scale (few threads/night) this is not a real cost.
+- **Session's transcript-free render policy (`include_transcript: false`)
+  chosen explicitly rather than following the doc's silence** - the design
+  doc's Embedding policy line ("only the distilled note is embedded... the
+  staged transcript is trace-recallable... never embedded") maps directly to
+  the SAME policy Article/Repo/Video already use (`RenderOptions::
+  for_url_publish` degenerates to `false` for a `None`/non-Thread payload);
+  Session is not a verbatim-preservation kind like Thread/Idea/Vocabulary, so
+  it takes the transcript-free branch rather than introducing a new policy
+  value.
+- **`earliest_created`/`latest_modified` log-and-skip on an unparseable
+  timestamp rather than propagating an error** - every member here already
+  passed through Phase 3's `cluster_threads`, which itself `bail!`s loudly on
+  an unparseable `created`/`modified` before a `Thread` can even exist. A
+  parse failure at this seam would mean a caller bypassed that gate (a
+  programmer error, not an operator-facing data problem), so logging + falling
+  back to the next-best candidate is a defensive backstop, not the primary
+  correctness mechanism - it never blocks a publish that would otherwise
+  succeed.
+
+### Open questions
+
+- `pipeline::tags::get_or_init_canonical`'s process-wide, config-blind cache
+  (first successful load wins for the rest of the test binary's life,
+  regardless of which config subsequent callers pass) is a pre-existing
+  test-isolation hazard, not introduced by Phase 5 but newly TRIGGERED by it
+  (Phase 5 is the first harvest-side caller of `finalize_tags` with a
+  `Config::default()`-shaped config in the test suite). Worth a follow-up
+  design note (scope: cortex/borg tag-pipeline test infrastructure) either
+  keying the cache by resolved path or giving tests an explicit reset hook;
+  not fixed here since it is shared, unrelated infrastructure outside this
+  phase's assigned files.
+- The design doc's "envelope.yml (the export metadata for the thread)" staged
+  artifact is, in practice, the SAME generic `Envelope` (`trace`/`kind`/
+  `method`/`received_at`) every content kind already gets from `stages::raw::
+  stage_0_init` - it is not enriched with thread-level export metadata
+  (repo/scope/dates/redaction). The concatenated `body.txt` (already written
+  generically for `ContentKind::Session`) IS the parsed-body artifact the doc
+  names, and `distilled.yml` is written by `distill_for_publish_session`
+  unchanged from Phase 4 - so 2 of the 3 named staged artifacts match exactly
+  and the third (envelope) carries strictly less thread-specific detail than
+  the doc's phrasing implies. Enriching `stage_0_init`'s envelope write would
+  require changing its shared signature (touching every content kind, not
+  just Session) or a second `write_envelope` call from the Session handler
+  that races/duplicates the generic one - flagged for the parent to decide
+  whether this is worth a follow-up rather than done speculatively here.

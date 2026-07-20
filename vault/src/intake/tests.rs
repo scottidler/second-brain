@@ -36,6 +36,7 @@ fn intake_kind_round_trip() {
         IntakeKind::Contact,
         IntakeKind::Empty,
         IntakeKind::Unknown,
+        IntakeKind::Session,
     ] {
         let parsed: IntakeKind = k.as_str().parse().expect("parse");
         assert_eq!(k, parsed);

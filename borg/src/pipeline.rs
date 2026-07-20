@@ -32,10 +32,12 @@ use inflight::InflightGuard;
 
 mod handlers;
 mod publish;
+mod session;
 mod tags;
 mod text;
 pub(crate) use handlers::*;
 pub use publish::*;
+pub(crate) use session::*;
 pub(crate) use tags::*;
 pub(crate) use text::*;
 
@@ -308,19 +310,35 @@ pub async fn process_content(
                 )
                 .await
             }
-            // Schema seam only (harvest-clyde-sessions design, Phase 1): the
-            // real dispatch (staged artifacts, SessionDistiller, atomic
-            // publish) is Phase 5's pipeline handler. `sb borg harvest`
-            // (Phase 3) does not yet construct this variant.
-            ContentKind::Session { .. } => IngestResult {
-                status: IngestStatus::Failed {
-                    reason: "ContentKind::Session pipeline dispatch not yet wired (Phase 5)".to_string(),
-                },
-                trace_id: Some(trace_id.clone()),
-                method: Some(method),
-                failure_stage: Some(FailureStage::ClassifyFailed),
-                ..Default::default()
-            },
+            // Harvest-clyde-sessions design, Phase 5: the harvest publish
+            // runner (`harvest::publish::publish_thread`) already
+            // selected/clustered/fetched everything - this handler distills,
+            // renders, and publishes.
+            ContentKind::Session {
+                body,
+                members,
+                primary_id,
+                body_truncated,
+            } => {
+                with_hard_timeout(
+                    process_session(
+                        &body,
+                        &members,
+                        &primary_id,
+                        body_truncated,
+                        tags,
+                        method,
+                        force,
+                        config,
+                        &trace_id,
+                    ),
+                    config,
+                    &trace_id,
+                    method,
+                    "session",
+                )
+                .await
+            }
         }
     };
     result.trace_id = Some(trace_id.clone());
@@ -920,6 +938,10 @@ async fn process_url_inner(
             additions.insert("trace-expires".to_string(), serde_yaml::Value::String(expires));
             additions
         },
+        // URL kinds keep the pre-existing `origin: assisted` / no `status:`
+        // behavior; only harvest's Session handler sets these.
+        origin: None,
+        status: None,
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);

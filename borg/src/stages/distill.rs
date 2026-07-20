@@ -24,7 +24,7 @@ use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
 use crate::types::{IngestKind, TraceMeta};
 use distillers::{
     ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, RepoMetadata,
-    SessionMetadata, VideoMetadata,
+    SessionConfig, SessionMetadata, VideoMetadata,
 };
 use eyre::{Context, Result};
 use vault::distilled::Distilled;
@@ -865,11 +865,71 @@ pub async fn distill_for_publish_thread(
     distilled
 }
 
+/// Build a distill dispatcher whose `SessionDistiller` carries `harvest`'s
+/// model/token-cap overrides (design doc: Distillation > Model) instead of
+/// the article defaults every other kind inherits. Every other kind's config
+/// is built identically to [`dispatcher_from_fabric_config`]; only the
+/// session sub-config differs - the `Dispatcher::new` doc comment explicitly
+/// invites this Phase 5 rebuild ("borg's harvest handler (Phase 5) rebuilds
+/// it via with_configs when harvest.token-cap differs").
+pub fn dispatcher_for_session(fabric: &FabricConfig, session_config: SessionConfig) -> Dispatcher<FabricShell> {
+    log::debug!(
+        "dispatcher_for_session: model={} token_cap={}",
+        session_config.model,
+        session_config.token_cap
+    );
+    let caller = FabricShell::new(fabric.binary.clone());
+    let article_config = ArticleConfig {
+        model: fabric.model.clone(),
+        max_chars: fabric.max_content_chars,
+        timeout_secs: fabric.timeout_secs,
+    };
+    let repo_config = distillers::RepoConfig {
+        model: article_config.model.clone(),
+        max_chars: article_config.max_chars,
+        timeout_secs: article_config.timeout_secs,
+    };
+    let video_config = distillers::VideoConfig {
+        model: article_config.model.clone(),
+        max_chars: article_config.max_chars,
+        timeout_secs: article_config.timeout_secs,
+        ..distillers::VideoConfig::default()
+    };
+    let thread_config = distillers::ThreadConfig {
+        model: article_config.model.clone(),
+        max_chars: article_config.max_chars,
+        timeout_secs: article_config.timeout_secs,
+    };
+    let image_config = distillers::ImageConfig {
+        model: article_config.model.clone(),
+        max_chars: article_config.max_chars,
+        timeout_secs: article_config.timeout_secs,
+    };
+    let voicenote_config = distillers::VoiceNoteConfig {
+        model: article_config.model.clone(),
+        max_chars: article_config.max_chars,
+        timeout_secs: article_config.timeout_secs,
+        ..distillers::VoiceNoteConfig::default()
+    };
+    Dispatcher::with_configs(
+        caller,
+        article_config,
+        repo_config,
+        video_config,
+        thread_config,
+        image_config,
+        voicenote_config,
+        session_config,
+    )
+}
+
 /// Harvest-clyde-sessions Phase 4 cutover: run the session distiller against
 /// the concatenated role-labeled body of a harvested thread. `source_url` is
 /// the primary session's `clyde://<id>` pointer; `session_metadata` carries the
 /// deterministic bookkeeping (repo anchor, member ids, message count, date
 /// range, `body-truncated`) the distiller attaches as `KindPayload::Session`.
+/// `session_config` carries harvest's model/token-cap overrides (Phase 5 -
+/// resolved by the caller, which holds `HarvestConfig`/`llm.model`).
 /// Persists `distilled.yml` on success. On any dispatch error returns a
 /// `fallback_distilled` so publish always has a payload - degraded distillation
 /// never blocks the note from landing (the borg degraded-quality contract).
@@ -880,6 +940,7 @@ pub async fn distill_for_publish_session(
     source_url: &str,
     body: &str,
     session_metadata: &SessionMetadata,
+    session_config: SessionConfig,
 ) -> Distilled {
     log::debug!(
         "distill_for_publish_session: trace={trace_id} source={source_url} transcript_len={} session_ids={} body_truncated={}",
@@ -887,7 +948,8 @@ pub async fn distill_for_publish_session(
         session_metadata.session_ids.len(),
         session_metadata.body_truncated,
     );
-    let stage = DistillStage::from_fabric_config(fabric);
+    let model = session_config.model.clone();
+    let stage = DistillStage::with_dispatcher(dispatcher_for_session(fabric, session_config));
     let started = std::time::Instant::now();
     let distilled = match stage
         .distill_with_session_metadata(body, Some(source_url), Some(session_metadata))
@@ -896,7 +958,7 @@ pub async fn distill_for_publish_session(
         Ok(d) => d,
         Err(e) => {
             log::warn!("[{trace_id}] distill_for_publish_session: dispatch error: {e:#}; using fallback");
-            distillers::fallback_distilled("distill-session-v1", "dispatch-error", body, None, &fabric.model)
+            distillers::fallback_distilled("distill-session-v1", "dispatch-error", body, None, &model)
         }
     };
     let elapsed_ms = started.elapsed().as_millis();

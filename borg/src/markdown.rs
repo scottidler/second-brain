@@ -37,6 +37,15 @@ pub struct NoteContent {
     /// closing `---`. Populated by `distillers::render` with `distilled:
     /// true`, `distilled-extractor`, and per-kind `cortex-*` fields.
     pub frontmatter_additions: BTreeMap<String, serde_yaml::Value>,
+    /// `origin:` override. `None` (the default for every existing kind)
+    /// renders `origin: assisted`, unchanged from before this field existed.
+    /// Harvest notes (produced end-to-end by the distiller, no operator
+    /// capture) set `Some(Origin::Generated)` (design doc: Data Model).
+    pub origin: Option<vault::schema::Origin>,
+    /// `status:` frontmatter, omitted (as before) when `None`. Harvest notes
+    /// set `Some(Status::Unread)` (design doc: Data Model); no other kind
+    /// writes this field today.
+    pub status: Option<vault::schema::Status>,
 }
 
 #[derive(Default)]
@@ -140,7 +149,11 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         fm.push_str(&format!("asset: {}\n", yaml_scalar(asset)));
     }
     fm.push_str(&format!("type: {type_field}\n"));
-    fm.push_str("origin: assisted\n");
+    let origin = note.origin.unwrap_or(vault::schema::Origin::Assisted);
+    fm.push_str(&format!("origin: {}\n", origin.as_str()));
+    if let Some(status) = note.status {
+        fm.push_str(&format!("status: {}\n", status.as_str()));
+    }
 
     if let Some(method) = &note.method {
         fm.push_str(&format!("method: {method}\n"));

@@ -35,6 +35,10 @@ fn receipt_kind(kind: IntakeKind) -> ReceiptKind {
         | IntakeKind::Poll
         | IntakeKind::Location
         | IntakeKind::Contact => ReceiptKind::Binary,
+        // A clyde session/thread candidate: `raw_input` is the concatenated
+        // parsed body (staged like `Binary`'s sidecar), never the lying
+        // `Text` classification (harvest-clyde-sessions design).
+        IntakeKind::Session => ReceiptKind::Session,
     }
 }
 

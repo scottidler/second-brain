@@ -92,6 +92,9 @@ fn classify_image_and_audio() {
 fn classify_session() {
     let kind = classify(&ContentKind::Session {
         body: "human: hi\nassistant: hello".to_string(),
+        members: Vec::new(),
+        primary_id: "sess-1".to_string(),
+        body_truncated: false,
     });
     assert_eq!(kind, IngestKind::Session);
 }

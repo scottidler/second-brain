@@ -130,7 +130,7 @@ pub fn write_capture<S: ArtifactStore>(
         ContentKind::Audio { data, filename } => {
             store.write_attachment(trace_id, filename, data)?;
         }
-        ContentKind::Session { body } => {
+        ContentKind::Session { body, .. } => {
             store.write_body(trace_id, body.as_bytes())?;
         }
     }

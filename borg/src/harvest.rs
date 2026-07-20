@@ -17,9 +17,13 @@
 //! - [`select`] - the selection gate (`fn -> Result<(), RejectionRecord>`)
 //! - [`cluster`] - deterministic `(cwd, git-branch) + gap` thread clustering
 //! - [`watermark`] - the state file, exclusive lock, and re-appearance logic
+//! - [`publish`] - Phase 5: fetch bodies + door capture + pipeline dispatch
+//!   for every publishable `ThreadDecision`, then the post-publish watermark
+//!   update
 
 pub mod cluster;
 pub mod contract;
+pub mod publish;
 pub mod reader;
 pub mod select;
 pub mod watermark;
@@ -93,6 +97,13 @@ pub struct ThreadDecision {
     pub total_msgs: i64,
     /// New note / follow-up / skip (with an optional in-place snapshot advance).
     pub decision: Reappearance,
+    /// Full bulk-metadata records for every member (repo, scope, title,
+    /// duration, redaction-count, dates), in `created` order. Phase 5 needs
+    /// these for `SessionMetadata`, the note's frontmatter (`repo:`,
+    /// `scope-*`/`redacted-source` tags), and the thread footer, without
+    /// re-deriving them from `member_ids`. Carries no `body` (bulk metadata
+    /// only) - Phase 5 fetches transcript bodies separately.
+    pub members: Vec<SessionRecord>,
 }
 
 /// A declined candidate: its selection-time trace and the full rejection
@@ -190,6 +201,7 @@ pub async fn plan_harvest<R: ExportReader>(
             member_ids: thread.member_ids(),
             total_msgs: thread.total_msgs(),
             decision,
+            members: thread.members.clone(),
         });
     }
 

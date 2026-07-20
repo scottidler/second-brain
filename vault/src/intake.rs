@@ -32,6 +32,11 @@ pub enum IntakeKind {
     Contact,
     Empty,
     Unknown,
+    /// A clyde session/thread candidate pulled by `sb borg harvest`
+    /// (harvest-clyde-sessions design). Kept distinct so `intake::
+    /// record_received_with_sidecar` can map it to the honest
+    /// `ReceiptKind::Session` rather than lying as `Text`.
+    Session,
 }
 
 impl IntakeKind {
@@ -51,6 +56,7 @@ impl IntakeKind {
             Self::Contact => "contact",
             Self::Empty => "empty",
             Self::Unknown => "unknown",
+            Self::Session => "session",
         }
     }
 }
@@ -79,6 +85,7 @@ impl FromStr for IntakeKind {
             "contact" => Ok(Self::Contact),
             "empty" => Ok(Self::Empty),
             "unknown" => Ok(Self::Unknown),
+            "session" => Ok(Self::Session),
             _ => Err(format!("unknown intake kind: {s}")),
         }
     }

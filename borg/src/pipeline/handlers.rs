@@ -790,6 +790,8 @@ pub(crate) async fn process_image_inner(
         slides: Vec::new(),
         distilled_body: Some(rendered_distilled.body_markdown),
         frontmatter_additions: rendered_distilled.frontmatter_additions,
+        origin: None,
+        status: None,
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
@@ -1017,6 +1019,8 @@ pub(crate) async fn process_audio_inner(
         slides: Vec::new(),
         distilled_body: Some(rendered_distilled.body_markdown),
         frontmatter_additions: rendered_distilled.frontmatter_additions,
+        origin: None,
+        status: None,
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);

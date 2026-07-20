@@ -34,11 +34,22 @@ pub enum ContentKind {
     },
     /// A clyde session/thread export, pre-fetched by the harvest reader
     /// (harvest-clyde-sessions design). `body` is the concatenated
-    /// role-labeled transcript text for every member session; Phase 3's
-    /// export reader constructs this, Phase 5's pipeline handler dispatches
-    /// on it.
+    /// role-labeled transcript text for every member session (Phase 3's
+    /// `watermark::thread_body_text`). `members` are the bulk-metadata
+    /// records (repo, scope, title, duration, redaction-count, dates) for
+    /// every session in the thread, in `created` order - carried WITHOUT
+    /// their own `body` field (the harvest publish runner fetches transcript
+    /// bodies once, for `body`, rather than storing them twice). `primary_id`
+    /// names which member anchors `source:`/`repo:`/the watermark entry (the
+    /// most-messages session, design doc: Selection > Thread boundary
+    /// rules). `body_truncated` is true when ANY member's `--with-body` fetch
+    /// flagged clyde-side truncation - drives the `[TRANSCRIPT TRUNCATED]`
+    /// marker so truncation is never silent to the model.
     Session {
         body: String,
+        members: Vec<crate::harvest::contract::SessionRecord>,
+        primary_id: String,
+        body_truncated: bool,
     },
 }
 
