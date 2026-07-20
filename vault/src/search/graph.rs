@@ -230,6 +230,21 @@ impl SearchIndex {
         Ok(n)
     }
 
+    /// Member note paths of a hub: the distinct `src` of every edge whose `dst`
+    /// is the hub note path (harvest-clyde-sessions design, Phase 12 - feeds
+    /// `cortex hub --synthesize`). Sorted for deterministic synthesis input.
+    pub fn hub_members(&self, hub_path: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT src FROM edges WHERE dst = ?1 ORDER BY src")?;
+        let rows = stmt.query_map(params![hub_path], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Upsert an `entities` row (Phase 3). `id` is the entity slug; `kind` is
     /// `concept`/`creator`/`source`/`tag`; `hub_path` is the stubbed hub note's
     /// vault path (when one exists); `ontotype` is the Phase-5 ontology class.

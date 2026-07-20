@@ -321,10 +321,17 @@ pub struct HubArgs {
     /// Write hub notes to disk (default: report what would be stubbed).
     #[arg(long)]
     pub apply: bool,
+    /// Re-synthesize each materialized hub's body from its membership
+    /// (requires --apply; a failed pass preserves the prior body).
+    #[arg(long)]
+    pub synthesize: bool,
 }
 impl From<HubArgs> for opts::HubOpts {
     fn from(a: HubArgs) -> Self {
-        Self { apply: a.apply }
+        Self {
+            apply: a.apply,
+            synthesize: a.synthesize,
+        }
     }
 }
 

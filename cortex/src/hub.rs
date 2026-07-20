@@ -105,6 +105,10 @@ pub struct HubReport {
     /// Stubs that would be created (dry-run) or were created (apply).
     pub stubs: Vec<String>,
     pub entities_recorded: usize,
+    /// Hubs whose body was re-synthesized (Phase 12, `--synthesize`).
+    pub synthesized: usize,
+    /// Hubs whose prior body was preserved because synthesis failed/was empty.
+    pub synth_preserved: usize,
 }
 
 /// Slugify an arbitrary surface form (creator name, source host) into a
@@ -288,11 +292,135 @@ pub fn run(vault_root: &Path, config: &Config, opts: &HubOpts) -> Result<HubRepo
     // Populate the entities table from the oracle index when present.
     if let Ok(index) = SearchIndex::open(&config.oracle_db_path()) {
         report.entities_recorded = populate_entities(&index, &stubs, &materialized)?;
+
+        // Phase 12: --synthesize re-synthesizes each materialized hub's body
+        // from its current membership (the note->hub edges). Loud fail-safe per
+        // hub: a failed/empty pass preserves the prior body, never re-slugs or
+        // deletes the hub. Only runs under --apply (it writes note bodies).
+        if opts.synthesize && opts.apply {
+            let synth = FabricHubSynthesizer {
+                fabric: &config.fabric,
+                pattern: HUB_SYNTH_PATTERN,
+                timeout_secs: config.entities.fabric_timeout_secs,
+                max_input_tokens: config.entities.max_input_tokens,
+            };
+            for stub in &stubs {
+                let hub_rel = stub.hub_path();
+                let hub_abs = vault_root.join(&hub_rel);
+                if !hub_abs.exists() {
+                    continue;
+                }
+                let members = index.hub_members(&hub_rel)?;
+                match synthesize_hub(&hub_abs, &stub.title, &members, &synth)? {
+                    SynthOutcome::Synthesized => report.synthesized += 1,
+                    SynthOutcome::Preserved => report.synth_preserved += 1,
+                }
+            }
+        }
     } else {
         log::warn!("cortex::hub: oracle index unavailable; skipped entities-table population");
+        if opts.synthesize {
+            log::warn!("cortex::hub: --synthesize needs the oracle index for membership; skipped");
+        }
     }
 
     Ok(report)
+}
+
+/// Fabric pattern used to synthesize a hub body from its membership. Reuses the
+/// general summarizer (a dedicated `synthesize-hub` pattern can supersede it).
+const HUB_SYNTH_PATTERN: &str = "summarize";
+
+/// Produces a hub body from its member note paths. Injected so the
+/// failure-preservation logic is testable without a live LLM.
+pub trait HubSynthesizer {
+    fn synthesize(&self, hub_title: &str, members: &[String]) -> Result<String>;
+}
+
+/// Production synthesizer: runs a Fabric pattern over the member list.
+pub struct FabricHubSynthesizer<'a> {
+    pub fabric: &'a crate::config::FabricConfig,
+    pub pattern: &'a str,
+    pub timeout_secs: u64,
+    pub max_input_tokens: usize,
+}
+
+impl HubSynthesizer for FabricHubSynthesizer<'_> {
+    fn synthesize(&self, hub_title: &str, members: &[String]) -> Result<String> {
+        let input = format!(
+            "Hub subject: {hub_title}\n\nMember notes ({}):\n{}",
+            members.len(),
+            members.iter().map(|m| format!("- {m}")).collect::<Vec<_>>().join("\n")
+        );
+        let input = crate::fabric::truncate_input(&input, self.max_input_tokens);
+        crate::fabric::run_pattern(self.fabric, self.pattern, input, self.timeout_secs)
+    }
+}
+
+/// Outcome of a single hub synthesis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SynthOutcome {
+    /// The body was re-synthesized and written.
+    Synthesized,
+    /// The synthesizer failed (or returned empty); the prior body is left
+    /// byte-identical (loud warn, never a blank/partial overwrite).
+    Preserved,
+}
+
+/// Split a note's raw text into `(frontmatter_block_incl_delimiters, body)`.
+/// `None` when the note has no leading `---` frontmatter block.
+fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
+    let rest = raw.strip_prefix("---\n")?;
+    let end = rest.find("\n---\n")?;
+    let fm_end = "---\n".len() + end + "\n---\n".len();
+    Some((&raw[..fm_end], &raw[fm_end..]))
+}
+
+/// Re-synthesize ONE hub's body from its current membership. Loud fail-safe:
+/// on synthesizer error OR empty output, the prior body is left byte-identical
+/// (never blank/partial). Rewrites the SAME file (never re-slugs or deletes
+/// the hub); the frontmatter block is preserved verbatim, only the body below
+/// it is replaced. `hub_abs` must exist.
+pub fn synthesize_hub(
+    hub_abs: &Path,
+    hub_title: &str,
+    members: &[String],
+    synth: &impl HubSynthesizer,
+) -> Result<SynthOutcome> {
+    log::debug!(
+        "cortex::hub::synthesize_hub: hub={} title={hub_title} members={}",
+        hub_abs.display(),
+        members.len()
+    );
+    let raw = std::fs::read_to_string(hub_abs).wrap_err_with(|| format!("read hub {}", hub_abs.display()))?;
+    let body = match synth.synthesize(hub_title, members) {
+        Ok(b) if !b.trim().is_empty() => b,
+        Ok(_) => {
+            log::warn!(
+                "cortex::hub::synthesize_hub: {} synthesized EMPTY; leaving prior body intact",
+                hub_abs.display()
+            );
+            return Ok(SynthOutcome::Preserved);
+        }
+        Err(e) => {
+            log::warn!(
+                "cortex::hub::synthesize_hub: {} synthesis failed ({e:#}); leaving prior body intact",
+                hub_abs.display()
+            );
+            return Ok(SynthOutcome::Preserved);
+        }
+    };
+    let Some((fm_block, _old_body)) = split_frontmatter(&raw) else {
+        log::warn!(
+            "cortex::hub::synthesize_hub: {} has no frontmatter block; refusing to overwrite",
+            hub_abs.display()
+        );
+        return Ok(SynthOutcome::Preserved);
+    };
+    let new_content = format!("{fm_block}\n{}\n", body.trim());
+    std::fs::write(hub_abs, new_content).wrap_err_with(|| format!("write hub {}", hub_abs.display()))?;
+    log::info!("cortex::hub::synthesize_hub: re-synthesized {}", hub_abs.display());
+    Ok(SynthOutcome::Synthesized)
 }
 
 #[cfg(test)]

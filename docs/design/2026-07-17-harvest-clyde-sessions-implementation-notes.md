@@ -1050,3 +1050,45 @@ Two background otto ci runs were killed mid-build by lock contention + high
 load on the shared host (load ~12; other sessions building) - NOT a code
 failure (the compile had already succeeded). Diagnosed via the run logs +
 `ps`/`uptime` rather than blind retry; a clean no-overlap run passed.
+
+## Phase 12: `cortex hub --synthesize`
+
+### Design decisions
+
+- `sb cortex hub --synthesize` (requires `--apply`; needs the oracle index for
+  membership) re-synthesizes each materialized hub's body from its members
+  (`SearchIndex::hub_members` = `SELECT DISTINCT src FROM edges WHERE dst =
+  <hub>`, so repo/creator/source hubs all resolve).
+- `synthesize_hub` is LOUD FAIL-SAFE: on synthesizer error OR empty output it
+  returns `Preserved` WITHOUT writing, so the prior body is byte-identical -
+  never a blank/partial overwrite. It rewrites the SAME file (never re-slugs or
+  deletes the hub) and preserves the frontmatter block verbatim, replacing only
+  the body below the closing `---`.
+- `HubSynthesizer` trait is injected (production `FabricHubSynthesizer` runs the
+  `summarize` pattern over the member list) so the failure-preservation logic is
+  testable without a live LLM.
+
+### Deviations / Tradeoffs
+
+- Reuses the existing `summarize` fabric pattern as the synthesizer rather than
+  adding a dedicated `synthesize-hub` pattern (a later pattern can supersede it
+  via the `HUB_SYNTH_PATTERN` const) - generalizes the one-off hand synthesis
+  without new prompt-authoring scope.
+
+### Open questions
+
+None.
+
+### Validation
+
+- `otto ci`: `✅ All CI checks passed!`.
+- Test: `synthesize_hub_writes_body_preserves_frontmatter_and_is_failsafe`
+  (success rewrites the body + preserves frontmatter + same path; a forced
+  failure leaves the body byte-identical and the hub present).
+
+### Process note
+
+3 background otto ci runs were killed by shared-host load (~9-12); a foreground
+run with a 10-min timeout completed. The check task also caught a `-D warnings`
+needless-borrow that a plain `cargo clippy` only warned on - `otto ci` remains
+the sole authoritative gate.

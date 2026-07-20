@@ -202,6 +202,9 @@ pub struct EntitiesOpts {
 pub struct HubOpts {
     /// Write hub notes to disk (default: report what would be stubbed).
     pub apply: bool,
+    /// Re-synthesize each materialized hub's body from its membership (Phase
+    /// 12). Requires `apply` (it writes note bodies) + the oracle index.
+    pub synthesize: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -242,3 +242,57 @@ fn collect_stubs_skips_malformed_repo() {
         "a malformed repo slug mints no repo hub (edge skipped, note still indexed)"
     );
 }
+
+struct OkSynth(String);
+impl HubSynthesizer for OkSynth {
+    fn synthesize(&self, _title: &str, _members: &[String]) -> eyre::Result<String> {
+        Ok(self.0.clone())
+    }
+}
+struct ErrSynth;
+impl HubSynthesizer for ErrSynth {
+    fn synthesize(&self, _title: &str, _members: &[String]) -> eyre::Result<String> {
+        eyre::bail!("synthesis boom")
+    }
+}
+
+#[test]
+fn synthesize_hub_writes_body_preserves_frontmatter_and_is_failsafe() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let hub = dir.path().join("repo-scottidler--loopr.md");
+    let original =
+        "---\ntitle: scottidler/loopr\ntype: entity\nontotype: repo\n---\n\n# scottidler/loopr\n\nstub body\n";
+    std::fs::write(&hub, original).expect("seed");
+
+    // Success: body rewritten, frontmatter preserved, same path (no re-slug).
+    let out = synthesize_hub(
+        &hub,
+        "scottidler/loopr",
+        &["a.md".to_string(), "b.md".to_string()],
+        &OkSynth("These 2 notes cover the loopr work.".to_string()),
+    )
+    .expect("synth");
+    assert_eq!(out, SynthOutcome::Synthesized);
+    let after = std::fs::read_to_string(&hub).expect("read");
+    assert!(
+        after.starts_with("---\ntitle: scottidler/loopr\ntype: entity\nontotype: repo\n---\n"),
+        "frontmatter preserved verbatim: {after}"
+    );
+    assert!(
+        after.contains("These 2 notes cover the loopr work."),
+        "body synthesized"
+    );
+    assert!(!after.contains("stub body"), "prior stub body replaced");
+    assert!(hub.exists(), "hub not deleted/re-slugged");
+
+    // Failure: prior body byte-identical (no write at all).
+    let before = std::fs::read_to_string(&hub).expect("read");
+    let out = synthesize_hub(&hub, "scottidler/loopr", &["a.md".to_string()], &ErrSynth).expect("synth");
+    assert_eq!(out, SynthOutcome::Preserved);
+    assert_eq!(
+        std::fs::read_to_string(&hub).expect("read"),
+        before,
+        "a failed synthesis leaves the body byte-identical"
+    );
+    assert!(hub.exists(), "hub still present after a failed synthesis");
+}
