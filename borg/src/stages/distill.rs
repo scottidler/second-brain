@@ -24,7 +24,7 @@ use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
 use crate::types::{IngestKind, TraceMeta};
 use distillers::{
     ArticleConfig, Dispatch, Dispatcher, DistillInputs, DistillKind, FabricCaller, FabricShell, RepoMetadata,
-    VideoMetadata,
+    SessionMetadata, VideoMetadata,
 };
 use eyre::{Context, Result};
 use vault::distilled::Distilled;
@@ -177,6 +177,7 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
             repo_metadata,
             video_metadata: None,
             capture_note,
+            session_metadata: None,
         };
         self.dispatcher.distill(distill_kind, inputs).await
     }
@@ -209,8 +210,38 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
             repo_metadata: None,
             video_metadata,
             capture_note,
+            session_metadata: None,
         };
         self.dispatcher.distill(distill_kind, inputs).await
+    }
+
+    /// Session-aware variant (harvest-clyde-sessions Phase 4). Harvest's
+    /// pipeline handler passes `session_metadata` (repo anchor, member ids,
+    /// message count, date range, `body-truncated` flag) so the distiller can
+    /// attach `KindPayload::Session` and mark truncation. `source_url` is the
+    /// primary session's `clyde://<id>` pointer.
+    pub async fn distill_with_session_metadata(
+        &self,
+        transcript: &str,
+        source_url: Option<&str>,
+        session_metadata: Option<&SessionMetadata>,
+    ) -> Result<Distilled> {
+        log::debug!(
+            "DistillStage::distill_with_session_metadata: transcript_len={} source_url={:?} has_session_metadata={}",
+            transcript.len(),
+            source_url,
+            session_metadata.is_some(),
+        );
+        let inputs = DistillInputs {
+            transcript,
+            source_url,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+            capture_note: None,
+            session_metadata,
+        };
+        self.dispatcher.distill(DistillKind::Session, inputs).await
     }
 }
 
@@ -830,6 +861,63 @@ pub async fn distill_for_publish_thread(
 
     if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
         log::warn!("[{trace_id}] distill_for_publish_thread: persist distilled.yml failed: {e:#}");
+    }
+    distilled
+}
+
+/// Harvest-clyde-sessions Phase 4 cutover: run the session distiller against
+/// the concatenated role-labeled body of a harvested thread. `source_url` is
+/// the primary session's `clyde://<id>` pointer; `session_metadata` carries the
+/// deterministic bookkeeping (repo anchor, member ids, message count, date
+/// range, `body-truncated`) the distiller attaches as `KindPayload::Session`.
+/// Persists `distilled.yml` on success. On any dispatch error returns a
+/// `fallback_distilled` so publish always has a payload - degraded distillation
+/// never blocks the note from landing (the borg degraded-quality contract).
+pub async fn distill_for_publish_session(
+    fabric: &FabricConfig,
+    staging: &StagingConfig,
+    trace_id: &str,
+    source_url: &str,
+    body: &str,
+    session_metadata: &SessionMetadata,
+) -> Distilled {
+    log::debug!(
+        "distill_for_publish_session: trace={trace_id} source={source_url} transcript_len={} session_ids={} body_truncated={}",
+        body.len(),
+        session_metadata.session_ids.len(),
+        session_metadata.body_truncated,
+    );
+    let stage = DistillStage::from_fabric_config(fabric);
+    let started = std::time::Instant::now();
+    let distilled = match stage
+        .distill_with_session_metadata(body, Some(source_url), Some(session_metadata))
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("[{trace_id}] distill_for_publish_session: dispatch error: {e:#}; using fallback");
+            distillers::fallback_distilled("distill-session-v1", "dispatch-error", body, None, &fabric.model)
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    let fallback = distilled
+        .meta
+        .validation
+        .fallback_reason
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    log::info!(
+        "[{trace_id}] distill_for_publish_session: extractor={} model={} claims={} tags={} links={} fallback={} elapsed_ms={}",
+        distilled.meta.extractor,
+        distilled.meta.model,
+        distilled.claims.len(),
+        distilled.tags.len(),
+        distilled.links.len(),
+        fallback,
+        elapsed_ms,
+    );
+    if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
+        log::warn!("[{trace_id}] distill_for_publish_session: persist distilled.yml failed: {e:#}");
     }
     distilled
 }

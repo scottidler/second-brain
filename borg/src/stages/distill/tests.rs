@@ -43,6 +43,48 @@ fn ingest_kind_maps_to_distill_kind() {
 }
 
 #[test]
+fn session_kind_maps_to_session_distill_kind() {
+    // Harvest-clyde-sessions Phase 4: IngestKind::Session routes to
+    // DistillKind::Session (the SessionDistiller).
+    assert_eq!(
+        distill_kind_from_ingest(IngestKind::Session).expect("map session"),
+        DistillKind::Session
+    );
+}
+
+#[tokio::test]
+async fn session_distillation_is_subject_to_gate_2() {
+    // SUCCESS CRITERION: Gate-2 (the paraphrase-of-a-block-page backstop)
+    // applies to session distillation. A session whose distiller summary
+    // matches a Gate-2 signature is caught exactly like every other kind's
+    // summary - the gate runs on the produced summary regardless of kind.
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        "distill-session",
+        "summary: \"The provided input contains an error message indicating access was denied.\"\nclaims: []\ntags: []\nlinks: []\n",
+    );
+    let stage = make_stage_with_fake(fake);
+    let metadata = distillers::SessionMetadata {
+        repo: Some("scottidler/second-brain".to_string()),
+        session_ids: vec!["871f6428".to_string()],
+        msg_count: 486,
+        date_start: None,
+        date_end: None,
+        body_truncated: false,
+    };
+    let distilled = stage
+        .distill_with_session_metadata("USER: x\nASSISTANT: y", Some("clyde://871f6428"), Some(&metadata))
+        .await
+        .expect("distill");
+    let reason = crate::stages::detect_paraphrased_block(&distilled.summary);
+    assert!(
+        reason.is_some(),
+        "Gate-2 must flag a session summary that paraphrases a block page: {:?}",
+        distilled.summary
+    );
+}
+
+#[test]
 fn vocabulary_kinds_map_to_vocabulary_distill_kind() {
     // Phase 9c-hotfix: Vocabulary is now wired (routes through IdeaDistiller).
     assert_eq!(

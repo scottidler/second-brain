@@ -17,6 +17,7 @@ pub mod image;
 pub mod passthrough;
 pub mod render;
 pub mod repo;
+pub mod session;
 pub mod text;
 pub mod thread;
 pub mod validate;
@@ -36,6 +37,7 @@ pub use image::{ImageConfig, ImageDistiller};
 pub use passthrough::PassthroughDistiller;
 pub use render::{RenderOptions, RenderedDistilled, render};
 pub use repo::{RepoConfig, RepoDistiller, RepoMetadata};
+pub use session::{SessionConfig, SessionDistiller, SessionMetadata};
 pub use text::demote_headings;
 pub use thread::{ThreadConfig, ThreadDistiller, infer_platform};
 pub use validate::{enforce_bounds, fallback_distilled, mark_enumeration_shortfall, max_claims};
@@ -71,6 +73,15 @@ pub struct DistillInputs<'a> {
     /// before reaching the LLM so a pasted hostile string cannot masquerade as
     /// pattern instructions. `None` for bare captures and cortex backfill.
     pub capture_note: Option<&'a str>,
+    /// Session-specific Stage-0 metadata (harvest-clyde-sessions design):
+    /// the thread's `<org>/<repo>` anchor, member session ids, message count,
+    /// date range, and the export's `body-truncated` flag. Populated by
+    /// harvest's pipeline handler; `None` for every non-session kind and for
+    /// cortex backfill. `SessionDistiller` reads it to attach
+    /// `KindPayload::Session` and to know whether to mark the assembled prompt
+    /// `[TRANSCRIPT TRUNCATED]`; other distillers ignore it. Mirrors
+    /// `repo_metadata`/`video_metadata`.
+    pub session_metadata: Option<&'a SessionMetadata>,
 }
 
 /// Per-kind extractor contract. Async because the LLM-bound distillers shell

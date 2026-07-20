@@ -122,6 +122,7 @@ links: []
             repo_metadata: None,
             video_metadata: Some(&metadata),
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -170,6 +171,7 @@ links: []
             repo_metadata: None,
             video_metadata: Some(&metadata),
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -197,6 +199,7 @@ async fn fabric_timeout_falls_back() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -220,6 +223,7 @@ async fn malformed_yaml_falls_back_with_raw_output() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -265,6 +269,7 @@ links: []
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -313,6 +318,7 @@ async fn long_transcript_partial_chunk_failure_keeps_surviving_claims() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -353,6 +359,7 @@ async fn long_transcript_reduce_failure_falls_back_to_concatenated_summaries() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -401,6 +408,7 @@ async fn long_transcript_reduce_selects_late_anchor_from_pool() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -442,6 +450,7 @@ async fn long_transcript_reduce_invented_anchor_stripped_and_counted() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -485,6 +494,7 @@ async fn long_transcript_reduce_empty_selection_falls_back_to_chronological() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -534,6 +544,7 @@ async fn long_transcript_reduce_malformed_output_falls_back_to_chronological() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -577,6 +588,7 @@ async fn long_transcript_builds_two_section_reduce_input_with_anchor_pool() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -630,6 +642,7 @@ async fn short_transcript_populates_transcript_field() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -654,6 +667,7 @@ async fn long_transcript_with_all_chunks_failing_falls_back() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -677,6 +691,7 @@ async fn empty_summary_falls_back() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -700,6 +715,7 @@ async fn no_metadata_leaves_kind_specific_unset() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -732,6 +748,7 @@ async fn single_call_populates_enumeration_tldr_and_key_ideas() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -804,6 +821,7 @@ async fn chunked_transcript_enumeration_survives_reduce_with_all_items_in_order(
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -843,6 +861,7 @@ async fn chunked_reduce_input_carries_enumeration_candidates_section() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -888,6 +907,7 @@ async fn chunked_enumeration_shortfall_marks_degraded() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");

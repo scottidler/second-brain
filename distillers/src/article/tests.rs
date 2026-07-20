@@ -32,6 +32,7 @@ links:
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -69,6 +70,7 @@ async fn fabric_timeout_falls_back() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -97,6 +99,7 @@ async fn fabric_error_falls_back_with_error_reason() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -120,6 +123,7 @@ async fn malformed_yaml_falls_back_with_raw_output() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -147,6 +151,7 @@ async fn empty_summary_falls_back() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -173,6 +178,7 @@ async fn strips_yaml_code_fence_if_present() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -195,6 +201,7 @@ async fn strips_bare_code_fence_if_present() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -220,6 +227,7 @@ async fn truncates_excess_claims_via_enforce_bounds() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -251,6 +259,7 @@ async fn drops_empty_claim_texts_and_anchors() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -276,6 +285,7 @@ async fn lowercases_tag_strings() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -296,6 +306,7 @@ async fn records_request_pattern_in_fake_history() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -346,6 +357,7 @@ async fn short_article_stays_on_single_call_path() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -400,6 +412,7 @@ async fn long_article_covers_whole_input_with_zero_truncation() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -476,6 +489,7 @@ async fn long_article_reduce_selected_fact_appears_in_published_claims() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -512,6 +526,7 @@ async fn long_article_reduce_failure_falls_back_to_chronological() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -560,6 +575,7 @@ async fn long_article_builds_two_section_reduce_input() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -615,6 +631,7 @@ async fn sub_threshold_oversize_input_records_loud_truncation() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -654,6 +671,7 @@ async fn single_call_article_populates_enumeration_and_strips_item_anchors() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");

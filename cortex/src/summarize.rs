@@ -262,6 +262,7 @@ async fn process_one<F: FabricCaller + Clone>(
         // cortex backfill has no capture note (the note's original capture
         // annotation, if any, already lives in the note body).
         capture_note: None,
+        session_metadata: None,
     };
 
     let distilled = dispatcher.distill(kind, inputs).await.context("dispatch distill")?;

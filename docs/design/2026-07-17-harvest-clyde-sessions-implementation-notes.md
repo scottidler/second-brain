@@ -432,3 +432,77 @@ verified and adopted as-is.
   note path) via `harvest::record_published`; `apply_plan_to_state` intentionally
   only advances the cursor + `Skip` in-place snapshot updates. The Phase-2 open
   question on `min-msgs`/`token-cap` starter values is resolved above.
+
+## Phase 4: Session distiller
+
+### Design decisions
+
+- `SessionDistiller` in `distillers/src/session.rs` (+ `session/tests.rs`),
+  following the `ThreadDistiller` add-a-kind pattern. `DistillKind::Session`
+  wired into the dispatcher (`distillers/src/dispatcher.rs:41` enum arm,
+  `:55` as_str, `:74`/`:127` the `session:` field on the dispatcher struct,
+  `:113` `SessionConfig` construction) - dispatcher registration is the
+  commonly-skipped seam and is done + covered by dispatcher tests.
+- `KindPayload::Session(SessionPayload)` (`vault/src/distilled.rs:252`/`:306`):
+  `SessionPayload` carries repo, session ids, msg counts, date range.
+- `render()` extended for the session kind and `distill_for_publish_session`
+  added (`borg/src/stages/distill.rs:876`), mirroring `distill_for_publish_thread`.
+- Fabric patterns in `borg/patterns/`: `distill-session.md` (+ `-chunk` /
+  `-reduce` map-reduce variants). Prompt contract per the Distillation
+  section: decisions / rejected approaches+why / gotchas / reusable patterns;
+  explicit no-narration, no-activity-ledger instruction (the conductor
+  anti-pattern). Deployed via the existing pattern path; added to the
+  `PATTERNS` array.
+- Truncation is never silent: `TRUNCATION_MARKER = "[TRANSCRIPT TRUNCATED]"`
+  (`session.rs:59`). Two sources feed it - (a) the export's `body-truncated`
+  flag threaded via `DistillInputs` (`lib.rs:82`), and (b) local head+tail
+  windowing when the body exceeds the token budget (the excised middle is
+  replaced by the marker). Both routes put the marker in the assembled prompt.
+- Model/limits inherit from the article config in the dispatcher
+  (`dispatcher.rs:110-117`), so `HarvestConfig.model` -> `llm.model` resolution
+  rides the established per-feature override chain rather than a bespoke path.
+
+### Deviations
+
+- Session distiller inherits its model/max_chars/timeout from the article
+  distiller's config in the dispatcher rather than introducing a standalone
+  config-resolution path. Same effective source (`llm.model` unless overridden),
+  fewer moving parts; documented here as the deliberate choice.
+- Gate-2 (paraphrase check) is NOT re-implemented in the session distiller: it
+  is a downstream pipeline gate applied uniformly to every `Distilled` at
+  publish time. Session distillation flows through that same gate with no
+  kind-specific bypass - which is exactly "Gate-2 applies". No session-only
+  Gate-2 code was added or needed.
+- Adding the `Session` arm to `DistillKind` forced match-arm updates across
+  every sibling distiller's tests (article/idea/image/passthrough/repo/thread/
+  video/voicenote) - mechanical exhaustiveness wiring, no behavior change.
+
+### Tradeoffs
+
+- Token cap 12000 CONFIRMED reasonable, not changed: the 806-msg golden thread
+  windows to a single fabric call under the default cap
+  (`large_thread_windows_to_single_call_under_default_cap`), and a raised cap
+  correctly routes to map-reduce (`raised_token_cap_routes_to_map_reduce`).
+  So 12000 keeps the common case single-pass while the chunk/reduce path is
+  proven to engage when a thread genuinely overflows. This resolves the
+  Phase-3 deferral of token-cap tuning.
+- Head+tail windowing over naive head-truncation: preserves both the framing
+  (early decisions) and the resolution (late gotchas) of a long session, which
+  is where the reusable knowledge concentrates.
+
+### Open questions
+
+None blocking. Phase 5 handoff (unchanged from Phase 3's note): call
+`harvest::record_published` AFTER publish; wire `distill_for_publish_session`
+into the pipeline handler.
+
+### Orchestration note
+
+Phase 4 was implemented by the `phase4` delegated agent, which completed all
+edits (session.rs, three patterns, dispatcher/render wiring, SessionPayload,
+distill_for_publish_session, 18 session tests, sibling-test match arms) but
+went quiet before running `otto ci`/committing - the same pre-commit stall as
+Phase 1. The orchestrator took over inline: verified every required arm/marker
+by grep, ran `cargo test --workspace` (0 failures) and `otto ci`
+(`✅ All CI checks passed!`), authored these notes, and committed. No code was
+re-written; the stalled agent's edits were verified and adopted as-is.

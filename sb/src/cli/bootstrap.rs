@@ -111,6 +111,18 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
         include_str!("../../../borg/patterns/distill-voicenote-reduce.md"),
     ),
     (
+        "distill-session.md",
+        include_str!("../../../borg/patterns/distill-session.md"),
+    ),
+    (
+        "distill-session-chunk.md",
+        include_str!("../../../borg/patterns/distill-session-chunk.md"),
+    ),
+    (
+        "distill-session-reduce.md",
+        include_str!("../../../borg/patterns/distill-session-reduce.md"),
+    ),
+    (
         "obsidian-classify.md",
         include_str!("../../../borg/patterns/obsidian-classify.md"),
     ),

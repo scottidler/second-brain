@@ -1,7 +1,7 @@
 use super::*;
 use vault::distilled::{
     Claim, ClaimKind, Distilled, DistilledMeta, EnumeratedItem, Enumeration, KindPayload, Link, RepoPayload,
-    ThreadPayload, ValidationMeta, VideoPayload,
+    SessionPayload, ThreadPayload, ValidationMeta, VideoPayload,
 };
 
 /// Transcript-emission policies used at the render seams. `NO_TRANSCRIPT` is the
@@ -61,6 +61,53 @@ fn render_emits_managed_sections_in_canonical_order() {
     assert!(body.contains("- First claim."));
     assert!(body.contains("- Second claim with anchor. [12:34]"));
     assert!(body.contains("- [Ref](https://example.com)"));
+}
+
+#[test]
+fn render_emits_session_footer_with_clyde_backpointers() {
+    let distilled = Distilled {
+        summary: "Session distilled a decision and a gotcha.".to_string(),
+        meta: base_meta("distill-session-v1"),
+        kind_specific: Some(KindPayload::Session(SessionPayload {
+            repo: Some("scottidler/second-brain".to_string()),
+            session_ids: vec!["871f6428".to_string(), "4ae69e3a".to_string()],
+            msg_count: 806,
+            date_start: Some("2026-07-02T09:00:00Z".to_string()),
+            date_end: Some("2026-07-02T11:00:00Z".to_string()),
+        })),
+        ..Default::default()
+    };
+    let body = render(&distilled, NO_TRANSCRIPT).body_markdown;
+    assert!(body.contains("## Sessions"), "session footer present");
+    // Back-pointers that `clyde session resume` accepts, one per member.
+    assert!(body.contains("- clyde://871f6428"));
+    assert!(body.contains("- clyde://4ae69e3a"));
+    // Lead line carries the repo anchor, message count, and date range.
+    assert!(body.contains("repo `scottidler/second-brain`"));
+    assert!(body.contains("806 messages"));
+    assert!(body.contains("2026-07-02T09:00:00Z -> 2026-07-02T11:00:00Z"));
+    // Frontmatter tagging arm still fires.
+    let fm = render(&distilled, NO_TRANSCRIPT).frontmatter_additions;
+    assert!(fm.contains_key("cortex-session-ids"));
+    assert!(fm.contains_key("cortex-session-msg-count"));
+}
+
+#[test]
+fn render_omits_session_footer_when_no_member_ids() {
+    let distilled = Distilled {
+        summary: "s".to_string(),
+        meta: base_meta("distill-session-v1"),
+        kind_specific: Some(KindPayload::Session(SessionPayload {
+            repo: Some("a/b".to_string()),
+            session_ids: Vec::new(),
+            msg_count: 0,
+            date_start: None,
+            date_end: None,
+        })),
+        ..Default::default()
+    };
+    let body = render(&distilled, NO_TRANSCRIPT).body_markdown;
+    assert!(!body.contains("## Sessions"), "no footer without member ids to link");
 }
 
 #[test]

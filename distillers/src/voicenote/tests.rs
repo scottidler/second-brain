@@ -42,6 +42,7 @@ links: []
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -68,6 +69,7 @@ async fn short_path_fabric_timeout_falls_back_and_preserves_transcript() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -93,6 +95,7 @@ async fn short_path_malformed_yaml_falls_back_and_preserves_transcript() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -142,6 +145,7 @@ claims:
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -174,6 +178,7 @@ async fn long_path_all_chunks_fail_falls_back_with_transcript() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -217,6 +222,7 @@ async fn long_path_partial_chunk_failure_keeps_surviving_claims() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -259,6 +265,7 @@ async fn long_path_reduce_failure_falls_back_to_concatenated_summaries() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -300,6 +307,7 @@ async fn long_path_reduce_empty_selection_falls_back_to_chronological() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -352,6 +360,7 @@ async fn long_path_reduce_selects_claims_with_no_anchors() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");

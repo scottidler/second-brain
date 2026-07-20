@@ -33,6 +33,7 @@ links:
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -68,6 +69,7 @@ async fn fenced_yaml_response_is_stripped_and_parsed() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -89,6 +91,7 @@ async fn fabric_timeout_falls_back_and_preserves_transcript() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -114,6 +117,7 @@ async fn malformed_yaml_falls_back_and_preserves_transcript() {
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");
@@ -149,6 +153,7 @@ links: []
             repo_metadata: None,
             video_metadata: None,
             capture_note: None,
+            session_metadata: None,
         })
         .await
         .expect("distill");

@@ -16,6 +16,7 @@ async fn dispatches_idea_to_idea_distiller() {
         repo_metadata: None,
         video_metadata: None,
         capture_note: None,
+        session_metadata: None,
     };
     let distilled = dispatcher.distill(DistillKind::Idea, inputs).await.expect("distill");
     // Phase 9c-hotfix: IdeaDistiller ID bumped to v2 after 280-cap deletion.
@@ -35,6 +36,7 @@ async fn dispatches_vocabulary_to_idea_distiller() {
         repo_metadata: None,
         video_metadata: None,
         capture_note: None,
+        session_metadata: None,
     };
     let distilled = dispatcher
         .distill(DistillKind::Vocabulary, inputs)
@@ -60,6 +62,7 @@ async fn dispatches_image_to_image_distiller() {
         repo_metadata: None,
         video_metadata: None,
         capture_note: None,
+        session_metadata: None,
     };
     let distilled = dispatcher.distill(DistillKind::Image, inputs).await.expect("distill");
     assert_eq!(distilled.meta.extractor, "distill-image-v1");
@@ -79,6 +82,7 @@ async fn dispatches_voice_note_to_voicenote_distiller() {
         repo_metadata: None,
         video_metadata: None,
         capture_note: None,
+        session_metadata: None,
     };
     let distilled = dispatcher
         .distill(DistillKind::VoiceNote, inputs)
@@ -105,6 +109,7 @@ async fn dispatches_article_to_fabric_backed_distiller() {
         repo_metadata: None,
         video_metadata: None,
         capture_note: None,
+        session_metadata: None,
     };
     let distilled = dispatcher.distill(DistillKind::Article, inputs).await.expect("distill");
     assert_eq!(distilled.meta.extractor, "distill-article-v1");
@@ -134,6 +139,7 @@ async fn dispatches_repo_to_fabric_backed_distiller() {
         repo_metadata: Some(&metadata),
         video_metadata: None,
         capture_note: None,
+        session_metadata: None,
     };
     let distilled = dispatcher.distill(DistillKind::Repo, inputs).await.expect("distill");
     assert_eq!(distilled.meta.extractor, "distill-repo-v1");
@@ -164,6 +170,7 @@ async fn dispatches_video_to_fabric_backed_distiller() {
         repo_metadata: None,
         video_metadata: Some(&metadata),
         capture_note: None,
+        session_metadata: None,
     };
     let distilled = dispatcher.distill(DistillKind::Video, inputs).await.expect("distill");
     assert_eq!(distilled.meta.extractor, "distill-video-v1");
@@ -188,6 +195,7 @@ async fn dispatches_thread_to_fabric_backed_distiller() {
         repo_metadata: None,
         video_metadata: None,
         capture_note: None,
+        session_metadata: None,
     };
     let distilled = dispatcher.distill(DistillKind::Thread, inputs).await.expect("distill");
     assert_eq!(distilled.meta.extractor, "distill-thread-v1");
@@ -197,4 +205,42 @@ async fn dispatches_thread_to_fabric_backed_distiller() {
     assert_eq!(payload.platform, "x");
     assert_eq!(payload.post_count, 5);
     assert_eq!(payload.author.as_deref(), Some("@simonw"));
+}
+
+#[tokio::test]
+async fn dispatches_session_to_fabric_backed_distiller() {
+    // Phase 4 (harvest-clyde-sessions): the dispatcher routes DistillKind::Session
+    // to the SessionDistiller (it used to bail loudly). This test pins the
+    // wiring the phase most commonly skips.
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        "distill-session",
+        "summary: \"Chose typed contracts; rejected an isolated target dir.\"\nclaims: []\ntags: [rust]\nlinks: []\n",
+    );
+    let dispatcher = Dispatcher::new(fake, ArticleConfig::default());
+    let metadata = crate::SessionMetadata {
+        repo: Some("scottidler/second-brain".to_string()),
+        session_ids: vec!["871f6428".to_string()],
+        msg_count: 486,
+        date_start: Some("2026-07-02T09:00:00Z".to_string()),
+        date_end: Some("2026-07-02T09:15:00Z".to_string()),
+        body_truncated: false,
+    };
+    let inputs = DistillInputs {
+        transcript: "USER: refactor the pipeline\nASSISTANT: decided on typed contracts",
+        source_url: Some("clyde://871f6428"),
+        title_hint: None,
+        repo_metadata: None,
+        video_metadata: None,
+        capture_note: None,
+        session_metadata: Some(&metadata),
+    };
+    let distilled = dispatcher.distill(DistillKind::Session, inputs).await.expect("distill");
+    assert_eq!(distilled.meta.extractor, "distill-session-v1");
+    let Some(vault::distilled::KindPayload::Session(payload)) = distilled.kind_specific else {
+        panic!("expected Session payload from dispatcher");
+    };
+    assert_eq!(payload.repo.as_deref(), Some("scottidler/second-brain"));
+    assert_eq!(payload.msg_count, 486);
+    assert_eq!(payload.session_ids, vec!["871f6428".to_string()]);
 }

@@ -10,6 +10,7 @@ async fn passthrough_summary_matches_transcript() {
         repo_metadata: None,
         video_metadata: None,
         capture_note: None,
+        session_metadata: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
     assert_eq!(distilled.summary, "OCR output for an image.");
@@ -35,6 +36,7 @@ async fn preserves_long_input_verbatim_in_transcript() {
         repo_metadata: None,
         video_metadata: None,
         capture_note: None,
+        session_metadata: None,
     };
     let distilled = distiller.distill(inputs).await.expect("distill");
     assert_eq!(distilled.summary.chars().count(), 5000);

@@ -20,8 +20,8 @@ use eyre::Result;
 
 use crate::{
     ArticleConfig, ArticleDistiller, DistillExtractor, DistillInputs, FabricCaller, IdeaDistiller, ImageConfig,
-    ImageDistiller, RepoConfig, RepoDistiller, ThreadConfig, ThreadDistiller, VideoConfig, VideoDistiller,
-    VoiceNoteConfig, VoiceNoteDistiller,
+    ImageDistiller, RepoConfig, RepoDistiller, SessionConfig, SessionDistiller, ThreadConfig, ThreadDistiller,
+    VideoConfig, VideoDistiller, VoiceNoteConfig, VoiceNoteDistiller,
 };
 
 /// Kinds the distillers crate knows how to produce a `Distilled` for.
@@ -71,6 +71,7 @@ pub struct Dispatcher<F: FabricCaller + Clone> {
     pub repo: RepoDistiller<F>,
     pub video: VideoDistiller<F>,
     pub thread: ThreadDistiller<F>,
+    pub session: SessionDistiller<F>,
 }
 
 impl<F: FabricCaller + Clone> Dispatcher<F> {
@@ -106,6 +107,15 @@ impl<F: FabricCaller + Clone> Dispatcher<F> {
             timeout_secs: article_config.timeout_secs,
             ..VoiceNoteConfig::default()
         };
+        // Session inherits model/max_chars/timeout from the article config and
+        // keeps the default token_cap (12K); borg's harvest handler (Phase 5)
+        // rebuilds it via `with_configs` when `harvest.token-cap` differs.
+        let session_config = SessionConfig {
+            model: article_config.model.clone(),
+            max_chars: article_config.max_chars,
+            timeout_secs: article_config.timeout_secs,
+            ..SessionConfig::default()
+        };
         Self {
             idea: IdeaDistiller,
             image: ImageDistiller::new(fabric.clone(), image_config),
@@ -113,7 +123,8 @@ impl<F: FabricCaller + Clone> Dispatcher<F> {
             article: ArticleDistiller::new(fabric.clone(), article_config),
             repo: RepoDistiller::new(fabric.clone(), repo_config),
             video: VideoDistiller::new(fabric.clone(), video_config),
-            thread: ThreadDistiller::new(fabric, thread_config),
+            thread: ThreadDistiller::new(fabric.clone(), thread_config),
+            session: SessionDistiller::new(fabric, session_config),
         }
     }
 
@@ -128,6 +139,7 @@ impl<F: FabricCaller + Clone> Dispatcher<F> {
         thread_config: ThreadConfig,
         image_config: ImageConfig,
         voicenote_config: VoiceNoteConfig,
+        session_config: SessionConfig,
     ) -> Self {
         Self {
             idea: IdeaDistiller,
@@ -136,7 +148,8 @@ impl<F: FabricCaller + Clone> Dispatcher<F> {
             article: ArticleDistiller::new(fabric.clone(), article_config),
             repo: RepoDistiller::new(fabric.clone(), repo_config),
             video: VideoDistiller::new(fabric.clone(), video_config),
-            thread: ThreadDistiller::new(fabric, thread_config),
+            thread: ThreadDistiller::new(fabric.clone(), thread_config),
+            session: SessionDistiller::new(fabric, session_config),
         }
     }
 }
@@ -163,11 +176,9 @@ impl<F: FabricCaller + Clone> Dispatch for Dispatcher<F> {
             DistillKind::Repo => self.repo.distill(inputs).await,
             DistillKind::Video => self.video.distill(inputs).await,
             DistillKind::Thread => self.thread.distill(inputs).await,
-            // Phase 1 schema seam only: no distiller is wired for this kind
-            // yet. `SessionDistiller` lands in Phase 4 of the
-            // harvest-clyde-sessions design; fail loudly rather than fake a
-            // result in the meantime.
-            DistillKind::Session => Err(eyre::eyre!("DistillKind::Session has no distiller wired yet (Phase 4)")),
+            // Phase 4 (harvest-clyde-sessions): sessions route through the
+            // SessionDistiller (head+tail windowing + KindPayload::Session).
+            DistillKind::Session => self.session.distill(inputs).await,
         }
     }
 }

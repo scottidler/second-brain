@@ -5,7 +5,7 @@
 //! `index_vault` later parses these sections back into the FTS5 index.
 
 use std::collections::BTreeMap;
-use vault::distilled::{Claim, ClaimKind, Distilled, Enumeration, KindPayload};
+use vault::distilled::{Claim, ClaimKind, Distilled, Enumeration, KindPayload, SessionPayload};
 
 /// Caller policy for [`render`]. Transcript emission is the caller's decision,
 /// not a global kind rule (2026-07-07 distillation-output-restore): borg
@@ -80,6 +80,12 @@ pub fn render(distilled: &Distilled, options: RenderOptions) -> RenderedDistille
     push_key_ideas(&mut body, &distilled.key_ideas);
     push_claims(&mut body, &distilled.claims);
     push_links(&mut body, &distilled.links);
+    // Session body footer (harvest-clyde-sessions Phase 4): list the member
+    // sessions as `clyde://` back-pointers so `clyde session resume` recovers
+    // full fidelity (the conductor-validated back-pointer, vault-native).
+    if let Some(KindPayload::Session(p)) = &distilled.kind_specific {
+        push_session_footer(&mut body, p);
+    }
     if options.include_transcript {
         push_transcript(&mut body, distilled.transcript.as_deref());
     }
@@ -346,6 +352,44 @@ fn push_transcript(body: &mut String, transcript: Option<&str>) {
     // can't collide with the surrounding L2 section structure.
     body.push_str(&crate::text::demote_headings(trimmed, 2));
     body.push_str("\n\n");
+}
+
+/// Render the `## Sessions` footer for a harvested session note: a lead line
+/// carrying the repo anchor + message count + date range, then one `clyde://`
+/// back-pointer per member session. Per-session title/duration are NOT in the
+/// frozen `SessionPayload` (Phase 1) - borg's publish layer, which holds the
+/// full clustered `SessionRecord`s, is the seam for a richer footer; this keeps
+/// the renderer faithful to the typed payload it is handed. Omitted entirely
+/// when the payload carries no session ids (nothing to link).
+fn push_session_footer(body: &mut String, payload: &SessionPayload) {
+    if payload.session_ids.is_empty() {
+        return;
+    }
+    body.push_str("## Sessions\n\n");
+    let mut lead_parts: Vec<String> = Vec::new();
+    if let Some(repo) = &payload.repo {
+        lead_parts.push(format!("repo `{repo}`"));
+    }
+    if payload.msg_count > 0 {
+        lead_parts.push(format!("{} messages", payload.msg_count));
+    }
+    match (&payload.date_start, &payload.date_end) {
+        (Some(start), Some(end)) if start == end => lead_parts.push(start.clone()),
+        (Some(start), Some(end)) => lead_parts.push(format!("{start} -> {end}")),
+        (Some(start), None) => lead_parts.push(start.clone()),
+        (None, Some(end)) => lead_parts.push(end.clone()),
+        (None, None) => {}
+    }
+    if !lead_parts.is_empty() {
+        body.push_str(&lead_parts.join(" | "));
+        body.push_str("\n\n");
+    }
+    for id in &payload.session_ids {
+        body.push_str("- clyde://");
+        body.push_str(id.trim());
+        body.push('\n');
+    }
+    body.push('\n');
 }
 
 fn push_links(body: &mut String, links: &[vault::distilled::Link]) {

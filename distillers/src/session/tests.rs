@@ -1,0 +1,338 @@
+use super::*;
+use crate::FakeFabric;
+use std::sync::Arc;
+
+fn make_distiller(fake: FakeFabric, config: SessionConfig) -> SessionDistiller<Arc<FakeFabric>> {
+    SessionDistiller::new(Arc::new(fake), config)
+}
+
+fn meta() -> SessionMetadata {
+    SessionMetadata {
+        repo: Some("scottidler/second-brain".to_string()),
+        session_ids: vec!["871f6428".to_string(), "4ae69e3a".to_string()],
+        msg_count: 806,
+        date_start: Some("2026-07-02T09:00:00Z".to_string()),
+        date_end: Some("2026-07-02T11:00:00Z".to_string()),
+        body_truncated: false,
+    }
+}
+
+fn inputs<'a>(transcript: &'a str, m: Option<&'a SessionMetadata>) -> DistillInputs<'a> {
+    DistillInputs {
+        transcript,
+        source_url: Some("clyde://871f6428"),
+        title_hint: None,
+        repo_metadata: None,
+        video_metadata: None,
+        capture_note: None,
+        session_metadata: m,
+    }
+}
+
+const VALID_YAML: &str = r#"
+summary: "The session chose typed cross-stage contracts and rejected an isolated CARGO_TARGET_DIR because it fills the tmpfs."
+claims:
+  - text: "Chose typed contracts over markdown for cross-stage handoff."
+    kind: position
+  - text: "Rejected an isolated CARGO_TARGET_DIR; it fills the tmpfs, so reuse the project target."
+    kind: recommendation
+tags: [rust, ci]
+links:
+  - url: "https://example.com/design"
+    label: "design doc"
+"#;
+
+// ---- SUCCESS CRITERION: FakeFabric emits a bounds-valid Distilled ----
+
+#[tokio::test]
+async fn fake_fabric_emits_bounds_valid_distilled_with_session_payload() {
+    let fake = FakeFabric::new();
+    fake.set_response(PATTERN, VALID_YAML);
+    let m = meta();
+    let distiller = make_distiller(fake, SessionConfig::default());
+    let distilled = distiller
+        .distill(inputs("USER: hi\nASSISTANT: decided X", Some(&m)))
+        .await
+        .expect("distill");
+
+    assert_eq!(distilled.meta.extractor, "distill-session-v1");
+    assert!(distilled.summary.starts_with("The session chose typed"));
+    assert!(distilled.meta.validation.fallback_reason.is_none());
+    // Bounds hold.
+    assert!(distilled.summary.chars().count() <= MAX_SUMMARY_CHARS);
+    assert!(distilled.claims.len() <= max_claims(1));
+    assert!(distilled.tags.len() <= 7);
+    // Session never carries a note transcript (staged body is the archive).
+    assert!(distilled.transcript.is_none());
+    // Payload attached from the deterministic Stage-0 metadata.
+    let Some(vault::distilled::KindPayload::Session(p)) = distilled.kind_specific else {
+        panic!("expected Session payload");
+    };
+    assert_eq!(p.repo.as_deref(), Some("scottidler/second-brain"));
+    assert_eq!(p.session_ids, vec!["871f6428".to_string(), "4ae69e3a".to_string()]);
+    assert_eq!(p.msg_count, 806);
+}
+
+#[tokio::test]
+async fn truncates_excess_claims_via_enforce_bounds() {
+    let fake = FakeFabric::new();
+    let mut yaml = String::from("summary: \"S.\"\nclaims:\n");
+    for i in 0..15 {
+        yaml.push_str(&format!("  - text: \"Claim {i}\"\n"));
+    }
+    yaml.push_str("tags: []\nlinks: []\n");
+    fake.set_response(PATTERN, yaml);
+    let m = meta();
+    let distiller = make_distiller(fake, SessionConfig::default());
+    let distilled = distiller.distill(inputs("body", Some(&m))).await.expect("distill");
+    assert_eq!(distilled.claims.len(), max_claims(1));
+    assert!(
+        distilled
+            .meta
+            .validation
+            .bounds_truncations
+            .iter()
+            .any(|t| t.starts_with("claims:"))
+    );
+}
+
+// ---- SUCCESS CRITERION: degraded fallback path sets degraded ----
+
+#[tokio::test]
+async fn fabric_error_falls_back_and_marks_degraded() {
+    let fake = FakeFabric::new();
+    fake.set_error(PATTERN, "fabric -p distill-session failed: 1");
+    let m = meta();
+    let distiller = make_distiller(fake, SessionConfig::default());
+    let distilled = distiller.distill(inputs("body", Some(&m))).await.expect("distill");
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("fabric-error")
+    );
+    // The borg degraded-quality contract: a fallback distillation is degraded.
+    assert!(distilled.meta.validation.is_degraded());
+    // The payload still rides so cortex/render see the session bookkeeping.
+    assert!(matches!(
+        distilled.kind_specific,
+        Some(vault::distilled::KindPayload::Session(_))
+    ));
+}
+
+#[tokio::test]
+async fn fabric_timeout_falls_back_and_marks_degraded() {
+    let fake = FakeFabric::new();
+    fake.set_timeout(PATTERN);
+    let m = meta();
+    let distiller = make_distiller(fake, SessionConfig::default());
+    let distilled = distiller.distill(inputs("body", Some(&m))).await.expect("distill");
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("fabric-timeout")
+    );
+    assert!(distilled.meta.validation.is_degraded());
+}
+
+#[tokio::test]
+async fn malformed_yaml_falls_back_with_raw_output() {
+    let fake = FakeFabric::new();
+    fake.set_response(PATTERN, "this is not yaml: [unclosed");
+    let m = meta();
+    let distiller = make_distiller(fake, SessionConfig::default());
+    let distilled = distiller.distill(inputs("body", Some(&m))).await.expect("distill");
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("yaml-parse-error")
+    );
+    assert!(distilled.meta.validation.raw_output.is_some());
+}
+
+// ---- SUCCESS CRITERION: truncated-body fixture shows the marker in the prompt ----
+
+#[tokio::test]
+async fn export_body_truncated_injects_marker_into_assembled_prompt() {
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(PATTERN, VALID_YAML);
+    let mut m = meta();
+    m.body_truncated = true; // clyde cut the transcript tail
+    let distiller = SessionDistiller::new(fake.clone(), SessionConfig::default());
+    // Short body -> single-call path -> exactly one assembled prompt.
+    distiller
+        .distill(inputs("USER: short\nASSISTANT: done", Some(&m)))
+        .await
+        .expect("distill");
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1, "single-call path issues one fabric call");
+    assert!(
+        calls[0].input.contains(TRUNCATION_MARKER),
+        "the assembled prompt must carry the truncation marker: {:?}",
+        calls[0].input
+    );
+}
+
+#[tokio::test]
+async fn no_marker_when_not_truncated() {
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(PATTERN, VALID_YAML);
+    let m = meta(); // body_truncated = false, small body -> no windowing
+    let distiller = SessionDistiller::new(fake.clone(), SessionConfig::default());
+    distiller
+        .distill(inputs("USER: short\nASSISTANT: done", Some(&m)))
+        .await
+        .expect("distill");
+    let calls = fake.calls();
+    assert!(
+        !calls[0].input.contains(TRUNCATION_MARKER),
+        "no marker when nothing was truncated"
+    );
+}
+
+// ---- Token-cap validation: head+tail windowing on a large ("806-msg") thread ----
+
+/// A body far larger than the default 12K-token cap, standing in for the
+/// 806-message golden thread's concatenated transcript.
+fn huge_body() -> String {
+    let mut body = String::from("USER: HEAD-MARKER kick off the token-broker arc.\n");
+    let filler = "ASSISTANT: worked through the pipeline refactor and the receipts migration. ";
+    while body.len() < 400_000 {
+        body.push_str(filler);
+    }
+    body.push_str("\nASSISTANT: TAIL-MARKER landed the fix and captured the gotcha.\n");
+    body
+}
+
+#[test]
+fn window_head_tail_keeps_head_and_tail_within_budget() {
+    let body = huge_body();
+    let token_cap = 12_000usize;
+    let (windowed, truncated) = window_head_tail(&body, token_cap);
+    assert!(truncated, "a 400K-char body must window under a 12K-token cap");
+    // Windowed body stays within the char budget (token_cap * 4 chars/token).
+    assert!(
+        windowed.chars().count() <= token_cap * 4,
+        "windowed body ({} chars) must fit the {}-char budget",
+        windowed.chars().count(),
+        token_cap * 4
+    );
+    assert!(windowed.contains(TRUNCATION_MARKER), "marker separates head from tail");
+    assert!(windowed.contains("HEAD-MARKER"), "the head is preserved");
+    assert!(windowed.contains("TAIL-MARKER"), "the tail is preserved");
+}
+
+#[test]
+fn window_head_tail_passes_small_bodies_through_unchanged() {
+    let body = "USER: tiny\nASSISTANT: done";
+    let (windowed, truncated) = window_head_tail(body, 12_000);
+    assert!(!truncated);
+    assert_eq!(windowed, body);
+}
+
+#[tokio::test]
+async fn large_thread_windows_to_single_call_under_default_cap() {
+    // SUCCESS CRITERION (token-cap validation): with the default 12K cap a very
+    // large thread windows down to the single-call path, and the assembled
+    // prompt stays within the cap and carries the marker.
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(PATTERN, VALID_YAML);
+    let m = meta();
+    let body = huge_body();
+    let distiller = SessionDistiller::new(fake.clone(), SessionConfig::default());
+    let distilled = distiller.distill(inputs(&body, Some(&m))).await.expect("distill");
+    assert!(distilled.meta.validation.fallback_reason.is_none());
+    let calls = fake.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "windowed body routes to the single-call path at the default cap"
+    );
+    assert_eq!(calls[0].pattern, PATTERN);
+    assert!(
+        calls[0].input.contains(TRUNCATION_MARKER),
+        "windowing marker rides the prompt"
+    );
+    // Prompt input is bounded by the cap (+ small capture framing, which is
+    // None here, so it equals the windowed body).
+    assert!(approx_tokens(calls[0].input.len()) <= SessionConfig::default().token_cap);
+}
+
+// ---- Map-reduce path (live only when token_cap is raised above the threshold) ----
+
+#[tokio::test]
+async fn raised_token_cap_routes_to_map_reduce() {
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk covered the migration.\"\nclaims:\n  - text: \"A chunk decision.\"\ntags: [ci]\nlinks: []\n",
+    );
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Whole-session synthesis of the token-broker arc.\"\nclaims:\n  - text: \"A chunk decision.\"\n",
+    );
+    let m = meta();
+    let body = huge_body();
+    // token_cap above SINGLE_CALL_TOKEN_THRESHOLD so the windowed body still
+    // exceeds the single-call threshold and map-reduce fires.
+    let config = SessionConfig {
+        token_cap: 30_000,
+        ..SessionConfig::default()
+    };
+    let distiller = SessionDistiller::new(fake.clone(), config);
+    let distilled = distiller.distill(inputs(&body, Some(&m))).await.expect("distill");
+    assert!(distilled.summary.contains("Whole-session synthesis"));
+    assert!(distilled.meta.validation.fallback_reason.is_none());
+    let patterns: Vec<String> = fake.calls().into_iter().map(|c| c.pattern).collect();
+    assert!(patterns.iter().any(|p| p == PATTERN_CHUNK), "chunk pattern invoked");
+    assert!(patterns.iter().any(|p| p == PATTERN_REDUCE), "reduce pattern invoked");
+    assert!(
+        !patterns.iter().any(|p| p == PATTERN),
+        "single-call pattern NOT invoked on the map-reduce path"
+    );
+}
+
+#[tokio::test]
+async fn map_reduce_falls_back_when_reduce_fails() {
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary.\"\nclaims:\n  - text: \"A chronological claim.\"\ntags: []\nlinks: []\n",
+    );
+    fake.set_error(PATTERN_REDUCE, "reduce boom");
+    let m = meta();
+    let body = huge_body();
+    let config = SessionConfig {
+        token_cap: 30_000,
+        ..SessionConfig::default()
+    };
+    let distiller = SessionDistiller::new(fake.clone(), config);
+    let distilled = distiller.distill(inputs(&body, Some(&m))).await.expect("distill");
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("reduce-selection-failed")
+    );
+    assert!(
+        !distilled.claims.is_empty(),
+        "chronological merge claims survive a failed reduce"
+    );
+    assert!(distilled.meta.validation.is_degraded());
+}
+
+#[tokio::test]
+async fn empty_body_falls_back() {
+    let fake = FakeFabric::new();
+    fake.set_response(PATTERN, VALID_YAML);
+    let m = meta();
+    let distiller = make_distiller(fake, SessionConfig::default());
+    let distilled = distiller.distill(inputs("   ", Some(&m))).await.expect("distill");
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("empty-transcript")
+    );
+}
+
+#[tokio::test]
+async fn no_metadata_yields_no_payload() {
+    let fake = FakeFabric::new();
+    fake.set_response(PATTERN, VALID_YAML);
+    let distiller = make_distiller(fake, SessionConfig::default());
+    let distilled = distiller.distill(inputs("body", None)).await.expect("distill");
+    assert!(distilled.kind_specific.is_none(), "no metadata -> no session payload");
+}
