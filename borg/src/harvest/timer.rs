@@ -9,6 +9,16 @@
 //! binary path and the unit sets an explicit `PATH=` - the run resolves even
 //! with an empty inherited environment (the `clyde_binary` config default is
 //! likewise absolute and tilde-expanded).
+//!
+//! The stripped environment also means NO decrypted secrets reach the run
+//! unless the unit bootstraps them itself (design doc: 2026-07-20
+//! harvest-completion, Phase 5). When `harvest.env_bootstrap` is configured,
+//! `sb-harvest.service` carries the same `ExecStartPre` decrypt +
+//! `EnvironmentFile` directives the borg/cortex daemon units already emit
+//! (`crate::service::install_systemd`, `cortex::daemon::render_systemd_unit`),
+//! written to its OWN env-file so a one-shot harvest run never clobbers the
+//! long-running daemon's captured environment. `None` (the default) omits
+//! both directives - a host with nothing to bootstrap still gets a valid unit.
 
 use std::path::Path;
 
@@ -43,16 +53,34 @@ pub fn render_units(home: &Path, binary: &Path, config: &Config) -> (String, Str
         }
     };
 
-    let service = format!(
+    let mut service = String::from(
         "[Unit]\n\
          Description=sb borg harvest - nightly Claude-session harvest into the vault (second-brain)\n\
          After=default.target\n\
          \n\
          [Service]\n\
-         Type=oneshot\n\
-         # Timers run with a stripped PATH; set it explicitly and use the\n\
+         Type=oneshot\n",
+    );
+
+    // Same secret/env bootstrap the borg/cortex daemon units emit
+    // (`borg::service::install_systemd`, `cortex::daemon::render_systemd_unit`).
+    // `None` omits both directives so a host with nothing to bootstrap still
+    // gets a valid, complete unit - never fabricated.
+    if let Some(bootstrap) = &config.harvest.env_bootstrap {
+        service.push_str(&format!(
+            "ExecStartPre=/bin/sh -c '{command} > {env_file}'\n",
+            command = bootstrap.command,
+            env_file = bootstrap.env_file.display(),
+        ));
+        service.push_str(&format!("EnvironmentFile=-{}\n", bootstrap.env_file.display()));
+    }
+
+    service.push_str(&format!(
+        "# Timers run with a stripped PATH; set it explicitly and use the\n\
          # absolute binary below so the run resolves with an empty inherited env.\n\
-         Environment=\"PATH={home}/.local/bin:{home}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n\
+         # mise shims come first so mise-managed tools (e.g. fabric) win over\n\
+         # any stale duplicate elsewhere on PATH.\n\
+         Environment=\"PATH={home}/.local/share/mise/shims:{home}/.local/bin:{home}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n\
          ExecStart={binary} borg harvest{config_flag}\n\
          WorkingDirectory={home}\n\
          \n\
@@ -62,7 +90,7 @@ pub fn render_units(home: &Path, binary: &Path, config: &Config) -> (String, Str
          PrivateTmp=true\n",
         home = home.display(),
         binary = binary.display(),
-    );
+    ));
 
     // The ONE value that IS the timer. Everything else lives in borg.yml.
     let timer = format!(

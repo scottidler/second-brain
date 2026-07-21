@@ -164,10 +164,15 @@ Two things specific to Signal:
 
 ## Known traps (lived experience)
 
-- **Fabric under systemd needs `go/bin` on PATH.** Fabric works in your
-  interactive shell but the daemon's `PATH` may omit `~/go/bin`, silently
-  breaking every distill. If ingest "succeeds" but produces empty/garbage
-  notes, check the daemon's environment.
+- **Fabric under systemd needs the mise shims dir on PATH.** Fabric is
+  mise-managed as of 2026-07-20; its binary resolves via
+  `~/.local/share/mise/shims/fabric`. That shim self-resolves under a
+  stripped PATH only if the shims dir is actually on it - the generated
+  systemd units (`daemon.rs`, `service.rs`, `harvest/timer.rs`) put it first.
+  If ingest "succeeds" but produces empty/garbage notes, check the daemon's
+  environment. (The two hand-built `~/go/bin/fabric` /
+  `~/.local/bin/fabric` binaries were retired the same day; `~/go/bin` is a
+  dead PATH entry now.)
 - **Fabric's `DEFAULT_MODEL` can point at a retired model.** When a provider
   retires a model, `~/.config/fabric/.env`'s `DEFAULT_MODEL` keeps naming it
   and the live API returns `404 not_found_error` - even though `fabric

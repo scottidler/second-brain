@@ -7,7 +7,7 @@
 use crate::config::Config;
 use crate::opts;
 use eyre::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Outcome of a `sb borg daemon <flag>` invocation (everything except
 /// `--start`, which sb routes to `serve_init`). Variants carry the typed
@@ -178,22 +178,17 @@ pub(crate) async fn launchctl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn install_systemd(exe_path: &str, config: &Config) -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
-    let unit_dir = home.join(".config/systemd/user");
-    let unit_path = unit_dir.join("borg.service");
-
-    // Derive the vault path from config (was hardcoded). The borg-owned data
-    // dir (`~/.local/share/sb/borg`: receipts DB, signal-state, staged
-    // artifacts) MUST be in ReadWritePaths too - it only worked before because
-    // the user manager wasn't enforcing ProtectHome; the moment it does, every
-    // receipts/signal/stages write fails.
-    let vault_path = config
-        .vault_root()
-        .unwrap_or_else(|_| home.join("repos/scottidler/obsidian"));
-    let data_path = vault::receipts::receipts_dir()
-        .map(|d| d.parent().map(|p| p.to_path_buf()).unwrap_or(d))
-        .unwrap_or_else(|_| home.join(".local/share/sb"));
+/// Render the `borg.service` unit content. Pure - no filesystem or
+/// environment access beyond the args - so `install_systemd` and its tests
+/// share one seam (tests assert on the returned string instead of touching
+/// the real `~/.config/systemd/user/`), mirroring
+/// `cortex::daemon::render_systemd_unit`.
+fn render_systemd_unit(exe_path: &str, home: &Path, vault_path: &Path, data_path: &Path, config: &Config) -> String {
+    log::debug!(
+        "service::render_systemd_unit: exe_path={exe_path} vault_path={} env_bootstrap={}",
+        vault_path.display(),
+        config.daemon.env_bootstrap.is_some(),
+    );
 
     let mut service = String::from(
         r#"[Unit]
@@ -218,7 +213,7 @@ Type=simple
     }
 
     service.push_str(&format!(
-        r#"Environment="PATH={home}/.local/bin:{home}/.cargo/bin:{home}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        r#"Environment="PATH={home}/.local/share/mise/shims:{home}/.local/bin:{home}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart={exe_path} borg --log-level debug daemon --start
 Restart=always
 RestartSec=5
@@ -239,7 +234,27 @@ WantedBy=default.target
         data = data_path.display(),
     ));
 
-    let unit_content = service;
+    service
+}
+
+pub(crate) async fn install_systemd(exe_path: &str, config: &Config) -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
+    let unit_dir = home.join(".config/systemd/user");
+    let unit_path = unit_dir.join("borg.service");
+
+    // Derive the vault path from config (was hardcoded). The borg-owned data
+    // dir (`~/.local/share/sb/borg`: receipts DB, signal-state, staged
+    // artifacts) MUST be in ReadWritePaths too - it only worked before because
+    // the user manager wasn't enforcing ProtectHome; the moment it does, every
+    // receipts/signal/stages write fails.
+    let vault_path = config
+        .vault_root()
+        .unwrap_or_else(|_| home.join("repos/scottidler/obsidian"));
+    let data_path = vault::receipts::receipts_dir()
+        .map(|d| d.parent().map(|p| p.to_path_buf()).unwrap_or(d))
+        .unwrap_or_else(|_| home.join(".local/share/sb"));
+
+    let unit_content = render_systemd_unit(exe_path, &home, &vault_path, &data_path, config);
 
     // Stop the running service if active (ignore errors - may not be running)
     systemctl(&["stop", "borg"]).await.ok();
@@ -470,3 +485,6 @@ pub(crate) fn uninstall_gnome_keybinding() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

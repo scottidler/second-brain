@@ -211,7 +211,7 @@ pub struct DaemonConfig {
 /// `ExecStartPre=/bin/sh -c '<command> > <env_file>'`, then the unit loads it
 /// with `EnvironmentFile=-<env_file>` (the leading `-` makes a missing file
 /// non-fatal).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct EnvBootstrapConfig {
     /// Shell command whose stdout is redirected into `env_file`.

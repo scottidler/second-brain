@@ -1088,3 +1088,37 @@ fn test_render_systemd_unit_omits_bootstrap_and_rayon_when_unset() {
     assert!(unit.contains("[Install]"));
     assert!(unit.contains("ExecStart="));
 }
+
+/// PATH hygiene (Phase 5, 2026-07-20 harvest-completion): fabric is
+/// mise-managed, so its shim dir must be on PATH and FIRST (mise-managed
+/// tools win over any stale duplicate); the retired `~/go/bin` hand-built
+/// fabric entry must be gone.
+#[test]
+fn test_render_systemd_unit_path_includes_mise_shims_and_excludes_go_bin() {
+    let config = Config::default();
+
+    let home = std::path::Path::new("/home/user");
+    let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
+    let vault_root = std::path::Path::new("/home/user/vault");
+
+    let unit = render_systemd_unit(home, binary, vault_root, &config);
+
+    assert!(
+        unit.contains("/home/user/.local/share/mise/shims"),
+        "PATH must include the mise shims dir:\n{unit}"
+    );
+    assert!(
+        !unit.contains("/home/user/go/bin"),
+        "PATH must not carry the retired ~/go/bin entry:\n{unit}"
+    );
+    let path_line = unit
+        .lines()
+        .find(|l| l.contains("Environment=\"PATH="))
+        .expect("expected a PATH line");
+    let mise_pos = path_line.find("mise/shims").expect("mise shims present");
+    let local_bin_pos = path_line.find(".local/bin").expect(".local/bin present");
+    assert!(
+        mise_pos < local_bin_pos,
+        "mise shims must come before .local/bin so mise-managed tools win:\n{path_line}"
+    );
+}

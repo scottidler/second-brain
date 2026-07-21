@@ -852,6 +852,35 @@ fn test_harvest_config_default_values() {
     assert!(h.clyde_binary.is_absolute());
     assert!(!h.clyde_binary.to_string_lossy().starts_with('~'));
     assert!(h.clyde_binary.ends_with("clyde"));
+    // Phase 5 (2026-07-20 harvest-completion): no env-bootstrap out of the
+    // box - a fresh install with nothing to bootstrap still gets a valid,
+    // complete timer service unit.
+    assert!(h.env_bootstrap.is_none());
+}
+
+#[test]
+fn test_harvest_config_env_bootstrap_parses_and_uses_distinct_default() {
+    let yaml = r#"
+harvest:
+  env-bootstrap:
+    command: "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env"
+    env-file: /run/user/1000/sb-harvest.env
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    let bootstrap = config
+        .harvest
+        .env_bootstrap
+        .as_ref()
+        .expect("env-bootstrap should be Some");
+    assert_eq!(
+        bootstrap.command,
+        "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env"
+    );
+    // Tilde-expanded like DaemonConfig's env-bootstrap, and distinct from the
+    // daemon's own borg.env so the timer never clobbers it.
+    assert!(bootstrap.env_file.is_absolute());
+    assert_eq!(bootstrap.env_file, PathBuf::from("/run/user/1000/sb-harvest.env"));
+    assert_ne!(bootstrap.env_file, PathBuf::from("/run/user/1000/borg.env"));
 }
 
 #[test]

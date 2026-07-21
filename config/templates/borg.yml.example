@@ -171,6 +171,18 @@ harvest:
   # The ONE value baked into the .timer unit; every knob above stays here in
   # config. Standard systemd calendar spec (daily | *-*-* 03:00:00 | ...).
   schedule: "*-*-* 03:00:00"
+  # Optional secret/env bootstrap for the installed sb-harvest.service unit:
+  # `command`'s stdout is captured into `env-file` via an ExecStartPre shell
+  # redirect, then the unit loads it with `EnvironmentFile=-<env-file>`.
+  # MANDATORY if fabric needs a decrypted secret (e.g. ANTHROPIC_API_KEY) to
+  # distill - systemd timers run with a stripped environment, so without this
+  # the nightly run has no key and every note lands degraded. Use a DISTINCT
+  # env-file from the daemon's so the one-shot timer run never clobbers the
+  # long-running daemon's captured environment. Omit this whole block on a
+  # host with no secrets to bootstrap - the generated unit is still valid.
+  # env-bootstrap:
+  #   command: manifest age decrypt ~/repos/scottidler/keep/.secrets -f env
+  #   env-file: /run/user/1000/sb-harvest.env
 
 # Log level: trace | debug | info | warn | error
 log-level: info

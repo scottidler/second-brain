@@ -867,7 +867,7 @@ fn render_systemd_unit(home: &Path, binary: &Path, vault_root: &Path, config: &C
     }
 
     service.push_str(&format!(
-        "Environment=\"PATH={home}/.local/bin:{home}/.cargo/bin:{home}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n",
+        "Environment=\"PATH={home}/.local/share/mise/shims:{home}/.local/bin:{home}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n",
         home = home.display(),
     ));
 

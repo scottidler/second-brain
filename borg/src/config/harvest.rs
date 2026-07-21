@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::EnvBootstrapConfig;
+
 /// Absolute, tilde-expanded default location for the clyde binary. The
 /// harvest systemd timer (Phase 8) runs with a stripped PATH, so a bare
 /// `"clyde"` would not resolve there - only an absolute path survives that
@@ -123,6 +125,17 @@ pub struct HarvestConfig {
     /// ExecStart at fire time. A standard systemd calendar spec (`daily`,
     /// `*-*-* 03:00:00`, `Mon *-*-* 06:00:00`).
     pub schedule: String,
+    /// Optional secret/environment bootstrap for the installed
+    /// `sb-harvest.service` unit (design doc: 2026-07-20 harvest-completion,
+    /// Phase 5 "Secret bootstrap on the timer's `.service`"). `None` (the
+    /// default) omits both the `ExecStartPre` and `EnvironmentFile`
+    /// directives, exactly like `daemon.env-bootstrap`
+    /// (`crate::config::DaemonConfig`) - a host with no secrets to bootstrap
+    /// still gets a valid, complete unit. When set, use a DISTINCT
+    /// `env-file` from the daemon's (e.g. `/run/user/1000/sb-harvest.env`)
+    /// so the timer's one-shot run never clobbers the long-running daemon's
+    /// captured environment.
+    pub env_bootstrap: Option<EnvBootstrapConfig>,
 }
 
 impl Default for HarvestConfig {
@@ -137,6 +150,7 @@ impl Default for HarvestConfig {
             token_cap: DEFAULT_TOKEN_CAP,
             model: String::new(),
             schedule: DEFAULT_SCHEDULE.to_string(),
+            env_bootstrap: None,
         }
     }
 }

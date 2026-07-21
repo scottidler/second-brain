@@ -174,3 +174,121 @@ Design doc: `docs/design/2026-07-20-harvest-completion.md`
   bug). The 7d publishable>0 criterion is reported UNVERIFIED (mis-specified);
   it needs the parent/Scott to either drop it or restate it (e.g. the steady-
   state cursor window, or a `--since` longer than `--dormant-after`).
+
+## Phase 5 (partial: timer env-bootstrap + PATH hygiene)
+
+This is the CODE portion of Phase 5 only (design doc bullets "Secret bootstrap
+on the timer's `.service`" and "PATH hygiene in all generated units"). The
+remaining Phase 5 work - wiring `--install` into `sb bootstrap`, running
+`--install` on the daemon host, the dry-run soak, and the live flip - is
+unimplemented; see Open Questions.
+
+### Design decisions
+- Added `env_bootstrap: Option<EnvBootstrapConfig>` to `HarvestConfig`
+  (`borg/src/config/harvest.rs`), reusing the EXISTING `EnvBootstrapConfig`
+  type (`borg/src/config.rs`, already used by `DaemonConfig.env_bootstrap` and
+  cortex's identical type) rather than inventing a parallel harvest-specific
+  struct - same shape, same serde behavior, one type to reason about.
+- `harvest::timer::render_units` (`borg/src/harvest/timer.rs`) now emits the
+  `ExecStartPre=/bin/sh -c '<command> > <env_file>'` + `EnvironmentFile=-<env_file>`
+  pair when `config.harvest.env_bootstrap` is `Some`, byte-for-byte the same
+  directive shape `borg::service::install_systemd` and
+  `cortex::daemon::render_systemd_unit` already emit for the daemons. `None`
+  omits both directives - a host with nothing to bootstrap still gets a
+  valid, complete unit (verified by
+  `harvest::timer::tests::service_omits_env_bootstrap_when_unconfigured`).
+- PATH hygiene applied identically in all three generators
+  (`borg/src/harvest/timer.rs`, `borg/src/service.rs`,
+  `cortex/src/daemon.rs`): dropped the stale `{home}/go/bin` segment (the
+  hand-built fabric binaries there were retired 2026-07-20), and inserted
+  `{home}/.local/share/mise/shims` FIRST (ahead of `.local/bin`) so the
+  mise-managed fabric shim wins over any stale duplicate elsewhere on PATH.
+- Added `PartialEq` to `EnvBootstrapConfig` (`borg/src/config.rs`) so
+  `HarvestConfig`'s existing `#[derive(PartialEq)]` (used by
+  `assert_eq!(config.harvest, HarvestConfig::default())` in
+  `config/tests.rs`) keeps compiling with the new `Option<EnvBootstrapConfig>`
+  field.
+- Extracted a pure `render_systemd_unit` function out of
+  `borg::service::install_systemd` (previously the string-building was
+  inlined in the async, filesystem-touching function, unlike
+  `cortex::daemon::render_systemd_unit` which was already split this way).
+  This mirrors the existing cortex pattern and is what makes
+  `borg/src/service/tests.rs` possible at all - `install_systemd` itself
+  touches the filesystem and shells out to `systemctl`, which is not a unit-test
+  seam.
+- Documented the new `harvest.env-bootstrap` config block in
+  `config/templates/borg.yml.example` (commented-out example, matching the
+  existing `cortex.yml.example` `daemon.env-bootstrap` documentation pattern)
+  and corrected the stale `~/go/bin` guidance in `docs/onboarding.md`'s "Known
+  traps" section to describe the mise-shims mechanism instead.
+
+### Deviations
+- **Shared helper vs replicated block:** did NOT extract a single shared
+  `render_env_bootstrap(bootstrap: &EnvBootstrapConfig) -> String` helper used
+  by all three generators, even though the `ExecStartPre` +
+  `EnvironmentFile` block is now byte-identical in three places
+  (`timer.rs`, `service.rs`, `daemon.rs`). Reason: `service.rs` and
+  `timer.rs` live in the `borg` crate while `daemon.rs` lives in the
+  `cortex` crate, so a shared helper would need a new home in a crate both
+  depend on (`vault`), which is a larger surface change than this phase's
+  scope ("timer env-bootstrap + PATH hygiene") calls for, and `vault` is
+  explicitly config/schema-first, not systemd-unit-rendering code. Per the
+  task's own guardrail ("if a shared helper is awkward across the borg
+  module boundary, replicating the small block is acceptable"), the block is
+  replicated 3x (2 in borg, already 1 pre-existing in cortex before this
+  phase). Each site is independently tested, and the tests would each catch a
+  divergence.
+- **"Runtime-dir resolution the daemon uses" does not exist in code.** The
+  task description asked to "mirror how the daemon derives its env-file
+  path/uid... use the same runtime-dir resolution the daemon uses." There is
+  no such resolution: `EnvBootstrapConfig.env_file` is a plain operator-supplied
+  config value (e.g. `/run/user/1000/borg.env` in `borg.yml`/`cortex.yml`),
+  never computed from `getuid()` or `$XDG_RUNTIME_DIR` in Rust. The "distinct
+  env-file" requirement is therefore satisfied entirely at the config layer:
+  `harvest.env-bootstrap.env-file` is a separate YAML key from
+  `daemon.env-bootstrap.env-file`, and the shipped example
+  (`config/templates/borg.yml.example`) names it `sb-harvest.env` next to the
+  daemon's `borg.env`. No code changes needed or made to uid/runtime-dir
+  handling.
+
+### Tradeoffs
+- `render_systemd_unit` (borg) takes `exe_path: &str` (matching
+  `install_systemd`'s existing `&str` parameter) rather than harmonizing it to
+  `&Path` like `cortex::daemon::render_systemd_unit`'s `binary: &Path`. Chosen
+  to minimize the diff at the one call site inside `install_systemd`, which
+  already holds `exe_path: &str` from `std::env::current_exe()... .display().to_string()`
+  further up the call chain (`install_service`); re-typing that chain end-to-end
+  is out of scope for a PATH/env-bootstrap phase.
+- Left `borg::harvest::config::HarvestConfig`'s doc comment claiming the
+  timer unit "bakes in nothing but `OnCalendar`" unchanged, since that
+  sentence is specifically about the `.timer` file (which is still true -
+  `env_bootstrap` and PATH only affect the `.service` file). Did not also
+  add a parallel sentence documenting `env_bootstrap`'s effect on the
+  `.service` file at that exact spot, to avoid conflating the two unit
+  files' contracts; the effect is documented at `render_units`'s own doc
+  comment instead.
+
+### Open questions
+- **Phase 5's non-code bullets are NOT done and are out of scope for this
+  phase per the phase-implementer contract:** wiring `sb borg harvest
+  --install` into `sb bootstrap`, running `--install` once on the daemon
+  host, updating `CLAUDE.md` to document the new units, the `mode: dry-run`
+  soak for one cycle, and the flip to `mode: live` all remain. The design
+  doc's Phase 5 success criteria that require an INSTALLED, RUNNING unit
+  ("`sb-harvest.timer` is installed + enabled"; "two consecutive runs
+  double-ingest nothing"; "a live timer run publishes a note with non-empty
+  claims") are UNVERIFIED by this phase and need the parent orchestrator (or
+  Scott) to run them against the real daemon host.
+- **The two `otto ci` test failures seen mid-session
+  (`harvest::watermark::tests::lock_releases_on_drop`,
+  `harvest::publish::tests::publish_plan_publishes_and_rerun_is_idempotent`)
+  were NOT caused by this phase's changes** - neither `watermark.rs` nor
+  `publish.rs` was touched here, both tests pass cleanly in isolation
+  (`cargo test -p borg -p cortex --lib harvest -- --test-threads=1`), and the
+  Phase 1 notes above already document
+  `publish_plan_publishes_and_rerun_is_idempotent` flaking once under the
+  full parallel suite. `otto ci` re-run clean immediately after. Flagged here
+  rather than silently ignored, per "tests must bite" - if this recurs it is
+  a pre-existing test-isolation gap (shared temp-dir file locks across
+  parallel test binaries), not a Phase 5 regression, and is a candidate for a
+  future hardening pass, not this phase's scope.

@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::Config;
+use crate::config::{Config, EnvBootstrapConfig};
 use std::path::PathBuf;
 
 fn cfg(schedule: &str) -> Config {
@@ -53,6 +53,108 @@ fn timer_bakes_only_oncalendar_from_config() {
             "the timer unit must not bake in `{baked}`:\n{timer}"
         );
     }
+}
+
+/// Phase 5 (2026-07-20 harvest-completion): with no `harvest.env_bootstrap`
+/// configured, `sb-harvest.service` must omit BOTH the `ExecStartPre` decrypt
+/// AND the `EnvironmentFile` directive - a host with nothing to bootstrap
+/// still gets a valid, complete unit, never a fabricated one.
+#[test]
+fn service_omits_env_bootstrap_when_unconfigured() {
+    let home = PathBuf::from("/home/tester");
+    let binary = PathBuf::from("/home/tester/.cargo/bin/sb");
+    let (service, _timer) = render_units(&home, &binary, &cfg("daily"));
+    assert!(
+        !service.contains("ExecStartPre"),
+        "no env-bootstrap configured, so ExecStartPre must be absent:\n{service}"
+    );
+    assert!(
+        !service.contains("EnvironmentFile"),
+        "no env-bootstrap configured, so EnvironmentFile must be absent:\n{service}"
+    );
+}
+
+/// The critical Phase 5 fix: a configured `harvest.env_bootstrap` MUST reach
+/// the generated `sb-harvest.service` as the same `ExecStartPre` decrypt +
+/// `EnvironmentFile` pair the borg/cortex daemon units already emit. Without
+/// this, the nightly timer fires with no decrypted secrets -> no
+/// ANTHROPIC_API_KEY -> fabric distillation fails -> every note lands
+/// degraded (the exact dead-on-arrival bug class this doc exists to kill).
+#[test]
+fn service_carries_env_bootstrap_when_configured() {
+    let mut config = cfg("daily");
+    config.harvest.env_bootstrap = Some(EnvBootstrapConfig {
+        command: "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env".to_string(),
+        env_file: PathBuf::from("/run/user/1000/sb-harvest.env"),
+    });
+
+    let home = PathBuf::from("/home/tester");
+    let binary = PathBuf::from("/home/tester/.cargo/bin/sb");
+    let (service, _timer) = render_units(&home, &binary, &config);
+
+    assert!(
+        service.contains(
+            "ExecStartPre=/bin/sh -c 'manifest age decrypt ~/repos/scottidler/keep/.secrets -f env > /run/user/1000/sb-harvest.env'"
+        ),
+        "missing secret ExecStartPre:\n{service}"
+    );
+    assert!(
+        service.contains("EnvironmentFile=-/run/user/1000/sb-harvest.env"),
+        "missing EnvironmentFile:\n{service}"
+    );
+}
+
+/// The timer's env-file must be DISTINCT from the daemon's (`borg.env`) so a
+/// one-shot harvest run never clobbers the long-running daemon's captured
+/// environment.
+#[test]
+fn service_env_bootstrap_uses_distinct_env_file_from_daemon() {
+    let mut config = cfg("daily");
+    config.harvest.env_bootstrap = Some(EnvBootstrapConfig {
+        command: "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env".to_string(),
+        env_file: PathBuf::from("/run/user/1000/sb-harvest.env"),
+    });
+
+    let home = PathBuf::from("/home/tester");
+    let binary = PathBuf::from("/home/tester/.cargo/bin/sb");
+    let (service, _timer) = render_units(&home, &binary, &config);
+
+    assert!(
+        !service.contains("/run/user/1000/borg.env"),
+        "timer's env-file must not collide with the daemon's borg.env:\n{service}"
+    );
+    assert!(
+        service.contains("sb-harvest.env"),
+        "expected the distinct harvest env-file:\n{service}"
+    );
+}
+
+/// PATH hygiene (Phase 5): fabric is mise-managed, so its shim dir must be on
+/// PATH and FIRST (mise-managed tools win over stale duplicates); the retired
+/// `~/go/bin` hand-built-fabric entry must be gone.
+#[test]
+fn service_path_includes_mise_shims_and_excludes_go_bin() {
+    let home = PathBuf::from("/home/tester");
+    let binary = PathBuf::from("/home/tester/.cargo/bin/sb");
+    let (service, _timer) = render_units(&home, &binary, &cfg("daily"));
+    assert!(
+        service.contains("/home/tester/.local/share/mise/shims"),
+        "PATH must include the mise shims dir:\n{service}"
+    );
+    assert!(
+        !service.contains("/home/tester/go/bin"),
+        "PATH must not carry the retired ~/go/bin entry:\n{service}"
+    );
+    let path_line = service
+        .lines()
+        .find(|l| l.contains("Environment=\"PATH="))
+        .expect("expected a PATH line");
+    let mise_pos = path_line.find("mise/shims").expect("mise shims present");
+    let local_bin_pos = path_line.find(".local/bin").expect(".local/bin present");
+    assert!(
+        mise_pos < local_bin_pos,
+        "mise shims must come before .local/bin so mise-managed tools win:\n{path_line}"
+    );
 }
 
 #[test]
