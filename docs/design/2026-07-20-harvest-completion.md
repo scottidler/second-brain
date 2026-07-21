@@ -113,8 +113,10 @@ Seven phases. The contract fix (Phase 1) is independent of clyde and unblocks si
 #### Phase 5: Install the timer, soak, flip live
 **Model:** sonnet
 - Wire `sb borg harvest --install` (writes `sb-harvest.service` + `sb-harvest.timer`) into `sb bootstrap` ONLY, where unit-writing belongs per `CLAUDE.md`. `otto deploy` stays restart-only (documented contract preserved). Run `--install` once on the current daemon host. Update `CLAUDE.md` to document the new units.
+- **Secret bootstrap on the timer's `.service` (MANDATORY, found missing 2026-07-20).** The `sb-harvest.service` unit MUST carry the same `ExecStartPre` secret-decrypt + `EnvironmentFile` that the borg/cortex daemon units already emit (`borg::service::install_systemd`, `cortex::install_systemd_service`). Without it the timer fires with NO decrypted secrets -> no `ANTHROPIC_API_KEY` -> fabric distillation fails -> every nightly note lands degraded (`[fabric-error]`), silently reproducing the exact dead-on-arrival bug this doc exists to kill. The current `borg/src/harvest/timer.rs` template emits `Environment=PATH` and an absolute ExecStart but NO env-bootstrap; Phase 5 fixes that (distinct env-file, e.g. `sb-harvest.env`).
+- **PATH hygiene in all generated units.** systemd units run with a stripped PATH. The generated `Environment="PATH=..."` must include `~/.local/share/mise/shims` (fabric is mise-managed as of 2026-07-20; the shim self-resolves under the stripped PATH) and must DROP the stale `~/go/bin` entry (the two hand-built fabric binaries were retired that day). Applies to the timer template AND the two daemon generators (`daemon.rs`, `service.rs`), so no unit leaves a dead PATH entry behind.
 - Soak in `mode: dry-run` for one cycle, review selections, flip `mode: live`.
-- **Success criteria:** `sb-harvest.timer` is installed + enabled; two consecutive runs double-ingest nothing (watermark holds); a live timer run publishes a note.
+- **Success criteria:** `sb-harvest.timer` is installed + enabled; the `.service` unit carries the secret bootstrap + a PATH containing the mise shims dir and no `~/go/bin`; two consecutive runs double-ingest nothing (watermark holds); a live timer run publishes a note **with non-empty claims** (proving the key reached fabric, not just that a note landed).
 
 #### Phase 6: Regression hardening + eval
 **Model:** sonnet
