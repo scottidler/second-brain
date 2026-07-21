@@ -333,14 +333,16 @@ fn build_edges_for(
     // --- repo-member (Phase 10): unconditional note -> repo hub edge. Unlike
     // the shared-* buckets above (note<->note within a bucket, fan-out capped),
     // this is genuinely new routing: EVERY note with a well-formed `repo:`
-    // joins its repo hub via the shared `repo_hub_slug`. A malformed slug is
+    // joins its repo hub via the shared `repo_hub_path`. A malformed slug is
     // skipped + logged (the note is still indexed). The edge resolves once the
-    // hub pass has stubbed `entities/repo-<org>--<repo>.md`; until then
+    // hub pass has stubbed `entities/repos/<org>/<repo>.md`; until then
     // insert_edges skips it (resolve-endpoint-or-skip), and the next sweep
-    // re-adds it - monotonic.
+    // re-adds it - monotonic. The dst MUST match the hub note's actual nested
+    // path (same `repo_hub_path`), or resolve-or-skip drops every edge and the
+    // hub synthesizes memberless.
     if !row.repo.is_empty() {
         if vault::schema::validate_repo_slug(&row.repo) {
-            let hub_path = format!("{}/{}.md", crate::hub::HUB_DIR, crate::hub::repo_hub_slug(&row.repo));
+            let hub_path = crate::hub::repo_hub_path(&row.repo);
             edges.push(Edge::deterministic(
                 src.clone(),
                 hub_path,

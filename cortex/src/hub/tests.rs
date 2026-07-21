@@ -202,6 +202,114 @@ fn repo_hub_slug_is_injective_on_the_org_repo_split() {
 }
 
 #[test]
+fn repo_hub_path_nests_and_is_injective_across_orgs() {
+    // Nested folders mirror ~/repos/<org>/<repo> under entities/repos/ (Scott,
+    // 2026-07-20), superseding the flat repo-<org>--<repo>.md scheme.
+    assert_eq!(
+        repo_hub_path("tatari-tv/okta-auth-py"),
+        "entities/repos/tatari-tv/okta-auth-py.md"
+    );
+    // Injective on the org/repo split: the adversarial pair the flat `slugify`
+    // would collide lands at DISTINCT nested paths because the `/` is now a real
+    // directory boundary - no separator-encoding needed.
+    assert_eq!(repo_hub_path("a/b-c"), "entities/repos/a/b-c.md");
+    assert_eq!(repo_hub_path("a-b/c"), "entities/repos/a-b/c.md");
+    assert_ne!(repo_hub_path("a/b-c"), repo_hub_path("a-b/c"));
+    // Case-folds like the slug (GitHub names are case-insensitive) -> one hub.
+    assert_eq!(repo_hub_path("Scott/Loopr"), repo_hub_path("scott/loopr"));
+    // Collision-safe across orgs sharing a repo basename: distinct hub files.
+    assert_ne!(
+        repo_hub_path("scottidler/loopr"),
+        repo_hub_path("tatari-tv/loopr"),
+        "same basename, different org -> distinct nested hub files"
+    );
+}
+
+#[test]
+fn repo_hub_wikilink_resolves_to_nested_file_and_is_collision_safe() {
+    // The wikilink TARGET is the exact vault-relative path minus `.md`, so it
+    // resolves UNCONDITIONALLY in Obsidian (literal-path match), never depending
+    // on basename uniqueness.
+    let target = repo_hub_wikilink_target("tatari-tv/okta-auth-py");
+    assert_eq!(target, "entities/repos/tatari-tv/okta-auth-py");
+    assert_eq!(
+        format!("{target}.md"),
+        repo_hub_path("tatari-tv/okta-auth-py"),
+        "target + .md is EXACTLY the on-disk hub path -> it resolves"
+    );
+    // Two orgs sharing a repo basename get DISTINCT resolving targets (the org
+    // dir disambiguates), where a bare `[[loopr]]` would be ambiguous.
+    assert_ne!(
+        repo_hub_wikilink_target("scottidler/loopr"),
+        repo_hub_wikilink_target("tatari-tv/loopr")
+    );
+}
+
+#[test]
+fn render_hub_repo_emits_resolving_nested_wikilink() {
+    let stub = HubStub {
+        slug: repo_hub_slug("tatari-tv/okta-auth-py"),
+        kind: HubKind::Repo,
+        title: "tatari-tv/okta-auth-py".to_string(),
+    };
+    let md = render_hub(&stub, "2026-07-20");
+    // A LIVE self-link (not a backticked code span) targeting the nested file,
+    // aliased to the byte-truthful <org>/<repo> for a clean render.
+    assert!(
+        md.contains("[[entities/repos/tatari-tv/okta-auth-py|tatari-tv/okta-auth-py]]"),
+        "repo hub stub carries a resolving nested self-link: {md}"
+    );
+    // NOT the flat slug, which would NOT resolve to the nested file.
+    assert!(
+        !md.contains("[[repo-tatari-tv--okta-auth-py]]"),
+        "no broken flat-slug self-link: {md}"
+    );
+}
+
+#[test]
+fn hub_path_nests_repo_but_keeps_other_kinds_flat() {
+    let repo = HubStub {
+        slug: repo_hub_slug("tatari-tv/okta-auth-py"),
+        kind: HubKind::Repo,
+        title: "tatari-tv/okta-auth-py".to_string(),
+    };
+    assert_eq!(repo.hub_path(), "entities/repos/tatari-tv/okta-auth-py.md");
+    let concept = HubStub {
+        slug: "langchain".to_string(),
+        kind: HubKind::Concept,
+        title: "langchain".to_string(),
+    };
+    assert_eq!(concept.hub_path(), "entities/langchain.md", "non-repo kinds stay flat");
+}
+
+#[test]
+fn write_stubs_writes_repo_hub_at_nested_path() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let stubs = vec![HubStub {
+        slug: repo_hub_slug("tatari-tv/okta-auth-py"),
+        kind: HubKind::Repo,
+        title: "tatari-tv/okta-auth-py".to_string(),
+    }];
+    let (report, materialized) = write_stubs(dir.path(), &stubs, true, "2026-07-20").expect("apply");
+    assert_eq!(report.created, 1);
+    // The entities-table id (materialized slug) stays the injective flat slug;
+    // only the FILE nests.
+    assert_eq!(materialized, vec![repo_hub_slug("tatari-tv/okta-auth-py")]);
+    assert!(
+        dir.path().join("entities/repos/tatari-tv/okta-auth-py.md").exists(),
+        "repo hub materialized at the nested path"
+    );
+    assert!(
+        !dir.path().join("entities/repo-tatari-tv--okta-auth-py.md").exists(),
+        "no flat repo hub file created"
+    );
+    // Idempotent: the nested file already exists on a second apply.
+    let (report2, _) = write_stubs(dir.path(), &stubs, true, "2026-07-20").expect("apply2");
+    assert_eq!(report2.created, 0);
+    assert_eq!(report2.existing, 1);
+}
+
+#[test]
 fn collect_stubs_mints_repo_hub_deterministically_and_disjoint_from_concepts() {
     let notes = vec![
         repo_note("a.md", "scottidler/loopr"),
@@ -254,6 +362,53 @@ impl HubSynthesizer for ErrSynth {
     fn synthesize(&self, _title: &str, _members: &[String]) -> eyre::Result<String> {
         eyre::bail!("synthesis boom")
     }
+}
+
+/// A synthesizer that records whether it was invoked, so a test can prove the
+/// memberless guard short-circuits BEFORE any LLM call.
+struct CountingSynth {
+    calls: std::cell::Cell<usize>,
+    body: String,
+}
+impl HubSynthesizer for CountingSynth {
+    fn synthesize(&self, _title: &str, _members: &[String]) -> eyre::Result<String> {
+        self.calls.set(self.calls.get() + 1);
+        Ok(self.body.clone())
+    }
+}
+
+#[test]
+fn synthesize_hub_skips_llm_when_memberless() {
+    // Regression: a repo hub with ZERO wired members must NOT be sent to the
+    // LLM. Live, feeding an empty member list produced a hallucinated body
+    // ("no member notes were provided") on the tatari-tv/okta-auth-py hub. The
+    // fail-safe leaves the stub body byte-intact and never calls the synth.
+    let dir = tempfile::tempdir().expect("tmp");
+    let hub = dir.path().join("okta-auth-py.md");
+    let stub_body = "---\ntitle: tatari-tv/okta-auth-py\ntype: entity\nontotype: repo\n---\n\n# tatari-tv/okta-auth-py\n\nstub body only\n";
+    std::fs::write(&hub, stub_body).expect("seed");
+
+    let synth = CountingSynth {
+        calls: std::cell::Cell::new(0),
+        body: "no member notes were provided (hallucination)".to_string(),
+    };
+    let out = synthesize_hub(&hub, "tatari-tv/okta-auth-py", &[], &synth).expect("synth");
+
+    assert_eq!(
+        out,
+        SynthOutcome::Preserved,
+        "zero members -> preserve, never synthesize"
+    );
+    assert_eq!(
+        synth.calls.get(),
+        0,
+        "the LLM synthesizer is NEVER invoked for a memberless hub"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&hub).expect("read"),
+        stub_body,
+        "stub body left byte-identical (no hallucinated overwrite)"
+    );
 }
 
 #[test]

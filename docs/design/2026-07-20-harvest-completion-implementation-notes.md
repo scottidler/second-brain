@@ -292,3 +292,98 @@ unimplemented; see Open Questions.
   a pre-existing test-isolation gap (shared temp-dir file locks across
   parallel test binaries), not a Phase 5 regression, and is a candidate for a
   future hardening pass, not this phase's scope.
+
+## Phase 2/4 addendum: nested repo-hub naming + memberless-synthesize fix
+
+Scope: the repo-hub on-disk naming decision (Scott, 2026-07-20) that Phases 2
+and 4 both depend on, plus the bundled `hub --synthesize` zero-member fail-safe.
+Not a full phase - a targeted correctness change ahead of the Phase 2 live
+verification gate.
+
+### Design decisions
+- Repo hubs now nest at `entities/repos/<slugify(org)>/<slugify(repo)>.md`
+  (`cortex::hub::repo_hub_path`), mirroring `~/repos/<org>/<repo>`, superseding
+  the flat `entities/repo-<org>--<repo>.md` path. `repo_hub_slug` is RETAINED
+  unchanged as the injective `entities`-table id and the `collect_stubs`
+  BTreeMap dedup key (`repo-<org>--<repo>`, disjoint from bare-token kinds); only
+  the FILE path nests. Split of concerns: slug = stable DB id, path =
+  human-navigable nested file.
+- `HubStub::hub_path` (`cortex/src/hub.rs`) is now kind-aware: `HubKind::Repo`
+  derives the nested path from the byte-truthful `<org>/<repo>` title via
+  `repo_hub_path`; every other kind stays flat at `entities/<slug>.md`
+  (unchanged). No new struct field was added - the title already carries the
+  canonical repo string, validated to hold exactly one `/`.
+- Wikilink form (`repo_hub_wikilink_target` + `HubStub::self_link`): the repo
+  hub stub body emits a LIVE `[[entities/repos/<org>/<repo>|<org>/<repo>]]`
+  self-link. The target is the full vault-relative path minus `.md`, chosen over
+  a bare basename because it resolves UNCONDITIONALLY in Obsidian (literal-path
+  match, no dependence on basename uniqueness) and is collision-safe across orgs
+  sharing a repo basename (`scottidler/loopr` vs `tatari-tv/loopr` disambiguate
+  on the org dir). The `<org>/<repo>` alias keeps the render clean. Non-repo
+  hubs keep their existing backticked `[[<slug>]]` doc form byte-for-byte.
+- `graph.rs` repo-member edge destination now uses `crate::hub::repo_hub_path`
+  (was `format!("{HUB_DIR}/{}.md", repo_hub_slug(...))`), so the edge `dst` is
+  the hub note's ACTUAL nested path. Without this, resolve-or-skip in
+  `insert_edges` drops every repo-member edge and the hub synthesizes memberless
+  - the exact live failure (see root-cause below).
+- `write_stubs` now `create_dir_all(abs.parent())` per stub instead of only
+  `entities/`, so the intermediate `entities/repos/<org>/` dirs exist before the
+  nested write.
+- Memberless-synthesize fail-safe: `synthesize_hub` (`cortex/src/hub.rs`) returns
+  `SynthOutcome::Preserved` and logs WARN when `members.is_empty()`, BEFORE
+  reading the file or calling the synthesizer. This kills the observed live
+  hallucination (a zero-member `okta-auth-py` hub whose LLM body literally read
+  "no member notes were provided"). Fixed in `synthesize_hub`, so the guard
+  applies to every caller, not just the `run` loop.
+
+### Root-cause finding: the live memberless case (timing vs code)
+Evidence-based, NOT a timing artifact of the search index. The member note
+`notes/review-okta-auth-security-changes-8.md` (`repo: tatari-tv/okta-auth-py`)
+IS indexed in `oracle.db`, as is the hub note (at the legacy single-dash path
+`entities/repo-tatari-tv-okta-auth-py.md`, a pre-`--` `slugify(whole)` scheme).
+The `edges` table contains ZERO `repo-member` edges of ANY kind. So the zero
+membership is STRUCTURAL: (1) the on-disk hub path never matched the edge-dst
+path the graph pass computes (legacy single-dash file vs current double-dash /
+now-nested dst), so resolve-or-skip dropped every candidate repo-member edge,
+leaving `hub_members` empty; compounded by (2) the code defect where
+`synthesize_hub` called the LLM anyway. The nested scheme fixes (1) - graph edge
+dst and hub file now share `entities/repos/<org>/<repo>.md`, so the edge wires -
+and the zero-member guard fixes (2). Not a search-DB indexing race; the note was
+present and indexed the whole time.
+
+### Deviations
+- `repo_hub_slug` was KEPT rather than deleted, despite the commit subject
+  saying "replace the flat repo_hub_slug scheme". The task explicitly requires
+  keeping it injective; the "replacement" is of the on-disk PATH scheme, not the
+  entity-id slug. Same effect (nested files), correct seam (slug stays the DB
+  id).
+- The stub body's non-repo self-reference stays a backticked code span
+  (`` `[[<slug>]]` ``, illustrative), while the repo self-link is a LIVE
+  `[[...]]` link. Making the repo link live (not backticked) is what lets the
+  "wikilink actually points at the nested file" test bite; non-repo bodies were
+  left untouched to avoid scope creep on other hub kinds.
+
+### Tradeoffs
+- Full vault-relative-path wikilink target vs basename-when-unique-else-partial.
+  Chose the always-resolving full path (aliased for display) over computing
+  basename uniqueness at render time: uniqueness can't be fully known in
+  `render_hub` (it lacks the full note set), and "resolves unconditionally +
+  collision-proof" is the hard requirement. The alias keeps the render clean, so
+  the verbosity is invisible to the reader.
+- `hub_path`/`self_link` derive the nested path from the stub TITLE (the
+  byte-truthful repo string) rather than adding a dedicated path field to
+  `HubStub`. The title is always the canonical `<org>/<repo>` for a Repo stub
+  (constructed that way in `collect_stubs`, validated by `validate_repo_slug`),
+  so a new field would be redundant state that could drift - dropped per "a field
+  derived from another never diverges."
+
+### Open questions
+- The new-scheme hub file is NOT regenerated live by this change (code-only, per
+  the task). The parent/orchestrator must run the Phase 2 live path
+  (index -> `sb cortex hub --apply` -> `sb cortex graph` -> `sb cortex hub
+  --synthesize`) on the daemon host to materialize `entities/repos/tatari-tv/
+  okta-auth-py.md` and verify the repo-member edge wires + the hub synthesizes
+  WITH members (non-empty body). The legacy hub file was quarantined to
+  `~/.cache/rkvr/manual-quarantine-2026-07-20/repo-tatari-tv-okta-auth-py.md`
+  (rkvr failed in-sandbox with a read-only-FS error; `mv` fallback per the
+  task).

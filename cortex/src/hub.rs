@@ -35,9 +35,12 @@ pub enum HubKind {
     Source,
     Tag,
     /// A `<org>/<repo>` GitHub repo (harvest-clyde-sessions design, Phase 10).
-    /// Minted from a note's `repo:` frontmatter via `repo_hub_slug`, so its
-    /// slug is always `repo-<org>--<repo>` - a namespace disjoint from the
-    /// bare-token Concept/Creator/Source/Tag slugs.
+    /// Minted from a note's `repo:` frontmatter. Its `entities` id (slug) is the
+    /// injective `repo-<org>--<repo>` from `repo_hub_slug` - a namespace disjoint
+    /// from the bare-token Concept/Creator/Source/Tag slugs. Its ON-DISK path is
+    /// NOT the flat slug: repo hubs nest at `entities/repos/<org>/<repo>.md`
+    /// (mirrors `~/repos`) via `repo_hub_path` (Scott, 2026-07-20). Slug =
+    /// stable DB id; path = human-navigable nested file.
     Repo,
 }
 
@@ -82,6 +85,35 @@ pub fn repo_hub_slug(repo: &str) -> String {
     format!("repo-{}--{}", slugify(org), slugify(name))
 }
 
+/// On-disk (vault-relative) path of a repo hub note: nested folders mirroring
+/// `~/repos/<org>/<repo>` under `entities/repos/` (Scott, 2026-07-20),
+/// superseding the flat `entities/repo-<org>--<repo>.md` scheme. Real directory
+/// nesting makes the path INJECTIVE on the `<org>/<repo>` split for free: the
+/// adversarial pair `a/b-c` and `a-b/c` land at DISTINCT paths
+/// (`entities/repos/a/b-c.md` vs `entities/repos/a-b/c.md`) because the `/`
+/// becomes a real directory boundary, no separator-encoding needed. Same
+/// per-component `slugify` lossiness the flat slug carried (`.`/`_` fold to `-`),
+/// which is accepted and membership-only; `repo:` frontmatter stays
+/// byte-truthful. The caller MUST have passed the value through
+/// `validate_repo_slug` first (exactly one `/`).
+pub fn repo_hub_path(repo: &str) -> String {
+    let (org, name) = repo.split_once('/').unwrap_or((repo, ""));
+    format!("{HUB_DIR}/repos/{}/{}.md", slugify(org), slugify(name))
+}
+
+/// Obsidian wikilink TARGET that resolves to a repo hub's nested note. This is
+/// the full vault-relative path MINUS the `.md` extension
+/// (`entities/repos/<org>/<repo>`). The full-path form is chosen over a bare
+/// basename because it resolves UNCONDITIONALLY (Obsidian matches the literal
+/// vault-relative path) and is collision-proof across orgs that share a repo
+/// basename (`scottidler/loopr` vs `tatari-tv/loopr` disambiguate on the `<org>`
+/// directory), where a bare `[[loopr]]` would be ambiguous. Pair it with an
+/// `<org>/<repo>` display alias for a clean render.
+pub fn repo_hub_wikilink_target(repo: &str) -> String {
+    let path = repo_hub_path(repo);
+    path.strip_suffix(".md").unwrap_or(&path).to_string()
+}
+
 /// One hub to materialize: its slug (== filename stem), kind, and the display
 /// title shown in the stub body/frontmatter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,8 +124,25 @@ pub struct HubStub {
 }
 
 impl HubStub {
+    /// Vault-relative path of this hub's note. Kind-aware: repo hubs nest at
+    /// `entities/repos/<org>/<repo>.md` (from the byte-truthful `<org>/<repo>`
+    /// title); every other kind stays flat at `entities/<slug>.md`.
     fn hub_path(&self) -> String {
-        format!("{HUB_DIR}/{}.md", self.slug)
+        match self.kind {
+            HubKind::Repo => repo_hub_path(&self.title),
+            _ => format!("{HUB_DIR}/{}.md", self.slug),
+        }
+    }
+
+    /// The Obsidian wikilink `[[...]]` markup that resolves to THIS hub note.
+    /// Repo hubs use the full nested-path target with an `<org>/<repo>` display
+    /// alias (a bare slug won't resolve to a nested file); other kinds use the
+    /// flat slug (its note is `entities/<slug>.md`, so the bare slug resolves).
+    fn self_link(&self) -> String {
+        match self.kind {
+            HubKind::Repo => format!("[[{}|{}]]", repo_hub_wikilink_target(&self.title), self.title),
+            _ => format!("[[{}]]", self.slug),
+        }
     }
 }
 
@@ -220,14 +269,26 @@ pub fn collect_stubs(
     stubs.into_values().collect()
 }
 
-/// Render a hub note's markdown (frontmatter + a short stub body).
+/// Render a hub note's markdown (frontmatter + a short stub body). The body
+/// carries a LIVE self-link (`self_link`) that resolves to this hub's note - a
+/// nested full-path link for repo hubs, the flat slug for every other kind.
 fn render_hub(stub: &HubStub, today: &str) -> String {
+    let body = match stub.kind {
+        HubKind::Repo => format!(
+            "Hub note for the **repo** entity `{title}`. Auto-stubbed by `sb cortex hub`; it gathers every note carrying `repo: {title}` and serves as a knowledge bundle for this repository. Canonical link: {link}.",
+            title = stub.title,
+            link = stub.self_link(),
+        ),
+        _ => format!(
+            "Hub note for the **{kind}** entity `{slug}`. Auto-stubbed by `sb cortex hub`; it resolves `[[{slug}]]` wikilinks and serves as a knowledge bundle for this entity.",
+            kind = stub.kind.as_str(),
+            slug = stub.slug,
+        ),
+    };
     format!(
-        "---\ntitle: {title}\ntype: entity\nontotype: {ontotype}\ndate: {today}\ntags: []\n---\n\n# {title}\n\nHub note for the **{kind}** entity `{slug}`. Auto-stubbed by `sb cortex hub`; it resolves `[[{slug}]]` wikilinks and serves as a knowledge bundle for this entity.\n",
+        "---\ntitle: {title}\ntype: entity\nontotype: {ontotype}\ndate: {today}\ntags: []\n---\n\n# {title}\n\n{body}\n",
         title = stub.title,
         ontotype = stub.kind.ontotype(),
-        kind = stub.kind.as_str(),
-        slug = stub.slug,
     )
 }
 
@@ -236,7 +297,6 @@ fn render_hub(stub: &HubStub, today: &str) -> String {
 /// (created this run or pre-existing). Pure filesystem work, no DB — testable
 /// against a tempdir.
 pub fn write_stubs(vault_root: &Path, stubs: &[HubStub], apply: bool, today: &str) -> Result<(HubReport, Vec<String>)> {
-    let hub_dir = vault_root.join(HUB_DIR);
     let mut report = HubReport::default();
     let mut materialized: Vec<String> = Vec::new();
     for stub in stubs {
@@ -247,7 +307,12 @@ pub fn write_stubs(vault_root: &Path, stubs: &[HubStub], apply: bool, today: &st
             continue;
         }
         if apply {
-            std::fs::create_dir_all(&hub_dir).wrap_err_with(|| format!("create hub dir {}", hub_dir.display()))?;
+            // Create the note's OWN parent dir (not just `entities/`): repo hubs
+            // nest at `entities/repos/<org>/<repo>.md`, so the intermediate
+            // `<org>` dirs must exist before the write.
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).wrap_err_with(|| format!("create hub dir {}", parent.display()))?;
+            }
             std::fs::write(&abs, render_hub(stub, today))
                 .wrap_err_with(|| format!("write hub note {}", abs.display()))?;
             log::info!("cortex::hub: stubbed {}", stub.hub_path());
@@ -392,6 +457,18 @@ pub fn synthesize_hub(
         hub_abs.display(),
         members.len()
     );
+    // Fail-safe: a hub with ZERO wired members is NOT sent to the LLM. Feeding
+    // an empty member list produced a hallucinated body ("no member notes were
+    // provided" - observed live on the tatari-tv/okta-auth-py repo hub, 2026-07-20).
+    // Leave the stub body byte-intact instead; a later sweep that wires members
+    // will synthesize for real.
+    if members.is_empty() {
+        log::warn!(
+            "cortex::hub::synthesize_hub: {} has ZERO members; skipping LLM synthesis (stub body left intact)",
+            hub_abs.display()
+        );
+        return Ok(SynthOutcome::Preserved);
+    }
     let raw = std::fs::read_to_string(hub_abs).wrap_err_with(|| format!("read hub {}", hub_abs.display()))?;
     let body = match synth.synthesize(hub_title, members) {
         Ok(b) if !b.trim().is_empty() => b,
