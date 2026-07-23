@@ -587,6 +587,68 @@ fn apply_linking_is_add_only_never_removes_or_alters_content() {
 }
 
 #[test]
+fn apply_linking_across_growing_sweeps_never_removes_prior_links() {
+    // Phase 6 (harvest-completion): extends the Phase 13 add-only guarantee
+    // (single-call) and the two-pass convergence test (identical vault) to a
+    // THIRD sweep where the vault GROWS - the exact shape every real nightly
+    // daemon tick takes. A prior sweep's inserted wikilink must survive
+    // byte-for-byte as a later sweep adds an unrelated link elsewhere: linking
+    // never removes an existing edge/link across sweeps.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    std::fs::write(
+        root.join("langchain.md"),
+        "---\ntitle: LangChain\ntype: note\n---\nhub\n",
+    )
+    .expect("w");
+    std::fs::write(root.join("graphrag.md"), "---\ntitle: GraphRAG\ntype: note\n---\nhub\n").expect("w");
+    std::fs::write(
+        root.join("a.md"),
+        "---\ntitle: A\ntype: note\n---\nWe use LangChain daily.\n",
+    )
+    .expect("w");
+
+    let cfg = glossary_config(&["langchain", "graphrag"], &[]);
+    let vault_config = crate::config::VaultConfig {
+        root_path: None,
+        ignore: vec![".git".to_string(), ".obsidian".to_string()],
+        exclude: Vec::new(),
+        include: Vec::new(),
+    };
+
+    // Sweep 1: a.md mentions langchain -> gets linked.
+    let notes1 = crate::vault::scan_vault(root, &vault_config).expect("scan1");
+    let written1 = apply_linking(root, &notes1, &cfg).expect("apply1");
+    assert_eq!(written1, vec!["a.md".to_string()], "sweep 1 links a.md");
+    let a_after_sweep1 = std::fs::read_to_string(root.join("a.md")).expect("read a after sweep1");
+    assert!(a_after_sweep1.contains("[[langchain"), "sweep 1 landed the link");
+
+    // Sweep 2: the vault GROWS - a brand new note mentions a DIFFERENT
+    // glossary concept. a.md is untouched input to this sweep.
+    std::fs::write(
+        root.join("b.md"),
+        "---\ntitle: B\ntype: note\n---\nA note about GraphRAG retrieval.\n",
+    )
+    .expect("w");
+    let notes2 = crate::vault::scan_vault(root, &vault_config).expect("scan2");
+    let written2 = apply_linking(root, &notes2, &cfg).expect("apply2");
+    assert_eq!(
+        written2,
+        vec!["b.md".to_string()],
+        "growth only links the NEW note; a.md is not re-written"
+    );
+
+    // a.md's sweep-1 link survives byte-for-byte across the growth sweep.
+    let a_after_sweep2 = std::fs::read_to_string(root.join("a.md")).expect("read a after sweep2");
+    assert_eq!(
+        a_after_sweep2, a_after_sweep1,
+        "a.md is byte-identical across the growth sweep - linking never removes a prior link"
+    );
+    let b_after = std::fs::read_to_string(root.join("b.md")).expect("read b");
+    assert!(b_after.contains("[[graphrag"), "the new note gained its own link");
+}
+
+#[test]
 fn concept_recall_every_glossary_concept_mentioned_gets_linked() {
     // Phase 13 acceptance (concept recall): over a small labeled corpus, the
     // fraction of known-concept mentions that actually land a wikilink bounds

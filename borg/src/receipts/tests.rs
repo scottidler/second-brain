@@ -518,6 +518,32 @@ fn count_since_helpers_window_on_terminal_at() {
 }
 
 #[test]
+fn count_kind_since_windows_on_received_at_regardless_of_status() {
+    let conn = fresh();
+    // Recent: one session receipt still `received`, one rejected. Both
+    // TOUCHED the pipeline in the window even though neither succeeded.
+    record_received(&conn, "s1", Method::Cli, ReceiptKind::Session, "body").expect("ins");
+    record_received(&conn, "s2", Method::Cli, ReceiptKind::Session, "body").expect("ins");
+    mark_rejected(&conn, "s2", "below bar").expect("reject");
+    // A non-session receipt in the same window must not be counted.
+    record_received(&conn, "u1", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    // An old session receipt (received long ago) must not be counted either.
+    record_received(&conn, "s0", Method::Cli, ReceiptKind::Session, "body").expect("ins");
+    conn.execute(
+        "UPDATE receipts SET received_at='2024-01-01T00:00:00Z' WHERE trace_id='s0'",
+        [],
+    )
+    .expect("backdate received_at");
+
+    let since = hours_ago_iso(24);
+    assert_eq!(
+        count_kind_since(&conn, ReceiptKind::Session, &since).expect("count_kind_since"),
+        2,
+        "s1 + s2 (rejected still counts - it TOUCHED the pipeline); s0 too old, u1 wrong kind"
+    );
+}
+
+#[test]
 fn count_by_status_groups_correctly() {
     let conn = fresh();
     record_received(&conn, "r1", Method::Http, ReceiptKind::Url, "u").expect("ins");

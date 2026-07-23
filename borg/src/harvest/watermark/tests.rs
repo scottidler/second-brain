@@ -200,3 +200,31 @@ fn classify_skip_advances_snapshot_when_hash_unchanged_but_msgs_grew() {
         other => panic!("expected Skip with snapshot advance, got {other:?}"),
     }
 }
+
+// ---- harvest-completion Phase 6: gap-fill. `BodyMessage.role`/`text` are the
+// one defensive Option Phase 0/1 never exercised through the identity-hash
+// path - a body element with a null role/text (a future-malformed element on
+// the `--with-body` path) must degrade to an empty string in the canonical
+// body render, never panic the hash.
+#[test]
+fn canonical_body_text_degrades_gracefully_on_null_role_and_text() {
+    let messages = vec![
+        BodyMessage {
+            role: Some("user".into()),
+            text: Some("hello".into()),
+            subagent: false,
+        },
+        BodyMessage {
+            role: None,
+            text: None,
+            subagent: false,
+        },
+    ];
+    let text = canonical_body_text(&messages);
+    assert_eq!(
+        text, "user: hello\n: \n",
+        "a null role/text degrades to an empty string, not a panic"
+    );
+    // Stable + hashable like any other body text.
+    assert_eq!(body_hash(&text), body_hash(&canonical_body_text(&messages)));
+}

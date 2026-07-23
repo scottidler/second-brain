@@ -223,3 +223,26 @@ fn unparseable_timestamp_is_a_loud_error() {
     let err = cluster_threads(&records, window_2h()).unwrap_err();
     assert!(format!("{err:#}").contains("unparseable"), "{err:#}");
 }
+
+// ---- harvest-completion Phase 6: created-guard bite, second layer. A null
+// `created` is normally rejected at the SELECTION stage (`select.rs`) so it
+// never reaches `cluster_threads`. This test proves the fail-loud backstop
+// still exists here too: if a null-`created` record ever bypassed selection
+// (a caller wiring bug, or the selection guard itself being reverted), the
+// WHOLE batch errors loudly rather than clustering on a fabricated timestamp
+// or silently dropping the record. Removing `select.rs`'s created guard would
+// let exactly this shape reach `cluster_threads` in production.
+#[test]
+fn null_created_bypassing_selection_is_a_loud_backstop_error() {
+    let mut r = rec(
+        "a",
+        "/c",
+        Some("main"),
+        "2026-07-05T09:00:00+00:00",
+        "2026-07-05T09:10:00+00:00",
+        40,
+    );
+    r.created = None;
+    let err = cluster_threads(&[r], window_2h()).unwrap_err();
+    assert!(format!("{err:#}").contains("null created timestamp"), "{err:#}");
+}

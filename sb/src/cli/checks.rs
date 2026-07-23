@@ -577,6 +577,26 @@ fn borg_findings() -> Vec<Finding> {
             "sb borg log --status failed (manual investigation)".to_string(),
         )),
     }
+    // Harvest drift guard (harvest-completion Phase 6): distinguishes "harvest
+    // has never run yet" (no warning - nothing installed/soaked) from "the
+    // timer runs but a FUTURE clyde contract drift silently produced zero
+    // session receipts for days" - the frozen CI fixtures can never catch a
+    // drift that only shows up against the live catalog.
+    match borg::triage::harvest_drift_stats() {
+        Ok(d) if d.should_warn() => {
+            findings.push(Finding::warn(
+                format!(
+                    "harvest timer has run before but produced zero session receipts in the last {}d - possible clyde contract drift",
+                    borg::triage::HARVEST_DRIFT_WINDOW_DAYS
+                ),
+                "sb borg harvest --dry-run --since 60d to check the live contract; \
+                 sb borg log --method harvest --since 7d for recent history"
+                    .to_string(),
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => findings.push(Finding::info(format!("harvest drift check failed: {e}"))),
+    }
     // Receipts DB summary: open read-only, group by status, group failures
     // by stage. Reported as info (the file may not exist yet on a fresh
     // install, which is fine).

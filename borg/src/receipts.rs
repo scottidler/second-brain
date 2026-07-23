@@ -747,6 +747,23 @@ pub fn count_degraded_since(conn: &Connection, since_iso: &str) -> Result<i64> {
     .context("count_degraded_since")
 }
 
+/// Count receipts of a given `kind` received at or after `since_iso`
+/// (`received_at`, not `terminal_at` - a rejected/still-`received` row still
+/// TOUCHED the pipeline in the window even if it never reached a successful
+/// terminal state). This is the durable proxy the harvest drift guard (Phase 6
+/// of the harvest-completion design) reads: "did the harvest run produce ANY
+/// session activity recently", independent of whether that activity ultimately
+/// succeeded. `since_iso` must be in [`TIMESTAMP_FMT`].
+pub fn count_kind_since(conn: &Connection, kind: ReceiptKind, since_iso: &str) -> Result<i64> {
+    log::debug!("receipts::count_kind_since: kind={} since={since_iso}", kind.as_str());
+    conn.query_row(
+        "SELECT COUNT(*) FROM receipts WHERE kind = ? AND received_at >= ?",
+        params![kind.as_str(), since_iso],
+        |row| row.get(0),
+    )
+    .context("count_kind_since")
+}
+
 /// Format `now - hours` as a [`TIMESTAMP_FMT`] lower bound for the
 /// `*_since` counters.
 pub fn hours_ago_iso(hours: i64) -> String {

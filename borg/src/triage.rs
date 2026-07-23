@@ -7,10 +7,13 @@
 //! markdown bookkeeping was excised (see
 //! docs/design/2026-06-03-receipts-log-legacy-markdown-excision.md).
 
+use std::path::Path;
+
+use crate::harvest::watermark::WatermarkState;
 use crate::receipts;
 use eyre::{Context, Result};
 use rusqlite::Connection;
-use vault::receipts::{FailureStage, ReceiptStatus};
+use vault::receipts::{FailureStage, ReceiptKind, ReceiptStatus};
 use vault::schema::Method;
 
 /// Live receipts health for `GET /health/audit` and the `sb doctor` borg
@@ -105,6 +108,69 @@ pub fn receipts_show(trace_id: &str) -> Result<crate::receipts::Receipt> {
         .context("lookup receipt")?
         .ok_or_else(|| eyre::eyre!("trace_id {trace_id} not found in receipts DB"))?;
     Ok(row)
+}
+
+/// The `sb doctor` harvest-drift window, in days (harvest-completion Phase 6,
+/// Opus SE K2 finding). Wide enough to absorb a nightly timer's normal jitter
+/// (a missed/delayed run) while still catching a contract drift that has gone
+/// silent for multiple cycles.
+pub const HARVEST_DRIFT_WINDOW_DAYS: i64 = 3;
+
+/// Harvest drift guard stats (harvest-completion Phase 6): the durable
+/// structural guard against a FUTURE clyde contract drift that the frozen CI
+/// fixtures cannot see. Mirrors the `degraded_24h` pattern - a silent-quality
+/// signal that never shows up in the failed/crashed counts above, because a
+/// total-abort drift (a brand new unanticipated type mismatch that dies before
+/// `write_rejections` ever runs) leaves NO receipts at all, not even a failed
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarvestDriftStats {
+    /// The harvest timer has run at least once: the watermark cursor is set.
+    /// Every LIVE run persists a cursor via `apply_plan_to_state`/`state.save`,
+    /// even a run that selected/published nothing, so this is independent of
+    /// the receipts table, unlike `session_receipts_in_window` below. A state
+    /// file that has never been written (`cursor: None`) means harvest has
+    /// never run live yet, which is expected pre-soak and never a warning.
+    pub timer_has_run: bool,
+    /// Count of `session`-kind receipts (any status - received, succeeded,
+    /// rejected, failed) received within [`HARVEST_DRIFT_WINDOW_DAYS`].
+    pub session_receipts_in_window: usize,
+}
+
+impl HarvestDriftStats {
+    /// The guard fires only when the timer has proven it can run (a prior
+    /// cursor exists) AND the recent window produced literally nothing - the
+    /// exact shape a future contract-parse abort would leave behind, since an
+    /// abort dies before any receipt (even a rejected one) gets written.
+    pub fn should_warn(&self) -> bool {
+        self.timer_has_run && self.session_receipts_in_window == 0
+    }
+}
+
+/// Compute the harvest drift guard against the real state file + receipts DB.
+pub fn harvest_drift_stats() -> Result<HarvestDriftStats> {
+    let state_path = vault::paths::borg_harvest_state();
+    let conn = receipts::open_default().context("open receipts DB")?;
+    harvest_drift_stats_at(&state_path, &conn, HARVEST_DRIFT_WINDOW_DAYS)
+}
+
+/// Path/conn-injectable core of [`harvest_drift_stats`].
+fn harvest_drift_stats_at(state_path: &Path, conn: &Connection, window_days: i64) -> Result<HarvestDriftStats> {
+    log::debug!(
+        "triage::harvest_drift_stats_at: state_path={} window_days={window_days}",
+        state_path.display()
+    );
+    let state = WatermarkState::load(state_path).context("load harvest watermark state")?;
+    let timer_has_run = state.cursor.is_some();
+    let since = receipts::hours_ago_iso(window_days * 24);
+    let session_receipts_in_window = receipts::count_kind_since(conn, ReceiptKind::Session, &since)? as usize;
+    log::debug!(
+        "triage::harvest_drift_stats_at: timer_has_run={timer_has_run} session_receipts_in_window={session_receipts_in_window}"
+    );
+    Ok(HarvestDriftStats {
+        timer_has_run,
+        session_receipts_in_window,
+    })
 }
 
 #[cfg(test)]

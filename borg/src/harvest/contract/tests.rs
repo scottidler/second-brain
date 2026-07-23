@@ -305,3 +305,28 @@ fn clyde_uri_shape() {
     .unwrap();
     assert_eq!(rec.clyde_uri(), "clyde://abc-123");
 }
+
+// ---- harvest-completion Phase 6: gap-fill for `BodyMessage.role`/`text`, the
+// one Phase-1-relaxed nullable pair that Phase 0/1 never asserted a direct
+// `None` deserialization for (only the already-non-null golden fixture body
+// was exercised, `with_body_payload_parses_body_array`). Reverting either
+// field's `Option<String>` back to a plain `String` is a compile error against
+// this test's `assert_eq!(..., None)` calls - a stronger bite than a runtime
+// RED, since it blocks the whole crate from building.
+#[test]
+fn body_message_role_and_text_are_present_null_tolerant() {
+    let msg: BodyMessage = serde_json::from_value(serde_json::json!({
+        "role": null, "text": null, "subagent": false
+    }))
+    .unwrap_or_else(|e| panic!("BodyMessage must tolerate present-null role/text: {e}"));
+    assert_eq!(msg.role, None);
+    assert_eq!(msg.text, None);
+    assert!(!msg.subagent);
+
+    // Omitted (not just present-null) also degrades to None via `#[serde(default)]`.
+    let omitted: BodyMessage = serde_json::from_value(serde_json::json!({}))
+        .unwrap_or_else(|e| panic!("BodyMessage must tolerate a wholly-omitted role/text/subagent: {e}"));
+    assert_eq!(omitted.role, None);
+    assert_eq!(omitted.text, None);
+    assert!(!omitted.subagent, "subagent defaults false when omitted");
+}

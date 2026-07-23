@@ -358,3 +358,60 @@ fn no_extra_repo_member_edges_when_repos_touched_absent_or_empty() {
         "both notes join the single loopr hub and nothing else"
     );
 }
+
+/// Phase 6 (harvest-completion): extends the Phase 4 determinism harness from a
+/// single full-rebuild snapshot to the INCREMENTAL path - the shape every real
+/// nightly `cortex graph` run takes after the first full rebuild. Growing the
+/// corpus with a NEW multi-repo note must only ADD repo-member edges; a prior
+/// sweep's edge for an untouched note must never be dropped.
+#[test]
+fn repo_member_edges_are_monotonic_across_incremental_builds() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let loopr_hub = crate::hub::repo_hub_path("scottidler/loopr");
+    let marquee_hub = crate::hub::repo_hub_path("tatari-tv/marquee");
+    for hub in [&loopr_hub, &marquee_hub] {
+        index
+            .insert_test_note_graph(hub, &[], "", "", "", "hub", 100)
+            .expect("hub note");
+    }
+
+    // Sweep 1 (full rebuild): note A joins repo X (loopr) only.
+    index_repo_session(&index, "inbox/a.md", Some("scottidler/loopr"), None);
+    let stats1 = build(&mut index, &cfg(), true).expect("build1");
+    assert!(stats1.full_rebuild);
+    assert_eq!(index.count_edges(Some("repo-member")).expect("count"), 1);
+    assert_eq!(
+        index.hub_members(&loopr_hub).expect("members"),
+        vec!["inbox/a.md".to_string()]
+    );
+
+    // Sweep 2 (incremental): a NEW note B joins repos X AND Y. Note A's
+    // modified_at watermark is unchanged, so the incremental pass does not
+    // even reprocess it - its edge survives purely because nothing removed
+    // it, not because it was rebuilt identically.
+    index_repo_session(
+        &index,
+        "inbox/b.md",
+        Some("scottidler/loopr"),
+        Some(vec!["scottidler/loopr", "tatari-tv/marquee"]),
+    );
+    let stats2 = build(&mut index, &cfg(), false).expect("build2");
+    assert!(!stats2.full_rebuild, "second pass is incremental");
+    assert_eq!(stats2.notes_processed, 1, "only the new note B is reprocessed");
+
+    assert_eq!(
+        index.hub_members(&loopr_hub).expect("members"),
+        vec!["inbox/a.md".to_string(), "inbox/b.md".to_string()],
+        "prior member A survives; growth only ADDS B, never removes A"
+    );
+    assert_eq!(
+        index.hub_members(&marquee_hub).expect("members"),
+        vec!["inbox/b.md".to_string()],
+        "the new multi-repo bridge is wired without disturbing the X hub"
+    );
+    assert_eq!(
+        index.count_edges(Some("repo-member")).expect("count"),
+        3,
+        "1 prior (A->X) + 2 new (B->X, B->Y); nothing removed across the incremental sweep"
+    );
+}
