@@ -84,12 +84,39 @@ pub enum Command {
     /// Promote a proposed concept from entity-proposals.yml into glossary.yml
     /// (reviewable diff; dry-run unless --apply)
     ConceptPromote(ConceptPromoteArgs),
+    /// One-time historical multi-repo backfill: LLM pass over pre-files-touched
+    /// sessions proposing cross-repo bridges to bridge-proposals.yml (needs the
+    /// live clyde catalog + fabric; the parent sequences the real env)
+    BridgeBackfill(BridgeBackfillArgs),
+    /// Apply a pending cross-repo bridge from bridge-proposals.yml as a hub-body
+    /// wikilink diff (reviewable; dry-run unless --apply; never touches a note)
+    BridgeApply(BridgeApplyArgs),
 }
 
 #[derive(Args)]
 pub struct ConceptPromoteArgs {
     /// The proposal slug to promote (must be a pending entity-proposals.yml entry).
     pub slug: String,
+    /// Write the change. Without it, prints the diff and writes nothing.
+    #[arg(long)]
+    pub apply: bool,
+}
+
+#[derive(Args)]
+pub struct BridgeBackfillArgs {
+    /// Cap the number of candidate notes processed this run (bounds LLM fan-out).
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Args)]
+pub struct BridgeApplyArgs {
+    /// The landed member note (vault-relative path) named by a pending proposal.
+    #[arg(long)]
+    pub member: String,
+    /// The secondary repo (`<org>/<repo>`) whose hub gains the bridge.
+    #[arg(long)]
+    pub repo: String,
     /// Write the change. Without it, prints the diff and writes nothing.
     #[arg(long)]
     pub apply: bool,
@@ -550,6 +577,30 @@ impl CortexCli {
                     println!("{}", report.diff);
                 }
             }
+            Command::BridgeBackfill(a) => {
+                run_bridge_backfill(&vault_root, &config, a.limit).await?;
+            }
+            Command::BridgeApply(a) => {
+                let report = cortex::bridge::apply_bridge(
+                    &vault::paths::bridge_proposals(),
+                    &vault_root,
+                    &a.member,
+                    &a.repo,
+                    a.apply,
+                )?;
+                if report.already_present {
+                    println!(
+                        "bridge-apply: {} already links `{}`; nothing to do",
+                        report.hub_path, report.member
+                    );
+                } else if report.applied {
+                    println!("bridge-apply: bridged `{}` into `{}`", report.member, report.repo);
+                    println!("{}", report.diff);
+                } else {
+                    println!("bridge-apply (dry-run - pass --apply to write):");
+                    println!("{}", report.diff);
+                }
+            }
             Command::Hub(a) => {
                 let apply = a.apply;
                 let report = cortex::hub::run(&vault_root, &config, &a.into())?;
@@ -571,6 +622,108 @@ impl CortexCli {
         }
         Ok(())
     }
+}
+
+/// Composition root for the one-time historical multi-repo backfill
+/// (harvest-completion Phase 7). cortex owns the LLM detector + the pure
+/// backfill/proposal logic; borg owns the clyde transcript reader; this glues
+/// the two: scan the vault for pre-`files-touched` candidate notes, fetch each
+/// survivor's transcript via borg's reader, and run the fail-closed backfill.
+///
+/// REAL RUN, DEFERRED: this needs the live clyde catalog (surviving transcripts),
+/// a fabric-ready `ANTHROPIC_API_KEY`, and the `extract-repos-touched` pattern in
+/// `~/.config/sb/patterns/`. The parent sequences that env; a transcript that has
+/// been reaped surfaces as a reader error and is logged as unreachable (bounded
+/// reach by design), never a hard abort.
+async fn run_bridge_backfill(
+    vault_root: &std::path::Path,
+    config: &cortex::config::Config,
+    limit: Option<usize>,
+) -> Result<()> {
+    log::debug!(
+        "run_bridge_backfill: vault_root={} limit={:?}",
+        vault_root.display(),
+        limit
+    );
+    let notes = cortex::vault::scan_vault(vault_root, &config.vault)?;
+    let mut candidates = cortex::bridge::candidate_members(&notes);
+    if let Some(n) = limit {
+        candidates.truncate(n);
+    }
+    if candidates.is_empty() {
+        println!("bridge-backfill: no pre-files-touched candidate notes found; nothing to do");
+        return Ok(());
+    }
+
+    // borg owns the clyde coupling: reuse its configured clyde binary + reader.
+    use borg::harvest::reader::ExportReader;
+    let borg_config: borg::config::Config = borg::config::load_config(None)?;
+    let reader = borg::harvest::reader::ClydeExportReader::new(borg_config.harvest.clyde_binary.clone());
+
+    let mut sessions: Vec<cortex::bridge::BackfillSession> = Vec::new();
+    let mut unreachable = 0usize;
+    for cand in &candidates {
+        match reader.export_with_body(&cand.session_id).await {
+            Ok(record) => match &record.body {
+                Some(msgs) if !msgs.is_empty() => {
+                    let transcript = borg::harvest::watermark::canonical_body_text(msgs);
+                    sessions.push(cortex::bridge::BackfillSession {
+                        session_id: cand.session_id.clone(),
+                        note_path: cand.note_path.clone(),
+                        primary_repo: cand.primary_repo.clone(),
+                        transcript,
+                    });
+                }
+                _ => {
+                    unreachable += 1;
+                    log::warn!(
+                        "run_bridge_backfill: session {} has no surviving transcript body (reaped/empty); skipping",
+                        cand.session_id
+                    );
+                }
+            },
+            Err(e) => {
+                unreachable += 1;
+                log::warn!(
+                    "run_bridge_backfill: session {} transcript unreachable ({e:#}); skipping (bounded reach)",
+                    cand.session_id
+                );
+            }
+        }
+    }
+
+    let detector = cortex::bridge::FabricBridgeDetector {
+        fabric: &config.fabric,
+        pattern: cortex::bridge::BRIDGE_DETECT_PATTERN,
+        max_input_tokens: config.entities.max_input_tokens,
+        timeout_secs: config.entities.fabric_timeout_secs,
+    };
+
+    // Fail-closed: any detector failure aborts with ZERO proposals + a visible
+    // error, never a silent partial write.
+    let proposals = cortex::bridge::backfill(&sessions, &detector)?;
+    let count = proposals.len();
+    if count == 0 {
+        println!(
+            "bridge-backfill: scanned {} candidate(s), {} reachable, {} unreachable; no cross-repo bridges proposed",
+            candidates.len(),
+            sessions.len(),
+            unreachable,
+        );
+        return Ok(());
+    }
+    let path = vault::paths::bridge_proposals();
+    cortex::bridge::write_bridge_proposals(&path, proposals)?;
+    println!(
+        "bridge-backfill: scanned {} candidate(s), {} reachable, {} unreachable; proposed {} cross-repo bridge(s) -> {}",
+        candidates.len(),
+        sessions.len(),
+        unreachable,
+        count,
+        path.display(),
+    );
+    println!("review with `sb cortex bridge-apply --member <note> --repo <org/repo>` (dry-run), then --apply");
+    Ok(())
 }
 
 fn print_state_report(r: &cortex::state::StateReport) {

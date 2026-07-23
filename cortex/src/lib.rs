@@ -5,6 +5,7 @@
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 
 pub mod autotag;
+pub mod bridge;
 pub mod classify;
 pub mod config;
 pub mod daemon;

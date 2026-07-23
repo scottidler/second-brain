@@ -130,6 +130,14 @@ pub fn entity_proposals() -> PathBuf {
     config_root().join("entity-proposals.yml")
 }
 
+/// LLM-proposed cross-repo bridges awaiting human approval (harvest-completion
+/// design, Phase 7 historical multi-repo backfill), mirroring
+/// `entity-proposals.yml`. Each proposal adds a `[[member]]` wikilink to a
+/// secondary repo hub's body; never applied silently.
+pub fn bridge_proposals() -> PathBuf {
+    config_root().join("bridge-proposals.yml")
+}
+
 pub fn patterns_dir() -> PathBuf {
     config_root().join("patterns")
 }

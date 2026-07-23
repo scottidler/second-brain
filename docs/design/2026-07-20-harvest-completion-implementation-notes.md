@@ -575,3 +575,123 @@ bootstrap`, and documenting the new units in `CLAUDE.md`.
 
 ### Open questions
 - None.
+
+## Phase 7: Historical multi-repo backfill (one-time)
+
+### Design decisions
+- New module `cortex::bridge` (`cortex/src/bridge.rs` + `cortex/src/bridge/tests.rs`),
+  built by COPYING the proven `cortex::entities` proposal/approve pattern rather
+  than inventing a mechanism: `BridgeProposal`/`BridgeProposalsFile` mirror
+  `EntityProposal`/`EntityProposalsFile`; `write_bridge_proposals` mirrors
+  `entities::write_proposals` (merge-preserving, never clobbers an in-progress
+  review); `apply_bridge` mirrors `entities::promote_concept` (reviewable diff,
+  dry-run by default, `--apply` writes + drops the promoted proposal, errors if
+  the target is not a pending proposal). The output lives in
+  `~/.config/sb/bridge-proposals.yml` (`vault::paths::bridge_proposals`, added
+  alongside `entity_proposals`).
+- Fail-closed is the load-bearing behavior and lives in
+  `cortex::bridge::backfill`: the injected `BridgeDetector::detect` returns
+  `Result<Vec<String>>`, and `backfill` calls it with `?` per session. A single
+  detector `Err` propagates out and discards EVERY proposal accumulated so far
+  (the `BTreeMap` accumulator is dropped) — the caller writes NONE. This is the
+  deliberate opposite of `entities::FabricExtractor`, which swallows per-note
+  errors to keep a STANDING pass alive; a ONE-TIME backfill must never emit a
+  silently-partial bridge set (design doc Phase 7 criterion + goals-doc §3c
+  "never limp along silently"). The production `FabricBridgeDetector::detect`
+  therefore PROPAGATES `run_pattern`'s error (unlike the hub/entity Fabric
+  adapters), labeled in-code.
+- Attachment mechanism is exactly goals-doc §3a: a bridge is a `[[member]]`
+  wikilink ADDED to the SECONDARY repo hub's body, never an edit to the landed
+  note. `apply_bridge` opens ONLY the hub note; `append_bridged_member` is
+  add-only (appends under a `## Bridged members (historical multi-repo backfill)`
+  heading, idempotent — a wikilink already present is a no-op `already_present`).
+  The member wikilink uses the full vault-relative-path-minus-`.md` target with a
+  file-stem alias (`[[notes/foo|foo]]`), the same collision-safe form repo-hub
+  self-links use (`hub::repo_hub_wikilink_target`), so it resolves regardless of
+  basename uniqueness and `cortex graph` wires the edge from the hub body.
+- Only SECONDARY repos become proposals: `backfill` computes
+  `repo_hub_path(primary)` and skips any detected repo whose hub path equals it —
+  the primary hub already gathers the note via its deterministic `repo:` edge
+  (Phase 4). Proposals are keyed on `(hub_path, member)` in a `BTreeMap`, so
+  output is deterministic and a repo touched by several of a note's sessions
+  ACCUMULATES provenance into one proposal rather than duplicating.
+- Candidate selection is a pure, tested function (`candidate_members`): a landed
+  note qualifies iff `source` starts with `clyde://` (harvest marker), it carries
+  a `validate_repo_slug`-valid primary `repo:`, AND `repos_touched` is `None`
+  (pre-`files-touched` — a `Some(..)` note is already bridged deterministically by
+  Phase 4, so re-bridging it semantically would be redundant churn). Keeping this
+  in `cortex` (testable offline with in-memory `Note`s) means the only untested
+  glue in `sb` is the async transcript fetch.
+- Seam respects the CLAUDE.md architecture: `cortex` owns the LLM detector + the
+  pure backfill/proposal/apply logic + the hub-body diff; it does NOT depend on
+  `borg` and stays free of the clyde coupling. `borg` owns the clyde reader
+  (`ExportReader::export_with_body`). `sb` is the composition root
+  (`sb/src/cli/cortex.rs::run_bridge_backfill`): scan vault ->
+  `candidate_members` -> fetch each survivor's transcript via
+  `borg::harvest::reader::ClydeExportReader` (clyde binary from `borg.yml`) ->
+  `borg::harvest::watermark::canonical_body_text` to render it ->
+  `cortex::bridge::backfill` (fail-closed) -> `write_bridge_proposals`.
+- Sensitive/large payloads: `FabricBridgeDetector::detect` and the sb gather loop
+  log the transcript as a `transcript_bytes=<len>` summary and log per-session ids
+  + counts, never the transcript text or the LLM response inline (logging rule +
+  task constraint).
+
+### Deviations
+- **CLI surface added, against the doc's "No new user-facing verbs" line.** The
+  API Design section says no new verbs, but that sentence is about the FORWARD
+  path (Phase 1-6, which reuse `sb borg harvest` / `sb cortex hub|graph`); Phase 7
+  is a distinct one-time operation with no existing verb to host it, and the task
+  explicitly asks for the added CLI surface. Two verbs, mirroring the
+  `entities --discover` -> `concept-promote` split exactly:
+  `sb cortex bridge-backfill [--limit N]` (the one-time gather+LLM pass, writes
+  `bridge-proposals.yml`) and
+  `sb cortex bridge-apply --member <note> --repo <org/repo> [--apply]` (the
+  reviewable hub-body diff). Same effect as the doc's intent (approve-gated
+  bridges), realized at the correct seam (a dedicated one-time verb pair).
+- **Element `index` fallback is n/a here (no per-record parse).** Unlike Phase 1,
+  this pass has no byte-offset/index concern — noted only to preempt the question.
+
+### Tradeoffs
+- **`sb cortex bridge-backfill`'s live gather is real, not stubbed, but is NOT
+  executed or unit-tested here** — it needs the deferred real env (network egress,
+  `ANTHROPIC_API_KEY`, surviving un-reaped clyde transcripts, Phase 4 live, and
+  the clyde `files-touched` release). Per the phase-implementer contract I did NOT
+  fake any of those to make CI green; the async fetch stitching in
+  `run_bridge_backfill` is genuine `borg` reader + `cortex` detector composition
+  that simply requires the live catalog to produce output. The LOGIC it wraps
+  (`candidate_members`, `backfill`, `write_bridge_proposals`, `apply_bridge`) is
+  fully offline-tested via a `MockDetector` (deterministic per-session repo sets)
+  and a `FailingDetector` (forced failure). This mirrors the same "sibling
+  untested-at-this-seam composition" gap the Phase 5/6 notes recorded for
+  `register_systemd_units` / `borg_findings` — the bite lives one seam lower, in
+  the pure functions.
+- **A reaped transcript surfaces as a reader `Err` and is treated as unreachable
+  (WARN + skip), not a hard abort.** The clyde reader `bail!`s when a session has
+  no parseable record, which is indistinguishable from "reaped." The sb gather
+  loop catches that per-session `Err`, counts it as `unreachable`, and continues —
+  matching the doc's "bounded reach by design; log what was unreachable/reaped."
+  The fail-closed abort is reserved for the LLM DETECTOR failure (the pass's one
+  nondeterministic step), which is the criterion the doc names. Chosen over
+  propagating every fetch error (which would let one reaped transcript kill the
+  whole bounded backfill).
+- **Provenance unions on merge.** `write_bridge_proposals` keeps an existing
+  proposal's fields but UNIONS new `sessions` ids into it (a re-run that saw more
+  evidence grows the trail); it never clobbers. A one-time pass rarely re-runs, but
+  the union is the truthful merge and costs nothing.
+
+### Open questions
+- **The `extract-repos-touched` fabric pattern is a DEFERRED OPS PREREQUISITE for
+  the real run** (`cortex::bridge::BRIDGE_DETECT_PATTERN`). It must be authored and
+  synced into `~/.config/sb/patterns/` (like the L2 distill patterns) before the
+  parent executes `sb cortex bridge-backfill` in the real env. The production
+  `FabricBridgeDetector` is real code that calls it; it is not stubbed. Authoring
+  the pattern + running the one-time backfill + reviewing/approving the emitted
+  bridges are the parent's/Scott's to sequence, gated on Phase 4 live + the clyde
+  `files-touched` release, per the design doc.
+- **Every Phase 7 LIVE success criterion is deferred to the real env** (offline
+  code + tests only here): "the pass emits approve-diffs with per-proposal
+  provenance" is proven offline by the `MockDetector` tests but a LIVE emission
+  needs surviving transcripts; the "forced-failure yields ZERO proposals + a
+  visible error" and "no landed note is modified" criteria ARE proven offline and
+  bite (`forced_llm_failure_yields_zero_proposals_and_a_visible_error`,
+  `apply_never_mutates_the_landed_member_note`).
