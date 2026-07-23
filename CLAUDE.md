@@ -22,7 +22,7 @@ second-brain/
   config/templates/ -- starter configs that `sb bootstrap` drops into ~/.config/sb/
 ```
 
-Systemd unit files are NOT in the repo. They are written into `~/.config/systemd/user/` by `sb borg daemon --install` and `sb cortex daemon --install`. Source of truth for unit content lives in `borg::install_systemd` (`borg/src/lib.rs`) and `cortex::install_systemd_service` (`cortex/src/daemon.rs`).
+Systemd unit files are NOT in the repo. They are written into `~/.config/systemd/user/` by `sb borg daemon --install` and `sb cortex daemon --install`. Source of truth for unit content lives in `borg::install_systemd` (`borg/src/lib.rs`) and `cortex::install_systemd_service` (`cortex/src/daemon.rs`). The nightly harvest timer (`sb-harvest.service` + `sb-harvest.timer`) is a third pair, written by `sb borg harvest --install`; source of truth is `harvest::timer::render_units` (`borg/src/harvest/timer.rs`). Unlike the two daemons, the harvest units are wired into `sb bootstrap` itself (`register_systemd_units`, `sb/src/cli/bootstrap.rs`) rather than requiring a separate manual invocation, so a fresh-machine bootstrap installs all three unit pairs in one pass.
 
 ## Intent Layer
 
@@ -107,7 +107,7 @@ otto deploy
 sb cortex embed --prefetch-model
 ```
 
-`otto deploy` builds the single `sb` bin, installs it to `~/.cargo/bin/`, syncs the fabric patterns and canonical tags to `~/.config/sb/`, and restarts any borg/cortex systemd units that already exist. Systemd unit content is owned by `sb borg daemon --install` and `sb cortex daemon --install` - run those on a fresh machine to write the units; the deploy task only restarts.
+`otto deploy` builds the single `sb` bin, installs it to `~/.cargo/bin/`, syncs the fabric patterns and canonical tags to `~/.config/sb/`, and restarts any borg/cortex systemd units that already exist. Systemd unit content is owned by `sb borg daemon --install` and `sb cortex daemon --install` - run those on a fresh machine to write the units; the deploy task only restarts. The nightly `sb-harvest.timer` (+ its `sb-harvest.service`) is written by `sb bootstrap` (not `otto deploy`, which stays restart-only, and not `sb borg daemon --install` - it is not a daemon); see `borg/src/harvest/timer.rs`. `sb-harvest.service` carries its own secret-bootstrap `ExecStartPre`/`EnvironmentFile` (env-file `sb-harvest.env`, distinct from the daemon's `borg.env`/`cortex.env`) when `harvest.env-bootstrap` is configured in `borg.yml`, so the nightly run has decrypted secrets (`ANTHROPIC_API_KEY` for fabric) without depending on any other unit's environment.
 
 oracle is an MCP server launched on demand via `.mcp.json` -> `sb oracle serve`. No restart needed. Project-scoped (vault-specific). The `gslides` MCP (`mcp__gslides__*`, vault-note -> Google Slides decks) is also available but user-scoped/global, defined in `~/.claude.json` via the `mcp-servers` step in `scottidler/claude/manifest.yml`.
 

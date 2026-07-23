@@ -328,6 +328,17 @@ async fn register_systemd_units() -> Result<()> {
         println!("{line}");
     }
 
+    // The nightly harvest timer (design doc 2026-07-20 harvest-completion,
+    // Phase 5): unit-writing is scoped to `sb bootstrap` ONLY, never
+    // `otto deploy` (which stays restart-only). Re-loaded rather than reused
+    // because `borg_config` above was already consumed by-value by
+    // `borg::daemon(borg_config, ...)`.
+    log::debug!("register_systemd_units: installing sb-harvest.{{service,timer}}");
+    let harvest_config = borg::config::load_config(None).context("load borg config for harvest timer install")?;
+    for line in borg::harvest::timer::install(&harvest_config)? {
+        println!("{line}");
+    }
+
     Ok(())
 }
 

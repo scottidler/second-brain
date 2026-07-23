@@ -388,6 +388,86 @@ present and indexed the whole time.
   (rkvr failed in-sandbox with a read-only-FS error; `mv` fallback per the
   task).
 
+## Phase 5 (remaining): wire `--install` into `sb bootstrap` + document units
+
+Scope: the code portion of Phase 5 left open by the "Phase 5 (partial: timer
+env-bootstrap + PATH hygiene)" section above (that section already shipped the
+secret-bootstrap `ExecStartPre`/`EnvironmentFile` pair and the mise-shims PATH
+hygiene across all three unit generators, with their own tests). This section
+covers only what remained: wiring `sb borg harvest --install` into `sb
+bootstrap`, and documenting the new units in `CLAUDE.md`.
+
+### Design decisions
+- `register_systemd_units` (`sb/src/cli/bootstrap.rs::register_systemd_units`)
+  now calls `borg::harvest::timer::install(&harvest_config)` as a third step
+  after the existing borg-daemon and cortex-daemon `--install` calls, printing
+  its returned lines the same way the other two do. Per the design doc, this
+  is the ONLY place the harvest timer gets installed automatically -
+  `otto deploy` is untouched and stays restart-only (`otto.yml`'s deploy task
+  was not touched by this phase).
+- `borg::config::load_config(None)` is called a SECOND time
+  (`harvest_config`, right before the new `borg::harvest::timer::install`
+  call) rather than reusing the earlier `borg_config` binding, because
+  `borg::daemon(borg_config, borg_install)` takes `Config` BY VALUE and moves
+  it (`borg::config::Config` does not derive `Clone` - it derives `Debug,
+  Default, Deserialize, Serialize` only, `borg/src/config.rs:156`). Re-loading
+  from disk is a cheap YAML parse and avoids adding `Clone` to a config type
+  purely to serve one call site.
+- `CLAUDE.md` updated in two places: the "Systemd unit files are NOT in the
+  repo" paragraph now names `sb-harvest.{service,timer}` as a third pair
+  (source of truth `harvest::timer::render_units`,
+  `borg/src/harvest/timer.rs`) and notes it is wired into `sb bootstrap`
+  itself rather than requiring a separate manual install verb like the two
+  daemons; the `otto deploy` paragraph in "Install (for /shipit)" now states
+  the harvest timer is written by `sb bootstrap` (not `otto deploy`, not `sb
+  borg daemon --install`) and describes the secret-bootstrap env-file
+  (`sb-harvest.env`, distinct from the daemons' `borg.env`/`cortex.env`).
+
+### Deviations
+- None against this phase's remaining spec items 1 and 4. Items 2 (secret
+  bootstrap) and 3 (PATH hygiene) were already fully implemented, tested, and
+  documented by the prior "Phase 5 (partial)" commit; this section does not
+  redo or re-test them.
+
+### Tradeoffs
+- No new automated test exercises `register_systemd_units` end-to-end calling
+  the real `borg::harvest::timer::install`. That function performs real
+  filesystem writes under `~/.config/systemd/user/` (via
+  `vault::paths::xdg_config_dir()`), exactly like the pre-existing
+  `borg::daemon(...)` and `cortex::daemon::run(...)` calls two lines above it
+  in the same function - NEITHER of which has an isolated unit test either
+  (there is no test in `sb/src/cli/bootstrap/tests.rs` that calls
+  `register_systemd_units`). The new harvest call follows the exact same
+  established, untested-at-this-seam pattern rather than inventing new test
+  infrastructure (env-redirecting `XDG_CONFIG_HOME` + a fake `systemctl` on
+  `PATH`) for one call that two sibling calls in the same function already
+  lack. The unit CONTENT this call writes (`render_units`'s output) is fully
+  covered by `borg/src/harvest/timer/tests.rs` (secret bootstrap, PATH
+  hygiene, schedule-only-timer-knob), which is the seam the task's TESTS
+  section actually asks for.
+
+### Open questions
+- **Every LIVE-only Phase 5 success criterion remains deferred to the parent's
+  real environment**, per this phase's explicit constraints (no `--install`
+  execution, no touching real `~/.config/systemd/user/`, no soak, no `mode`
+  flip):
+  - "`sb-harvest.timer` is installed + enabled" - requires running `sb
+    bootstrap` (or `sb borg harvest --install`) on the daemon host plus
+    `systemctl --user enable --now sb-harvest.timer`.
+  - "two consecutive runs double-ingest nothing (watermark holds)" - requires
+    two real timer fires (or two on-demand live runs) against the real
+    `harvest-state.json` cursor.
+  - "a live timer run publishes a note with non-empty claims" - requires a
+    real fired run with `harvest.env-bootstrap` configured and a real
+    `ANTHROPIC_API_KEY`-bearing secret file, which this phase does not
+    require, configure, or fabricate (per "never fake or stub a deferred
+    external dependency").
+  - The `mode: dry-run` soak and the eventual flip to `mode: live` in
+    `borg.yml` are explicitly out of scope here and belong to the parent
+    orchestrator (or Scott) running against the real daemon host, per the
+    task's constraints and the design doc's own "Phase 2 is a verification
+    gate, Phase 5's soak/flip happens once" framing.
+
 ## Phase 4: Multi-repo bridging in sb
 
 ### Design decisions
