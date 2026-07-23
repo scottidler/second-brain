@@ -200,3 +200,78 @@ fn repo_round_trips_through_index_to_graph_note_row() {
         "repo threads verbatim from frontmatter through the upsert to GraphNoteRow"
     );
 }
+
+/// Phase 4: `repos-touched` frontmatter -> upsert bind -> `notes.repos_touched`
+/// column -> `GraphNoteRow.repos_touched`, exercising the THREE-STATE
+/// distinction byte-for-byte. The DB column stores `None` as SQL NULL,
+/// `Some(vec![])` as `'[]'`, and `Some(xs)` as the JSON array; the edge-facing
+/// `GraphNoteRow.repos_touched` flattens NULL and `'[]'` to an empty Vec (both
+/// mean "no bridge") and carries the populated set verbatim.
+#[test]
+fn repos_touched_round_trips_through_index_to_graph_note_row_three_state() {
+    use crate::frontmatter::Frontmatter;
+    use std::path::PathBuf;
+
+    fn index_with(index: &SearchIndex, path: &str, repos_touched: Option<Vec<String>>) {
+        let note = Note {
+            path: PathBuf::from(path),
+            frontmatter: Frontmatter {
+                title: Some("a session".to_string()),
+                note_type: Some("session".to_string()),
+                origin: Some("generated".to_string()),
+                repos_touched,
+                ..Frontmatter::default()
+            },
+            body: "body".to_string(),
+            raw: "---\n---\nbody".to_string(),
+        };
+        index.index_one(&note, 1).expect("index");
+    }
+
+    let index = SearchIndex::open_memory().expect("open");
+    index_with(&index, "inbox/none.md", None);
+    index_with(&index, "inbox/empty.md", Some(vec![]));
+    index_with(
+        &index,
+        "inbox/multi.md",
+        Some(vec!["scottidler/loopr".to_string(), "tatari-tv/marquee".to_string()]),
+    );
+
+    // Byte-for-byte three-state in the stored column: NULL vs '[]' vs JSON.
+    let raw = |path: &str| -> Option<String> {
+        index
+            .conn
+            .query_row("SELECT repos_touched FROM notes WHERE path = ?1", params![path], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .expect("query")
+    };
+    assert_eq!(raw("inbox/none.md"), None, "None -> SQL NULL (touched set unknowable)");
+    assert_eq!(
+        raw("inbox/empty.md").as_deref(),
+        Some("[]"),
+        "Some(vec![]) -> '[]' (definitively touched nothing), NEVER NULL"
+    );
+    assert_eq!(
+        raw("inbox/multi.md").as_deref(),
+        Some(r#"["scottidler/loopr","tatari-tv/marquee"]"#),
+        "Some(xs) -> the JSON array verbatim"
+    );
+
+    // GraphNoteRow flattens NULL and '[]' to empty, carries the populated set.
+    let rows = index.graph_note_rows().expect("rows");
+    let get = |path: &str| rows.iter().find(|r| r.path == path).expect("row present");
+    assert!(
+        get("inbox/none.md").repos_touched.is_empty(),
+        "None -> empty touched set"
+    );
+    assert!(
+        get("inbox/empty.md").repos_touched.is_empty(),
+        "Some(vec![]) -> empty touched set at the edge seam"
+    );
+    assert_eq!(
+        get("inbox/multi.md").repos_touched,
+        vec!["scottidler/loopr".to_string(), "tatari-tv/marquee".to_string()],
+        "Some(xs) -> the touched set threads verbatim to GraphNoteRow"
+    );
+}

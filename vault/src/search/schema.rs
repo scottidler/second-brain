@@ -64,6 +64,7 @@ impl super::SearchIndex {
         self.ensure_distilled_columns()?;
         self.ensure_trace_columns()?;
         self.ensure_repo_columns()?;
+        self.ensure_repos_touched_column()?;
 
         // FTS5 cannot ALTER, so we detect old (no-claims) schemas and rebuild.
         // Triggers attach to `notes`, not `notes_fts`, so they must be dropped
@@ -381,6 +382,39 @@ impl super::SearchIndex {
         if !existing_columns.contains(&"repo".to_string()) {
             self.conn
                 .execute_batch("ALTER TABLE notes ADD COLUMN repo TEXT DEFAULT '';")?;
+        }
+
+        Ok(())
+    }
+
+    /// Add the `repos_touched` column to existing DBs (harvest-completion design,
+    /// Phase 4: every repo a session touched, feeding the multi-repo-member hub
+    /// edge). Same idempotent `PRAGMA table_info` + single `ALTER ADD COLUMN`
+    /// pattern as `ensure_repo_columns`.
+    ///
+    /// Deliberately NULLABLE with NO `DEFAULT`, unlike sibling `repo` (which
+    /// defaults `''`): the frontmatter field is THREE-STATE and the distinction
+    /// is load-bearing (`vault::frontmatter::Frontmatter::repos_touched`). A
+    /// pre-existing row (or an omitted key) reads back as SQL `NULL` == `None`
+    /// == "touched set unknowable", never `'[]'` == `Some(vec![])` ==
+    /// "definitively touched nothing". A `DEFAULT ''`/`'[]'` would collapse the
+    /// unknowable state into the empty state and lose the distinction. Stored
+    /// form: `NULL` for `None`, a JSON array (including `[]`) for `Some(..)`.
+    ///
+    /// No `user_version`/`schema_version` bump: this crate's `notes`-table
+    /// migrations carry no version infra (see `ensure_trace_columns`), and a
+    /// single idempotent `ALTER ADD COLUMN` cannot half-apply, so the Rust
+    /// DDL-transaction rule does not bite.
+    fn ensure_repos_touched_column(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(notes)")?;
+        let existing_columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(warn_row)
+            .collect();
+
+        if !existing_columns.contains(&"repos_touched".to_string()) {
+            self.conn
+                .execute_batch("ALTER TABLE notes ADD COLUMN repos_touched TEXT;")?;
         }
 
         Ok(())

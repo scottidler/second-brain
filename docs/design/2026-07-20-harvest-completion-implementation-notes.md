@@ -387,3 +387,81 @@ present and indexed the whole time.
   `~/.cache/rkvr/manual-quarantine-2026-07-20/repo-tatari-tv-okta-auth-py.md`
   (rkvr failed in-sandbox with a read-only-FS error; `mv` fallback per the
   task).
+
+## Phase 4: Multi-repo bridging in sb
+
+### Design decisions
+- `repos_touched` consumed by REUSING the existing frontmatter field
+  (`vault::frontmatter::Frontmatter::repos_touched`, `Option<Vec<String>>`), no
+  new field — per the Resolved Decision. Four seams touched:
+  1. `notes.repos_touched` DB column
+     (`vault::search::schema::ensure_repos_touched_column`), migration-only
+     (mirrors sibling `ensure_repo_columns` exactly: not in the fresh
+     `CREATE TABLE`, added by the idempotent `PRAGMA table_info` + single
+     `ALTER TABLE notes ADD COLUMN` on every open). Deliberately NULLABLE with
+     NO `DEFAULT` (unlike `repo`'s `DEFAULT ''`) so the THREE-STATE survives:
+     `NULL` == `None` (unknowable), `'[]'` == `Some(vec![])` (touched nothing),
+     JSON array == populated.
+  2. Upsert binding (`vault::search::index.rs`, both UPDATE `?36` and INSERT
+     `?36`): `fm.repos_touched.as_ref().map(serde_json::to_string)` -> `None`
+     binds SQL NULL, `Some(..)` binds the JSON (including `'[]'`).
+  3. `GraphNoteRow.repos_touched: Vec<String>` plumbing
+     (`vault::search::graph::graph_note_rows`): reads the column, NULL/`''`/`'[]'`
+     -> empty Vec, JSON array -> the set. FLATTENED to the set here (mirrors the
+     sibling `repo: String`) because the edge is a set operation; the
+     load-bearing three-state lives in the column + frontmatter, not this seam.
+  4. Deterministic multi-repo-member edge
+     (`cortex::graph::build_edges_for`): the note's `repo` UNION every element of
+     `repos_touched`, validated (`vault::schema::validate_repo_slug`), deduped
+     into a `BTreeSet<String>` of `repo_hub_path`s (deterministic + collision-
+     safe), one `repo-member` edge per distinct hub. Replaces the former single-
+     repo-only block; the single-repo path is the `once(&row.repo)` head of the
+     same iterator.
+- `collect_stubs` (`cortex::hub::collect_stubs`) mints a `HubKind::Repo` stub for
+  EVERY validated element of `repos_touched` via the real `repo_hub_slug`. The
+  `insert` closure is keyed on the slug in a `BTreeMap`, so dedup against
+  `frontmatter.repo` (and self-dedup within `repos_touched`) is free — a repo in
+  both maps to one entry. Three-state honored by iterating only `Some(..)`;
+  `None`/`Some(vec![])` mint nothing extra.
+
+### Deviations
+- **No `schema_version`/`user_version` bump.** The task bullet said "migration +
+  schema_version bump per the repo's migration pattern," but this crate's
+  `notes`-table migrations carry NO version infra (documented in
+  `ensure_trace_columns`: "there is no version infra in `vault/src/search/` to
+  hang a version on"). The repo's ACTUAL pattern is an idempotent
+  `PRAGMA table_info` + single `ALTER ADD COLUMN`, which cannot half-apply, so
+  the Rust DDL-transaction rule does not bite and there is no version to bump.
+  Followed the real pattern — same effect, correct seam. (The `schema_version`
+  bump in the design doc's Data Model is the CLYDE-side `SCHEMA_VERSION -> 6`,
+  Phase 3, a different repo.)
+- **`GraphNoteRow.repos_touched` flattens the three-state to a `Vec`.** The
+  design doc says "carried on `GraphNoteRow`"; it is, but as the flattened SET
+  (`None`/`[]` -> empty), mirroring the sibling `repo: String`. The edge is a set
+  op and `None`/`[]` are edge-equivalent (no bridge). The distinct three-state is
+  stored faithfully in the DB column (`NULL` vs `'[]'`) and in frontmatter, where
+  the byte-for-byte test asserts it — same effect, correct seam ("a field derived
+  from another never diverges").
+
+### Tradeoffs
+- Deduped the repo-member edges on the resolved `repo_hub_path` (via `BTreeSet`)
+  rather than on the raw repo string. Chosen because two distinct repo strings
+  can slug-collide to one hub (`org/.github` and `org/github`, or case folds), so
+  path-level dedup is the correct grain — one edge per actual hub, deterministic
+  order. The DB's `INSERT OR REPLACE` on the edge PK would collapse duplicates
+  anyway, but emitting one clean edge is truer to intent and keeps `GraphStats`
+  counts honest.
+- Reused the real frontmatter->index->`GraphNoteRow` path in the cortex graph
+  edge tests (`index_repo_session` calls `index_one`) instead of a synthetic
+  `insert_test_note_graph_repos_touched` helper, so the test exercises the actual
+  upsert binding + column read, not a hand-built row. Cost: the test must insert
+  hub notes with an EMPTY domain so they do not form shared-domain edges among
+  themselves (which pollute the kind-agnostic `hub_members` query) — documented
+  inline.
+
+### Open questions
+- None. The forward multi-repo bridge is code-complete and offline-green. The
+  live proof (a real session touching two repos landing edges to both hubs after
+  `hub --apply` -> `graph` -> `hub --synthesize`) rides the Phase 2 verification
+  gate + Phase 3 clyde `files-touched` release + Phase 7 backfill, which are the
+  parent's to sequence; this phase adds no new open question.

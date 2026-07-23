@@ -161,6 +161,18 @@ impl super::SearchIndex {
         // Canonical `<org>/<repo>` anchor (harvest-clyde-sessions Phase 9);
         // present-null/absent -> "" (no repo hub edge). Stored verbatim.
         let repo = fm.repo.as_deref().unwrap_or("");
+        // Every repo the session touched (harvest-completion Phase 4). The
+        // frontmatter field is THREE-STATE and the distinction is load-bearing,
+        // so it is NOT flattened here: `None` -> SQL NULL (touched set
+        // unknowable); `Some(vec![])` -> `'[]'` (definitively touched nothing);
+        // `Some(xs)` -> the JSON array. The multi-repo-member edge is driven off
+        // the populated case; NULL and `'[]'` both mean "no bridge", but they
+        // are stored distinctly so the semantic three-state survives the round
+        // trip (Phase 7 backfill and future consumers depend on it).
+        let repos_touched: Option<String> = fm
+            .repos_touched
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()));
 
         // `pinned` is vault-derived: the user edits `pinned: true` in their
         // note's frontmatter. None or false -> 0; true -> 1. The flip-test
@@ -188,7 +200,7 @@ impl super::SearchIndex {
                     cortex_thread_author = ?29,
                     pinned = ?30,
                     trace = ?31, ingested = ?32, trace_expires = ?33,
-                    capture_note = ?34, repo = ?35
+                    capture_note = ?34, repo = ?35, repos_touched = ?36
                  WHERE path = ?1",
                 params![
                     path_str.as_ref(),
@@ -226,6 +238,7 @@ impl super::SearchIndex {
                     trace_expires,
                     capture_note,
                     repo,
+                    repos_touched,
                 ],
             )?;
             Ok(IndexAction::Updated)
@@ -245,7 +258,7 @@ impl super::SearchIndex {
                     search_hit_count, last_accessed_at, inbound_link_count,
                     pinned,
                     trace, ingested, trace_expires,
-                    capture_note, repo
+                    capture_note, repo, repos_touched
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                     ?15, ?16, ?17, ?18, ?19, ?20,
@@ -253,7 +266,7 @@ impl super::SearchIndex {
                     0, NULL, 0,
                     ?30,
                     ?31, ?32, ?33,
-                    ?34, ?35
+                    ?34, ?35, ?36
                 )",
                 params![
                     path_str.as_ref(),
@@ -291,6 +304,7 @@ impl super::SearchIndex {
                     trace_expires,
                     capture_note,
                     repo,
+                    repos_touched,
                 ],
             )?;
             Ok(IndexAction::Inserted)

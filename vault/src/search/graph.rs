@@ -91,6 +91,14 @@ pub struct GraphNoteRow {
     /// Canonical `<org>/<repo>` anchor (harvest-clyde-sessions Phase 9), empty
     /// when the note has no repo. Feeds the Phase 10 `repo-member` hub edge.
     pub repo: String,
+    /// Every repo the session touched (harvest-completion Phase 4), feeding the
+    /// deterministic multi-repo-member hub edge. Flattened to the SET of repos
+    /// here, mirroring `repo` (empty = no bridge), because the edge is a set
+    /// operation: `None` and `Some(vec![])` both yield an empty Vec (no extra
+    /// edge). The load-bearing three-state distinction lives where it is
+    /// consumed semantically -- the `notes.repos_touched` column (NULL vs `'[]'`)
+    /// and `Frontmatter::repos_touched` -- not at this edge-building seam.
+    pub repos_touched: Vec<String>,
 }
 
 /// One entity row's mutable columns: `(kind, hub_path, ontotype)`.
@@ -337,7 +345,7 @@ impl SearchIndex {
     pub fn graph_note_rows(&self) -> Result<Vec<GraphNoteRow>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path, tags, source, creator, domain, body, modified_at, repo FROM notes")?;
+            .prepare("SELECT path, tags, source, creator, domain, body, modified_at, repo, repos_touched FROM notes")?;
         let rows = stmt.query_map([], |row| {
             let path: String = row.get(0)?;
             let tags_json: String = row.get::<_, Option<String>>(1)?.unwrap_or_default();
@@ -347,17 +355,42 @@ impl SearchIndex {
             let body: String = row.get::<_, Option<String>>(5)?.unwrap_or_default();
             let modified_at: i64 = row.get::<_, Option<i64>>(6)?.unwrap_or(0);
             let repo: String = row.get::<_, Option<String>>(7)?.unwrap_or_default();
-            Ok((path, tags_json, source, creator, domain, body, modified_at, repo))
+            // NULL (`None`) and `'[]'` (`Some(vec![])`) both arrive as an empty
+            // touched set here; only the populated case drives an extra edge.
+            let repos_touched_json: Option<String> = row.get::<_, Option<String>>(8)?;
+            Ok((
+                path,
+                tags_json,
+                source,
+                creator,
+                domain,
+                body,
+                modified_at,
+                repo,
+                repos_touched_json,
+            ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (path, tags_json, source, creator, domain, body, modified_at, repo) = r?;
+            let (path, tags_json, source, creator, domain, body, modified_at, repo, repos_touched_json) = r?;
             let tags: Vec<String> = match serde_json::from_str(&tags_json) {
                 Ok(t) => t,
                 Err(e) => {
                     log::warn!("graph_note_rows: unparseable tags JSON for {path}, treating as no tags: {e}");
                     Vec::new()
                 }
+            };
+            let repos_touched: Vec<String> = match repos_touched_json.as_deref() {
+                None | Some("") => Vec::new(),
+                Some(json) => match serde_json::from_str(json) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::warn!(
+                            "graph_note_rows: unparseable repos_touched JSON for {path}, treating as no touched repos: {e}"
+                        );
+                        Vec::new()
+                    }
+                },
             };
             out.push(GraphNoteRow {
                 path,
@@ -368,6 +401,7 @@ impl SearchIndex {
                 body,
                 modified_at,
                 repo,
+                repos_touched,
             });
         }
         Ok(out)

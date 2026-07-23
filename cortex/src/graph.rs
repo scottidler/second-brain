@@ -330,31 +330,42 @@ fn build_edges_for(
         cfg.fanout_cap,
     );
 
-    // --- repo-member (Phase 10): unconditional note -> repo hub edge. Unlike
-    // the shared-* buckets above (note<->note within a bucket, fan-out capped),
-    // this is genuinely new routing: EVERY note with a well-formed `repo:`
-    // joins its repo hub via the shared `repo_hub_path`. A malformed slug is
-    // skipped + logged (the note is still indexed). The edge resolves once the
-    // hub pass has stubbed `entities/repos/<org>/<repo>.md`; until then
-    // insert_edges skips it (resolve-endpoint-or-skip), and the next sweep
-    // re-adds it - monotonic. The dst MUST match the hub note's actual nested
-    // path (same `repo_hub_path`), or resolve-or-skip drops every edge and the
-    // hub synthesizes memberless.
-    if !row.repo.is_empty() {
-        if vault::schema::validate_repo_slug(&row.repo) {
-            let hub_path = crate::hub::repo_hub_path(&row.repo);
-            edges.push(Edge::deterministic(
-                src.clone(),
-                hub_path,
-                KIND_REPO_MEMBER,
-                REPO_MEMBER_WEIGHT,
-            ));
-        } else {
-            log::warn!(
-                "graph: note {src} has malformed repo slug {:?} - skipping repo-member edge",
-                row.repo
-            );
+    // --- repo-member (Phase 10 single-repo + Phase 4 multi-repo): note -> repo
+    // hub edges. Unlike the shared-* buckets above (note<->note within a bucket,
+    // fan-out capped), this is genuinely new routing: EVERY well-formed repo the
+    // note anchors to joins that repo's hub via the shared `repo_hub_path`. The
+    // set is the note's `repo:` (harvest-clyde Phase 9) UNION every element of
+    // `repos-touched` (harvest-completion Phase 4). A malformed slug is skipped +
+    // logged (the note is still indexed). Each edge resolves once the hub pass
+    // has stubbed `entities/repos/<org>/<repo>.md`; until then insert_edges skips
+    // it (resolve-endpoint-or-skip) and the next sweep re-adds it - monotonic.
+    // The dst MUST match the hub note's actual nested path (same
+    // `repo_hub_path`), or resolve-or-skip drops the edge and the hub synthesizes
+    // memberless.
+    //
+    // Deduped on the resolved hub path (BTreeSet: deterministic + collision-safe)
+    // so a repo listed in BOTH `repo` and `repos_touched`, or two `repos_touched`
+    // entries that slug-collide, yields exactly one edge - no secondary-repo edge
+    // is dropped and no duplicate is emitted. A note carrying `repos-touched
+    // [X,Y]` joins hub `repo-<slug(X)>` AND `repo-<slug(Y)>` on every sweep.
+    let mut repo_hub_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for repo in std::iter::once(&row.repo).chain(row.repos_touched.iter()) {
+        if repo.is_empty() {
+            continue;
         }
+        if vault::schema::validate_repo_slug(repo) {
+            repo_hub_paths.insert(crate::hub::repo_hub_path(repo));
+        } else {
+            log::warn!("graph: note {src} has malformed repo slug {repo:?} - skipping repo-member edge");
+        }
+    }
+    for hub_path in repo_hub_paths {
+        edges.push(Edge::deterministic(
+            src.clone(),
+            hub_path,
+            KIND_REPO_MEMBER,
+            REPO_MEMBER_WEIGHT,
+        ));
     }
 
     Ok(edges)

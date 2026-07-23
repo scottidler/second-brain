@@ -263,3 +263,98 @@ fn incremental_only_rebuilds_changed_notes() {
     assert_eq!(stats.notes_processed, 1, "only the new note c is reprocessed");
     assert!(index.count_edges(None).expect("count") > before, "c's edges added");
 }
+
+/// Index a session note carrying `repo:` + `repos-touched` through the real
+/// frontmatter -> upsert -> `graph_note_rows` path, so the edge builder reads
+/// the same shape production does.
+fn index_repo_session(index: &SearchIndex, path: &str, repo: Option<&str>, repos_touched: Option<Vec<&str>>) {
+    use std::path::PathBuf;
+    use vault::frontmatter::Frontmatter;
+    use vault::note::Note;
+    let note = Note {
+        path: PathBuf::from(path),
+        frontmatter: Frontmatter {
+            title: Some("session".to_string()),
+            note_type: Some("session".to_string()),
+            origin: Some("generated".to_string()),
+            repo: repo.map(|s| s.to_string()),
+            repos_touched: repos_touched.map(|v| v.into_iter().map(|s| s.to_string()).collect()),
+            ..Frontmatter::default()
+        },
+        body: "session body".to_string(),
+        raw: "---\n---\nbody".to_string(),
+    };
+    index.index_one(&note, 100).expect("index session");
+}
+
+/// Phase 4 positive: a session touching repos X+Y joins BOTH repo hubs via
+/// deterministic repo-member edges, and the `repo:` anchor that ALSO appears in
+/// `repos-touched` collapses to ONE edge (deduped on the resolved hub path). The
+/// hub notes must exist at their nested paths for the edges to resolve.
+#[test]
+fn multi_repo_member_edges_join_every_touched_repo_hub_deduped() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let repos = ["scottidler/loopr", "tatari-tv/marquee", "scottidler/second-brain"];
+    // Stub the three repo hubs at their real nested paths so `insert_edges`
+    // resolves the `dst` (an absent hub note would silently drop the edge).
+    // Empty domain so the hubs do not form shared-domain edges among themselves
+    // (which would pollute `hub_members`, a kind-agnostic incoming-edge query).
+    for repo in repos {
+        let hub = crate::hub::repo_hub_path(repo);
+        index
+            .insert_test_note_graph(&hub, &[], "", "", "", "hub", 100)
+            .expect("hub note");
+    }
+    // repo: loopr, repos-touched [loopr, marquee, second-brain] -> loopr is
+    // duplicated across `repo` and `repos_touched` and must collapse to one edge.
+    index_repo_session(
+        &index,
+        "inbox/multi.md",
+        Some("scottidler/loopr"),
+        Some(vec!["scottidler/loopr", "tatari-tv/marquee", "scottidler/second-brain"]),
+    );
+
+    build(&mut index, &cfg(), true).expect("build");
+
+    assert_eq!(
+        index.count_edges(Some("repo-member")).expect("count"),
+        3,
+        "three distinct touched hubs -> three repo-member edges, the duplicated loopr collapsed"
+    );
+    for repo in repos {
+        let hub = crate::hub::repo_hub_path(repo);
+        assert_eq!(
+            index.hub_members(&hub).expect("members"),
+            vec!["inbox/multi.md".to_string()],
+            "the session joins the {repo} hub"
+        );
+    }
+}
+
+/// Phase 4 negative: with `repos-touched` absent (`None`) or present-empty
+/// (`Some(vec![])`), only the single `repo:` anchor yields a repo-member edge -
+/// no phantom multi-repo edges. Proves `None` and `[]` behave identically to a
+/// bare `repo:` (the three-state's edge-layer collapse).
+#[test]
+fn no_extra_repo_member_edges_when_repos_touched_absent_or_empty() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let hub = crate::hub::repo_hub_path("scottidler/loopr");
+    index
+        .insert_test_note_graph(&hub, &[], "", "", "tech", "hub", 100)
+        .expect("hub note");
+    index_repo_session(&index, "inbox/none.md", Some("scottidler/loopr"), None);
+    index_repo_session(&index, "inbox/empty.md", Some("scottidler/loopr"), Some(vec![]));
+
+    build(&mut index, &cfg(), true).expect("build");
+
+    assert_eq!(
+        index.count_edges(Some("repo-member")).expect("count"),
+        2,
+        "each note yields exactly ONE repo-member edge (to the loopr hub); no phantom edges"
+    );
+    assert_eq!(
+        index.hub_members(&hub).expect("members"),
+        vec!["inbox/empty.md".to_string(), "inbox/none.md".to_string()],
+        "both notes join the single loopr hub and nothing else"
+    );
+}

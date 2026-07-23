@@ -185,6 +185,21 @@ fn repo_note(path: &str, repo: &str) -> Note {
     }
 }
 
+/// A note with an explicit `repo:` and/or three-state `repos-touched:`. `None`
+/// leaves the field unset (key omitted); `Some(vec![])` is present-but-empty.
+fn multi_repo_note(path: &str, repo: Option<&str>, repos_touched: Option<Vec<&str>>) -> Note {
+    Note {
+        path: std::path::PathBuf::from(path),
+        frontmatter: vault::frontmatter::Frontmatter {
+            repo: repo.map(|s| s.to_string()),
+            repos_touched: repos_touched.map(|v| v.into_iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        },
+        body: String::new(),
+        raw: String::new(),
+    }
+}
+
 #[test]
 fn repo_hub_slug_is_injective_on_the_org_repo_split() {
     // The adversarial pair the generic slugify would collide (both -> a-b-c)
@@ -454,11 +469,19 @@ fn synthesize_hub_writes_body_preserves_frontmatter_and_is_failsafe() {
 
 #[test]
 fn frozen_corpus_hub_groupings_are_deterministic_across_sweeps() {
-    // Phase 13 acceptance (3f frozen-corpus determinism): a mixed corpus
-    // (repo + creator + source + over-cap tag) sweeps to byte-identical
-    // groupings twice.
+    // Phase 13 acceptance (3f frozen-corpus determinism), extended for Phase 4
+    // multi-repo: a mixed corpus (single-repo + multi-repo + creator + source +
+    // over-cap tag) sweeps to byte-identical groupings twice, and the
+    // multi-repo note bridges BOTH touched hubs.
     let notes = vec![
         repo_note("r1.md", "scottidler/loopr"),
+        // A session touching repos X+Y: repo: loopr (also in repos-touched),
+        // repos-touched adds the secondary tatari-tv/marquee bridge.
+        multi_repo_note(
+            "r2.md",
+            Some("scottidler/loopr"),
+            Some(vec!["scottidler/loopr", "tatari-tv/marquee"]),
+        ),
         note(
             "c1.md",
             Some("Andrej Karpathy"),
@@ -475,6 +498,102 @@ fn frozen_corpus_hub_groupings_are_deterministic_across_sweeps() {
     let a = collect_stubs(&["graphrag".to_string()], &[], &notes, 1);
     let b = collect_stubs(&["graphrag".to_string()], &[], &notes, 1);
     assert_eq!(a, b, "identical hub groupings byte-for-byte across sweeps");
+    // The multi-repo note bridges: BOTH touched hubs are present, minted once.
+    let slugs: Vec<&str> = a.iter().map(|s| s.slug.as_str()).collect();
+    assert!(slugs.contains(&"repo-scottidler--loopr"), "primary/repo hub: {slugs:?}");
+    assert!(
+        slugs.contains(&"repo-tatari-tv--marquee"),
+        "secondary repos-touched hub bridged, not dropped: {slugs:?}"
+    );
+    assert_eq!(
+        a.iter().filter(|s| s.slug == "repo-scottidler--loopr").count(),
+        1,
+        "loopr appears in r1.repo, r2.repo AND r2.repos_touched -> exactly one hub"
+    );
+}
+
+#[test]
+fn collect_stubs_repos_touched_three_state_distinction_byte_for_byte() {
+    // Phase 4: the None vs [] vs populated distinction, byte-for-byte at the
+    // hub-minting seam. None (touched set unknowable) and Some(vec![])
+    // (definitively touched nothing) BOTH mint no repo hub - identical output.
+    // The populated case mints one hub per element and is DISTINCT from both.
+    let none = collect_stubs(&[], &[], &[multi_repo_note("n.md", None, None)], 10);
+    assert!(none.is_empty(), "None repos_touched (no repo:) mints nothing: {none:?}");
+
+    let empty = collect_stubs(&[], &[], &[multi_repo_note("e.md", None, Some(vec![]))], 10);
+    assert_eq!(
+        empty, none,
+        "Some(vec![]) is byte-for-byte identical to None at the hub seam (no hubs)"
+    );
+
+    let populated = collect_stubs(
+        &[],
+        &[],
+        &[multi_repo_note(
+            "p.md",
+            None,
+            Some(vec!["scottidler/loopr", "tatari-tv/marquee"]),
+        )],
+        10,
+    );
+    let slugs: Vec<&str> = populated.iter().map(|s| s.slug.as_str()).collect();
+    assert!(slugs.contains(&"repo-scottidler--loopr"), "X hub minted: {slugs:?}");
+    assert!(slugs.contains(&"repo-tatari-tv--marquee"), "Y hub minted: {slugs:?}");
+    assert_eq!(populated.len(), 2, "exactly the two touched-repo hubs");
+    assert_ne!(
+        populated, none,
+        "populated repos_touched mints hubs that None/[] do not"
+    );
+}
+
+#[test]
+fn collect_stubs_mints_every_touched_repo_deduped_against_repo() {
+    // Phase 4: repo: X + repos-touched [X, Y] -> hubs for X and Y, with X
+    // (present in BOTH) minted exactly once. Deterministic across sweeps.
+    let notes = vec![multi_repo_note(
+        "s.md",
+        Some("scottidler/loopr"),
+        Some(vec!["scottidler/loopr", "tatari-tv/marquee"]),
+    )];
+    let a = collect_stubs(&[], &[], &notes, 10);
+    let b = collect_stubs(&[], &[], &notes, 10);
+    assert_eq!(a, b, "collect_stubs is deterministic byte-for-byte across sweeps");
+    let repo_slugs: Vec<&str> = a
+        .iter()
+        .filter(|s| s.kind == HubKind::Repo)
+        .map(|s| s.slug.as_str())
+        .collect();
+    assert!(repo_slugs.contains(&"repo-scottidler--loopr"), "X hub: {repo_slugs:?}");
+    assert!(repo_slugs.contains(&"repo-tatari-tv--marquee"), "Y hub: {repo_slugs:?}");
+    assert_eq!(
+        a.iter().filter(|s| s.slug == "repo-scottidler--loopr").count(),
+        1,
+        "X in both repo: and repos-touched mints ONE hub (deduped on slug)"
+    );
+
+    // A malformed repos-touched element skips (edge dropped, note still
+    // indexed); the well-formed sibling still mints its hub.
+    let mixed = collect_stubs(
+        &[],
+        &[],
+        &[multi_repo_note(
+            "m.md",
+            None,
+            Some(vec!["no-slash-here", "tatari-tv/marquee"]),
+        )],
+        10,
+    );
+    let mixed_slugs: Vec<&str> = mixed.iter().map(|s| s.slug.as_str()).collect();
+    assert!(
+        mixed_slugs.contains(&"repo-tatari-tv--marquee"),
+        "well-formed sibling minted despite the malformed entry: {mixed_slugs:?}"
+    );
+    assert_eq!(
+        mixed.len(),
+        1,
+        "the malformed entry mints nothing; only the valid hub remains"
+    );
 }
 
 #[test]

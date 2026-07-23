@@ -277,3 +277,62 @@ fn embedding_examined_table_created_and_schema_ensure_is_idempotent() {
         .expect("query sqlite_master again");
     assert_eq!(still, 1, "re-ensure must leave exactly one embedding_examined table");
 }
+
+/// Phase 4 (harvest-completion): the `repos_touched` column migration. A DB
+/// whose `notes` table predates the column gains it via `ensure_schema` without
+/// losing rows, existing rows read back as SQL NULL (== `None` == "touched set
+/// unknowable", NOT `'[]'`), and re-ensuring is a no-op. Mirrors the crate's
+/// established no-`user_version` idempotent `ALTER ADD COLUMN` discipline.
+#[test]
+fn repos_touched_column_migration_adds_column_preserves_rows_and_is_idempotent() {
+    let conn = Connection::open_in_memory().expect("open");
+    // A pre-Phase-4 `notes` table: no `repos_touched` column, one existing row.
+    conn.execute_batch(
+        "CREATE TABLE notes (path TEXT PRIMARY KEY, title TEXT, repo TEXT DEFAULT '');
+         INSERT INTO notes (path, title, repo) VALUES ('notes/old.md', 'legacy', 'scottidler/loopr');",
+    )
+    .expect("old notes schema");
+    let index = SearchIndex { conn };
+
+    // (pre) The column does not exist yet.
+    assert!(
+        !notes_has_column(&index, "repos_touched"),
+        "pre-migration DB lacks the repos_touched column"
+    );
+
+    index.ensure_repos_touched_column().expect("migrate");
+
+    // (post) Column present; the legacy row survived and reads back NULL.
+    assert!(
+        notes_has_column(&index, "repos_touched"),
+        "the migration added the repos_touched column"
+    );
+    let (title, repos_touched): (String, Option<String>) = index
+        .conn
+        .query_row(
+            "SELECT title, repos_touched FROM notes WHERE path = 'notes/old.md'",
+            [],
+            |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .expect("legacy row survived");
+    assert_eq!(title, "legacy", "the legacy row is preserved");
+    assert_eq!(
+        repos_touched, None,
+        "a pre-existing row reads back NULL (None == unknowable), never '[]'"
+    );
+
+    // Idempotent: a second run over the migrated DB does not error or dup.
+    index.ensure_repos_touched_column().expect("re-run is idempotent");
+    assert!(notes_has_column(&index, "repos_touched"));
+}
+
+/// True when the `notes` table has a column named `col`.
+fn notes_has_column(index: &SearchIndex, col: &str) -> bool {
+    let mut stmt = index.conn.prepare("PRAGMA table_info(notes)").expect("pragma");
+    let cols: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .expect("query")
+        .map(|r| r.expect("col name"))
+        .collect();
+    cols.iter().any(|c| c == col)
+}

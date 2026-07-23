@@ -251,6 +251,30 @@ pub fn collect_stubs(
                 );
             }
         }
+        // Multi-repo hubs (harvest-completion Phase 4): mint a Repo stub for
+        // EVERY validated element of `repos-touched`, so a session touching
+        // repos X+Y gets BOTH hubs stubbed and neither secondary-repo edge is
+        // dropped silently (`insert_edges` skips an edge whose `dst` hub note
+        // does not exist). Deduped against `frontmatter.repo` for free: the
+        // `insert` closure is keyed on the `repo_hub_slug`, so a repo appearing
+        // in both `repo` and `repos_touched` (or twice in `repos_touched`) maps
+        // to one BTreeMap entry. Three-state honored by iterating only the
+        // populated case: `None`/`Some(vec![])` mint nothing extra.
+        if let Some(repos) = note.frontmatter.repos_touched.as_ref() {
+            for repo in repos {
+                if repo.is_empty() {
+                    continue;
+                }
+                if vault::schema::validate_repo_slug(repo) {
+                    insert(repo_hub_slug(repo), HubKind::Repo, repo.to_string());
+                } else {
+                    log::warn!(
+                        "cortex::hub: note {} has malformed repos-touched slug {repo:?} - skipping repo hub edge (note still indexed)",
+                        note.path.display()
+                    );
+                }
+            }
+        }
         if let Some(tags) = note.frontmatter.tags.as_ref() {
             for tag in tags {
                 *tag_counts.entry(tag.clone()).or_insert(0) += 1;
