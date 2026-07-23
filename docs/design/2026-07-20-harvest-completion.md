@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-07-20
-**Status:** Ready to build (all review findings dispositioned; Open Questions empty)
+**Status:** Code-complete on branch `harvest-completion` (Phases 4-7 built + otto-ci-green 2026-07-23; Phases 0/1 and partial 5 pre-existing). NOT yet live: the single-repo live proof (Phase 2), the timer install/soak/flip (Phase 5 live), the clyde `files-touched` release (Phase 3), the Phase 7 backfill run, and the sb ship (bump/deploy) all remain and require the daemon-host env with secrets + LLM egress.
 **Review Passes Completed:** 5/5 (author) + review-panel: Architect (Gemini) + Staff Engineer (Codex) + Staff Engineer (Opus, credit-substitute) — all findings folded
 
 ## Summary
