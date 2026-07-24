@@ -1014,6 +1014,137 @@ fn null_lease_is_stale_and_promoted_with_generic_reason() {
 }
 
 #[test]
+fn renew_races_scan_between_select_and_promotion_is_not_reaped() {
+    // The exact cross-process TOCTOU this feature exists to close. Unlike the
+    // static `fresh_lease_*` test (which writes the fresh lease BEFORE the
+    // SELECT, so both SELECT and UPDATE agree the row is safe from the start),
+    // this reproduces the RACE interleaving: the row IS a stale candidate when
+    // the watchdog's SELECT runs, and only AFTER that does the owning process
+    // renew its lease - between the SELECT and the promotion UPDATE. Here the
+    // SELECT alone cannot protect the row (it already returned it); only the
+    // atomic lease predicate REPEATED in the promotion UPDATE saves the live
+    // trace. That is the distinct value of this test over the Phase 2 statics.
+    //
+    // BITE: this is a predicate/TOCTOU regression, live from Phase 2 - NOT a
+    // "fails before Phase 4" claim. Delete the trailing
+    // `AND (lease_until IS NULL OR lease_until < ?)` from
+    // `promote_single_to_crashed`'s UPDATE `WHERE` clause and this test flips:
+    // the UPDATE would then match on `trace_id=? AND status='received'` alone,
+    // the still-`received` row promotes, `promoted` becomes true, and both the
+    // `!promoted` and `status == "received"` assertions fail. The SELECT (which
+    // already returned this row as a candidate above) does not and cannot catch
+    // it - only the UPDATE's own re-check does. Verified by scratch-removing the
+    // predicate: with it, promote matches 0 rows; without it, 1 row.
+    let conn = fresh();
+    record_received(&conn, "racer", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    conn.execute(
+        "UPDATE receipts SET received_at='2024-01-01T00:00:00Z' WHERE trace_id='racer'",
+        [],
+    )
+    .expect("backdate");
+    let now = Utc::now();
+    // Lease is expired at SELECT time, so the row IS a reap candidate: this is
+    // the state the watchdog observes when it lists stale rows.
+    write_lease(&conn, "racer", 4242, &lease_at(now, -60)).expect("write_lease expired");
+
+    // Step 1: the watchdog's candidate SELECT sees the row as stale.
+    let stale = list_stale(&conn, 60, now).expect("list_stale");
+    assert!(
+        stale.iter().any(|(id, _)| id == "racer"),
+        "the row must be a stale candidate at SELECT time (an expired lease)"
+    );
+
+    // Step 2: the owning cross-process worker renews the lease AFTER the scan's
+    // SELECT but BEFORE the watchdog's promotion UPDATE - the race window.
+    renew_lease(&conn, "racer", &lease_at(now, 1800)).expect("renew_lease");
+
+    // Step 3: the watchdog's promotion UPDATE fires with the SAME `now`. Its
+    // own lease predicate re-checks atomically and matches 0 rows, so the live
+    // trace is NOT reaped despite having been a candidate a moment ago.
+    let promoted = promote_single_to_crashed(&conn, "racer", 60, now).expect("promote");
+    assert!(
+        !promoted,
+        "a lease renewed between SELECT and promotion must make the UPDATE match 0 rows"
+    );
+    let r = get(&conn, "racer").expect("get").expect("row");
+    assert_eq!(
+        r.status, "received",
+        "the renew-races-scan trace stays received - the atomic UPDATE predicate is the guard"
+    );
+}
+
+#[test]
+fn dead_process_orphan_not_renewed_is_reaped_fail_closed() {
+    // Fail-closed counterpart to `renew_races_scan_*`: identical starting
+    // point (a backdated `received` row that `list_stale` returns as a stale
+    // candidate with an expired lease), but the owning process is genuinely
+    // dead, so NO renew lands in the race window. The atomic promotion UPDATE
+    // therefore DOES reap it - proving the renew (plus the atomic predicate),
+    // not anything intrinsic to the row, is what saved the live trace in the
+    // race test. A genuinely dead process's orphan must not live forever.
+    let conn = fresh();
+    record_received(&conn, "orphan", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    conn.execute(
+        "UPDATE receipts SET received_at='2024-01-01T00:00:00Z' WHERE trace_id='orphan'",
+        [],
+    )
+    .expect("backdate");
+    let now = Utc::now();
+    write_lease(&conn, "orphan", 4242, &lease_at(now, -60)).expect("write_lease expired");
+
+    let stale = list_stale(&conn, 60, now).expect("list_stale");
+    assert!(
+        stale.iter().any(|(id, _)| id == "orphan"),
+        "the dead-process orphan is a stale candidate"
+    );
+
+    // No renew: the owning process died. The promotion UPDATE reaps it.
+    let promoted = promote_single_to_crashed(&conn, "orphan", 60, now).expect("promote");
+    assert!(
+        promoted,
+        "an un-renewed expired-lease orphan must be reaped (fail-closed)"
+    );
+    let r = get(&conn, "orphan").expect("get").expect("row");
+    assert_eq!(r.status, "failed");
+    assert_eq!(r.failure_stage.as_deref(), Some("crashed"));
+    assert_eq!(
+        r.failure_reason.as_deref(),
+        Some("lease-expired"),
+        "an expired (not absent) lease reaps with the distinct lease-expired reason"
+    );
+}
+
+#[test]
+fn null_lease_orphan_not_renewed_is_reaped_fail_closed() {
+    // The other fail-closed shape: a row that NEVER held a lease (a legacy
+    // pre-lease row, or a process that died before its initial write_lease).
+    // `list_stale` returns it, no renew lands, and the promotion UPDATE reaps
+    // it with the generic reason (only an EXPIRED, not absent, lease gets the
+    // distinct lease-expired reason).
+    let conn = fresh();
+    record_received(&conn, "orphan-null", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    conn.execute(
+        "UPDATE receipts SET received_at='2024-01-01T00:00:00Z' WHERE trace_id='orphan-null'",
+        [],
+    )
+    .expect("backdate");
+    let now = Utc::now();
+
+    let stale = list_stale(&conn, 60, now).expect("list_stale");
+    assert!(
+        stale.iter().any(|(id, _)| id == "orphan-null"),
+        "a never-leased backdated row is a stale candidate"
+    );
+
+    let promoted = promote_single_to_crashed(&conn, "orphan-null", 60, now).expect("promote");
+    assert!(promoted, "a never-leased orphan must be reaped (fail-closed)");
+    let r = get(&conn, "orphan-null").expect("get").expect("row");
+    assert_eq!(r.status, "failed");
+    assert_eq!(r.failure_stage.as_deref(), Some("crashed"));
+    assert_eq!(r.failure_reason.as_deref(), Some("no terminal event within 60s"));
+}
+
+#[test]
 fn query_filters_by_harvest_method() {
     // Phase 6 observability: `sb borg log --method harvest` maps to this
     // filter. A harvest session row and a non-harvest row coexist; the filter

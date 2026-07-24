@@ -158,3 +158,60 @@ Design doc: `docs/design/2026-07-24-harvest-watchdog-cross-process-reaping.md`
 
 ### Open questions
 - None.
+
+## Phase 3: TOCTOU + fail-closed lease regression tests (predicate level)
+
+### Design decisions
+- **`renew_races_scan_between_select_and_promotion_is_not_reaped`** (test-only,
+  `borg/src/receipts/tests.rs`) drives the receipts primitives directly to
+  reproduce the exact cross-process race interleaving: (1) seed a backdated
+  `received` row whose lease is EXPIRED at scan time, (2) `list_stale` returns
+  it as a stale candidate (asserted), (3) `renew_lease` re-stamps a future
+  `lease_until` -- simulating the owning worker renewing AFTER the scan's SELECT
+  but BEFORE the promotion UPDATE, (4) `promote_single_to_crashed` matches 0
+  rows and the row stays `received`. Placed in `receipts/tests.rs`, not
+  `watchdog/tests.rs`: the interleaving must inject a `renew_lease` BETWEEN the
+  SELECT and the UPDATE, and `watchdog::run_once_conn` runs SELECT-then-promote
+  in one uninterruptible loop pass -- there is no seam to inject a renew through
+  it, so the receipts primitive level is the only place this race is expressible.
+- **`dead_process_orphan_not_renewed_is_reaped_fail_closed`** is the paired
+  fail-closed counterpart: identical starting state (a backdated, expired-lease
+  stale candidate `list_stale` returns), but NO renew lands -- the promotion
+  UPDATE reaps it (`status='crashed'`, `failure_reason='lease-expired'`). The
+  pairing proves the renew (plus the atomic predicate), not anything intrinsic
+  to the row, is what saved the live trace in the race test.
+- **`null_lease_orphan_not_renewed_is_reaped_fail_closed`** covers the other
+  fail-closed shape: a row that never held a lease (legacy/pre-`write_lease`)
+  is reaped with the generic reason. Together the two fail-closed tests cover
+  "expired lease" and "NULL lease", both un-renewed.
+- **Bite verified by scratch removal, not just reasoning.** Temporarily deleted
+  the trailing `AND (lease_until IS NULL OR lease_until < ?)` (and its bound
+  `now_iso` param) from `promote_single_to_crashed`'s UPDATE `WHERE` and re-ran:
+  `renew_races_scan_*` FAILED at the `!promoted` assertion (and the Phase 2
+  static `fresh_lease_*` also flipped), confirming the atomic UPDATE predicate
+  -- not the SELECT, which had already returned the row -- is the guard. Then
+  restored `receipts.rs` to a byte-identical state (`git diff` empty). The bite
+  comment on the test documents this as a predicate/TOCTOU regression live from
+  Phase 2, explicitly NOT a "fails before Phase 4" claim (Phase 4 does the
+  guard/watchdog wiring; the predicate itself already exists).
+
+### Deviations
+- **Tests live in `receipts/tests.rs`, not `watchdog/tests.rs`.** The design
+  doc's Testing Strategy names `watchdog/tests.rs` for the TOCTOU regression,
+  but the explicit renew-between-SELECT-and-UPDATE interleaving is only
+  expressible at the receipts primitive seam (the watchdog's `run_once_conn`
+  offers no injection point mid-loop). The task prompt authorized either file
+  "as appropriate". Same effect (TOCTOU regression that bites on predicate
+  removal), correct seam.
+
+### Tradeoffs
+- Phase 3 is test-only: no production behavior change, since the atomic
+  predicate already shipped in Phase 2. Chose to add the fail-closed
+  counterparts (`dead_process_orphan_*`, `null_lease_orphan_*`) alongside the
+  race test rather than rely on Phase 2's `expired_lease_*`/`null_lease_*`
+  statics -- the value is the direct A/B pairing (same stale candidate, WITH vs
+  WITHOUT the renew) reading as one narrative, so a future reader sees exactly
+  what the renew changes.
+
+### Open questions
+- None.
