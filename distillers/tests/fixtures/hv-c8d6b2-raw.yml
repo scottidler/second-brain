@@ -1,0 +1,51 @@
+summary: "Two near-identical sessions reviewed the same diff (a mcp-io dependency bump plus a new Config::valet_env_override that bakes an explicit valet-URL override into an MCP entry's environment during `slack mcp register`) for security vulnerabilities. Both reviews concluded there is no new source-to-sink vulnerability because the override only ever propagates a value the same local user already controls, and no privilege or trust boundary is crossed."
+claims:
+  - text: "Config::valet_env_override() intentionally returns None when the resolved valet URL equals the compiled default, so an unconfigured `slack mcp register` does not pin the user to today's default (a not-yet-deployed prod host) and stays free to pick up future default changes."
+    anchor: null
+    kind: position
+    who: null
+    quote: "Baking the default would pin an unconfigured user to today's default ... and defeat a future default change"
+    quote: null
+  - text: "The DEFAULT_VALET_URL is deliberately left pointing at the not-yet-live prod host (`valet.internal.tatari.dev`) rather than the working test host, with the intent to flip it once prod is actually serving; test usage requires an explicit override via flag/env/config."
+    anchor: null
+    kind: fact
+    who: null
+    quote: null
+  - text: "The valet_url override value is passed into mcp-io's with_env via a typed (String, String) API rather than shell-interpolated, so it is not subject to shell/command injection even though it is user-controlled."
+    anchor: null
+    kind: fact
+    who: null
+    quote: null
+  - text: "An empty-string SLACK_VALET_URL is treated as a distinct-from-default override and gets baked in, which would break the spawned server's connectivity, but this is a UX bug not a security issue since no privilege boundary is crossed."
+    anchor: null
+    kind: fact
+    who: null
+    quote: null
+  - text: "Because all three valet_url sources (--valet-url flag, SLACK_VALET_URL env, slack.yml config) require the same local user's access as the MCP registration sink, propagating the value into the registered entry does not cross any trust boundary."
+    anchor: null
+    kind: position
+    who: null
+    quote: null
+  - text: "Lack of URL-format validation on valet_url (no https:// enforcement, empty/file:// accepted) predates this diff and is unaffected by it, so it was noted but not flagged as a new finding."
+    anchor: null
+    kind: fact
+    who: null
+    quote: null
+  - text: "Reusable security-review pattern: when assessing a diff, explicitly separate pre-existing unvalidated behavior from newly-introduced source-to-sink paths, and check whether the change actually crosses a privilege/trust boundary before flagging it."
+    anchor: null
+    kind: recommendation
+    who: null
+    quote: null
+  - text: "A git-pinned dependency version bump (mcp-io v0.1.2 to v0.1.4) was checked and dismissed as a supply-chain concern since the tag-pinned dependency shape is unchanged and no diff content for the dependency itself was visible."
+    anchor: null
+    kind: fact
+    who: null
+    quote: null
+tags:
+  - rust
+  - security-review
+  - config-management
+  - mcp
+  - dependency-management
+  - cargo
+links: []

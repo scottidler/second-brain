@@ -161,7 +161,7 @@ impl<F: FabricCaller + Clone> ThreadDistiller<F> {
         };
 
         let yaml_body = strip_fences(&raw);
-        let parsed: PatternYaml = match serde_yaml::from_str(yaml_body) {
+        let parsed: PatternYaml = match crate::parse::parse_pattern_yaml(yaml_body) {
             Ok(p) => p,
             Err(err) => {
                 log::warn!("ThreadDistiller: yaml parse failed: {err}; using fallback");
@@ -551,13 +551,13 @@ struct ThreadReduceYaml {
 
 fn parse_chunk_yaml(raw: &str) -> Result<ChunkYaml> {
     let yaml_body = strip_fences(raw);
-    let parsed: ChunkYaml = serde_yaml::from_str(yaml_body)?;
+    let parsed: ChunkYaml = crate::parse::parse_pattern_yaml(yaml_body)?;
     Ok(parsed)
 }
 
 fn parse_thread_reduce_yaml(raw: &str) -> Result<ThreadReduceYaml> {
     let yaml_body = strip_fences(raw);
-    let parsed: ThreadReduceYaml = serde_yaml::from_str(yaml_body)?;
+    let parsed: ThreadReduceYaml = crate::parse::parse_pattern_yaml(yaml_body)?;
     Ok(parsed)
 }
 

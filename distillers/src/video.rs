@@ -643,13 +643,13 @@ pub fn chunk_transcript(transcript: &str, target_tokens: usize) -> Vec<String> {
 
 fn parse_video_yaml(raw: &str) -> Result<PatternYaml> {
     let yaml_body = strip_fences(raw);
-    let parsed: PatternYaml = serde_yaml::from_str(yaml_body)?;
+    let parsed: PatternYaml = crate::parse::parse_pattern_yaml(yaml_body)?;
     Ok(parsed)
 }
 
 fn parse_reduce_yaml(raw: &str) -> Result<ReduceYaml> {
     let yaml_body = strip_fences(raw);
-    let parsed: ReduceYaml = serde_yaml::from_str(yaml_body)?;
+    let parsed: ReduceYaml = crate::parse::parse_pattern_yaml(yaml_body)?;
     Ok(parsed)
 }
 

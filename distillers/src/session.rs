@@ -200,7 +200,7 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
             }
         };
         let yaml_body = strip_fences(&raw);
-        let parsed: PatternYaml = match serde_yaml::from_str(yaml_body) {
+        let parsed: PatternYaml = match crate::parse::parse_pattern_yaml(yaml_body) {
             Ok(p) => p,
             Err(err) => {
                 log::warn!("SessionDistiller: yaml parse failed: {err}; using fallback");
@@ -313,7 +313,7 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
                 }
             };
             output_chars += raw.len();
-            let parsed: PatternYaml = match serde_yaml::from_str(strip_fences(&raw)) {
+            let parsed: PatternYaml = match crate::parse::parse_pattern_yaml(strip_fences(&raw)) {
                 Ok(p) => p,
                 Err(err) => {
                     log::warn!("SessionDistiller: chunk yaml parse failed: {err}");
@@ -352,7 +352,7 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
             .call_fabric(PATTERN_REDUCE, &reduce_input)
             .await
         {
-            Ok(raw) => match serde_yaml::from_str::<ReduceYaml>(strip_fences(&raw)) {
+            Ok(raw) => match crate::parse::parse_pattern_yaml::<ReduceYaml>(strip_fences(&raw)) {
                 Ok(parsed) => {
                     let slug = clean_slug(parsed.slug.as_deref());
                     let summary = parsed

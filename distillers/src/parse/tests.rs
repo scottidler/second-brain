@@ -452,3 +452,146 @@ fn input_truncation_tag_fires_only_over_limit() {
     // max_chars == 0 means "no limit" (matches truncate_input's short-circuit).
     assert!(input_truncation_tag(1_000_000, 0).is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Tolerant parse (harvest distill-parsing robustness, 2026-07-24)
+// ---------------------------------------------------------------------------
+
+/// Verbatim staged model output whose first claim carries `quote: "<real>"`
+/// then `quote: null` (value+null duplicate). Strict `serde_yaml` rejects it.
+const HV_C8D6B2_RAW: &str = include_str!("../../tests/fixtures/hv-c8d6b2-raw.yml");
+/// Verbatim staged model output whose first claim carries a duplicate `kind:`
+/// with EQUAL non-null values (`position` / `position`).
+const HV_EE6CCC_RAW: &str = include_str!("../../tests/fixtures/hv-ee6ccc-raw.yml");
+
+#[test]
+fn strict_parse_rejects_the_real_duplicate_artifacts() {
+    // Bite proof: the pre-fix path (plain strict parse) fails on both real
+    // artifacts, so the tolerant parser below is load-bearing, not cosmetic.
+    assert!(serde_yaml::from_str::<PatternYaml>(HV_C8D6B2_RAW).is_err());
+    assert!(serde_yaml::from_str::<PatternYaml>(HV_EE6CCC_RAW).is_err());
+}
+
+#[test]
+fn tolerant_parse_recovers_value_then_null_quote_keeping_the_real_value() {
+    // hv-c8d6b2: first claim has `quote: "<real>"` then `quote: null`. The real
+    // quote must survive and the claim set must be non-empty.
+    let parsed: PatternYaml = parse_pattern_yaml(HV_C8D6B2_RAW).expect("value+null quote repairs");
+    let claims = parsed.claims.expect("claims present");
+    assert!(!claims.is_empty(), "expected >= 1 claim");
+    let quote = claims[0].quote.as_deref().expect("first claim keeps its real quote");
+    assert!(
+        quote.contains("Baking the default"),
+        "the real quote was dropped in favor of null: {quote:?}"
+    );
+}
+
+#[test]
+fn tolerant_parse_recovers_equal_non_null_kind_keeping_one() {
+    // hv-ee6ccc: first claim has `kind: position` twice (equal non-null). One
+    // survives; claims are non-empty.
+    let parsed: PatternYaml = parse_pattern_yaml(HV_EE6CCC_RAW).expect("equal-non-null kind repairs");
+    let claims = parsed.claims.expect("claims present");
+    assert!(!claims.is_empty(), "expected >= 1 claim");
+    assert_eq!(claims[0].kind, ClaimKind::Position);
+    // The real quote on that claim is preserved too.
+    assert!(
+        claims[0]
+            .quote
+            .as_deref()
+            .is_some_and(|q| q.contains("bumped dependencies")),
+        "first claim's quote was lost"
+    );
+}
+
+#[test]
+fn tolerant_parse_keeps_the_non_null_value_when_null_comes_first() {
+    // (null, value) order — the mirror of the c8d6b2 shape.
+    let raw = "claims:\n  - text: \"x\"\n    quote: null\n    quote: \"real value\"\n";
+    let parsed: PatternYaml = parse_pattern_yaml(raw).expect("null+value quote repairs");
+    let claims = parsed.claims.expect("claims present");
+    assert_eq!(claims[0].quote.as_deref(), Some("real value"));
+}
+
+#[test]
+fn tolerant_parse_collapses_equal_null_duplicates() {
+    let raw = "claims:\n  - text: \"x\"\n    anchor: null\n    anchor: null\n";
+    let parsed: PatternYaml = parse_pattern_yaml(raw).expect("equal-null anchor repairs");
+    let claims = parsed.claims.expect("claims present");
+    assert_eq!(claims[0].anchor, None);
+    assert_eq!(claims[0].text, "x");
+}
+
+#[test]
+fn tolerant_parse_fails_loud_on_differing_non_null_duplicate() {
+    // Two DIFFERING non-null values must NOT be silently reconciled.
+    let raw = "claims:\n  - text: \"x\"\n    kind: position\n    kind: fact\n";
+    assert!(
+        parse_pattern_yaml::<PatternYaml>(raw).is_err(),
+        "differing non-null duplicate must fail loud, never guess a value"
+    );
+}
+
+#[test]
+fn tolerant_parse_never_touches_a_key_shaped_line_inside_a_block_scalar() {
+    // A real duplicate (`kind` in the claim) forces the repair to run, while the
+    // summary block scalar contains a `kind:`-shaped line that is prose, not a
+    // mapping key. That block content must survive verbatim.
+    let raw = concat!(
+        "summary: |-\n",
+        "  Some prose about the review.\n",
+        "  kind: fake-inside-block\n",
+        "claims:\n",
+        "  - text: \"x\"\n",
+        "    kind: position\n",
+        "    kind: position\n",
+    );
+    let parsed: PatternYaml = parse_pattern_yaml(raw).expect("claim dup repairs, block untouched");
+    let summary = parsed.summary.expect("summary present");
+    assert!(
+        summary.contains("kind: fake-inside-block"),
+        "scalar-block content was corrupted by the dedupe: {summary:?}"
+    );
+    assert_eq!(parsed.claims.expect("claims").len(), 1);
+}
+
+#[test]
+fn tolerant_parse_strips_a_leading_prose_preamble() {
+    // The observed "...Let me construct the YAML now." shape: prose before the
+    // YAML. The scoped strip removes it and the YAML parses.
+    let raw = concat!(
+        "Given the truncation marker, I need to distill. Let me construct the YAML now.\n",
+        "summary: \"A real summary.\"\n",
+        "claims:\n",
+        "  - text: \"A concrete claim.\"\n",
+        "    kind: fact\n",
+    );
+    let parsed: PatternYaml = parse_pattern_yaml(raw).expect("prose preamble is stripped");
+    assert_eq!(parsed.summary.as_deref(), Some("A real summary."));
+    assert_eq!(parsed.claims.expect("claims").len(), 1);
+}
+
+#[test]
+fn tolerant_parse_leaves_prose_with_an_embedded_indented_key_failing_loud() {
+    // The strip is SCOPED to the first UNINDENTED root key. A prose blob whose
+    // only key-shaped line is indented has no root key, so nothing is stripped
+    // and it still fails loud (never eats the embedded key).
+    let raw = concat!(
+        "Here is my analysis of the session.\n",
+        "  summary: this looks like yaml but is indented prose\n",
+        "The user asked about the config.\n",
+    );
+    assert!(
+        parse_pattern_yaml::<PatternYaml>(raw).is_err(),
+        "an embedded indented key must not be promoted to a root key"
+    );
+}
+
+#[test]
+fn tolerant_parse_still_fails_loud_on_plain_malformed_yaml() {
+    let raw = "summary: \"unterminated string\nclaims: [\n";
+    assert!(
+        parse_pattern_yaml::<PatternYaml>(raw).is_err(),
+        "genuinely malformed YAML must fail loud to the fallback"
+    );
+}

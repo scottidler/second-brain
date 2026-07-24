@@ -1,0 +1,66 @@
+summary: "Two dependency-bump diff reviews (renew v0.2.0→v0.3.0 in persona-cli's Cargo.toml) were cleared as no security-relevant since they only touch pinned git deps with no code changes. A longer session then verified, released, and shipped persona v1.3.1 (with the renew v0.3.0 repin), root-caused a fatal shell-startup error to a sandboxed-filesystem interaction with the `manifest` CLI, and produced a handoff doc for that cross-repo sandbox issue, later moved into the dotfiles repo. Session also confirmed renew's CLI-instrumentation guide was complete and shipped in the v0.3.0 tag."
+claims:
+  - text: "Dependency version/tag bumps in Cargo.toml with no accompanying code changes should not be reported as security findings even if the bumped crate's internal changes are unknown, since the diff itself introduces no new source/sink or entry point."
+    anchor: null
+    kind: position
+    who: null
+    quote: "Per the instructions, outdated / bumped dependencies without concrete impact should not be reported as security findings."
+    kind: position
+  - text: "Verify claims about integration behavior by actually building the branch and exercising the code path rather than inferring from diffs or memory."
+    anchor: null
+    kind: recommendation
+    who: null
+    quote: null
+  - text: "RENEW_FORCE_NOTIFY only removes the TTY gate on the update-notification banner; it does not fabricate a stale-version state, so testing it on a build that isn't actually behind latest will show no notice, which is correct behavior, not a bug."
+    anchor: null
+    kind: fact
+    who: null
+    quote: null
+  - text: "A repeating 'Error: Read-only file system (os error 30)' at src/main.rs:193 on every shell command was a sandbox artifact from the `manifest` CLI, invoked via ~/.zshenv on every shell, trying to write logs to a read-only ~/.local/share/manifest/logs — not a persona-cli bug."
+    anchor: null
+    kind: fact
+    who: null
+    quote: null
+  - text: "manifest treats a log-file-open failure as fatal and leaks eyre's Location: trace, unlike qai and aka which warn and continue on the same sandboxed-filesystem condition — recommended fix is to add ~/.local/share and ~/.cache to the sandbox write allowlist and make manifest degrade gracefully like the other tools."
+    anchor: null
+    kind: recommendation
+    who: null
+    quote: null
+  - text: "Git operations over SSH (git@github.com) fail inside the sandbox because it blocks the ssh-agent, surfacing as a misleading 'Repository not found' error; HTTPS and gh CLI work fine, and such syncs must be retried with the sandbox off."
+    anchor: null
+    kind: fact
+    who: null
+    quote: "Origin is SSH — the sandbox blocks the ssh-agent, hence \"Repository not found\"."
+  - text: "Redirecting XDG_DATA_HOME to a temp dir is a working workaround to run a Rust CLI's logging/data-writing paths inside a read-only sandbox for verification purposes."
+    anchor: null
+    kind: recommendation
+    who: null
+    quote: null
+  - text: "persona-cli's main branch is actually ungated per the live `bump --gates` check, contradicting CLAUDE.md's documented 'gated main' note, which is stale and worth correcting."
+    anchor: null
+    kind: fact
+    who: null
+    quote: "Live gate check says **ungated** (matches what I have in memory ... despite CLAUDE.md's older \"gated\" note)."
+  - text: "When cutting a release after a merge that already bumped the version, use `bump --tag-only` rather than bumping again, since it verifies HEAD == origin/main and only creates the tag."
+    anchor: null
+    kind: recommendation
+    who: null
+    quote: null
+  - text: "Push release tags by explicit tag name, never with `--tags`, to avoid pushing unintended tags."
+    anchor: null
+    kind: recommendation
+    who: null
+    quote: null
+tags:
+  - rust
+  - cargo
+  - dependency-management
+  - security-review
+  - sandboxing
+  - release-process
+  - cli-tooling
+links:
+  - url: "https://github.com/tatari-tv/persona-cli/pull/41"
+    label: "persona-cli PR #41"
+  - url: "https://github.com/tatari-tv/persona-cli/releases/tag/v1.3.1"
+    label: "persona-cli v1.3.1 release"

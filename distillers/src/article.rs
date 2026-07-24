@@ -154,7 +154,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
         };
 
         let yaml_body = strip_fences(&raw);
-        let parsed: PatternYaml = match serde_yaml::from_str(yaml_body) {
+        let parsed: PatternYaml = match crate::parse::parse_pattern_yaml(yaml_body) {
             Ok(p) => p,
             Err(err) => {
                 log::warn!("ArticleDistiller: yaml parse failed: {err}; using fallback");
@@ -552,13 +552,13 @@ fn strip_item_anchors(mut enumeration: vault::distilled::Enumeration) -> vault::
 
 fn parse_article_yaml(raw: &str) -> Result<PatternYaml> {
     let yaml_body = strip_fences(raw);
-    let parsed: PatternYaml = serde_yaml::from_str(yaml_body)?;
+    let parsed: PatternYaml = crate::parse::parse_pattern_yaml(yaml_body)?;
     Ok(parsed)
 }
 
 fn parse_reduce_yaml(raw: &str) -> Result<ReduceYaml> {
     let yaml_body = strip_fences(raw);
-    let parsed: ReduceYaml = serde_yaml::from_str(yaml_body)?;
+    let parsed: ReduceYaml = crate::parse::parse_pattern_yaml(yaml_body)?;
     Ok(parsed)
 }
 

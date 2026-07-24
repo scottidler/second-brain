@@ -2,8 +2,9 @@
 //! truncation bug fixed), token estimation, and the common `Pattern*` YAML leaf
 //! structs. Consolidated in Phase 9 from six near-identical copies.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use vault::distilled::{Claim, ClaimKind, EnumeratedItem, Enumeration};
 
 /// ~4 chars per token (English-prose rule of thumb); good enough for budget
@@ -37,6 +38,412 @@ pub fn strip_fences(raw: &str) -> &str {
         }
         None => trimmed,
     }
+}
+
+/// Tolerant deserialization of a distiller pattern's YAML output (harvest
+/// distill-parsing robustness, 2026-07-24).
+///
+/// The model occasionally drifts into two observed shapes that `serde_yaml`
+/// (0.9, strict) refuses outright — a duplicate mapping key (verified to be
+/// rejected even when deserializing to the untyped `Value`, so there is no
+/// tolerant untyped tree to dedupe on) and a prose preamble before the YAML.
+/// Either shape today collapses the WHOLE distillation to the impoverished
+/// `yaml-parse-error` / dropped-chunk fallback. This helper survives BOTH while
+/// staying fail-loud-safe:
+///
+/// 1. strict `serde_yaml::from_str` — the common case, returned unchanged;
+/// 2. on failure, apply bounded STRUCTURAL repairs (scoped prose-strip, then an
+///    indent-aware duplicate-key dedupe that NEVER touches scalar-block content)
+///    and retry the strict parse exactly once;
+/// 3. if the retry still fails — or a repair cannot be applied safely (e.g. a
+///    duplicate key with two DIFFERING non-null values) — return the ORIGINAL
+///    strict error so the caller's existing fallback fires (fail loud).
+///
+/// The repair is UNCONDITIONAL (no config flag): it is safe by construction and
+/// gating it would force a cross-crate flag into the config-free `distillers`
+/// crate for no benefit. `raw` is expected to already be fence-stripped by the
+/// caller (`strip_fences`); the prose-strip composes AFTER that.
+///
+/// Mirrors the in-house drift-absorbing `ClaimKind` Deserialize precedent
+/// (`vault::distilled` :154): absorb KNOWN drift with a WARN, else fail loud.
+pub fn parse_pattern_yaml<T: DeserializeOwned>(raw: &str) -> Result<T, serde_yaml::Error> {
+    match serde_yaml::from_str::<T>(raw) {
+        Ok(value) => Ok(value),
+        Err(original) => match repair_pattern_yaml(raw) {
+            RepairOutcome::Repaired(fixed) => match serde_yaml::from_str::<T>(&fixed) {
+                Ok(value) => {
+                    log::debug!("parse_pattern_yaml: structural repair recovered the parse");
+                    Ok(value)
+                }
+                // Repair did not make it parse: fail loud with the ORIGINAL error
+                // so the fallback reason and message reflect the real problem.
+                Err(_) => {
+                    log::warn!("parse_pattern_yaml: repair applied but parse still failed; failing loud: {original}");
+                    Err(original)
+                }
+            },
+            // No safe repair applied, or an ambiguous conflict was detected:
+            // fail loud so the existing fallback path fires.
+            RepairOutcome::NoRepair => Err(original),
+            RepairOutcome::Conflict => {
+                log::warn!("parse_pattern_yaml: duplicate key with differing non-null values; failing loud (no guess)");
+                Err(original)
+            }
+        },
+    }
+}
+
+/// Result of the structural repair pass.
+enum RepairOutcome {
+    /// A repair changed the text; caller retries the strict parse once.
+    Repaired(String),
+    /// Nothing to repair (the failure was not a shape we know how to fix).
+    NoRepair,
+    /// A duplicate key carried two DIFFERING non-null values — do not guess.
+    Conflict,
+}
+
+/// Apply the bounded structural repairs in order: scoped prose-strip, then the
+/// indent-aware duplicate-key dedupe. WARNs on every repair actually applied.
+fn repair_pattern_yaml(raw: &str) -> RepairOutcome {
+    let (stripped, removed) = strip_prose_preamble(raw);
+    let mut changed = false;
+    if removed > 0 {
+        log::warn!("parse_pattern_yaml: stripped {removed} leading prose line(s) before the first root-level YAML key");
+        changed = true;
+    }
+    match dedupe_mapping_keys(&stripped) {
+        DedupeOutcome::Conflict => RepairOutcome::Conflict,
+        DedupeOutcome::NoChange => {
+            if changed {
+                RepairOutcome::Repaired(stripped)
+            } else {
+                RepairOutcome::NoRepair
+            }
+        }
+        DedupeOutcome::Deduped { text, repairs } => {
+            for r in &repairs {
+                log::warn!(
+                    "parse_pattern_yaml: deduped mapping key `{}` (line {}): kept {}, dropped {}",
+                    r.key,
+                    r.line + 1,
+                    r.kept,
+                    r.dropped,
+                );
+            }
+            RepairOutcome::Repaired(text)
+        }
+    }
+}
+
+/// Strip a leading prose preamble the model sometimes emits before the YAML
+/// (e.g. "...Let me construct the YAML now."). SCOPED: it removes leading lines
+/// only up to the first UNINDENTED (column-0) root-level mapping key, matched
+/// generically as `^[A-Za-z0-9_-]+:` (optionally with an inline value) after an
+/// optional BOM. It never matches an indented/embedded `summary:`-like line, so
+/// a prose blob whose only key-shaped line is indented is left untouched and
+/// still fails loud. Does NOT hardcode any `Distilled` field name.
+///
+/// Returns the (possibly unchanged) text and the count of leading lines removed.
+/// When the input already starts (after optional blanks / `#` comments / `---`)
+/// with a root key, nothing is removed — so this is a no-op on a duplicate-only
+/// failure and cannot interfere with the dedupe pass.
+fn strip_prose_preamble(raw: &str) -> (String, usize) {
+    let lines: Vec<&str> = raw.lines().collect();
+    let first_key = lines.iter().position(|line| {
+        let line = line.strip_prefix('\u{feff}').unwrap_or(line);
+        is_root_mapping_key(line)
+    });
+    match first_key {
+        Some(0) | None => (raw.to_string(), 0),
+        Some(idx) => (lines[idx..].join("\n"), idx),
+    }
+}
+
+/// A line is a root-level mapping key when it starts at column 0 (no leading
+/// whitespace) with `word-chars` immediately followed by `:` and then either
+/// end-of-line or whitespace. `key:value` (no space) is deliberately NOT matched
+/// — it is a scalar, not a mapping entry.
+fn is_root_mapping_key(line: &str) -> bool {
+    let line = line.trim_end_matches('\r');
+    let Some(colon) = line.find(':') else {
+        return false;
+    };
+    if colon == 0 {
+        return false;
+    }
+    let key = &line[..colon];
+    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return false;
+    }
+    let rest = &line[colon + 1..];
+    rest.is_empty() || rest.starts_with(char::is_whitespace)
+}
+
+/// One recorded duplicate-key repair, for the WARN trail.
+struct DedupeRepair {
+    key: String,
+    line: usize,
+    kept: String,
+    dropped: String,
+}
+
+/// Outcome of the indent-aware duplicate-key dedupe.
+enum DedupeOutcome {
+    NoChange,
+    Deduped {
+        text: String,
+        repairs: Vec<DedupeRepair>,
+    },
+    /// A duplicate key had two DIFFERING non-null values (or a value we cannot
+    /// safely compare) — fail loud rather than pick one.
+    Conflict,
+}
+
+/// The value shape of a mapping-key line, for the duplicate-key invariant table.
+#[derive(Clone, PartialEq)]
+enum ValueClass {
+    /// Explicit YAML null (`null` / `~`).
+    Null,
+    /// An inline scalar value.
+    NonNull(String),
+    /// Empty (a parent key), a block scalar (`|`/`>`), or a flow collection —
+    /// not a safely-comparable leaf, so a duplicate involving it fails loud.
+    Opaque,
+}
+
+/// A parsed mapping-key line.
+struct KeyLine {
+    key: String,
+    /// Column where the key starts (leading indent + any `- ` sequence marker).
+    key_col: usize,
+    /// Whether a `- ` sequence marker precedes the key (starts a new element).
+    has_dash: bool,
+    value: ValueClass,
+    is_block: bool,
+}
+
+/// A mapping scope on the walk stack: the column its keys sit at, plus the keys
+/// already seen in THIS mapping instance (first-occurrence line + value class).
+struct DedupeScope {
+    col: usize,
+    seen: HashMap<String, (usize, ValueClass)>,
+}
+
+/// Indent-aware duplicate-key dedupe (mechanism (c) — chosen in Phase 0 after
+/// verifying `serde_yaml` rejects duplicate keys even for the untyped `Value`,
+/// and adding a lenient YAML crate is out of scope).
+///
+/// It walks lines, tracks the mapping-scope stack by column, and applies the
+/// invariant table to any key that repeats within the SAME mapping:
+/// - (value, null) / (null, value)  -> keep the non-null value; record;
+/// - equal non-null (e.g. `kind: position` x2) -> keep one; record;
+/// - differing non-null (or a non-leaf value) -> [`DedupeOutcome::Conflict`].
+///
+/// Scalar-block bodies (`|`/`>`) are marked opaque up front and are NEVER
+/// inspected or removed, so a legitimate `quote: null` inside a multiline block
+/// cannot be corrupted (the panel's string-repair hazard).
+fn dedupe_mapping_keys(input: &str) -> DedupeOutcome {
+    let lines: Vec<String> = input.lines().map(|l| l.trim_end_matches('\r').to_string()).collect();
+    let opaque = mark_block_scalar_bodies(&lines);
+
+    let mut stack: Vec<DedupeScope> = Vec::new();
+    let mut to_delete: HashSet<usize> = HashSet::new();
+    let mut repairs: Vec<DedupeRepair> = Vec::new();
+
+    for (idx, line) in lines.iter().enumerate() {
+        if opaque[idx] || line.trim().is_empty() {
+            continue;
+        }
+        let Some(kl) = parse_key_line(line) else {
+            continue;
+        };
+
+        // Dedent: pop every scope deeper than this key.
+        while stack.last().is_some_and(|s| s.col > kl.key_col) {
+            stack.pop();
+        }
+        if kl.has_dash {
+            // A `- ` marker opens a NEW sequence element: reset this column's
+            // seen-set so item 2's keys never read as duplicates of item 1's.
+            if stack.last().is_some_and(|s| s.col == kl.key_col) {
+                stack.pop();
+            }
+            stack.push(DedupeScope {
+                col: kl.key_col,
+                seen: HashMap::new(),
+            });
+        } else if stack.last().map(|s| s.col) != Some(kl.key_col) {
+            stack.push(DedupeScope {
+                col: kl.key_col,
+                seen: HashMap::new(),
+            });
+        }
+
+        let scope = stack.last_mut().expect("scope pushed above");
+        if let Some((prev_idx, prev_class)) = scope.seen.get(&kl.key).cloned() {
+            match resolve_duplicate(&prev_class, &kl.value) {
+                DuplicateResolution::DropCurrent => {
+                    to_delete.insert(idx);
+                    repairs.push(DedupeRepair {
+                        key: kl.key.clone(),
+                        line: idx,
+                        kept: describe_value(&prev_class),
+                        dropped: describe_value(&kl.value),
+                    });
+                }
+                DuplicateResolution::DropPrevious => {
+                    to_delete.insert(prev_idx);
+                    repairs.push(DedupeRepair {
+                        key: kl.key.clone(),
+                        line: prev_idx,
+                        kept: describe_value(&kl.value),
+                        dropped: describe_value(&prev_class),
+                    });
+                    scope.seen.insert(kl.key, (idx, kl.value));
+                }
+                DuplicateResolution::Conflict => return DedupeOutcome::Conflict,
+            }
+        } else {
+            scope.seen.insert(kl.key, (idx, kl.value));
+        }
+    }
+
+    if to_delete.is_empty() {
+        return DedupeOutcome::NoChange;
+    }
+    let text = lines
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !to_delete.contains(idx))
+        .map(|(_, l)| l.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    DedupeOutcome::Deduped { text, repairs }
+}
+
+/// Which line of a duplicate-key pair to drop.
+enum DuplicateResolution {
+    DropCurrent,
+    DropPrevious,
+    Conflict,
+}
+
+/// Apply the duplicate-key invariant table to a (previous, current) value pair.
+fn resolve_duplicate(previous: &ValueClass, current: &ValueClass) -> DuplicateResolution {
+    match (previous, current) {
+        (ValueClass::Null, ValueClass::NonNull(_)) => DuplicateResolution::DropPrevious,
+        (ValueClass::NonNull(_), ValueClass::Null) => DuplicateResolution::DropCurrent,
+        (ValueClass::Null, ValueClass::Null) => DuplicateResolution::DropCurrent,
+        (ValueClass::NonNull(a), ValueClass::NonNull(b)) if a == b => DuplicateResolution::DropCurrent,
+        // Differing non-null, or any Opaque (block/parent/flow) value we cannot
+        // safely compare: do not guess.
+        _ => DuplicateResolution::Conflict,
+    }
+}
+
+/// Human-readable rendering of a value class for the WARN trail.
+fn describe_value(value: &ValueClass) -> String {
+    match value {
+        ValueClass::Null => "null".to_string(),
+        ValueClass::NonNull(v) => v.clone(),
+        ValueClass::Opaque => "<non-scalar>".to_string(),
+    }
+}
+
+/// Parse a mapping-key line into its column, dash flag, key, and value class.
+/// Returns `None` for non-key lines (plain sequence scalars, continuations).
+fn parse_key_line(line: &str) -> Option<KeyLine> {
+    let indent = line.chars().take_while(|c| *c == ' ').count();
+    let after_indent = &line[indent..];
+    let (has_dash, rest) = match after_indent.strip_prefix("- ") {
+        Some(r) => (true, r.trim_start_matches(' ')),
+        None => (false, after_indent),
+    };
+    let dash_width = after_indent.len() - rest.len();
+    let colon = rest.find(':')?;
+    if colon == 0 {
+        return None;
+    }
+    let key = &rest[..colon];
+    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return None;
+    }
+    let value_str = &rest[colon + 1..];
+    // A mapping entry requires the colon to be followed by whitespace or EOL;
+    // `key:value` (no space) is a scalar, not a mapping key.
+    if !value_str.is_empty() && !value_str.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(KeyLine {
+        key: key.to_string(),
+        key_col: indent + dash_width,
+        has_dash,
+        value: classify_value(value_str),
+        is_block: is_block_scalar_indicator(value_str),
+    })
+}
+
+/// Classify the inline value after `key:` for the invariant table.
+fn classify_value(value: &str) -> ValueClass {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        // Empty value = a parent key (nested block follows); not a safe leaf.
+        return ValueClass::Opaque;
+    }
+    if is_block_scalar_indicator(value) || trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return ValueClass::Opaque;
+    }
+    if trimmed == "null" || trimmed == "~" {
+        return ValueClass::Null;
+    }
+    ValueClass::NonNull(trimmed.to_string())
+}
+
+/// Whether an inline value introduces a block scalar (`|`/`>`, with optional
+/// chomping/indentation indicators). A plain or quoted scalar can never start
+/// with a bare `|`/`>`, so a leading one is an unambiguous block indicator.
+fn is_block_scalar_indicator(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with('|') || trimmed.starts_with('>')
+}
+
+/// Mark every line that is the BODY of a block scalar (`|`/`>`) opaque, so the
+/// dedupe walk never inspects or removes scalar content. A block body is the run
+/// of more-indented (or blank) lines following a `key: |`/`key: >` line, up to
+/// the first line indented at or below the key's column.
+fn mark_block_scalar_bodies(lines: &[String]) -> Vec<bool> {
+    let mut opaque = vec![false; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(kl) = parse_key_line(&lines[i]) else {
+            i += 1;
+            continue;
+        };
+        if !kl.is_block {
+            i += 1;
+            continue;
+        }
+        let threshold = kl.key_col;
+        let mut j = i + 1;
+        while j < lines.len() {
+            let line = &lines[j];
+            if line.trim().is_empty() {
+                opaque[j] = true;
+                j += 1;
+                continue;
+            }
+            let indent = line.chars().take_while(|c| *c == ' ').count();
+            if indent > threshold {
+                opaque[j] = true;
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        i = j;
+    }
+    opaque
 }
 
 /// The YAML leaf mirroring `vault::distilled::Claim` as a distiller pattern

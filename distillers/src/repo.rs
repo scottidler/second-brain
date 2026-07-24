@@ -110,7 +110,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
         };
 
         let yaml_body = strip_fences(&raw);
-        let parsed: PatternYaml = match serde_yaml::from_str(yaml_body) {
+        let parsed: PatternYaml = match crate::parse::parse_pattern_yaml(yaml_body) {
             Ok(p) => p,
             Err(err) => {
                 log::warn!("RepoDistiller: yaml parse failed: {err}; using fallback");
