@@ -39,7 +39,7 @@ pub const POOL_SIZE: u32 = 8;
 
 /// Schema version recorded in the `schema_version` table. Bump when the
 /// schema changes.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA_SQL: &str = include_str!("receipts/schema.sql");
 
@@ -249,6 +249,27 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )
         .context("rebuild receipts table for v3 CHECK constraint widen")?;
     }
+    // v4 (harvest-watchdog-cross-process-reaping design, Phase 1): add the
+    // shared trace-lease columns (`lease_owner_pid`, `lease_until`) so the
+    // daemon watchdog and a separate `sb borg harvest` process can agree on
+    // trace liveness through the shared receipts row instead of the
+    // process-local `ACTIVE_TRACES` set. MUST run AFTER the v3 rebuild block
+    // above: that rebuild's fixed 12-column `INSERT...SELECT` would silently
+    // DROP any column added before it runs, on a pre-v3 DB. Idempotent via
+    // the column probe, same pattern as the v2 `degraded` add.
+    if !has_column(conn, "receipts", "lease_owner_pid")? {
+        log::debug!("receipts::run_migrations: adding lease_owner_pid column (v4)");
+        conn.execute(
+            "ALTER TABLE receipts ADD COLUMN lease_owner_pid INTEGER DEFAULT NULL",
+            [],
+        )
+        .context("add lease_owner_pid column")?;
+    }
+    if !has_column(conn, "receipts", "lease_until")? {
+        log::debug!("receipts::run_migrations: adding lease_until column (v4)");
+        conn.execute("ALTER TABLE receipts ADD COLUMN lease_until TEXT DEFAULT NULL", [])
+            .context("add lease_until column")?;
+    }
     // MAX() over an empty table returns one row whose value is NULL, which
     // rusqlite cannot decode straight into i64; bind through Option to read
     // it cleanly.
@@ -257,6 +278,12 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             row.get::<_, Option<i64>>(0)
         })
         .context("read schema_version")?;
+    // Rollback safety: a stored version >= the code's SCHEMA_VERSION (e.g. this
+    // DB was already opened by a newer binary, or a future migration lands
+    // ahead of this one in a rollback) is a no-op, never a downgrade and never
+    // a panic. The column/table probes above are idempotent regardless of this
+    // counter, so an older binary opening a newer DB still gets its additive
+    // columns/tables verified present; it just leaves `schema_version` alone.
     match current {
         Some(v) if v >= SCHEMA_VERSION => Ok(()),
         _ => {

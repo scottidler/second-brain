@@ -718,6 +718,110 @@ fn schema_version_recorded_once() {
 }
 
 #[test]
+fn fresh_db_has_lease_columns() {
+    // A brand-new DB created straight from the baseline schema.sql (v4)
+    // must have both lease columns without any migration running.
+    let conn = fresh();
+    assert!(
+        has_column(&conn, "receipts", "lease_owner_pid").expect("probe"),
+        "fresh DB must have lease_owner_pid"
+    );
+    assert!(
+        has_column(&conn, "receipts", "lease_until").expect("probe"),
+        "fresh DB must have lease_until"
+    );
+}
+
+#[test]
+fn v4_migration_adds_lease_columns_surviving_v3_rebuild_from_pre_v3_db() {
+    // Simulate a v1 DB (no `degraded` column, narrower CHECK constraints, no
+    // `lease_*` columns) seeded at a real file path, then drive it through
+    // the real `open_at()` entry point -- which chains v2 (add degraded), v3
+    // (rebuild, widen CHECK), then v4 (add lease columns) in that order.
+    // Proves the v4 columns survive the v3 rebuild's fixed 12-column
+    // INSERT...SELECT (they are added AFTER it, per the migration-ordering
+    // resolved decision) and that re-opening is idempotent.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("receipts.db");
+    {
+        let conn = Connection::open(&path).expect("open raw v1 db");
+        apply_pragmas(&conn).expect("pragmas");
+        conn.execute_batch(
+            "CREATE TABLE receipts (
+               trace_id        TEXT NOT NULL PRIMARY KEY,
+               received_at     TEXT NOT NULL,
+               method          TEXT NOT NULL,
+               kind            TEXT NOT NULL
+                                CHECK (kind IN ('url', 'text', 'binary')),
+               raw_input       TEXT NOT NULL,
+               status          TEXT NOT NULL
+                                CHECK (status IN ('received', 'succeeded', 'failed')),
+               terminal_at     TEXT,
+               note_path       TEXT,
+               failure_stage   TEXT,
+               failure_reason  TEXT,
+               replay_of       TEXT
+             );
+             CREATE TABLE schema_version (version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_version (version, applied_at) VALUES (1, '2026-01-01T00:00:00Z');
+             INSERT INTO receipts (trace_id, received_at, method, kind, raw_input, status)
+               VALUES ('legacy-1', '2026-01-01T00:00:00Z', 'http', 'url', 'https://x.com', 'succeeded');",
+        )
+        .expect("seed pre-v3 (v1) schema");
+    }
+
+    // First open: chains v2 -> v3 -> v4. Confirm both new columns exist and
+    // the pre-existing row survived the v3 rebuild untouched.
+    {
+        let conn = open_at(&path).expect("first open migrates v1 all the way to v4");
+        assert!(
+            has_column(&conn, "receipts", "lease_owner_pid").expect("probe"),
+            "lease_owner_pid must survive the v3 rebuild"
+        );
+        assert!(
+            has_column(&conn, "receipts", "lease_until").expect("probe"),
+            "lease_until must survive the v3 rebuild"
+        );
+        let r = get(&conn, "legacy-1").expect("get").expect("legacy row present");
+        assert_eq!(r.status, "succeeded");
+        assert_eq!(r.kind, "url");
+    }
+
+    // Second open: idempotent, no error, columns still present.
+    {
+        let conn = open_at(&path).expect("second open does not re-fail");
+        assert!(has_column(&conn, "receipts", "lease_owner_pid").expect("probe"));
+        assert!(has_column(&conn, "receipts", "lease_until").expect("probe"));
+        let r = get(&conn, "legacy-1").expect("get").expect("legacy row still present");
+        assert_eq!(r.status, "succeeded");
+    }
+}
+
+#[test]
+fn migrations_do_not_panic_on_a_newer_stored_schema_version() {
+    // A DB stamped with a schema_version newer than the code's SCHEMA_VERSION
+    // (a v4 DB opened by an older binary, or a hypothetical future version)
+    // must not panic and must not be downgraded. The `v >= SCHEMA_VERSION`
+    // match arm is the rollback-safety guard; this test bites if that arm is
+    // ever removed or narrowed to exact equality.
+    let conn = fresh();
+    let future_version = SCHEMA_VERSION + 95;
+    conn.execute(
+        "UPDATE schema_version SET version=? WHERE version=?",
+        params![future_version, SCHEMA_VERSION],
+    )
+    .expect("bump stored version to a future value");
+    run_migrations(&conn).expect("must not panic on a newer stored version");
+    let v: i64 = conn
+        .query_row("SELECT MAX(version) FROM schema_version", [], |row| row.get(0))
+        .expect("max version");
+    assert_eq!(v, future_version, "stored version must not be downgraded");
+    // Column probes are unconditional, so they still hold on the "future" DB.
+    assert!(has_column(&conn, "receipts", "lease_owner_pid").expect("probe"));
+    assert!(has_column(&conn, "receipts", "lease_until").expect("probe"));
+}
+
+#[test]
 fn query_filters_by_harvest_method() {
     // Phase 6 observability: `sb borg log --method harvest` maps to this
     // filter. A harvest session row and a non-harvest row coexist; the filter

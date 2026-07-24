@@ -37,7 +37,16 @@ CREATE TABLE IF NOT EXISTS receipts (
   -- rather than halting). Queryable via `sb borg log --degraded`. This
   -- formally retires the old "hard distill failures halt and route to DLQ"
   -- policy: degraded publishes are the documented behavior, now visible.
-  degraded        INTEGER NOT NULL DEFAULT 0
+  degraded        INTEGER NOT NULL DEFAULT 0,
+  -- Renewable cross-process liveness lease (harvest-watchdog-cross-process-
+  -- reaping design). `lease_owner_pid` is the owning process's
+  -- `std::process::id()` -- DIAGNOSTIC only (which process holds it), never
+  -- the liveness gate, because a PID can be reused after its process dies.
+  -- `lease_until` (TIMESTAMP_FMT) IS the liveness gate: NULL means no live
+  -- lease; a non-NULL value in the past means the owning process stopped
+  -- renewing (fail closed, reap-eligible past the received_at deadline).
+  lease_owner_pid INTEGER DEFAULT NULL,
+  lease_until     TEXT DEFAULT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_receipts_status ON receipts(status);
