@@ -301,6 +301,37 @@ fn stale_embedding_targets_returns_unembedded_notes_for_summary() {
 }
 
 #[test]
+fn stale_embedding_targets_excludes_merge_tombstones() {
+    // cortex association-sweep Phase 3: a soft-retired tombstone carries a
+    // non-empty `superseded_by`. It MUST NOT surface as an embedding target,
+    // for any kind. Both notes here have a NON-EMPTY summary (insert_note sets
+    // `summary`), so exclusion can only come from the `superseded_by` predicate,
+    // not the incidental empty-summary filter - this is the bite: it proves the
+    // skip is by-tombstone, not by-empty-note.
+    let index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-test-v1");
+    insert_note(&index, "notes/live.md", "tech", "session", 100);
+    insert_note(&index, "notes/tomb.md", "tech", "session", 100);
+    index
+        .conn
+        .execute(
+            "UPDATE notes SET superseded_by = 'live' WHERE path = 'notes/tomb.md'",
+            [],
+        )
+        .expect("mark tombstone");
+
+    let targets = index
+        .stale_embedding_targets(EmbeddingKind::Summary, m.model_version(), 100)
+        .expect("targets");
+    let paths: Vec<&str> = targets.iter().map(|t| t.note_path.as_str()).collect();
+    assert!(paths.contains(&"notes/live.md"), "the live note is a target: {paths:?}");
+    assert!(
+        !paths.contains(&"notes/tomb.md"),
+        "the tombstone is excluded despite a non-empty summary: {paths:?}"
+    );
+}
+
+#[test]
 fn stale_embedding_targets_carry_note_title() {
     // Phase 7a: cortex needs the title to prepend it to the summary before
     // embedding, so the target rows must surface `notes.title`.

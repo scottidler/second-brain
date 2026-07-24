@@ -7,11 +7,15 @@
 //! Phase 2 adds the pure similarity decision core (`decide`): pairwise
 //! similarity (embedding cosine primary, claim TF-IDF fallback, uncomputable
 //! treated as below-threshold) fed into union-find transitive clustering.
-//! The merge executor, cross-link executor, and CLI/daemon wiring are later
-//! phases of the same design - see
+//! Phase 3 adds the merge executor (`execute_merge`): it enriches the survivor
+//! with the idempotent union of every absorbed note's claims,
+//! `## Session Details`, and `cortex-session-ids`, then soft-retires each
+//! absorbed note to a `superseded-by:` tombstone (no deletion). The cross-link
+//! executor and CLI/daemon wiring are later phases of the same design - see
 //! `docs/design/2026-07-24-cortex-association-sweep.md`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use eyre::Result;
@@ -358,6 +362,363 @@ impl UnionFind {
         let (root, child) = if ra < rb { (ra, rb) } else { (rb, ra) };
         self.parent[child] = root;
     }
+}
+
+// -- Phase 3: merge executor -----------------------------------------------
+
+/// The `## Claims` section heading (as `distillers::render` writes it).
+const CLAIMS_HEADING: &str = "## Claims";
+/// The `## Session Details` section heading (as `borg::pipeline::session`
+/// writes it).
+const SESSION_DETAILS_HEADING: &str = "## Session Details";
+
+/// The single note-write seam the merge executor writes through. Production is
+/// `AtomicWriter` (delegating to `vault::note::write_atomic`); tests inject a
+/// writer that fails for a chosen path so the partial-failure self-heal can be
+/// asserted deterministically without racing the real filesystem. Generic over
+/// the port (no `dyn`) per the repo's Rust conventions.
+///
+/// The sibling `apply_scope`/`apply_duplicates` call `write_atomic` directly;
+/// the port here is the one deviation, earned by Phase 3's requirement to test
+/// a mid-cluster tombstone-write failure (a break-the-code self-heal proof).
+pub trait NoteWriter {
+    fn write(&self, dest: &Path, bytes: &[u8]) -> Result<()>;
+}
+
+/// The production writer: an atomic, Syncthing-safe write via the shared
+/// workspace primitive (`vault::note::write_atomic`).
+pub struct AtomicWriter;
+
+impl NoteWriter for AtomicWriter {
+    fn write(&self, dest: &Path, bytes: &[u8]) -> Result<()> {
+        vault::note::write_atomic(dest, bytes)
+    }
+}
+
+/// Execute ONE merge cluster: enrich the survivor with the deduped union of
+/// every absorbed note's claims, `## Session Details` bullets, and
+/// `cortex-session-ids`, then soft-retire each absorbed note to a tombstone.
+///
+/// `survivor`, `absorbed`, and `session_ids` come straight off the
+/// `AssociationOutcome::Merge` variant `decide` produced (survivor already
+/// chosen by earliest date, ids already the sorted dedup union). Paths are
+/// vault-relative; each is joined onto `vault_root` for the read/write.
+///
+/// Apply order (multi-file safety - `write_atomic` is per-file, a merge touches
+/// N+1 files): (1) preflight-read the survivor and every absorbed note; (2)
+/// write the enriched survivor FIRST (it holds the full union); (3) then write
+/// each absorbed tombstone. If the survivor read/write fails the whole cluster
+/// is skipped (no absorbed note is retired, so nothing is stranded). If a
+/// single tombstone write fails it WARN-and-continues (the `duplicates.rs:189`
+/// contract): the survivor already holds the union and the un-retired absorbed
+/// note keeps its `slug:`, so the next run re-groups and re-absorbs it - and
+/// because the union is idempotent, no duplication results (self-heal).
+///
+/// Returns the vault-relative paths this call actually byte-changed (the
+/// survivor when enriched, plus each retired tombstone), mirroring
+/// `scope::apply_scope` / `duplicates::apply_duplicates` so the daemon's
+/// oscillation fingerprint draws only from real writes. A byte-identical
+/// survivor is NOT rewritten, so a re-absorption during self-heal reports only
+/// the newly-retired tombstone.
+pub fn execute_merge<W: NoteWriter>(
+    vault_root: &Path,
+    survivor: &Path,
+    absorbed: &[PathBuf],
+    session_ids: &[String],
+    writer: &W,
+) -> Result<Vec<String>> {
+    log::debug!(
+        "association::execute_merge: vault_root={} survivor={} absorbed={} ids={}",
+        vault_root.display(),
+        survivor.display(),
+        absorbed.len(),
+        session_ids.len()
+    );
+    let mut changed: Vec<String> = Vec::new();
+
+    let survivor_abs = vault_root.join(survivor);
+    let original = match fs::read_to_string(&survivor_abs) {
+        Ok(c) => c,
+        Err(e) => {
+            // Survivor unreadable -> skip the whole cluster. Retiring an
+            // absorbed note now would strand its content with no enriched home.
+            log::warn!(
+                "association::execute_merge: skipping cluster, survivor unreadable {}: {e}",
+                survivor.display()
+            );
+            return Ok(changed);
+        }
+    };
+
+    // Preflight-read every absorbed note. A note that fails to read is skipped
+    // (neither unioned nor retired): it keeps its slug and re-groups next run.
+    let mut readable: Vec<(&PathBuf, String)> = Vec::new();
+    for path in absorbed {
+        match fs::read_to_string(vault_root.join(path)) {
+            Ok(c) => readable.push((path, c)),
+            Err(e) => log::warn!(
+                "association::execute_merge: skipping absorbed note (unreadable) {}: {e}",
+                path.display()
+            ),
+        }
+    }
+
+    // Build the enriched survivor: append the absorbed claim bullets, then the
+    // absorbed session-detail bullets, then set cortex-session-ids to the union.
+    let claim_blocks: Vec<Vec<String>> = readable
+        .iter()
+        .flat_map(|(_, c)| bullet_blocks(c, CLAIMS_HEADING))
+        .collect();
+    let detail_blocks: Vec<Vec<String>> = readable
+        .iter()
+        .flat_map(|(_, c)| bullet_blocks(c, SESSION_DETAILS_HEADING))
+        .collect();
+
+    let mut enriched = append_bullets(&original, CLAIMS_HEADING, &claim_blocks, claim_key);
+    enriched = append_bullets(&enriched, SESSION_DETAILS_HEADING, &detail_blocks, session_detail_key);
+    if !session_ids.is_empty() {
+        let seq = serde_yaml::Value::Sequence(
+            session_ids
+                .iter()
+                .map(|id| serde_yaml::Value::String(id.clone()))
+                .collect(),
+        );
+        if let Some(with_ids) =
+            crate::scope::insert_frontmatter_fields(&enriched, &[("cortex-session-ids".to_string(), seq)])
+        {
+            enriched = with_ids;
+        }
+    }
+
+    // Write the survivor FIRST, only if it actually changed (a byte-identical
+    // re-run must not churn the file or the daemon fingerprint).
+    if enriched != original {
+        if let Err(e) = writer.write(&survivor_abs, enriched.as_bytes()) {
+            // Survivor write failed -> do NOT retire any absorbed note.
+            log::warn!(
+                "association::execute_merge: survivor write failed, cluster skipped {}: {e}",
+                survivor.display()
+            );
+            return Ok(changed);
+        }
+        log::info!("association::execute_merge: enriched survivor {}", survivor.display());
+        changed.push(survivor.to_string_lossy().into_owned());
+    }
+
+    // Soft-retire each readable absorbed note. A failed tombstone write WARNs
+    // and continues; the note self-heals on the next run.
+    for (path, content) in &readable {
+        let Some(tombstone) = tombstone_content(content, survivor) else {
+            log::warn!(
+                "association::execute_merge: absorbed note has no frontmatter, not retiring {}",
+                path.display()
+            );
+            continue;
+        };
+        if let Err(e) = writer.write(&vault_root.join(path), tombstone.as_bytes()) {
+            log::warn!(
+                "association::execute_merge: tombstone write failed (self-heals next run) {}: {e}",
+                path.display()
+            );
+            continue;
+        }
+        log::info!(
+            "association::execute_merge: soft-retired {} -> superseded-by {}",
+            path.display(),
+            survivor.display()
+        );
+        changed.push(path.to_string_lossy().into_owned());
+    }
+
+    log::debug!("association::execute_merge: changed={}", changed.len());
+    Ok(changed)
+}
+
+/// True for a markdown list-item line (`- ` or `* `), inspected trimmed.
+fn is_bullet(trimmed: &str) -> bool {
+    trimmed.starts_with("- ") || trimmed.starts_with("* ")
+}
+
+/// The bullet content with its `- `/`* ` marker stripped (unchanged if it is
+/// not a bullet).
+fn strip_bullet(trimmed: &str) -> &str {
+    trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .unwrap_or(trimmed)
+}
+
+/// Extract the bullet "blocks" of a `## H2` section: each block is a bullet
+/// line plus any `> ...` quote-continuation lines that belong to it (matching
+/// `vault::search::parse_body_claims`'s continuation handling), so a claim's
+/// verbatim quote rides along when it is unioned into the survivor. Lines are
+/// returned verbatim so formatting is preserved. Empty when the section is
+/// absent.
+fn bullet_blocks(content: &str, heading: &str) -> Vec<Vec<String>> {
+    let mut blocks: Vec<Vec<String>> = Vec::new();
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("## ") {
+            if in_section {
+                break;
+            }
+            in_section = trimmed == heading;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if is_bullet(trimmed) {
+            blocks.push(vec![line.to_string()]);
+        } else if trimmed.starts_with("> ")
+            && let Some(last) = blocks.last_mut()
+        {
+            last.push(line.to_string());
+        }
+    }
+    blocks
+}
+
+/// Dedup key for a `## Claims` bullet: its trimmed text with the bullet marker
+/// stripped (the design's "claims whose trimmed text is not already present").
+fn claim_key(bullet_line: &str) -> String {
+    strip_bullet(bullet_line.trim_start()).trim().to_string()
+}
+
+/// Dedup key for a `## Session Details` bullet: the `clyde://<id>` session id,
+/// so the same session is never listed twice even if its rendered title/repo
+/// columns differ across notes. Falls back to the trimmed text when the bullet
+/// carries no `clyde://` id.
+fn session_detail_key(bullet_line: &str) -> String {
+    let text = strip_bullet(bullet_line.trim_start()).trim();
+    if let Some(rest) = text.strip_prefix("clyde://") {
+        let id: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
+        if !id.is_empty() {
+            return id;
+        }
+    }
+    text.to_string()
+}
+
+/// Append `incoming` bullet blocks to `content`'s `heading` section, skipping
+/// any block whose `key` already appears there (idempotent union). Incoming
+/// blocks are also deduped against each other so two absorbed notes carrying
+/// the same claim add it once. If the section is absent it is created at the
+/// end of the document. Returns `content` unchanged (byte-identical) when every
+/// incoming block is already present.
+fn append_bullets(content: &str, heading: &str, incoming: &[Vec<String>], key: fn(&str) -> String) -> String {
+    if incoming.is_empty() {
+        return content.to_string();
+    }
+
+    let mut seen: BTreeSet<String> = bullet_blocks(content, heading)
+        .iter()
+        .filter_map(|b| b.first())
+        .map(|line| key(line))
+        .collect();
+
+    let mut to_add: Vec<&Vec<String>> = Vec::new();
+    for block in incoming {
+        let Some(first) = block.first() else { continue };
+        if seen.insert(key(first)) {
+            to_add.push(block);
+        }
+    }
+    if to_add.is_empty() {
+        return content.to_string();
+    }
+
+    let ends_with_newline = content.ends_with('\n');
+    let mut lines: Vec<String> = content.lines().map(String::from).collect();
+
+    match lines.iter().position(|l| l.trim_start() == heading) {
+        Some(start) => {
+            // Section end = the next `## ` heading after start, else EOF.
+            let end = lines[start + 1..]
+                .iter()
+                .position(|l| l.trim_start().starts_with("## "))
+                .map(|off| start + 1 + off)
+                .unwrap_or(lines.len());
+            // Insert after the last non-blank line within the section so new
+            // bullets sit with the existing ones, not after trailing blanks.
+            let mut insert_at = start + 1;
+            for (i, line) in lines.iter().enumerate().take(end).skip(start + 1) {
+                if !line.trim().is_empty() {
+                    insert_at = i + 1;
+                }
+            }
+            let flat: Vec<String> = to_add.into_iter().flatten().cloned().collect();
+            lines.splice(insert_at..insert_at, flat);
+        }
+        None => {
+            // Section absent: create it at EOF.
+            if lines.last().map(|l| !l.trim().is_empty()).unwrap_or(false) {
+                lines.push(String::new());
+            }
+            lines.push(heading.to_string());
+            lines.push(String::new());
+            for block in to_add {
+                lines.extend(block.iter().cloned());
+            }
+        }
+    }
+
+    let mut out = lines.join("\n");
+    if ends_with_newline {
+        out.push('\n');
+    }
+    out
+}
+
+/// Rewrite an absorbed note into a soft-retire tombstone: frontmatter gains
+/// `superseded-by: <survivor-stem>` and loses `slug:` (so it never re-groups),
+/// and the body becomes a single `Merged into [[survivor-stem]].` redirect.
+/// No `status:` change - `vault::schema::Status` has no Archived variant, so
+/// `superseded-by:` IS the tombstone marker (schema-is-law). Returns `None`
+/// when the note has no frontmatter block (cannot be marked).
+fn tombstone_content(content: &str, survivor: &Path) -> Option<String> {
+    let stem = survivor_stem(survivor);
+    // Drop slug first (if present), then set superseded-by.
+    let without_slug =
+        crate::scope::remove_frontmatter_fields(content, &["slug".to_string()]).unwrap_or_else(|| content.to_string());
+    let marked = crate::scope::insert_frontmatter_fields(
+        &without_slug,
+        &[("superseded-by".to_string(), serde_yaml::Value::String(stem.clone()))],
+    )?;
+    let redirect = format!("Merged into [[{stem}]].\n");
+    swap_body(&marked, &redirect)
+}
+
+/// The survivor's filename without its `.md` extension - the wikilink target
+/// and `superseded-by:` value (e.g. `foo--a1b2c3d4.md` -> `foo--a1b2c3d4`).
+fn survivor_stem(survivor: &Path) -> String {
+    survivor
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| survivor.to_string_lossy().into_owned())
+}
+
+/// Replace a note's body (everything after the closing `---` fence) with
+/// `new_body`, preserving the frontmatter block verbatim. Mirrors the
+/// fence-parsing in `scope::insert_frontmatter_fields`. `None` when there is no
+/// frontmatter block.
+fn swap_body(content: &str, new_body: &str) -> Option<String> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    let after_opening = trimmed[3..].trim_start_matches(['\r', '\n']);
+    let end_pos = after_opening.find("\n---")?;
+    let fm_block = &after_opening[..end_pos];
+    // rest = "\n---...\n<body>"; skip the leading '\n', the fence line runs to
+    // the next newline.
+    let rest = &after_opening[end_pos + 1..];
+    let fence_end = rest.find('\n').unwrap_or(rest.len());
+    let closing_fence = &rest[..fence_end];
+    let offset = content.len() - trimmed.len();
+    let prefix = &content[..offset];
+    Some(format!("{prefix}---\n{fm_block}\n{closing_fence}\n\n{new_body}"))
 }
 
 #[cfg(test)]

@@ -188,3 +188,60 @@ Design doc: `docs/design/2026-07-24-cortex-association-sweep.md`
   interpretation; it is resolved in-line above and covered by
   `three_member_group_merges_close_pair_cross_links_distant_third`. Phases 3–5
   (executors + CLI/daemon) consume `AssociationOutcome` unchanged.
+
+## Phase 3: Merge executor
+
+### Design decisions
+- **`execute_merge(vault_root, survivor, absorbed, session_ids, writer)` returns
+  the changed vault-relative paths** — `cortex/src/association.rs::execute_merge`
+  — mirrors `scope::apply_scope`/`duplicates::apply_duplicates` so Phase 5's
+  `apply` and the daemon oscillation fingerprint draw only from real writes; a
+  byte-identical survivor is not rewritten (skip-if-unchanged).
+- **Idempotent union operates on raw section bullet lines, keyed per section** —
+  `association.rs::append_bullets` + `claim_key`/`session_detail_key` — claims
+  dedup by trimmed bullet text (design wording), session-details dedup by the
+  `clyde://<id>` id (stable even if a rendered title/repo column differs).
+  `bullet_blocks` carries each claim's `> "..."` quote-continuation lines along
+  with it, matching `vault::search::parse_body_claims`.
+- **Tombstone via existing frontmatter helpers + a body swap** —
+  `association.rs::tombstone_content` composes `scope::remove_frontmatter_fields`
+  (drop `slug:`), `scope::insert_frontmatter_fields` (add `superseded-by:`), and
+  a new local `swap_body` (replace body with the `Merged into [[stem]].`
+  redirect). NO `status:` change — `superseded-by:` is the marker (schema-is-law).
+- **Survivor-stem, not a rename** — `association.rs::survivor_stem` uses the
+  survivor's own `file_stem`; the survivor keeps its filename (design OQ4).
+- **Explicit tombstone exclusion from embed via a `superseded_by` notes column**
+  — `vault/src/search/schema.rs` (CREATE TABLE + `ensure_superseded_by_column`
+  migration), `vault/src/search/index.rs::index_one` (populate from
+  `superseded-by` frontmatter), `vault/src/search/vector.rs::stale_embedding_targets`
+  (`AND (n.superseded_by IS NULL OR n.superseded_by = '')` on all three kinds).
+  A session tombstone would already be skipped incidentally (empty summary/claims,
+  Session is not transcript-eligible), but the explicit predicate is fail-closed
+  and lets the test bite with a tombstone that STILL carries a non-empty summary.
+
+### Deviations
+- **A `NoteWriter` port (`AtomicWriter` in prod) instead of calling
+  `vault::note::write_atomic` directly** like the sibling `apply_*` functions —
+  same effect, correct seam. Earned by Phase 3's mandate to test a mid-cluster
+  tombstone-write failure and prove self-heal deterministically (a `FailWriter`
+  fails one path); a read-only-dir filesystem trick would be non-portable and
+  root-fragile. Phase 5's `apply` threads `&AtomicWriter`.
+- **Added the `superseded_by` column + migration in the vault crate**, which the
+  Phase 3 bullet ("tombstones excluded from ... embed") implies but does not
+  spell out as a schema change. It is the correct, testable seam for the
+  "a tombstone gets no new embedding row" success criterion.
+
+### Tradeoffs
+- **Skip-if-unchanged on the survivor, always-write on a retire** vs writing
+  both unconditionally — keeps the normal second run a true byte-level no-op and
+  lets a self-heal re-absorption report only the newly-retired tombstone
+  (survivor already unioned), rather than churning the survivor's mtime.
+- **Dedup session-details by clyde id, claims by trimmed text** vs one uniform
+  key — the design specifies different identities for the two sections, and the
+  id is the stable identity for a session bullet whose display columns can drift.
+
+### Open questions
+- None. Cross-repo/system-mutating steps: none in this phase. The `superseded_by`
+  column is additive (`DEFAULT ''`, idempotent `ALTER`), so it needs no
+  coordinated migration — existing DBs gain it on next open via
+  `ensure_superseded_by_column`.

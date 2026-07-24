@@ -109,6 +109,13 @@ impl super::SearchIndex {
         // summary) without any file I/O.
         let capture_note = extract_cortex_string(&fm.extra, "capture-note");
 
+        // The merge tombstone marker (cortex association-sweep Phase 3): the
+        // survivor-stem a soft-retired note redirects to. Non-empty => this row
+        // is a tombstone and `stale_embedding_targets` excludes it from every
+        // embedding kind. Vault-derived (cortex writes it in frontmatter), so it
+        // rides the same UPDATE/INSERT path as the rest.
+        let superseded_by = extract_cortex_string(&fm.extra, "superseded-by");
+
         let tags_json = fm
             .tags
             .as_ref()
@@ -200,7 +207,8 @@ impl super::SearchIndex {
                     cortex_thread_author = ?29,
                     pinned = ?30,
                     trace = ?31, ingested = ?32, trace_expires = ?33,
-                    capture_note = ?34, repo = ?35, repos_touched = ?36
+                    capture_note = ?34, repo = ?35, repos_touched = ?36,
+                    superseded_by = ?37
                  WHERE path = ?1",
                 params![
                     path_str.as_ref(),
@@ -239,6 +247,7 @@ impl super::SearchIndex {
                     capture_note,
                     repo,
                     repos_touched,
+                    superseded_by,
                 ],
             )?;
             Ok(IndexAction::Updated)
@@ -258,7 +267,8 @@ impl super::SearchIndex {
                     search_hit_count, last_accessed_at, inbound_link_count,
                     pinned,
                     trace, ingested, trace_expires,
-                    capture_note, repo, repos_touched
+                    capture_note, repo, repos_touched,
+                    superseded_by
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                     ?15, ?16, ?17, ?18, ?19, ?20,
@@ -266,7 +276,8 @@ impl super::SearchIndex {
                     0, NULL, 0,
                     ?30,
                     ?31, ?32, ?33,
-                    ?34, ?35, ?36
+                    ?34, ?35, ?36,
+                    ?37
                 )",
                 params![
                     path_str.as_ref(),
@@ -305,6 +316,7 @@ impl super::SearchIndex {
                     capture_note,
                     repo,
                     repos_touched,
+                    superseded_by,
                 ],
             )?;
             Ok(IndexAction::Inserted)

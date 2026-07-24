@@ -42,7 +42,8 @@ impl super::SearchIndex {
                 pinned INTEGER DEFAULT 0,
                 trace TEXT DEFAULT '',
                 ingested TEXT DEFAULT '',
-                trace_expires TEXT DEFAULT ''
+                trace_expires TEXT DEFAULT '',
+                superseded_by TEXT DEFAULT ''
             );
 
             CREATE INDEX IF NOT EXISTS idx_notes_domain ON notes(domain);
@@ -65,6 +66,7 @@ impl super::SearchIndex {
         self.ensure_trace_columns()?;
         self.ensure_repo_columns()?;
         self.ensure_repos_touched_column()?;
+        self.ensure_superseded_by_column()?;
 
         // FTS5 cannot ALTER, so we detect old (no-claims) schemas and rebuild.
         // Triggers attach to `notes`, not `notes_fts`, so they must be dropped
@@ -415,6 +417,34 @@ impl super::SearchIndex {
         if !existing_columns.contains(&"repos_touched".to_string()) {
             self.conn
                 .execute_batch("ALTER TABLE notes ADD COLUMN repos_touched TEXT;")?;
+        }
+
+        Ok(())
+    }
+
+    /// Add the `superseded_by` column to existing DBs (cortex association-sweep
+    /// design, Phase 3: the survivor-stem a soft-retired tombstone points at).
+    /// A non-empty value marks the row as a merge tombstone, which
+    /// [`stale_embedding_targets`](super::SearchIndex::stale_embedding_targets)
+    /// excludes from every embedding kind so a tombstone never lands an
+    /// embedding row (the exclusion is a required part of the feature, not an
+    /// afterthought). Same idempotent `PRAGMA table_info` + single
+    /// `ALTER ADD COLUMN` pattern as `ensure_repo_columns`.
+    ///
+    /// `DEFAULT ''` (not NULL) so a non-tombstone row reads back as the empty
+    /// string, matching what `index_one` writes for every ordinary note; the
+    /// exclusion predicate then treats both `''` and legacy `NULL` as
+    /// "not superseded".
+    fn ensure_superseded_by_column(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(notes)")?;
+        let existing_columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(warn_row)
+            .collect();
+
+        if !existing_columns.contains(&"superseded_by".to_string()) {
+            self.conn
+                .execute_batch("ALTER TABLE notes ADD COLUMN superseded_by TEXT DEFAULT '';")?;
         }
 
         Ok(())

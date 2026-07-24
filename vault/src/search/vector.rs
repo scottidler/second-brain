@@ -663,6 +663,7 @@ impl SearchIndex {
                   AND x.kind = ?1
                   AND x.model_version = ?2
                  WHERE (n.summary IS NOT NULL AND n.summary != '')
+                   AND (n.superseded_by IS NULL OR n.superseded_by = '')
                    AND (e.id IS NULL
                         OR e.source_modified_at < n.modified_at)
                    AND (x.note_path IS NULL
@@ -683,6 +684,7 @@ impl SearchIndex {
                   AND x.kind = ?1
                   AND x.model_version = ?2
                  WHERE n.note_type IN ({transcript_eligible_in_clause})
+                   AND (n.superseded_by IS NULL OR n.superseded_by = '')
                    AND (e.id IS NULL
                         OR e.source_modified_at < n.modified_at)
                    AND (x.note_path IS NULL
@@ -707,6 +709,7 @@ impl SearchIndex {
                   AND x.kind = ?1
                   AND x.model_version = ?2
                  WHERE (n.claims IS NOT NULL AND n.claims != '')
+                   AND (n.superseded_by IS NULL OR n.superseded_by = '')
                    AND (e.id IS NULL
                         OR e.source_modified_at < n.modified_at)
                    AND (x.note_path IS NULL

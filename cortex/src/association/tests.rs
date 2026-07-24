@@ -4,10 +4,13 @@ use std::path::{Path, PathBuf};
 use eyre::Result;
 use serde_yaml::Value;
 
-use super::{AssociationOutcome, DecideCtx, EmbeddingCosine, decide, group_by_slug};
+use super::{
+    AssociationOutcome, AtomicWriter, DecideCtx, EmbeddingCosine, NoteWriter, append_bullets, decide, execute_merge,
+    group_by_slug,
+};
 use crate::config::SimilaritySource;
 use crate::testutil::NoteBuilder;
-use crate::vault::Note;
+use crate::vault::{Note, parse_note};
 
 fn session_note(path: &str, slug: &str) -> Note {
     NoteBuilder::new(path)
@@ -507,4 +510,380 @@ fn embedding_db_error_propagates_not_swallowed() {
         decide(&refs(&notes), &ctx).is_err(),
         "a real DB error surfaces, not swallowed as uncomputable"
     );
+}
+
+// -- Phase 3: merge executor -----------------------------------------------
+
+/// Write a full harvest-shaped session note to `root/<name>` sharing slug
+/// `foo`, with the given date, primary session id, `## Claims` bullets, and
+/// `## Session Details` bullets. Mirrors what borg publishes so the executor's
+/// section-union logic runs against realistic input.
+fn write_session_file(root: &std::path::Path, name: &str, date: &str, id: &str, claims: &[&str], details: &[&str]) {
+    let claims_block = claims.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n");
+    let details_block = details.iter().map(|d| format!("- {d}")).collect::<Vec<_>>().join("\n");
+    let content = format!(
+        "---\n\
+         title: {name}\n\
+         date: {date}\n\
+         type: session\n\
+         slug: foo\n\
+         cortex-session-ids:\n\
+         - {id}\n\
+         ---\n\
+         ## Summary\n\n\
+         summary of {name}\n\n\
+         ## Claims\n\n\
+         {claims_block}\n\n\
+         ## Session Details\n\n\
+         {details_block}\n"
+    );
+    std::fs::write(root.join(name), content).expect("write session file");
+}
+
+/// Parse every `.md` in `root` into `Note`s (path-sorted), the input to a
+/// grouping+decide+execute run against the on-disk fixture.
+fn scan_dir(root: &std::path::Path) -> Vec<Note> {
+    let mut notes: Vec<Note> = std::fs::read_dir(root)
+        .expect("read_dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("md"))
+        .map(|p| parse_note(root, &p).expect("parse"))
+        .collect();
+    notes.sort_by(|a, b| a.path.cmp(&b.path));
+    notes
+}
+
+/// One faithful association run over the on-disk vault: scan -> group -> decide
+/// -> `execute_merge` per Merge outcome (the exact composition Phase 5's `apply`
+/// will use). Returns the changed paths. Similarity is claim-based (empty
+/// embeddings fall through to the TF fallback under `Both`).
+fn associate_run<W: NoteWriter>(root: &std::path::Path, threshold: f64, writer: &W) -> Vec<String> {
+    let embed = FakeEmbeddings::default();
+    let notes = scan_dir(root);
+    let groups = group_by_slug(&notes);
+    let mut changed = Vec::new();
+    for group in groups {
+        let members: Vec<&Note> = group.iter().map(|&i| &notes[i]).collect();
+        for outcome in decide(&members, &ctx(&embed, threshold, SimilaritySource::Both)).unwrap() {
+            if let AssociationOutcome::Merge {
+                survivor,
+                absorbed,
+                session_ids,
+            } = outcome
+            {
+                changed.extend(execute_merge(root, &survivor, &absorbed, &session_ids, writer).unwrap());
+            }
+        }
+    }
+    changed
+}
+
+/// A writer that fails for exactly one absolute path (the mid-cluster
+/// tombstone-write failure the self-heal test needs) and writes atomically
+/// everywhere else.
+struct FailWriter {
+    fail: std::path::PathBuf,
+}
+
+impl NoteWriter for FailWriter {
+    fn write(&self, dest: &std::path::Path, bytes: &[u8]) -> Result<()> {
+        if dest == self.fail {
+            return Err(eyre::eyre!("simulated write failure for {}", dest.display()));
+        }
+        vault::note::write_atomic(dest, bytes)
+    }
+}
+
+#[test]
+fn execute_merge_unions_claims_session_details_and_ids_and_tombstones_absorbed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_session_file(
+        root,
+        "a.md",
+        "2026-07-01",
+        "aaa",
+        &["alpha beta gamma", "delta only-a"],
+        &["clyde://aaa - A - `repo` - 5m"],
+    );
+    write_session_file(
+        root,
+        "b.md",
+        "2026-07-10",
+        "bbb",
+        &["alpha beta gamma", "epsilon only-b"],
+        &["clyde://bbb - B - `repo` - 3m"],
+    );
+
+    let changed = execute_merge(
+        root,
+        std::path::Path::new("a.md"),
+        &[PathBuf::from("b.md")],
+        &["aaa".to_string(), "bbb".to_string()],
+        &AtomicWriter,
+    )
+    .unwrap();
+    assert_eq!(changed, vec!["a.md".to_string(), "b.md".to_string()]);
+
+    // Survivor carries the union of both id sets and both session-detail bullets,
+    // plus the absorbed note's distinct claim.
+    let survivor = parse_note(root, &root.join("a.md")).unwrap();
+    let ids: Vec<String> = survivor
+        .frontmatter
+        .extra
+        .get("cortex-session-ids")
+        .and_then(|v| v.as_sequence())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, vec!["aaa".to_string(), "bbb".to_string()], "union of both id sets");
+    assert!(survivor.body.contains("clyde://aaa"), "keeps its own session detail");
+    assert!(
+        survivor.body.contains("clyde://bbb"),
+        "gains the absorbed session detail"
+    );
+    assert!(survivor.body.contains("- delta only-a"), "keeps its own claim");
+    assert!(survivor.body.contains("- epsilon only-b"), "gains the absorbed claim");
+
+    // Absorbed note is a tombstone: superseded-by set, slug removed, redirect body.
+    let tomb = parse_note(root, &root.join("b.md")).unwrap();
+    assert_eq!(
+        tomb.frontmatter.extra.get("superseded-by").and_then(|v| v.as_str()),
+        Some("a"),
+        "superseded-by points at the survivor stem"
+    );
+    assert!(
+        !tomb.frontmatter.extra.contains_key("slug"),
+        "slug removed so it never re-groups"
+    );
+    assert_eq!(tomb.body.trim(), "Merged into [[a]].", "body is a single redirect");
+}
+
+#[test]
+fn second_run_is_byte_level_no_op() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_session_file(
+        root,
+        "a.md",
+        "2026-07-01",
+        "aaa",
+        &["alpha beta gamma", "delta only-a"],
+        &["clyde://aaa - A - `repo` - 5m"],
+    );
+    write_session_file(
+        root,
+        "b.md",
+        "2026-07-10",
+        "bbb",
+        &["alpha beta gamma", "epsilon only-b"],
+        &["clyde://bbb - B - `repo` - 3m"],
+    );
+
+    let first = associate_run(root, 0.5, &AtomicWriter);
+    assert!(!first.is_empty(), "first run merges");
+    let a_after1 = std::fs::read(root.join("a.md")).unwrap();
+    let b_after1 = std::fs::read(root.join("b.md")).unwrap();
+
+    // Second run: b is now a tombstone (slug removed), so the group collapses to
+    // a singleton and decide is never even reached - zero writes.
+    let second = associate_run(root, 0.5, &AtomicWriter);
+    assert!(second.is_empty(), "second run writes nothing: {second:?}");
+    assert_eq!(
+        std::fs::read(root.join("a.md")).unwrap(),
+        a_after1,
+        "survivor byte-identical"
+    );
+    assert_eq!(
+        std::fs::read(root.join("b.md")).unwrap(),
+        b_after1,
+        "tombstone byte-identical"
+    );
+}
+
+#[test]
+fn tombstone_write_failure_self_heals_next_run_with_no_duplication() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_session_file(
+        root,
+        "a.md",
+        "2026-07-01",
+        "aaa",
+        &["alpha beta gamma", "delta only-a"],
+        &["clyde://aaa - A - `repo` - 5m"],
+    );
+    write_session_file(
+        root,
+        "b.md",
+        "2026-07-10",
+        "bbb",
+        &["alpha beta gamma", "epsilon only-b"],
+        &["clyde://bbb - B - `repo` - 3m"],
+    );
+
+    // Run 1: the tombstone write for b FAILS mid-cluster. The survivor still gets
+    // the full union; b is left un-retired (keeps its slug).
+    let fail = FailWriter {
+        fail: root.join("b.md"),
+    };
+    let changed1 = associate_run(root, 0.5, &fail);
+    assert_eq!(changed1, vec!["a.md".to_string()], "only the survivor was written");
+    let b1 = parse_note(root, &root.join("b.md")).unwrap();
+    assert!(
+        b1.frontmatter.extra.contains_key("slug"),
+        "b keeps its slug after the failed retire"
+    );
+    assert!(
+        !b1.frontmatter.extra.contains_key("superseded-by"),
+        "b is not yet a tombstone"
+    );
+
+    // Run 2: b re-groups with the survivor and is re-absorbed cleanly.
+    let changed2 = associate_run(root, 0.5, &AtomicWriter);
+    assert_eq!(
+        changed2,
+        vec!["b.md".to_string()],
+        "self-heal retires b; survivor already unioned, not rewritten"
+    );
+
+    // No duplication: each claim and each id appears exactly once in the survivor.
+    let survivor = std::fs::read_to_string(root.join("a.md")).unwrap();
+    assert_eq!(
+        survivor.matches("- alpha beta gamma").count(),
+        1,
+        "shared claim not doubled"
+    );
+    assert_eq!(
+        survivor.matches("- epsilon only-b").count(),
+        1,
+        "absorbed claim added once"
+    );
+    assert_eq!(
+        survivor.matches("clyde://bbb").count(),
+        1,
+        "absorbed session detail added once"
+    );
+    let ids: Vec<String> = parse_note(root, &root.join("a.md"))
+        .unwrap()
+        .frontmatter
+        .extra
+        .get("cortex-session-ids")
+        .and_then(|v| v.as_sequence())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["aaa".to_string(), "bbb".to_string()],
+        "ids deduped, no double-add"
+    );
+
+    // b is finally a tombstone.
+    let b2 = parse_note(root, &root.join("b.md")).unwrap();
+    assert_eq!(
+        b2.frontmatter.extra.get("superseded-by").and_then(|v| v.as_str()),
+        Some("a")
+    );
+    assert!(!b2.frontmatter.extra.contains_key("slug"));
+}
+
+#[test]
+fn survivor_write_failure_skips_cluster_without_retiring_absorbed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_session_file(
+        root,
+        "a.md",
+        "2026-07-01",
+        "aaa",
+        &["alpha beta gamma"],
+        &["clyde://aaa - A - `repo` - 5m"],
+    );
+    write_session_file(
+        root,
+        "b.md",
+        "2026-07-10",
+        "bbb",
+        &["epsilon only-b"],
+        &["clyde://bbb - B - `repo` - 3m"],
+    );
+    let b_before = std::fs::read(root.join("b.md")).unwrap();
+
+    // Survivor write fails -> whole cluster skipped, absorbed note untouched.
+    let fail = FailWriter {
+        fail: root.join("a.md"),
+    };
+    let changed = execute_merge(
+        root,
+        std::path::Path::new("a.md"),
+        &[PathBuf::from("b.md")],
+        &["aaa".to_string(), "bbb".to_string()],
+        &fail,
+    )
+    .unwrap();
+    assert!(changed.is_empty(), "no path reported when the survivor write fails");
+    assert_eq!(
+        std::fs::read(root.join("b.md")).unwrap(),
+        b_before,
+        "absorbed note is NOT retired when the survivor never landed"
+    );
+    let b = parse_note(root, &root.join("b.md")).unwrap();
+    assert!(
+        b.frontmatter.extra.contains_key("slug"),
+        "b keeps its slug, re-groups next run"
+    );
+}
+
+#[test]
+fn merge_leaves_unrelated_vault_files_untouched() {
+    // The executor scopes its writes to exactly the cluster files. Borg's
+    // receipts DB lives outside the vault and is never opened here; this proves
+    // the executor does not touch any file beyond the survivor + absorbed set.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_session_file(
+        root,
+        "a.md",
+        "2026-07-01",
+        "aaa",
+        &["alpha beta gamma"],
+        &["clyde://aaa - A - `repo` - 5m"],
+    );
+    write_session_file(
+        root,
+        "b.md",
+        "2026-07-10",
+        "bbb",
+        &["epsilon only-b"],
+        &["clyde://bbb - B - `repo` - 3m"],
+    );
+    let sentinel = root.join("receipts.db");
+    std::fs::write(&sentinel, b"receipts-rows-unchanged").unwrap();
+
+    execute_merge(
+        root,
+        std::path::Path::new("a.md"),
+        &[PathBuf::from("b.md")],
+        &["aaa".to_string(), "bbb".to_string()],
+        &AtomicWriter,
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        b"receipts-rows-unchanged",
+        "an unrelated file (stand-in for the receipts DB) is untouched"
+    );
+}
+
+#[test]
+fn append_bullets_is_idempotent_when_all_present() {
+    let content = "---\ntitle: A\n---\n## Claims\n\n- one\n- two\n";
+    let incoming = vec![vec!["- one".to_string()], vec!["- two".to_string()]];
+    let out = append_bullets(content, "## Claims", &incoming, super::claim_key);
+    assert_eq!(out, content, "re-adding present bullets is a byte-level no-op");
 }
