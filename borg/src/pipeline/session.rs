@@ -13,6 +13,11 @@ use crate::harvest::contract::SessionRecord;
 use chrono::{DateTime, FixedOffset};
 use distillers::{SessionConfig, SessionMetadata};
 
+/// Length of the primary-session-id prefix used to disambiguate a harvest
+/// filename collision (harvest-content-slug-naming Phase 3). Clyde ids are
+/// UUIDs; the first 8 hex chars are ample to separate two same-slug sessions.
+const SESSION_SLUG_SUFFIX_LEN: usize = 8;
+
 /// Resolve a harvest session note's filename stem (harvest-content-slug-naming,
 /// 2026-07-24). The distiller's content-derived slug names the note's real
 /// subject; the generic clyde title is only the fallback when the distiller
@@ -24,6 +29,29 @@ pub(crate) fn harvest_slug_stem(slug: Option<&str>, title: &str) -> (String, boo
         Some(slug) => (hygiene::sanitize_filename(slug), false),
         None => (hygiene::sanitize_filename(title), true),
     }
+}
+
+/// Resolve the harvest note path DETERMINISTICALLY (harvest-content-slug-naming
+/// Phase 3). The shared `atomic::resolve_publish_path` disambiguates collisions
+/// with an order-dependent `-N` counter, which is nondeterministic across
+/// re-harvests (a re-run can renumber notes, breaking the watermark idempotency
+/// contract). A harvest collision on the content-slug is instead disambiguated
+/// with a suffix derived from the PRIMARY SESSION ID, so the same session always
+/// resolves to the same filename regardless of publish order. `force` (a
+/// deliberate re-distill) overwrites the bare-slug note in place.
+///
+/// The residual "which of two same-slug sessions gets the bare slug" question is
+/// deliberately NOT resolved here: cortex's association sweep merges or
+/// cross-links same-base-slug notes by similarity (`cortex.yml` threshold). The
+/// filename is display/addressing only; the load-bearing identity anchor stays
+/// the session id in frontmatter and the receipts DB, never the filename.
+fn harvest_publish_path(dir: &std::path::Path, slug_stem: &str, primary_id: &str, force: bool) -> std::path::PathBuf {
+    let base = dir.join(format!("{slug_stem}.md"));
+    if force || !base.exists() {
+        return base;
+    }
+    let short: String = primary_id.chars().take(SESSION_SLUG_SUFFIX_LEN).collect();
+    dir.join(format!("{slug_stem}--{short}.md"))
 }
 
 pub(crate) async fn process_session(
@@ -231,12 +259,11 @@ pub(crate) async fn process_session_inner(
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
-    let filename = format!("{slug_stem}.md");
 
     let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
-    let note_path = super::atomic::resolve_publish_path(&dest_path.join(&filename), force);
+    let note_path = harvest_publish_path(&dest_path, &slug_stem, primary_id, force);
     vault::note::write_atomic(&note_path, rendered.as_bytes()).context("Failed to write session note to vault")?;
 
     log::info!(

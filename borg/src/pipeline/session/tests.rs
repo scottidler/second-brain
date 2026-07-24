@@ -244,6 +244,36 @@ fn harvest_slug_stem_falls_back_to_title_when_slug_absent_or_blank() {
     assert!(fb_blank);
 }
 
+#[test]
+fn harvest_publish_path_uses_bare_slug_when_free() {
+    let dir = TempDir::new().unwrap();
+    let p = harvest_publish_path(dir.path(), "gha-uv-sync-review", "871f6428-c866-4c08", false);
+    assert_eq!(p, dir.path().join("gha-uv-sync-review.md"));
+}
+
+#[test]
+fn harvest_publish_path_collision_is_deterministic_session_suffix_never_dash_n() {
+    let dir = TempDir::new().unwrap();
+    // A different note already occupies the bare slug.
+    std::fs::write(dir.path().join("gha-uv-sync-review.md"), b"other").unwrap();
+    let p = harvest_publish_path(dir.path(), "gha-uv-sync-review", "871f6428-c866-4c08", false);
+    // Deterministic session-keyed suffix, NOT the order-dependent `-2`.
+    assert_eq!(p, dir.path().join("gha-uv-sync-review--871f6428.md"));
+    assert!(!p.to_string_lossy().ends_with("-2.md"), "must never use the -N counter");
+    // Same session + same collision -> same path every time (idempotent).
+    let p2 = harvest_publish_path(dir.path(), "gha-uv-sync-review", "871f6428-c866-4c08", false);
+    assert_eq!(p, p2);
+}
+
+#[test]
+fn harvest_publish_path_force_overwrites_bare_slug_in_place() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("gha-uv-sync-review.md"), b"prior").unwrap();
+    // force = a deliberate re-distill: reuse the bare-slug note, do not fork.
+    let p = harvest_publish_path(dir.path(), "gha-uv-sync-review", "871f6428-c866-4c08", true);
+    assert_eq!(p, dir.path().join("gha-uv-sync-review.md"));
+}
+
 /// End-to-end fallback: with no real fabric the distillation degrades and emits
 /// no slug, so the note filename is the title-slug and `slug:` is persisted to
 /// frontmatter matching that stem (harvest-content-slug-naming Phase 2).
