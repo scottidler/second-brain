@@ -95,3 +95,96 @@ Design doc: `docs/design/2026-07-24-cortex-association-sweep.md`
 - None. Phase 1's scope (config, grouping, shared sim primitives) has no
   outstanding decisions — all resolved in the design doc's "Resolved
   Decisions" section before this phase started.
+
+## Phase 2: Similarity decision core (transitive clustering)
+
+### Design decisions
+
+- **`AssociationOutcome` enum** — `cortex/src/association.rs` — the doc's Data
+  Model variants (`Merge { survivor, absorbed, session_ids }` / `CrossLink
+  { notes }`), derives `PartialEq, Eq` so tests can assert whole outcomes by
+  value. Only `AssociationOutcome` is defined; `AssociationReport`
+  (`WouldAssociate`/`Associated`) is deferred to Phase 5 (CLI/daemon) — Phase
+  2's `decide` returns the bare outcome vector it needs and nothing more.
+- **`decide(group, ctx)`** — `cortex/src/association.rs` — pure transitive
+  clustering. Visits every pair in sorted `(i, j)` order, computes similarity
+  per source, unions any pair `>= threshold` via `UnionFind`, then maps each
+  resulting cluster to a `Merge` (>= 2 members) or a cross-link representative
+  (singleton). One group-level `CrossLink` of all cluster representatives is
+  emitted when the group resolves to >= 2 clusters.
+- **`EmbeddingCosine` port + `DecideCtx<'a, E>`** — `cortex/src/association.rs`
+  — the embedding signal is a trait (generic DI, no `dyn`, per the repo Rust
+  rules); `vault::search::SearchIndex` gets the production impl (delegates to
+  the Phase 1 `cosine_between`), and tests inject a deterministic
+  `FakeEmbeddings`. This is what keeps `decide` a pure, index-free unit under
+  test while the real path stays wired to the pairwise-cosine primitive.
+- **`UnionFind` with union-by-min** — `cortex/src/association.rs` — a cluster's
+  root is pinned to its smallest member index, so cluster ids are stable and
+  the `BTreeMap<root, members>` iterates in a deterministic, union-order-
+  independent sequence. Path compression on `find` keeps it near-constant.
+- **Survivor computed in `decide`, not left as a Phase 3 placeholder** —
+  `resolve_merge` / `survivor_key` (`cortex/src/association.rs`) — the doc's
+  survivor rule (earliest `date`, ties by smallest primary session id) is
+  deterministic and the `CrossLink` representative of a merge cluster IS its
+  survivor, so `decide` must know it anyway. Computing it here (rather than a
+  placeholder) means the `Merge` fields are final and Phase 3's executor
+  consumes them as-is; a missing/unparseable `date` sorts LAST
+  (`NaiveDate::MAX`) so a dated note always wins survivorship, and `path` is
+  the final total-order tiebreak so no run can differ.
+- **Claim-text fallback = pairwise TF cosine over the `## Claims` section** —
+  `claim_similarity` / `claim_text` (`cortex/src/association.rs`) — reuses the
+  Phase-1-promoted `duplicates::{tokenize, cosine_similarity}` exactly as the
+  Phase 1 `promoted_sim_fns_are_callable_from_association` test demonstrated
+  (raw term counts as the vector, not corpus-IDF-weighted). Term-count TF is
+  genuinely pairwise (a third group member can't shift an A–B claim score),
+  which matches the design's "real pairwise, not affected by others" principle
+  that motivated `cosine_between` on the embedding side.
+
+### Deviations
+
+- **`decide` returns `Result<Vec<AssociationOutcome>>`, not the doc's bare
+  `Vec<AssociationOutcome>`** (same effect, correct seam). The embedding
+  signal is a fallible SQLite read (`cosine_between -> Result<Option<f32>>`);
+  `decide` propagates that `Result` and treats `Ok(None)` as the "uncomputable"
+  case. This is exactly what the Phase 1 notes recommended, and a
+  `embedding_db_error_propagates_not_swallowed` test pins that a real DB error
+  surfaces as `Err` rather than silently degrading every pair to cross-link on
+  a broken index.
+- **`decide` takes `group: &[&Note]` (the resolved members of one group), not
+  the doc's unspecified `group` shape.** `group_by_slug` returns
+  `Vec<Vec<usize>>` indices into the caller's `notes`; the Phase 5 caller maps
+  one group's indices to `&Note` refs and hands them here. Keeps `decide`
+  self-contained and index-free for unit testing, and avoids cloning `Note`s.
+- **Uncomputable vs computed-zero are distinguished internally but both route
+  to cross-link.** `claim_similarity` returns `None` (uncomputable) only when
+  at least one note has NO claim tokens; two notes that both have claims but
+  share no terms return `Some(0.0)` — a real below-threshold measurement.
+  Either way the pair is never unioned, so the fail-safe (uncomputable never
+  merges) holds; the distinction is preserved so `similarity-source` semantics
+  and the tests read honestly.
+
+### Tradeoffs
+
+- **One group-level `CrossLink` of cluster representatives, vs per-pair
+  cross-links.** For a 3-member group resolving to Merge{A,B} + singleton{C},
+  `decide` emits `CrossLink { notes: [survivor(A,B), C] }` — the merge
+  cluster is represented by its survivor (absorbed notes become tombstones
+  that redirect to it, so linking them is pointless), and all distinct
+  clusters in the group cross-reference each other through one outcome. The
+  doc's success-criterion shorthand "Merge{A,B} + CrossLink{C}" is read as
+  "C is cross-linked (to the merged note)"; the executor (Phase 4) inserts
+  reciprocal wikilinks among the named representatives.
+- **Term-count TF cosine for claims instead of corpus-IDF TF-IDF** (the
+  duplicates fuzzy path builds IDF over its corpus). IDF would couple a pair's
+  score to which other members are in the group, breaking pairwise
+  independence; the flat TF cosine keeps each pair's similarity a function of
+  only those two notes, and matches the primitive-usage pattern Phase 1 already
+  established and tested.
+
+### Open questions
+
+- None. The 3-member `CrossLink` representative shape (survivor + singleton,
+  not the literal `{C}`) is the one place the doc's shorthand needed
+  interpretation; it is resolved in-line above and covered by
+  `three_member_group_merges_close_pair_cross_links_distant_third`. Phases 3–5
+  (executors + CLI/daemon) consume `AssociationOutcome` unchanged.
