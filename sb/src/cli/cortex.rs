@@ -77,6 +77,8 @@ pub enum Command {
     Embed(EmbedArgs),
     /// Build the deterministic edge graph oracle's graph retrieval reads
     Graph(GraphArgs),
+    /// Merge or cross-link same-slug harvest session notes (dry-run unless --apply)
+    Associate(AssociateArgs),
     /// Stub/refresh entity hub notes (concepts, creators, sources, dense tags)
     Hub(HubArgs),
     /// Discover candidate glossary entities from ingested notes (LLM)
@@ -344,6 +346,19 @@ impl From<GraphArgs> for opts::GraphOpts {
 }
 
 #[derive(Args)]
+pub struct AssociateArgs {
+    /// Execute the plan: merge/cross-link same-slug session note groups
+    /// (default: dry-run reporting what would happen, writes zero bytes).
+    #[arg(long)]
+    pub apply: bool,
+}
+impl From<AssociateArgs> for opts::AssociateOpts {
+    fn from(a: AssociateArgs) -> Self {
+        Self { apply: a.apply }
+    }
+}
+
+#[derive(Args)]
 pub struct HubArgs {
     /// Write hub notes to disk (default: report what would be stubbed).
     #[arg(long)]
@@ -540,6 +555,11 @@ impl CortexCli {
                     stats.metadata,
                     stats.skipped,
                 );
+            }
+            Command::Associate(a) => {
+                let apply = a.apply;
+                let report = cortex::association::run(&vault_root, &config, &a.into())?;
+                print_association_report(apply, &report);
             }
             Command::Entities(a) => {
                 if !a.discover {
@@ -813,6 +833,59 @@ fn print_sweep_report(r: &cortex::sweep::SweepReport) {
             }
             if let Some(path) = &r.proposals_path {
                 println!("Proposals written to {path}");
+            }
+        }
+    }
+}
+
+/// Format a `cortex associate` report. Mirrors the `SweepMode` precedent:
+/// `AssociationReport`'s two variants already say whether anything was
+/// written, so this formats purely off the report - `apply` is only used to
+/// pick the dry-run-vs-applied HEADER wording, never to re-decide behavior.
+fn print_association_report(apply: bool, report: &cortex::association::AssociationReport) {
+    use cortex::association::AssociationOutcome;
+
+    let outcomes = report.outcomes();
+    if apply {
+        let merges = outcomes
+            .iter()
+            .filter(|o| matches!(o, AssociationOutcome::Merge { .. }))
+            .count();
+        let cross_links = outcomes.len() - merges;
+        println!("associate complete: {merges} merge(s), {cross_links} cross-link(s)");
+    } else if outcomes.is_empty() {
+        println!("associate dry-run: no same-slug groups to associate");
+    } else {
+        println!("associate dry-run (pass --apply to write):");
+    }
+
+    for outcome in outcomes {
+        match outcome {
+            AssociationOutcome::Merge {
+                survivor,
+                absorbed,
+                session_ids,
+            } => {
+                println!(
+                    "  merge: {} absorbs {} ({} session id(s))",
+                    survivor.display(),
+                    absorbed
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    session_ids.len(),
+                );
+            }
+            AssociationOutcome::CrossLink { notes } => {
+                println!(
+                    "  cross-link: {}",
+                    notes
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" <-> "),
+                );
             }
         }
     }

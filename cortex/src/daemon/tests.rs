@@ -30,6 +30,65 @@ fn test_is_enabled_explicit_false() {
     assert!(!config.is_enabled("lint"));
 }
 
+/// Phase 5 (2026-07-24 cortex-association-sweep design): `is_enabled` is a
+/// generic lookup over `daemon.actions`, so "association" needs no dedicated
+/// gate function - it defaults off exactly like every other action, because
+/// `DaemonConfig::default()`'s action map never registers it.
+#[test]
+fn test_is_enabled_default_omits_association() {
+    let config = DaemonConfig::default();
+    assert!(!config.is_enabled("association"), "association is OFF by default");
+}
+
+#[test]
+fn test_is_enabled_explicit_true_for_association() {
+    let mut config = DaemonConfig::default();
+    config
+        .actions
+        .insert("association".to_string(), crate::config::DaemonAction { enable: true });
+    assert!(config.is_enabled("association"));
+}
+
+/// The on-change dispatch loop must be a deliberate NO-OP for "association"
+/// (its real work runs on the separate periodic `association_interval` tick,
+/// never per-change) - registering it in `daemon.actions` must not fall
+/// through to the `unknown daemon action` catch-all, and must never write.
+#[test]
+fn configured_actions_association_is_a_no_op_never_a_per_change_write() {
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let vault_root = vault_dir.path();
+    std::fs::write(
+        vault_root.join("a.md"),
+        "---\ntitle: a\ndate: 2026-07-01\ntype: session\nslug: foo\n---\nbody\n",
+    )
+    .expect("write note");
+    std::fs::write(
+        vault_root.join("b.md"),
+        "---\ntitle: b\ndate: 2026-07-10\ntype: session\nslug: foo\n---\nbody\n",
+    )
+    .expect("write note");
+
+    let config = Config::default();
+    let mut daemon_config = DaemonConfig::default();
+    daemon_config.actions.clear();
+    daemon_config
+        .actions
+        .insert("association".to_string(), crate::config::DaemonAction { enable: true });
+
+    let fingerprint =
+        configured_actions_with_scanner(vault_root, &config, &daemon_config, &[], crate::vault::scan_vault);
+
+    assert!(
+        fingerprint.is_empty(),
+        "the on-change loop's association arm never writes, regardless of same-slug notes present: {fingerprint:?}"
+    );
+    // The files are untouched - proof the on-change path took the no-op arm,
+    // not some accidental write.
+    let a = std::fs::read_to_string(vault_root.join("a.md")).unwrap();
+    let b = std::fs::read_to_string(vault_root.join("b.md")).unwrap();
+    assert!(a.contains("slug: foo") && b.contains("slug: foo"), "notes untouched");
+}
+
 #[test]
 fn test_configured_actions() {
     let config = DaemonConfig::default();

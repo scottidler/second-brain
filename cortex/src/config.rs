@@ -679,6 +679,16 @@ pub struct AssociationConfig {
     pub min_quiescence_secs: u64,
     /// Glob paths excluded from association entirely.
     pub exclude: Vec<String>,
+    /// Daemon cadence (seconds) for the association tick (Phase 5). A NEW
+    /// periodic interval arm, modeled on `graph_interval_secs` /
+    /// `discover_interval_secs` - not part of the doc's Data Model YAML
+    /// example, added here because the Architecture section requires "own
+    /// cadence config" and every sibling periodic action keys its cadence off
+    /// its own config struct, never a bare literal. Default 3600 (hourly): a
+    /// merge is destructive-ish (soft-retire) so it runs far less often than
+    /// the read-mostly embed/graph ticks, matching the design's "e.g. hourly"
+    /// suggestion.
+    pub interval_secs: u64,
 }
 
 impl Default for AssociationConfig {
@@ -688,6 +698,7 @@ impl Default for AssociationConfig {
             similarity_source: SimilaritySource::default(),
             min_quiescence_secs: 600,
             exclude: Vec::new(),
+            interval_secs: 3_600,
         }
     }
 }

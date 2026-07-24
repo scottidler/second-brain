@@ -91,6 +91,17 @@ fn association_config_default_values() {
     assert_eq!(cfg.similarity_source, SimilaritySource::Both);
     assert_eq!(cfg.min_quiescence_secs, 600);
     assert!(cfg.exclude.is_empty());
+    // Phase 5: the daemon's own cadence knob, hourly by default (a merge is
+    // soft-retire-destructive, so it runs far less often than the
+    // read-mostly embed/graph ticks).
+    assert_eq!(cfg.interval_secs, 3_600);
+}
+
+#[test]
+fn association_config_deserializes_interval_secs_kebab_case() {
+    let yaml = "interval-secs: 120\n";
+    let cfg: AssociationConfig = serde_yaml::from_str(yaml).expect("deserialize");
+    assert_eq!(cfg.interval_secs, 120);
 }
 
 #[test]

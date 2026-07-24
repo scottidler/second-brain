@@ -55,10 +55,46 @@ graph:
   # on the shared embed lock (a separate systemd timer would). Default 604800 (weekly).
   # fact-interval-secs: 604800
 
+# `sb cortex associate`: groups harvest session notes sharing a
+# content-derived `slug:` (borg's harvest naming, v0.12.2) and, per pairwise
+# similarity, merges same-subject sessions or cross-links distinct-but-related
+# ones. All fields optional; defaults live in cortex/src/config.rs
+# AssociationConfig. Dry-run by default (`sb cortex associate`); `--apply`
+# writes. The daemon tick is OFF by default - see `daemon.actions.association`
+# below.
+actions:
+  association:
+    # Merge iff pairwise similarity >= this. Default 0.85 (mirrors
+    # actions.duplicates' threshold).
+    # threshold: 0.85
+    # Which similarity signal to compute: embedding | claim | both. Default
+    # `both` (embedding cosine primary, claim TF-IDF fallback when a note has
+    # no summary embedding) - selecting the active methodology is legitimate
+    # config per the general.md carve-out.
+    # similarity-source: both
+    # Skip a note - and its WHOLE same-slug group, never a half-merged group -
+    # modified within this many seconds, so an actively-edited note is never
+    # merged mid-edit. Default 600 (10 min).
+    # min-quiescence-secs: 600
+    # Glob paths excluded from association entirely.
+    # exclude:
+    #   - "journal/**"
+    # Daemon cadence (seconds) for the association tick, when enabled below.
+    # Default 3600 (hourly).
+    # interval-secs: 3600
+
 # Daemon cadence (sweep loop interval).
 daemon:
   embed-interval-secs: 600
   sweep-interval-secs: 3600
+  # Per-action auto-apply toggles for the on-change sweep loop. `association`
+  # is the exception: it has NO on-change behavior (a merge must never fire on
+  # startup or every debounced watcher event) - enabling it here only turns on
+  # the separate periodic tick cadenced by `actions.association.interval-secs`
+  # above (default hourly). OFF by default.
+  # actions:
+  #   association:
+  #     enable: true
   # Rayon thread-pool cap emitted into the installed systemd unit as
   # Environment="RAYON_NUM_THREADS=N" (candle's gemm degree reads the same
   # var, so this also bounds embedding fan-out). 0 (default) omits the line

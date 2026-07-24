@@ -322,3 +322,131 @@ Design doc: `docs/design/2026-07-24-cortex-association-sweep.md`
 
 ### Open questions
 - None. Cross-repo/system-mutating steps: none in this phase.
+
+## Phase 5: CLI + daemon wiring
+
+### Design decisions
+- **`AssociationReport` enum** — `cortex/src/association.rs` — the doc's Data
+  Model variants (`WouldAssociate(Vec<AssociationOutcome>)` /
+  `Associated(Vec<AssociationOutcome>)`), plus two small accessor methods
+  (`outcomes()`, `applied()`) so `sb` formats without matching on the enum
+  twice. Mirrors the `SweepMode` precedent named throughout the design.
+- **`apply<E: EmbeddingCosine>(vault_root, notes, config, embeddings, do_apply)
+  -> Result<AssociationReport>`** — `cortex/src/association.rs::apply` — the
+  top-level orchestrator: exclude-filter -> `group_by_slug` -> whole-group
+  quiescence guard -> `decide` per surviving group -> (only when `do_apply`)
+  execute each outcome via `execute_merge`/`execute_cross_link`. This is
+  exactly the composition `association/tests.rs`'s Phase 3/4 `associate_run`
+  fixture already exercised, generalized into a public entry point with the
+  exclude filter and quiescence guard added.
+- **`run(vault_root, config: &Config, opts: &AssociateOpts) ->
+  Result<AssociationReport>`** — `cortex/src/association.rs::run` — the
+  production composition root, modeled on `graph::run` (`graph.rs:78`): opens
+  its own `vault::search::SearchIndex` connection, takes
+  `crate::embed::acquire_lock()` before reading `note_embeddings`, and
+  delegates to `apply` with the real port and `opts.apply`. Follows the house
+  `run(vault_root, config, opts)` entry-point convention documented in
+  `cortex/AGENTS.md`.
+- **Whole-group quiescence guard** — `association.rs::group_is_quiescing` —
+  reads each member's real file mtime via `fs::metadata(...).modified()` and
+  skips the ENTIRE group if any member's mtime is within
+  `min_quiescence_secs` of now. Fail-safe on both edges: an unreadable mtime
+  or a future mtime (clock skew on a synced vault) is treated as "still
+  quiescing" (skip), never as "safe to proceed."
+- **Exclude-glob filtering, wired for the first time** — local
+  `matches_exclude`/`parse_exclude_patterns` in `association.rs` — Phase 1
+  defined `AssociationConfig.exclude` but nothing consumed it yet; `apply`
+  filters `notes` against it before grouping, exactly like
+  `duplicates::lint_duplicates` filters before its own pass.
+- **`AssociationConfig.interval_secs`** — `cortex/src/config.rs` — a NEW field
+  (default 3600/hourly), not in the doc's literal Data Model YAML, added
+  because the Architecture section explicitly calls for "own cadence config"
+  and every sibling periodic daemon action (`graph.graph_interval_secs`,
+  `entities.discover_interval_secs`, `embed.cadence_secs`) keys its cadence
+  off its own action's config struct — never a bare literal in `daemon.rs`.
+- **Daemon interval arm** — `cortex/src/daemon.rs::start_watching` — a NEW
+  `association_interval` (`tokio::time::interval` on
+  `config.actions.association.interval_secs`), modeled on the
+  `embed`/`cold`/`graph` arms (fires unconditionally on cadence, `continue`s
+  out with no work when disabled — the same shape as the embed-model-load-
+  failure `continue`). Gated by `daemon_config.is_enabled("association")`
+  read fresh on every tick, so flipping the config on/off takes effect within
+  one cadence window with no daemon restart. `DaemonConfig::default()` never
+  registers `"association"`, so `is_enabled` is false out of the box (Phase
+  5's "default OFF" criterion needs no new code — the generic mechanism
+  already defaults every unregistered key to disabled).
+- **`association::daemon_tick(vault_root, config) -> Result<AssociationReport>`**
+  — thin wrapper that calls `run` with `AssociateOpts { apply: true }` (the
+  daemon always auto-applies when its own tick fires and is enabled — there is
+  no daemon-side dry-run concept, matching `embed`/`graph`/`cold`'s ticks).
+- **No-op `"association"` arm in `configured_actions_with_scanner`'s on-change
+  match** — `daemon.rs` — `daemon.actions` is ONE shared map read by BOTH the
+  on-change dispatch loop and every `is_enabled(name)` lookup an independent
+  interval arm makes. Registering `association` there (to turn on the
+  periodic tick) would otherwise fall through to the `unknown daemon action`
+  warning on every single on-change cycle; the explicit no-op arm silences
+  that while structurally guaranteeing the on-change path never executes an
+  association pass (the design's "never per-change" requirement, enforced in
+  code, not just by omission).
+- **`sb cortex associate [--apply]`** — `sb/src/cli/cortex.rs` — `AssociateArgs
+  { apply: bool }` (the `--apply` split convention shared with
+  Hub/Migrate/Link/Classify), `Command::Associate` calls
+  `cortex::association::run` and hands the typed report to a new
+  `print_association_report` that formats purely off the `AssociationReport`
+  variant, never re-inspecting `apply` except to choose the header wording
+  (the `SweepMode`/`print_sweep_report` precedent named in the design).
+- **`config/templates/cortex.yml.example`** — added an `actions.association`
+  block (mirroring the file's existing commented-annotated style — there was
+  no live `actions.duplicates` example to copy verbatim, since the file had
+  no `actions:` section at all yet) and a `daemon.actions.association`
+  example explaining the "on-change no-op, periodic-only" split.
+
+### Deviations
+- **`apply`'s signature carries an explicit `embeddings: &E` port and a
+  `do_apply: bool` flag, not the doc's bare `apply(vault_root, notes,
+  config)`** (same effect, correct seam). The port keeps `apply` unit-testable
+  against the Phase 2 `FakeEmbeddings` fixture with no SQLite index required;
+  `do_apply` as an explicit argument (rather than re-deriving dry-run-vs-apply
+  from `config` or `AssociateOpts`) keeps the WouldAssociate/Associated split
+  a function of one obvious input, not an implicit opts re-inspection. `run`
+  is the doc-shaped production entry point that supplies both.
+- **`Associated` carries only outcomes whose executor actually changed >= 1
+  file**, not every outcome `decide` planned. An idempotent no-op (already
+  merged/linked, or every write WARN-skipped) is silently omitted rather than
+  reported as a fresh association — this is what makes a re-run's `Associated`
+  list empty exactly when nothing was written, matching the doc's own
+  "changed paths for the daemon fingerprint" framing for that variant even
+  though the daemon tick here does not itself feed a `SweepFingerprint` (see
+  Tradeoffs).
+- **`AssociationConfig.interval_secs` is a new field beyond the doc's literal
+  Data Model YAML** — see Design decisions above; recorded here because it is
+  config surface the doc's YAML example does not show.
+
+### Tradeoffs
+- **The association daemon tick never touches `SweepFingerprint` / the
+  oscillation-detection machinery**, unlike the on-change `configured_actions`
+  loop's fingerprinted actions. Chosen because `embed`/`cold`/`graph`/`fact`/
+  `entities` — every existing periodic (non-per-change) tick — are already
+  outside that fingerprint; oscillation detection exists specifically for the
+  on-change loop's own convergence, and association is deliberately never
+  wired into that loop. A future need for association-specific idempotency
+  telemetry can read `AssociationReport::Associated`'s outcome list directly
+  (already the real, changed-only set) without any fingerprint plumbing.
+- **Quiescence guard reads real filesystem mtimes at `apply` time** (an I/O
+  side effect the otherwise-`decide`-pure pipeline unit tests can exercise
+  without a fake, since a freshly-written `tempfile` `TempDir` note's mtime is
+  always "now"). Tests drive both edges by setting `min_quiescence_secs` to 0
+  (never quiescing) or an absurdly large value (always quiescing) rather than
+  mocking the clock or the filesystem — no `filetime`-equivalent dependency
+  needed for full coverage of the guard's whole-group behavior.
+- **Exclude filtering clones matched notes into an owned `Vec<Note>`** (`apply`
+  filters via `.cloned()`) rather than adding an index-filtering variant of
+  `group_by_slug`. Same tradeoff Phase 1 already made for `group_by_slug`
+  itself: same-slug groups are small, and cloning simplifies the pipeline over
+  micro-optimizing an allocation that is bounded by vault size, not request
+  volume.
+
+### Open questions
+- None. Cross-repo/system-mutating steps: none in this phase — `otto deploy`
+  picking up the new `cortex.yml` example is the existing, already-automated
+  config-sync path (`CLAUDE.md`'s Install section), not a new manual step.

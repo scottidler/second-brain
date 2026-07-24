@@ -5,10 +5,10 @@ use eyre::Result;
 use serde_yaml::Value;
 
 use super::{
-    AssociationOutcome, AtomicWriter, DecideCtx, EmbeddingCosine, NoteWriter, append_bullets, decide,
-    execute_cross_link, execute_merge, group_by_slug,
+    AssociationOutcome, AssociationReport, AtomicWriter, DecideCtx, EmbeddingCosine, NoteWriter, append_bullets, apply,
+    decide, execute_cross_link, execute_merge, group_by_slug,
 };
-use crate::config::SimilaritySource;
+use crate::config::{AssociationConfig, SimilaritySource};
 use crate::testutil::NoteBuilder;
 use crate::vault::{Note, parse_note};
 
@@ -1079,4 +1079,251 @@ fn related_key_extracts_target_before_pipe_case_insensitively() {
     assert_eq!(super::related_key("- [[Foo]]"), "foo");
     assert_eq!(super::related_key("- [[foo|Foo Title]]"), "foo");
     assert_eq!(super::related_key("* [[bar|Alias]]"), "bar");
+}
+
+// -- Phase 5: apply orchestrator (CLI + daemon wiring) ----------------------
+
+/// `min_quiescence_secs: 0` never treats a just-written test fixture (mtime
+/// ~now) as quiescing: `elapsed < Duration::ZERO` is never true. Used by every
+/// test below that wants the quiescence guard to be a no-op so it can assert
+/// on grouping/decide/execute behavior in isolation.
+fn no_quiescence_config(threshold: f64) -> AssociationConfig {
+    AssociationConfig {
+        threshold,
+        min_quiescence_secs: 0,
+        ..AssociationConfig::default()
+    }
+}
+
+#[test]
+fn dry_run_reports_the_plan_and_writes_zero_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_session_file(
+        root,
+        "a.md",
+        "2026-07-01",
+        "aaa",
+        &["alpha beta gamma"],
+        &["clyde://aaa - A - `repo` - 5m"],
+    );
+    write_session_file(
+        root,
+        "b.md",
+        "2026-07-10",
+        "bbb",
+        &["alpha beta gamma"],
+        &["clyde://bbb - B - `repo` - 3m"],
+    );
+    let a_before = std::fs::read(root.join("a.md")).unwrap();
+    let b_before = std::fs::read(root.join("b.md")).unwrap();
+
+    let mut embed = FakeEmbeddings::default();
+    embed.set("a.md", "b.md", Some(0.95));
+    let notes = scan_dir(root);
+
+    let report = apply(root, &notes, &no_quiescence_config(0.85), &embed, false).unwrap();
+
+    assert!(
+        matches!(report, AssociationReport::WouldAssociate(_)),
+        "no --apply -> WouldAssociate: {report:?}"
+    );
+    assert_eq!(report.outcomes().len(), 1, "the plan names the one merge cluster");
+    assert!(
+        matches!(report.outcomes()[0], AssociationOutcome::Merge { .. }),
+        "the planned outcome is the merge decide would produce: {:?}",
+        report.outcomes()[0]
+    );
+    assert!(!report.applied(), "WouldAssociate.applied() is false");
+
+    assert_eq!(std::fs::read(root.join("a.md")).unwrap(), a_before, "a untouched");
+    assert_eq!(std::fs::read(root.join("b.md")).unwrap(), b_before, "b untouched");
+}
+
+#[test]
+fn apply_executes_the_plan_and_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_session_file(
+        root,
+        "a.md",
+        "2026-07-01",
+        "aaa",
+        &["alpha beta gamma"],
+        &["clyde://aaa - A - `repo` - 5m"],
+    );
+    write_session_file(
+        root,
+        "b.md",
+        "2026-07-10",
+        "bbb",
+        &["alpha beta gamma"],
+        &["clyde://bbb - B - `repo` - 3m"],
+    );
+
+    let mut embed = FakeEmbeddings::default();
+    embed.set("a.md", "b.md", Some(0.95));
+    let notes = scan_dir(root);
+
+    let report = apply(root, &notes, &no_quiescence_config(0.85), &embed, true).unwrap();
+
+    assert!(report.applied(), "--apply -> Associated");
+    assert_eq!(report.outcomes().len(), 1);
+    let survivor = parse_note(root, &root.join("a.md")).unwrap();
+    assert!(survivor.body.contains("clyde://bbb"), "survivor absorbed b's detail");
+    let tomb = parse_note(root, &root.join("b.md")).unwrap();
+    assert_eq!(
+        tomb.frontmatter.extra.get("superseded-by").and_then(|v| v.as_str()),
+        Some("a"),
+        "b is soft-retired"
+    );
+
+    // Re-running is a no-op: b dropped its slug, so the group no longer forms
+    // and there is nothing left to decide, let alone associate.
+    let notes2 = scan_dir(root);
+    let report2 = apply(root, &notes2, &no_quiescence_config(0.85), &embed, true).unwrap();
+    assert!(
+        report2.outcomes().is_empty(),
+        "idempotent re-run: {:?}",
+        report2.outcomes()
+    );
+}
+
+#[test]
+fn whole_group_is_skipped_when_any_member_is_within_quiescence_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_session_file(
+        root,
+        "a.md",
+        "2026-07-01",
+        "aaa",
+        &["alpha beta gamma"],
+        &["clyde://aaa - A - `repo` - 5m"],
+    );
+    write_session_file(
+        root,
+        "b.md",
+        "2026-07-10",
+        "bbb",
+        &["alpha beta gamma"],
+        &["clyde://bbb - B - `repo` - 3m"],
+    );
+    let a_before = std::fs::read(root.join("a.md")).unwrap();
+    let b_before = std::fs::read(root.join("b.md")).unwrap();
+
+    let mut embed = FakeEmbeddings::default();
+    embed.set("a.md", "b.md", Some(0.95));
+    let notes = scan_dir(root);
+
+    // An absurdly large window means "just written" (mtime ~now) always
+    // counts as quiescing - the whole group must be skipped even though the
+    // pair would otherwise merge at this threshold.
+    let quiescing = AssociationConfig {
+        threshold: 0.85,
+        min_quiescence_secs: 999_999,
+        ..AssociationConfig::default()
+    };
+
+    let report = apply(root, &notes, &quiescing, &embed, true).unwrap();
+
+    assert!(
+        report.outcomes().is_empty(),
+        "whole group skipped, no outcomes at all: {:?}",
+        report.outcomes()
+    );
+    assert_eq!(std::fs::read(root.join("a.md")).unwrap(), a_before, "a untouched");
+    assert_eq!(std::fs::read(root.join("b.md")).unwrap(), b_before, "b untouched");
+}
+
+#[test]
+fn quiescence_skip_is_whole_group_never_half_merged() {
+    // Three same-slug members where the pairwise similarities would otherwise
+    // cluster {a,b} and cross-link {c}; quiescence must drop the ENTIRE group,
+    // not just the one member technically within the window.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_session_file(root, "a.md", "2026-07-01", "aaa", &["x"], &["clyde://aaa"]);
+    write_session_file(root, "b.md", "2026-07-02", "bbb", &["x"], &["clyde://bbb"]);
+    write_session_file(root, "c.md", "2026-07-03", "ccc", &["y"], &["clyde://ccc"]);
+
+    let mut embed = FakeEmbeddings::default();
+    embed.set("a.md", "b.md", Some(0.95));
+    embed.set("a.md", "c.md", Some(0.10));
+    embed.set("b.md", "c.md", Some(0.10));
+    let notes = scan_dir(root);
+
+    let quiescing = AssociationConfig {
+        threshold: 0.85,
+        min_quiescence_secs: 999_999,
+        ..AssociationConfig::default()
+    };
+
+    let report = apply(root, &notes, &quiescing, &embed, true).unwrap();
+    assert!(
+        report.outcomes().is_empty(),
+        "one recently-modified member (all of them, in this fixture) skips the WHOLE 3-member group: {:?}",
+        report.outcomes()
+    );
+    for name in ["a.md", "b.md", "c.md"] {
+        let note = parse_note(root, &root.join(name)).unwrap();
+        assert!(
+            !note.frontmatter.extra.contains_key("superseded-by"),
+            "{name} was not merged"
+        );
+    }
+}
+
+#[test]
+fn excluded_path_never_groups() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("journal")).unwrap();
+    write_session_file(root, "a.md", "2026-07-01", "aaa", &["x"], &["clyde://aaa"]);
+    write_session_file(
+        &root.join("journal"),
+        "b.md",
+        "2026-07-10",
+        "bbb",
+        &["x"],
+        &["clyde://bbb"],
+    );
+
+    let mut embed = FakeEmbeddings::default();
+    embed.set("a.md", "journal/b.md", Some(0.99));
+    let notes = scan_dir_recursive(root);
+
+    let excluded = AssociationConfig {
+        threshold: 0.85,
+        min_quiescence_secs: 0,
+        exclude: vec!["journal/**".to_string()],
+        ..AssociationConfig::default()
+    };
+
+    let report = apply(root, &notes, &excluded, &embed, false).unwrap();
+    assert!(
+        report.outcomes().is_empty(),
+        "b.md is excluded, so a.md's slug group never reaches two members: {:?}",
+        report.outcomes()
+    );
+}
+
+/// Like `scan_dir`, but walks one level of subdirectories too (the exclude
+/// test needs a `journal/` note, and its vault-relative path must include the
+/// subdirectory for the `journal/**` glob to match).
+fn scan_dir_recursive(root: &std::path::Path) -> Vec<Note> {
+    fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<Note>) {
+        for entry in std::fs::read_dir(dir).expect("read_dir").filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else if path.extension().and_then(|x| x.to_str()) == Some("md") {
+                out.push(parse_note(root, &path).expect("parse"));
+            }
+        }
+    }
+    let mut notes = Vec::new();
+    walk(root, root, &mut notes);
+    notes.sort_by(|a, b| a.path.cmp(&b.path));
+    notes
 }

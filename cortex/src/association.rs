@@ -14,17 +14,23 @@
 //! the cross-link executor (`execute_cross_link`): it inserts a reciprocal
 //! `## Related` `[[wikilink]]` in every note named by an
 //! `AssociationOutcome::CrossLink` (the distinct clusters' representatives),
-//! skipping any link already present. CLI/daemon wiring is the final phase of
-//! the same design - see `docs/design/2026-07-24-cortex-association-sweep.md`.
+//! skipping any link already present. Phase 5 (this phase) wires it all
+//! together: the pure `apply` orchestrator (group -> whole-group quiescence
+//! guard -> decide -> conditionally execute), the `run` composition root that
+//! opens the oracle index + embed lock the way `graph::run` does, and
+//! `daemon_tick` for the daemon's own periodic interval arm - see
+//! `docs/design/2026-07-24-cortex-association-sweep.md`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use vault::schema::NoteType;
 
-use crate::config::SimilaritySource;
+use crate::config::{AssociationConfig, Config, SimilaritySource};
+use crate::opts::AssociateOpts;
 use crate::vault::Note;
 
 /// Group session notes that share the same content-derived `slug:`
@@ -94,6 +100,41 @@ pub enum AssociationOutcome {
     /// reciprocal wikilinks (one representative per cluster: a merge cluster's
     /// survivor, or a singleton's sole member).
     CrossLink { notes: Vec<PathBuf> },
+}
+
+/// Outcome of a `cortex associate` invocation (Phase 5). Mirrors the
+/// `SweepMode` precedent: dry-run and apply produce distinct variants so `sb`
+/// formats the result without re-inspecting `AssociateOpts`.
+///
+/// `WouldAssociate` is the full plan `decide` produced across every eligible
+/// group (nothing written). `Associated` carries only the outcomes that
+/// `apply` actually executed AND that changed at least one byte on disk - an
+/// outcome whose executor reported zero changed paths (already up to date, or
+/// every write failed and WARN-skipped) is dropped rather than reported as
+/// associated, so the daemon's own logging and any future fingerprinting only
+/// ever see real writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssociationReport {
+    /// Dry-run: the plan `sb cortex associate` (no `--apply`) prints.
+    WouldAssociate(Vec<AssociationOutcome>),
+    /// `--apply`: the outcomes that were executed and changed real files.
+    Associated(Vec<AssociationOutcome>),
+}
+
+impl AssociationReport {
+    /// The outcomes carried by either variant, for callers that format or
+    /// count without caring whether this was a dry-run or a real apply.
+    pub fn outcomes(&self) -> &[AssociationOutcome] {
+        match self {
+            AssociationReport::WouldAssociate(outcomes) | AssociationReport::Associated(outcomes) => outcomes,
+        }
+    }
+
+    /// True when `apply` actually executed (this is `Associated`), false for
+    /// a dry-run `WouldAssociate`.
+    pub fn applied(&self) -> bool {
+        matches!(self, AssociationReport::Associated(_))
+    }
 }
 
 /// Exact pairwise embedding cosine between two notes' `kind=summary`
@@ -365,6 +406,230 @@ impl UnionFind {
         let (root, child) = if ra < rb { (ra, rb) } else { (rb, ra) };
         self.parent[child] = root;
     }
+}
+
+// -- Phase 5: CLI + daemon orchestration ------------------------------------
+
+/// Glob-exclude check, mirroring `duplicates::matches_exclude` exactly (not
+/// promoted/shared: it is three lines and association's own `exclude` list is
+/// a distinct config field from duplicates', so cross-module coupling here
+/// would buy nothing).
+fn matches_exclude(note: &Note, patterns: &[glob::Pattern]) -> bool {
+    patterns.iter().any(|pat| {
+        let path_str = note.path.to_string_lossy();
+        pat.matches(&path_str)
+            || note
+                .path
+                .file_name()
+                .map(|f| pat.matches(f.to_string_lossy().as_ref()))
+                .unwrap_or(false)
+    })
+}
+
+/// Parse `AssociationConfig.exclude` glob strings, mirroring
+/// `duplicates::parse_exclude_patterns`. An invalid pattern is WARN-and-skip,
+/// never a hard error - one typo'd glob must not take down the whole run.
+fn parse_exclude_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
+    patterns
+        .iter()
+        .filter_map(|p| match glob::Pattern::new(p) {
+            Ok(pat) => Some(pat),
+            Err(e) => {
+                log::warn!("association::apply: invalid exclude pattern, skipping: {p}: {e}");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Whole-group quiescence guard: true when ANY member's file mtime falls
+/// within `min_quiescence_secs` of now, in which case the ENTIRE group is
+/// skipped this run (design's "quiescence is whole-group" - never a
+/// half-merged group because one member happened to be mid-edit).
+///
+/// Fail-safe on the unreadable/unknown cases too: a note whose mtime cannot be
+/// read, or whose mtime is somehow in the future (clock skew across a synced
+/// vault), is treated as "still quiescing" - skip the group rather than risk
+/// merging a note whose edit state is unknown.
+fn group_is_quiescing(vault_root: &Path, notes: &[Note], members: &[usize], min_quiescence_secs: u64) -> bool {
+    let quiescence = Duration::from_secs(min_quiescence_secs);
+    let now = SystemTime::now();
+    members.iter().any(|&i| {
+        let note = &notes[i];
+        let abs_path = vault_root.join(&note.path);
+        match fs::metadata(&abs_path).and_then(|m| m.modified()) {
+            Ok(mtime) => match now.duration_since(mtime) {
+                Ok(elapsed) => elapsed < quiescence,
+                Err(_) => {
+                    log::warn!(
+                        "association::apply: mtime in the future (clock skew?), treating as quiescing {}",
+                        note.path.display()
+                    );
+                    true
+                }
+            },
+            Err(e) => {
+                log::warn!(
+                    "association::apply: mtime unreadable, treating group as quiescing (skip) {}: {e}",
+                    note.path.display()
+                );
+                true
+            }
+        }
+    })
+}
+
+/// Pure(ish) top-level orchestrator: group -> whole-group quiescence guard ->
+/// decide -> (only when `do_apply`) execute. This is exactly the composition
+/// `association/tests.rs`'s `associate_run` fixture already exercises for
+/// Phases 3/4; Phase 5 wraps it in a public, generic-over-the-embedding-port
+/// entry point and adds the exclude filter and the quiescence guard.
+///
+/// Same-effect, correct-seam deviation from the design's bare
+/// `apply(vault_root, notes, config) -> Result<AssociationReport>` signature:
+/// the embedding port and the apply-vs-dry-run flag are threaded as explicit
+/// arguments rather than implied by `config` or re-derived from
+/// `AssociateOpts`, so this stays unit-testable with the same `FakeEmbeddings`
+/// fixture Phase 2 already built, with no SQLite index required. `run` below
+/// is the production composition root that supplies the real port (a
+/// `vault::search::SearchIndex`) and the real `AssociateOpts.apply` value.
+///
+/// Per-outcome execution failure never `?`-aborts the run (the
+/// `duplicates.rs:189` contract, inherited from `execute_merge`/
+/// `execute_cross_link`'s own WARN-and-skip internals): an outcome whose
+/// executor changed zero files (already up to date, or every write failed) is
+/// simply omitted from `Associated`, not treated as an error.
+pub fn apply<E: EmbeddingCosine>(
+    vault_root: &Path,
+    notes: &[Note],
+    config: &AssociationConfig,
+    embeddings: &E,
+    do_apply: bool,
+) -> Result<AssociationReport> {
+    log::debug!(
+        "association::apply: vault_root={} notes={} threshold={} source={:?} do_apply={}",
+        vault_root.display(),
+        notes.len(),
+        config.threshold,
+        config.similarity_source,
+        do_apply
+    );
+
+    let exclude_patterns = parse_exclude_patterns(&config.exclude);
+    let eligible: Vec<Note> = notes
+        .iter()
+        .filter(|n| !matches_exclude(n, &exclude_patterns))
+        .cloned()
+        .collect();
+
+    let groups = group_by_slug(&eligible);
+    log::debug!(
+        "association::apply: eligible={} groups={}",
+        eligible.len(),
+        groups.len()
+    );
+
+    let ctx = DecideCtx {
+        threshold: config.threshold,
+        similarity_source: config.similarity_source,
+        embeddings,
+    };
+
+    let mut outcomes: Vec<AssociationOutcome> = Vec::new();
+    let mut skipped_groups = 0usize;
+    for members in &groups {
+        if group_is_quiescing(vault_root, &eligible, members, config.min_quiescence_secs) {
+            skipped_groups += 1;
+            continue;
+        }
+        let group_refs: Vec<&Note> = members.iter().map(|&i| &eligible[i]).collect();
+        outcomes.extend(decide(&group_refs, &ctx)?);
+    }
+    if skipped_groups > 0 {
+        log::info!(
+            "association::apply: skipped {skipped_groups} group(s) whole (a member is within min-quiescence-secs)"
+        );
+    }
+
+    if !do_apply {
+        log::debug!("association::apply: dry-run, outcomes={}", outcomes.len());
+        return Ok(AssociationReport::WouldAssociate(outcomes));
+    }
+
+    let writer = AtomicWriter;
+    let mut associated: Vec<AssociationOutcome> = Vec::new();
+    let mut changed_files = 0usize;
+    for outcome in outcomes {
+        // execute_merge/execute_cross_link already WARN-and-skip every
+        // per-file failure internally and return `Ok` in practice; this
+        // outer match never `?`-aborts the run even so, per the
+        // `duplicates.rs:189` contract, in case a future executor change
+        // introduces a genuine top-level `Err`.
+        let changed = match &outcome {
+            AssociationOutcome::Merge {
+                survivor,
+                absorbed,
+                session_ids,
+            } => execute_merge(vault_root, survivor, absorbed, session_ids, &writer),
+            AssociationOutcome::CrossLink { notes: members } => execute_cross_link(vault_root, members, &writer),
+        };
+        let changed = match changed {
+            Ok(changed) => changed,
+            Err(e) => {
+                log::warn!("association::apply: outcome execution failed, skipping: {e}");
+                continue;
+            }
+        };
+        if changed.is_empty() {
+            // Idempotent no-op (already merged/linked) - never reported as a
+            // fresh association.
+            continue;
+        }
+        changed_files += changed.len();
+        associated.push(outcome);
+    }
+    log::info!(
+        "association::apply: associated {} outcome(s), {} file(s) changed",
+        associated.len(),
+        changed_files
+    );
+    Ok(AssociationReport::Associated(associated))
+}
+
+/// Composition root for `sb cortex associate`: scans the vault, opens its own
+/// oracle-DB connection (cortex commands do not share oracle's
+/// `Mutex<SearchIndex>` - the `graph.rs:87` precedent), takes the shared embed
+/// file lock before reading `note_embeddings` so this can never interleave
+/// with a concurrent `cortex embed` write, and delegates to `apply`.
+pub fn run(vault_root: &Path, config: &Config, opts: &AssociateOpts) -> Result<AssociationReport> {
+    log::debug!(
+        "association::run: vault_root={} apply={}",
+        vault_root.display(),
+        opts.apply
+    );
+    let notes = crate::vault::scan_vault(vault_root, &config.vault)?;
+
+    let db_path = config.oracle_db_path();
+    let index = vault::search::SearchIndex::open(&db_path)
+        .wrap_err_with(|| format!("failed to open search index at {}", db_path.display()))?;
+
+    let lock = crate::embed::acquire_lock()?;
+    log::debug!("association::run: acquired embed file lock");
+    let report = apply(vault_root, &notes, &config.actions.association, &index, opts.apply)?;
+    drop(lock);
+
+    Ok(report)
+}
+
+/// Daemon tick (Phase 5): the NEW periodic interval arm, modeled on the
+/// `embed`/`cold`/`graph` ticks - always AUTO-APPLIES (there is no per-tick
+/// dry-run; the daemon either associates or, per `is_enabled("association")`,
+/// does not run at all). The caller (`daemon::start_watching`) is responsible
+/// for the `is_enabled` gate and for wrapping this in `block_in_place` (it
+/// does blocking SQLite IO under the embed lock, same as `graph::daemon_tick`).
+pub fn daemon_tick(vault_root: &Path, config: &Config) -> Result<AssociationReport> {
+    log::debug!("association::daemon_tick: vault_root={}", vault_root.display());
+    run(vault_root, config, &AssociateOpts { apply: true })
 }
 
 // -- Phase 3: merge executor -----------------------------------------------

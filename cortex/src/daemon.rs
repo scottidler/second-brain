@@ -189,6 +189,17 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut fact_interval = tokio::time::interval(Duration::from_secs(config.graph.fact_interval_secs));
     fact_interval.tick().await; // consume the immediate first tick
 
+    // Association-sweep tick (2026-07-24 cortex-association-sweep design,
+    // Phase 5): a NEW periodic interval arm, deliberately NOT folded into the
+    // on-change `configured_actions` loop - a merge is soft-retiring
+    // (destructive-ish), so it must run on its own slow cadence, never on
+    // every debounced watcher event. Gated by `is_enabled("association")`,
+    // default OFF (the action is absent from `DaemonConfig::default()`'s
+    // action map); the tick still fires on cadence but no-ops when disabled,
+    // matching the embed-model-load-failure `continue` pattern below.
+    let mut association_interval = tokio::time::interval(Duration::from_secs(config.actions.association.interval_secs));
+    association_interval.tick().await; // consume the immediate first tick
+
     // LLM entity-discovery pass (Phase 4). Daily by default; LLM-bound and
     // bounded by `entities.max_per_run`, so it never fans unbounded calls.
     let mut entities_interval = tokio::time::interval(Duration::from_secs(config.entities.discover_interval_secs));
@@ -358,6 +369,37 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                         stats.facts_written, stats.noise_removed, stats.contradictions, stats.bridges_added,
                     ),
                     Err(e) => log::error!("daemon fact tick failed: {e}"),
+                }
+            }
+            _ = association_interval.tick() => {
+                // Association-sweep tick (2026-07-24 cortex-association-sweep
+                // design, Phase 5). Disabled by default; the tick still fires
+                // on cadence but is a no-op unless explicitly enabled, so
+                // flipping the config on takes effect within one cadence
+                // window with no daemon restart required.
+                if !daemon_config.is_enabled("association") {
+                    continue;
+                }
+                // block_in_place: opens its own SQLite connection and takes
+                // the shared embed lock (same shape as the graph tick), so it
+                // must not starve the watcher/timers while doing blocking IO.
+                match tokio::task::block_in_place(|| crate::association::daemon_tick(vault_root, config)) {
+                    Ok(report) => {
+                        let outcomes = report.outcomes();
+                        let merges = outcomes
+                            .iter()
+                            .filter(|o| matches!(o, crate::association::AssociationOutcome::Merge { .. }))
+                            .count();
+                        let cross_links = outcomes.len() - merges;
+                        if outcomes.is_empty() {
+                            log::debug!("daemon association tick: nothing to associate");
+                        } else {
+                            log::info!(
+                                "daemon association tick: merges={merges} cross_links={cross_links}",
+                            );
+                        }
+                    }
+                    Err(e) => log::error!("daemon association tick failed: {e}"),
                 }
             }
             _ = entities_interval.tick() => {
@@ -809,6 +851,16 @@ where
                     Ok(_) => {}
                     Err(e) => log::error!("sweep proposals scan failed: {e}"),
                 }
+            }
+            "association" => {
+                // Deliberately a no-op here: `daemon.actions.association.enable`
+                // is read by the SEPARATE `association_interval` tick above via
+                // `is_enabled("association")`, never by this on-change loop - a
+                // merge/cross-link pass must run on its own slow cadence, not on
+                // startup or every debounced watcher event (2026-07-24
+                // cortex-association-sweep design, Phase 5). This arm exists
+                // solely so registering the action in `daemon.actions` does not
+                // fall through to the `unknown daemon action` warning below.
             }
             other => {
                 log::warn!("unknown daemon action: {other}");
