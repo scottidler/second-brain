@@ -245,3 +245,80 @@ Design doc: `docs/design/2026-07-24-cortex-association-sweep.md`
   column is additive (`DEFAULT ''`, idempotent `ALTER`), so it needs no
   coordinated migration — existing DBs gain it on next open via
   `ensure_superseded_by_column`.
+
+## Phase 4: Cross-link executor
+
+### Design decisions
+- **`execute_cross_link(vault_root, notes, writer) -> Result<Vec<String>>`** —
+  `cortex/src/association.rs::execute_cross_link` — takes an
+  `AssociationOutcome::CrossLink.notes` list verbatim (already the distinct
+  clusters' representatives per Phase 2 — a merge survivor or a singleton's
+  sole member, never an absorbed tombstone) and inserts a reciprocal
+  `## Related` bullet in every member pointing at every OTHER member. Uses the
+  SAME `NoteWriter` seam (`AtomicWriter` in prod) Phase 3's `execute_merge`
+  established, for the same reason: consistent write path and a swappable
+  fake for tests.
+- **Reused `append_bullets` (Phase 3) verbatim for the `## Related` section** —
+  a cross-link bullet (`- [[stem]]`) is structurally identical to a Claims/
+  Session-Details bullet (a `- `-prefixed line with a dedup key), so the exact
+  idempotent-append-or-create-section primitive Phase 3 built is reused rather
+  than reimplemented. Only a new dedup key (`related_key`) and heading const
+  (`RELATED_HEADING`) were added.
+- **`related_key` dedups by the wikilink TARGET before any `|` alias, case-
+  insensitively** — `association.rs::related_key` — so a manually-authored
+  `[[b|Some Alias]]` already in a note's `## Related` section is recognized as
+  "link to b already present" and never duplicated, even though the executor
+  itself always emits the plain `[[stem]]` form.
+- **Wikilink target is always the note's own filename stem** — the design's
+  API Design section says `[[<other-slug-or-stem>]]`; implemented as always
+  the file stem (`note_stem`, Phase 3's `survivor_stem` renamed and
+  generalized — see Deviations), never the bare `slug:` frontmatter value.
+  Every member of a group shares the identical `slug:` by construction (that
+  is what makes it a group), so linking by slug could never disambiguate
+  which sibling a wikilink targets; only the real, unique filename resolves
+  correctly in Obsidian. This mirrors the merge tombstone's own
+  `[[survivor-stem]]` redirect (Phase 3), so both outcome types point at
+  notes the exact same way.
+- **Preflight-read every member before writing any** (mirrors `execute_merge`'s
+  apply order) — an unreadable member is WARN-and-skipped and excluded from
+  BOTH directions: it is not written to, and it is never offered as a link
+  target to its siblings, so no sibling ever gains a wikilink pointing at a
+  note that could not be confirmed to exist on this pass.
+- **Skip-if-unchanged per note** — a note whose `## Related` section already
+  carries every sibling's link is not rewritten, giving the exact
+  "second run writes zero bytes" contract via `append_bullets`'s existing
+  no-op behavior (already proven idempotent by Phase 3's Claims/Session-
+  Details tests; Phase 4 adds its own tests over the Related section since it
+  is new call-site coverage).
+
+### Deviations
+- **Renamed `survivor_stem` to `note_stem`** — `association.rs` — same
+  behavior, no signature change; the function is now called for a general
+  "this note's wikilink-safe stem" purpose (cross-link targets) as well as
+  the merge tombstone's redirect target, so the merge-specific name no longer
+  matched what it does. Same effect, correct name (schema-is-law / names-
+  tell-the-truth).
+- **The design's `[[<other-slug-or-stem>]]` is implemented as always-stem,
+  never slug** — see Design decisions above. Same intent (a resolvable
+  wikilink to the sibling), correct mechanism: the bare slug is shared by
+  every group member and cannot disambiguate.
+
+### Tradeoffs
+- **Idempotency scoped to the `## Related` section, not the whole note body**
+  — `related_key` only inspects existing `## Related` bullets (via
+  `append_bullets`'s existing section scan), matching how Phase 3's Claims/
+  Session-Details union already scopes its dedup per-section. A wikilink to a
+  sibling appearing elsewhere in the note's prose (outside `## Related`) is
+  not treated as "already present" and could theoretically produce a second,
+  redundant link outside this executor's control — but this executor never
+  touches prose outside `## Related`, so it cannot itself create that
+  situation; it only guards against re-running itself.
+- **A note that fails to read is dropped from the cross-link entirely (both as
+  writer and as target)**, vs. still linking to it from readable siblings.
+  Chosen to avoid ever emitting a wikilink pointing at a note whose current
+  existence/content could not be confirmed on this pass — consistent with
+  `execute_merge`'s "an unreadable absorbed note is skipped, not partially
+  processed" contract.
+
+### Open questions
+- None. Cross-repo/system-mutating steps: none in this phase.

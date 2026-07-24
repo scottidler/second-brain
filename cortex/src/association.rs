@@ -10,9 +10,12 @@
 //! Phase 3 adds the merge executor (`execute_merge`): it enriches the survivor
 //! with the idempotent union of every absorbed note's claims,
 //! `## Session Details`, and `cortex-session-ids`, then soft-retires each
-//! absorbed note to a `superseded-by:` tombstone (no deletion). The cross-link
-//! executor and CLI/daemon wiring are later phases of the same design - see
-//! `docs/design/2026-07-24-cortex-association-sweep.md`.
+//! absorbed note to a `superseded-by:` tombstone (no deletion). Phase 4 adds
+//! the cross-link executor (`execute_cross_link`): it inserts a reciprocal
+//! `## Related` `[[wikilink]]` in every note named by an
+//! `AssociationOutcome::CrossLink` (the distinct clusters' representatives),
+//! skipping any link already present. CLI/daemon wiring is the final phase of
+//! the same design - see `docs/design/2026-07-24-cortex-association-sweep.md`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -371,6 +374,9 @@ const CLAIMS_HEADING: &str = "## Claims";
 /// The `## Session Details` section heading (as `borg::pipeline::session`
 /// writes it).
 const SESSION_DETAILS_HEADING: &str = "## Session Details";
+/// The `## Related` cross-link section heading Phase 4's `execute_cross_link`
+/// writes/appends to.
+const RELATED_HEADING: &str = "## Related";
 
 /// The single note-write seam the merge executor writes through. Production is
 /// `AtomicWriter` (delegating to `vault::note::write_atomic`); tests inject a
@@ -678,7 +684,7 @@ fn append_bullets(content: &str, heading: &str, incoming: &[Vec<String>], key: f
 /// `superseded-by:` IS the tombstone marker (schema-is-law). Returns `None`
 /// when the note has no frontmatter block (cannot be marked).
 fn tombstone_content(content: &str, survivor: &Path) -> Option<String> {
-    let stem = survivor_stem(survivor);
+    let stem = note_stem(survivor);
     // Drop slug first (if present), then set superseded-by.
     let without_slug =
         crate::scope::remove_frontmatter_fields(content, &["slug".to_string()]).unwrap_or_else(|| content.to_string());
@@ -690,13 +696,17 @@ fn tombstone_content(content: &str, survivor: &Path) -> Option<String> {
     swap_body(&marked, &redirect)
 }
 
-/// The survivor's filename without its `.md` extension - the wikilink target
-/// and `superseded-by:` value (e.g. `foo--a1b2c3d4.md` -> `foo--a1b2c3d4`).
-fn survivor_stem(survivor: &Path) -> String {
-    survivor
-        .file_stem()
+/// A note's filename without its `.md` extension - the wikilink target for
+/// both the merge tombstone's `superseded-by:`/redirect (e.g.
+/// `foo--a1b2c3d4.md` -> `foo--a1b2c3d4`) and the Phase 4 cross-link
+/// executor. Always the actual filename stem, never the shared `slug:`
+/// frontmatter value: same-slug notes are exactly what a same-slug GROUP is,
+/// so the slug alone cannot disambiguate which sibling a wikilink targets -
+/// only the real, unique filename resolves in Obsidian.
+fn note_stem(path: &Path) -> String {
+    path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| survivor.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
 /// Replace a note's body (everything after the closing `---` fence) with
@@ -719,6 +729,101 @@ fn swap_body(content: &str, new_body: &str) -> Option<String> {
     let offset = content.len() - trimmed.len();
     let prefix = &content[..offset];
     Some(format!("{prefix}---\n{fm_block}\n{closing_fence}\n\n{new_body}"))
+}
+
+// -- Phase 4: cross-link executor -------------------------------------------
+
+/// Execute ONE `AssociationOutcome::CrossLink`: insert a reciprocal
+/// `## Related` `[[wikilink]]` bullet in every named note, pointing at each
+/// OTHER named note by its own filename stem (`note_stem`) - the house
+/// wikilink form used throughout `cortex/src/linking.rs`.
+///
+/// `notes` is exactly `CrossLink.notes` off `decide`'s output: the
+/// representatives of the group's distinct clusters (a merge survivor, or a
+/// singleton's sole member) - never an absorbed tombstone, which already
+/// carries its own `Merged into [[survivor]].` redirect and has nothing to
+/// gain from a second link.
+///
+/// Preflight-reads every member first (mirrors `execute_merge`'s apply
+/// order); a note that fails to read is WARN-and-skipped - it is neither
+/// written to nor referenced as a link target for its siblings, so no
+/// sibling ever gains a wikilink pointing at a note that could not be
+/// confirmed to exist. Idempotent via `append_bullets` + `related_key`: a
+/// bullet whose wikilink target is already present in the note's `## Related`
+/// section is never re-added, so a second run on an already-linked group
+/// writes zero bytes (skip-if-unchanged, the same contract `execute_merge`'s
+/// survivor enrichment uses).
+///
+/// Returns the vault-relative paths this call actually byte-changed, mirroring
+/// `execute_merge` / `scope::apply_scope` / `duplicates::apply_duplicates` so
+/// the daemon's oscillation fingerprint draws only from real writes.
+pub fn execute_cross_link<W: NoteWriter>(vault_root: &Path, notes: &[PathBuf], writer: &W) -> Result<Vec<String>> {
+    log::debug!(
+        "association::execute_cross_link: vault_root={} notes={}",
+        vault_root.display(),
+        notes.len()
+    );
+    let mut changed: Vec<String> = Vec::new();
+
+    // Preflight-read every member. An unreadable note is skipped entirely: it
+    // is never written to, and never offered as a link target to its
+    // siblings (a wikilink to a note that could not be confirmed present is
+    // worse than no link).
+    let mut readable: Vec<(&PathBuf, String)> = Vec::new();
+    for path in notes {
+        match fs::read_to_string(vault_root.join(path)) {
+            Ok(c) => readable.push((path, c)),
+            Err(e) => log::warn!(
+                "association::execute_cross_link: skipping note (unreadable) {}: {e}",
+                path.display()
+            ),
+        }
+    }
+
+    if readable.len() < 2 {
+        log::debug!("association::execute_cross_link: fewer than two readable members, nothing to cross-link");
+        return Ok(changed);
+    }
+
+    let stems: Vec<String> = readable.iter().map(|(path, _)| note_stem(path)).collect();
+
+    for (idx, (path, content)) in readable.iter().enumerate() {
+        let sibling_blocks: Vec<Vec<String>> = stems
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| j != idx)
+            .map(|(_, stem)| vec![format!("- [[{stem}]]")])
+            .collect();
+
+        let updated = append_bullets(content, RELATED_HEADING, &sibling_blocks, related_key);
+        if &updated == content {
+            continue;
+        }
+        if let Err(e) = writer.write(&vault_root.join(path), updated.as_bytes()) {
+            log::warn!("association::execute_cross_link: write failed {}: {e}", path.display());
+            continue;
+        }
+        log::info!("association::execute_cross_link: cross-linked {}", path.display());
+        changed.push(path.to_string_lossy().into_owned());
+    }
+
+    log::debug!("association::execute_cross_link: changed={}", changed.len());
+    Ok(changed)
+}
+
+/// Dedup key for a `## Related` bullet: the wikilink TARGET (the text before
+/// any `|` alias, inside `[[...]]`), lowercased - so `[[Foo]]` and
+/// `[[foo|Foo Title]]` are treated as the same link and a second run never
+/// re-adds a link already present regardless of its exact piped form. Falls
+/// back to the trimmed bullet text when the bullet carries no `[[...]]`
+/// wikilink (defensive; every bullet this executor emits is always one).
+fn related_key(bullet_line: &str) -> String {
+    let text = strip_bullet(bullet_line.trim_start()).trim();
+    let inner = text
+        .strip_prefix("[[")
+        .and_then(|s| s.strip_suffix("]]"))
+        .unwrap_or(text);
+    inner.split('|').next().unwrap_or(inner).trim().to_lowercase()
 }
 
 #[cfg(test)]

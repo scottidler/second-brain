@@ -5,8 +5,8 @@ use eyre::Result;
 use serde_yaml::Value;
 
 use super::{
-    AssociationOutcome, AtomicWriter, DecideCtx, EmbeddingCosine, NoteWriter, append_bullets, decide, execute_merge,
-    group_by_slug,
+    AssociationOutcome, AtomicWriter, DecideCtx, EmbeddingCosine, NoteWriter, append_bullets, decide,
+    execute_cross_link, execute_merge, group_by_slug,
 };
 use crate::config::SimilaritySource;
 use crate::testutil::NoteBuilder;
@@ -886,4 +886,197 @@ fn append_bullets_is_idempotent_when_all_present() {
     let incoming = vec![vec!["- one".to_string()], vec!["- two".to_string()]];
     let out = append_bullets(content, "## Claims", &incoming, super::claim_key);
     assert_eq!(out, content, "re-adding present bullets is a byte-level no-op");
+}
+
+// -- Phase 4: cross-link executor -------------------------------------------
+
+/// A minimal note (frontmatter + body) for cross-link fixtures - the executor
+/// only touches the body's `## Related` section, so these don't need the full
+/// harvest-session shape `write_session_file` builds.
+fn write_plain_note(root: &std::path::Path, name: &str, body: &str) {
+    let content = format!("---\ntitle: {name}\n---\n{body}");
+    std::fs::write(root.join(name), content).expect("write plain note");
+}
+
+#[test]
+fn execute_cross_link_inserts_reciprocal_related_section() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_plain_note(root, "a.md", "## Summary\n\nfoo\n");
+    write_plain_note(root, "b.md", "## Summary\n\nbar\n");
+
+    let changed = execute_cross_link(root, &[PathBuf::from("a.md"), PathBuf::from("b.md")], &AtomicWriter).unwrap();
+    assert_eq!(changed, vec!["a.md".to_string(), "b.md".to_string()]);
+
+    let a = std::fs::read_to_string(root.join("a.md")).unwrap();
+    let b = std::fs::read_to_string(root.join("b.md")).unwrap();
+    assert!(a.contains("## Related"), "a gains a Related section: {a}");
+    assert!(a.contains("- [[b]]"), "a links to b by its filename stem: {a}");
+    assert!(b.contains("## Related"), "b gains a Related section: {b}");
+    assert!(b.contains("- [[a]]"), "b links to a by its filename stem: {b}");
+}
+
+#[test]
+fn execute_cross_link_appends_to_an_existing_related_section() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_plain_note(root, "a.md", "## Related\n\n- [[preexisting]]\n\n## Summary\n\nfoo\n");
+    write_plain_note(root, "b.md", "## Summary\n\nbar\n");
+
+    let changed = execute_cross_link(root, &[PathBuf::from("a.md"), PathBuf::from("b.md")], &AtomicWriter).unwrap();
+    assert_eq!(changed, vec!["a.md".to_string(), "b.md".to_string()]);
+
+    let a = std::fs::read_to_string(root.join("a.md")).unwrap();
+    assert_eq!(
+        a.matches("## Related").count(),
+        1,
+        "the existing section is reused, never duplicated: {a}"
+    );
+    assert!(
+        a.contains("- [[preexisting]]"),
+        "the pre-existing bullet is preserved: {a}"
+    );
+    assert!(a.contains("- [[b]]"), "the sibling link is appended: {a}");
+}
+
+#[test]
+fn execute_cross_link_skips_a_link_already_present_in_piped_form() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    // a already links to b, via a piped alias - `related_key` recognizes the
+    // target before the `|`, so this counts as "already present".
+    write_plain_note(root, "a.md", "## Related\n\n- [[b|Some Alias]]\n\n## Summary\n\nfoo\n");
+    write_plain_note(root, "b.md", "## Summary\n\nbar\n");
+
+    let changed = execute_cross_link(root, &[PathBuf::from("a.md"), PathBuf::from("b.md")], &AtomicWriter).unwrap();
+
+    // a is unchanged (already linked); b still gains the reciprocal link.
+    assert_eq!(
+        changed,
+        vec!["b.md".to_string()],
+        "a untouched, only b's missing reciprocal link is written: {changed:?}"
+    );
+    let a = std::fs::read_to_string(root.join("a.md")).unwrap();
+    assert_eq!(
+        a.matches("[[b").count(),
+        1,
+        "the existing piped link is not duplicated: {a}"
+    );
+}
+
+#[test]
+fn execute_cross_link_three_members_each_gains_the_other_two() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_plain_note(root, "a.md", "## Summary\n\nfoo\n");
+    write_plain_note(root, "b.md", "## Summary\n\nbar\n");
+    write_plain_note(root, "c.md", "## Summary\n\nbaz\n");
+
+    let changed = execute_cross_link(
+        root,
+        &[PathBuf::from("a.md"), PathBuf::from("b.md"), PathBuf::from("c.md")],
+        &AtomicWriter,
+    )
+    .unwrap();
+    assert_eq!(
+        changed,
+        vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()]
+    );
+
+    let a = std::fs::read_to_string(root.join("a.md")).unwrap();
+    let b = std::fs::read_to_string(root.join("b.md")).unwrap();
+    let c = std::fs::read_to_string(root.join("c.md")).unwrap();
+    assert!(
+        a.contains("- [[b]]") && a.contains("- [[c]]"),
+        "a links to b and c: {a}"
+    );
+    assert!(
+        b.contains("- [[a]]") && b.contains("- [[c]]"),
+        "b links to a and c: {b}"
+    );
+    assert!(
+        c.contains("- [[a]]") && c.contains("- [[b]]"),
+        "c links to a and b: {c}"
+    );
+}
+
+#[test]
+fn execute_cross_link_skips_an_unreadable_member_and_still_links_the_rest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_plain_note(root, "a.md", "## Summary\n\nfoo\n");
+    write_plain_note(root, "b.md", "## Summary\n\nbar\n");
+    // "missing.md" is named in the outcome but does not exist on disk (e.g. a
+    // stale run against a note deleted out-of-band): it must never appear as
+    // a link target and must never be written to.
+    let changed = execute_cross_link(
+        root,
+        &[
+            PathBuf::from("a.md"),
+            PathBuf::from("b.md"),
+            PathBuf::from("missing.md"),
+        ],
+        &AtomicWriter,
+    )
+    .unwrap();
+    assert_eq!(changed, vec!["a.md".to_string(), "b.md".to_string()]);
+    let a = std::fs::read_to_string(root.join("a.md")).unwrap();
+    let b = std::fs::read_to_string(root.join("b.md")).unwrap();
+    assert!(
+        !a.contains("missing"),
+        "the unreadable member never becomes a link target: {a}"
+    );
+    assert!(
+        !b.contains("missing"),
+        "the unreadable member never becomes a link target: {b}"
+    );
+    assert!(!root.join("missing.md").exists(), "never created");
+}
+
+#[test]
+fn execute_cross_link_with_fewer_than_two_readable_members_is_a_no_op() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_plain_note(root, "a.md", "## Summary\n\nfoo\n");
+    let changed = execute_cross_link(
+        root,
+        &[PathBuf::from("a.md"), PathBuf::from("missing.md")],
+        &AtomicWriter,
+    )
+    .unwrap();
+    assert!(
+        changed.is_empty(),
+        "a lone readable member has no sibling to link: {changed:?}"
+    );
+    let a = std::fs::read_to_string(root.join("a.md")).unwrap();
+    assert!(
+        !a.contains("## Related"),
+        "no Related section is created for nothing to link: {a}"
+    );
+}
+
+#[test]
+fn second_cross_link_run_writes_zero_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_plain_note(root, "a.md", "## Summary\n\nfoo\n");
+    write_plain_note(root, "b.md", "## Summary\n\nbar\n");
+    let members = [PathBuf::from("a.md"), PathBuf::from("b.md")];
+
+    let first = execute_cross_link(root, &members, &AtomicWriter).unwrap();
+    assert!(!first.is_empty(), "first run writes the reciprocal links");
+    let a_after1 = std::fs::read(root.join("a.md")).unwrap();
+    let b_after1 = std::fs::read(root.join("b.md")).unwrap();
+
+    let second = execute_cross_link(root, &members, &AtomicWriter).unwrap();
+    assert!(second.is_empty(), "second run writes zero bytes: {second:?}");
+    assert_eq!(std::fs::read(root.join("a.md")).unwrap(), a_after1, "a byte-identical");
+    assert_eq!(std::fs::read(root.join("b.md")).unwrap(), b_after1, "b byte-identical");
+}
+
+#[test]
+fn related_key_extracts_target_before_pipe_case_insensitively() {
+    assert_eq!(super::related_key("- [[Foo]]"), "foo");
+    assert_eq!(super::related_key("- [[foo|Foo Title]]"), "foo");
+    assert_eq!(super::related_key("* [[bar|Alias]]"), "bar");
 }
