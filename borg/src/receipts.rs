@@ -541,6 +541,28 @@ pub fn renew_lease(conn: &Connection, trace_id: &str, lease_until: &str) -> Resu
     Ok(())
 }
 
+/// Clear the lease columns (`lease_owner_pid=NULL, lease_until=NULL`) on a
+/// still-`received` row WITHOUT changing its status. This is the RAII
+/// panic/future-cancel path in [`crate::pipeline::permits::TraceLeaseGuard`]'s
+/// Drop, where the terminal write (which normally folds the clear into its own
+/// UPDATE) never ran. Guarded to `status='received'` so it can never disturb a
+/// row that already reached a terminal state. Clearing the lease makes a
+/// genuinely dead trace immediately reap-eligible (fail-closed).
+pub fn clear_lease(conn: &Connection, trace_id: &str) -> Result<()> {
+    log::debug!("receipts::clear_lease: trace={trace_id}");
+    let rows = conn
+        .execute(
+            "UPDATE receipts SET lease_owner_pid=NULL, lease_until=NULL \
+             WHERE trace_id=? AND status='received'",
+            params![trace_id],
+        )
+        .with_context(|| format!("Failed to clear lease trace_id={trace_id}"))?;
+    if rows == 0 {
+        log::debug!("receipts::clear_lease: trace_id={trace_id} not in 'received' state, no-op");
+    }
+    Ok(())
+}
+
 /// SELECT the trace_ids that are candidates for crashed-promotion: status
 /// `received`, `received_at` older than the deadline, AND no live lease
 /// (`lease_until` absent or already expired against `now`). A row whose

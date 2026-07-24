@@ -14,6 +14,7 @@ use crate::router;
 use crate::trace;
 use crate::transcription::TranscriptionClient;
 use crate::types::{AudioFormat, ContentKind, IngestMethod, IngestResult, IngestStatus};
+use crate::watchdog;
 use crate::youtube;
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -180,15 +181,43 @@ pub async fn process_content(
     let trace_id = trace_id.unwrap_or_else(|| trace::generate(method));
     log::info!("[{trace_id}] Starting ingest: method={method}");
 
-    // Register the trace as active *before* any await so the watchdog sees
-    // it as live during the permit wait. Drop on scope exit (including
-    // panic-unwind and future-cancel) removes the entry.
-    let _active_guard = permits::ActiveTraceGuard::acquire(&trace_id);
+    // Take the cross-process trace lease *before* any await so the watchdog
+    // sees the row as live during the permit wait - even a watchdog running in
+    // a SEPARATE daemon process (the harvest false-crash this fixes). The lease
+    // is pinned to the SAME `hard_timeout + buffer` deadline the watchdog uses.
+    // Drop clears the lease on panic/future-cancel; the happy path cancel()s it
+    // after the terminal write (which already NULLed the lease in one UPDATE).
+    //
+    // FAIL CLOSED: `process_content` returns `IngestResult`, not `Result`, so a
+    // failed initial lease write is an explicit early terminal - never a
+    // NULL-lease continuation that the watchdog would instantly reap.
+    let lease_deadline_secs = config.pipeline.hard_timeout_secs + watchdog::WATCHDOG_BUFFER_SECS;
+    let lease_guard = match permits::TraceLeaseGuard::acquire(&trace_id, lease_deadline_secs) {
+        Ok(guard) => guard,
+        Err(e) => {
+            log::error!("[{trace_id}] failed to acquire trace lease; aborting fail-closed: {e:#}");
+            let result = IngestResult {
+                status: IngestStatus::Failed {
+                    reason: format!("failed to acquire trace lease: {e:#}"),
+                },
+                trace_id: Some(trace_id.clone()),
+                method: Some(method),
+                failure_stage: Some(FailureStage::Crashed),
+                ..Default::default()
+            };
+            record_terminal_to_receipts(&trace_id, &result);
+            return result;
+        }
+    };
 
     // Acquire the general permit. Every trace passes through this cap.
     log::debug!("process_content[{trace_id}]: acquiring general permit");
     let _general_permit = permits::GENERAL_PERMITS.acquire().await;
     log::debug!("process_content[{trace_id}]: general permit acquired");
+
+    // Renew the lease now that work is truly starting, so the actual-processing
+    // window is measured from permit grant rather than from queue entry.
+    lease_guard.renew();
 
     // Stage-0 rejection must flow through the SAME terminal-write chokepoint
     // as every other outcome (below). Returning early here left the receipts
@@ -349,6 +378,11 @@ pub async fn process_content(
     // markdown DLQ was removed (see
     // docs/design/2026-06-03-receipts-log-legacy-markdown-excision.md).
     record_terminal_to_receipts(&trace_id, &result);
+    // The terminal write above already NULLed the lease in its own UPDATE, so
+    // disarm the guard's Drop: no redundant blocking SQLite UPDATE on a Tokio
+    // worker on the happy path. Only a panic/future-cancel before this point
+    // leaves Drop armed to clear the lease.
+    lease_guard.cancel();
     result
 }
 

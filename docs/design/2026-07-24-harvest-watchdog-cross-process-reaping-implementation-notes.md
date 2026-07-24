@@ -215,3 +215,86 @@ Design doc: `docs/design/2026-07-24-harvest-watchdog-cross-process-reaping.md`
 
 ### Open questions
 - None.
+
+## Phase 4: Wire lease into guard + watchdog; remove ACTIVE_TRACES
+
+### Design decisions
+- **`TraceLeaseGuard` owns its receipts `Connection`** -- `pipeline/permits.rs`.
+  The guard writes/renews/clears the lease through a connection it opens itself
+  (`acquire` -> `receipts::open_default()`), because harvest has no pool and
+  `process_content` already opens a per-call connection at its terminal write
+  (`record_terminal_to_receipts`). The connection is held open for the life of
+  the trace (only written on acquire/renew/clear); `rusqlite::Connection` is
+  `Send`, so holding it across the `.await` on the general permit keeps the
+  future `Send` for the multi-thread runtime. It is NOT a lock, so the
+  no-lock-across-await rule does not apply.
+- **`acquire` / `acquire_with_conn` split** -- `pipeline/permits.rs`. Production
+  `acquire(trace_id, deadline_secs)` opens the DB and delegates to
+  `acquire_with_conn(conn, ...)`, the conn-injectable seam tests drive over a
+  shared on-disk `TempDir` DB (so the guard's own connection and the watchdog's
+  connection observe the same lease -- impossible with `:memory:`, where every
+  open is a distinct DB). Mirrors the old `ActiveTraceGuard::acquire`/
+  `acquire_in` split.
+- **`cancel(self)` disarms Drop via a `cancelled: bool`** -- `pipeline/permits.rs`.
+  Standard RAII-disarm: the happy path calls `lease_guard.cancel()` AFTER
+  `record_terminal_to_receipts` (`pipeline.rs`), and the terminal
+  `mark_succeeded`/`mark_failed` already NULLed the lease in one UPDATE (Phase
+  2), so Drop does no I/O on the common path. Drop clears the lease ONLY when
+  never cancelled -- panic-unwind / future-cancel -- making a genuinely dead
+  trace reap-eligible. Drop-clear failure is WARN-not-panic (`clear_lease`
+  errors are logged; the lease still expires on its own).
+- **New `receipts::clear_lease(conn, trace_id)`** -- `receipts.rs`. NULLs both
+  lease columns guarded to `status='received'`, for the guard's Drop path only.
+  Phase 2 folded the happy-path clear into the terminal UPDATE; the panic path
+  had no primitive, so this fills that one gap without touching status.
+- **`lease_deadline_secs = hard_timeout_secs + WATCHDOG_BUFFER_SECS`** computed
+  at the guard site (`pipeline.rs`), the SAME value `watchdog::run_once`
+  computes. Made `watchdog::WATCHDOG_BUFFER_SECS` `pub` so the two sites share
+  one constant rather than duplicating `60`.
+- **Fail-closed acquire is an explicit early terminal** -- `pipeline.rs`.
+  `process_content` returns `IngestResult`, not `Result`, so a failed initial
+  `write_lease` builds a `Failed`/`Crashed` `IngestResult`, records it via
+  `record_terminal_to_receipts`, and `return`s -- never a `?`, never a
+  NULL-lease continuation.
+- **Watchdog drops the `&dyn Fn` liveness closure** -- `watchdog.rs`.
+  `run_once(config)` and `run_once_conn(conn, deadline_secs)` no longer take the
+  active-trace predicate; liveness is entirely the lease predicate baked into
+  `list_stale` + `promote_single_to_crashed` (Phase 2). `ACTIVE_TRACES`,
+  `is_trace_active`, `active_traces()`, `ActiveTraceGuard`, and the
+  `use crate::pipeline::permits` import in `watchdog.rs` are deleted. No test
+  injection seam remained necessary -- the conn-injectable `run_once_conn` plus
+  the `acquire_with_conn` guard seam cover every test.
+
+### Deviations
+- **Guard constructor is `acquire(trace_id, deadline_secs)`, not the doc's
+  `acquire(conn, trace_id, deadline)`** -- `pipeline/permits.rs`. The design's
+  literal signature takes a `conn`, but production has nowhere to hand one in
+  (harvest has no pool; the guard must outlive any single call). Same effect --
+  the guard writes the lease on construction and fails closed -- at the correct
+  seam: production `acquire` opens `open_default()` internally (the design's own
+  "per-guard `open_default()`" note), and the `conn`-taking form survives as
+  `acquire_with_conn` for tests. "deadline" is passed as `deadline_secs` (the
+  guard computes `lease_until = now + deadline_secs`), matching how the watchdog
+  already expresses the deadline.
+- **`run_once`/`run_once_conn` lost the `&dyn Fn` parameter entirely** rather
+  than keeping it as a documented test seam. The design said "the seam may
+  remain for tests"; it was not needed (see above), and the task/`rust.md`
+  forbid dead plumbing, so it was removed cleanly.
+
+### Tradeoffs
+- **Guard holds an open SQLite connection for the whole trace (up to
+  `hard_timeout_secs`) vs opening per lease-write.** Chose hold-open: it is one
+  file handle (not a pool connection), WAL + `busy_timeout` already tolerate
+  many concurrent handles, and renew/clear need a connection anyway. Opening a
+  fresh connection per renew/clear would triple the open cost for no benefit.
+- **End-to-end tests use an on-disk `TempDir` DB, not `:memory:`.** Required so
+  the guard's owned connection and the watchdog's connection point at the same
+  database; `:memory:` gives each `open_*` a private DB. Slightly slower than
+  in-memory but the only way to exercise the true cross-connection (stand-in for
+  cross-process) lease visibility this feature is about.
+- **No heartbeat** -- Phase 0 CLOSED it (renew-at-permit suffices at the
+  configured permit cap; the entry-lease cannot expire before permit grant
+  single-user). Not added.
+
+### Open questions
+- None.
