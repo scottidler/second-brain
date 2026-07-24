@@ -108,7 +108,7 @@ pub fn distill_kind_from_ingest(kind: IngestKind) -> Result<DistillKind> {
 /// callers go through `DistillStage::from_fabric_config`; tests build a
 /// `DistillStage::with_dispatcher` to inject a `FakeFabric`-driven one.
 pub fn dispatcher_from_fabric_config(config: &FabricConfig) -> Dispatcher<FabricShell> {
-    let fabric = FabricShell::new(config.binary.clone());
+    let fabric = FabricShell::new(config.binary.clone(), config.api_key.clone());
     let article_config = ArticleConfig {
         model: config.model.clone(),
         max_chars: config.max_content_chars,
@@ -878,7 +878,7 @@ pub fn dispatcher_for_session(fabric: &FabricConfig, session_config: SessionConf
         session_config.model,
         session_config.token_cap
     );
-    let caller = FabricShell::new(fabric.binary.clone());
+    let caller = FabricShell::new(fabric.binary.clone(), fabric.api_key.clone());
     let article_config = ArticleConfig {
         model: fabric.model.clone(),
         max_chars: fabric.max_content_chars,

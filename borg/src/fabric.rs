@@ -54,6 +54,7 @@ pub async fn run_pattern(pattern: &str, input: &str, config: &FabricConfig) -> R
         &resolved,
         input,
         &config.binary,
+        &config.api_key,
         &config.model,
         config.max_content_chars,
         config.timeout_secs,

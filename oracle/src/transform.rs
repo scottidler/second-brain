@@ -39,6 +39,9 @@ pub fn fabric_transform(cfg: &QueryTransformConfig, query: &str) -> Result<Vec<S
         &cfg.pattern,
         query,
         TRANSFORM_BINARY,
+        // No configured credential var is threaded into the transform path; pass
+        // "" so fabric falls back to its own .env (prior behavior).
+        "",
         &cfg.model,
         TRANSFORM_MAX_CHARS,
         TRANSFORM_TIMEOUT_SECS,

@@ -71,6 +71,44 @@ fn wait_with_timeout_kills_on_timeout() {
 }
 
 #[test]
+fn build_fabric_command_sets_anthropic_key_from_named_env_var() {
+    // Hold ENV_LOCK for the whole env-mutation window so no parallel test
+    // observes our var override.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let var = "VAULT_FABRIC_TEST_KEY";
+    let original = std::env::var_os(var);
+    // SAFETY: env mutation is intentional for testing child-env wiring.
+    unsafe { std::env::set_var(var, "sekret-value-123") };
+
+    let cmd = build_fabric_command("fabric", "summarize", "", var);
+    let entry = cmd
+        .get_envs()
+        .find(|(k, _)| *k == std::ffi::OsStr::new("ANTHROPIC_API_KEY"));
+    let (_, value) = entry.expect("ANTHROPIC_API_KEY must be set on the child");
+    assert_eq!(value, Some(std::ffi::OsStr::new("sekret-value-123")));
+
+    // SAFETY: restore env to avoid leaking state to other tests.
+    unsafe {
+        match original {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
+    }
+}
+
+#[test]
+fn build_fabric_command_leaves_anthropic_key_unset_when_env_name_empty() {
+    // No api_key_env => the child must carry no explicit ANTHROPIC_API_KEY
+    // override (fabric falls back to its own .env). get_envs() reports only
+    // explicitly-set child overrides, so an empty result is the assertion.
+    let cmd = build_fabric_command("fabric", "summarize", "", "");
+    let has_key = cmd
+        .get_envs()
+        .any(|(k, _)| k == std::ffi::OsStr::new("ANTHROPIC_API_KEY"));
+    assert!(!has_key, "empty api_key_env must not set ANTHROPIC_API_KEY on the child");
+}
+
+#[test]
 fn test_extract_json_bare() {
     let input = r#"{"folder": "Tech", "confidence": 0.9}"#;
     let result = extract_json(input);

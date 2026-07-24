@@ -338,7 +338,22 @@ fn fabric_live_probe_findings() -> Vec<Finding> {
     if !vault::fabric::is_available("fabric") {
         return Vec::new();
     }
-    match vault::fabric::run_pattern("summarize", "ping", "fabric", "", 0, FABRIC_PROBE_TIMEOUT_SECS) {
+    // Thread the configured credential var NAME (borg's `llm.api-key`, which the
+    // borg Config mirrors into `fabric.api-key`) so the probe exercises the same
+    // ANTHROPIC_API_KEY-on-the-child translation the live ingest path uses. Fall
+    // back to the fabric-native name when config is unavailable.
+    let api_key_env = borg::config::load_config::<borg::config::Config>(None)
+        .map(|cfg| cfg.fabric.api_key)
+        .unwrap_or_else(|_| "ANTHROPIC_API_KEY".to_string());
+    match vault::fabric::run_pattern(
+        "summarize",
+        "ping",
+        "fabric",
+        &api_key_env,
+        "",
+        0,
+        FABRIC_PROBE_TIMEOUT_SECS,
+    ) {
         Ok(_) => vec![Finding::ok(
             "fabric live probe (summarize) succeeded against the configured model".to_string(),
         )],

@@ -31,6 +31,7 @@ pub fn run_pattern(fabric: &FabricConfig, pattern: &str, input: &str, timeout_se
         pattern,
         input,
         &fabric.binary,
+        &fabric.api_key,
         &fabric.model,
         fabric.max_content_chars,
         timeout_secs,

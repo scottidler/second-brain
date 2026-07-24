@@ -22,12 +22,32 @@ pub use ntfy::NtfyConfig;
 pub use signal::SignalConfig;
 pub use telegram::TelegramConfig;
 
+/// Post-deserialization normalization hook run by [`load_config`] on every
+/// loaded config, regardless of which path in the fallback chain produced it.
+/// Lets a config type derive fields from others so the two can never drift
+/// (borg mirrors `llm.api-key` into `fabric.api-key` here). The default impl is
+/// a no-op so a type that needs no normalization can `impl Normalize for T {}`.
+pub trait Normalize {
+    fn normalize(&mut self) {}
+}
+
 /// Load configuration with fallback chain:
 /// 1. Explicit path (if provided)
 /// 2. ~/.config/sb/borg.yml
 /// 3. ./borg.yml
 /// 4. Default
-pub fn load_config<T: DeserializeOwned + Default>(config_path: Option<&PathBuf>) -> Result<T> {
+///
+/// After loading, [`Normalize::normalize`] runs on every path so derived
+/// fields (e.g. `fabric.api-key` mirroring `llm.api-key`) can never be missed.
+pub fn load_config<T: DeserializeOwned + Default + Normalize>(config_path: Option<&PathBuf>) -> Result<T> {
+    let mut config = load_config_inner::<T>(config_path)?;
+    // Applied to EVERY load path (explicit --config, primary, fallback,
+    // defaults) so a derived field can never be left un-normalized.
+    config.normalize();
+    Ok(config)
+}
+
+fn load_config_inner<T: DeserializeOwned + Default>(config_path: Option<&PathBuf>) -> Result<T> {
     if let Some(path) = config_path {
         return load_from_file(path).context(format!("Failed to load config from {}", path.display()));
     }
@@ -54,6 +74,18 @@ pub fn load_config<T: DeserializeOwned + Default>(config_path: Option<&PathBuf>)
 
     log::info!("No config file found, using defaults");
     Ok(T::default())
+}
+
+impl Normalize for Config {
+    /// Fabric (the third-party Go binary) reads its credential from the env var
+    /// named literally `ANTHROPIC_API_KEY`. `llm.api-key` is the single source
+    /// of truth for which var/file actually holds the credential, so we mirror
+    /// it into `fabric.api-key` here rather than exposing a second yml knob that
+    /// could drift. The fabric-spawn boundary then translates this NAME to
+    /// `ANTHROPIC_API_KEY` on the child process only.
+    fn normalize(&mut self) {
+        self.fabric.api_key = self.llm.api_key.clone();
+    }
 }
 
 fn load_from_file<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> Result<T> {
@@ -918,6 +950,14 @@ pub struct FabricConfig {
     /// (`fabric -y`) use their own pipeline-level timeouts so a stuck fetch
     /// cannot consume the LLM budget - see `PipelineConfig`.
     pub timeout_secs: u64,
+    /// NAME of the env var (or a file path) holding the Anthropic credential
+    /// that the fabric child needs under the literal name `ANTHROPIC_API_KEY`.
+    /// NOT a standalone yml knob: [`Config::normalize`] overwrites it with
+    /// `llm.api-key` at load so the two can never diverge (single source). The
+    /// serde default only covers a bare `FabricConfig` deserialized outside a
+    /// full `Config`.
+    #[serde(alias = "api_key_env", alias = "api_key")]
+    pub api_key: String,
 }
 
 impl Default for FabricConfig {
@@ -931,6 +971,7 @@ impl Default for FabricConfig {
             tag_pattern: "create_tags".to_string(),
             max_content_chars: 100000,
             timeout_secs: 600,
+            api_key: "ANTHROPIC_API_KEY".to_string(),
         }
     }
 }

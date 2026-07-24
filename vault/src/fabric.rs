@@ -49,29 +49,70 @@ pub fn resolve_pattern(name: &str) -> String {
     name.to_string()
 }
 
-/// Run a Fabric pattern against input text with a per-call timeout.
-/// If the timeout fires, the child is killed and an error is returned.
-/// Returns the pattern output or an error.
-pub fn run_pattern(
-    pattern: &str,
-    input: &str,
-    binary: &str,
-    model: &str,
-    max_chars: usize,
-    timeout_secs: u64,
-) -> Result<String> {
-    log::debug!(
-        "fabric::run_pattern: pattern={pattern} binary={binary} model={model} max_chars={max_chars} timeout_secs={timeout_secs} input_len={}",
-        input.len()
-    );
+/// Build the `fabric -p <pattern>` child `Command`, wiring stdio to pipes and
+/// -- crucially -- setting `ANTHROPIC_API_KEY` on the CHILD's environment ONLY.
+///
+/// `api_key_env` is the NAME of the configured credential var (e.g.
+/// `ESCOTE_ANTHROPIC_API_KEY`) or a file path, resolved via
+/// [`crate::config::resolve_secret`]. Fabric (the third-party Go binary) reads
+/// the credential exclusively from the env var named literally
+/// `ANTHROPIC_API_KEY`, so when the workspace credential is stored under a
+/// persona-scoped name we translate it to fabric's required name here, on this
+/// one child process. The value is NEVER set in the parent/global env and NEVER
+/// written to a file at rest.
+///
+/// When `api_key_env` is empty, or resolution fails, `ANTHROPIC_API_KEY` is left
+/// unset on the child and fabric falls back to its own `.env` (preserving prior
+/// behavior). A resolution failure is `warn!`-logged (the var NAME, never the
+/// value).
+///
+/// Factored out so it is unit-testable via `Command::get_envs()` without
+/// spawning fabric.
+fn build_fabric_command(binary: &str, pattern: &str, model: &str, api_key_env: &str) -> Command {
     let mut cmd = Command::new(resolve_binary(binary));
     cmd.args(["-p", &resolve_pattern(pattern)]);
     if !model.is_empty() {
         cmd.args(["-m", model]);
     }
+    if !api_key_env.is_empty() {
+        match crate::config::resolve_secret(api_key_env) {
+            Ok(value) => {
+                cmd.env("ANTHROPIC_API_KEY", value);
+            }
+            Err(e) => log::warn!(
+                "build_fabric_command: could not resolve api-key var '{api_key_env}': {e}; \
+                 leaving ANTHROPIC_API_KEY unset (fabric will fall back to its own .env)"
+            ),
+        }
+    }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    cmd
+}
+
+/// Run a Fabric pattern against input text with a per-call timeout.
+/// If the timeout fires, the child is killed and an error is returned.
+/// Returns the pattern output or an error.
+///
+/// `api_key_env` names the configured credential var (or file) that carries the
+/// Anthropic key; it is translated to fabric's required `ANTHROPIC_API_KEY` on
+/// the child process only (see [`build_fabric_command`]). Pass `""` to leave the
+/// child's `ANTHROPIC_API_KEY` untouched (fabric uses its own `.env`).
+pub fn run_pattern(
+    pattern: &str,
+    input: &str,
+    binary: &str,
+    api_key_env: &str,
+    model: &str,
+    max_chars: usize,
+    timeout_secs: u64,
+) -> Result<String> {
+    log::debug!(
+        "fabric::run_pattern: pattern={pattern} binary={binary} api_key_env={api_key_env} model={model} max_chars={max_chars} timeout_secs={timeout_secs} input_len={}",
+        input.len()
+    );
+    let mut cmd = build_fabric_command(binary, pattern, model, api_key_env);
 
     let child = cmd.spawn().context("Failed to spawn fabric binary")?;
 

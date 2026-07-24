@@ -39,11 +39,19 @@ impl<F: FabricCaller + ?Sized> FabricCaller for std::sync::Arc<F> {
 #[derive(Debug, Clone)]
 pub struct FabricShell {
     pub binary: String,
+    /// NAME of the env var (or file path) holding the Anthropic credential the
+    /// fabric child needs under the literal name `ANTHROPIC_API_KEY`. Threaded
+    /// from the caller's `FabricConfig.api-key` (which borg/cortex mirror from
+    /// `llm.api-key`); empty leaves the child's `ANTHROPIC_API_KEY` untouched.
+    pub api_key: String,
 }
 
 impl FabricShell {
-    pub fn new(binary: impl Into<String>) -> Self {
-        Self { binary: binary.into() }
+    pub fn new(binary: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self {
+            binary: binary.into(),
+            api_key: api_key.into(),
+        }
     }
 }
 
@@ -51,6 +59,7 @@ impl FabricShell {
 impl FabricCaller for FabricShell {
     async fn call(&self, request: FabricRequest) -> Result<String> {
         let binary = self.binary.clone();
+        let api_key = self.api_key.clone();
         let FabricRequest {
             pattern,
             input,
@@ -67,7 +76,7 @@ impl FabricCaller for FabricShell {
             input.len()
         );
         tokio::task::spawn_blocking(move || {
-            vault::fabric::run_pattern(&pattern, &input, &binary, &model, max_chars, timeout_secs)
+            vault::fabric::run_pattern(&pattern, &input, &binary, &api_key, &model, max_chars, timeout_secs)
         })
         .await
         .context("fabric task panicked")?

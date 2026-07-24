@@ -287,6 +287,13 @@ pub struct FabricConfig {
     pub max_content_chars: usize,
     #[serde(rename = "timeout-secs")]
     pub timeout_secs: u64,
+    /// NAME of the env var (or a file path) holding the Anthropic credential
+    /// the fabric child needs under the literal name `ANTHROPIC_API_KEY`. NOT a
+    /// standalone yml knob: [`Config::load`] overwrites it with `llm.api-key` at
+    /// load so the two can never diverge (single source). The serde default only
+    /// covers a bare `FabricConfig` deserialized outside a full `Config`.
+    #[serde(rename = "api-key", alias = "api_key_env", alias = "api_key")]
+    pub api_key: String,
 }
 
 impl Default for FabricConfig {
@@ -296,6 +303,7 @@ impl Default for FabricConfig {
             model: String::new(),
             max_content_chars: 32_000,
             timeout_secs: 120,
+            api_key: "ANTHROPIC_API_KEY".to_string(),
         }
     }
 }
@@ -848,6 +856,19 @@ impl Config {
     /// 2. ~/.config/sb/cortex.yml
     /// 3. Defaults
     pub fn load(config_path: Option<&PathBuf>) -> Result<Self> {
+        let mut config = Self::load_inner(config_path)?;
+        // Fabric (the third-party Go binary) reads its credential from the env
+        // var named literally `ANTHROPIC_API_KEY`. `llm.api-key` is the single
+        // source of truth for which var/file holds it; mirror it into
+        // `fabric.api-key` here (not a second yml knob) so the two can never
+        // diverge. The fabric-spawn boundary translates this NAME to
+        // `ANTHROPIC_API_KEY` on the child process only. Applied to every load
+        // path (explicit --config, primary, defaults).
+        config.fabric.api_key = config.llm.api_key.clone();
+        Ok(config)
+    }
+
+    fn load_inner(config_path: Option<&PathBuf>) -> Result<Self> {
         if let Some(path) = config_path {
             return Self::load_from_file(path).context(format!("Failed to load config from {}", path.display()));
         }

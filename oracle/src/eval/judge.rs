@@ -98,10 +98,13 @@ impl FabricJudge {
 impl RelevanceJudge for FabricJudge {
     fn judge(&self, query: &str, note_title: &str, note_text: &str) -> Result<u8> {
         let input = format!("# QUERY\n{query}\n\n# NOTE TITLE\n{note_title}\n\n# NOTE\n{note_text}\n");
+        // Eval-only path: no configured credential var is threaded here, so pass
+        // "" and let fabric fall back to its own .env (prior behavior).
         let reply = vault::fabric::run_pattern(
             &self.pattern,
             &input,
             &self.binary,
+            "",
             &self.model,
             self.max_chars,
             self.timeout_secs,

@@ -138,10 +138,15 @@ impl DistillationJudge for FabricJudge {
             note.len()
         );
         let input = format!("# KIND\n{kind}\n\n# SOURCE\n{source}\n\n# DISTILLED NOTE\n{note}\n");
+        // Eval-only path: no configured credential var is threaded here, so pass
+        // "" and let fabric fall back to its own .env (prior behavior). The
+        // daemon/harvest hot path routes through the borg/cortex FabricConfig
+        // wrapper, which carries the mirrored llm.api-key.
         let reply = vault::fabric::run_pattern(
             &self.pattern,
             &input,
             &self.binary,
+            "",
             &self.model,
             self.max_chars,
             self.timeout_secs,

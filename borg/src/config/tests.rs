@@ -6,6 +6,9 @@ struct TestConfig {
     name: String,
 }
 
+// `load_config` requires `Normalize`; this test type needs no derived fields.
+impl Normalize for TestConfig {}
+
 #[test]
 fn test_load_config_returns_default_when_no_file() {
     let config: TestConfig = load_config(None).expect("should succeed");
