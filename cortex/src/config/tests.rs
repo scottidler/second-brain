@@ -1,5 +1,117 @@
 use super::*;
 
+// Suite-wide lock: every test in this crate's test binary that mutates
+// `XDG_CONFIG_HOME` (or resolves it indirectly) acquires the SAME
+// `crate::testutil::ENV_LOCK` - see that static's doc comment for the race
+// this closes.
+use crate::testutil::ENV_LOCK;
+
+struct EnvGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: intentional env mutation for path-resolution tests.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: restore env to avoid leaking state.
+        unsafe {
+            match self.original.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+#[test]
+fn load_inner_defaults_when_primary_config_missing() {
+    // 2026-07-24 cortex-association-sweep design, Phase 1 fail-closed loader:
+    // a MISSING config file still defaults (this half of the contract is
+    // unchanged - only the present-but-unparseable half hard-errors now).
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    // No cortex.yml written under tmp/sb/ - the primary path does not exist.
+
+    let config = Config::load_inner(None).expect("missing config must default, not error");
+    assert_eq!(config.log_level, "info", "defaulted config carries the default value");
+}
+
+#[test]
+fn load_inner_fails_loud_on_present_but_unparseable_config() {
+    // The fail-closed fix itself: a PRESENT config with a typo'd key must
+    // hard-error, never silently fall back to defaults (the pre-Phase-1 bug -
+    // a typo ran the daemon on defaults with zero visible signal).
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+
+    let sb_root = tmp.path().join("sb");
+    std::fs::create_dir_all(&sb_root).expect("create sb config dir");
+    // `log-leveel` is a typo'd key that does not exist on `Config`. Config's
+    // top-level struct has no `deny_unknown_fields`, so this alone would not
+    // trip serde - use genuinely malformed YAML instead, which is the actual
+    // failure mode `load_from_file`'s `serde_yaml::from_str` reports.
+    std::fs::write(sb_root.join("cortex.yml"), "log-level: [unterminated\n").expect("write malformed cortex.yml");
+
+    let err = Config::load_inner(None).expect_err("a present-but-unparseable config must hard-error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("cortex.yml"),
+        "error should name the config file that failed to load: {msg}"
+    );
+}
+
+#[test]
+fn load_inner_explicit_path_hard_errors_on_unparseable_content() {
+    // The explicit `--config <path>` branch already hard-errored before this
+    // phase; pinning it here so a future refactor of `load_inner` cannot
+    // silently regress it back to a warn-and-default.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("explicit.yml");
+    std::fs::write(&path, "actions: {association: {threshold: not-a-number}}\n").expect("write");
+
+    let err = Config::load_inner(Some(&path)).expect_err("unparseable explicit config must error");
+    assert!(format!("{err:#}").contains("explicit.yml"));
+}
+
+#[test]
+fn association_config_default_values() {
+    let cfg = AssociationConfig::default();
+    assert_eq!(cfg.threshold, 0.85);
+    assert_eq!(cfg.similarity_source, SimilaritySource::Both);
+    assert_eq!(cfg.min_quiescence_secs, 600);
+    assert!(cfg.exclude.is_empty());
+}
+
+#[test]
+fn association_config_rejects_unknown_field() {
+    // deny_unknown_fields on AssociationConfig itself: a typo'd key fails to
+    // deserialize even in isolation from the full Config/loader path.
+    let yaml = "threshold: 0.9\nsimilarty-source: both\n"; // "similarty" typo
+    let err = serde_yaml::from_str::<AssociationConfig>(yaml).expect_err("typo'd key must fail deny_unknown_fields");
+    assert!(format!("{err}").contains("unknown field"), "{err}");
+}
+
+#[test]
+fn association_config_typo_under_full_config_fails_loud() {
+    // The end-to-end shape `Config::load_from_file` actually parses: a typo
+    // nested under `actions.association` must fail the whole `Config` parse,
+    // not just an isolated `AssociationConfig`.
+    let yaml = "actions:\n  association:\n    threshhold: 0.9\n"; // "threshhold" typo
+    let err = serde_yaml::from_str::<Config>(yaml).expect_err("typo under actions.association must fail");
+    assert!(format!("{err}").contains("unknown field"), "{err}");
+}
+
 #[test]
 fn test_schema_config_default_non_empty() {
     // SchemaConfig::default() must be built from the vault::schema enums, never

@@ -32,9 +32,10 @@ use std::sync::Mutex;
 pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 use crate::config::{
-    ActionsConfig, AutoTagConfig, BackfillConfig, BrokenLinksConfig, Config, DaemonConfig, DuplicatesConfig,
-    FabricConfig, FrontmatterConfig, IntelConfig, LinkingConfig, LinkingEntities, LlmConfig, NamingConfig,
-    QualityConfig, SchemaConfig, ScopeConfig, ScopeMatch, ScopeRule, StateConfig, SweepConfig, TagsConfig, VaultConfig,
+    ActionsConfig, AssociationConfig, AutoTagConfig, BackfillConfig, BrokenLinksConfig, Config, DaemonConfig,
+    DuplicatesConfig, FabricConfig, FrontmatterConfig, IntelConfig, LinkingConfig, LinkingEntities, LlmConfig,
+    NamingConfig, QualityConfig, SchemaConfig, ScopeConfig, ScopeMatch, ScopeRule, StateConfig, SweepConfig,
+    TagsConfig, VaultConfig,
 };
 use crate::vault::{self, Frontmatter, Note};
 
@@ -323,6 +324,7 @@ impl TestVault {
                     same_type_only: false,
                     exclude: Vec::new(),
                 },
+                association: AssociationConfig::default(),
                 broken_links: BrokenLinksConfig {
                     check_wikilinks: true,
                     check_urls: false,

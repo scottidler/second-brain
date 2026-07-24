@@ -15,6 +15,8 @@
 //! max-pool aggregation across summary + transcript-chunk rows; the
 //! storage and API shapes here do not need to change for that work.
 
+use std::path::Path;
+
 use super::{optional_row, warn_row};
 use eyre::Result;
 use rusqlite::{TransactionBehavior, params};
@@ -347,6 +349,59 @@ impl SearchIndex {
         hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         hits.truncate(k);
         Ok(hits)
+    }
+
+    /// Exact pairwise cosine similarity between two notes' stored `summary`
+    /// embeddings (active model only). `None` when either note lacks a
+    /// summary embedding for the active model.
+    ///
+    /// Deviates from the design's literal `-> Option<f32>` signature (same
+    /// effect, correct seam): reading `note_embeddings` is a fallible SQLite
+    /// call like every other reader in this module, so the DB error path is
+    /// `Result`-wrapped and only embedding-presence collapses to `Option`.
+    ///
+    /// Distinct from [`semantic_neighbors`](Self::semantic_neighbors), which
+    /// is global-top-k: a genuinely-similar note can be crowded out of the
+    /// top-k by unrelated high-similarity notes elsewhere in the vault,
+    /// silently misrouting a caller that needs THIS pair's exact similarity
+    /// (e.g. `cortex::association`'s same-slug merge-vs-cross-link decision).
+    /// This reads exactly the two named rows and dot-products them directly -
+    /// no top-k, no other note in the vault can affect the result.
+    pub fn cosine_between(&self, note_a: &Path, note_b: &Path) -> Result<Option<f32>> {
+        let a = note_a.to_string_lossy();
+        let b = note_b.to_string_lossy();
+        log::debug!("search::cosine_between: note_a={a} note_b={b}");
+        let active_model = self.active_embedding_model()?;
+
+        let bytes_a = self.read_summary_embedding_bytes(&a, &active_model)?;
+        let bytes_b = self.read_summary_embedding_bytes(&b, &active_model)?;
+        let (Some(bytes_a), Some(bytes_b)) = (bytes_a, bytes_b) else {
+            log::debug!("search::cosine_between: uncomputable (missing summary embedding)");
+            return Ok(None);
+        };
+        if bytes_a.len() != bytes_b.len() {
+            log::warn!("search::cosine_between: dim mismatch note_a={a} note_b={b}, treating as uncomputable");
+            return Ok(None);
+        }
+
+        let vec_a: Vec<f32> = bytes_a
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let cosine = dot_product_from_bytes(&vec_a, &bytes_b);
+        Ok(Some(cosine))
+    }
+
+    /// Read one note's own `kind=summary` embedding BLOB for the given
+    /// model, or `None` if it has none. Shared by [`cosine_between`](Self::cosine_between).
+    fn read_summary_embedding_bytes(&self, note_path: &str, active_model: &str) -> Result<Option<Vec<u8>>> {
+        optional_row(self.conn.query_row(
+            "SELECT embedding FROM note_embeddings
+                 WHERE note_path = ?1 AND kind = ?2 AND model_version = ?3
+                 ORDER BY chunk_index LIMIT 1",
+            params![note_path, EmbeddingKind::Summary.as_str(), active_model],
+            |row| row.get(0),
+        ))
     }
 
     /// Insert (or replace) a single embedding row.

@@ -375,6 +375,7 @@ pub struct ActionsConfig {
     pub linking: LinkingConfig,
     pub intel: IntelConfig,
     pub duplicates: DuplicatesConfig,
+    pub association: AssociationConfig,
     #[serde(rename = "broken-links")]
     pub broken_links: BrokenLinksConfig,
     pub quality: QualityConfig,
@@ -638,6 +639,59 @@ impl Default for DuplicatesConfig {
     }
 }
 
+/// Which similarity signal `cortex associate` uses to decide merge vs.
+/// cross-link for a same-slug pair. Selecting the active methodology is
+/// legitimate config per the `general.md` carve-out (this picks the
+/// system's retrieval methodology, not whether a governance rule runs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SimilaritySource {
+    /// Embedding cosine only (via `vault::search::cosine_between`); a pair
+    /// with no summary embedding on either side is uncomputable.
+    Embedding,
+    /// Claim TF-IDF cosine only (`duplicates::cosine_similarity` over claim
+    /// text).
+    Claim,
+    /// Embedding cosine primary, claim TF-IDF fallback when a note has no
+    /// `kind=summary` embedding. The default: harvest session notes are
+    /// summary-embedded in practice (probed 2026-07-24, 213 rows live), so
+    /// embedding is the strong signal and claim only covers the gap.
+    #[default]
+    Both,
+}
+
+/// Knobs for `cortex associate` (`sb cortex associate`): groups harvest
+/// session notes sharing a content-derived `slug:` (borg's harvest naming,
+/// v0.12.2) and, per pairwise similarity, merges or cross-links them
+/// (2026-07-24 cortex-association-sweep design). `deny_unknown_fields` so a
+/// typo'd key fails the loader loud (see `Config::load_inner`) instead of
+/// silently running with a default threshold.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct AssociationConfig {
+    /// Merge iff pairwise similarity >= this (mirrors `duplicates.threshold`).
+    pub threshold: f64,
+    /// Which similarity signal to compute.
+    pub similarity_source: SimilaritySource,
+    /// Skip a note (and its whole group - quiescence is whole-group) modified
+    /// within this many seconds, so an actively-edited note is never merged
+    /// mid-edit.
+    pub min_quiescence_secs: u64,
+    /// Glob paths excluded from association entirely.
+    pub exclude: Vec<String>,
+}
+
+impl Default for AssociationConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 0.85,
+            similarity_source: SimilaritySource::default(),
+            min_quiescence_secs: 600,
+            exclude: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct AutoTagConfig {
@@ -875,15 +929,12 @@ impl Config {
 
         let primary = vault::paths::cortex_config();
         if primary.exists() {
-            match Self::load_from_file(&primary) {
-                Ok(config) => return Ok(config),
-                Err(e) => {
-                    log::warn!(
-                        "failed to load config, falling back to defaults: {}: {e}",
-                        primary.display()
-                    );
-                }
-            }
+            // Fail-closed (2026-07-24 cortex-association-sweep design, panel
+            // finding 8): a PRESENT config that fails to parse used to warn and
+            // silently fall back to defaults, so a typo'd key ran the daemon on
+            // defaults with zero visible signal. A present-but-unparseable file
+            // is now a hard error; only a MISSING file defaults.
+            return Self::load_from_file(&primary).context(format!("failed to load config from {}", primary.display()));
         }
 
         log::info!("no config file found, using defaults");

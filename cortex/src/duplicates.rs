@@ -332,7 +332,11 @@ fn find_similar_notes(notes: &[Note], threshold: f64, same_type_only: bool) -> V
 }
 
 /// Tokenize text into word frequency map.
-fn tokenize(text: &str) -> HashMap<&str, usize> {
+///
+/// `pub(crate)` (2026-07-24 cortex-association-sweep design, Phase 1):
+/// `cortex::association`'s claim-similarity fallback reuses this TF-IDF
+/// primitive rather than reimplementing it.
+pub(crate) fn tokenize(text: &str) -> HashMap<&str, usize> {
     let mut counts = HashMap::new();
     for word in text.split_whitespace() {
         let word = word.trim_matches(|c: char| !c.is_alphanumeric());
@@ -344,7 +348,10 @@ fn tokenize(text: &str) -> HashMap<&str, usize> {
 }
 
 /// Cosine similarity between two sparse TF-IDF vectors.
-fn cosine_similarity(a: &HashMap<&str, f64>, b: &HashMap<&str, f64>) -> f64 {
+///
+/// `pub(crate)` for the same reason as [`tokenize`]: `cortex::association`
+/// calls this directly for its claim-text similarity fallback.
+pub(crate) fn cosine_similarity(a: &HashMap<&str, f64>, b: &HashMap<&str, f64>) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }

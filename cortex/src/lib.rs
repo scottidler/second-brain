@@ -4,6 +4,7 @@
 // stdout are exempted via the not(test) guard below.
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 
+pub mod association;
 pub mod autotag;
 pub mod bridge;
 pub mod classify;

@@ -208,6 +208,13 @@ pub struct HubOpts {
 }
 
 #[derive(Debug, Clone)]
+pub struct AssociateOpts {
+    /// Execute the plan: merge/cross-link same-slug session note groups
+    /// (default: dry-run reporting what would happen, writes zero bytes).
+    pub apply: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct GraphOpts {
     /// Force a full rebuild of the `edges` table (clear-then-rebuild every
     /// note), bypassing the incremental watermarks. Implied on the first run

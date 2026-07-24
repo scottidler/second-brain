@@ -973,3 +973,80 @@ fn semantic_neighbors_ignores_claim_rows() {
         "a claim-only note must NOT appear (semantic_neighbors stays summary-only)"
     );
 }
+
+#[test]
+fn cosine_between_returns_some_for_two_embedded_notes() {
+    use std::path::Path;
+
+    let index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-pairwise-v1");
+    insert_note(&index, "notes/a.md", "tech", "session", 100);
+    insert_note(&index, "notes/b.md", "tech", "session", 100);
+
+    // Identical text -> deterministic mock embeds identically -> cosine ~1.0.
+    upsert_summary(&index, &m, "notes/a.md", "durable execution temporal", 100);
+    upsert_summary(&index, &m, "notes/b.md", "durable execution temporal", 100);
+
+    let cosine = index
+        .cosine_between(Path::new("notes/a.md"), Path::new("notes/b.md"))
+        .expect("cosine_between")
+        .expect("both notes are embedded");
+    assert!(
+        (cosine - 1.0).abs() < 1e-5,
+        "identical summaries cosine to ~1.0, got {cosine}"
+    );
+}
+
+#[test]
+fn cosine_between_ignores_unrelated_notes_unlike_global_topk() {
+    use std::path::Path;
+
+    // The whole reason cosine_between exists: two notes can be a strong
+    // pairwise match while OTHER unrelated notes in the vault would crowd
+    // one of them out of a global top-k neighbor list. This test proves the
+    // pairwise read is unaffected by how many unrelated notes exist.
+    let index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-pairwise-v2");
+    insert_note(&index, "notes/a.md", "tech", "session", 100);
+    insert_note(&index, "notes/b.md", "tech", "session", 100);
+    insert_note(&index, "notes/noise1.md", "tech", "article", 100);
+    insert_note(&index, "notes/noise2.md", "tech", "article", 100);
+
+    upsert_summary(&index, &m, "notes/a.md", "durable execution temporal", 100);
+    upsert_summary(&index, &m, "notes/b.md", "durable execution temporal", 100);
+    upsert_summary(&index, &m, "notes/noise1.md", "completely unrelated banana", 100);
+    upsert_summary(&index, &m, "notes/noise2.md", "completely unrelated banana", 100);
+
+    let cosine = index
+        .cosine_between(Path::new("notes/a.md"), Path::new("notes/b.md"))
+        .expect("cosine_between")
+        .expect("both notes are embedded");
+    assert!(
+        (cosine - 1.0).abs() < 1e-5,
+        "unrelated notes must not affect the pairwise result"
+    );
+}
+
+#[test]
+fn cosine_between_returns_none_when_either_note_unembedded() {
+    use std::path::Path;
+
+    let index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-pairwise-v3");
+    insert_note(&index, "notes/embedded.md", "tech", "session", 100);
+    insert_note(&index, "notes/bare.md", "tech", "session", 100);
+    upsert_summary(&index, &m, "notes/embedded.md", "durable execution temporal", 100);
+
+    let one_side = index
+        .cosine_between(Path::new("notes/embedded.md"), Path::new("notes/bare.md"))
+        .expect("cosine_between");
+    assert!(one_side.is_none(), "one embedded + one bare note is uncomputable");
+
+    let both_bare = index
+        .cosine_between(Path::new("notes/bare.md"), Path::new("notes/bare.md"))
+        .expect("cosine_between");
+    assert!(
+        both_bare.is_none(),
+        "a note with no embedding at all is uncomputable even against itself"
+    );
+}
