@@ -220,6 +220,7 @@ impl<F: FabricCaller + Clone> ThreadDistiller<F> {
         let output_tokens = approx_tokens(raw.len()) as u32;
 
         let distilled = Distilled {
+            slug: None,
             summary,
             tldr: None,
             enumeration: None,
@@ -418,6 +419,7 @@ impl<F: FabricCaller + Clone> ThreadDistiller<F> {
         let input_tokens = approx_tokens(transcript.len()) as u32;
         let output_tokens = approx_tokens(output_chars) as u32;
         let distilled = Distilled {
+            slug: None,
             summary,
             tldr: None,
             enumeration: None,

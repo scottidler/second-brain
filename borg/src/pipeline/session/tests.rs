@@ -208,6 +208,87 @@ async fn process_session_inner_tags_redacted_source_when_any_member_redacted() {
     assert!(!contents.contains("## Session Details"), "{contents}");
 }
 
+// ---- harvest-content-slug-naming: filename stem resolution ----
+
+#[test]
+fn harvest_slug_stem_prefers_content_slug() {
+    // A clean lowercase-kebab slug is a sanitize fixed point and wins over the
+    // generic title; no fallback.
+    let (stem, fallback) = harvest_slug_stem(
+        Some("slack-cli-idcache-groups-list-vs-string-bug"),
+        "Review Slack thread",
+    );
+    assert_eq!(stem, "slack-cli-idcache-groups-list-vs-string-bug");
+    assert!(!fallback);
+}
+
+#[test]
+fn harvest_slug_stem_sanitizes_a_dirty_slug() {
+    // Spaces/punctuation/case in a slug are sanitized to a safe stem, still no
+    // fallback (the distiller DID emit a slug).
+    let (stem, fallback) = harvest_slug_stem(Some("Has Spaces & Junk!"), "irrelevant title");
+    assert_eq!(stem, "has-spaces-junk");
+    assert!(!fallback);
+}
+
+#[test]
+fn harvest_slug_stem_falls_back_to_title_when_slug_absent_or_blank() {
+    // None and whitespace-only both fall back to the title-slug, flagged so the
+    // caller WARNs.
+    let (stem_none, fb_none) = harvest_slug_stem(None, "Review Slack Thread");
+    assert_eq!(stem_none, "review-slack-thread");
+    assert!(fb_none);
+
+    let (stem_blank, fb_blank) = harvest_slug_stem(Some("   "), "Review Slack Thread");
+    assert_eq!(stem_blank, "review-slack-thread");
+    assert!(fb_blank);
+}
+
+/// End-to-end fallback: with no real fabric the distillation degrades and emits
+/// no slug, so the note filename is the title-slug and `slug:` is persisted to
+/// frontmatter matching that stem (harvest-content-slug-naming Phase 2).
+#[tokio::test]
+async fn process_session_inner_names_file_from_title_slug_on_distiller_fallback() {
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+
+    // session_record sets title = "session <id> work"; sanitize -> that kebab.
+    let members = vec![session_record(
+        "abc123",
+        "2026-07-02T04:51:21+00:00",
+        "2026-07-02T06:08:39+00:00",
+        42,
+    )];
+
+    let result = process_session_inner(
+        "human: hi\nassistant: hello\n",
+        &members,
+        "abc123",
+        false,
+        vec![],
+        IngestMethod::Harvest,
+        false,
+        &config,
+        "harvest-test-slug-fallback",
+    )
+    .await
+    .expect("process_session_inner should succeed on distill fallback");
+
+    let note_path = result.note_path.expect("note_path set on success");
+    let stem = std::path::Path::new(&note_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("utf-8 stem");
+    assert_eq!(stem, "session-abc123-work", "fallback filename is the title-slug");
+
+    let contents = std::fs::read_to_string(&note_path).expect("read note");
+    assert!(
+        contents.contains("slug: session-abc123-work"),
+        "the chosen stem is persisted to frontmatter: {contents}"
+    );
+}
+
 #[tokio::test]
 async fn process_session_inner_fails_loudly_when_primary_id_missing() {
     let vault_dir = TempDir::new().unwrap();

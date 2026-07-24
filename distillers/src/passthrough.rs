@@ -44,6 +44,7 @@ impl DistillExtractor for PassthroughDistiller {
         let trimmed = inputs.transcript.trim();
 
         Ok(Distilled {
+            slug: None,
             summary: trimmed.to_string(),
             tldr: None,
             enumeration: None,

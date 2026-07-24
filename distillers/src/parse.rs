@@ -196,6 +196,11 @@ pub struct ReduceYaml {
     /// pattern (summary + claims only) still parses.
     #[serde(default)]
     pub tldr: Option<String>,
+    /// Content-derived kebab-case slug for the whole session, reduce path
+    /// (harvest-content-slug-naming, 2026-07-24). The reduce pass names the
+    /// whole; serde-defaulted so a pre-slug reduce output still parses.
+    #[serde(default)]
+    pub slug: Option<String>,
     /// The merged enumeration the reduce step restored from the pooled chunk
     /// candidates (Phase 4). `None` when the source is not a listicle.
     #[serde(default)]
@@ -464,6 +469,11 @@ pub struct PatternYaml {
     /// pre-Phase-4 pattern output (no `tldr:` key) still parses unchanged.
     #[serde(default)]
     pub tldr: Option<String>,
+    /// Content-derived kebab-case slug (harvest-content-slug-naming, 2026-07-24).
+    /// Only the `distill-session` pattern emits it today; serde-defaulted so
+    /// every other pattern (no `slug:` key) parses unchanged.
+    #[serde(default)]
+    pub slug: Option<String>,
     /// Detected enumeration, single-call path (Phase 4). `None`/absent for
     /// non-listicle sources.
     #[serde(default)]

@@ -579,6 +579,7 @@ fn rewrite_note_file_is_atomic_and_merges_frontmatter() {
     let parsed = crate::vault::parse_note(v.root(), &path).expect("parse");
 
     let distilled = Distilled {
+        slug: None,
         summary: "Rewritten.".to_string(),
         tldr: None,
         enumeration: None,

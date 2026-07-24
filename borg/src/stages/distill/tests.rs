@@ -340,6 +340,7 @@ fn write_distilled_yml_no_op_when_staging_disabled() {
         ..StagingConfig::default()
     };
     let distilled = Distilled {
+        slug: None,
         summary: "s".to_string(),
         tldr: None,
         enumeration: None,
@@ -376,6 +377,7 @@ fn write_distilled_yml_persists_to_per_trace_dir() {
         ..StagingConfig::default()
     };
     let distilled = Distilled {
+        slug: None,
         summary: "Hello.".to_string(),
         tldr: None,
         enumeration: None,

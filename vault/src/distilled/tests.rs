@@ -14,6 +14,7 @@ fn sample_meta() -> DistilledMeta {
 #[test]
 fn roundtrip_article_distilled() {
     let original = Distilled {
+        slug: None,
         summary: "Two-sentence article summary.".to_string(),
         tldr: None,
         enumeration: None,
@@ -56,6 +57,7 @@ fn roundtrip_article_distilled() {
 #[test]
 fn roundtrip_repo_payload() {
     let original = Distilled {
+        slug: None,
         summary: "A Rust CLI for X.".to_string(),
         tldr: None,
         enumeration: None,
@@ -92,6 +94,7 @@ fn roundtrip_repo_payload() {
 #[test]
 fn roundtrip_video_payload() {
     let original = Distilled {
+        slug: None,
         summary: "A talk on distributed systems.".to_string(),
         tldr: None,
         enumeration: None,
@@ -129,6 +132,7 @@ fn roundtrip_video_payload() {
 #[test]
 fn roundtrip_thread_payload() {
     let original = Distilled {
+        slug: None,
         summary: "Twitter thread about Rust async.".to_string(),
         tldr: None,
         enumeration: None,
@@ -161,6 +165,7 @@ fn roundtrip_thread_payload() {
 #[test]
 fn roundtrip_session_payload() {
     let original = Distilled {
+        slug: None,
         summary: "Debugged the token-broker refresh race.".to_string(),
         tldr: None,
         enumeration: None,
@@ -218,6 +223,7 @@ meta:
 #[test]
 fn kebab_case_keys_on_serialize() {
     let original = Distilled {
+        slug: None,
         summary: "X".to_string(),
         tldr: None,
         enumeration: None,

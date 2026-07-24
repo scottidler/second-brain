@@ -162,6 +162,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for ImageDistiller<F> {
         let output_tokens = approx_tokens(raw.len()) as u32;
 
         let distilled = Distilled {
+            slug: None,
             summary,
             tldr: None,
             enumeration: None,

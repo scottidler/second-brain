@@ -328,6 +328,79 @@ async fn empty_body_falls_back() {
     );
 }
 
+// ---- SUCCESS CRITERION: content-derived slug (harvest-content-slug-naming) ----
+
+const SLUG_YAML: &str = r#"
+summary: "Chose typed cross-stage contracts."
+slug: "  Typed-CrossStage-Contract-Handoff  "
+claims:
+  - text: "Chose typed contracts over markdown."
+    kind: position
+tags: [rust]
+links: []
+"#;
+
+#[tokio::test]
+async fn single_call_extracts_and_normalizes_content_slug() {
+    // Positive: the distiller carries the pattern's slug through, trimmed and
+    // lowercased (filename-safety sanitization is the publish path's job).
+    let fake = FakeFabric::new();
+    fake.set_response(PATTERN, SLUG_YAML);
+    let m = meta();
+    let distiller = make_distiller(fake, SessionConfig::default());
+    let distilled = distiller
+        .distill(inputs("USER: hi\nASSISTANT: ok", Some(&m)))
+        .await
+        .expect("distill");
+    assert_eq!(distilled.slug.as_deref(), Some("typed-crossstage-contract-handoff"));
+}
+
+#[tokio::test]
+async fn single_call_slug_is_none_when_pattern_omits_it() {
+    // Negative: VALID_YAML carries no `slug:` key, so the distiller emits None -
+    // the signal the publish path uses to fall back to the title-slug.
+    let fake = FakeFabric::new();
+    fake.set_response(PATTERN, VALID_YAML);
+    let m = meta();
+    let distiller = make_distiller(fake, SessionConfig::default());
+    let distilled = distiller
+        .distill(inputs("USER: hi\nASSISTANT: ok", Some(&m)))
+        .await
+        .expect("distill");
+    assert_eq!(distilled.slug, None);
+}
+
+#[tokio::test]
+async fn map_reduce_carries_reduce_slug() {
+    // The reduce pass names the whole session; its slug rides through.
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk.\"\nclaims:\n  - text: \"A decision.\"\ntags: []\nlinks: []\n",
+    );
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Whole-session synthesis.\"\nslug: \"token-broker-arc-refactor\"\nclaims:\n  - text: \"A decision.\"\n",
+    );
+    let m = meta();
+    let body = huge_body();
+    let config = SessionConfig {
+        token_cap: 30_000,
+        ..SessionConfig::default()
+    };
+    let distiller = SessionDistiller::new(fake.clone(), config);
+    let distilled = distiller.distill(inputs(&body, Some(&m))).await.expect("distill");
+    assert_eq!(distilled.slug.as_deref(), Some("token-broker-arc-refactor"));
+}
+
+#[test]
+fn clean_slug_trims_lowercases_and_drops_empty() {
+    assert_eq!(clean_slug(Some("  Foo-Bar-Baz  ")).as_deref(), Some("foo-bar-baz"));
+    assert_eq!(clean_slug(Some("   ")), None);
+    assert_eq!(clean_slug(Some("")), None);
+    assert_eq!(clean_slug(None), None);
+}
+
 #[tokio::test]
 async fn no_metadata_yields_no_payload() {
     let fake = FakeFabric::new();

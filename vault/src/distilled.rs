@@ -23,6 +23,19 @@ pub struct Distilled {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tldr: Option<String>,
 
+    /// Content-derived kebab-case slug naming the note's real subject/outcome,
+    /// emitted by the distiller from the full source (harvest-content-slug-naming,
+    /// 2026-07-24). Borg derives the harvest note's FILENAME from this (falling
+    /// back to the title-slug only when the distiller omits it) and persists it
+    /// as the frontmatter `slug:` so the name is stable across re-harvest. It is
+    /// display/addressing only — the load-bearing identity anchor stays the
+    /// input-body-hash from the harvest watermark, never the slug. `None` when
+    /// the distiller did not produce one (every non-session kind, and the legacy
+    /// fallback paths); `#[serde(default)]` keeps pre-slug staged `distilled.yml`
+    /// files deserializable unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+
     /// Enumerated points harvested when the source is a listicle ("Top N X").
     /// `None` when the content is not enumerable — no forced enumeration.
     /// Rendered as `## Enumerated Points`; rides the body FTS column only,

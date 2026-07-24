@@ -237,6 +237,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
             .collect();
 
         Ok(Distilled {
+            slug: None,
             summary,
             tldr,
             enumeration,
@@ -472,6 +473,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
         let input_tokens = approx_tokens(transcript.len()) as u32;
         let output_tokens = approx_tokens(output_chars) as u32;
         Ok(Distilled {
+            slug: None,
             summary,
             tldr,
             enumeration,

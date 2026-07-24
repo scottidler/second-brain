@@ -399,6 +399,7 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
         let input_tokens = approx_tokens(transcript.len()) as u32;
         let output_tokens = approx_tokens(output_chars) as u32;
         Ok(Distilled {
+            slug: None,
             summary,
             tldr,
             enumeration,
@@ -507,6 +508,7 @@ fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str
         .collect();
 
     Distilled {
+        slug: None,
         summary,
         tldr,
         enumeration,

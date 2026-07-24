@@ -224,6 +224,7 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
                 &self.config.model,
             )));
         }
+        let slug = clean_slug(parsed.slug.as_deref());
         let claims = collect_claims(parsed.claims);
         let tags = collect_tags(parsed.tags);
         let links = collect_links(parsed.links);
@@ -232,6 +233,7 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
         Ok(Built(Distilled {
             summary,
             tldr: None,
+            slug,
             enumeration: None,
             key_ideas: Vec::new(),
             claims,
@@ -346,9 +348,13 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
         let joined = chunk_summaries.join("\n\n");
         let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims, &[], None);
         let mut anchors_stripped: u32 = 0;
-        let (summary, claims, reduce_selection_failed) = match self.call_fabric(PATTERN_REDUCE, &reduce_input).await {
+        let (summary, claims, reduce_selection_failed, slug) = match self
+            .call_fabric(PATTERN_REDUCE, &reduce_input)
+            .await
+        {
             Ok(raw) => match serde_yaml::from_str::<ReduceYaml>(strip_fences(&raw)) {
                 Ok(parsed) => {
+                    let slug = clean_slug(parsed.slug.as_deref());
                     let summary = parsed
                         .summary
                         .as_ref()
@@ -359,21 +365,21 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
                         .claims
                         .and_then(|c| select_reduce_claims(c, &combined_claims, &mut anchors_stripped))
                     {
-                        Some(selected) => (summary, selected, false),
+                        Some(selected) => (summary, selected, false, slug),
                         None => {
                             log::warn!("SessionDistiller: reduce selected no claims; falling back to chunk merge");
-                            (summary, combined_claims.clone(), true)
+                            (summary, combined_claims.clone(), true, slug)
                         }
                     }
                 }
                 Err(err) => {
                     log::warn!("SessionDistiller: reduce yaml parse failed: {err}; falling back to concat + merge");
-                    (joined.clone(), combined_claims.clone(), true)
+                    (joined.clone(), combined_claims.clone(), true, None)
                 }
             },
             Err(reason) => {
                 log::warn!("SessionDistiller: reduce fabric call failed ({reason}); falling back to concat + merge");
-                (joined.clone(), combined_claims.clone(), true)
+                (joined.clone(), combined_claims.clone(), true, None)
             }
         };
 
@@ -389,6 +395,7 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
         Ok(Built(Distilled {
             summary,
             tldr: None,
+            slug,
             enumeration: None,
             key_ideas: Vec::new(),
             claims,
@@ -435,6 +442,14 @@ fn build_meta(model: &str, input_tokens: u32, output_tokens: u32, validation: Va
         produced_at: Utc::now().to_rfc3339(),
         validation,
     }
+}
+
+/// Normalize a distiller-emitted slug: trim, lowercase, and drop it when empty.
+/// The pattern already asks for lowercase-kebab; this is defensive normalization
+/// only. Filename-safety (illegal chars, length) is the publish path's job via
+/// `hygiene::sanitize_filename` — this helper keeps the raw subject intact.
+fn clean_slug(slug: Option<&str>) -> Option<String> {
+    slug.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty())
 }
 
 fn collect_claims(claims: Option<Vec<crate::parse::PatternClaim>>) -> Vec<Claim> {

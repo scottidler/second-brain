@@ -49,6 +49,7 @@ impl DistillExtractor for IdeaDistiller {
         let links = extract_links(trimmed);
 
         Ok(Distilled {
+            slug: None,
             summary: trimmed.to_string(),
             tldr: None,
             enumeration: None,

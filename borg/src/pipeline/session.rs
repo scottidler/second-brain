@@ -13,6 +13,19 @@ use crate::harvest::contract::SessionRecord;
 use chrono::{DateTime, FixedOffset};
 use distillers::{SessionConfig, SessionMetadata};
 
+/// Resolve a harvest session note's filename stem (harvest-content-slug-naming,
+/// 2026-07-24). The distiller's content-derived slug names the note's real
+/// subject; the generic clyde title is only the fallback when the distiller
+/// omitted a slug. Returns `(stem, used_title_fallback)` so the caller can WARN
+/// on the fallback. Both branches pass through `hygiene::sanitize_filename` for
+/// filesystem safety, so the returned stem is always a safe filename base.
+pub(crate) fn harvest_slug_stem(slug: Option<&str>, title: &str) -> (String, bool) {
+    match slug.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(slug) => (hygiene::sanitize_filename(slug), false),
+        None => (hygiene::sanitize_filename(title), true),
+    }
+}
+
 pub(crate) async fn process_session(
     body: &str,
     members: &[SessionRecord],
@@ -183,6 +196,21 @@ pub(crate) async fn process_session_inner(
     let expires = retention::trace_expires_for(now.date_naive(), config.staging.retention_days);
     frontmatter_additions.insert("trace-expires".to_string(), serde_yaml::Value::String(expires));
 
+    // harvest-content-slug-naming (2026-07-24): the note's filename is the
+    // distiller's content-derived slug (naming the real subject/outcome), NOT
+    // the generic, collision-prone clyde session title. Fall back to the
+    // title-slug only when the distiller omitted a slug, and WARN so the gap is
+    // visible. The chosen stem is persisted as frontmatter `slug:` so it is
+    // stable across re-harvest and gives the collision-association check
+    // something to match on.
+    let (slug_stem, used_title_fallback) = harvest_slug_stem(distilled.slug.as_deref(), &title);
+    if used_title_fallback {
+        log::warn!(
+            "[{trace_id}] session distiller emitted no slug; falling back to title-slug filename (title={title:?})"
+        );
+    }
+    frontmatter_additions.insert("slug".to_string(), serde_yaml::Value::String(slug_stem.clone()));
+
     let note = NoteContent {
         title: title.clone(),
         source_url: Some(source_url.clone()),
@@ -203,7 +231,7 @@ pub(crate) async fn process_session_inner(
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
-    let filename = format!("{}.md", hygiene::sanitize_filename(&title));
+    let filename = format!("{slug_stem}.md");
 
     let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;

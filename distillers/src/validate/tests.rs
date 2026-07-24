@@ -12,6 +12,7 @@ fn with_enumeration(declared_count: Option<u32>, item_count: usize) -> Distilled
         })
         .collect();
     Distilled {
+        slug: None,
         summary: "ok".to_string(),
         tldr: None,
         enumeration: Some(Enumeration {
@@ -51,6 +52,7 @@ fn enforce_bounds_truncates_excess_claims() {
         })
         .collect();
     let distilled = Distilled {
+        slug: None,
         summary: "ok".to_string(),
         tldr: None,
         enumeration: None,
@@ -79,6 +81,7 @@ fn enforce_bounds_truncates_excess_claims() {
 fn enforce_bounds_truncates_excess_tags() {
     let tags = (0..MAX_TAGS + 2).map(|i| format!("tag{i}")).collect();
     let distilled = Distilled {
+        slug: None,
         summary: "ok".to_string(),
         tldr: None,
         enumeration: None,
@@ -110,6 +113,7 @@ fn enforce_bounds_truncates_summary_at_sentence() {
         summary.push_str("Sentence here. ");
     }
     let distilled = Distilled {
+        slug: None,
         summary: summary.clone(),
         tldr: None,
         enumeration: None,
@@ -134,6 +138,7 @@ fn enforce_bounds_truncates_summary_at_sentence() {
 #[test]
 fn enforce_bounds_leaves_within_limit_payload_untouched() {
     let distilled = Distilled {
+        slug: None,
         summary: "short".to_string(),
         tldr: None,
         enumeration: None,

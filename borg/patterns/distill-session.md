@@ -43,6 +43,7 @@ missing span.
 
 ```yaml
 summary: "2-4 sentence prose summary of what this session accomplished and learned"
+slug: "kebab-case-subject-of-this-session"
 claims:
   - text: "single sentence stating one decision, rejected approach, gotcha, or reusable pattern"
     anchor: null
@@ -63,6 +64,18 @@ links:
 - `summary`: 2-4 sentences. Lead with what the session set out to do and the
   most important thing decided or learned. Report what the transcript shows;
   do not editorialize.
+- `slug`: a lowercase, hyphenated slug of 4-7 significant words naming the
+  CONCRETE subject or outcome of this session - the specific bug fixed, the
+  specific decision made, the system touched plus what happened to it. This
+  becomes the note's filename, so it must be distinctive.
+  - GOOD: `slack-cli-idcache-groups-list-vs-string-bug`,
+    `gha-uv-sync-workdir-inputs-injection-review`,
+    `harvest-content-slug-naming-contract`.
+  - BAD (never emit): generic filler like `review`, `session`, `changes`,
+    `fixes`, `update`, `security-review` alone - name WHAT was reviewed/changed.
+  - Use only `[a-z0-9-]`; no spaces, no punctuation, no trailing/leading hyphen.
+  - Be deterministic: pick the most literal noun phrase for the subject so the
+    same session distilled again yields the same slug.
 - `claims`: maximum 10. Each is a single tight sentence stating ONE decision,
   rejected approach (with its reason), gotcha (with its fix), or reusable
   pattern. Prefer the WHY over the WHAT. No narration, no ledger entries.

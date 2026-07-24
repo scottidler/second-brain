@@ -29,6 +29,7 @@ The input has two labeled sections:
 
 ```yaml
 summary: "3-4 sentence prose summary of the whole session"
+slug: "kebab-case-subject-of-the-whole-session"
 claims:
   - text: "A selected claim, copied from the pool"
     anchor: null         # sessions carry no anchors - always null
@@ -42,6 +43,12 @@ claims:
 - Output ONLY valid YAML matching the schema above. No prose, no fences.
 - `summary`: 3-4 sentences synthesizing the whole session; do not list every
   chunk individually.
+- `slug`: a lowercase, hyphenated slug of 4-7 significant words naming the
+  CONCRETE subject or outcome of the WHOLE session (the specific bug, decision,
+  or system + what happened). This becomes the note's filename, so it must be
+  distinctive - never generic filler (`review`, `session`, `changes`, `fixes`)
+  alone. Use only `[a-z0-9-]`; no spaces or punctuation. Pick the most literal
+  noun phrase so the same session yields the same slug on a re-run.
 - `claims`: select the most important claims spanning the whole session.
   - Copy each selected claim's `text` verbatim (or near-verbatim) from the
     pool. You may lightly consolidate wording, but do not invent facts.

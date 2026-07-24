@@ -199,6 +199,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
             .collect();
 
         let distilled = Distilled {
+            slug: None,
             summary,
             tldr,
             enumeration,

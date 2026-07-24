@@ -234,6 +234,7 @@ pub fn fallback_distilled(
         Some(transcript_snippet.to_string())
     };
     Distilled {
+        slug: None,
         summary,
         tldr: None,
         enumeration: None,
