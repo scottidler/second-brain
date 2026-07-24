@@ -749,6 +749,29 @@ fn test_distill_config_default_all_true() {
     assert!(d.slide_append);
     assert!(d.capture_note);
     assert!(d.propose_tags);
+    // harvest distill-parsing robustness (2026-07-24): one retry by default.
+    assert_eq!(d.chunk_retries, 1);
+}
+
+#[test]
+fn test_distill_config_chunk_retries_loads_and_defaults() {
+    // Explicit value threads through the kebab key.
+    let yaml = r#"
+distill:
+  chunk-retries: 3
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    assert_eq!(config.distill.chunk_retries, 3);
+    // The other flags stay defaulted TRUE (container default fills them).
+    assert!(config.distill.slide_append);
+
+    // Absent key falls back to the struct Default (1), NOT usize::default() (0).
+    let absent: DistillConfig = serde_yaml::from_str("{}").expect("parse empty");
+    assert_eq!(absent.chunk_retries, 1);
+
+    // 0 is a legal explicit override (restores the old no-retry behavior).
+    let zero: DistillConfig = serde_yaml::from_str("chunk-retries: 0").expect("parse zero");
+    assert_eq!(zero.chunk_retries, 0);
 }
 
 #[test]

@@ -102,6 +102,13 @@ pub struct SessionConfig {
     /// Head+tail windowing budget in approximate tokens (design doc:
     /// `harvest.token-cap`, default 12000).
     pub token_cap: usize,
+    /// Bounded per-chunk retries on the map-reduce path (harvest
+    /// distill-parsing robustness, 2026-07-24). A sub-chunk whose fabric call
+    /// errors OR whose YAML fails to parse is retried up to this many times
+    /// before it counts toward `partial-chunk-failure`. `distillers` is
+    /// config-free: borg populates this from `DistillConfig.chunk_retries` via
+    /// the `pipeline::session` constructor. Default 1.
+    pub chunk_retries: usize,
 }
 
 impl Default for SessionConfig {
@@ -111,6 +118,7 @@ impl Default for SessionConfig {
             max_chars: 32_000,
             timeout_secs: 60,
             token_cap: 12_000,
+            chunk_retries: 1,
         }
     }
 }
@@ -273,21 +281,18 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
         }
 
         let concurrency = DEFAULT_CHUNK_CONCURRENCY.max(1);
-        let chunk_results: Vec<(usize, Result<String>)> = stream::iter(chunks.iter().cloned().enumerate())
+        let chunk_retries = self.config.chunk_retries;
+        let chunk_results: Vec<(usize, ChunkOutcome)> = stream::iter(chunks.iter().cloned().enumerate())
             .map(|(idx, chunk)| {
                 let fabric = self.fabric.clone();
                 let model = self.config.model.clone();
                 let max_chars = self.config.max_chars;
                 let timeout_secs = self.config.timeout_secs;
                 async move {
-                    let request = FabricRequest {
-                        pattern: PATTERN_CHUNK.to_string(),
-                        input: chunk,
-                        model,
-                        max_chars,
-                        timeout_secs,
-                    };
-                    (idx, fabric.call(request).await)
+                    let outcome =
+                        distill_chunk_with_retry(&fabric, idx, &chunk, &model, max_chars, timeout_secs, chunk_retries)
+                            .await;
+                    (idx, outcome)
                 }
             })
             .buffer_unordered(concurrency)
@@ -303,32 +308,28 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
         let mut any_chunk_failed = false;
         let mut output_chars: usize = 0;
 
-        for (_, result) in chunk_results {
-            let raw = match result {
-                Ok(r) => r,
-                Err(err) => {
-                    log::warn!("SessionDistiller: chunk fabric call failed: {err}");
-                    any_chunk_failed = true;
-                    continue;
+        for (_, outcome) in chunk_results {
+            match outcome {
+                ChunkOutcome::Parsed {
+                    output_chars: oc,
+                    parsed,
+                } => {
+                    let parsed = *parsed;
+                    output_chars += oc;
+                    if let Some(s) = parsed.summary.clone()
+                        && !s.trim().is_empty()
+                    {
+                        chunk_summaries.push(s.trim().to_string());
+                    }
+                    combined_claims.extend(collect_claims(parsed.claims));
+                    combined_links.extend(collect_links(parsed.links));
+                    combined_tags.extend(collect_tags(parsed.tags));
                 }
-            };
-            output_chars += raw.len();
-            let parsed: PatternYaml = match crate::parse::parse_pattern_yaml(strip_fences(&raw)) {
-                Ok(p) => p,
-                Err(err) => {
-                    log::warn!("SessionDistiller: chunk yaml parse failed: {err}");
+                ChunkOutcome::Failed { output_chars: oc } => {
+                    output_chars += oc;
                     any_chunk_failed = true;
-                    continue;
                 }
-            };
-            if let Some(s) = parsed.summary.clone()
-                && !s.trim().is_empty()
-            {
-                chunk_summaries.push(s.trim().to_string());
             }
-            combined_claims.extend(collect_claims(parsed.claims));
-            combined_links.extend(collect_links(parsed.links));
-            combined_tags.extend(collect_tags(parsed.tags));
         }
 
         let mut seen_tags = std::collections::HashSet::new();
@@ -429,6 +430,93 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
                 Err(reason)
             }
         }
+    }
+}
+
+/// Outcome of one sub-chunk's bounded call+parse retry loop.
+enum ChunkOutcome {
+    /// The chunk's fabric call returned AND its YAML parsed (possibly after a
+    /// structural repair inside `parse_pattern_yaml`). `output_chars` is the
+    /// successful attempt's raw length, for token accounting. `parsed` is boxed
+    /// so this variant does not dwarf `Failed` (clippy `large_enum_variant`).
+    Parsed {
+        output_chars: usize,
+        parsed: Box<PatternYaml>,
+    },
+    /// Every attempt (initial + `chunk_retries`) failed to call or parse. The
+    /// caller flags `partial-chunk-failure`. `output_chars` is the last
+    /// attempt's raw length (0 when no call ever returned).
+    Failed { output_chars: usize },
+}
+
+/// Distill ONE sub-chunk with a bounded retry (harvest distill-parsing
+/// robustness, 2026-07-24). A chunk whose fabric call errors OR whose YAML
+/// fails `parse_pattern_yaml` is retried up to `chunk_retries` times
+/// (`chunk_retries + 1` total attempts). The retry re-issues ONLY after the
+/// prior attempt's awaited `fabric.call` has fully returned — this loop is
+/// sequential, so no two calls for the SAME chunk are ever in flight at once
+/// (the design's non-overlap invariant). Exhausted retries degrade cleanly to
+/// [`ChunkOutcome::Failed`] (no panic), exactly as the pre-retry path did on a
+/// chunk's first failure.
+async fn distill_chunk_with_retry<F: FabricCaller + Clone>(
+    fabric: &F,
+    idx: usize,
+    chunk: &str,
+    model: &str,
+    max_chars: usize,
+    timeout_secs: u64,
+    chunk_retries: usize,
+) -> ChunkOutcome {
+    let attempts = chunk_retries.saturating_add(1);
+    log::debug!("distill_chunk_with_retry: chunk={idx} attempts={attempts} chunk_retries={chunk_retries}");
+    let mut last_output_chars = 0usize;
+    let mut last_error: Option<String> = None;
+    for attempt in 0..attempts {
+        let request = FabricRequest {
+            pattern: PATTERN_CHUNK.to_string(),
+            input: chunk.to_string(),
+            model: model.to_string(),
+            max_chars,
+            timeout_secs,
+        };
+        match fabric.call(request).await {
+            Ok(raw) => {
+                last_output_chars = raw.len();
+                match crate::parse::parse_pattern_yaml::<PatternYaml>(strip_fences(&raw)) {
+                    Ok(parsed) => {
+                        log::debug!(
+                            "distill_chunk_with_retry: chunk={idx} parsed on attempt {}/{attempts}",
+                            attempt + 1
+                        );
+                        return ChunkOutcome::Parsed {
+                            output_chars: raw.len(),
+                            parsed: Box::new(parsed),
+                        };
+                    }
+                    Err(err) => {
+                        log::trace!(
+                            "distill_chunk_with_retry: chunk={idx} attempt {}/{attempts} yaml parse failed: {err}",
+                            attempt + 1
+                        );
+                        last_error = Some(format!("yaml parse failed: {err}"));
+                    }
+                }
+            }
+            Err(err) => {
+                log::trace!(
+                    "distill_chunk_with_retry: chunk={idx} attempt {}/{attempts} fabric call failed: {err}",
+                    attempt + 1
+                );
+                last_error = Some(format!("fabric call failed: {err}"));
+            }
+        }
+    }
+    log::warn!(
+        "SessionDistiller: chunk {idx} exhausted {attempts} attempt(s); degrading (last: {})",
+        last_error.as_deref().unwrap_or("unknown")
+    );
+    ChunkOutcome::Failed {
+        output_chars: last_output_chars,
     }
 }
 

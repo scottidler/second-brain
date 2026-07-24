@@ -167,3 +167,78 @@ load-bearing.
 - None. (Completed by the orchestrator after the phase agent edited + synced the
   patterns but idled before committing; the belt text, the three-file sync, and
   this note were verified before commit.)
+
+## Phase 3: Chunk-path tolerant parse + bounded retry
+
+The chunk parse already routes through `parse_pattern_yaml` (Phase 1). Phase 3
+adds the bounded per-chunk RETRY and the `chunk-retries` config plumbed across
+the borg -> distillers boundary.
+
+### Design decisions
+
+- **`chunk_retries` config knob, default 1, plumbed borg -> distillers.**
+  `DistillConfig.chunk_retries` (`borg/src/config.rs`, `deny_unknown_fields`,
+  kebab `chunk-retries` via `rename_all`) is populated into
+  `SessionConfig.chunk_retries` (`distillers/src/session.rs`) by the borg
+  pipeline constructor (`borg/src/pipeline/session.rs`). `distillers` stays
+  config-free — it receives the value, never reads config. Struct field + the
+  `borg.yml.example` line landed in this one commit so `deny_unknown_fields`
+  never rejects the key. Default 1 is a hand-written `impl Default` (not the
+  `usize::default()` 0) so an absent key keeps the retry on.
+- **Retry lives in a free fn `distill_chunk_with_retry`** (`session.rs`) that
+  owns ONE chunk's `chunk_retries + 1` attempt loop: each attempt awaits
+  `fabric.call` to completion, then parses; on call-error OR parse-failure it
+  loops. Because the loop is sequential inside a single per-chunk task, no two
+  calls for the same chunk are ever in flight — the design's non-overlap
+  invariant holds by construction, not by luck.
+- **`ChunkOutcome` enum replaces the raw `Result<String>` fan-out result.** The
+  per-chunk task now returns `Parsed { output_chars, parsed }` or
+  `Failed { output_chars }`; the sequential reduce loop maps `Parsed` to the
+  claim/summary/link/tag merge and `Failed` to `any_chunk_failed = true` —
+  byte-for-byte the old `partial-chunk-failure` semantics, just after the retry
+  is exhausted rather than on first failure.
+- **Logging (per `logging.md` + `rust.md`):** per-ATTEMPT failures are `trace!`
+  (tight loop); the chunk-level DEBUG entry (`attempts=`) fires once; an
+  EXHAUSTED chunk logs a single `warn!` naming the last error — preserving the
+  `borg.log` chunk-failure evidence the design's Bug-2 diagnosis rests on.
+- **`FakeFabric` grew `set_response_for_input` / `set_error_for_input`** (input
+  substring, first-match, checked before the pattern-keyed steady response) so a
+  two-chunk partial-failure test is DETERMINISTIC regardless of
+  `buffer_unordered` completion order — the outcome rides the chunk's own body
+  marker, not call ordering (the panel's `set_response_sequence` "order not
+  overlap" caveat).
+- **Non-overlap proven with a real concurrency probe.** A test-local
+  `InFlightProbe` FabricCaller opens a sleep-widened in-flight window, records
+  peak concurrent chunk calls, fails attempt 1 to force a retry, succeeds
+  attempt 2; the test asserts `chunk_calls == 2` (a retry happened) AND
+  `max_inflight == 1` (it never overlapped). This bites: a spawn-both-attempts
+  implementation would read `max_inflight == 2`.
+
+### Deviations
+
+- **Retry tests drive `distill_long` DIRECTLY with hand-built chunk vectors**
+  rather than the `distill()` entry. The fixed chunk-size constants
+  (`SINGLE_CALL_TOKEN_THRESHOLD` 12K, `CHUNK_TOKEN_TARGET` 8K) make it impossible
+  to produce a single controllable chunk through `distill()`, so the direct call
+  is the correct seam to isolate one chunk's retry deterministically. Same effect
+  (the real map-reduce path runs `distill_long`), correct seam.
+- **`ChunkOutcome::Parsed.parsed` is `Box<PatternYaml>`** to satisfy clippy
+  `large_enum_variant` (`PatternYaml` is ~264 bytes; `Failed` is 8). Cosmetic;
+  the box is unwrapped (`*parsed`) at the single consumption site.
+
+### Tradeoffs
+
+- **Accumulate `output_chars` from the returned attempt** (successful attempt's
+  raw len, or the last failed attempt's) rather than summing every attempt's
+  bytes. `output_chars` feeds only the token-accounting meta field, not any
+  load-bearing decision, so counting the final attempt keeps the metric honest
+  without inflating it by the retried bytes.
+- **Extended `FakeFabric` over adding a second fake.** Input-keyed matching is a
+  small, general addition that other map-reduce tests can reuse, versus a
+  bespoke throwaway fake; the dedicated `InFlightProbe` is kept only for the
+  concurrency assertion it uniquely needs (a real awaited in-flight window,
+  which `FakeFabric`'s lock-per-call model cannot express).
+
+### Open questions
+
+- None.

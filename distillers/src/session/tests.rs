@@ -409,3 +409,178 @@ async fn no_metadata_yields_no_payload() {
     let distilled = distiller.distill(inputs("body", None)).await.expect("distill");
     assert!(distilled.kind_specific.is_none(), "no metadata -> no session payload");
 }
+
+// ---- SUCCESS CRITERION (Phase 3): bounded per-chunk retry -----------------
+//
+// These exercise `distill_long` directly with hand-built chunk vectors so the
+// retry behavior is deterministic (the normal `distill()` entry cannot produce
+// a single chunk on the map-reduce path under the fixed chunk-size constants).
+
+const CHUNK_YAML_VALID: &str =
+    "summary: \"Chunk covered the migration.\"\nclaims:\n  - text: \"A chunk decision.\"\ntags: [ci]\nlinks: []\n";
+const REDUCE_YAML_VALID: &str = "summary: \"Whole-session synthesis.\"\nclaims:\n  - text: \"A chunk decision.\"\n";
+/// Transient, NON-repair-shape malformed YAML: it is neither a duplicate-key
+/// nor a prose-preamble shape, so `parse_pattern_yaml`'s structural repair does
+/// NOT cover it — only a RETRY can rescue the chunk.
+const CHUNK_YAML_TRANSIENT_GARBAGE: &str = "this is not yaml: [unclosed";
+
+#[tokio::test]
+async fn chunk_retry_recovers_transient_malformed_then_valid() {
+    // Attempt 1 returns transient garbage YAML; attempt 2 returns valid YAML.
+    // With the default chunk_retries=1 the retry rescues the chunk, so the
+    // result is full and NOT flagged partial-chunk-failure.
+    let fake = FakeFabric::new();
+    fake.set_response_sequence(
+        PATTERN_CHUNK,
+        vec![
+            Ok(CHUNK_YAML_TRANSIENT_GARBAGE.to_string()),
+            Ok(CHUNK_YAML_VALID.to_string()),
+        ],
+    );
+    fake.set_response(PATTERN_REDUCE, REDUCE_YAML_VALID);
+    let distiller = make_distiller(fake, SessionConfig::default());
+    let built = distiller
+        .distill_long("body text", vec!["USER: chunk one\nASSISTANT: ok".to_string()])
+        .await
+        .expect("distill_long");
+    let distilled = built.take();
+    assert!(
+        distilled.meta.validation.fallback_reason.is_none(),
+        "retry rescued the chunk; expected fallback=none, got {:?}",
+        distilled.meta.validation.fallback_reason
+    );
+    assert!(!distilled.claims.is_empty(), "the recovered chunk contributes claims");
+}
+
+#[tokio::test]
+async fn chunk_retries_zero_disables_retry_and_degrades() {
+    // Same transient-then-valid sequence, but chunk_retries=0 → exactly ONE
+    // attempt, which fails to parse. The single chunk fails → chunk-failures
+    // fallback. Proves the config knob is load-bearing (contrast with the
+    // default-1 test above, which recovers the identical input).
+    let fake = FakeFabric::new();
+    fake.set_response_sequence(
+        PATTERN_CHUNK,
+        vec![
+            Ok(CHUNK_YAML_TRANSIENT_GARBAGE.to_string()),
+            Ok(CHUNK_YAML_VALID.to_string()),
+        ],
+    );
+    fake.set_response(PATTERN_REDUCE, REDUCE_YAML_VALID);
+    let config = SessionConfig {
+        chunk_retries: 0,
+        ..SessionConfig::default()
+    };
+    let distiller = make_distiller(fake, config);
+    let built = distiller
+        .distill_long("body text", vec!["USER: chunk one\nASSISTANT: ok".to_string()])
+        .await
+        .expect("distill_long");
+    let distilled = built.take();
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("chunk-failures"),
+        "chunk_retries=0 issues one attempt only; the failed chunk is not rescued"
+    );
+}
+
+#[tokio::test]
+async fn chunk_retry_exhausted_degrades_to_partial_chunk_failure() {
+    // Two chunks: chunk A (FAIL-MARKER) errors on EVERY attempt and exhausts its
+    // retries; chunk B (OK-MARKER) parses. Deterministic by chunk BODY, not by
+    // buffer_unordered completion order. The exhausted chunk degrades the reduce
+    // to partial-chunk-failure without panicking.
+    let fake = FakeFabric::new();
+    fake.set_error_for_input("FAIL-MARKER", "boom");
+    fake.set_response_for_input("OK-MARKER", CHUNK_YAML_VALID);
+    fake.set_response(PATTERN_REDUCE, REDUCE_YAML_VALID);
+    let distiller = make_distiller(fake, SessionConfig::default());
+    let chunks = vec![
+        "USER: FAIL-MARKER chunk\nASSISTANT: x".to_string(),
+        "USER: OK-MARKER chunk\nASSISTANT: y".to_string(),
+    ];
+    let built = distiller.distill_long("body text", chunks).await.expect("distill_long");
+    let distilled = built.take();
+    assert_eq!(
+        distilled.meta.validation.fallback_reason.as_deref(),
+        Some("partial-chunk-failure"),
+        "an exhausted chunk plus a surviving sibling degrades to partial-chunk-failure"
+    );
+    assert!(!distilled.claims.is_empty(), "the surviving chunk's claims are kept");
+}
+
+/// A `FabricCaller` that records the peak concurrent in-flight call count for
+/// `distill-session-chunk`. Each chunk call opens a real (sleep-widened)
+/// in-flight window; if a retry ever OVERLAPPED the prior call, `max_inflight`
+/// would read 2. Attempt 1 returns garbage (forcing a retry), attempt 2 valid.
+#[derive(Clone)]
+struct InFlightProbe {
+    inner: Arc<ProbeInner>,
+}
+
+struct ProbeInner {
+    inflight: std::sync::atomic::AtomicUsize,
+    max_inflight: std::sync::atomic::AtomicUsize,
+    chunk_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl InFlightProbe {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(ProbeInner {
+                inflight: std::sync::atomic::AtomicUsize::new(0),
+                max_inflight: std::sync::atomic::AtomicUsize::new(0),
+                chunk_calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl FabricCaller for InFlightProbe {
+    async fn call(&self, request: FabricRequest) -> eyre::Result<String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if request.pattern != PATTERN_CHUNK {
+            return Ok(REDUCE_YAML_VALID.to_string());
+        }
+        let attempt = self.inner.chunk_calls.fetch_add(1, SeqCst);
+        let cur = self.inner.inflight.fetch_add(1, SeqCst) + 1;
+        self.inner.max_inflight.fetch_max(cur, SeqCst);
+        // Hold the in-flight window open so an erroneous overlapping retry would
+        // be observed as inflight == 2.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        self.inner.inflight.fetch_sub(1, SeqCst);
+        // First attempt fails to parse (forces a retry); the second succeeds.
+        if attempt == 0 {
+            Ok(CHUNK_YAML_TRANSIENT_GARBAGE.to_string())
+        } else {
+            Ok(CHUNK_YAML_VALID.to_string())
+        }
+    }
+}
+
+#[tokio::test]
+async fn chunk_retry_never_overlaps_a_running_call() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let probe = InFlightProbe::new();
+    let distiller = SessionDistiller::new(probe.clone(), SessionConfig::default());
+    let built = distiller
+        .distill_long("body text", vec!["USER: chunk one\nASSISTANT: ok".to_string()])
+        .await
+        .expect("distill_long");
+    let distilled = built.take();
+    assert_eq!(
+        probe.inner.chunk_calls.load(SeqCst),
+        2,
+        "one retry means exactly two chunk attempts (proves a retry actually happened)"
+    );
+    assert_eq!(
+        probe.inner.max_inflight.load(SeqCst),
+        1,
+        "the retry re-issued only AFTER the prior call returned; never overlapping"
+    );
+    assert!(
+        distilled.meta.validation.fallback_reason.is_none(),
+        "the second attempt succeeded, so the chunk is not degraded"
+    );
+}

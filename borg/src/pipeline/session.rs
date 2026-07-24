@@ -144,6 +144,10 @@ pub(crate) async fn process_session_inner(
         max_chars: config.fabric.max_content_chars,
         timeout_secs: config.fabric.timeout_secs,
         token_cap: config.harvest.token_cap,
+        // Bounded per-chunk retry knob (harvest distill-parsing robustness):
+        // borg owns config; the config-free distillers crate receives the
+        // value here rather than reading it.
+        chunk_retries: config.distill.chunk_retries,
     };
 
     let distilled = crate::stages::distill::distill_for_publish_session(

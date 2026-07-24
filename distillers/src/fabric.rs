@@ -97,6 +97,12 @@ struct FakeInner {
     /// `responses` entry. Lets a test make some calls to the same pattern fail
     /// and others succeed (e.g. one chunk fails, the rest distill cleanly).
     sequences: HashMap<String, VecDeque<FakeResponse>>,
+    /// Steady outcomes keyed by an INPUT substring, matched in insertion order
+    /// (first containing match wins) before the pattern-keyed `responses`.
+    /// Lets a map-reduce test make ONE chunk fail and its siblings succeed
+    /// DETERMINISTICALLY regardless of `buffer_unordered` completion order —
+    /// the outcome rides the chunk's own body (a marker), not call ordering.
+    input_matches: Vec<(String, FakeResponse)>,
     calls: Vec<FabricRequest>,
 }
 
@@ -162,6 +168,27 @@ impl FakeFabric {
         inner.sequences.insert(pattern.into(), queue);
     }
 
+    /// Queue a steady OK response for any call whose INPUT contains `needle`.
+    /// Matched (first-wins, insertion order) before the pattern-keyed responses,
+    /// so a map-reduce test can make one chunk (identified by a marker in its
+    /// body) succeed while a sibling fails — independent of completion order.
+    pub fn set_response_for_input(&self, needle: impl Into<String>, yaml_body: impl Into<String>) {
+        let mut inner = self.inner.lock().expect("FakeFabric poisoned");
+        inner
+            .input_matches
+            .push((needle.into(), FakeResponse::Ok(yaml_body.into())));
+    }
+
+    /// Queue a steady ERROR for any call whose INPUT contains `needle` (see
+    /// [`set_response_for_input`]). Every attempt for that chunk errors, which
+    /// is how a test drives one chunk to exhaust its retries while siblings pass.
+    pub fn set_error_for_input(&self, needle: impl Into<String>, message: impl Into<String>) {
+        let mut inner = self.inner.lock().expect("FakeFabric poisoned");
+        inner
+            .input_matches
+            .push((needle.into(), FakeResponse::Err(message.into())));
+    }
+
     /// Inspect what callers asked for.
     pub fn calls(&self) -> Vec<FabricRequest> {
         let inner = self.inner.lock().expect("FakeFabric poisoned");
@@ -194,6 +221,15 @@ impl FabricCaller for FakeFabric {
             && let Some(response) = queue.pop_front()
         {
             return fake_response_to_result(&response, &request);
+        }
+        // Input-substring matches take precedence over the pattern-keyed steady
+        // response so a test can route by chunk body (first containing match).
+        if let Some((_, response)) = inner
+            .input_matches
+            .iter()
+            .find(|(needle, _)| request.input.contains(needle.as_str()))
+        {
+            return fake_response_to_result(&response.clone(), &request);
         }
         match inner.responses.get(&request.pattern) {
             Some(response) => fake_response_to_result(response, &request),

@@ -293,6 +293,16 @@ pub struct DistillConfig {
     /// When false, only the proposed-tag merge is skipped; the canonical filter
     /// and every other tag source are unaffected.
     pub propose_tags: bool,
+    /// Bounded per-chunk retries on the harvest session map-reduce path
+    /// (harvest distill-parsing robustness, 2026-07-24). A sub-chunk whose
+    /// fabric call errors OR whose YAML fails to parse is retried up to this
+    /// many times before it counts toward `partial-chunk-failure`; the retry
+    /// re-issues only after the prior attempt has fully returned (never
+    /// overlapping). Default 1 (one retry) is a behavior change from the old
+    /// one-call-per-chunk path — intended. Threads into the config-free
+    /// `distillers` crate via `SessionConfig.chunk_retries`
+    /// (`borg::pipeline::session`). Set 0 to restore the old no-retry behavior.
+    pub chunk_retries: usize,
 }
 
 impl Default for DistillConfig {
@@ -301,6 +311,7 @@ impl Default for DistillConfig {
             slide_append: true,
             capture_note: true,
             propose_tags: true,
+            chunk_retries: 1,
         }
     }
 }

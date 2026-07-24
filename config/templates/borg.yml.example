@@ -123,6 +123,7 @@ distill:
   slide-append:  true   # append distilled sections below the slide body on slide-published videos
   capture-note:  true   # thread the capture note into ## Why Captured + capture-note frontmatter + distiller context
   propose-tags:  true   # merge distiller-proposed candidate tags into the tag pipeline
+  chunk-retries: 1      # retries per failed/unparseable harvest sub-chunk before it degrades the reduce (0 = no retry)
 
 # Harvest - `sb borg harvest` pulls clyde session-export candidates, selects
 # the sessions worth remembering, distills each into a note, and lands it in
