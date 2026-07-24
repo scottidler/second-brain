@@ -32,8 +32,12 @@ links:
 # RULES
 
 - Output ONLY valid YAML matching the schema above. No leading prose, no
-  closing prose, no Markdown code fences. The YAML body is parsed directly by a
-  downstream consumer.
+  closing prose, no Markdown code fences, and no explanatory sentence before
+  or after the YAML (e.g. "Let me construct the YAML now."). The YAML body is
+  parsed directly by a downstream consumer; any non-YAML text breaks the parse.
+- Emit each mapping key EXACTLY ONCE per object. Never repeat a key - e.g. two
+  `quote:` lines, or two `kind:` lines, inside the same claim. A duplicate key
+  fails the parse.
 - `summary`: 1-2 sentences describing what THIS CHUNK's turns decided or
   learned. A later reduce step combines chunk summaries into the whole-session
   summary; don't try to summarize the whole session.

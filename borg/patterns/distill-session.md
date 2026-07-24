@@ -59,8 +59,12 @@ links:
 # RULES
 
 - Output ONLY valid YAML matching the schema above. No leading prose, no
-  closing prose, no Markdown code fences. The YAML body is parsed directly by a
-  downstream consumer.
+  closing prose, no Markdown code fences, and no explanatory sentence before
+  or after the YAML (e.g. "Let me construct the YAML now."). The YAML body is
+  parsed directly by a downstream consumer; any non-YAML text breaks the parse.
+- Emit each mapping key EXACTLY ONCE per object. Never repeat a key - e.g. two
+  `quote:` lines, or two `kind:` lines, inside the same claim. A duplicate key
+  fails the parse.
 - `summary`: 2-4 sentences. Lead with what the session set out to do and the
   most important thing decided or learned. Report what the transcript shows;
   do not editorialize.

@@ -131,3 +131,39 @@ parsed by the Phase 1 tests:
 ### Open questions
 
 - None.
+
+## Phase 2: Prompt belt (single-key, no-preamble)
+
+Belt to the Phase 1 parser's suspenders: reduce the frequency of the two drift
+shapes the tolerant parser recovers. Prose-only change; the parser stays
+load-bearing.
+
+### Design decisions
+
+- Strengthened the existing "Output ONLY valid YAML ... no closing prose"
+  RULES line in all three session patterns (`distill-session.md`,
+  `distill-session-chunk.md`, `distill-session-reduce.md`) to (a) name the exact
+  preamble failure ("no explanatory sentence before or after the YAML, e.g.
+  'Let me construct the YAML now.'") and (b) add an explicit "emit each mapping
+  key EXACTLY ONCE ... never two `quote:` or two `kind:` lines" rule, each
+  naming that a violation fails the parse.
+- Patterns are NOT embedded via `include_str!`; borg resolves them at runtime
+  from `~/.config/sb/patterns/` (source of truth `borg/patterns/`). Synced the
+  three edited files to `~/.config/sb/patterns/` explicitly (verified in sync via
+  `diff`); that deployed copy is outside the repo and is not committed (it is a
+  runtime target `otto deploy` also refreshes).
+
+### Deviations
+
+- None.
+
+### Tradeoffs
+
+- Extended the existing RULES lines rather than adding a new standalone rule
+  block, to keep the pattern terse and avoid a vague duplicate instruction.
+
+### Open questions
+
+- None. (Completed by the orchestrator after the phase agent edited + synced the
+  patterns but idled before committing; the belt text, the three-file sync, and
+  this note were verified before commit.)

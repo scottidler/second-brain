@@ -40,7 +40,11 @@ claims:
 
 # RULES
 
-- Output ONLY valid YAML matching the schema above. No prose, no fences.
+- Output ONLY valid YAML matching the schema above. No prose, no fences, and
+  no explanatory sentence before or after the YAML (e.g. "Let me construct the
+  YAML now.") - any non-YAML text breaks the parse.
+- Emit each mapping key EXACTLY ONCE per claim. Never repeat a key - e.g. two
+  `quote:` lines, or two `kind:` lines - a duplicate key fails the parse.
 - `summary`: 3-4 sentences synthesizing the whole session; do not list every
   chunk individually.
 - `slug`: a lowercase, hyphenated slug of 4-7 significant words naming the
