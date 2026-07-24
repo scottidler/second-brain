@@ -216,10 +216,11 @@ fn list_stale_selects_only_past_deadline_rows() {
     .expect("backdate");
     // The watchdog selects stale candidates, then promotes each survivor
     // individually (the mass promote_stale_to_crashed was deleted as dead).
-    let stale = list_stale(&conn, 60).expect("list_stale");
+    let now = Utc::now();
+    let stale = list_stale(&conn, 60, now).expect("list_stale");
     assert_eq!(stale.len(), 1, "only the old row is stale");
     assert_eq!(stale[0].0, "old");
-    let promoted = promote_single_to_crashed(&conn, "old", 60).expect("promote");
+    let promoted = promote_single_to_crashed(&conn, "old", 60, now).expect("promote");
     assert!(promoted);
     let fresh_row = get(&conn, "fresh").expect("get").expect("row");
     assert_eq!(fresh_row.status, "received");
@@ -235,7 +236,7 @@ fn promote_single_to_crashed_status_guard() {
     // Simulate the pipeline winning the race first.
     mark_succeeded(&conn, "tr-race", "inbox/race.md", false).expect("succ");
     // Watchdog tries to crash it now -> no-op.
-    let crashed = promote_single_to_crashed(&conn, "tr-race", 60).expect("promote");
+    let crashed = promote_single_to_crashed(&conn, "tr-race", 60, Utc::now()).expect("promote");
     assert!(!crashed);
     let r = get(&conn, "tr-race").expect("get").expect("row");
     assert_eq!(r.status, "succeeded");
@@ -254,7 +255,7 @@ fn list_stale_returns_only_past_deadline_received() {
     .expect("backdate");
     // old2 is already terminal -> should not appear.
     mark_failed(&conn, "old2", FailureStage::FetchFailed, "x").expect("fail");
-    let stale = list_stale(&conn, 60).expect("list_stale");
+    let stale = list_stale(&conn, 60, Utc::now()).expect("list_stale");
     let ids: Vec<&str> = stale.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(ids, vec!["old1"]);
 }
@@ -472,7 +473,7 @@ fn watchdog_crash_promotion_is_queryable_by_stage_crashed() {
         [],
     )
     .expect("backdate");
-    let promoted = promote_single_to_crashed(&conn, "stale", 60).expect("promote");
+    let promoted = promote_single_to_crashed(&conn, "stale", 60, Utc::now()).expect("promote");
     assert!(promoted);
     let crashed = query(
         &conn,
@@ -819,6 +820,197 @@ fn migrations_do_not_panic_on_a_newer_stored_schema_version() {
     // Column probes are unconditional, so they still hold on the "future" DB.
     assert!(has_column(&conn, "receipts", "lease_owner_pid").expect("probe"));
     assert!(has_column(&conn, "receipts", "lease_until").expect("probe"));
+}
+
+/// Format `now + secs` (or `now - secs` for a negative offset) as a
+/// [`TIMESTAMP_FMT`] string, matching how `lease_until` is stored.
+fn lease_at(now: DateTime<Utc>, offset_secs: i64) -> String {
+    (now + chrono::Duration::seconds(offset_secs))
+        .format(TIMESTAMP_FMT)
+        .to_string()
+}
+
+#[test]
+fn write_lease_sets_pid_and_expiry() {
+    let conn = fresh();
+    record_received(&conn, "tr-lease1", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    let now = Utc::now();
+    let until = lease_at(now, 1800);
+    write_lease(&conn, "tr-lease1", 4242, &until).expect("write_lease");
+    let owner_pid: i64 = conn
+        .query_row(
+            "SELECT lease_owner_pid FROM receipts WHERE trace_id='tr-lease1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read lease_owner_pid");
+    let lease_until: String = conn
+        .query_row("SELECT lease_until FROM receipts WHERE trace_id='tr-lease1'", [], |r| {
+            r.get(0)
+        })
+        .expect("read lease_until");
+    assert_eq!(owner_pid, 4242);
+    assert_eq!(lease_until, until);
+}
+
+#[test]
+fn write_lease_is_noop_on_terminal_row() {
+    // A lease write against an already-terminal row must not resurrect it or
+    // stamp a lease that would never be cleared (mark_succeeded/mark_failed
+    // are the only lease-clearing sites, and they never run again on an
+    // absorbing state).
+    let conn = fresh();
+    record_received(&conn, "tr-lease-term", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    mark_succeeded(&conn, "tr-lease-term", "n.md", false).expect("mark_succeeded");
+    write_lease(&conn, "tr-lease-term", 999, &lease_at(Utc::now(), 1800)).expect("write_lease no-op");
+    let r = get(&conn, "tr-lease-term").expect("get").expect("row");
+    assert_eq!(r.status, "succeeded", "already-terminal row is untouched");
+}
+
+#[test]
+fn renew_lease_updates_expiry_only() {
+    let conn = fresh();
+    record_received(&conn, "tr-renew", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    let now = Utc::now();
+    write_lease(&conn, "tr-renew", 111, &lease_at(now, 1800)).expect("write_lease");
+    let renewed_until = lease_at(now, 3600);
+    renew_lease(&conn, "tr-renew", &renewed_until).expect("renew_lease");
+    let owner_pid: i64 = conn
+        .query_row(
+            "SELECT lease_owner_pid FROM receipts WHERE trace_id='tr-renew'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read lease_owner_pid");
+    let lease_until: String = conn
+        .query_row("SELECT lease_until FROM receipts WHERE trace_id='tr-renew'", [], |r| {
+            r.get(0)
+        })
+        .expect("read lease_until");
+    assert_eq!(owner_pid, 111, "renew never touches lease_owner_pid");
+    assert_eq!(lease_until, renewed_until, "renew re-stamps lease_until");
+}
+
+#[test]
+fn mark_succeeded_nulls_lease_columns_in_one_update() {
+    let conn = fresh();
+    record_received(&conn, "tr-succ-lease", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    write_lease(&conn, "tr-succ-lease", 555, &lease_at(Utc::now(), 1800)).expect("write_lease");
+    mark_succeeded(&conn, "tr-succ-lease", "n.md", false).expect("mark_succeeded");
+    let (owner_pid, lease_until): (Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT lease_owner_pid, lease_until FROM receipts WHERE trace_id='tr-succ-lease'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("read lease columns");
+    assert!(owner_pid.is_none(), "mark_succeeded must NULL lease_owner_pid");
+    assert!(lease_until.is_none(), "mark_succeeded must NULL lease_until");
+}
+
+#[test]
+fn mark_failed_nulls_lease_columns_in_one_update() {
+    let conn = fresh();
+    record_received(&conn, "tr-fail-lease", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    write_lease(&conn, "tr-fail-lease", 555, &lease_at(Utc::now(), 1800)).expect("write_lease");
+    mark_failed(&conn, "tr-fail-lease", FailureStage::FetchFailed, "boom").expect("mark_failed");
+    let (owner_pid, lease_until): (Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT lease_owner_pid, lease_until FROM receipts WHERE trace_id='tr-fail-lease'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("read lease columns");
+    assert!(owner_pid.is_none(), "mark_failed must NULL lease_owner_pid");
+    assert!(lease_until.is_none(), "mark_failed must NULL lease_until");
+}
+
+#[test]
+fn fresh_lease_excludes_row_from_list_stale_and_promotion_despite_past_deadline() {
+    // Backdated well past the received_at deadline, but the lease is still
+    // FRESH (in the future) - a live cross-process owner is still renewing
+    // it. Both the SELECT and the atomic promotion UPDATE must agree the row
+    // is not a reap candidate. This is the bite check for the whole feature:
+    // dropping the lease predicate from either list_stale or the promotion
+    // UPDATE's WHERE clause would flip one or both of these assertions.
+    let conn = fresh();
+    record_received(&conn, "leased", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    conn.execute(
+        "UPDATE receipts SET received_at='2024-01-01T00:00:00Z' WHERE trace_id='leased'",
+        [],
+    )
+    .expect("backdate");
+    let now = Utc::now();
+    write_lease(&conn, "leased", 777, &lease_at(now, 1800)).expect("write_lease fresh");
+
+    let stale = list_stale(&conn, 60, now).expect("list_stale");
+    assert!(
+        stale.iter().all(|(id, _)| id != "leased"),
+        "a row with a fresh lease must not be a stale candidate"
+    );
+
+    let promoted = promote_single_to_crashed(&conn, "leased", 60, now).expect("promote");
+    assert!(
+        !promoted,
+        "the promotion UPDATE must match 0 rows when the lease is still fresh"
+    );
+    let r = get(&conn, "leased").expect("get").expect("row");
+    assert_eq!(r.status, "received", "fresh-leased row is untouched");
+}
+
+#[test]
+fn expired_lease_is_stale_and_promoted_with_lease_expired_reason() {
+    let conn = fresh();
+    record_received(&conn, "expired", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    conn.execute(
+        "UPDATE receipts SET received_at='2024-01-01T00:00:00Z' WHERE trace_id='expired'",
+        [],
+    )
+    .expect("backdate");
+    let now = Utc::now();
+    // Lease existed but expired 30 minutes ago.
+    write_lease(&conn, "expired", 888, &lease_at(now, -1800)).expect("write_lease expired");
+
+    let stale = list_stale(&conn, 60, now).expect("list_stale");
+    assert!(
+        stale.iter().any(|(id, _)| id == "expired"),
+        "a row with an expired lease is a stale candidate"
+    );
+
+    let promoted = promote_single_to_crashed(&conn, "expired", 60, now).expect("promote");
+    assert!(promoted, "an expired lease must be reaped");
+    let r = get(&conn, "expired").expect("get").expect("row");
+    assert_eq!(r.status, "failed");
+    assert_eq!(r.failure_stage.as_deref(), Some("crashed"));
+    assert_eq!(
+        r.failure_reason.as_deref(),
+        Some("lease-expired"),
+        "an expired (not absent) lease gets the distinct lease-expired reason"
+    );
+}
+
+#[test]
+fn null_lease_is_stale_and_promoted_with_generic_reason() {
+    // A row that never held a lease (legacy pre-Phase-4 row, or a trace whose
+    // owning process died before ever writing one) keeps the pre-existing
+    // generic "no terminal event within Ns" reason - only an EXPIRED (not
+    // absent) lease gets the distinct lease-expired reason.
+    let conn = fresh();
+    record_received(&conn, "nulllease", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    conn.execute(
+        "UPDATE receipts SET received_at='2024-01-01T00:00:00Z' WHERE trace_id='nulllease'",
+        [],
+    )
+    .expect("backdate");
+    let now = Utc::now();
+
+    let stale = list_stale(&conn, 60, now).expect("list_stale");
+    assert!(stale.iter().any(|(id, _)| id == "nulllease"));
+
+    let promoted = promote_single_to_crashed(&conn, "nulllease", 60, now).expect("promote");
+    assert!(promoted);
+    let r = get(&conn, "nulllease").expect("get").expect("row");
+    assert_eq!(r.failure_reason.as_deref(), Some("no terminal event within 60s"));
 }
 
 #[test]

@@ -49,6 +49,13 @@ const SCHEMA_SQL: &str = include_str!("receipts/schema.sql");
 /// this exact format or string ordering diverges from chronological ordering.
 const TIMESTAMP_FMT: &str = "%Y-%m-%dT%H:%M:%SZ";
 
+/// `failure_reason` recorded by [`promote_single_to_crashed`] when the row it
+/// reaped carried a lease that had expired (as opposed to a row that never
+/// held one, which keeps the generic "no terminal event within Ns" reason).
+/// Lets `sb borg log` distinguish a cross-process lease reap from a bare
+/// permit-less timeout.
+const LEASE_EXPIRED_REASON: &str = "lease-expired";
+
 /// One row from the `receipts` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Receipt {
@@ -437,9 +444,13 @@ pub fn record_replay(
 /// state (e.g. the watchdog beat the pipeline to it).
 pub fn mark_succeeded(conn: &Connection, trace_id: &str, note_path: &str, degraded: bool) -> Result<bool> {
     log::debug!("receipts::mark_succeeded: trace={trace_id} note_path={note_path} degraded={degraded}");
+    // The lease clear rides this SAME UPDATE (Resolved Decision: "clear
+    // folded into the terminal UPDATE") - no separate happy-path I/O, and no
+    // window where a terminal row still carries a live-looking lease.
     let rows = conn
         .execute(
-            "UPDATE receipts SET status='succeeded', terminal_at=?, note_path=?, degraded=? \
+            "UPDATE receipts SET status='succeeded', terminal_at=?, note_path=?, degraded=?, \
+             lease_owner_pid=NULL, lease_until=NULL \
              WHERE trace_id=? AND status='received'",
             params![now_iso8601(), note_path, degraded as i64, trace_id],
         )
@@ -476,9 +487,11 @@ pub fn mark_failed(conn: &Connection, trace_id: &str, stage: FailureStage, reaso
         "receipts::mark_failed: trace={trace_id} stage={stage} reason_len={}",
         reason.len()
     );
+    // Lease clear rides this SAME UPDATE, same rationale as mark_succeeded.
     let rows = conn
         .execute(
-            "UPDATE receipts SET status='failed', failure_stage=?, failure_reason=?, terminal_at=? \
+            "UPDATE receipts SET status='failed', failure_stage=?, failure_reason=?, terminal_at=?, \
+             lease_owner_pid=NULL, lease_until=NULL \
              WHERE trace_id=? AND status='received'",
             params![stage.as_str(), reason, now_iso8601(), trace_id],
         )
@@ -489,22 +502,67 @@ pub fn mark_failed(conn: &Connection, trace_id: &str, stage: FailureStage, reaso
     Ok(rows > 0)
 }
 
+/// Write the cross-process liveness lease on a trace's receipts row:
+/// `lease_owner_pid` (diagnostic only - PID reuse means it is never the
+/// liveness gate) and `lease_until` (the gate itself, [`TIMESTAMP_FMT`]).
+/// Guarded to `status='received'` so a lease can never be stamped onto a row
+/// that has already reached a terminal state. Called at trace entry
+/// (`pipeline.rs`, Phase 4) before the permit is granted, so a permit-queued
+/// trace already holds a lease the watchdog must respect.
+pub fn write_lease(conn: &Connection, trace_id: &str, pid: u32, lease_until: &str) -> Result<()> {
+    log::debug!("receipts::write_lease: trace={trace_id} pid={pid} lease_until={lease_until}");
+    let rows = conn
+        .execute(
+            "UPDATE receipts SET lease_owner_pid=?, lease_until=? \
+             WHERE trace_id=? AND status='received'",
+            params![pid, lease_until, trace_id],
+        )
+        .with_context(|| format!("Failed to write lease trace_id={trace_id}"))?;
+    if rows == 0 {
+        log::warn!("receipts::write_lease: trace_id={trace_id} not in 'received' state, no-op");
+    }
+    Ok(())
+}
+
+/// Re-stamp `lease_until` on an already-leased row (renew at permit grant, so
+/// the actual-processing window is measured from when work truly starts).
+/// Same `status='received'` guard as [`write_lease`].
+pub fn renew_lease(conn: &Connection, trace_id: &str, lease_until: &str) -> Result<()> {
+    log::debug!("receipts::renew_lease: trace={trace_id} lease_until={lease_until}");
+    let rows = conn
+        .execute(
+            "UPDATE receipts SET lease_until=? WHERE trace_id=? AND status='received'",
+            params![lease_until, trace_id],
+        )
+        .with_context(|| format!("Failed to renew lease trace_id={trace_id}"))?;
+    if rows == 0 {
+        log::warn!("receipts::renew_lease: trace_id={trace_id} not in 'received' state, no-op");
+    }
+    Ok(())
+}
+
 /// SELECT the trace_ids that are candidates for crashed-promotion: status
-/// `received` with `received_at` older than the deadline. Returned in
-/// reverse-chronological order so the watchdog can sample / log.
-pub fn list_stale(conn: &Connection, deadline_secs: u64) -> Result<Vec<(String, String)>> {
-    let now = Utc::now();
+/// `received`, `received_at` older than the deadline, AND no live lease
+/// (`lease_until` absent or already expired against `now`). A row whose
+/// owning process is still renewing its lease is excluded here even past the
+/// `received_at` deadline - it is legitimately mid-flight in a SEPARATE OS
+/// process the daemon's own in-memory active-trace set cannot see. `now` is
+/// caller-injected so tests are deterministic (no wall-clock read inside).
+/// Returned in reverse-chronological order so the watchdog can sample / log.
+pub fn list_stale(conn: &Connection, deadline_secs: u64, now: DateTime<Utc>) -> Result<Vec<(String, String)>> {
     let cutoff = now - chrono::Duration::seconds(deadline_secs as i64);
     let cutoff_iso = cutoff.format(TIMESTAMP_FMT).to_string();
+    let now_iso = now.format(TIMESTAMP_FMT).to_string();
     let mut stmt = conn
         .prepare(
             "SELECT trace_id, received_at FROM receipts \
              WHERE status='received' AND received_at < ? \
+             AND (lease_until IS NULL OR lease_until < ?) \
              ORDER BY received_at DESC",
         )
         .context("prepare list_stale")?;
     let iter = stmt
-        .query_map(params![cutoff_iso], |row| {
+        .query_map(params![cutoff_iso, now_iso], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .context("query_map list_stale")?;
@@ -517,14 +575,44 @@ pub fn list_stale(conn: &Connection, deadline_secs: u64) -> Result<Vec<(String, 
 
 /// Promote a single trace from `received` to `failed` with stage `crashed`.
 /// Used by the watchdog after the in-memory permit filter.
-pub fn promote_single_to_crashed(conn: &Connection, trace_id: &str, deadline_secs: u64) -> Result<bool> {
-    let reason = format!("no terminal event within {deadline_secs}s");
+///
+/// Repeats the SAME lease predicate as [`list_stale`] ATOMICALLY in this
+/// UPDATE's `WHERE` clause (`status='received' AND (lease_until IS NULL OR
+/// lease_until < now)`) - this is the TOCTOU fix: if the owning process
+/// renews between the watchdog's `list_stale` SELECT and this promotion
+/// UPDATE, the UPDATE matches 0 rows and the live trace is NOT reaped, even
+/// though it was a stale candidate a moment ago. `now` is caller-injected,
+/// same value the caller passed to `list_stale`, so the two checks agree.
+///
+/// A row whose lease was live but expired gets [`LEASE_EXPIRED_REASON`]
+/// instead of the generic "no terminal event" reason, so `sb borg log` can
+/// tell a cross-process lease reap apart from a bare permit-less timeout.
+pub fn promote_single_to_crashed(
+    conn: &Connection,
+    trace_id: &str,
+    deadline_secs: u64,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let now_iso = now.format(TIMESTAMP_FMT).to_string();
+    let generic_reason = format!("no terminal event within {deadline_secs}s");
     let rows = conn
         .execute(
             "UPDATE receipts SET status='failed', failure_stage='crashed', \
-             failure_reason=?, terminal_at=? \
-             WHERE trace_id=? AND status='received'",
-            params![reason, now_iso8601(), trace_id],
+             failure_reason = CASE \
+               WHEN lease_until IS NOT NULL AND lease_until < ? THEN ? \
+               ELSE ? \
+             END, \
+             terminal_at = ? \
+             WHERE trace_id = ? AND status = 'received' \
+             AND (lease_until IS NULL OR lease_until < ?)",
+            params![
+                now_iso,
+                LEASE_EXPIRED_REASON,
+                generic_reason,
+                now_iso8601(),
+                trace_id,
+                now_iso
+            ],
         )
         .with_context(|| format!("Failed to promote {trace_id} to crashed"))?;
     Ok(rows > 0)

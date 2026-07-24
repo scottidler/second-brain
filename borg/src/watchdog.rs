@@ -9,6 +9,7 @@
 use crate::config::Config;
 use crate::pipeline::permits;
 use crate::receipts;
+use chrono::Utc;
 use eyre::{Context, Result};
 use rusqlite::Connection;
 use std::sync::Arc;
@@ -51,7 +52,11 @@ pub fn run_once(config: &Config, active_traces: &dyn Fn(&str) -> bool) -> Result
 ///    legitimately mid-flight and must not be promoted).
 /// 3. For each survivor, issue the status-guarded `promote_single_to_crashed`.
 fn run_once_conn(conn: &Connection, deadline_secs: u64, active_traces: &dyn Fn(&str) -> bool) -> Result<usize> {
-    let stale = receipts::list_stale(conn, deadline_secs).context("receipts: list_stale")?;
+    // Read the clock once so `list_stale`'s SELECT and each promotion UPDATE
+    // agree on "now" - the atomic lease predicate in `promote_single_to_crashed`
+    // depends on comparing against the SAME instant, not a re-read per row.
+    let now = Utc::now();
+    let stale = receipts::list_stale(conn, deadline_secs, now).context("receipts: list_stale")?;
     let mut promoted = 0usize;
     for (trace_id, received_at) in stale {
         if active_traces(&trace_id) {
@@ -60,7 +65,7 @@ fn run_once_conn(conn: &Connection, deadline_secs: u64, active_traces: &dyn Fn(&
             );
             continue;
         }
-        match receipts::promote_single_to_crashed(conn, &trace_id, deadline_secs) {
+        match receipts::promote_single_to_crashed(conn, &trace_id, deadline_secs, now) {
             Ok(true) => {
                 log::warn!("watchdog: promoted trace={trace_id} to crashed (received_at={received_at})");
                 promoted += 1;

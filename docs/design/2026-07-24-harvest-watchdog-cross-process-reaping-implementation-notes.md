@@ -78,3 +78,83 @@ Design doc: `docs/design/2026-07-24-harvest-watchdog-cross-process-reaping.md`
 
 ### Open questions
 - None.
+
+## Phase 2: Receipts lease primitives + atomic promotion + terminal-clear
+
+### Design decisions
+- **`write_lease(conn, trace_id, pid, lease_until)` / `renew_lease(conn,
+  trace_id, lease_until)`** added exactly as specced in the API Design
+  section: `params![]`-bound, no clock read inside either function (the
+  caller computes and passes the already-formatted `lease_until` string).
+  Both are guarded `WHERE trace_id=? AND status='received'` -- a lease can
+  never be stamped onto (or renewed on) a row that has already reached a
+  terminal state, matching the existing status-guard convention every other
+  mutating function in this file already follows. 0-rows-affected logs at
+  WARN rather than erroring (mirrors `mark_succeeded`/`mark_failed`'s
+  no-op-on-terminal-row logging) -- Phase 4's guard is where "0 rows on the
+  INITIAL write" becomes a fail-closed abort; this primitive stays a plain
+  UPDATE.
+- **Lease clear folded into `mark_succeeded`'s and `mark_failed`'s EXISTING
+  UPDATE** (`SET ..., lease_owner_pid=NULL, lease_until=NULL`) rather than a
+  second statement -- exactly the Resolved Decision's "no separate clear on
+  the happy path, no redundant I/O" requirement. One transaction per terminal
+  write, unchanged row-count semantics (`rows > 0` still means "this call
+  performed the transition").
+- **`list_stale(conn, deadline_secs, now: DateTime<Utc>)`** gains `AND
+  (lease_until IS NULL OR lease_until < ?)` in the SELECT, bound from the
+  caller-supplied `now` (formatted once via the existing `TIMESTAMP_FMT`).
+  `now` is a new required parameter -- the function no longer reads
+  `Utc::now()` internally, so a test (or the watchdog, which now reads the
+  clock once per scan in `watchdog.rs::run_once_conn`) can hold the deadline
+  and the lease-liveness check to the SAME instant.
+- **`promote_single_to_crashed(conn, trace_id, deadline_secs, now)`** repeats
+  the identical `(lease_until IS NULL OR lease_until < ?)` predicate directly
+  in the UPDATE's `WHERE` clause -- this is the TOCTOU fix from the Resolved
+  Decisions: the SELECT and the promotion UPDATE now agree on both "is this
+  row old enough" and "is this row unleased", checked against the caller's
+  single `now`, atomically as part of the same UPDATE that flips the status.
+  A renew landing between the SELECT and this UPDATE makes the UPDATE match 0
+  rows, so the trace is not reaped.
+- **Distinct `failure_reason` for a lease-specific reap.** The UPDATE's SET
+  clause uses a SQL `CASE WHEN lease_until IS NOT NULL AND lease_until < ?
+  THEN 'lease-expired' ELSE <generic "no terminal event..."> END` so the
+  distinction (an EXPIRED lease vs a row that never held one) is made by the
+  same query that performs the promotion, rather than a second read-then-branch
+  round trip. `LEASE_EXPIRED_REASON` is a named module constant, not an inline
+  literal, per the no-magic-values convention already used for
+  `TIMESTAMP_FMT`.
+- **`watchdog.rs::run_once_conn`** reads `Utc::now()` once per scan and
+  threads it into both `list_stale` and each `promote_single_to_crashed`
+  call, so all rows in one scan pass are judged against the same instant.
+  This is mechanical signature-following (the functions' new `now` parameter
+  forces every caller to supply one) and is NOT the Phase 4 guard-wiring --
+  no lease is written or renewed anywhere yet, so every row the watchdog
+  currently sees has `lease_until IS NULL` and reaps exactly as it did before
+  this phase.
+
+### Deviations
+- None. Signatures, guard placement, and the atomic-predicate repetition
+  match the design doc's API Design and Resolved Decisions sections; the
+  `now`-injection requirement forced updating `watchdog.rs`'s two call sites
+  and the pre-existing `receipts::tests` call sites for `list_stale`/
+  `promote_single_to_crashed` to pass a value, which is a mechanical
+  same-effect change (previously the functions read the clock internally),
+  not a design deviation.
+
+### Tradeoffs
+- Considered a two-step promotion (SELECT the lease state, then branch in
+  Rust to choose the `failure_reason` string before a plain UPDATE) instead
+  of the in-SQL `CASE`. Rejected: a two-step read-then-write reopens exactly
+  the TOCTOU window the atomic UPDATE predicate exists to close (the branch
+  decision and the UPDATE would no longer be the same atomic statement).
+- Considered guarding `write_lease`/`renew_lease` to only the row's current
+  `lease_owner_pid` (so a second process could not silently overwrite
+  another's lease). Rejected for Phase 2: `lease_owner_pid` is explicitly
+  diagnostic-only per the design doc ("never the liveness gate, PID reuse"),
+  and only one process at a time should ever hold an entry lease on a given
+  `trace_id` by construction (a trace is created once, by exactly one door);
+  Phase 4's guard is the correct place to decide whether an owner check adds
+  value once the write sites are wired in.
+
+### Open questions
+- None.
