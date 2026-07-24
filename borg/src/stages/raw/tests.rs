@@ -203,8 +203,15 @@ fn run_gate_1_block_body_when_enabled_persists_blocklist_and_rejection() {
     // doesn't leak into the user's real dotfiles.
     //
     // run_gate_1 uses blocklist::default_path() which resolves via
-    // dirs::data_local_dir(). We set XDG_DATA_HOME for this test.
-    // SAFETY: single-threaded test.
+    // xdg_data_dir(); we point XDG_DATA_HOME at the tempdir. Cargo runs test
+    // FUNCTIONS concurrently across threads (the old "single-threaded test"
+    // comment was wrong), and XDG_DATA_HOME is process-global, so hold the ONE
+    // shared xdg lock the harvest publish/skip tests use for the whole window
+    // this var is redirected. Without it, this test clobbers XDG_DATA_HOME
+    // mid-body of `harvest::publish::tests` and their `receipts::open_default()`
+    // reads the wrong DB - the intermittent `receipts row` failure.
+    let _xdg_guard = crate::harvest::TEST_XDG_LOCK.blocking_lock();
+    let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
     unsafe {
         std::env::set_var("XDG_DATA_HOME", tmp.path());
     }
@@ -231,8 +238,12 @@ fn run_gate_1_block_body_when_enabled_persists_blocklist_and_rejection() {
     let bl = crate::blocklist::Blocklist::from_file(&bl_path).unwrap();
     assert!(bl.is_blocked("xda-developers.com", chrono::Utc::now()));
 
-    // Clean up env var for other tests.
+    // Restore the prior env (the `_xdg_guard` drops at fn end, releasing the
+    // shared lock only AFTER the var is restored, so the next holder starts clean).
     unsafe {
-        std::env::remove_var("XDG_DATA_HOME");
+        match prior_xdg {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
     }
 }
