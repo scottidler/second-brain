@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler (via agent)
 **Date:** 2026-07-24
-**Status:** Draft
+**Status:** Implemented (code; Phase 4 replay is post-deploy)
 **Review Passes Completed:** 5/5 + review-panel x2 (Architect + Staff Engineer) + consensus loop
 
 ## Summary
