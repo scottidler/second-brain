@@ -279,10 +279,54 @@ fn unreadable_session_id_falls_back_to_element_index() {
 
 #[test]
 fn schema_version_mismatch_is_a_loud_error() {
-    let payload = br#"{"schema-version": 2, "cursor": 1, "sessions": []}"#;
+    // 3 is the next UNRELEASED version: this test pins the guard's behavior, so
+    // it must name a version harvest does not speak, not whatever clyde ships.
+    let payload = br#"{"schema-version": 3, "cursor": 1, "sessions": []}"#;
     let err = parse_export(payload).unwrap_err();
     let msg = format!("{err:#}");
-    assert!(msg.contains("unsupported schema-version 2"), "got: {msg}");
+    assert!(msg.contains("unsupported schema-version 3"), "got: {msg}");
+}
+
+#[test]
+fn both_reviewed_versions_are_accepted() {
+    // The v2 change touches only `scope`, which harvest never reads, so both
+    // versions parse. The captured v1 fixtures depend on this.
+    for v in [1, 2] {
+        let payload = format!(r#"{{"schema-version": {v}, "cursor": 1, "sessions": []}}"#);
+        assert!(
+            parse_export(payload.as_bytes()).is_ok(),
+            "schema-version {v} must be accepted"
+        );
+    }
+}
+
+#[test]
+fn a_live_shaped_v2_record_parses() {
+    // Guards the 1 -> 2 bump with the field set clyde v0.25.3 actually emits,
+    // including the keys v2 added, which the tolerant envelope must ignore.
+    let payload = br#"{"schema-version": 2, "cursor": 1, "sessions": [{
+        "session-id": "abc-123", "host": "desk", "scope": "work",
+        "cwd": "/home/x", "project-dir": "/home/x/.claude", "repo": "o/r",
+        "git-branch": "main", "created": "2026-08-01T00:00:00Z",
+        "modified": "2026-08-02T00:00:00Z", "updated-at": 5, "duration-secs": 60,
+        "dormant": true, "title": "t", "first-prompt": "p", "n-msgs": 12,
+        "model": "claude-sonnet-5", "summary": "s", "tags": ["rust"],
+        "enrich-status": "ok", "redaction-count": 0,
+        "transcript-path": "/t.jsonl", "staged-path": null, "archived": false,
+        "efficiency": {"cache-reuse": 0.5}, "scope-version": 2,
+        "prompt-version": 7, "enrich-model": "claude-sonnet-5",
+        "enriched-at": "2026-08-02T00:00:00Z", "tags-source": "enrich"
+    }]}"#;
+    let parsed = parse_export(payload).expect("v2 payload must parse");
+    assert_eq!(
+        parsed.rejections.len(),
+        0,
+        "no field may be rejected: {:?}",
+        parsed.rejections
+    );
+    assert_eq!(parsed.export.sessions.len(), 1);
+    assert_eq!(parsed.export.sessions[0].session_id, "abc-123");
+    assert_eq!(parsed.export.sessions[0].scope, "work");
 }
 
 #[test]

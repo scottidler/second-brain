@@ -44,6 +44,12 @@ pub fn render_units(home: &Path, binary: &Path, config: &Config) -> (String, Str
 
     // Pin the config path explicitly when present so the timer's stripped
     // environment can't resolve a different one.
+    //
+    // `--config` is a flag on `sb borg`, NOT on the `harvest` subcommand, so it
+    // is interpolated BEFORE `harvest` in the ExecStart below. Emitting
+    // `borg harvest --config <path>` made every scheduled run die instantly with
+    // `error: unexpected argument '--config' found` (exit 2), which nothing
+    // noticed because the timer had never actually fired on this host.
     let config_flag = {
         let path = vault::paths::borg_config();
         if path.exists() {
@@ -81,7 +87,7 @@ pub fn render_units(home: &Path, binary: &Path, config: &Config) -> (String, Str
          # mise shims come first so mise-managed tools (e.g. fabric) win over\n\
          # any stale duplicate elsewhere on PATH.\n\
          Environment=\"PATH={home}/.local/share/mise/shims:{home}/.local/bin:{home}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n\
-         ExecStart={binary} borg harvest{config_flag}\n\
+         ExecStart={binary} borg{config_flag} harvest\n\
          WorkingDirectory={home}\n\
          \n\
          # Hardening (harvest writes the vault + ~/.local/share/sb, so no\n\

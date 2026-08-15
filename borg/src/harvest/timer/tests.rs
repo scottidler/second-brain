@@ -16,9 +16,16 @@ fn service_uses_absolute_binary_and_explicit_path() {
     let home = PathBuf::from("/home/tester");
     let binary = PathBuf::from("/home/tester/.cargo/bin/sb");
     let (service, _timer) = render_units(&home, &binary, &cfg("daily"));
+    // Asserts the binary, not the whole argv: `--config` sits between `borg` and
+    // `harvest` whenever a config file exists, so pinning the full string here
+    // made this test env-dependent.
     assert!(
-        service.contains("ExecStart=/home/tester/.cargo/bin/sb borg harvest"),
+        service.contains("ExecStart=/home/tester/.cargo/bin/sb borg"),
         "ExecStart must use the absolute binary path, not a bare `sb`:\n{service}"
+    );
+    assert!(
+        service.contains(" harvest\n"),
+        "ExecStart must invoke the harvest subcommand:\n{service}"
     );
     assert!(
         service.contains("Environment=\"PATH="),
@@ -169,4 +176,47 @@ fn schedule_change_is_the_only_timer_difference() {
     let diff2: Vec<&str> = t2.lines().filter(|l| !t1.contains(*l)).collect();
     assert_eq!(diff1, vec!["OnCalendar=daily"]);
     assert_eq!(diff2, vec!["OnCalendar=weekly"]);
+}
+
+/// Serializes the env mutation the config-flag tests need.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn config_flag_goes_before_the_subcommand_not_after() {
+    // Regression: the unit shipped `borg harvest --config <path>`, but --config
+    // is a flag on `sb borg`, not on `harvest`. Every scheduled run died with
+    // `error: unexpected argument '--config' found` (exit 2). It went unnoticed
+    // for weeks because the timer had never fired on the daemon host.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("sb")).expect("mkdir sb");
+    std::fs::write(tmp.path().join("sb").join("borg.yml"), "").expect("write borg.yml");
+
+    let prev = std::env::var_os("XDG_CONFIG_HOME");
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", tmp.path()) };
+    let (service, _timer) = render_units(
+        &PathBuf::from("/home/tester"),
+        &PathBuf::from("/home/tester/.cargo/bin/sb"),
+        &cfg("daily"),
+    );
+    match prev {
+        Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+    }
+
+    let exec = service
+        .lines()
+        .find(|l| l.starts_with("ExecStart="))
+        .expect("unit has an ExecStart");
+    assert!(
+        exec.contains("--config"),
+        "test is vacuous unless the config file was actually found:\n{exec}"
+    );
+    assert!(
+        !exec.contains("harvest --config"),
+        "--config is a `sb borg` flag, not a `harvest` flag:\n{exec}"
+    );
+    let config_at = exec.find("--config").expect("--config present");
+    let harvest_at = exec.rfind(" harvest").expect("subcommand present");
+    assert!(config_at < harvest_at, "--config must precede the subcommand:\n{exec}");
 }

@@ -21,7 +21,37 @@ use serde::{Deserialize, Serialize};
 
 /// The only contract version harvest speaks. A payload carrying any other
 /// value is a loud failure in [`parse_export`].
-pub const CONTRACT_SCHEMA_VERSION: u32 = 1;
+///
+/// **1 -> 2 (reviewed 2026-08-15).** clyde bumped to 2 on 2026-08-01 and this
+/// guard then blocked every harvest run (`unsupported schema-version 2`), which
+/// is the guard working: it is a deliberate stop-and-look, not a defect.
+///
+/// The delta, from clyde's own `sessions/src/export.rs`: `scope` is now the
+/// scope that was DECIDED (`scope_override -> stored scope -> classify(cwd)`)
+/// rather than `classify(cwd)` alone. Its TYPE and VOCABULARY are unchanged
+/// (`"work" | "personal"`, never null), so the envelope stays additive; clyde
+/// bumped anyway precisely so consumers could not silently start receiving
+/// differently-derived values.
+///
+/// Harvest is unaffected: [`SessionRecord::scope`] is parsed and carried, but
+/// never READ on any non-test path (no selection, clustering, or publish
+/// decision consults it). Every field this struct requires without a
+/// `#[serde(default)]` (`session-id`, `host`, `scope`, `modified`, `dormant`,
+/// `n-msgs`) is still present in a v2 payload, and the new v2 keys
+/// (`efficiency`, `scope-version`, `prompt-version`, `enrich-model`,
+/// `enriched-at`, `tags-source`) are ignored by the tolerant envelope.
+///
+/// Because the ONLY v2 change is to a field harvest ignores, 1 and 2 are
+/// interchangeable HERE and both stay supported: the captured v1 fixtures under
+/// `config/eval/` are real recorded payloads and remain valid test inputs.
+pub const CONTRACT_SCHEMA_VERSION: u32 = 2;
+
+/// Every contract version harvest has reviewed and can consume. A payload
+/// carrying anything else is a loud failure in [`parse_export`].
+///
+/// A SET, not a floor: a future v3 must be read and added deliberately, exactly
+/// as v2 was, rather than being accepted because it is newer.
+pub const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[1, CONTRACT_SCHEMA_VERSION];
 
 /// The frozen `enrich-status` vocabulary (design doc Selection section:
 /// `ok | skipped-personal | skipped-empty | failed | null`). Modeled as an
@@ -238,16 +268,16 @@ pub fn parse_export(bytes: &[u8]) -> Result<ParsedExport> {
     log::debug!("harvest::parse_export: input_bytes={}", bytes.len());
     let header: VersionHeader = serde_json::from_slice(bytes)
         .context("clyde session export: payload is not valid JSON or is missing `schema-version`")?;
-    if header.schema_version != CONTRACT_SCHEMA_VERSION {
+    if !SUPPORTED_SCHEMA_VERSIONS.contains(&header.schema_version) {
         bail!(
-            "clyde session export: unsupported schema-version {} (harvest speaks {}); \
+            "clyde session export: unsupported schema-version {} (harvest speaks {:?}); \
              refusing to limp along on a mismatched contract - upgrade the clyde binary or harvest",
             header.schema_version,
-            CONTRACT_SCHEMA_VERSION
+            SUPPORTED_SCHEMA_VERSIONS
         );
     }
     let raw: RawExport =
-        serde_json::from_slice(bytes).context("clyde session export: failed to parse the schema-version-1 envelope")?;
+        serde_json::from_slice(bytes).context("clyde session export: failed to parse the export envelope")?;
 
     let mut records: Vec<SessionRecord> = Vec::with_capacity(raw.sessions.len());
     let mut rejections: Vec<ParseRejection> = Vec::new();
