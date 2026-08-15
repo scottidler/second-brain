@@ -42,13 +42,11 @@ use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
 
 /// New (Phase 1) frontmatter key holding the SHA-256 of the input transcript.
 const HARVEST_BODY_HASH_KEY: &str = "harvest-body-hash";
-/// Cortex's soft-retire marker (`cortex::association::tombstone_content`) -
-/// a bare filename stem naming the live survivor. Reused here as a contract:
-/// this module writes and reads the identical key/shape.
-const SUPERSEDED_BY_KEY: &str = "superseded-by";
-/// Borg's content-slug key. Stripped on tombstone so a retired note never
-/// re-groups (mirrors `cortex::association::tombstone_content`).
-const SLUG_KEY: &str = "slug";
+// The soft-retire marker and the stripped slug key are the SHARED tombstone
+// contract (`vault::tombstone`), not borg's to define: `cortex::association`
+// writes the same shape, and three readers key on it. Imported, never
+// re-declared, so the two writers cannot drift into separate dialects.
+use vault::tombstone::{SLUG_KEY, SUPERSEDED_BY_KEY};
 /// Cortex's needs-review flag - one of the three degradation signals the
 /// survivor rule checks.
 const NEEDS_REVIEW_KEY: &str = "cortex-needs-review";
@@ -364,7 +362,7 @@ fn apply_group(vault_root: &Path, group: &DedupeGroup) -> Result<()> {
         let yaml = fm
             .to_yaml()
             .context("dedupe-sessions: serialize tombstone frontmatter")?;
-        let redirect_body = format!("Merged into [[{survivor_stem}]].\n");
+        let redirect_body = vault::tombstone::redirect_body(&survivor_stem);
         let content = format!("---\n{yaml}---\n\n{redirect_body}");
         vault::note::write_atomic(&abs, content.as_bytes())
             .with_context(|| format!("dedupe-sessions: tombstone write {}", abs.display()))?;

@@ -39,6 +39,32 @@ async fn the_live_and_staged_body_hashes_agree_byte_for_byte() {
     let live_text = watermark::thread_body_text(&member_bodies);
     let live_hash = watermark::body_hash(&live_text);
 
+    // CROSS-VERSION pin. Everything else in this file compares two values that
+    // both flow through `thread_body_text`, so they move together: changing the
+    // member separator or the role formatting keeps every other assertion here
+    // green while silently invalidating the `harvest-body-hash:` on all 272
+    // already-published notes. That is prior attempt 1's failure mode exactly -
+    // an invariant that lives in one file and is falsified in another - and it
+    // is what the design doc's Phase 3 bullet says this guard exists to catch.
+    //
+    // So pin the canonical format itself to a literal. If you are here because
+    // this failed, you changed the canonical body format: that is a decision
+    // about every stored hash in the vault, not a test to update. Either revert,
+    // or re-hash the existing notes (Phase 6's backfill) and update this literal
+    // in the same commit.
+    const CANONICAL_TEXT: &str = "=== session 871f6428 ===\n\
+                                  human: migrate ci.yml to the reusable workflow\n\
+                                  assistant: here is the plan\n";
+    const CANONICAL_HASH: &str = "827b8566cdde7d6c24d37b38998aca91df150cf4e7df54e45574c1101b149b20";
+    assert_eq!(
+        live_text, CANONICAL_TEXT,
+        "the canonical thread-body format changed - every stored harvest-body-hash: is now stale"
+    );
+    assert_eq!(
+        live_hash, CANONICAL_HASH,
+        "the canonical thread-body hash changed - every stored harvest-body-hash: is now stale"
+    );
+
     // The REPLAY path: the bytes staging holds, which is what a stage-2 replay
     // re-derives (and re-hashes) from.
     let store = FsArtifactStore::from_config(&published.config.staging);

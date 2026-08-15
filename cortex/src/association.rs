@@ -68,7 +68,7 @@ pub fn group_by_slug(notes: &[Note]) -> Vec<Vec<usize>> {
         if note.frontmatter.note_type.as_deref() != Some(NoteType::Session.as_str()) {
             continue;
         }
-        if note.frontmatter.extra.contains_key("superseded-by") {
+        if note.frontmatter.extra.contains_key(vault::tombstone::SUPERSEDED_BY_KEY) {
             continue;
         }
         let Some(slug) = note.frontmatter.extra.get("slug").and_then(|v| v.as_str()) else {
@@ -124,7 +124,7 @@ pub fn group_by_session_identity(notes: &[Note]) -> Vec<Vec<usize>> {
         if note.frontmatter.note_type.as_deref() != Some(NoteType::Session.as_str()) {
             continue;
         }
-        if note.frontmatter.extra.contains_key("superseded-by") {
+        if note.frontmatter.extra.contains_key(vault::tombstone::SUPERSEDED_BY_KEY) {
             continue;
         }
         match note.frontmatter.trace.as_deref().filter(|t| !t.is_empty()) {
@@ -1045,13 +1045,20 @@ fn append_bullets(content: &str, heading: &str, incoming: &[Vec<String>], key: f
 fn tombstone_content(content: &str, survivor: &Path) -> Option<String> {
     let stem = note_stem(survivor);
     // Drop slug first (if present), then set superseded-by.
-    let without_slug =
-        crate::scope::remove_frontmatter_fields(content, &["slug".to_string()]).unwrap_or_else(|| content.to_string());
+    // Key names and redirect text come from the SHARED contract
+    // (`vault::tombstone`), not from literals here: `borg::dedupe` writes the
+    // same shape and three readers key on it, so a literal in this function
+    // could drift from borg's while both crates' own tests stayed green.
+    let without_slug = crate::scope::remove_frontmatter_fields(content, &[vault::tombstone::SLUG_KEY.to_string()])
+        .unwrap_or_else(|| content.to_string());
     let marked = crate::scope::insert_frontmatter_fields(
         &without_slug,
-        &[("superseded-by".to_string(), serde_yaml::Value::String(stem.clone()))],
+        &[(
+            vault::tombstone::SUPERSEDED_BY_KEY.to_string(),
+            serde_yaml::Value::String(stem.clone()),
+        )],
     )?;
-    let redirect = format!("Merged into [[{stem}]].\n");
+    let redirect = vault::tombstone::redirect_body(&stem);
     swap_body(&marked, &redirect)
 }
 

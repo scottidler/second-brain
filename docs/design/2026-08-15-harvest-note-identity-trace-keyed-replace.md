@@ -249,9 +249,13 @@ executor strips `slug:` and inserts `superseded-by:` holding a bare filename STE
 (`association.rs:951-962`), leaving `trace:` intact. Rule: if a resolved note
 carries `superseded-by:`, follow it via the stem index, transitively, with a
 visited set and a depth bound of 8. Refuse (WARN, return `None`, publish new) if:
-the stem is ambiguous (**33 duplicate filename stems exist vault-wide**, 26
-excluding `system/`; re-counted 2026-08-15 at the ready-to-build gate -- the
-earlier figure of 32 was stale, the `system/` weekly-note series drifted by one),
+the stem is ambiguous (**33 duplicate filename stems exist vault-wide**, 27
+excluding `system/`; re-counted 2026-08-15 at the implementation audit, which
+corrected BOTH earlier figures -- the doc's original 32/26 and the gate's
+33/26. Max multiplicity of any stem is 3. **Zero of the 33 is a harvest note**:
+not one carries `trace: hv-`, which is why `follows:` and `superseded-by:` can
+safely name a bare stem today, and why this refusal path is a guard against a
+future collision rather than a current one),
 the stem resolves to nothing, a cycle is detected, or the depth bound trips.
 Never rewrite a live body onto a tombstone. The multi-match tie-break skips
 tombstones entirely.
@@ -442,8 +446,13 @@ cortex-move staleness, so it is resolved through `resolve_prior_note` using
 `PublishedEntry.trace` (Phase 2), never used raw.
 
 Acceptance:
-- [ ] A follow-up note carries `follows:` pointing at the prior note's CURRENT
-      path, including when cortex has moved it.
+- [ ] A follow-up note carries `follows:` naming the prior note's CURRENT
+      filename STEM (the wikilink target, per the Data Model -- not a path),
+      resolved freshly through `resolve_prior_note` including when cortex has
+      moved it. A stem is deliberate: `follows:` is written once and never
+      re-resolved (a replace carries it forward verbatim), so a stored path
+      would go permanently stale on the first cortex move, while `[[stem]]`
+      keeps resolving. Same reasoning as `superseded-by:` and Alternative 3.
 - [ ] An unresolvable prior note omits `follows:` and WARNs; it never blocks the
       publish.
 

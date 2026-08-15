@@ -50,10 +50,11 @@ use crate::receipts;
 /// written by Phase 3.
 const HARVEST_BODY_HASH_KEY: &str = "harvest-body-hash";
 
-/// Frontmatter key cortex's merge executor writes on a soft-retire tombstone
-/// (`cortex::association::tombstone_content`). A bare filename stem, no
-/// extension, no directory.
-const SUPERSEDED_BY_KEY: &str = "superseded-by";
+/// Frontmatter key the tombstone writers (`cortex::association::tombstone_content`
+/// and `borg::dedupe`) set on a soft-retired note. A bare filename stem, no
+/// extension, no directory. Imported from the shared contract rather than
+/// re-declared, so this follower cannot drift from what the writers emit.
+use vault::tombstone::SUPERSEDED_BY_KEY;
 
 /// Depth bound on a `superseded-by` chain (Architecture: "a depth bound of
 /// 8"). Guards against a pathological long chain burning cycles even when no

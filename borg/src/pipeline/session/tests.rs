@@ -1050,8 +1050,15 @@ async fn follows_survives_a_replace() {
 /// session policy to that constant plus this handler's own additions, so a new
 /// writer key cannot silently become a carried-forward (i.e. never-updated)
 /// key on a replace.
+/// NAME IS DELIBERATE: this matches the DECLARATION
+/// (`markdown::RENDER_NOTE_KEYS`), not the writer body. Adding an emitted key
+/// to `render_note` without declaring it leaves THIS test green - the one that
+/// catches that is `markdown::tests::render_note_keys_matches_the_writer`. The
+/// cross-cutting criterion is covered by the two together (writer -> constant
+/// -> policy); neither link alone is sufficient, so do not rename this back to
+/// "matches_the_writer" and do not treat it as the writer guard.
 #[test]
-fn borg_owned_key_policy_matches_the_writer() {
+fn borg_owned_key_policy_matches_the_declaration() {
     let owned = borg_owned_keys();
     for key in markdown::RENDER_NOTE_KEYS {
         assert!(

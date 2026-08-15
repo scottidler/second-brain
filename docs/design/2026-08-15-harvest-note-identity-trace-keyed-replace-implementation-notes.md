@@ -673,3 +673,101 @@ count was executed against current `main` and the live vault before Phase 1.
   tombstoned set per trace, including the real `hv-e5d240` cohort), and then
   `--apply` (and later, separately, `--purge`) are the operator's own next
   steps.
+
+## Post-implementation audit (review-panel round 1, Mode 2)
+
+Synthesis: `/tmp/review-panel/MR3tal8b/synthesis.md`. Architect (Gemini) +
+Staff Engineer (Codex), both rc=0. Panel call: ship after one fix. The panel also
+ran verification neither seat ran: full suite 2371 passed / 0 failed, clippy
+clean, and a READ-ONLY Phase 6 dry-run against the live vault
+(`groups=20 backfilled=216 uncovered=0`; `hv-e5d240` survivor =
+`notes/clyde-ci-yml-public-reusable-workflow-migration.md`, clean and distilled,
+NOT `-5`) -- which verifies two Phase 6 acceptance criteria against real data.
+
+### Must-fix, applied
+
+- **`borg/tests/body_hash_agrees_across_paths.rs` did not catch the failure mode
+  it exists for.** Proven by mutation: changing `thread_body_text`'s member
+  separator from `"=== session "` to `"=== SESSION "` left the test PASSING. The
+  test built its `live_text` by calling `thread_body_text` -- the same function
+  the publish path calls -- so both sides of every assertion moved together. It
+  pinned the cross-PATH invariant (staging holds the bytes the hasher saw; a
+  third mutation confirms that half does bite) but NOT the cross-VERSION
+  invariant that `harvest-body-hash:` continuity actually rests on, which is
+  precisely what the doc's Phase 3 bullet says the guard is for.
+  Fix: pinned the canonical text AND its SHA-256 to literals
+  (`827b8566cdde7d6c24d37b38998aca91df150cf4e7df54e45574c1101b149b20`), with a
+  comment stating that a failure here is a decision about every stored hash in
+  the vault, not a test to update. **Re-ran the panel's mutation 1 after the
+  fix: it now FAILS** ("the canonical thread-body format changed - every stored
+  harvest-body-hash: is now stale"). Mutation reverted.
+
+  This is the same defect class the doc was written about, one level up: the
+  guard against "an invariant living in one file, falsified in another" was
+  itself written so it could not observe that falsification.
+
+### Cheap-wins, applied
+
+- **Tombstone-shape drift across crates.** `cortex::association` and
+  `borg::dedupe` each carried independent hardcoded `"superseded-by"` /
+  `"Merged into [[{stem}]].\n"`, each pinned only by its own crate-local test, so
+  changing one crate and its test left the other green. The panel proposed a
+  cross-crate test in `sb`; `tombstone_content` is private, so instead the
+  contract moved to the shared crate: NEW `vault/src/tombstone.rs` owns
+  `SUPERSEDED_BY_KEY`, `SLUG_KEY`, and `redirect_body()`. Both WRITERS
+  (`association::tombstone_content`, `dedupe::apply_group`) and the READERS
+  (`association::group_by_slug`, `association::group_by_session_identity`,
+  `harvest::identity`'s tombstone follower) now import it. Drift is now
+  impossible rather than merely detectable -- consistent with the repo's
+  schema-is-law rule against hardcoding shared strings in consumer crates.
+  Deliberately NOT unified: cortex does text-level frontmatter surgery, borg
+  parses and re-serializes. Key names and body text are the contract; YAML key
+  order is not, and the module says so.
+- **Misleading test name.** `borg_owned_key_policy_matches_the_writer` renamed to
+  `borg_owned_key_policy_matches_the_declaration`, with a doc comment stating it
+  matches `RENDER_NOTE_KEYS`, that the writer guard is
+  `markdown::tests::render_note_keys_matches_the_writer`, and that the
+  cross-cutting criterion is covered by the two together. The probe result
+  (adding an undeclared key to `render_note`: first test fails, second passes)
+  was correct behavior all along, just misnamed.
+- **Phase 4 acceptance criterion reworded** from "pointing at the prior note's
+  CURRENT path" to naming the current filename STEM, with the reasoning inline,
+  so the criterion and the Data Model agree and the next auditor does not
+  re-raise it.
+
+### Corrected in the doc
+
+- **Duplicate stem count, corrected twice.** Original doc said 32 vault-wide / 26
+  excluding `system/`; the ready-to-build gate said 33/26; the audit re-measured
+  33/**27**. The gate's 26 was wrong. Now 33/27 with max multiplicity 3.
+- **The `follows:` bare-stem concern raised at Phase 4 was based on a bad
+  premise, and is withdrawn.** "`review-ci-workflow-security-changes` appears 15
+  times" counted the `slug:` FRONTMATTER VALUE, not filename stems -- those 15
+  files have 15 distinct filenames. Measured decisively: **zero of the 33
+  duplicate stems carries `trace: hv-`**, so no duplicate stem is a harvest note
+  and `follows:` (which only ever names a harvest note) cannot currently be
+  ambiguous. The staff engineer's proposed fix (store a path) would be strictly
+  WORSE: `follows:` is written once and never re-resolved (a replace carries it
+  forward verbatim, `session.rs`; a stage-2 replay passes `follows_prior: None`,
+  `replay.rs`), so a stored path goes permanently stale on the first cortex move
+  with nothing to repair it, while a stem survives. No code change; the doc now
+  records the measurement.
+
+### Deferred, NOT fixed (flagged for the operator)
+
+- **`group_by_slug` is dead in production and `slug:` now has no code reader.**
+  `apply` calls only `group_by_session_identity`; `group_by_slug`'s body was the
+  last production reader of `slug:`. The doc keeps `slug:` for a separate stated
+  reason (it should stop lying about the file it names), so this is disclosed
+  rather than a deviation -- but `slug:` is now effectively human/Obsidian-facing
+  only. Either delete `group_by_slug` or state that `slug:` has no code reader.
+- **One vault note has malformed YAML frontmatter** (surfaced by the panel's
+  dry-run: "line 4 column 49"; falls back to EMPTY metadata). Pre-existing, but
+  it matters more now: such a note has no visible `trace:`, so it is invisible to
+  both resolution and dedupe and would silently fork on replay. Out of scope
+  here; wants an `sb cortex lint` pass.
+
+### Open questions
+
+- None blocking. The two defers above are the operator's call, and the Phase 6
+  `--apply` / `--purge` runs remain un-run against the live vault.
