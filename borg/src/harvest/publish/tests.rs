@@ -185,7 +185,9 @@ async fn publish_plan_publishes_and_rerun_is_idempotent() {
     assert_eq!(plan.threads[0].member_ids.len(), 2);
     assert_eq!(plan.publishable().count(), 1);
 
-    let (state, outcomes) = publish_plan(&reader, &config, &plan, state).await;
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().join("harvest-state.json");
+    let (state, outcomes) = publish_plan(&reader, &config, &plan, state, &state_path).await;
     assert_eq!(outcomes.len(), 1);
     assert!(
         matches!(outcomes[0].result.status, crate::types::IngestStatus::Completed),
@@ -239,6 +241,133 @@ async fn publish_plan_publishes_and_rerun_is_idempotent() {
     let report = crate::replay::run(config, replay_opts, |_| {}).await.unwrap();
     assert_eq!(report.succeeded, 1, "stage-2 replay re-derives the session note");
     assert_eq!(report.failed, 0);
+
+    match prior_xdg {
+        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
+}
+
+/// Phase 2 (harvest-run integrity), acceptance: "Killing the process between
+/// two threads leaves the first thread's `published` entry on disk AND the
+/// cursor unadvanced." Drives `publish_thread` (the per-thread durable-save
+/// seam) for the FIRST of two independently-clustered threads only, standing
+/// in for a process that stops right there - never reaching the second
+/// thread or the end-of-run `apply_plan_to_state` + final `save`. Then
+/// finishes the run and confirms the cursor advances only at that final step.
+#[tokio::test]
+async fn per_thread_save_is_durable_and_the_cursor_stays_unadvanced_until_end_of_run() {
+    let _guard = ENV_LOCK.lock().await;
+    crate::pipeline::permits::GENERAL_PERMITS.init(4);
+    crate::pipeline::permits::HEAVY_PERMITS.init(2);
+    let data_home = TempDir::new().unwrap();
+    let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
+    unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+
+    // Same (cwd, git-branch) cluster key but >2h apart (the `opts()`
+    // thread-window) so these land as TWO separate threads, not one.
+    let s1 = session_record(
+        "aaaa1111-1111-1111-1111-111111111111",
+        "2026-07-02T04:00:00+00:00",
+        "2026-07-02T04:10:00+00:00",
+        20,
+    );
+    let s2 = session_record(
+        "bbbb2222-2222-2222-2222-222222222222",
+        "2026-07-02T10:00:00+00:00",
+        "2026-07-02T10:10:00+00:00",
+        20,
+    );
+    let export = SessionExport {
+        schema_version: 1,
+        generated_at: None,
+        host: None,
+        cursor: 99,
+        sessions: vec![s1, s2],
+    };
+    let reader = FakeReader {
+        bulk: export.clone(),
+        bodies: [
+            (
+                "aaaa1111-1111-1111-1111-111111111111".to_string(),
+                vec![BodyMessage {
+                    role: Some("human".to_string()),
+                    text: Some("first thread's transcript".to_string()),
+                    subagent: false,
+                }],
+            ),
+            (
+                "bbbb2222-2222-2222-2222-222222222222".to_string(),
+                vec![BodyMessage {
+                    role: Some("human".to_string()),
+                    text: Some("second thread's transcript".to_string()),
+                    subagent: false,
+                }],
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let state = WatermarkState::default();
+    let plan = plan_harvest(&reader, export.clone(), &opts(), &state).await.unwrap();
+    assert_eq!(
+        plan.threads.len(),
+        2,
+        "sessions >2h apart cluster into two separate threads"
+    );
+    assert_eq!(plan.publishable().count(), 2);
+
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().join("harvest-state.json");
+    assert!(!state_path.exists(), "no watermark on disk yet");
+
+    let mut state = state;
+    // Publish ONLY the first thread - simulating the process stopping right
+    // here, before the second thread or the end-of-run bookkeeping ever run.
+    let outcome1 = publish_thread(&reader, &config, &plan.threads[0], &mut state, &state_path).await;
+    assert!(
+        matches!(outcome1.result.status, crate::types::IngestStatus::Completed),
+        "{:?}",
+        outcome1.result
+    );
+
+    let on_disk = WatermarkState::load(&state_path).unwrap();
+    assert!(
+        on_disk.published.contains_key(&plan.threads[0].primary_id),
+        "the first thread's snapshot is durable on disk immediately, before the run finishes"
+    );
+    assert_eq!(
+        on_disk.cursor, None,
+        "the cursor must NOT have advanced yet - only apply_plan_to_state advances it, at end of run"
+    );
+
+    // Publish the second thread too - the cursor is STILL unadvanced, proving
+    // the cursor bump really does live only in the end-of-run step, not
+    // anywhere in this per-thread loop.
+    let outcome2 = publish_thread(&reader, &config, &plan.threads[1], &mut state, &state_path).await;
+    assert!(
+        matches!(outcome2.result.status, crate::types::IngestStatus::Completed),
+        "{:?}",
+        outcome2.result
+    );
+    let on_disk2 = WatermarkState::load(&state_path).unwrap();
+    assert!(on_disk2.published.contains_key(&plan.threads[1].primary_id));
+    assert_eq!(
+        on_disk2.cursor, None,
+        "still unadvanced after both threads publish - the cursor advance is a separate, later step"
+    );
+
+    // Now run the actual end-of-run step (mirrors `harvest::run_with`) and
+    // confirm THIS is what advances the cursor.
+    let final_state = crate::harvest::apply_plan_to_state(state, &plan);
+    final_state.save(&state_path).unwrap();
+    let on_disk3 = WatermarkState::load(&state_path).unwrap();
+    assert_eq!(on_disk3.cursor, Some(99), "cursor advances only at the end-of-run step");
 
     match prior_xdg {
         Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },

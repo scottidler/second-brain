@@ -7,6 +7,7 @@ fn entry(n_msgs: i64, hash: &str) -> PublishedEntry {
         note_path: "inbox/note.md".to_string(),
         n_msgs,
         body_hash: hash.to_string(),
+        trace: Some("hv-test01".to_string()),
     }
 }
 
@@ -31,6 +32,64 @@ fn save_then_load_round_trips() {
 
     let reloaded = WatermarkState::load(&path).unwrap();
     assert_eq!(reloaded, state);
+}
+
+#[test]
+fn save_uses_atomic_write_with_no_leftover_temp_files() {
+    // Phase 2: `save` now goes through `vault::note::write_atomic` (fsync temp
+    // + parent, then rename into place) instead of the prior unfsynced
+    // `fs::write` + `fs::rename`. Same observable proof `vault::note::tests`
+    // uses for `write_atomic` itself: no temp file of EITHER naming scheme
+    // (the new `.sb-tmp-*` prefix, or the old `<name>.json.tmp` suffix)
+    // survives a save, and the content round-trips.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("harvest-state.json");
+    let mut state = WatermarkState {
+        cursor: Some(99),
+        ..Default::default()
+    };
+    state.published.insert("s1".to_string(), entry(10, "abc"));
+    state.save(&path).unwrap();
+
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name() != std::ffi::OsStr::new("harvest-state.json"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "atomic write left a temp file behind: {leftovers:?}"
+    );
+
+    let reloaded = WatermarkState::load(&path).unwrap();
+    assert_eq!(reloaded, state, "content durably round-trips through the atomic write");
+}
+
+#[test]
+fn published_entry_trace_defaults_to_none_for_legacy_state_without_the_key() {
+    // Existing on-disk state files predate `PublishedEntry.trace` and carry no
+    // `trace` key at all - deserialization must keep working, reading back as
+    // `None` rather than erroring.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("harvest-state.json");
+    let legacy = br#"{
+  "cursor": 1500,
+  "published": {
+    "s1": {
+      "note-path": "inbox/2dda6936.md",
+      "n-msgs": 486,
+      "body-hash": "deadbeef"
+    }
+  }
+}"#;
+    std::fs::write(&path, legacy).unwrap();
+
+    let state = WatermarkState::load(&path).unwrap();
+    assert_eq!(
+        state.published["s1"].trace, None,
+        "legacy state with no trace key must still deserialize"
+    );
+    assert_eq!(state.published["s1"].n_msgs, 486);
 }
 
 #[test]
@@ -195,6 +254,10 @@ fn classify_skip_advances_snapshot_when_hash_unchanged_but_msgs_grew() {
             assert_eq!(
                 updated.note_path, "inbox/note.md",
                 "note path unchanged (notes are immutable)"
+            );
+            assert_eq!(
+                updated.trace, e.trace,
+                "trace carries forward unchanged - this is not a new publish"
             );
         }
         other => panic!("expected Skip with snapshot advance, got {other:?}"),

@@ -158,3 +158,83 @@ count was executed against current `main` and the live vault before Phase 1.
 ### Open questions
 
 - None.
+
+## Phase 2: harvest-run integrity
+
+### Design decisions
+
+- `WatermarkState::save` now serializes to bytes and calls
+  `vault::note::write_atomic` directly rather than hand-rolling its own
+  temp-then-rename - `write_atomic` already fsyncs the temp file and the
+  parent directory, which is exactly the durability gap the doc names
+  (`watermark.rs::save`).
+- `record_published` gained a `trace_id: &str` parameter and now writes
+  `PublishedEntry.trace = Some(trace_id)` on every fresh publish - the doc's
+  Phase 4 section calls this field "`PublishedEntry.trace` (Phase 2)", i.e.
+  Phase 2 is credited with actually populating it, not just adding an
+  always-`None` schema field (which the doc's own "write-only fields are not
+  mitigations" rule would otherwise flag). `classify_reappearance`'s
+  snapshot-advance branch (unchanged n-msgs->hash, only `n_msgs` bumps)
+  carries the PRIOR entry's `trace` forward unchanged, since that path is not
+  a new publish (`watermark.rs::classify_reappearance`).
+- Per-thread durable save is implemented as: `publish_thread_inner` calls
+  `state.save(state_path)` immediately after `record_published`, inside the
+  per-thread loop (`publish.rs::publish_thread_inner`). This required
+  threading a `state_path: &Path` parameter through `publish_plan` ->
+  `publish_thread` -> `publish_thread_inner`; the one production call site
+  (`harvest::run_with`) already had `state_path` in scope. Because
+  `state.cursor` is never touched anywhere in this per-thread loop (the doc's
+  own constraint - it stays in `apply_plan_to_state` at end-of-run), a save
+  here is a `published`-only persist BY CONSTRUCTION: no special-cased partial
+  serialization was needed to satisfy "persisting `published` ONLY".
+- A per-thread save failure is logged (`log::error!`, naming primary_id +
+  trace_id + the error) but does NOT flip the thread's outcome to `Failed` -
+  the note already landed by that point (mirrors the existing best-effort
+  policy on the `members.yml` staging write two lines below it in the same
+  function). Flipping to `Failed` would misrepresent a landed note as failed
+  and would additionally cause `intake::record_failure_at_door` to write a
+  false `FetchFailed` receipts row for a publish that actually succeeded.
+- Duplicate `session_id` handling lives as a pre-pass in `plan_harvest`,
+  before trace generation / selection: a `HashMap<String, SessionRecord>`
+  keyed by `session_id` walks `export.sessions` once; a repeat that is
+  `==` (derived `PartialEq`) to the first occurrence is dropped with a
+  `log::debug!` and the run continues; a repeat that differs in ANY field
+  calls `eyre::bail!` naming the session id, failing `plan_harvest` (and
+  therefore the whole run) before any candidate from this export is selected,
+  clustered, or published (`harvest.rs::plan_harvest`).
+- `replay_session_stage2` acquires `watermark::acquire_lock` as its very
+  first action (before even reading the staged body), unconditionally -
+  including for a `--dry-run` session-trace replay. The doc frames this as
+  serializing "timer-vs-manual" generally (Concurrency and failure modes
+  section), not merely protecting the watermark file specifically, so the
+  lock is taken for the whole function rather than carving out a
+  dry-run-only exemption the doc never specifies (`replay.rs`). The lock
+  error propagates via a bare `?` (no `.context()` wrapping), matching
+  `harvest::run_with`'s own call site and cortex's `EmbedLockHeld` precedent,
+  so callers can `downcast_ref::<HarvestLockHeld>()` the top-level error
+  rather than substring-matching a message.
+
+### Deviations
+
+- None. The doc's four Phase 2 bullets and its four acceptance checkboxes are
+  implemented as specified; no signature in the doc's own API section
+  constrained this phase's seams, so no "doc says X, correct seam is Y"
+  divergence arose.
+
+### Tradeoffs
+
+- A per-thread watermark save costs one `write_atomic` (temp file + two
+  fsyncs + rename) per publish instead of one per run. Accepted: this is
+  exactly the doc's tradeoff (durability over one syscall batch's worth of
+  I/O), and harvest runs are nightly/on-demand, not a hot loop.
+- The duplicate-`session_id` guard is a `HashMap` clone-and-compare pre-pass
+  over the whole export rather than a streaming check woven into the
+  existing single loop. Accepted for clarity: the doc's rule ("byte-identical
+  collapses; ANY difference fails the whole run") reads far more directly as
+  its own pass than interleaved with trace generation and the selection gate,
+  and an export page is small (harvest runs paginated, `limit`-bounded)
+  relative to the vault-scan costs the rest of this design is careful about.
+
+### Open questions
+
+- None.

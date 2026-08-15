@@ -6,6 +6,8 @@
 //! the pipeline-side half (`ContentKind::Session` handling: distill, render,
 //! atomic publish) lives in `pipeline::session`.
 
+use std::path::Path;
+
 use eyre::{Context, Result};
 
 use crate::config::Config;
@@ -36,17 +38,22 @@ pub struct PublishOutcome {
 /// outcome. A single thread's failure does not abort the run - the loop
 /// continues so one bad session fetch does not silently drop the rest of the
 /// night's harvest (mirrors `write_rejections`'s per-item best-effort policy).
+/// `state_path` is where each thread's landed `published` snapshot is durably
+/// saved IMMEDIATELY, one thread at a time (Phase 2 of the trace-keyed-replace
+/// design) - the cursor advance stays out of this loop entirely and happens
+/// once, at end-of-run, in [`super::apply_plan_to_state`].
 pub async fn publish_plan<R: ExportReader>(
     reader: &R,
     config: &Config,
     plan: &HarvestPlan,
     mut state: WatermarkState,
+    state_path: &Path,
 ) -> (WatermarkState, Vec<PublishOutcome>) {
     let publishable: Vec<&ThreadDecision> = plan.publishable().collect();
     log::debug!("harvest::publish::publish_plan: publishable={}", publishable.len());
     let mut outcomes = Vec::with_capacity(publishable.len());
     for thread in publishable {
-        outcomes.push(publish_thread(reader, config, thread, &mut state).await);
+        outcomes.push(publish_thread(reader, config, thread, &mut state, state_path).await);
     }
     log::debug!(
         "harvest::publish::publish_plan: done outcomes={} published={}",
@@ -64,6 +71,7 @@ async fn publish_thread<R: ExportReader>(
     config: &Config,
     thread: &ThreadDecision,
     state: &mut WatermarkState,
+    state_path: &Path,
 ) -> PublishOutcome {
     log::debug!(
         "harvest::publish::publish_thread: primary={} trace={} members={}",
@@ -71,7 +79,7 @@ async fn publish_thread<R: ExportReader>(
         thread.trace_id,
         thread.member_ids.len()
     );
-    match publish_thread_inner(reader, config, thread, state).await {
+    match publish_thread_inner(reader, config, thread, state, state_path).await {
         Ok(result) => PublishOutcome {
             primary_id: thread.primary_id.clone(),
             trace_id: thread.trace_id.clone(),
@@ -113,6 +121,7 @@ async fn publish_thread_inner<R: ExportReader>(
     config: &Config,
     thread: &ThreadDecision,
     state: &mut WatermarkState,
+    state_path: &Path,
 ) -> Result<IngestResult> {
     // Fetch every member's parsed body. Phase 3 only fetches a body for the
     // deep re-appearance check (a `NewNote`/cheap-filter `Skip` decision has
@@ -177,7 +186,36 @@ async fn publish_thread_inner<R: ExportReader>(
     if let IngestStatus::Completed = result.status
         && let Some(note_path) = result.note_path.as_deref()
     {
-        super::record_published(state, &thread.primary_id, note_path, thread.total_msgs, &body_hash);
+        super::record_published(
+            state,
+            &thread.primary_id,
+            note_path,
+            thread.total_msgs,
+            &body_hash,
+            &thread.trace_id,
+        );
+
+        // Durably persist the watermark's `published` map RIGHT NOW, one
+        // thread at a time - not once at the end of the run. `state.cursor`
+        // has not advanced yet (that happens exactly once, at end-of-run, in
+        // `apply_plan_to_state`), so this save persists `published` only, by
+        // construction rather than by special-casing the serialized shape.
+        // A crash between this save and the next thread's therefore never
+        // steps the cursor past this thread, and this thread's snapshot is
+        // never lost. Best-effort on failure (mirrors the staging-write
+        // policy just below): the note already landed, so a save error here
+        // must not flip an already-`Completed` outcome to `Failed` - it is
+        // logged loudly instead, since a repeat run would otherwise re-detect
+        // this trace as unpublished.
+        if let Err(e) = state.save(state_path) {
+            log::error!(
+                "harvest::publish::publish_thread_inner: durable watermark save failed after \
+                 publishing primary={} trace={}: {e:#} - a crash before the next successful save \
+                 could re-detect this thread as unpublished",
+                thread.primary_id,
+                thread.trace_id
+            );
+        }
 
         // Stage the thread's member records so `replay --from-stage 2` can
         // re-derive the note from the staged transcript without re-fetching

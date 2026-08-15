@@ -410,6 +410,15 @@ async fn replay_one(
 /// touching clyde. Produces a STRUCTURALLY equivalent note (same
 /// `source:`/`trace:`, valid `Distilled`, bounds respected) - byte-identity is
 /// not asserted because the distiller is an LLM pass.
+///
+/// Takes the SAME exclusive harvest state lock the nightly `sb borg harvest`
+/// run holds for its whole run (`harvest::run_with`) - a session-trace replay
+/// touches the same durable harvest identity a live run owns, so a manual
+/// replay and a timer run must not race. A URL replay never calls this
+/// function and so never takes this lock (design doc Phase 2: "for SESSION
+/// traces only"). `acquire_lock` is `try_lock_exclusive` (never waits), so
+/// this fails instantly and loudly with `HarvestLockHeld` naming the lock path
+/// rather than blocking or racing.
 async fn replay_session_stage2(
     config: &Config,
     store: &FsArtifactStore,
@@ -417,6 +426,9 @@ async fn replay_session_stage2(
     dry_run: bool,
     progress: &mut (impl FnMut(&ReplayEvent) + ?Sized),
 ) -> Result<(usize, usize)> {
+    let state_path = vault::paths::borg_harvest_state();
+    let _lock = crate::harvest::watermark::acquire_lock(&state_path)?;
+
     let body = String::from_utf8(store.read_body(trace_id)?).context("read staged body as utf-8")?;
     progress(&ReplayEvent::TraceHeader {
         trace_id: trace_id.to_string(),

@@ -165,6 +165,56 @@ async fn same_cwd_unrelated_does_not_merge() {
     assert_eq!(plan.rejections.len(), 0);
 }
 
+// ---- Phase 2 (harvest-run integrity): duplicate session_id, fail-closed.
+
+#[tokio::test]
+async fn duplicate_session_id_byte_identical_collapses_to_one_candidate() {
+    // clyde declares `session_id TEXT NOT NULL UNIQUE`, so a well-formed
+    // export cannot contain the same id twice - but a byte-identical repeat
+    // (the exact same record twice) is harmless and collapses to one
+    // candidate rather than failing the run.
+    let mut export = load(SINGLE);
+    let dup = export.sessions[0].clone();
+    export.sessions.push(dup);
+    assert_eq!(export.sessions.len(), 2, "export now carries the same record twice");
+
+    let reader = FakeReader::new(export.clone());
+    let plan = plan_harvest(&reader, export, &opts(6, &[], false), &WatermarkState::default())
+        .await
+        .expect("a byte-identical duplicate must not fail the run");
+    assert_eq!(
+        plan.threads.len(),
+        1,
+        "the duplicate collapses to exactly one candidate/thread"
+    );
+    assert_eq!(plan.rejections.len(), 0);
+}
+
+#[tokio::test]
+async fn duplicate_session_id_with_differing_content_fails_the_run_loudly() {
+    // The SAME session_id appearing twice with ANY differing field is an
+    // export-contract violation (the schema declares session_id UNIQUE) - a
+    // "keep the record with more messages" merge rule was specced and
+    // withdrawn, so this must fail closed rather than silently pick one.
+    let mut export = load(SINGLE);
+    let dup_id = export.sessions[0].session_id.clone();
+    let mut differing = export.sessions[0].clone();
+    differing.n_msgs += 1;
+    export.sessions.push(differing);
+
+    let reader = FakeReader::new(export.clone());
+    let err = plan_harvest(&reader, export, &opts(6, &[], false), &WatermarkState::default())
+        .await
+        .expect_err("a duplicate session_id with differing content must fail the run loudly");
+    let msg = format!("{err:#}");
+    assert!(msg.contains(&dup_id), "error must name the session id: {msg}");
+    assert!(
+        msg.contains("UNIQUE"),
+        "error must cite the export contract's uniqueness guarantee: {msg}"
+    );
+    assert!(msg.contains("twice"), "{msg}");
+}
+
 // ---- Rejects (success criterion): rejection.yml + rejected receipts row.
 
 #[tokio::test]
@@ -268,6 +318,7 @@ async fn rerun_with_unchanged_catalog_is_a_no_op() {
         "inbox/2dda6936.md",
         plan1.threads[0].total_msgs,
         &published_hash,
+        &plan1.threads[0].trace_id,
     );
 
     // Second run, identical catalog + a reader that would PANIC-track any body
@@ -295,7 +346,14 @@ async fn resumed_session_body_hash_changed_is_follow_up() {
         ..Default::default()
     };
     let original_hash = body_hash(&thread_body_text(&[(primary.to_string(), original.clone())]));
-    record_published(&mut state, primary, "inbox/2dda6936.md", 70, &original_hash);
+    record_published(
+        &mut state,
+        primary,
+        "inbox/2dda6936.md",
+        70,
+        &original_hash,
+        "hv-orig01",
+    );
 
     // Re-appear with grown n-msgs AND a different body (a resume).
     let mut grown = export.clone();
@@ -328,7 +386,7 @@ async fn unchanged_body_skips_and_advances_without_redistilling() {
         ..Default::default()
     };
     let hash = body_hash(&thread_body_text(&[(primary.to_string(), body.clone())]));
-    record_published(&mut state, primary, "inbox/2dda6936.md", 70, &hash);
+    record_published(&mut state, primary, "inbox/2dda6936.md", 70, &hash, "hv-test01");
 
     // n-msgs grew (metadata churn) but the body is byte-identical.
     let mut grown = export.clone();
@@ -376,7 +434,7 @@ async fn force_redistills_published_session() {
     let body = msg("the original transcript");
     let mut state = WatermarkState::default();
     let hash = body_hash(&thread_body_text(&[(primary.to_string(), body.clone())]));
-    record_published(&mut state, primary, "inbox/2dda6936.md", 70, &hash);
+    record_published(&mut state, primary, "inbox/2dda6936.md", 70, &hash, "hv-test01");
 
     let reader = FakeReader::new(export.clone()).with_body(primary, body);
     let plan = plan_harvest(&reader, export, &opts(6, &[], true), &state)

@@ -34,10 +34,10 @@ pub mod select;
 pub mod timer;
 pub mod watermark;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{Duration, Utc};
-use eyre::{Context, Result};
+use eyre::{Context, Result, bail};
 use rusqlite::Connection;
 
 use crate::config::HarvestConfig;
@@ -164,7 +164,44 @@ pub async fn plan_harvest<R: ExportReader>(
     let mut selected: Vec<SessionRecord> = Vec::new();
     let mut trace_by_id: BTreeMap<String, String> = BTreeMap::new();
 
+    // Fail-closed guard against a duplicate `session_id` within one export.
+    // clyde's schema declares `session_id TEXT NOT NULL UNIQUE` and the export
+    // selects from `sessions` with no fan-out join, so a well-formed export
+    // CANNOT contain the same id twice. A byte-identical duplicate (the
+    // record equals the first occurrence in every field) collapses to one
+    // candidate - harmless, logged at debug. ANY differing field on a repeated
+    // id is an export-contract violation: refuse to guess which record is
+    // authoritative (a "keep the one with more messages" merge rule was
+    // specced and withdrawn - it would silently discard data and mask an
+    // upstream export bug rather than surface it).
+    let mut seen_sessions: HashMap<String, SessionRecord> = HashMap::new();
+    let mut sessions: Vec<SessionRecord> = Vec::with_capacity(export.sessions.len());
     for record in export.sessions {
+        match seen_sessions.get(&record.session_id) {
+            Some(prior) if prior == &record => {
+                log::debug!(
+                    "harvest::plan_harvest: duplicate session_id={} in export, byte-identical to \
+                     the first occurrence - collapsing to one candidate",
+                    record.session_id
+                );
+            }
+            Some(_) => {
+                bail!(
+                    "clyde session export: session_id {} appears twice with DIFFERING content - \
+                     the export contract declares session_id UNIQUE (clyde sessions/src/db.rs); \
+                     refusing to guess which record is authoritative rather than silently \
+                     discarding one and masking an upstream export bug",
+                    record.session_id
+                );
+            }
+            None => {
+                seen_sessions.insert(record.session_id.clone(), record.clone());
+                sessions.push(record);
+            }
+        }
+    }
+
+    for record in sessions {
         // Trace generated at selection time (before any body fetch) so a
         // rejected candidate has a receipts key and a rejection.yml home.
         let trace_id = trace::generate(IngestMethod::Harvest);
@@ -374,21 +411,27 @@ pub fn apply_plan_to_state(mut state: WatermarkState, plan: &HarvestPlan) -> Wat
 
 /// Convenience: record a freshly published thread's snapshot (Phase 5 wiring
 /// seam). Kept here so the published-entry shape lives with the watermark
-/// logic rather than being reconstructed in the pipeline.
+/// logic rather than being reconstructed in the pipeline. `trace_id` (Phase 2
+/// of the trace-keyed-replace design) is the reader Phase 4's follow-up
+/// back-link resolves through instead of trusting a stale `note_path`.
 pub fn record_published(
     state: &mut WatermarkState,
     primary_id: &str,
     note_path: &str,
     total_msgs: i64,
     body_hash: &str,
+    trace_id: &str,
 ) {
-    log::debug!("harvest::record_published: primary={primary_id} note_path={note_path} n_msgs={total_msgs}");
+    log::debug!(
+        "harvest::record_published: primary={primary_id} note_path={note_path} n_msgs={total_msgs} trace={trace_id}"
+    );
     state.published.insert(
         primary_id.to_string(),
         PublishedEntry {
             note_path: note_path.to_string(),
             n_msgs: total_msgs,
             body_hash: body_hash.to_string(),
+            trace: Some(trace_id.to_string()),
         },
     );
 }
@@ -527,7 +570,7 @@ pub async fn run_with<R: ExportReader>(
     write_rejections(&store, &conn, &parse_outcomes)?;
     write_rejections(&store, &conn, &plan.rejections)?;
 
-    let (state, outcomes) = publish::publish_plan(reader, config, &plan, state).await;
+    let (state, outcomes) = publish::publish_plan(reader, config, &plan, state, state_path).await;
     let state = apply_plan_to_state(state, &plan);
     state.save(state_path)?;
 

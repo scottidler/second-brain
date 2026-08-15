@@ -36,6 +36,15 @@ pub struct PublishedEntry {
     pub note_path: String,
     pub n_msgs: i64,
     pub body_hash: String,
+    /// The trace that produced this snapshot (design doc
+    /// `2026-08-15-harvest-note-identity-trace-keyed-replace.md`, Phase 2/4):
+    /// lets a follow-up resolve its prior note through
+    /// `identity::resolve_prior_note` instead of trusting a stale
+    /// `note_path`. `serde(default)` so on-disk state written before this
+    /// field existed keeps deserializing (those rows read back as `None`
+    /// until their next publish).
+    #[serde(default)]
+    pub trace: Option<String>,
 }
 
 /// The on-disk harvest state. `published` is a `BTreeMap` (not `HashMap`) so
@@ -78,9 +87,12 @@ impl WatermarkState {
         }
     }
 
-    /// Atomically persist state: write a temp file IN THE TARGET'S OWN
-    /// DIRECTORY, then rename over the target (crash/torn-write safe, and the
-    /// tree is Syncthing'd).
+    /// Atomically AND DURABLY persist state via `vault::note::write_atomic`
+    /// (temp file in the target's own directory, fsynced, renamed into place,
+    /// parent directory fsynced). The prior `fs::write` + `fs::rename` pair
+    /// fsynced neither the temp file nor the parent dir, so the note could
+    /// survive a power loss while the record that it exists did not
+    /// (durability inverted) - Phase 2 of the trace-keyed-replace design.
     pub fn save(&self, path: &Path) -> Result<()> {
         log::debug!(
             "harvest::WatermarkState::save: path={} cursor={:?} published={}",
@@ -93,9 +105,8 @@ impl WatermarkState {
                 .with_context(|| format!("create harvest state dir {}", parent.display()))?;
         }
         let json = serde_json::to_vec_pretty(self).context("serialize harvest state")?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json).with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+        vault::note::write_atomic(path, &json)
+            .with_context(|| format!("durably write harvest state {}", path.display()))?;
         Ok(())
     }
 }
@@ -265,12 +276,16 @@ pub fn classify_reappearance(
         Some(hash) if hash != entry.body_hash => Reappearance::FollowUp { prior: entry.clone() },
         Some(hash) => {
             // n-msgs grew but the body hash is unchanged: advance the snapshot
-            // in place so the next run's cheap filter short-circuits.
+            // in place so the next run's cheap filter short-circuits. The
+            // note/trace are UNCHANGED (this is not a new publish), so both
+            // carry forward from the prior entry rather than being freshly
+            // assigned.
             Reappearance::Skip {
                 snapshot_update: Some(PublishedEntry {
                     note_path: entry.note_path.clone(),
                     n_msgs: current_total_msgs,
                     body_hash: hash.to_string(),
+                    trace: entry.trace.clone(),
                 }),
             }
         }
