@@ -1005,6 +1005,20 @@ fn resolve_collision(path: &Path, source_url: Option<&str>) -> PathBuf {
         if !candidate.exists() {
             return candidate;
         }
+        // Same re-check as the base path: a numeric candidate carrying the
+        // SAME source is a reingest replacement too, not a distinct sibling.
+        // Without this the loop walks past every same-source `-N` candidate
+        // and mints `-N+1` forever (the real hv-e5d240 failure mode - see
+        // docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md).
+        if let Some(source) = source_url
+            && existing_note_has_source(&candidate, source)
+        {
+            log::info!(
+                "collision is a reingest replacement (same source), overwriting: {}",
+                candidate.display()
+            );
+            return candidate;
+        }
     }
 
     // Extremely unlikely - fall back to original

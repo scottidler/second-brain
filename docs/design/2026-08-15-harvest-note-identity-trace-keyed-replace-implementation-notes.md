@@ -434,3 +434,111 @@ count was executed against current `main` and the live vault before Phase 1.
 ### Open questions
 
 - None.
+
+## Phase 5: cortex fixes
+
+### Design decisions
+
+- **`group_by_session_identity` is two independent tracks, never mixed**
+  (`association.rs::group_by_session_identity`): every note with a present,
+  non-empty `trace:` groups by that value alone, exact match; a note with NO
+  `trace:` falls back to transitive `cortex-session-ids` overlap (union-find).
+  A legacy (no-trace) note is never absorbed into a trace-keyed group by
+  sharing a session id with one of that group's members, and two notes with
+  DIFFERENT non-empty traces are never grouped even if every
+  `cortex-session-ids` entry matches - that is exactly the genuine follow-up
+  case Phase 4 made real (`follows:`), not a duplicate to clean up.
+- **The `superseded-by` skip guard was carried over verbatim** (same
+  `if note.frontmatter.extra.contains_key("superseded-by") { continue; }` line,
+  same position in the loop, before the trace/legacy branch) so an absorbed
+  note is filtered out before it can even be classified into either track -
+  it never re-enters `trace_groups` or the legacy union-find.
+- **`resolve_collision`'s numeric-candidate loop re-applies
+  `existing_note_has_source` to each `-N` candidate**, not just the base path
+  (`classify.rs::resolve_collision`). The very first same-source candidate
+  found in the `2..100` scan is returned as the overwrite target; the loop
+  never reaches a `-N+1` slot once a same-source `-N` is found. This is prior
+  attempt 4's guard, applied where the doc's Evidence section shows it was
+  missing (`-5`, `-7` .. `-14` in the real cohort).
+- **`resolve_collision`'s test fixtures write real files to a `tempfile`
+  tempdir** (mirroring the crate's existing tempdir convention) rather than
+  faking `existing_note_has_source`'s file read, because that function reads
+  real bytes off disk with no seam to inject a fake - the correct-seam choice
+  is a real file, not a mock.
+
+### Deviations
+
+- **None from the doc's two Phase 5 bullets themselves** (grouping mechanism,
+  collision-loop fix) - both are implemented exactly as specified.
+- **Five pre-existing `association` tests were updated, not left green by
+  accident.** `apply()`'s only production caller of a grouping function now
+  points at `group_by_session_identity` instead of `group_by_slug`. Two tests
+  (`apply_executes_the_plan_and_writes`,
+  `dry_run_reports_the_plan_and_writes_zero_bytes`) exercised `apply()`'s full
+  group -> decide -> execute composition using two notes that shared only a
+  hand-picked `slug: foo` and DIFFERENT primary session ids/no trace - under
+  the new grouping they would never form a group at all, so both were
+  silently passing for the wrong reason (an empty outcome list, not "the
+  quiescence/exclude guard fired"). Both literally FAILED once
+  `group_by_session_identity` landed (`left: 0, right: 1`) and were fixed, not
+  papered over: their fixtures now share a `trace:` (added a
+  `write_session_file_with_trace` variant of the existing fixture writer,
+  used only where a real trace-keyed group needs to form) so the tests still
+  exercise the genuine "same trace, not yet cleaned up, decide() picks
+  Merge" case. Three more tests
+  (`whole_group_is_skipped_when_any_member_is_within_quiescence_window`,
+  `quiescence_skip_is_whole_group_never_half_merged`, `excluded_path_never_groups`)
+  did NOT fail (they assert `outcomes().is_empty()`, which is trivially true
+  whether the guard fired or the group never formed in the first place) but
+  were silently defanged as regression coverage for their actual guards
+  (quiescence, exclude) - updated to the same traced fixture so a broken
+  quiescence/exclude guard would fail them again.
+- **`associate_run`, the test-only helper in `tests.rs` that exercises
+  `execute_merge`/`execute_cross_link` directly, deliberately still calls
+  `group_by_slug`**, not `group_by_session_identity`: its fixtures
+  (`write_session_file`) predate this design and carry no `trace:`, and its
+  purpose is proving the merge/cross-link executors' section-union and
+  tombstone logic against realistic bodies - not proving which grouping
+  function `apply()` uses (`apply()`'s own tests do that). Left as-is with an
+  updated comment (the old comment claimed it mirrored `apply()`'s
+  composition, which stopped being true the moment `apply()`'s grouping
+  function changed).
+- **`NoteBuilder` gained a `.trace(&str)` setter** (`testutil.rs`) - the
+  builder already threads every other `Frontmatter` field through a matching
+  setter, and `trace` is a promoted (non-`extra`) field, so building a
+  session-identity fixture without it meant reaching into `note.frontmatter.
+  trace` by hand at every call site instead of one shared setter.
+- **`association/tests.rs` split into `association/tests.rs` +
+  `association/tests/session_identity.rs`.** Phase 5's new tests pushed
+  `tests.rs` to 1597 lines, over the workspace's 1500-line `BLOAT_MAX_LINES`
+  gate (`otto ci`'s `bloat` task). Followed the precedent already in the repo
+  (`vault/src/search/tests.rs` + `tests/{group_a,group_b,trace}.rs`): shared
+  imports/helpers stay in `tests.rs`, the new self-contained block (the
+  `hv_e5d240_note`/`other_session_note` fixture builders and their four
+  tests) moved to its own file with `use super::*;` picking up the parent
+  module's imports.
+
+### Tradeoffs
+
+- The legacy fallback's union-find visits every `cortex-session-ids` entry of
+  every no-trace note in one pass (`O(total ids)`), same asymptotic cost as
+  the trace-keyed `BTreeMap` grouping it runs alongside. Accepted: this
+  mirrors `group_by_slug`'s own single-pass-over-notes cost and `apply()`
+  already pays one `scan_vault` per invocation, which dominates.
+- `resolve_collision`'s fix re-reads each numeric candidate's frontmatter
+  header (`existing_note_has_source`, a bounded 2048-byte read) instead of
+  batching all `-N` reads up front. Accepted: the loop already stats each
+  candidate path one at a time (`!candidate.exists()`), and the realistic
+  fork count per collision is small (double digits at worst, per the doc's
+  own `hv-e5d240` evidence), not worth restructuring into a batch read for.
+
+### Open questions
+
+- None blocking. Worth a note for a future reader: `group_by_slug` now has
+  ZERO production callers (`apply()` is its only caller and now calls
+  `group_by_session_identity`; every remaining reference is a test, either
+  `group_by_slug`'s own unit tests or the `associate_run` test helper
+  described above). It is kept, not deleted, per this phase's explicit scope
+  (fix grouping and collision resolution, not retire the prior mechanism) -
+  flagged here rather than silently removed or silently left implying it is
+  still load-bearing.

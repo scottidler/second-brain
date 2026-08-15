@@ -387,6 +387,7 @@ pub struct NoteBuilder {
     tags: Option<Vec<String>>,
     source: Option<String>,
     creator: Option<String>,
+    trace: Option<String>,
     extra: HashMap<String, serde_yaml::Value>,
     body: String,
     raw: String,
@@ -405,6 +406,7 @@ impl NoteBuilder {
             tags: None,
             source: None,
             creator: None,
+            trace: None,
             extra: HashMap::new(),
             body: String::new(),
             raw: String::new(),
@@ -456,6 +458,11 @@ impl NoteBuilder {
         self
     }
 
+    pub fn trace(mut self, trace: &str) -> Self {
+        self.trace = Some(trace.to_string());
+        self
+    }
+
     pub fn extra(mut self, key: &str, value: serde_yaml::Value) -> Self {
         self.extra.insert(key.to_string(), value);
         self
@@ -485,7 +492,7 @@ impl NoteBuilder {
                 source: self.source,
                 creator: self.creator,
                 pinned: None,
-                trace: None,
+                trace: self.trace,
                 ingested: None,
                 trace_expires: None,
                 repo: None,

@@ -6,11 +6,15 @@ use serde_yaml::Value;
 
 use super::{
     AssociationOutcome, AssociationReport, AtomicWriter, DecideCtx, EmbeddingCosine, NoteWriter, append_bullets, apply,
-    decide, execute_cross_link, execute_merge, group_by_slug,
+    decide, execute_cross_link, execute_merge, group_by_session_identity, group_by_slug,
 };
 use crate::config::{AssociationConfig, SimilaritySource};
 use crate::testutil::NoteBuilder;
 use crate::vault::{Note, parse_note};
+
+// Phase 5's group_by_session_identity tests live in their own submodule
+// (BLOAT_MAX_LINES) - see tests/session_identity.rs.
+mod session_identity;
 
 fn session_note(path: &str, slug: &str) -> Note {
     NoteBuilder::new(path)
@@ -514,6 +518,45 @@ fn embedding_db_error_propagates_not_swallowed() {
 
 // -- Phase 3: merge executor -----------------------------------------------
 
+/// Like [`write_session_file`], but also stamps `trace: <trace>` into the
+/// frontmatter - Phase 5's `group_by_session_identity` groups on `trace:`
+/// alone, so any `apply()`-composition test that needs its fixture notes to
+/// actually FORM a group (to exercise decide/execute/quiescence/exclude
+/// against a real candidate) must share a trace, not just a slug. Models the
+/// realistic "same trace, republished more than once, not yet cleaned up"
+/// case - not the mirror-image bug (different traces, same generic slug)
+/// `group_by_session_identity`'s own unit tests cover separately.
+fn write_session_file_with_trace(
+    root: &std::path::Path,
+    name: &str,
+    date: &str,
+    id: &str,
+    trace: &str,
+    claims: &[&str],
+    details: &[&str],
+) {
+    let claims_block = claims.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n");
+    let details_block = details.iter().map(|d| format!("- {d}")).collect::<Vec<_>>().join("\n");
+    let content = format!(
+        "---\n\
+         title: {name}\n\
+         date: {date}\n\
+         type: session\n\
+         slug: foo\n\
+         trace: {trace}\n\
+         cortex-session-ids:\n\
+         - {id}\n\
+         ---\n\
+         ## Summary\n\n\
+         summary of {name}\n\n\
+         ## Claims\n\n\
+         {claims_block}\n\n\
+         ## Session Details\n\n\
+         {details_block}\n"
+    );
+    std::fs::write(root.join(name), content).expect("write session file");
+}
+
 /// Write a full harvest-shaped session note to `root/<name>` sharing slug
 /// `foo`, with the given date, primary session id, `## Claims` bullets, and
 /// `## Session Details` bullets. Mirrors what borg publishes so the executor's
@@ -555,9 +598,15 @@ fn scan_dir(root: &std::path::Path) -> Vec<Note> {
 }
 
 /// One faithful association run over the on-disk vault: scan -> group -> decide
-/// -> `execute_merge` per Merge outcome (the exact composition Phase 5's `apply`
-/// will use). Returns the changed paths. Similarity is claim-based (empty
-/// embeddings fall through to the TF fallback under `Both`).
+/// -> `execute_merge` per Merge outcome. Returns the changed paths. Similarity
+/// is claim-based (empty embeddings fall through to the TF fallback under
+/// `Both`). Deliberately still uses `group_by_slug`, not the harvest-note-
+/// identity design's `group_by_session_identity`: this helper exercises
+/// `execute_merge`/`execute_cross_link` against slug-based fixtures that
+/// predate that design and carry no `trace:`, so re-pointing it at the
+/// trace-keyed grouping would only add legacy-fallback (session-id-overlap)
+/// coverage this file already gets elsewhere - `apply`'s own test coverage is
+/// what actually proves the production grouping function.
 fn associate_run<W: NoteWriter>(root: &std::path::Path, threshold: f64, writer: &W) -> Vec<String> {
     let embed = FakeEmbeddings::default();
     let notes = scan_dir(root);
@@ -1099,19 +1148,23 @@ fn no_quiescence_config(threshold: f64) -> AssociationConfig {
 fn dry_run_reports_the_plan_and_writes_zero_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write_session_file(
+    // Phase 5: apply()'s grouping is trace-keyed, so a/b must share a trace to
+    // form a group at all - see write_session_file_with_trace.
+    write_session_file_with_trace(
         root,
         "a.md",
         "2026-07-01",
         "aaa",
+        "hv-shared01",
         &["alpha beta gamma"],
         &["clyde://aaa - A - `repo` - 5m"],
     );
-    write_session_file(
+    write_session_file_with_trace(
         root,
         "b.md",
         "2026-07-10",
         "bbb",
+        "hv-shared01",
         &["alpha beta gamma"],
         &["clyde://bbb - B - `repo` - 3m"],
     );
@@ -1144,19 +1197,23 @@ fn dry_run_reports_the_plan_and_writes_zero_bytes() {
 fn apply_executes_the_plan_and_writes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write_session_file(
+    // Phase 5: apply()'s grouping is trace-keyed, so a/b must share a trace to
+    // form a group at all - see write_session_file_with_trace.
+    write_session_file_with_trace(
         root,
         "a.md",
         "2026-07-01",
         "aaa",
+        "hv-shared01",
         &["alpha beta gamma"],
         &["clyde://aaa - A - `repo` - 5m"],
     );
-    write_session_file(
+    write_session_file_with_trace(
         root,
         "b.md",
         "2026-07-10",
         "bbb",
+        "hv-shared01",
         &["alpha beta gamma"],
         &["clyde://bbb - B - `repo` - 3m"],
     );
@@ -1178,8 +1235,9 @@ fn apply_executes_the_plan_and_writes() {
         "b is soft-retired"
     );
 
-    // Re-running is a no-op: b dropped its slug, so the group no longer forms
-    // and there is nothing left to decide, let alone associate.
+    // Re-running is a no-op: b now carries superseded-by, so the tombstone
+    // skip guard drops it from the group and there is nothing left to decide,
+    // let alone associate.
     let notes2 = scan_dir(root);
     let report2 = apply(root, &notes2, &no_quiescence_config(0.85), &embed, true).unwrap();
     assert!(
@@ -1193,19 +1251,23 @@ fn apply_executes_the_plan_and_writes() {
 fn whole_group_is_skipped_when_any_member_is_within_quiescence_window() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write_session_file(
+    // Phase 5: apply()'s grouping is trace-keyed, so a/b must share a trace to
+    // form a group at all - see write_session_file_with_trace.
+    write_session_file_with_trace(
         root,
         "a.md",
         "2026-07-01",
         "aaa",
+        "hv-shared01",
         &["alpha beta gamma"],
         &["clyde://aaa - A - `repo` - 5m"],
     );
-    write_session_file(
+    write_session_file_with_trace(
         root,
         "b.md",
         "2026-07-10",
         "bbb",
+        "hv-shared01",
         &["alpha beta gamma"],
         &["clyde://bbb - B - `repo` - 3m"],
     );
@@ -1238,14 +1300,39 @@ fn whole_group_is_skipped_when_any_member_is_within_quiescence_window() {
 
 #[test]
 fn quiescence_skip_is_whole_group_never_half_merged() {
-    // Three same-slug members where the pairwise similarities would otherwise
-    // cluster {a,b} and cross-link {c}; quiescence must drop the ENTIRE group,
-    // not just the one member technically within the window.
+    // Three same-trace members (Phase 5: apply()'s grouping is trace-keyed)
+    // where the pairwise similarities would otherwise cluster {a,b} and
+    // cross-link {c}; quiescence must drop the ENTIRE group, not just the one
+    // member technically within the window.
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write_session_file(root, "a.md", "2026-07-01", "aaa", &["x"], &["clyde://aaa"]);
-    write_session_file(root, "b.md", "2026-07-02", "bbb", &["x"], &["clyde://bbb"]);
-    write_session_file(root, "c.md", "2026-07-03", "ccc", &["y"], &["clyde://ccc"]);
+    write_session_file_with_trace(
+        root,
+        "a.md",
+        "2026-07-01",
+        "aaa",
+        "hv-shared02",
+        &["x"],
+        &["clyde://aaa"],
+    );
+    write_session_file_with_trace(
+        root,
+        "b.md",
+        "2026-07-02",
+        "bbb",
+        "hv-shared02",
+        &["x"],
+        &["clyde://bbb"],
+    );
+    write_session_file_with_trace(
+        root,
+        "c.md",
+        "2026-07-03",
+        "ccc",
+        "hv-shared02",
+        &["y"],
+        &["clyde://ccc"],
+    );
 
     let mut embed = FakeEmbeddings::default();
     embed.set("a.md", "b.md", Some(0.95));
@@ -1279,12 +1366,23 @@ fn excluded_path_never_groups() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("journal")).unwrap();
-    write_session_file(root, "a.md", "2026-07-01", "aaa", &["x"], &["clyde://aaa"]);
-    write_session_file(
+    // Phase 5: apply()'s grouping is trace-keyed, so a/b must share a trace
+    // for a.md's group to ever reach two members in the first place.
+    write_session_file_with_trace(
+        root,
+        "a.md",
+        "2026-07-01",
+        "aaa",
+        "hv-shared03",
+        &["x"],
+        &["clyde://aaa"],
+    );
+    write_session_file_with_trace(
         &root.join("journal"),
         "b.md",
         "2026-07-10",
         "bbb",
+        "hv-shared03",
         &["x"],
         &["clyde://bbb"],
     );
@@ -1303,7 +1401,7 @@ fn excluded_path_never_groups() {
     let report = apply(root, &notes, &excluded, &embed, false).unwrap();
     assert!(
         report.outcomes().is_empty(),
-        "b.md is excluded, so a.md's slug group never reaches two members: {:?}",
+        "b.md is excluded, so a.md's trace group never reaches two members: {:?}",
         report.outcomes()
     );
 }

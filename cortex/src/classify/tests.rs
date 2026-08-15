@@ -108,6 +108,69 @@ fn test_resolve_collision_no_conflict() {
     assert_eq!(resolve_collision(&path, None), path);
 }
 
+/// Phase 5 fix, `2026-08-15-harvest-note-identity-trace-keyed-replace.md`
+/// prior attempt 4: a base-path collision with a DIFFERENT source correctly
+/// mints `-2`, but the bug walked past every SAME-source numeric candidate
+/// (`-5`, `-7` .. `-14` in the real `hv-e5d240` cohort) because
+/// `existing_note_has_source` was only ever applied to the base path. This
+/// asserts the repaired loop overwrites the first same-source `-N` candidate
+/// it finds instead of minting `-N+1`.
+#[test]
+fn test_resolve_collision_overwrites_same_source_numeric_candidate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join("note.md");
+    let source = "clyde://8d6b6ef3-aaaa-bbbb-cccc-dddddddddddd";
+    // Genuinely different sources (not a suffixed variant of `source`, which
+    // `existing_note_has_source`'s substring `contains` would still match).
+    let other_source = "clyde://eb65b08e-1111-2222-3333-444444444444";
+
+    // Base path collides with a DIFFERENT source.
+    std::fs::write(&base, format!("---\nsource: {other_source}\n---\nbody\n")).expect("write base");
+    // -2 and -3 are also different sources (real siblings from other sessions).
+    std::fs::write(
+        dir.path().join("note-2.md"),
+        format!("---\nsource: {other_source}\n---\nbody\n"),
+    )
+    .expect("write -2");
+    std::fs::write(
+        dir.path().join("note-3.md"),
+        format!("---\nsource: {other_source}\n---\nbody\n"),
+    )
+    .expect("write -3");
+    // -4 carries the SAME source: this is the candidate that must be
+    // overwritten rather than skipped in favor of -5.
+    std::fs::write(
+        dir.path().join("note-4.md"),
+        format!("---\nsource: {source}\n---\nold body\n"),
+    )
+    .expect("write -4");
+
+    let resolved = resolve_collision(&base, Some(source));
+    assert_eq!(resolved, dir.path().join("note-4.md"));
+    // -5 must never have been consulted/created by this call.
+    assert!(!dir.path().join("note-5.md").exists());
+}
+
+/// Mirror-image control: when NO numeric candidate shares the source, the
+/// loop still mints the first free `-N` slot exactly as before the fix.
+#[test]
+fn test_resolve_collision_mints_next_free_slot_when_no_candidate_matches_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join("note.md");
+    let source = "clyde://8d6b6ef3-aaaa-bbbb-cccc-dddddddddddd";
+    let other_source = "clyde://eb65b08e-1111-2222-3333-444444444444";
+
+    std::fs::write(&base, format!("---\nsource: {other_source}\n---\nbody\n")).expect("write base");
+    std::fs::write(
+        dir.path().join("note-2.md"),
+        format!("---\nsource: {other_source}\n---\nbody\n"),
+    )
+    .expect("write -2");
+
+    let resolved = resolve_collision(&base, Some(source));
+    assert_eq!(resolved, dir.path().join("note-3.md"));
+}
+
 #[test]
 fn test_build_enrichment_fields() {
     let result = ClassifyResult {

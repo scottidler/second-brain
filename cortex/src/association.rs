@@ -53,6 +53,14 @@ use crate::vault::Note;
 /// `Note`s) so the caller controls ownership. BTreeMap-ordered by slug so
 /// the group order - and therefore any downstream deterministic tie-break -
 /// never depends on `notes`' scan order or hash-map iteration order.
+///
+/// Superseded by [`group_by_session_identity`] as `apply`'s grouping
+/// function (`docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md`
+/// Phase 5): the model-generated slug forks under replay, so a slug
+/// collision is no longer a reliable association signal. Kept (not deleted)
+/// because it has no other caller-visible defect and this design's Phase 5
+/// scope is "fix grouping and collision resolution", not "delete the prior
+/// mechanism" - flagged as having no production caller after this change.
 pub fn group_by_slug(notes: &[Note]) -> Vec<Vec<usize>> {
     log::debug!("association::group_by_slug: notes={}", notes.len());
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
@@ -71,6 +79,92 @@ pub fn group_by_slug(notes: &[Note]) -> Vec<Vec<usize>> {
     let result: Vec<Vec<usize>> = groups.into_values().filter(|members| members.len() >= 2).collect();
     log::debug!(
         "association::group_by_slug: groups={} (singletons, legacy, and tombstoned notes dropped)",
+        result.len()
+    );
+    result
+}
+
+/// Group session notes by durable session identity: `trace:` frontmatter,
+/// falling back to `cortex-session-ids` overlap ONLY for legacy notes that
+/// carry no `trace:` at all
+/// (`docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md`
+/// Phase 5, `apply`'s new grouping function, replacing [`group_by_slug`]).
+///
+/// Two tracks, never mixed:
+///
+/// - **Trace-keyed.** Every note whose `trace:` is present and non-empty is
+///   grouped by that value alone, exact match. Two notes carrying DIFFERENT
+///   non-empty traces are never grouped, even if they share every
+///   `cortex-session-ids` entry - that is exactly the genuine follow-up case
+///   Phase 4 made a real, linked thing (`follows:`), not a duplicate to merge.
+/// - **Legacy fallback.** A note with no `trace:` groups by transitive
+///   `cortex-session-ids` overlap (union-find: any two legacy notes sharing
+///   at least one session id land in the same cluster, and that clustering
+///   composes transitively through a chain of shared ids). This track never
+///   reaches into the trace-keyed track: a legacy note is never absorbed into
+///   a trace-keyed group just because it shares a session id with one of that
+///   group's members.
+///
+/// Same two guards as `group_by_slug`, carried over verbatim: scoped to
+/// `content_type == Session`, and a note carrying `superseded-by:` (already
+/// absorbed) is skipped so it never re-groups and re-merges on every daemon
+/// tick.
+///
+/// Groups with fewer than two members are dropped. Trace-keyed groups are
+/// BTreeMap-ordered by trace value; legacy clusters follow, ordered by their
+/// union-find root's position among legacy notes - both orders are
+/// deterministic and independent of `notes`' scan order.
+pub fn group_by_session_identity(notes: &[Note]) -> Vec<Vec<usize>> {
+    log::debug!("association::group_by_session_identity: notes={}", notes.len());
+
+    let mut trace_groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut legacy_indices: Vec<usize> = Vec::new();
+
+    for (i, note) in notes.iter().enumerate() {
+        if note.frontmatter.note_type.as_deref() != Some(NoteType::Session.as_str()) {
+            continue;
+        }
+        if note.frontmatter.extra.contains_key("superseded-by") {
+            continue;
+        }
+        match note.frontmatter.trace.as_deref().filter(|t| !t.is_empty()) {
+            Some(trace) => {
+                trace_groups.entry(trace.to_string()).or_default().push(i);
+            }
+            None => legacy_indices.push(i),
+        }
+    }
+
+    // Legacy track: union-find over cortex-session-ids overlap, transitively.
+    // `id_owner` maps a session id to the first legacy note (by LOCAL index
+    // into `legacy_indices`) seen carrying it; a later note carrying the same
+    // id unions with that owner. Union-by-min plus this "first owner wins"
+    // rule is enough for transitive closure: A-B-C sharing (id1),(id1,id2),
+    // (id2) still lands in one cluster regardless of scan order.
+    let mut uf = UnionFind::new(legacy_indices.len());
+    let mut id_owner: HashMap<String, usize> = HashMap::new();
+    for (local, &global) in legacy_indices.iter().enumerate() {
+        for id in session_ids(&notes[global]) {
+            if let Some(&owner) = id_owner.get(&id) {
+                uf.union(local, owner);
+            } else {
+                id_owner.insert(id, local);
+            }
+        }
+    }
+    let mut legacy_clusters: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (local, &global) in legacy_indices.iter().enumerate() {
+        let root = uf.find(local);
+        legacy_clusters.entry(root).or_default().push(global);
+    }
+
+    let mut result: Vec<Vec<usize>> = trace_groups
+        .into_values()
+        .filter(|members| members.len() >= 2)
+        .collect();
+    result.extend(legacy_clusters.into_values().filter(|members| members.len() >= 2));
+    log::debug!(
+        "association::group_by_session_identity: groups={} (singletons, non-session, and tombstoned notes dropped)",
         result.len()
     );
     result
@@ -522,7 +616,7 @@ pub fn apply<E: EmbeddingCosine>(
         .cloned()
         .collect();
 
-    let groups = group_by_slug(&eligible);
+    let groups = group_by_session_identity(&eligible);
     log::debug!(
         "association::apply: eligible={} groups={}",
         eligible.len(),
