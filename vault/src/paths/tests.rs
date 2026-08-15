@@ -115,3 +115,57 @@ fn all_config_files_land_under_config_root() {
     assert_eq!(tag_proposals(), root.join("tag-proposals.yml"));
     assert_eq!(patterns_dir(), root.join("patterns"));
 }
+
+/// Build a directory that structurally looks like this workspace checkout.
+fn fake_second_brain_checkout(root: &std::path::Path) {
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    for member in ["cortex", "borg", "vault"] {
+        std::fs::create_dir_all(root.join(member)).unwrap();
+    }
+}
+
+#[test]
+fn cli_override_pointing_at_the_source_tree_is_refused() {
+    // 2026-08-15: `sb bootstrap` baked its CWD into the unit's --vault and
+    // cortex rewrote 203 files of its own source. The override is the highest
+    // precedence input, so it is exactly the one that must be checked.
+    let tmp = TempDir::new().unwrap();
+    fake_second_brain_checkout(tmp.path());
+
+    let err = resolve_vault_root(Some(tmp.path()), None).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("refusing to use the second-brain source tree"),
+        "unexpected: {msg}"
+    );
+}
+
+#[test]
+fn config_value_pointing_at_the_source_tree_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    fake_second_brain_checkout(tmp.path());
+
+    let err = resolve_vault_root(None, Some(tmp.path().to_str().unwrap())).unwrap_err();
+    assert!(
+        format!("{err}").contains("refusing to use the second-brain source tree"),
+        "config path must be checked too"
+    );
+}
+
+#[test]
+fn a_real_vault_directory_is_still_accepted() {
+    // The guard is structural: a directory with none of the member crates is a
+    // normal vault and must pass untouched.
+    let tmp = TempDir::new().unwrap();
+    let resolved = resolve_vault_root(Some(tmp.path()), None).unwrap();
+    assert_eq!(resolved, tmp.path());
+}
+
+#[test]
+fn a_vault_that_merely_shares_one_directory_name_is_accepted() {
+    // Only the full structural match is a refusal; a vault with a `vault/`
+    // folder and no Cargo manifest is not this repo.
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vault")).unwrap();
+    assert!(resolve_vault_root(Some(tmp.path()), None).is_ok());
+}

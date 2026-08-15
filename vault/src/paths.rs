@@ -383,6 +383,36 @@ pub fn oracle_eval_cache_path() -> PathBuf {
 /// The CWD fallback only fires when the working directory contains a `.obsidian/`
 /// directory - Obsidian writes this the moment a vault is opened in the app, so
 /// this is the universal "this is a vault" signal.
+/// Refuse a vault root that is the second-brain workspace itself.
+///
+/// cortex governs a vault by REWRITING it: lint fixes frontmatter, the naming
+/// rule renames files, autotag and link edit bodies. Pointed at this repo it
+/// treats source as notes. On 2026-08-15 that happened for real (a `sb bootstrap`
+/// run from inside the checkout baked `--vault <repo>` into the systemd unit) and
+/// cortex rewrote 203 files: every `borg/patterns/*.md` prompt gained note
+/// frontmatter and wikilinks, the `config/eval/distill-fixtures/**` goldens were
+/// edited, and the naming lint renamed `AGENTS.md` to `agents.md`.
+///
+/// The check is structural, not name-based, so a checkout under any directory
+/// name is caught: a Cargo manifest sitting next to this workspace's own member
+/// crates. A real Obsidian vault has neither.
+fn reject_self_repo(root: PathBuf) -> Result<PathBuf> {
+    let looks_like_this_workspace = root.join("Cargo.toml").is_file()
+        && root.join("cortex").is_dir()
+        && root.join("borg").is_dir()
+        && root.join("vault").is_dir();
+    if looks_like_this_workspace {
+        return Err(eyre!(
+            "refusing to use the second-brain source tree as a vault root: {}\n\
+             cortex REWRITES what it governs (lint renames files, autotag and link edit bodies), \
+             so pointing it here corrupts patterns, eval fixtures, and docs.\n\
+             Set `vault.root-path` in your config, or pass --vault <your Obsidian vault>.",
+            root.display()
+        ));
+    }
+    Ok(root)
+}
+
 pub fn resolve_vault_root(cli_override: Option<&Path>, config_value: Option<&str>) -> Result<PathBuf> {
     log::debug!(
         "resolve_vault_root: cli_override={:?} config_value={:?}",
@@ -390,15 +420,15 @@ pub fn resolve_vault_root(cli_override: Option<&Path>, config_value: Option<&str
         config_value
     );
     if let Some(p) = cli_override {
-        return Ok(p.to_path_buf());
+        return reject_self_repo(p.to_path_buf());
     }
     if let Some(s) = config_value {
         let expanded = shellexpand::tilde(s);
-        return Ok(PathBuf::from(expanded.as_ref()));
+        return reject_self_repo(PathBuf::from(expanded.as_ref()));
     }
     let cwd = std::env::current_dir()?;
     if cwd.join(".obsidian").is_dir() {
-        return Ok(cwd);
+        return reject_self_repo(cwd);
     }
     Err(eyre!(
         "vault root not set: pass --vault <path>, set `vault.root-path` in your config, \

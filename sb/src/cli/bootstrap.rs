@@ -312,12 +312,24 @@ async fn register_systemd_units() -> Result<()> {
     }
 
     let cortex_config = cortex::config::Config::load(None).context("load cortex config for daemon install")?;
-    let cwd = std::env::current_dir().context("get CWD")?;
-    // The unified resolver is strict: a marker-less CWD returns Err. For
-    // bootstrap's install path we tolerate that and fall back to the CWD
-    // we already have - the install only writes the systemd unit; the
-    // daemon itself will re-resolve via `--vault` (set in the unit) at start time.
-    let cortex_vault = cortex_config.vault_root(Some(&cwd)).unwrap_or_else(|_| cwd.clone());
+    // NEVER pass the CWD as the cli_override. `resolve_vault_root` returns an
+    // override before it looks at config, so `Some(&cwd)` made `sb bootstrap`
+    // bake whatever directory it was run from into the unit's `--vault`,
+    // silently beating `vault.root-path`. On 2026-08-15 a bootstrap run from
+    // inside this repo wrote `--vault <second-brain checkout>`; cortex then
+    // governed its own source tree as a vault and rewrote 203 files (every
+    // pattern, the eval fixtures, and the AGENTS.md files, which the naming
+    // lint also renamed to lowercase).
+    //
+    // The comment this replaces argued the daemon "re-resolves via --vault at
+    // start time", which is exactly the problem: the wrong path is what got
+    // written into the unit. Pass None so config wins, and let the marker-gated
+    // CWD fallback inside the resolver handle a config-less install. A failure
+    // to resolve is now fatal rather than silently CWD, because writing a unit
+    // that points somewhere arbitrary is worse than not writing one.
+    let cortex_vault = cortex_config
+        .vault_root(None)
+        .context("resolve cortex vault root for daemon install (set vault.root-path in cortex.yml)")?;
     let cortex_install = cortex::opts::DaemonOpts {
         install: true,
         uninstall: false,
