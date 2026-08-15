@@ -98,6 +98,43 @@ pub enum ContentType {
     Session,
 }
 
+/// Every frontmatter key [`render_note`] can emit from its own fields - the
+/// SOURCE OF TRUTH for the borg-owned key policy that
+/// `pipeline::session`'s replace-in-place merge is derived from (design doc
+/// `2026-08-15-harvest-note-identity-trace-keyed-replace.md`, Data Model: the
+/// borg-owned set is "DERIVED FROM THE WRITER, not hand-listed, so it cannot
+/// drift the way `slug:` did").
+///
+/// Not every key appears on every note - most are conditional on a `Some`
+/// field or a `ContentType` branch - but nothing outside this list is ever
+/// written by this function's own field handling. Keys from
+/// `NoteContent::frontmatter_additions` are deliberately NOT here: those are
+/// the CALLER's keys, and each caller owns its own list.
+///
+/// `markdown::tests::render_note_keys_matches_the_writer` renders a matrix
+/// covering every `ContentType` variant (via an exhaustive match, so a new
+/// variant fails to compile until the matrix covers it) with every optional
+/// field populated, and asserts the emitted key set equals this constant. Add
+/// a key to `render_note` without adding it here and that test fails.
+pub const RENDER_NOTE_KEYS: &[&str] = &[
+    "title",
+    "date",
+    "ingested",
+    "source",
+    "asset",
+    "type",
+    "origin",
+    "status",
+    "method",
+    "trace",
+    "capture-note",
+    "slides",
+    "tags",
+    "creator",
+    "duration",
+    "language",
+];
+
 pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -> String {
     let tz: Tz = frontmatter_config
         .timezone

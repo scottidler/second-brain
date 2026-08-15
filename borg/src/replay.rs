@@ -450,8 +450,14 @@ async fn replay_session_stage2(
     let meta: crate::harvest::SessionReplayMeta =
         serde_yaml::from_slice(&raw).context("parse staged session replay metadata (members.yml)")?;
 
-    // force=true: the note already landed, so re-derivation overwrites the
-    // same path in place rather than minting a uniquified sibling.
+    // `ResolveIntent::Replay` is what lands this re-derivation on the note the
+    // trace already produced: the publish path resolves the prior note by
+    // identity (trace + source + body hash) and writes THAT path. `force=true`
+    // is retained for the miss case only - a trace whose note was deleted
+    // republishes as a new note under the bare `{slug}.md` rather than a
+    // `--<id8>` sibling. It never meant "overwrite in place" (the filename stem
+    // is model output, so the bare slug is a file that has never existed); that
+    // misreading is the bug this design fixes.
     let result = crate::pipeline::session::process_session(
         &body,
         &meta.members,
@@ -460,6 +466,7 @@ async fn replay_session_stage2(
         Vec::new(),
         IngestMethod::Harvest,
         true,
+        crate::harvest::identity::ResolveIntent::Replay,
         config,
         trace_id,
     )

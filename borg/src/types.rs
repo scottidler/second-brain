@@ -45,11 +45,18 @@ pub enum ContentKind {
     /// rules). `body_truncated` is true when ANY member's `--with-body` fetch
     /// flagged clyde-side truncation - drives the `[TRANSCRIPT TRUNCATED]`
     /// marker so truncation is never silent to the model.
+    /// `intent` is why we are publishing, threaded from the harvest planner's
+    /// re-appearance decision (`NewNote` / `FollowUp`); it decides which
+    /// prior-note resolution branches are legal at publish time
+    /// (`harvest::identity::ResolveIntent`). A stage-2 replay never builds a
+    /// `ContentKind` - it calls `pipeline::session::process_session` directly
+    /// with `ResolveIntent::Replay`.
     Session {
         body: String,
         members: Vec<crate::harvest::contract::SessionRecord>,
         primary_id: String,
         body_truncated: bool,
+        intent: crate::harvest::identity::ResolveIntent,
     },
 }
 

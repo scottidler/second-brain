@@ -19,8 +19,9 @@ use vault::intake::IntakeKind;
 use vault::receipts::FailureStage;
 
 use super::contract::BodyMessage;
+use super::identity::ResolveIntent;
 use super::reader::ExportReader;
-use super::watermark::{self, WatermarkState};
+use super::watermark::{self, Reappearance, WatermarkState};
 use super::{HarvestPlan, ThreadDecision};
 
 /// Outcome of driving one thread through publish. The caller (Phase 6's CLI)
@@ -156,11 +157,32 @@ async fn publish_thread_inner<R: ExportReader>(
     )
     .with_context(|| format!("harvest publish: door capture for trace {}", thread.trace_id))?;
 
+    // Publish intent, threaded from the planner's re-appearance decision
+    // (trace-keyed-replace design, Phase 3). `NewNote` gets the crash-recovery
+    // fallback; `FollowUp` - which is also what `--force` produces
+    // (`classify_reappearance` returns it before consulting the body hash) -
+    // never resolves a prior note, because a follow-up is a brand new note.
+    let intent = match &thread.decision {
+        Reappearance::NewNote => ResolveIntent::NewNote,
+        Reappearance::FollowUp { .. } => ResolveIntent::FollowUp,
+        // `publishable()` filters `Skip` out before this loop ever runs, so
+        // this arm is a caller bug. Fail closed (never replace) and say so.
+        Reappearance::Skip { .. } => {
+            log::error!(
+                "harvest::publish::publish_thread_inner: Skip decision reached publish for primary={} trace={} \
+                 - treating as FollowUp so nothing is overwritten",
+                thread.primary_id,
+                thread.trace_id
+            );
+            ResolveIntent::FollowUp
+        }
+    };
     let content = ContentKind::Session {
         body: body_text,
         members: thread.members.clone(),
         primary_id: thread.primary_id.clone(),
         body_truncated,
+        intent,
     };
     // `force` stays false here regardless of `--force`: `--force` (design
     // doc API) means "re-distill this in-scope published id", which Phase 3

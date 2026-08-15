@@ -70,6 +70,7 @@ fn test_content_kind_session() {
         members: Vec::new(),
         primary_id: "sess-1".to_string(),
         body_truncated: false,
+        intent: crate::harvest::identity::ResolveIntent::NewNote,
     };
     assert!(matches!(kind, ContentKind::Session { ref body, .. } if body.starts_with("human:")));
 }

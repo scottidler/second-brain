@@ -238,3 +238,116 @@ count was executed against current `main` and the live vault before Phase 1.
 ### Open questions
 
 - None.
+
+## Phase 3: wire replace-in-place
+
+### Design decisions
+
+- **Intent rides on `ContentKind::Session`.** `publish_thread_inner` maps the
+  planner's `Reappearance` to a `ResolveIntent` (`NewNote` -> `NewNote`,
+  `FollowUp` -> `FollowUp`, and a `Skip` that should be unreachable -> logged
+  `log::error!` + `FollowUp`, i.e. fail closed / never replace) and carries it
+  in the variant; `pipeline::process_content` threads it to
+  `process_session`. `replay::replay_session_stage2` bypasses `ContentKind`
+  entirely and passes `ResolveIntent::Replay` straight to `process_session` -
+  `borg/src/types.rs`, `borg/src/harvest/publish.rs`, `borg/src/replay.rs`.
+- **Resolution happens BEFORE the distill pass**, not just before naming
+  (`session.rs::process_session_inner`). The fail-closed path is a receipts DB
+  error, and failing after an LLM call would burn a distill for a publish that
+  cannot land. Nothing in the resolve inputs (trace, `clyde://<primary>`,
+  `watermark::body_hash(body)`) depends on the distill.
+- **`body_hash` is computed inside `process_session_inner` from the `body`
+  argument**, so the live path and the replay path derive it from the same
+  place by construction rather than by two callers agreeing.
+  `borg/tests/body_hash_agrees_across_paths.rs` pins the remaining assumption
+  (that staging holds those exact bytes).
+- **The borg-owned key set is derived from a new
+  `markdown::RENDER_NOTE_KEYS`** (declared next to `render_note`, the writer)
+  plus `SESSION_OWNED_KEYS` plus `DISTILLER_OWNED_KEYS`
+  (`session.rs::borg_owned_keys`). Two tests hold the derivation up:
+  `markdown::tests::render_note_keys_matches_the_writer` renders every
+  `ContentType` variant (enumerated through an EXHAUSTIVE match, so a new
+  variant fails to compile until the matrix covers it) with every optional
+  field populated and asserts emitted-keys == `RENDER_NOTE_KEYS` in BOTH
+  directions; `session::tests::borg_owned_key_policy_matches_the_writer`
+  asserts the session policy contains every writer key and that the three
+  sources do not overlap.
+- **`status:` is carried forward as a RAW `serde_yaml::Value`, not parsed
+  through `vault::schema::Status`.** The doc's own acceptance criterion names
+  `status: read`, which is not in the schema (`unread`/`reading`/`reviewed`/
+  `starred`). Parsing would silently reset any off-schema operator value to
+  `unread` - the exact failure the ownership change exists to prevent. On a
+  replace, `NoteContent.status` is set to `None` and the prior value is
+  re-emitted through `frontmatter_additions`, so exactly one `status:` line is
+  written. Cosmetic consequence: on a replaced note `status:` renders in the
+  additions block (after `tags`/`creator`) rather than its usual slot.
+- **`read_prior_frontmatter` fails the publish CLOSED** on an unreadable or
+  unparseable prior note rather than replacing it with a note that has
+  silently lost its `cortex-*` fields. The resolver parsed that same file
+  moments earlier, so either error means the file changed underneath us.
+- **`record_landed_path` runs on EVERY session publish, hit or miss**
+  (`receipts::update_note_path` + `identity::note_published`), per
+  Architecture's "Phase 3 calls it on every session publish including replay"
+  and "every successful publish inserts (trace, absolute path)". It is
+  best-effort AFTER the note lands: failing an already-published note over a
+  bookkeeping write would misreport what happened (same policy as Phase 2's
+  per-thread watermark save).
+- **`identity::reset_index_cache_for_tests`** (new, `#[cfg(test)]`) drops the
+  memoized index for one vault root. The "note moved inbox/ -> notes/" case is
+  a NEXT-PROCESS case in production (cortex promotes between borg runs); in a
+  single test process the self-inserted index entry would otherwise pin the
+  pre-move path. The test resets the cache to stand in for that next process,
+  and then proves the receipts row is repaired.
+
+### Deviations
+
+- **The doc's PROSE list of `render_note`'s keys is under-inclusive** (flagged
+  at the Phase 0 gate). `RENDER_NOTE_KEYS` therefore also carries `asset`,
+  `capture-note`, `slides`, `duration`, and `language`. Session notes never
+  take those branches, so no behavior differs; the doc's governing rule
+  ("DERIVED FROM THE WRITER, not hand-listed") is what was implemented, and a
+  hand-typed list from the prose would have failed the required
+  policy-matches-writer test on day one.
+- **`follows:` is deliberately NOT in `SESSION_OWNED_KEYS`,** though the doc's
+  Data Model lists it among the borg-owned session additions. Nothing writes it
+  until Phase 4, and until Phase 4 re-emits it on every render, owning it here
+  would mean a replay DROPS a follow-up's back-link (a stage-2 replay has no
+  way to re-derive it - it never sees the prior `PublishedEntry`). Left out, it
+  is carried forward verbatim instead. **Phase 4 must move it into
+  `SESSION_OWNED_KEYS` at the same time it starts emitting it**, or a
+  re-derived `follows:` and a carried-forward one will fight (the carry-forward
+  loop skips keys the publish already derived, so the derived value would win -
+  but the ownership would be implicit rather than declared).
+- **Verified stub-out of the required regression guard.** With
+  `session::resolve_prior_note` temporarily replaced by `Ok(None)`,
+  `borg/tests/replay_lands_same_note.rs` fails as designed:
+  `["inbox/a-wholly-different-subject-line.md", "inbox/session-871f6428-work.md"]`,
+  `left: 2, right: 1`. The stub was reverted and the guard re-run green.
+- **The existing `pipeline::session` tests gained XDG isolation**
+  (`XdgSandbox`, serialized on the shared `harvest::TEST_XDG_LOCK`). They
+  previously wrote the operator's REAL success ledger; after this phase they
+  would also read and write the real receipts DB. Not a spec deviation - a
+  consequence of this phase that had to be handled rather than shipped.
+
+### Tradeoffs
+
+- `resolve_prior_note` and `record_landed_path` open the receipts DB
+  separately (two short-lived connections per publish) instead of holding one
+  across the whole handler. Holding a SQLite handle across a multi-minute LLM
+  distill for the sake of one saved open is the worse trade.
+- The prior note is read twice on a replace: once by the resolver (to apply
+  the confirmation guard) and once by `read_prior_frontmatter` (to take the
+  carried keys). Threading the parsed `Note` back out of `resolve_prior_note`
+  would save the read but change the signature the doc's API Design section
+  fixed. One extra read of one file per replace, against a phase-crossing
+  signature change: not worth it.
+- Integration-test harness lives in `borg/tests/common/mod.rs` with a
+  module-wide `#![allow(dead_code)]`. Cargo compiles it separately into each
+  test binary and each uses a different subset, so without the allow the
+  `-D warnings` clippy gate fails on the unused half. This is the shared-test-
+  helper case, not a suppressed warning about production code.
+
+### Open questions
+
+- None blocking. One handoff item for Phase 4, stated above: when `follows:`
+  starts being written, add it to `SESSION_OWNED_KEYS`.

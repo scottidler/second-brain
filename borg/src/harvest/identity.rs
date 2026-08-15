@@ -207,6 +207,19 @@ pub fn note_published(vault_root: &Path, trace_id: &str, absolute_path: &Path) {
     }
 }
 
+/// Test-only: drop the memoized index for `vault_root` so the next
+/// [`resolve_prior_note`] rebuilds it from disk. Stands in for the NEXT
+/// PROCESS, which is the only place an external mover (cortex promoting a note
+/// out of `inbox/`) becomes visible to the index - within one process borg is
+/// the sole creator of harvest notes and the self-insert keeps the view exact
+/// (see the module doc's freshness contract).
+#[cfg(test)]
+pub(crate) fn reset_index_cache_for_tests(vault_root: &Path) {
+    let canon_root = canonical_or(vault_root);
+    let mut cache = INDEX_CACHE.lock().expect("harvest identity index cache poisoned");
+    cache.remove(&canon_root);
+}
+
 fn canonical_or(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }

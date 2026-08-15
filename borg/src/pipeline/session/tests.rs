@@ -3,6 +3,41 @@ use super::*;
 use crate::config::Config;
 use tempfile::TempDir;
 
+/// Point `XDG_DATA_HOME` at a throwaway directory for the duration of a test,
+/// serialized against every other test that does the same
+/// (`crate::harvest::TEST_XDG_LOCK` is the ONE shared lock; a per-file lock
+/// would let these race `harvest::tests`'s live-run test over the same env
+/// var). Every publish path this module drives now touches XDG-rooted state -
+/// the receipts DB (prior-note resolution + the post-publish `note_path`
+/// repair) and the success ledger - so without this the tests would read and
+/// write the operator's REAL `~/.local/share/sb/borg/` state.
+struct XdgSandbox {
+    #[allow(dead_code)]
+    lock: tokio::sync::MutexGuard<'static, ()>,
+    #[allow(dead_code)]
+    data_home: TempDir,
+    prior: Option<String>,
+}
+
+impl XdgSandbox {
+    async fn new() -> Self {
+        let lock = crate::harvest::TEST_XDG_LOCK.lock().await;
+        let data_home = TempDir::new().unwrap();
+        let prior = std::env::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+        Self { lock, data_home, prior }
+    }
+}
+
+impl Drop for XdgSandbox {
+    fn drop(&mut self) {
+        match &self.prior {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+    }
+}
+
 fn session_record(id: &str, created: &str, modified: &str, n_msgs: i64) -> SessionRecord {
     SessionRecord {
         session_id: id.to_string(),
@@ -125,6 +160,7 @@ fn test_config(vault_root: &std::path::Path, staging_root: &std::path::Path) -> 
 /// `source: clyde://<primary-id>` (Phase 5 success criterion).
 #[tokio::test]
 async fn process_session_inner_publishes_note_with_trace_and_source() {
+    let _sandbox = XdgSandbox::new().await;
     let vault_dir = TempDir::new().unwrap();
     let staging_dir = TempDir::new().unwrap();
     let config = test_config(vault_dir.path(), staging_dir.path());
@@ -153,6 +189,7 @@ async fn process_session_inner_publishes_note_with_trace_and_source() {
         vec![],
         IngestMethod::Harvest,
         false,
+        ResolveIntent::NewNote,
         &config,
         "harvest-test-trace",
     )
@@ -181,6 +218,7 @@ async fn process_session_inner_publishes_note_with_trace_and_source() {
 
 #[tokio::test]
 async fn process_session_inner_tags_redacted_source_when_any_member_redacted() {
+    let _sandbox = XdgSandbox::new().await;
     let vault_dir = TempDir::new().unwrap();
     let staging_dir = TempDir::new().unwrap();
     let config = test_config(vault_dir.path(), staging_dir.path());
@@ -196,6 +234,7 @@ async fn process_session_inner_tags_redacted_source_when_any_member_redacted() {
         vec![],
         IngestMethod::Harvest,
         false,
+        ResolveIntent::NewNote,
         &config,
         "harvest-test-redacted",
     )
@@ -279,6 +318,7 @@ fn harvest_publish_path_force_overwrites_bare_slug_in_place() {
 /// frontmatter matching that stem (harvest-content-slug-naming Phase 2).
 #[tokio::test]
 async fn process_session_inner_names_file_from_title_slug_on_distiller_fallback() {
+    let _sandbox = XdgSandbox::new().await;
     let vault_dir = TempDir::new().unwrap();
     let staging_dir = TempDir::new().unwrap();
     let config = test_config(vault_dir.path(), staging_dir.path());
@@ -299,6 +339,7 @@ async fn process_session_inner_names_file_from_title_slug_on_distiller_fallback(
         vec![],
         IngestMethod::Harvest,
         false,
+        ResolveIntent::NewNote,
         &config,
         "harvest-test-slug-fallback",
     )
@@ -321,6 +362,7 @@ async fn process_session_inner_names_file_from_title_slug_on_distiller_fallback(
 
 #[tokio::test]
 async fn process_session_inner_fails_loudly_when_primary_id_missing() {
+    let _sandbox = XdgSandbox::new().await;
     let vault_dir = TempDir::new().unwrap();
     let staging_dir = TempDir::new().unwrap();
     let config = test_config(vault_dir.path(), staging_dir.path());
@@ -339,6 +381,7 @@ async fn process_session_inner_fails_loudly_when_primary_id_missing() {
         vec![],
         IngestMethod::Harvest,
         false,
+        ResolveIntent::NewNote,
         &config,
         "harvest-test-missing-primary",
     )
@@ -346,4 +389,453 @@ async fn process_session_inner_fails_loudly_when_primary_id_missing() {
     .expect_err("missing primary id must be a loud error, never a silent publish");
 
     assert!(format!("{err:#}").contains("not-present"));
+}
+
+// ---- trace-keyed replace-in-place (2026-08-15 note-identity design, Phase 3) ----
+
+const REPLACE_BODY: &str = "human: migrate ci.yml to the reusable workflow\nassistant: here is the plan\n";
+
+/// One session publish through the real handler. `title` drives the distiller
+/// FALLBACK slug (no real fabric in tests, so the distill degrades and the
+/// filename comes from the title-slug) - which is how these tests inject a
+/// DIFFERENT slug for the same trace, exactly the condition that forked 15
+/// notes out of `hv-e5d240` in the live vault.
+async fn publish_session(
+    config: &Config,
+    title: &str,
+    primary_id: &str,
+    trace_id: &str,
+    intent: ResolveIntent,
+    force: bool,
+) -> Result<IngestResult> {
+    let mut member = session_record(primary_id, "2026-07-02T04:51:21+00:00", "2026-07-02T06:08:39+00:00", 42);
+    member.title = Some(title.to_string());
+    process_session_inner(
+        REPLACE_BODY,
+        &[member],
+        primary_id,
+        false,
+        vec![],
+        IngestMethod::Harvest,
+        force,
+        intent,
+        config,
+        trace_id,
+    )
+    .await
+}
+
+/// Every `.md` file under `root`, recursively, sorted.
+fn all_notes(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Splice extra frontmatter lines (each `\n`-terminated) into an existing
+/// note - standing in for cortex's classify/quality writes and an operator
+/// editing `status:` in Obsidian.
+fn inject_frontmatter(path: &std::path::Path, extra: &str) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let rest = text
+        .strip_prefix("---\n")
+        .expect("note starts with a frontmatter fence");
+    let end = rest.find("\n---\n").expect("note has a closing frontmatter fence");
+    let (fm, body) = rest.split_at(end);
+    std::fs::write(path, format!("---\n{fm}\n{extra}{}", &body[1..])).unwrap();
+}
+
+fn frontmatter_of(path: &std::path::Path) -> serde_yaml::Mapping {
+    let text = std::fs::read_to_string(path).unwrap();
+    let (yaml, _body) = vault::frontmatter::split_raw(&text).expect("note has frontmatter");
+    serde_yaml::from_str(yaml).expect("frontmatter parses")
+}
+
+/// Acceptance: "Replay the same trace three times -> exactly one note, same
+/// path each time" AND "Filename unchanged when the model emits a different
+/// slug; `slug:` equals the filename stem afterwards."
+///
+/// Each replay is handed a DIFFERENT title, so the fallback slug differs on
+/// every pass. Before this phase that produced three files (the live vault's
+/// `hv-e5d240` has 15 for exactly this reason).
+#[tokio::test]
+async fn replaying_one_trace_three_times_lands_exactly_one_note_at_one_path() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+    let trace = "hv-e5d24011";
+
+    let first = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        trace,
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .unwrap();
+    let landed = std::path::PathBuf::from(first.note_path.expect("first publish lands a note"));
+    assert_eq!(landed.file_stem().unwrap(), "review-ci-workflow");
+
+    for title in ["Wholly Different Subject", "Third Slug Entirely"] {
+        let replay = publish_session(&config, title, "8d6b6ef3", trace, ResolveIntent::Replay, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::path::PathBuf::from(replay.note_path.expect("replay lands a note")),
+            landed,
+            "a replay of trace {trace} must write the note the trace already produced, \
+             not a file named after the fresh slug"
+        );
+    }
+
+    let notes = all_notes(vault_dir.path());
+    assert_eq!(notes.len(), 1, "one trace, one note: {notes:?}");
+    assert_eq!(notes[0], landed);
+
+    let fm = frontmatter_of(&landed);
+    assert_eq!(
+        fm.get("slug").and_then(|v| v.as_str()),
+        Some("review-ci-workflow"),
+        "slug: names the file it actually lives in, not the slug this distill pass produced"
+    );
+    assert!(fm.get("harvest-body-hash").and_then(|v| v.as_str()).is_some());
+}
+
+/// Acceptance: "`cortex-classified`, `cortex-quality*`, and a user-set
+/// `status: read` survive all three replays."
+///
+/// `status: read` is deliberately OFF-schema (`vault::schema::Status` has no
+/// `read`) - the value is carried forward verbatim rather than parsed, so an
+/// operator value borg does not model still survives.
+#[tokio::test]
+async fn replace_preserves_cortex_fields_and_a_user_set_status() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+    let trace = "hv-c0de1234";
+
+    let first = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        trace,
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .unwrap();
+    let landed = std::path::PathBuf::from(first.note_path.unwrap());
+    assert_eq!(
+        frontmatter_of(&landed).get("status").and_then(|v| v.as_str()),
+        Some("unread"),
+        "a fresh publish still establishes status: unread"
+    );
+
+    inject_frontmatter(
+        &landed,
+        "cortex-classified: true\ncortex-quality-score: 87\ncortex-quality-issues: [no-outbound-links]\n\
+         domain: engineering\n",
+    );
+    // The operator marks it read in Obsidian (replacing borg's `unread`).
+    let text = std::fs::read_to_string(&landed)
+        .unwrap()
+        .replace("status: unread", "status: read");
+    std::fs::write(&landed, text).unwrap();
+
+    for title in ["Different Slug One", "Different Slug Two", "Different Slug Three"] {
+        publish_session(&config, title, "8d6b6ef3", trace, ResolveIntent::Replay, true)
+            .await
+            .unwrap();
+    }
+
+    let fm = frontmatter_of(&landed);
+    assert_eq!(fm.get("cortex-classified").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(fm.get("cortex-quality-score").and_then(|v| v.as_u64()), Some(87));
+    assert!(fm.contains_key("cortex-quality-issues"), "{fm:?}");
+    assert_eq!(fm.get("domain").and_then(|v| v.as_str()), Some("engineering"));
+    assert_eq!(
+        fm.get("status").and_then(|v| v.as_str()),
+        Some("read"),
+        "a replay must never reset a status the operator set"
+    );
+    // Borg-owned keys are still rewritten by the publish.
+    assert_eq!(fm.get("trace").and_then(|v| v.as_str()), Some(trace));
+    assert_eq!(fm.get("type").and_then(|v| v.as_str()), Some("session"));
+    assert_eq!(fm.get("origin").and_then(|v| v.as_str()), Some("generated"));
+    assert_eq!(all_notes(vault_dir.path()).len(), 1);
+}
+
+/// Acceptance: "A note moved `inbox/` -> `notes/` is resolved and its receipts
+/// row updated."
+///
+/// The index reset stands in for the next process: cortex promotes notes
+/// BETWEEN borg runs, and the receipts row is what carries the repair across
+/// (`update_note_path`, which `mark_succeeded`'s `WHERE status='received'`
+/// could never do).
+#[tokio::test]
+async fn a_cortex_moved_note_is_resolved_and_its_receipts_row_repaired() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+    let trace = "hv-m0ved001";
+
+    let conn = receipts::open_default().unwrap();
+    receipts::record_received(
+        &conn,
+        trace,
+        vault::schema::Method::Harvest,
+        vault::receipts::ReceiptKind::Session,
+        "clyde://8d6b6ef3",
+    )
+    .unwrap();
+
+    let first = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        trace,
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .unwrap();
+    let inbox_path = std::path::PathBuf::from(first.note_path.unwrap());
+    assert!(inbox_path.starts_with(vault_dir.path().join("inbox")));
+
+    // cortex promotes it.
+    let notes_dir = vault_dir.path().join("notes");
+    std::fs::create_dir_all(&notes_dir).unwrap();
+    let moved = notes_dir.join(inbox_path.file_name().unwrap());
+    std::fs::rename(&inbox_path, &moved).unwrap();
+    crate::harvest::identity::reset_index_cache_for_tests(vault_dir.path());
+
+    let replay = publish_session(
+        &config,
+        "Some Other Slug",
+        "8d6b6ef3",
+        trace,
+        ResolveIntent::Replay,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::path::PathBuf::from(replay.note_path.unwrap()),
+        moved,
+        "the replay must follow the note cortex moved, not re-mint one in inbox/"
+    );
+    assert_eq!(all_notes(vault_dir.path()).len(), 1);
+
+    let row = receipts::get(&conn, trace).unwrap().expect("receipts row");
+    assert_eq!(
+        row.note_path.as_deref(),
+        Some(moved.to_string_lossy().as_ref()),
+        "the receipts row is repaired to the note's current path"
+    );
+}
+
+/// Acceptance: "A `FollowUp` ... produces a second, distinct note." A genuine
+/// follow-up carries its own trace and must never replace the note it follows
+/// (notes are immutable once published).
+#[tokio::test]
+async fn a_follow_up_publishes_a_second_distinct_note() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+
+    let first = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        "hv-f1r57000",
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .unwrap();
+    let first_path = std::path::PathBuf::from(first.note_path.unwrap());
+
+    let follow_up = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        "hv-f0110w00",
+        ResolveIntent::FollowUp,
+        false,
+    )
+    .await
+    .unwrap();
+    let follow_up_path = std::path::PathBuf::from(follow_up.note_path.unwrap());
+
+    assert_ne!(first_path, follow_up_path);
+    assert_eq!(all_notes(vault_dir.path()).len(), 2);
+}
+
+/// Acceptance: "a `--force` re-harvest ... produces a second, distinct note."
+///
+/// This is the dangerous one: `classify_reappearance` returns `FollowUp` on
+/// `--force` BEFORE consulting the body hash, so an unchanged `--force`
+/// re-harvest presents the same `source:` AND the same `harvest-body-hash:` as
+/// the landed note - every term of the confirmation guard matches. Only the
+/// intent gate keeps it from overwriting.
+#[tokio::test]
+async fn a_force_reharvest_of_an_unchanged_session_still_forks_a_new_note() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+
+    let first = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        "hv-f0rce001",
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .unwrap();
+    let first_path = std::path::PathBuf::from(first.note_path.unwrap());
+
+    // Identical body (same hash), identical source, identical title/slug -
+    // only the trace differs, exactly as a `--force` re-harvest presents.
+    let forced = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        "hv-f0rce002",
+        ResolveIntent::FollowUp,
+        false,
+    )
+    .await
+    .unwrap();
+    let forced_path = std::path::PathBuf::from(forced.note_path.unwrap());
+
+    assert_ne!(
+        first_path, forced_path,
+        "--force must fork, never overwrite: the prior note stays as published"
+    );
+    assert_eq!(all_notes(vault_dir.path()).len(), 2);
+}
+
+/// Acceptance: "A trace whose note was deleted republishes cleanly as new."
+/// The re-stat before return is what catches this: the index still holds the
+/// self-inserted path from the first publish.
+#[tokio::test]
+async fn a_trace_whose_note_was_deleted_republishes_as_new() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+    let trace = "hv-de1e7ed0";
+
+    let first = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        trace,
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .unwrap();
+    let first_path = std::path::PathBuf::from(first.note_path.unwrap());
+    std::fs::remove_file(&first_path).unwrap();
+
+    let replay = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        trace,
+        ResolveIntent::Replay,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(replay.status, IngestStatus::Completed));
+    let notes = all_notes(vault_dir.path());
+    assert_eq!(notes.len(), 1, "republished cleanly, exactly once: {notes:?}");
+    assert_eq!(std::path::PathBuf::from(replay.note_path.unwrap()), first_path);
+}
+
+/// Design doc, Concurrency and failure modes: "Resolver DB error fails the
+/// publish CLOSED, with the trace id and the SQLite error in the message; the
+/// note is not written and the receipts row is left for a later replay."
+///
+/// The DB is broken by putting a DIRECTORY where the receipts file belongs, so
+/// the open fails the way a corrupt/unopenable DB would.
+#[tokio::test]
+async fn a_broken_receipts_db_fails_the_publish_closed() {
+    let _sandbox = XdgSandbox::new().await;
+    std::fs::create_dir_all(vault::receipts::receipts_db_path().unwrap()).unwrap();
+
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+
+    let err = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        "hv-br0ken01",
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .expect_err("a resolver DB error must fail the publish, never publish blind");
+
+    let rendered = format!("{err:#}");
+    assert!(rendered.contains("hv-br0ken01"), "error names the trace: {rendered}");
+    assert!(rendered.contains("fail-closed"), "{rendered}");
+    assert!(
+        all_notes(vault_dir.path()).is_empty(),
+        "no note is written when resolution fails"
+    );
+}
+
+/// Cross-cutting acceptance: the borg-owned key policy is DERIVED from the
+/// writer. `markdown::tests::render_note_keys_matches_the_writer` pins
+/// `RENDER_NOTE_KEYS` to what `render_note` actually emits; this pins the
+/// session policy to that constant plus this handler's own additions, so a new
+/// writer key cannot silently become a carried-forward (i.e. never-updated)
+/// key on a replace.
+#[test]
+fn borg_owned_key_policy_matches_the_writer() {
+    let owned = borg_owned_keys();
+    for key in markdown::RENDER_NOTE_KEYS {
+        assert!(
+            owned.contains(key),
+            "render_note emits {key:?} but the session replace policy does not own it - \
+             a replace would carry a stale value forward instead of rewriting it"
+        );
+    }
+    for key in SESSION_OWNED_KEYS.iter().chain(DISTILLER_OWNED_KEYS) {
+        assert!(owned.contains(key), "{key:?} missing from the owned set");
+    }
+    assert_eq!(
+        owned.len(),
+        markdown::RENDER_NOTE_KEYS.len() + SESSION_OWNED_KEYS.len() + DISTILLER_OWNED_KEYS.len(),
+        "the three key sources must not overlap - a key owned twice hides which writer owns it"
+    );
+    // `status` is the one writer key a REPLACE hands back to the user
+    // (design doc: "a deliberate ownership change"), so it must be in the
+    // owned set AND excluded explicitly at merge time.
+    assert!(owned.contains(STATUS_KEY));
 }

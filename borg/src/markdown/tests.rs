@@ -643,3 +643,139 @@ fn test_blank_capture_note_is_treated_as_bare() {
     assert!(!rendered.contains("## Why Captured"));
     assert!(!rendered.contains("capture-note:"));
 }
+
+// ---- borg-owned frontmatter key policy: derived from the writer ----
+
+/// Every `ContentType` variant, built through an EXHAUSTIVE match so a new
+/// variant fails to compile here until the matrix covers it. That is what
+/// keeps `render_note_keys_matches_the_writer` honest about the
+/// `ContentType`-conditional frontmatter branches (`duration:`, `language:`).
+fn every_content_type() -> Vec<ContentType> {
+    // The match exists purely for its exhaustiveness check; the returned list
+    // is what the matrix renders.
+    let probe = ContentType::Note;
+    match &probe {
+        ContentType::YouTube { .. }
+        | ContentType::Article { .. }
+        | ContentType::GitHub { .. }
+        | ContentType::Social
+        | ContentType::Reddit
+        | ContentType::Image { .. }
+        | ContentType::Pdf { .. }
+        | ContentType::Audio { .. }
+        | ContentType::Note
+        | ContentType::VocabDefine { .. }
+        | ContentType::VocabClarify { .. }
+        | ContentType::Document { .. }
+        | ContentType::Code { .. }
+        | ContentType::Session => {}
+    }
+    vec![
+        ContentType::YouTube {
+            uploader: "uploader".to_string(),
+            duration_secs: 600.0,
+        },
+        ContentType::Article {
+            author: Some("byline".to_string()),
+        },
+        ContentType::GitHub {
+            owner: "scottidler".to_string(),
+        },
+        ContentType::Social,
+        ContentType::Reddit,
+        ContentType::Image {
+            asset_path: "assets/a.png".to_string(),
+        },
+        ContentType::Pdf {
+            asset_path: "assets/a.pdf".to_string(),
+        },
+        ContentType::Audio {
+            asset_path: "assets/a.m4a".to_string(),
+            duration_secs: Some(90.0),
+        },
+        ContentType::Note,
+        ContentType::VocabDefine {
+            word: "w".to_string(),
+            language: "es".to_string(),
+        },
+        ContentType::VocabClarify {
+            word_a: "a".to_string(),
+            word_b: "b".to_string(),
+            language: "es".to_string(),
+        },
+        ContentType::Document {
+            asset_path: "assets/a.docx".to_string(),
+        },
+        ContentType::Code {
+            language: "rust".to_string(),
+        },
+        ContentType::Session,
+    ]
+}
+
+/// Frontmatter keys in a rendered note, in emission order.
+fn frontmatter_keys(rendered: &str) -> Vec<String> {
+    let (yaml, _body) = vault::frontmatter::split_raw(rendered).expect("rendered note has frontmatter");
+    let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("frontmatter parses as a YAML mapping");
+    map.into_iter()
+        .filter_map(|(k, _)| k.as_str().map(str::to_string))
+        .collect()
+}
+
+/// Cross-cutting acceptance criterion (design doc
+/// `2026-08-15-harvest-note-identity-trace-keyed-replace.md`): "The borg-owned
+/// key policy is derived from `markdown::render_note`, with a test that fails
+/// when the writer gains an unknown key."
+///
+/// Renders every `ContentType` with every optional field populated and asserts
+/// the union of emitted keys is EXACTLY `RENDER_NOTE_KEYS`. Add a key to
+/// `render_note` without adding it to that constant and this fails; declare a
+/// key the writer never emits and this fails too.
+#[test]
+fn render_note_keys_matches_the_writer() {
+    let config = FrontmatterConfig {
+        default_tags: vec!["inbox".to_string()],
+        default_creator: "Scott Idler".to_string(),
+        timezone: "UTC".to_string(),
+    };
+    let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for content_type in every_content_type() {
+        let note = NoteContent {
+            title: "T".to_string(),
+            source_url: Some("https://example.com/a".to_string()),
+            asset_path: Some("assets/a.png".to_string()),
+            tags: vec!["rust".to_string()],
+            summary: "s".to_string(),
+            description: Some("d".to_string()),
+            capture_note: Some("why I grabbed this".to_string()),
+            content_type,
+            embed_code: None,
+            method: Some(IngestMethod::Cli),
+            trace_id: Some("hv-deadbeef".to_string()),
+            slides: vec!["assets/slide-1.jpg".to_string()],
+            distilled_body: None,
+            // Deliberately EMPTY: `frontmatter_additions` keys belong to the
+            // caller, not to `render_note`, and are policed by each caller's
+            // own key list (`pipeline::session::borg_owned_keys`).
+            frontmatter_additions: BTreeMap::new(),
+            origin: Some(vault::schema::Origin::Generated),
+            status: Some(vault::schema::Status::Unread),
+        };
+        emitted.extend(frontmatter_keys(&render_note(&note, &config)));
+    }
+
+    let declared: std::collections::HashSet<String> = RENDER_NOTE_KEYS.iter().map(|k| k.to_string()).collect();
+    let mut undeclared: Vec<&String> = emitted.difference(&declared).collect();
+    undeclared.sort();
+    assert!(
+        undeclared.is_empty(),
+        "render_note emits frontmatter key(s) missing from RENDER_NOTE_KEYS: {undeclared:?} - \
+         add them there AND account for them in pipeline::session::borg_owned_keys"
+    );
+    let mut unemitted: Vec<&String> = declared.difference(&emitted).collect();
+    unemitted.sort();
+    assert!(
+        unemitted.is_empty(),
+        "RENDER_NOTE_KEYS declares key(s) render_note never emits: {unemitted:?}"
+    );
+}

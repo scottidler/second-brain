@@ -10,8 +10,11 @@
 
 use super::*;
 use crate::harvest::contract::SessionRecord;
+use crate::harvest::identity::{self, ResolveIntent};
+use crate::harvest::watermark;
 use chrono::{DateTime, FixedOffset};
 use distillers::{SessionConfig, SessionMetadata};
+use std::collections::{BTreeMap, HashSet};
 
 /// Length of the primary-session-id prefix used to disambiguate a harvest
 /// filename collision (harvest-content-slug-naming Phase 3). Clyde ids are
@@ -40,6 +43,12 @@ pub(crate) fn harvest_slug_stem(slug: Option<&str>, title: &str) -> (String, boo
 /// resolves to the same filename regardless of publish order. `force` (a
 /// deliberate re-distill) overwrites the bare-slug note in place.
 ///
+/// This names a NEW note only. A trace that already has a landed note never
+/// reaches here: `process_session_inner` resolves that note through
+/// `harvest::identity::resolve_prior_note` and short-circuits to its current
+/// path (design doc `2026-08-15-harvest-note-identity-trace-keyed-replace.md`,
+/// which is also why `force` is no longer what makes a replay land in place).
+///
 /// The residual "which of two same-slug sessions gets the bare slug" question is
 /// deliberately NOT resolved here: cortex's association sweep merges or
 /// cross-links same-base-slug notes by similarity (`cortex.yml` threshold). The
@@ -54,6 +63,138 @@ fn harvest_publish_path(dir: &std::path::Path, slug_stem: &str, primary_id: &str
     dir.join(format!("{slug_stem}--{short}.md"))
 }
 
+/// Frontmatter keys this handler adds on top of [`markdown::RENDER_NOTE_KEYS`]
+/// (design doc: Data Model, "plus session additions"). `follows` is Phase 4's
+/// key and is deliberately absent: nothing writes it yet, and until Phase 4
+/// re-derives it on every render it must be CARRIED FORWARD across a replay
+/// (which cannot re-derive it) rather than dropped as borg-owned.
+const SESSION_OWNED_KEYS: &[&str] = &["repo", "trace-expires", "slug", "harvest-body-hash"];
+
+/// Frontmatter keys `distillers::render` contributes for a session note
+/// (`distillers/src/render.rs`, the `KindPayload::Session` arm plus the two
+/// unconditional keys). Borg-owned: a replace re-derives them from the fresh
+/// distill pass.
+const DISTILLER_OWNED_KEYS: &[&str] = &[
+    "distilled",
+    "distilled-extractor",
+    "cortex-session-msg-count",
+    "cortex-session-ids",
+];
+
+/// `status:` is written by [`markdown::render_note`] and so is nominally
+/// borg-owned, but on a REPLACE its value is user state (design doc: Data
+/// Model, "`status:` is a deliberate ownership change ... Phase 3 reads the
+/// existing note's `status:` and feeds it back so a replay does not reset a
+/// note the user marked `read`"). It is therefore the one writer key excluded
+/// from the drop-list when merging a prior note.
+const STATUS_KEY: &str = "status";
+
+/// The complete borg-owned frontmatter key set: everything
+/// [`markdown::render_note`] emits from its own fields, plus this handler's
+/// session additions, plus the session distiller's additions. On a replace
+/// these are rewritten from the fresh publish; EVERY other key (`domain`,
+/// `cortex-classified*`, `cortex-quality*`, `superseded-by`, user keys) is
+/// carried forward verbatim.
+///
+/// Derived from the writer rather than hand-listed, per the design doc's
+/// governing rule - `borg_owned_key_policy_matches_the_writer` fails if
+/// `render_note` gains a key this policy has not accounted for.
+pub(crate) fn borg_owned_keys() -> HashSet<&'static str> {
+    markdown::RENDER_NOTE_KEYS
+        .iter()
+        .chain(SESSION_OWNED_KEYS)
+        .chain(DISTILLER_OWNED_KEYS)
+        .copied()
+        .collect()
+}
+
+/// What a replace carries off the note it is about to overwrite: every
+/// non-borg-owned frontmatter key, verbatim, plus the prior `status:` value.
+struct PriorFrontmatter {
+    /// The prior `status:` value, RAW (not parsed through
+    /// `vault::schema::Status`) so an off-schema operator value survives
+    /// byte-for-byte instead of being silently reset to `unread`.
+    status: Option<serde_yaml::Value>,
+    /// Non-borg-owned keys, verbatim.
+    carried: BTreeMap<String, serde_yaml::Value>,
+}
+
+/// Read the frontmatter of the note being replaced and split it into the
+/// carried-forward keys plus the preserved `status:`.
+///
+/// Fails CLOSED on an unreadable or unparseable note: the alternative is to
+/// overwrite it with a note that has silently lost its cortex classification
+/// and quality fields. The resolver parsed this same file moments earlier, so
+/// reaching either error means the file changed underneath us.
+fn read_prior_frontmatter(path: &Path) -> Result<PriorFrontmatter> {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("read the note being replaced: {}", path.display()))?;
+    let Some((yaml, _body)) = vault::frontmatter::split_raw(&raw) else {
+        log::warn!(
+            "process_session_inner: note being replaced has no frontmatter block ({}) - nothing to carry forward",
+            path.display()
+        );
+        return Ok(PriorFrontmatter {
+            status: None,
+            carried: BTreeMap::new(),
+        });
+    };
+    let map: serde_yaml::Mapping = serde_yaml::from_str(yaml)
+        .with_context(|| format!("parse frontmatter of the note being replaced: {}", path.display()))?;
+
+    let owned = borg_owned_keys();
+    let mut status = None;
+    let mut carried = BTreeMap::new();
+    for (key, value) in map {
+        let Some(key) = key.as_str() else {
+            log::warn!(
+                "process_session_inner: non-string frontmatter key in {} - dropped on replace",
+                path.display()
+            );
+            continue;
+        };
+        if key == STATUS_KEY {
+            status = Some(value);
+            continue;
+        }
+        if owned.contains(key) {
+            continue;
+        }
+        carried.insert(key.to_string(), value);
+    }
+    log::debug!(
+        "process_session_inner: replacing {} - carrying {} non-borg key(s) forward, prior status={:?}",
+        path.display(),
+        carried.len(),
+        status
+    );
+    Ok(PriorFrontmatter { status, carried })
+}
+
+/// Resolve the note this publish should replace, failing the publish CLOSED on
+/// a receipts DB error (design doc: Concurrency and failure modes - "Resolver
+/// DB error fails the publish CLOSED, with the trace id and the SQLite error
+/// in the message; the note is not written and the receipts row is left for a
+/// later replay"). Called BEFORE the distill pass so a broken DB costs no LLM
+/// work.
+fn resolve_prior_note(
+    vault_root: &Path,
+    trace_id: &str,
+    source_url: &str,
+    body_hash: &str,
+    intent: ResolveIntent,
+) -> Result<Option<PathBuf>> {
+    let closed = || {
+        format!(
+            "[{trace_id}] session publish aborted (fail-closed): prior-note resolution failed, \
+             so the note was NOT written and the receipts row is left for a later replay"
+        )
+    };
+    let conn = receipts::open_default().with_context(closed)?;
+    identity::resolve_prior_note(&conn, vault_root, trace_id, source_url, body_hash, intent).with_context(closed)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_session(
     body: &str,
     members: &[SessionRecord],
@@ -62,6 +203,7 @@ pub(crate) async fn process_session(
     tags: Vec<String>,
     method: IngestMethod,
     force: bool,
+    intent: ResolveIntent,
     config: &Config,
     trace_id: &str,
 ) -> IngestResult {
@@ -74,6 +216,7 @@ pub(crate) async fn process_session(
         tags,
         method,
         force,
+        intent,
         config,
         trace_id,
     )
@@ -114,6 +257,7 @@ pub(crate) async fn process_session_inner(
     tags: Vec<String>,
     method: IngestMethod,
     force: bool,
+    intent: ResolveIntent,
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
@@ -124,13 +268,22 @@ pub(crate) async fn process_session_inner(
         )
     })?;
     log::debug!(
-        "process_session_inner: trace={trace_id} primary={primary_id} members={} body_len={} body_truncated={body_truncated}",
+        "process_session_inner: trace={trace_id} primary={primary_id} members={} body_len={} body_truncated={body_truncated} intent={intent:?}",
         members.len(),
         body.len()
     );
 
     let session_metadata = build_session_metadata(members, primary_id, body_truncated);
     let source_url = format!("clyde://{primary_id}");
+
+    // Resolve BEFORE naming anything (design doc: "Resolve before you name").
+    // `body` here is the same canonical transcript the harvest runner hashed
+    // for the watermark (`harvest/publish.rs`) and the same bytes staging
+    // wrote to `body.txt`, so this hash agrees across the live and replay
+    // paths - asserted by `borg/tests/body_hash_agrees_across_paths.rs`.
+    let body_hash = watermark::body_hash(body);
+    let vault_root = config.vault_root()?;
+    let prior_note = resolve_prior_note(&vault_root, trace_id, &source_url, &body_hash, intent)?;
 
     // harvest.model empty inherits llm.model (design doc: Distillation >
     // Model, the established per-feature override precedent).
@@ -241,7 +394,66 @@ pub(crate) async fn process_session_inner(
             "[{trace_id}] session distiller emitted no slug; falling back to title-slug filename (title={title:?})"
         );
     }
-    frontmatter_additions.insert("slug".to_string(), serde_yaml::Value::String(slug_stem.clone()));
+
+    // A resolved prior note short-circuits the slug-derived naming entirely
+    // (design doc: Architecture - "if this trace already has a landed note,
+    // write to that note's current path"). `harvest_publish_path` keeps its
+    // signature and its role: naming a NEW note.
+    let note_path = match &prior_note {
+        Some(resolved) => {
+            log::info!(
+                "[{trace_id}] session note resolves to an existing note - replacing in place: {} \
+                 (fresh slug would have been {slug_stem:?})",
+                resolved.display()
+            );
+            resolved.clone()
+        }
+        None => {
+            let dest_path = config.inbox_dir()?;
+            std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
+            harvest_publish_path(&dest_path, &slug_stem, primary_id, force)
+        }
+    };
+
+    // `slug:` names the file it actually lives in - on a replace that is the
+    // RESOLVED stem, not the slug this distill pass produced (design doc: Data
+    // Model, "`slug:` ... is set to the RESOLVED filename stem on a replace,
+    // so it stops lying about the file it names").
+    let effective_stem = note_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&slug_stem)
+        .to_string();
+    frontmatter_additions.insert("slug".to_string(), serde_yaml::Value::String(effective_stem));
+    // Readers: the confirmation guard and the crash-recovery fallback in
+    // `harvest::identity`, plus Phase 6's `--rebuild-state`.
+    frontmatter_additions.insert(
+        "harvest-body-hash".to_string(),
+        serde_yaml::Value::String(body_hash.clone()),
+    );
+
+    // Frontmatter merge on replace: borg rewrites the keys it owns and carries
+    // every other key forward verbatim, `status:` included (its value is user
+    // state, not borg's). A carried key never displaces a freshly-derived one.
+    let mut status = Some(vault::schema::Status::Unread);
+    if let Some(resolved) = &prior_note {
+        let prior = read_prior_frontmatter(resolved)?;
+        if let Some(prior_status) = prior.status {
+            // Carried as a raw value rather than through `NoteContent.status`
+            // so an off-schema operator value survives verbatim. It renders in
+            // the additions block instead of its usual slot - same key, same
+            // value, different line.
+            status = None;
+            frontmatter_additions.insert(STATUS_KEY.to_string(), prior_status);
+        }
+        for (key, value) in prior.carried {
+            if frontmatter_additions.contains_key(&key) {
+                log::debug!("[{trace_id}] frontmatter key {key:?} re-derived by this publish; not carried forward");
+                continue;
+            }
+            frontmatter_additions.insert(key, value);
+        }
+    }
 
     let note = NoteContent {
         title: title.clone(),
@@ -259,22 +471,27 @@ pub(crate) async fn process_session_inner(
         distilled_body: Some(distilled_body),
         frontmatter_additions,
         origin: Some(vault::schema::Origin::Generated),
-        status: Some(vault::schema::Status::Unread),
+        status,
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
 
-    let dest_path = config.inbox_dir()?;
-    std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
-
-    let note_path = harvest_publish_path(&dest_path, &slug_stem, primary_id, force);
     vault::note::write_atomic(&note_path, rendered.as_bytes()).context("Failed to write session note to vault")?;
 
     log::info!(
-        "[{trace_id}] Wrote session note: {} (members={})",
+        "[{trace_id}] Wrote session note: {} (members={} replaced={})",
         note_path.display(),
-        members.len()
+        members.len(),
+        prior_note.is_some()
     );
+
+    // Repair the trace's recorded note_path (terminal-state-safe, so it works
+    // for a replay too, which never reaches `process_content`'s receipts
+    // chokepoint) and self-insert into the in-process vault index. Both are
+    // best-effort AFTER a landed note: the note is the durable artifact, and
+    // failing an already-published note over a bookkeeping write would be a
+    // lie about what happened.
+    record_landed_path(trace_id, &vault_root, &note_path);
 
     publish_note(
         config,
@@ -286,6 +503,29 @@ pub(crate) async fn process_session_inner(
         trace_id,
         distilled.meta.validation.is_degraded(),
     )
+}
+
+/// Record where this trace's note actually landed, on EVERY session publish
+/// including a replay (design doc: Architecture, "Receipts write-back" and
+/// "Index freshness: self-insert on write").
+///
+/// [`receipts::update_note_path`] is the terminal-state-safe writer:
+/// `mark_succeeded` carries `WHERE status='received'` and so cannot repair the
+/// row of a note cortex has since moved, and a stage-2 replay bypasses that
+/// chokepoint entirely. [`identity::note_published`] keeps the process-lifetime
+/// vault index exact without a rebuild.
+///
+/// Best-effort by design: the note has already landed by the time this runs.
+fn record_landed_path(trace_id: &str, vault_root: &Path, note_path: &Path) {
+    match receipts::open_default() {
+        Ok(conn) => {
+            if let Err(e) = receipts::update_note_path(&conn, trace_id, &note_path.to_string_lossy()) {
+                log::error!("[{trace_id}] receipts::update_note_path failed after publish: {e:#}");
+            }
+        }
+        Err(e) => log::error!("[{trace_id}] receipts open failed for post-publish note_path repair: {e:#}"),
+    }
+    identity::note_published(vault_root, trace_id, note_path);
 }
 
 /// Deterministic Stage-0 metadata for the distiller (design doc: Watermark +
