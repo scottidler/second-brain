@@ -17,6 +17,7 @@ pub mod backoff;
 pub mod blocklist;
 pub mod byline;
 pub mod config;
+pub mod dedupe;
 pub mod description;
 pub mod discord;
 pub mod dispatch;

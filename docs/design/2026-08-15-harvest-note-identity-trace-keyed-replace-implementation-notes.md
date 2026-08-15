@@ -542,3 +542,134 @@ count was executed against current `main` and the live vault before Phase 1.
   (fix grouping and collision resolution, not retire the prior mechanism) -
   flagged here rather than silently removed or silently left implying it is
   still load-bearing.
+
+## Phase 6: retire the existing forks
+
+### Design decisions
+
+- **New `borg::dedupe` module, not a `cortex` module.** `sb borg
+  dedupe-sessions` groups and tombstones BORG's own duplicate publishes, so it
+  lives in the crate that owns the writer it is cleaning up after. It does
+  NOT depend on `cortex` (no `cortex` dependency was added to `borg/Cargo.toml`
+  - checked: `cortex` does not depend on `borg` either, so a `borg -> cortex`
+  edge would be structurally fine, but it would still cross the workspace's
+  one-way capture/governance layering the root `CLAUDE.md` documents). The
+  tombstone SHAPE (`slug:` stripped, `superseded-by: <stem>` inserted, body ->
+  `Merged into [[stem]].`) is reproduced as a CONTRACT rather than imported
+  from `cortex::association::tombstone_content` - `borg/src/dedupe.rs`'s
+  `apply_group`.
+- **Group by `trace:`, full stop - with one defensive addition beyond the
+  doc's literal wording.** A trace bucket is split by `source:` before being
+  accepted as a duplicate cohort (`dedupe.rs::split_by_source`). The doc's
+  Risks table names a 32-bit trace collision as "vanishingly unlikely but not
+  impossible" everywhere else in this design (the whole reason the
+  resolution path in Phases 1-3 carries a three-term guard); grouping by
+  `trace:` alone here would tombstone a genuinely different session that
+  happened to collide into the same bucket. A same-trace, different-source
+  split WARNs and evaluates each source's sub-cohort independently; a
+  sub-cohort of size 1 is not a duplicate group. The real `hv-e5d240` cohort
+  is unaffected (all 15 forks share one `source:`), so this changes nothing
+  observable for the concrete fixture the doc names, only the collision edge
+  case.
+- **Survivor rule implemented as a single lexicographic tuple**
+  `(is_clean, effective_timestamp, path)`, MAX wins
+  (`dedupe.rs::survivor_key`). `is_clean` requires `distilled: true` AND
+  neither degradation signal: `cortex-needs-review: true` (frontmatter) OR a
+  literal `[missing-summary]`/`[yaml-parse-error]` marker in the body (the
+  first line `distillers::validate::fallback_distilled` writes into `##
+  Summary` on a degraded distill pass - there is no separate frontmatter flag
+  for this, confirmed by reading the real `hv-e5d240` notes in the live vault:
+  `distilled: true` is set on every one of the 15 forks, degraded or not, so
+  it is a necessary but not sufficient gate exactly as the doc states).
+  Reading the real cohort confirmed the is_clean predicate identifies exactly
+  6 clean notes among the 15 (the doc's own count) and that the 4 notes
+  ingested 2026-07-24 are all excluded, matching the doc's evidence exactly.
+- **"Greatest receipts `terminal_at` if present, else greatest mtime" is
+  PER-NOTE, not a group-wide tier switch** (`dedupe.rs::effective_timestamp`).
+  A shared trace has exactly ONE receipts row, so `terminal_at` can only ever
+  attach to whichever single fork the row's `note_path` currently names (most
+  forks in a group will not match, and fall through to their own mtime).
+  Both are converted to the same Unix-seconds scale so they compose into one
+  `Option<i64>` field; `None` (both reads failed) still falls through to the
+  path tie-break in the same tuple.
+- **Backfill and tombstoning share one `run_with` pass** so a note this
+  invocation is ABOUT to tombstone is excluded from the backfill target set
+  (`tombstoned_this_run`, a `HashSet<&PathBuf>` built from the just-computed
+  plan) - a hash is only ever useful on a live, resolvable note, and Phase 1's
+  identity resolver never looks up a tombstone directly. A tombstone from an
+  EARLIER run (already carrying `superseded-by:`) is excluded the same way,
+  via the ordinary `is_tombstone` scan filter.
+- **`--purge`'s candidate set unions two sources**: every on-disk Session note
+  already carrying `superseded-by:` (covers `--purge` run alone, later, after
+  an earlier `--apply`), plus this run's freshly-planned tombstones (which, on
+  a dry run, are not yet reflected on disk or in the `notes` scan at all) -
+  `dedupe.rs::run_purge`. This lets `--apply --purge` in one pass, or
+  `--apply` now / `--purge` later, both work.
+- **Inbound-link detection reuses one regex** (`\[\[([^\]|]+)(?:\|[^\]]+)?\]\]`)
+  for piped, path-qualified, AND embedded links - an `![[embed]]` matches the
+  same capture group because the `!` sits outside it, so no separate embed
+  pattern was needed. `.base` views were deliberately NOT scanned: reading a
+  real one (`system/views/borg-ledger.base`) confirmed they are property-filter
+  queries (`filters:`/`properties:`/`views:` YAML), not literal `[[wikilink]]`
+  references to specific notes - there is nothing there to break or resolve.
+- **`rkvr::remove` (already `pub(crate)`) is reused verbatim for `--purge`**,
+  not reimplemented - it already has the "prefer `rkvr rmrf`, fall back to
+  non-recoverable removal when the binary is absent, bypass to the fallback
+  under `cfg!(test)`" contract Phase 6 needs, with no changes.
+
+### Deviations
+
+- **Same-effect, correct seam: tombstone/backfill rewrites go through
+  `Frontmatter::to_yaml()` + a full-file rebuild, not a targeted
+  insert/remove-single-field text patch.** `cortex::association::
+  tombstone_content` (which this phase's shape is modeled on) mutates the raw
+  frontmatter TEXT in place via `cortex::scope::insert_frontmatter_fields`/
+  `remove_frontmatter_fields`, preserving the original key order. `borg` has
+  no equivalent helper (and, per the module-doc decision above, does not
+  import `cortex`'s), so `dedupe.rs` instead parses the note via
+  `vault::frontmatter::parse_frontmatter`, mutates the typed `Frontmatter`,
+  and re-serializes with `.to_yaml()` - the exact pattern already used by
+  `cortex::summarize::rewrite_note_file`. Effect is identical (every
+  pre-existing key, including ones this design does not own like `domain:`
+  or `cortex-classified:`, survives the rewrite byte-for-byte in VALUE, only
+  possibly reordered to the writer's canonical order); a unit test
+  (`apply_group_writes_the_tombstone_contract_shape`) asserts a non-owned
+  field survives across the rewrite.
+- **No other deviations from the doc's Phase 6 bullets or acceptance
+  criteria.** `--apply`/`--purge`/dry-run-by-default, tombstone-not-delete,
+  no wikilink rewrite, and backfill-report-not-skip are all implemented
+  exactly as specified.
+
+### Tradeoffs
+
+- `run_purge`'s inbound-link index (`build_link_index`) is built from a full
+  `scan_vault` pass regardless of how many tombstone candidates exist.
+  Accepted: this is a maintenance command run rarely (operator-invoked, not
+  nightly), and `association::apply` already pays the same full-vault-scan
+  cost for the same class of reason.
+- The purge test suite (`run_purge_*`) is exercised as `borg` LIB unit tests
+  (`#[cfg(test)] mod tests` inside `dedupe.rs`), not `borg/tests/*.rs`
+  integration tests. `rkvr::remove`'s `cfg!(test)` bypass to the non-recoverable
+  fallback is only `true` when the CRATE ITSELF is compiled in test mode,
+  which holds for the crate's own lib unit tests but not for a separate
+  integration-test binary (which links a normal-mode build of `borg`) - an
+  integration test would have shelled out to the REAL `rkvr rmrf` (or its
+  NotFound fallback) and touched the operator's actual `~/.local/share/rkvr/`
+  archive store. Lib-unit-test placement was the correct seam to keep the
+  test suite from touching real machine state, matching this design's own
+  "never touch the live vault" boundary.
+- `plan_groups`' safety split (`split_by_source`) costs one extra `BTreeMap`
+  pass per trace bucket with more than one candidate. Negligible: 22 of 208
+  distinct sessions in the live vault currently own more than one note per
+  the doc's own measured evidence, so this is a small, rarely-hit path.
+
+### Open questions
+
+- None blocking. Flagged for the operator, not a question: `sb borg
+  dedupe-sessions` (dry-run) has NOT been run against the live vault at
+  `~/repos/scottidler/obsidian` as part of this phase - per this phase's
+  explicit scope boundary, only tempdir fixtures were exercised. Running the
+  dry-run against the live vault, reviewing the printed plan (survivor +
+  tombstoned set per trace, including the real `hv-e5d240` cohort), and then
+  `--apply` (and later, separately, `--purge`) are the operator's own next
+  steps.

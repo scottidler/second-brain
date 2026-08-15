@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler (via agent)
 **Date:** 2026-08-15
-**Status:** Draft
+**Status:** Implemented
 **Review Passes Completed:** review-panel rounds 1-3 (Architect + Staff Engineer, cross-model). Round 1: 5 must-fix, folded. Round 2: 7 must-fix, folded. Round 3 (delta review of the un-deferrals): 2 must-fix + 3 approved-with-edits, folded. Nothing deferred; no open questions.
 
 ## Summary

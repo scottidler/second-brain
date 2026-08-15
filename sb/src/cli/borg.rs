@@ -110,6 +110,22 @@ pub enum Command {
     /// (design 2026-07-17). Selects, clusters into threads, distills, and
     /// publishes to the inbox through the normal borg pipeline.
     Harvest(HarvestCliArgs),
+    /// Retire the surplus harvest-session-note forks a trace produced before
+    /// the trace-keyed-replace fix (design 2026-08-15, Phase 6). Groups by
+    /// `trace:`, tombstones every loser (never deletes), and backfills
+    /// `harvest-body-hash:` where staging survives. Dry-run by default.
+    DedupeSessions {
+        /// Write the tombstones (and, with --purge, archive eligible ones).
+        /// Without this flag, nothing on disk changes.
+        #[arg(long)]
+        apply: bool,
+        /// Also rkvr-archive any tombstone (new this run, or left over from
+        /// an earlier one) with zero live inbound wikilinks. Independent of
+        /// --apply: --purge alone previews/archives existing tombstones
+        /// without planning new ones.
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 #[derive(Args)]
@@ -620,6 +636,11 @@ impl BorgCli {
                     Ok(())
                 }
             }
+            Some(Command::DedupeSessions { apply, purge }) => {
+                let report = borg::dedupe::run(&config, &borg::dedupe::DedupeOpts { apply, purge })?;
+                print_dedupe_report(&report);
+                Ok(())
+            }
             Some(Command::Blocklist(args)) => match args.action {
                 BlocklistAction::List => {
                     let rows = borg::blocklist::entries()?;
@@ -805,6 +826,68 @@ fn print_harvest_report(report: &borg::harvest::HarvestReport) {
         report.parse_rejections.len(),
         report.plan.new_cursor
     );
+}
+
+/// Render a `sb borg dedupe-sessions` outcome. Dry-run and apply share the
+/// same shape, differing only in verb tense, so the operator can review the
+/// EXACT plan (survivor + tombstoned set per trace) before approving `--apply`.
+fn print_dedupe_report(r: &borg::dedupe::DedupeReport) {
+    let mode = if r.applied { "APPLY" } else { "DRY-RUN" };
+    println!("dedupe-sessions: {mode}");
+    if r.groups.is_empty() {
+        println!("No duplicate trace groups found.");
+    } else {
+        let tombstone_verb = if r.applied { "tombstoned" } else { "would tombstone" };
+        println!("{} duplicate trace group(s):", r.groups.len());
+        for g in &r.groups {
+            println!("  trace {}", g.trace);
+            println!("    survivor:     {}", g.survivor.display());
+            for t in &g.tombstoned {
+                println!("    {tombstone_verb}: {}", t.display());
+            }
+        }
+    }
+
+    println!();
+    let backfill_verb = if r.applied { "backfilled" } else { "would backfill" };
+    println!(
+        "harvest-body-hash backfill: {} {} note(s)",
+        backfill_verb,
+        r.backfill.backfilled.len()
+    );
+    for p in &r.backfill.backfilled {
+        println!("  {}", p.display());
+    }
+    if !r.backfill.uncovered.is_empty() {
+        println!(
+            "  {} note(s) have no surviving staging - harvest-body-hash left absent:",
+            r.backfill.uncovered.len()
+        );
+        for p in &r.backfill.uncovered {
+            println!("    {}", p.display());
+        }
+    }
+
+    if let Some(purge) = &r.purge {
+        println!();
+        let purge_verb = if r.applied { "archived" } else { "would archive" };
+        println!("purge: {purge_verb} {} tombstone(s)", purge.archived.len());
+        for p in &purge.archived {
+            println!("  {}", p.display());
+        }
+        if !purge.refused.is_empty() {
+            println!(
+                "purge refused {} tombstone(s) with a live inbound link:",
+                purge.refused.len()
+            );
+            for (p, sources) in &purge.refused {
+                println!("  {} <- linked from:", p.display());
+                for s in sources {
+                    println!("      {}", s.display());
+                }
+            }
+        }
+    }
 }
 
 fn print_replay_event(event: &borg::replay::ReplayEvent) {
