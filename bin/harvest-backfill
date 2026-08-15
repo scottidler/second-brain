@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# harvest-backfill - fire a deliberate `sb borg harvest` backfill over a window
+# and log it. Wraps the LIVE on-demand backfill (publish notes, write receipts,
+# advance the watermark) so it can be launched from a bare/non-interactive shell
+# without the ambient secret eval an interactive login gets.
+#
+# The distiller talks to Claude via fabric, which needs ESCOTE_ANTHROPIC_API_KEY
+# (borg aliases it to ANTHROPIC_API_KEY on the fabric child). If that var is
+# already in the environment it is used as-is; otherwise it is decrypted on the
+# spot from keep/.secrets via `manifest age decrypt` (never printed, never
+# persisted). --since overrides the stored watermark cursor and re-scans the
+# whole window; already-published sessions are skipped (idempotent) unless
+# --force is passed.
+#
+# usage: harvest-backfill [--since SPAN] [--limit N] [--force] [--foreground]
+#   --since SPAN    scan window: relative span (60d, 24h) or a date (default: 60d)
+#   --limit N       cap candidate sessions pulled this run (default: no cap)
+#   --force         re-distill and re-publish already-published in-scope sessions
+#   --foreground    run attached and tee to the log (default: background + nohup)
+# env:
+#   ESCOTE_ANTHROPIC_API_KEY  fabric's Claude key; auto-decrypted if unset
+set -euo pipefail
+
+log() { echo "harvest-backfill: $*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+help() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; }
+
+since=60d
+limit=""
+force=false
+foreground=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --since) since="$2"; shift ;;
+    --limit) limit="$2"; shift ;;
+    --force) force=true ;;
+    --foreground) foreground=true ;;
+    -h|--help) help; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+  shift
+done
+
+command -v sb >/dev/null || die "sb not found (cargo install / otto deploy first)"
+
+# Fabric's Claude key. Prefer the ambient value (interactive shell eval'd it at
+# startup); otherwise decrypt just this one secret via manifest.
+secret=~/repos/scottidler/keep/.secrets/escote-anthropic-api-key.age
+if [[ -z "${ESCOTE_ANTHROPIC_API_KEY:-}" ]]; then
+  command -v manifest >/dev/null || die "manifest not found; cannot decrypt the Claude key"
+  [[ -f "$secret" ]] || die "secret not found: $secret"
+  log "ESCOTE_ANTHROPIC_API_KEY not set; decrypting from keep/.secrets"
+  eval "$(manifest age decrypt "$secret")"
+fi
+[[ -n "${ESCOTE_ANTHROPIC_API_KEY:-}" ]] || die "ESCOTE_ANTHROPIC_API_KEY still empty after decrypt"
+
+# Build the argv. --since always wins over the stored cursor; --live forces a
+# publishing run regardless of the harvest.mode config default.
+args=(borg harvest --since "$since" --live --verbose)
+[[ -n "$limit" ]] && args+=(--limit "$limit")
+$force && args+=(--force)
+
+logdir=~/.local/share/sb/borg/harvest-backfill
+mkdir -p "$logdir"
+stamp=$(date +%Y%m%d-%H%M%S)
+logfile="$logdir/harvest-$since-$stamp.log"
+
+log "window=$since force=$force limit=${limit:-none}"
+log "log -> $logfile"
+
+if $foreground; then
+  sb "${args[@]}" 2>&1 | tee "$logfile"
+else
+  nohup sb "${args[@]}" >"$logfile" 2>&1 &
+  pid=$!
+  log "launched in background (pid $pid)"
+  log "tail -f $logfile"
+fi
