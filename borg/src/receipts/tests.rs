@@ -1168,3 +1168,44 @@ fn query_filters_by_harvest_method() {
     assert_eq!(rows[0].kind, "session");
     assert_eq!(rows[0].raw_input, "clyde://abc");
 }
+
+#[test]
+fn update_note_path_repairs_a_succeeded_row() {
+    // harvest note identity design (Phase 1): `mark_succeeded`'s
+    // `WHERE status='received'` guard cannot repair a row that already
+    // reached `succeeded` (a replay, or a note cortex moved between
+    // directories). `update_note_path` has NO status predicate for exactly
+    // this reason.
+    let conn = fresh();
+    record_received(&conn, "hv-1", Method::Harvest, ReceiptKind::Session, "clyde://abc").expect("ins");
+    mark_succeeded(&conn, "hv-1", "inbox/old-slug.md", false).expect("mark succeeded");
+    assert_eq!(get(&conn, "hv-1").expect("get").expect("row").status, "succeeded");
+
+    let updated = update_note_path(&conn, "hv-1", "notes/new-slug.md").expect("update_note_path");
+    assert!(updated, "update_note_path must report true when it repaired a row");
+
+    let r = get(&conn, "hv-1").expect("get").expect("row");
+    assert_eq!(r.status, "succeeded", "status is untouched by update_note_path");
+    assert_eq!(r.note_path.as_deref(), Some("notes/new-slug.md"));
+}
+
+#[test]
+fn update_note_path_also_repairs_a_failed_row() {
+    // Terminal-state-safe means ANY terminal status, not just succeeded.
+    let conn = fresh();
+    record_received(&conn, "hv-2", Method::Harvest, ReceiptKind::Session, "clyde://abc").expect("ins");
+    mark_failed(&conn, "hv-2", FailureStage::PublishFailed, "boom").expect("mark failed");
+
+    let updated = update_note_path(&conn, "hv-2", "notes/recovered.md").expect("update_note_path");
+    assert!(updated);
+    let r = get(&conn, "hv-2").expect("get").expect("row");
+    assert_eq!(r.status, "failed");
+    assert_eq!(r.note_path.as_deref(), Some("notes/recovered.md"));
+}
+
+#[test]
+fn update_note_path_returns_false_for_absent_trace() {
+    let conn = fresh();
+    let updated = update_note_path(&conn, "no-such-trace", "notes/whatever.md").expect("update_note_path");
+    assert!(!updated, "an absent trace_id updates zero rows");
+}

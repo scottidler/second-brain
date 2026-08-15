@@ -1,0 +1,160 @@
+# Implementation notes: harvest note identity -- trace-keyed replace
+
+Append-only. Each phase adds a section with all four buckets.
+
+## Phase 0: ready-to-build gate (pre-implementation verification)
+
+The design doc's acceptance criteria carried no `Observed on main:` lines, so
+every criterion and rationale claim naming an existing symbol, path, flag, or
+count was executed against current `main` and the live vault before Phase 1.
+
+### Verified exactly as written
+
+- `vault/src/trace.rs:36` is `format!("{:06x}", mixed & 0x00FF_FFFF)` -- matches
+  the Phase 1 edit list's "before" state.
+- Phase 1's "exactly ONE length assumption exists in the workspace": confirmed.
+  Grep for slice patterns, `chars().take`, `len()` comparisons, and hex shape
+  regexes returns exactly one trace-length assertion,
+  `vault/src/trace/tests.rs:6` (`^[a-z]{2}-[0-9a-f]{6}$`). The one other
+  `chars().take` near trace code is `borg/src/pipeline/session.rs:53`, which
+  truncates the *primary session id*, not the trace.
+- `borg/src/harvest/watermark.rs:97-99` is `fs::write` + `fs::rename` with no
+  fsync; `vault/src/note.rs:112-128` `write_atomic` fsyncs temp and parent.
+  Phase 2's "durability is inverted" premise holds.
+- `watermark.rs` `acquire_lock` uses `try_lock_exclusive` and returns
+  `HarvestLockHeld` -- Phase 2's "fails instantly, does not wait" claim holds.
+- `watermark.rs` `classify_reappearance` returns `FollowUp` on `force` **before**
+  consulting `fresh_hash`. Phase 1's `ResolveIntent::FollowUp` gate is required
+  exactly as the doc argues.
+- `receipts.rs` `mark_succeeded` carries `WHERE trace_id=? AND status='received'`
+  -- cannot repair a terminal row, so `update_note_path` is needed.
+- `cortex/src/classify.rs` `resolve_collision`: the `existing_note_has_source`
+  check is applied only to the base path; the `for i in 2..100` loop tests
+  `!candidate.exists()` alone. Attempt 4's bug is real and Phase 5's fix is
+  correctly scoped.
+- `cortex/src/association.rs` `group_by_slug` skips `superseded-by` and keeps
+  groups of `>= 2` -- the guard Phase 5 must carry over exists where stated.
+- `.otto.yml` uses `--features vec` for check/clippy/test. `rkvr` is on PATH at
+  `~/.cargo/bin/rkvr` (Phase 6 `--purge` dependency).
+- `sb borg dedupe-sessions` does not exist yet -- correct, Phase 6 introduces it.
+- Live vault: 3,141 markdown files, 10.0 MB (exact match). 272 harvest notes,
+  208 distinct `clyde://` sources, 22 sources owning more than one note (all
+  three exact). Trace `hv-e5d240` has exactly 15 notes, all under `notes/`, with
+  the filenames the doc lists.
+
+### Doc defects found and amended
+
+- **Duplicate filename stems: doc said 32 vault-wide, actual is 33.** Measured
+  `find . -name '*.md' -not -path './.obsidian/*' -printf '%f\n' | sort | uniq -d
+  | wc -l` -> `33`; excluding `system/` -> `26` (the doc's 26 is exact). The
+  drift is in the `system/` weekly-note series. Amended in the doc's tombstone
+  paragraph with the re-count date. This is a stale measurement, not a load-
+  bearing change: the ambiguity conclusion that kills Alternative 3 holds at 33
+  as it did at 32.
+
+### Doc imprecision recorded, not amended
+
+- **The borg-owned key enumeration is under-inclusive.** The doc lists
+  `markdown::render_note`'s emitted keys as `title`, `date`, `ingested`,
+  `source`, `type`, `origin`, `status`, `method`, `trace`, `tags`, `creator`.
+  `render_note` also emits `asset`, `capture-note`, `slides`, `duration`, and
+  `language` (`borg/src/markdown.rs`, the `ContentType`-conditional branches).
+  Session notes never take those branches, so the omission is harmless for this
+  design's behavior -- but the cross-cutting criterion requires the policy set be
+  DERIVED from the writer with a test that fails on an unknown writer key, and a
+  hand-typed list from the doc would fail that test on day one. Phase 3 must
+  derive the set from `render_note` itself, per the doc's own governing rule
+  ("DERIVED FROM THE WRITER, not hand-listed"), and treat the doc's prose list
+  as illustrative. No doc amendment: the governing rule is already correct.
+
+### Open questions
+
+- None. Gate passes; Phase 1 proceeds.
+
+## Phase 1: resolution primitives
+
+### Design decisions
+
+- `resolve_prior_note` builds/fetches a process-lifetime memoized `VaultIndex`
+  (`trace_index`, `stem_index`, `source_hash_index`) from ONE `scan_vault` call
+  per vault root, keyed by canonicalized root in a global
+  `Mutex<HashMap<PathBuf, VaultIndex>>` — `borg/src/harvest/identity.rs::get_or_build_index`.
+  Keying by root (not a single global) lets production (one root) and tests
+  (one tempdir per test) coexist in the same process without cross-talk.
+- `note_published(vault_root, trace_id, absolute_path)` is the Phase 3
+  self-insert hook: it mutates the trace_index entry of an ALREADY-BUILT cached
+  index in place, and is a no-op if no index has been built yet for that root
+  (the next `resolve_prior_note` call builds fresh from disk, which already
+  includes the just-landed note) — `identity.rs::note_published`.
+- `source_hash_index` is populated in the SAME `scan_vault` pass as
+  `trace_index`/`stem_index`, not a second pass on a step-3 miss — this is what
+  keeps the crash-recovery fallback from ever paying a second full-vault walk
+  — `identity.rs::build_index`.
+- Tombstone-chain tie-break resolved to: a stem with an ambiguous (>1) file
+  count is disambiguated by filtering OUT any candidate that is itself a
+  tombstone (`superseded-by:` present); a stem with exactly ONE match is used
+  regardless of whether that single match is itself a tombstone (this is what
+  makes the chain actually transitive — filtering unconditionally would turn
+  every multi-hop chain into a false "missing stem") —
+  `identity.rs::follow_tombstone_chain`. This reading was inferred from the
+  Architecture section's two adjacent but distinct sentences ("follow it...
+  transitively... depth bound of 8" vs. "the multi-match tie-break skips
+  tombstones entirely") — no open question was raised because the two
+  sentences are only mutually consistent under this reading; recorded here for
+  scrutiny.
+- `try_resolve_candidate` (steps 1-2, three-term guard) and
+  `try_resolve_crash_candidate` (step 3, source+hash only, no trace term, no
+  hash-absence leniency) are separate functions rather than one parameterized
+  guard, because step 3's Data Model rule ("both keys are required; a note
+  lacking the hash is not eligible") is the OPPOSITE of the confirmation
+  guard's legacy-hash-absent-passes leniency — folding them into one function
+  with a flag would obscure that the leniency direction flips.
+
+### Deviations
+
+- **Doc prose said "timestamped rebuild" (Phase 1 section) and "built at most
+  once per 60s" (Performance section); both are stale leftovers from an
+  earlier TTL design that the Architecture section's "Index freshness"
+  paragraph explicitly withdraws in favor of no-TTL/self-insert-on-write.**
+  Implemented per the withdrawal (no TTL, no timer, no 60s window — memoized
+  for the process lifetime, refreshed only by `note_published`'s self-insert).
+  Fixed both stale sentences in the design doc itself (Phase 1 section and
+  Performance section) rather than leaving the contradiction for a reader to
+  trip over.
+- **`resolve_prior_note`'s signature takes no index parameter** (the doc's API
+  Design section shows only `conn, vault_root, trace_id, primary_source,
+  body_hash, intent`), so the "memoized for the process lifetime" index is
+  necessarily internal (a module-private static), not caller-supplied. Same
+  effect as a caller-owned index, correct seam for a signature the doc fixed.
+- Step 2 (vault index) and step 3 (crash-recovery) do not special-case a
+  multi-candidate match with an explicit ambiguity WARN the way the tombstone
+  follower does — the doc only specs ambiguity handling for the STEM lookup.
+  For steps 2/3, multiple index candidates are tried in `scan_vault`'s
+  deterministic path-sorted order and the first guard-passing one wins; the
+  three-term guard (trace+source+hash) is expected to narrow this to at most
+  one legitimate match in practice (trace-collision is the only way step 2 can
+  have >1 same-trace candidate, and the guard's source+hash terms are exactly
+  what the doc says makes that collision non-destructive). No doc contradiction
+  — just an implementation choice the doc left unspecified.
+
+### Tradeoffs
+
+- Full-vault `scan_vault` cost is paid once per process per vault root instead
+  of amortized/streamed — accepted per the doc's own rejection of Alternative
+  4 (O(vault) per publish) and its Performance section's math (~140 misses/night
+  would make ANY rebuild-on-miss policy the dominant cost). A long-lived daemon
+  process that both harvests AND has cortex actively moving notes around
+  between publishes would see this index drift stale until `note_published`
+  fires again — accepted because the receipts fast path plus re-stat already
+  cover that case (Concurrency and failure modes: "External staleness... is
+  covered by the receipts fast path... plus the re-stat before write").
+- `VaultIndex` is `Clone`d out of the mutex on every `resolve_prior_note` call
+  (rather than holding the lock or returning a guard) so the mutex is never
+  held across the (parse-heavy) resolution work that follows — trades a
+  per-call `HashMap`/`Vec` clone for lock-hygiene; the clone is cheap relative
+  to the `scan_vault` it replaces and is only paid per publish, not per vault
+  scan.
+
+### Open questions
+
+- None.

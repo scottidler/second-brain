@@ -9,16 +9,21 @@ static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Generate a trace ID with a method-specific prefix.
 ///
-/// Format: `{prefix}-{6 hex chars}`
+/// Format: `{prefix}-{8 hex chars}`
 ///
-/// Collision profile: the ID is the lower 24 bits of a mix of nanosecond
-/// timestamp, PID, and an atomic counter - a 16,777,216-value space. This is
-/// NOT a uniqueness guarantee: by the birthday bound, collisions become likely
-/// around ~4,800 IDs sharing a prefix. It is a low-collision, dependency-free
-/// (no `rand`) label, adequate because the receipts DB keys on the full trace
-/// string and a rare collision only conflates two ingests in the log, not in
-/// the vault. If true uniqueness is ever required, widen the field or add a
-/// UUID dependency.
+/// Collision profile: the ID is the lower 32 bits of a mix of nanosecond
+/// timestamp, PID, and an atomic counter - a 4,294,967,296-value space. This
+/// is NOT a uniqueness guarantee: by the birthday bound, collisions become
+/// likely around ~77,000 IDs sharing a prefix (widened from ~4,800 at the
+/// prior 24-bit width - a delay, not an elimination; see the harvest note
+/// identity design doc, which keys note replacement on this field and widens
+/// it for that reason). It is a low-collision, dependency-free (no `rand`)
+/// label, adequate because the receipts DB keys on the full trace string and
+/// a rare collision only conflates two ingests in the log, not in the vault -
+/// and, since the harvest identity design, the three-term confirmation guard
+/// (`trace` + `source` + `harvest-body-hash`) is what makes a collision
+/// non-destructive there too. If true uniqueness is ever required, widen the
+/// field further or add a UUID dependency.
 pub fn generate(method: Method) -> String {
     let prefix = method_prefix(method);
     let nanos = SystemTime::now()
@@ -28,12 +33,12 @@ pub fn generate(method: Method) -> String {
     let pid = std::process::id();
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    // Mix all three sources, then take lower 24 bits (6 hex chars)
+    // Mix all three sources, then take lower 32 bits (8 hex chars)
     let mixed = nanos
         .wrapping_mul(6364136223846793005) // LCG multiplier
         ^ (pid as u64) << 16
         ^ seq as u64;
-    let hex = format!("{:06x}", mixed & 0x00FF_FFFF);
+    let hex = format!("{:08x}", mixed & 0xFFFF_FFFF);
     format!("{prefix}-{hex}")
 }
 

@@ -461,6 +461,29 @@ pub fn mark_succeeded(conn: &Connection, trace_id: &str, note_path: &str, degrad
     Ok(rows > 0)
 }
 
+/// Repair `note_path` on a row that is already terminal (`succeeded` or
+/// `failed`) - the only other writer of `note_path` besides [`mark_succeeded`].
+/// Deliberately terminal-state-safe: unlike `mark_succeeded`'s
+/// `WHERE status='received'` guard, this has NO status predicate, because its
+/// entire reason to exist (harvest note identity resolution, design doc
+/// `2026-08-15-harvest-note-identity-trace-keyed-replace.md`) is repairing a
+/// row that already reached `succeeded` (a replay, or a note cortex moved
+/// between directories). Returns `false` (not an error) when `trace_id` has no
+/// row at all - the caller decides whether an absent trace is worth a WARN.
+pub fn update_note_path(conn: &Connection, trace_id: &str, note_path: &str) -> Result<bool> {
+    log::debug!("receipts::update_note_path: trace={trace_id} note_path={note_path}");
+    let rows = conn
+        .execute(
+            "UPDATE receipts SET note_path=? WHERE trace_id=?",
+            params![note_path, trace_id],
+        )
+        .with_context(|| format!("Failed to update note_path trace_id={trace_id}"))?;
+    if rows == 0 {
+        log::warn!("receipts::update_note_path: trace_id={trace_id} has no receipts row, no-op");
+    }
+    Ok(rows > 0)
+}
+
 /// Promote a `received` row to `rejected` (the harvest selection gate
 /// declining to publish, `GateId::Selection` - harvest-clyde-sessions
 /// design). Distinct from [`mark_failed`]: a rejection is the gate correctly

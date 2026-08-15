@@ -20,9 +20,14 @@
 //! - [`publish`] - Phase 5: fetch bodies + door capture + pipeline dispatch
 //!   for every publishable `ThreadDecision`, then the post-publish watermark
 //!   update
+//! - [`identity`] - trace-keyed prior-note resolution (design doc
+//!   `docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md`),
+//!   so a replay/re-appearance replaces the note a trace already produced
+//!   instead of forking a sibling
 
 pub mod cluster;
 pub mod contract;
+pub mod identity;
 pub mod publish;
 pub mod reader;
 pub mod select;
