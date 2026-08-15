@@ -105,7 +105,10 @@ fn build_fabric_command_leaves_anthropic_key_unset_when_env_name_empty() {
     let has_key = cmd
         .get_envs()
         .any(|(k, _)| k == std::ffi::OsStr::new("ANTHROPIC_API_KEY"));
-    assert!(!has_key, "empty api_key_env must not set ANTHROPIC_API_KEY on the child");
+    assert!(
+        !has_key,
+        "empty api_key_env must not set ANTHROPIC_API_KEY on the child"
+    );
 }
 
 #[test]
