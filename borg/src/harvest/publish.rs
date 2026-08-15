@@ -177,12 +177,21 @@ async fn publish_thread_inner<R: ExportReader>(
             ResolveIntent::FollowUp
         }
     };
+    // The follow-up back-link source (trace-keyed-replace design, Phase 4):
+    // `ThreadDecision.decision` already carries the prior `PublishedEntry` for
+    // exactly the `FollowUp` case - `None` for `NewNote`/the fail-closed `Skip`
+    // arm above, since neither continues a prior note.
+    let follows_prior = match &thread.decision {
+        Reappearance::FollowUp { prior } => Some(prior.clone()),
+        Reappearance::NewNote | Reappearance::Skip { .. } => None,
+    };
     let content = ContentKind::Session {
         body: body_text,
         members: thread.members.clone(),
         primary_id: thread.primary_id.clone(),
         body_truncated,
         intent,
+        follows_prior,
     };
     // `force` stays false here regardless of `--force`: `--force` (design
     // doc API) means "re-distill this in-scope published id", which Phase 3

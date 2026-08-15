@@ -51,12 +51,20 @@ pub enum ContentKind {
     /// (`harvest::identity::ResolveIntent`). A stage-2 replay never builds a
     /// `ContentKind` - it calls `pipeline::session::process_session` directly
     /// with `ResolveIntent::Replay`.
+    /// `follows_prior` is `Some` only for a genuine `FollowUp` decision - the
+    /// prior published entry `ThreadDecision.decision` carries, threaded
+    /// through so the handler can back-link `follows:` to the note it
+    /// continues (design doc `2026-08-15-harvest-note-identity-trace-keyed-
+    /// replace.md`, Phase 4). `None` for `NewNote` and for a stage-2 replay
+    /// (which carries no `ThreadDecision` at all and instead re-derives any
+    /// `follows:` from the note being replaced).
     Session {
         body: String,
         members: Vec<crate::harvest::contract::SessionRecord>,
         primary_id: String,
         body_truncated: bool,
         intent: crate::harvest::identity::ResolveIntent,
+        follows_prior: Option<crate::harvest::watermark::PublishedEntry>,
     },
 }
 

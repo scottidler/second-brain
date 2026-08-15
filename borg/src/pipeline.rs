@@ -349,6 +349,7 @@ pub async fn process_content(
                 primary_id,
                 body_truncated,
                 intent,
+                follows_prior,
             } => {
                 with_hard_timeout(
                     process_session(
@@ -360,6 +361,7 @@ pub async fn process_content(
                         method,
                         force,
                         intent,
+                        follows_prior,
                         config,
                         &trace_id,
                     ),

@@ -458,6 +458,12 @@ async fn replay_session_stage2(
     // `--<id8>` sibling. It never meant "overwrite in place" (the filename stem
     // is model output, so the bare slug is a file that has never existed); that
     // misreading is the bug this design fixes.
+    // `follows_prior: None` - a stage-2 replay carries no `ThreadDecision` (it
+    // never went through `harvest::publish`), so it cannot know a fresh prior
+    // entry to back-link. A note that was originally published as a
+    // follow-up already carries its own `follows:` frontmatter; the handler
+    // carries that forward from the note being replaced rather than dropping
+    // it (design doc Phase 4: "follows: survives a replace").
     let result = crate::pipeline::session::process_session(
         &body,
         &meta.members,
@@ -467,6 +473,7 @@ async fn replay_session_stage2(
         IngestMethod::Harvest,
         true,
         crate::harvest::identity::ResolveIntent::Replay,
+        None,
         config,
         trace_id,
     )

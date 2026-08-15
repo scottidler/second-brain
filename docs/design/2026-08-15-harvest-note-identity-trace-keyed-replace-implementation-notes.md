@@ -351,3 +351,86 @@ count was executed against current `main` and the live vault before Phase 1.
 
 - None blocking. One handoff item for Phase 4, stated above: when `follows:`
   starts being written, add it to `SESSION_OWNED_KEYS`.
+
+## Phase 4: follow-up back-link
+
+### Design decisions
+
+- **`ContentKind::Session` gained `follows_prior: Option<watermark::PublishedEntry>`**,
+  threaded from `harvest::publish::publish_thread_inner`'s own match on
+  `thread.decision` (mirroring how `intent` is already derived there):
+  `Reappearance::FollowUp { prior }` -> `Some(prior.clone())`; `NewNote` and the
+  fail-closed `Skip` arm -> `None`. `replay.rs`'s `replay_session_stage2` -
+  which builds no `ContentKind` at all - passes `None` directly to
+  `process_session` (`borg/src/types.rs`, `borg/src/harvest/publish.rs`,
+  `borg/src/replay.rs`).
+- **A second, distinct `ResolveIntent::Replay` call resolves the PRIOR note**,
+  separate from the current publish's own `resolve_prior_note` call
+  (`pipeline::session::resolve_follows_stem`). The prior entry's `.trace` is
+  already known (Phase 2 populates it), so only the receipts-fast-path +
+  vault-index steps apply (with tombstone-follow) - exactly `Replay`'s
+  documented semantics ("the trace is authoritative, steps 1-2 only"). `NewNote`
+  would pull in step 3's crash-recovery fallback (irrelevant - a trace is
+  already known) and `FollowUp` refuses to resolve at all (wrong intent
+  entirely for a lookup that ISN'T the current publish's own identity). This
+  answers the task brief's explicit question: the current publish uses
+  `FollowUp` (never resolves itself); the auxiliary prior-note lookup uses
+  `Replay` (resolves by a known trace, steps 1-2 only) - two different intents
+  for two different lookups against two different traces.
+- **`follows:` stores a bare filename stem**, the same convention
+  `superseded-by:` already uses, not a path and not the prior trace id. This is
+  deliberate: Obsidian resolves a `[[stem]]` wikilink by filename across the
+  WHOLE vault, not by directory, so the body link keeps resolving after a
+  cortex move WITHOUT this handler re-resolving it on every later replay - the
+  fresh-resolution-via-trace machinery only has to run ONCE, at the moment the
+  follow-up is first published. A plain replay of that note (which carries no
+  `follows_prior` - see `replay.rs`) instead carries the EXISTING stem forward
+  unchanged from the note being replaced (`resolve_follows_stem`,
+  `read_prior_frontmatter`'s new `follows` field, `process_session_inner`'s
+  `follows_stem` fallback chain).
+- **`follows` moved into `SESSION_OWNED_KEYS`** exactly as Phase 3's notes
+  flagged it would need to. It is still "derived", not "carried generically":
+  `read_prior_frontmatter` special-cases it alongside `status` (captured into
+  `PriorFrontmatter.follows`, excluded from the generic `carried` map) so the
+  handler controls precisely which of the two sources (fresh `follows_prior`
+  resolution vs. carried-forward prior value) wins, rather than letting the
+  blanket carry-forward loop silently decide.
+- **The body wikilink is re-derived from `follows_stem` on every render**
+  (`render_follows_link`, prepended to `distilled_body` right before
+  `NoteContent` construction) rather than ever being read back out of the old
+  body - the whole body is replaced by the fresh distill pass on every
+  publish/replay, so anything not re-emitted from the frontmatter key would
+  silently vanish, per the Data Model's explicit warning.
+- **Never blocks the publish.** `resolve_follows_stem` returns `None` (WARN
+  logged) rather than propagating an `Err` on: a missing `prior.trace`, a
+  receipts-open failure, a resolution error, or a resolution miss (`Ok(None)`)
+  - all four are exercised by
+  `an_unresolvable_prior_note_omits_follows_and_never_blocks_the_publish`.
+
+### Deviations
+
+- None. `follows_prior`'s exact field name/shape and `resolve_follows_stem`'s
+  seam are not fixed by the doc's API Design section (which only fixes
+  `resolve_prior_note`'s own signature), so no doc-vs-implementation signature
+  conflict arose here the way Phase 1 hit for the index.
+
+### Tradeoffs
+
+- `resolve_follows_stem` opens its own receipts connection (a second
+  short-lived `Connection` alongside the current publish's own
+  `resolve_prior_note` call) rather than threading one connection through both
+  lookups. Accepted for the same reason Phase 3's notes accepted it for
+  `resolve_prior_note`/`record_landed_path`: a short-lived open is cheaper than
+  restructuring the call graph to share a handle across an LLM-distill-bounded
+  function.
+- Storing a bare stem in `follows:` (instead of the prior trace) means a
+  RENAME of the target file (not a cortex directory move, which Obsidian's
+  stem-based resolution already tolerates) would break the link with no
+  automatic repair. Accepted: notes are immutable once published and cortex
+  only moves between directories, it does not rename; `superseded-by:` already
+  carries the identical risk/convention and this keeps `follows:` consistent
+  with it rather than introducing a second addressing scheme.
+
+### Open questions
+
+- None.

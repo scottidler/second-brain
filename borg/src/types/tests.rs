@@ -71,6 +71,7 @@ fn test_content_kind_session() {
         primary_id: "sess-1".to_string(),
         body_truncated: false,
         intent: crate::harvest::identity::ResolveIntent::NewNote,
+        follows_prior: None,
     };
     assert!(matches!(kind, ContentKind::Session { ref body, .. } if body.starts_with("human:")));
 }

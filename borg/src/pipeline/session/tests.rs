@@ -190,6 +190,7 @@ async fn process_session_inner_publishes_note_with_trace_and_source() {
         IngestMethod::Harvest,
         false,
         ResolveIntent::NewNote,
+        None,
         &config,
         "harvest-test-trace",
     )
@@ -235,6 +236,7 @@ async fn process_session_inner_tags_redacted_source_when_any_member_redacted() {
         IngestMethod::Harvest,
         false,
         ResolveIntent::NewNote,
+        None,
         &config,
         "harvest-test-redacted",
     )
@@ -340,6 +342,7 @@ async fn process_session_inner_names_file_from_title_slug_on_distiller_fallback(
         IngestMethod::Harvest,
         false,
         ResolveIntent::NewNote,
+        None,
         &config,
         "harvest-test-slug-fallback",
     )
@@ -382,6 +385,7 @@ async fn process_session_inner_fails_loudly_when_primary_id_missing() {
         IngestMethod::Harvest,
         false,
         ResolveIntent::NewNote,
+        None,
         &config,
         "harvest-test-missing-primary",
     )
@@ -408,6 +412,23 @@ async fn publish_session(
     intent: ResolveIntent,
     force: bool,
 ) -> Result<IngestResult> {
+    publish_session_with_follows(config, title, primary_id, trace_id, intent, force, None).await
+}
+
+/// [`publish_session`] plus an explicit `follows_prior` - the follow-up
+/// back-link source (Phase 4), threaded through exactly the way
+/// `harvest::publish::publish_thread_inner` derives it from
+/// `Reappearance::FollowUp { prior }`.
+#[allow(clippy::too_many_arguments)]
+async fn publish_session_with_follows(
+    config: &Config,
+    title: &str,
+    primary_id: &str,
+    trace_id: &str,
+    intent: ResolveIntent,
+    force: bool,
+    follows_prior: Option<watermark::PublishedEntry>,
+) -> Result<IngestResult> {
     let mut member = session_record(primary_id, "2026-07-02T04:51:21+00:00", "2026-07-02T06:08:39+00:00", 42);
     member.title = Some(title.to_string());
     process_session_inner(
@@ -419,6 +440,7 @@ async fn publish_session(
         IngestMethod::Harvest,
         force,
         intent,
+        follows_prior,
         config,
         trace_id,
     )
@@ -807,6 +829,218 @@ async fn a_broken_receipts_db_fails_the_publish_closed() {
     assert!(
         all_notes(vault_dir.path()).is_empty(),
         "no note is written when resolution fails"
+    );
+}
+
+// ---- follow-up back-link (2026-08-15 note-identity design, Phase 4) ----
+
+/// Acceptance: "A follow-up note carries `follows:` pointing at the prior
+/// note's CURRENT path, including when cortex has moved it."
+///
+/// The prior note is published to `inbox/`, then moved to `notes/` (cortex's
+/// promotion) BEFORE the follow-up runs - `follows_prior.note_path` still
+/// names the stale `inbox/` location, exactly what a real
+/// `PublishedEntry.note_path` would hold. The follow-up must resolve through
+/// `identity::resolve_prior_note` (keyed on the prior entry's OWN `trace`) to
+/// find the moved file, never trust `note_path` raw.
+#[tokio::test]
+async fn a_follow_up_back_links_to_the_prior_notes_current_path_even_after_a_cortex_move() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+    let prior_trace = "hv-pr10r001";
+
+    let first = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        prior_trace,
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .unwrap();
+    let inbox_path = std::path::PathBuf::from(first.note_path.unwrap());
+    let prior_stem = inbox_path.file_stem().unwrap().to_str().unwrap().to_string();
+
+    // cortex promotes it, same as `a_cortex_moved_note_is_resolved_and_its_receipts_row_repaired`.
+    let notes_dir = vault_dir.path().join("notes");
+    std::fs::create_dir_all(&notes_dir).unwrap();
+    let moved = notes_dir.join(inbox_path.file_name().unwrap());
+    std::fs::rename(&inbox_path, &moved).unwrap();
+    crate::harvest::identity::reset_index_cache_for_tests(vault_dir.path());
+
+    let prior_entry = watermark::PublishedEntry {
+        note_path: inbox_path.to_string_lossy().to_string(), // stale - never used raw
+        n_msgs: 42,
+        body_hash: watermark::body_hash(REPLACE_BODY),
+        trace: Some(prior_trace.to_string()),
+    };
+    let follow_up = publish_session_with_follows(
+        &config,
+        "Follow-up: more CI work",
+        "8d6b6ef3",
+        "hv-f0110w02",
+        ResolveIntent::FollowUp,
+        false,
+        Some(prior_entry),
+    )
+    .await
+    .unwrap();
+    let follow_up_path = std::path::PathBuf::from(follow_up.note_path.unwrap());
+    assert_ne!(follow_up_path, moved, "a follow-up is a distinct note, never a replace");
+
+    let fm = frontmatter_of(&follow_up_path);
+    assert_eq!(
+        fm.get("follows").and_then(|v| v.as_str()),
+        Some(prior_stem.as_str()),
+        "follows: must name the prior note's CURRENT (post-move) stem, not the stale note_path: {fm:?}"
+    );
+    let body = std::fs::read_to_string(&follow_up_path).unwrap();
+    assert!(
+        body.contains(&format!("[[{prior_stem}]]")),
+        "the body must carry the back-link wikilink: {body}"
+    );
+}
+
+/// Acceptance: "An unresolvable prior note omits `follows:` and WARNs; it
+/// never blocks the publish." Two unresolvable shapes in one test: no `trace`
+/// on the prior entry (pre-Phase-2 watermark row) and a `trace` that never
+/// resolves to any note.
+#[tokio::test]
+async fn an_unresolvable_prior_note_omits_follows_and_never_blocks_the_publish() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+
+    let no_trace_entry = watermark::PublishedEntry {
+        note_path: "inbox/some-old-note.md".to_string(),
+        n_msgs: 10,
+        body_hash: watermark::body_hash(REPLACE_BODY),
+        trace: None,
+    };
+    let result = publish_session_with_follows(
+        &config,
+        "Follow-up with no prior trace",
+        "8d6b6ef3",
+        "hv-nopr10r1",
+        ResolveIntent::FollowUp,
+        false,
+        Some(no_trace_entry),
+    )
+    .await
+    .expect("an unresolvable prior note must never block the publish");
+    assert!(matches!(result.status, IngestStatus::Completed));
+    let fm = frontmatter_of(std::path::Path::new(&result.note_path.unwrap()));
+    assert!(!fm.contains_key("follows"), "no prior trace -> no follows: key: {fm:?}");
+
+    let unknown_trace_entry = watermark::PublishedEntry {
+        note_path: "inbox/some-other-old-note.md".to_string(),
+        n_msgs: 10,
+        body_hash: watermark::body_hash(REPLACE_BODY),
+        trace: Some("hv-never000".to_string()),
+    };
+    let result2 = publish_session_with_follows(
+        &config,
+        "Follow-up with unresolvable prior trace",
+        "8d6b6ef3",
+        "hv-nopr10r2",
+        ResolveIntent::FollowUp,
+        false,
+        Some(unknown_trace_entry),
+    )
+    .await
+    .expect("an unresolvable prior trace must never block the publish");
+    assert!(matches!(result2.status, IngestStatus::Completed));
+    let fm2 = frontmatter_of(std::path::Path::new(&result2.note_path.unwrap()));
+    assert!(
+        !fm2.contains_key("follows"),
+        "prior trace resolves to nothing -> no follows: key: {fm2:?}"
+    );
+}
+
+/// Acceptance (Phase 4, "confirm ... that `follows:` survives a replace"):
+/// replaying a follow-up note re-emits BOTH the frontmatter key and the body
+/// wikilink, even though the replay itself carries no `follows_prior` (a
+/// stage-2 replay has no `ThreadDecision` to derive one from - see
+/// `replay.rs`). The value must be carried forward off the note being
+/// replaced, per the Data Model rule that the frontmatter key is the DURABLE
+/// carrier and the body link is re-derived from it on every render.
+#[tokio::test]
+async fn follows_survives_a_replace() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+    let prior_trace = "hv-pr10r002";
+    let follow_trace = "hv-f0110w03";
+
+    let first = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        prior_trace,
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .unwrap();
+    let prior_path = std::path::PathBuf::from(first.note_path.unwrap());
+    let prior_stem = prior_path.file_stem().unwrap().to_str().unwrap().to_string();
+
+    let prior_entry = watermark::PublishedEntry {
+        note_path: prior_path.to_string_lossy().to_string(),
+        n_msgs: 42,
+        body_hash: watermark::body_hash(REPLACE_BODY),
+        trace: Some(prior_trace.to_string()),
+    };
+    let follow_up = publish_session_with_follows(
+        &config,
+        "Follow-up: more CI work",
+        "8d6b6ef3",
+        follow_trace,
+        ResolveIntent::FollowUp,
+        false,
+        Some(prior_entry),
+    )
+    .await
+    .unwrap();
+    let follow_up_path = std::path::PathBuf::from(follow_up.note_path.unwrap());
+    assert_eq!(
+        frontmatter_of(&follow_up_path).get("follows").and_then(|v| v.as_str()),
+        Some(prior_stem.as_str())
+    );
+
+    // Replay the follow-up note itself - a DIFFERENT fallback slug each time
+    // (mirrors `replaying_one_trace_three_times_lands_exactly_one_note_at_one_path`),
+    // and critically `follows_prior: None` (exactly what `replay.rs` passes).
+    for title in ["Some Other Follow-up Title", "Yet Another Title"] {
+        publish_session_with_follows(
+            &config,
+            title,
+            "8d6b6ef3",
+            follow_trace,
+            ResolveIntent::Replay,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(all_notes(vault_dir.path()).len(), 2, "prior + follow-up, no forks");
+    let fm = frontmatter_of(&follow_up_path);
+    assert_eq!(
+        fm.get("follows").and_then(|v| v.as_str()),
+        Some(prior_stem.as_str()),
+        "follows: must survive a replay that carries no fresh follows_prior: {fm:?}"
+    );
+    let body = std::fs::read_to_string(&follow_up_path).unwrap();
+    assert!(
+        body.contains(&format!("[[{prior_stem}]]")),
+        "the body wikilink must be re-emitted from follows: on every render: {body}"
     );
 }
 

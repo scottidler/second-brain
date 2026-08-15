@@ -64,11 +64,13 @@ fn harvest_publish_path(dir: &std::path::Path, slug_stem: &str, primary_id: &str
 }
 
 /// Frontmatter keys this handler adds on top of [`markdown::RENDER_NOTE_KEYS`]
-/// (design doc: Data Model, "plus session additions"). `follows` is Phase 4's
-/// key and is deliberately absent: nothing writes it yet, and until Phase 4
-/// re-derives it on every render it must be CARRIED FORWARD across a replay
-/// (which cannot re-derive it) rather than dropped as borg-owned.
-const SESSION_OWNED_KEYS: &[&str] = &["repo", "trace-expires", "slug", "harvest-body-hash"];
+/// (design doc: Data Model, "plus session additions"). `follows` (Phase 4) is
+/// borg-owned like `slug:`: a replace REWRITES it from a fresh derivation
+/// (either the current publish's own follow-up prior, or - on a plain replay -
+/// the value carried off the note being replaced), rather than leaving the
+/// generic carry-forward loop touch it. See [`FOLLOWS_KEY`] /
+/// [`resolve_follows_stem`].
+const SESSION_OWNED_KEYS: &[&str] = &["repo", "trace-expires", "slug", "harvest-body-hash", "follows"];
 
 /// Frontmatter keys `distillers::render` contributes for a session note
 /// (`distillers/src/render.rs`, the `KindPayload::Session` arm plus the two
@@ -88,6 +90,17 @@ const DISTILLER_OWNED_KEYS: &[&str] = &[
 /// note the user marked `read`"). It is therefore the one writer key excluded
 /// from the drop-list when merging a prior note.
 const STATUS_KEY: &str = "status";
+
+/// `follows:` frontmatter key (design doc: Data Model, Phase 4). Holds a bare
+/// filename STEM, no extension, no directory - the same convention
+/// `superseded-by:` already uses (`cortex::association::tombstone_content`).
+/// A bare stem is deliberate: Obsidian resolves a `[[stem]]` wikilink by
+/// filename across the WHOLE vault, not by path, so it keeps working even
+/// after cortex moves the target between directories without this handler
+/// re-resolving it on every later replay. See [`resolve_follows_stem`] for how
+/// the value is derived and [`render_follows_link`] for the body wikilink it
+/// is re-emitted as on every render.
+const FOLLOWS_KEY: &str = "follows";
 
 /// The complete borg-owned frontmatter key set: everything
 /// [`markdown::render_note`] emits from its own fields, plus this handler's
@@ -115,6 +128,13 @@ struct PriorFrontmatter {
     /// `vault::schema::Status`) so an off-schema operator value survives
     /// byte-for-byte instead of being silently reset to `unread`.
     status: Option<serde_yaml::Value>,
+    /// The prior `follows:` value (a bare filename stem), if the note being
+    /// replaced carried one. `resolve_follows_stem`'s fallback source on a
+    /// plain replay (no fresh follow-up prior for THIS publish) - the value
+    /// is carried forward unchanged rather than re-resolved, since a bare
+    /// stem already survives a cortex move by construction (see
+    /// [`FOLLOWS_KEY`]).
+    follows: Option<String>,
     /// Non-borg-owned keys, verbatim.
     carried: BTreeMap<String, serde_yaml::Value>,
 }
@@ -136,6 +156,7 @@ fn read_prior_frontmatter(path: &Path) -> Result<PriorFrontmatter> {
         );
         return Ok(PriorFrontmatter {
             status: None,
+            follows: None,
             carried: BTreeMap::new(),
         });
     };
@@ -144,6 +165,7 @@ fn read_prior_frontmatter(path: &Path) -> Result<PriorFrontmatter> {
 
     let owned = borg_owned_keys();
     let mut status = None;
+    let mut follows = None;
     let mut carried = BTreeMap::new();
     for (key, value) in map {
         let Some(key) = key.as_str() else {
@@ -157,18 +179,30 @@ fn read_prior_frontmatter(path: &Path) -> Result<PriorFrontmatter> {
             status = Some(value);
             continue;
         }
+        if key == FOLLOWS_KEY {
+            // A non-string `follows:` (never written by this handler) is
+            // dropped rather than propagated - `resolve_follows_stem`'s
+            // fallback source is a bare stem or nothing.
+            follows = value.as_str().map(str::to_string);
+            continue;
+        }
         if owned.contains(key) {
             continue;
         }
         carried.insert(key.to_string(), value);
     }
     log::debug!(
-        "process_session_inner: replacing {} - carrying {} non-borg key(s) forward, prior status={:?}",
+        "process_session_inner: replacing {} - carrying {} non-borg key(s) forward, prior status={:?}, prior follows={:?}",
         path.display(),
         carried.len(),
-        status
+        status,
+        follows
     );
-    Ok(PriorFrontmatter { status, carried })
+    Ok(PriorFrontmatter {
+        status,
+        follows,
+        carried,
+    })
 }
 
 /// Resolve the note this publish should replace, failing the publish CLOSED on
@@ -194,6 +228,89 @@ fn resolve_prior_note(
     identity::resolve_prior_note(&conn, vault_root, trace_id, source_url, body_hash, intent).with_context(closed)
 }
 
+/// Resolve the CURRENT filename stem of the note a genuine follow-up
+/// continues (design doc: Data Model, `follows:` - "the prior note's path is
+/// subject to the same cortex-move staleness ... resolved through
+/// `resolve_prior_note` using `PublishedEntry.trace`, never used raw").
+///
+/// Uses `ResolveIntent::Replay`, not `NewNote`/`FollowUp`: this is a DIFFERENT
+/// lookup than the current publish's own resolution above - `prior.trace` is
+/// already known (Phase 2 populates it), so only the receipts-fast-path +
+/// vault-index steps (with tombstone-follow) apply, which is exactly what
+/// `Replay` names ("the trace is authoritative, steps 1-2 only"). Step 3's
+/// crash-recovery fallback exists to find a note when NO trace is known yet;
+/// it does not apply here and `NewNote`/`FollowUp` would either pull in that
+/// irrelevant branch or (for `FollowUp`) refuse to resolve at all.
+///
+/// Never fails the publish (design doc Phase 4 acceptance: "an unresolvable
+/// prior note omits `follows:` and WARNs; it never blocks the publish") - a
+/// missing trace, a DB error, or a resolution miss all WARN and return `None`
+/// rather than propagating.
+fn resolve_follows_stem(
+    vault_root: &Path,
+    trace_id: &str,
+    source_url: &str,
+    prior: &watermark::PublishedEntry,
+) -> Option<String> {
+    let Some(prior_trace) = prior.trace.as_deref() else {
+        log::warn!(
+            "[{trace_id}] follow-up back-link: prior published entry has no trace (pre-Phase-2 watermark row) \
+             - omitting follows:"
+        );
+        return None;
+    };
+    let conn = match receipts::open_default() {
+        Ok(conn) => conn,
+        Err(e) => {
+            log::warn!("[{trace_id}] follow-up back-link: receipts open failed: {e:#} - omitting follows:");
+            return None;
+        }
+    };
+    match identity::resolve_prior_note(
+        &conn,
+        vault_root,
+        prior_trace,
+        source_url,
+        &prior.body_hash,
+        ResolveIntent::Replay,
+    ) {
+        Ok(Some(path)) => match path.file_stem().and_then(|s| s.to_str()) {
+            Some(stem) => Some(stem.to_string()),
+            None => {
+                log::warn!(
+                    "[{trace_id}] follow-up back-link: resolved path {} has no filename stem - omitting follows:",
+                    path.display()
+                );
+                None
+            }
+        },
+        Ok(None) => {
+            log::warn!(
+                "[{trace_id}] follow-up back-link: prior trace {prior_trace} did not resolve to a live note \
+                 - omitting follows:"
+            );
+            None
+        }
+        Err(e) => {
+            log::warn!(
+                "[{trace_id}] follow-up back-link: resolution of prior trace {prior_trace} failed: {e:#} \
+                 - omitting follows:"
+            );
+            None
+        }
+    }
+}
+
+/// The body wikilink for a `follows:` back-link (design doc: Data Model - "the
+/// body wikilink is what Obsidian's backlink pane resolves"). Re-derived from
+/// `follows:` on EVERY render rather than being carried as body text itself -
+/// a replace rewrites the whole body from the fresh distill pass, so anything
+/// not re-emitted from the frontmatter key would silently vanish on the next
+/// replay.
+fn render_follows_link(stem: &str) -> String {
+    format!("**Follows:** [[{stem}]]\n\n")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_session(
     body: &str,
@@ -204,6 +321,7 @@ pub(crate) async fn process_session(
     method: IngestMethod,
     force: bool,
     intent: ResolveIntent,
+    follows_prior: Option<watermark::PublishedEntry>,
     config: &Config,
     trace_id: &str,
 ) -> IngestResult {
@@ -217,6 +335,7 @@ pub(crate) async fn process_session(
         method,
         force,
         intent,
+        follows_prior,
         config,
         trace_id,
     )
@@ -258,6 +377,7 @@ pub(crate) async fn process_session_inner(
     method: IngestMethod,
     force: bool,
     intent: ResolveIntent,
+    follows_prior: Option<watermark::PublishedEntry>,
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
@@ -436,6 +556,15 @@ pub(crate) async fn process_session_inner(
     // every other key forward verbatim, `status:` included (its value is user
     // state, not borg's). A carried key never displaces a freshly-derived one.
     let mut status = Some(vault::schema::Status::Unread);
+    // `follows:` back-link (design doc Phase 4). A genuine follow-up resolves
+    // its prior note FRESH (`follows_prior` is `Some` only for that case); a
+    // plain replace/replay falls back to whatever the note being replaced
+    // already carried, so the key (and the body wikilink re-derived from it
+    // below) survives a replay untouched. `None` for a brand-new,
+    // never-published note.
+    let mut follows_stem: Option<String> = follows_prior
+        .as_ref()
+        .and_then(|prior| resolve_follows_stem(&vault_root, trace_id, &source_url, prior));
     if let Some(resolved) = &prior_note {
         let prior = read_prior_frontmatter(resolved)?;
         if let Some(prior_status) = prior.status {
@@ -446,6 +575,9 @@ pub(crate) async fn process_session_inner(
             status = None;
             frontmatter_additions.insert(STATUS_KEY.to_string(), prior_status);
         }
+        if follows_stem.is_none() {
+            follows_stem = prior.follows;
+        }
         for (key, value) in prior.carried {
             if frontmatter_additions.contains_key(&key) {
                 log::debug!("[{trace_id}] frontmatter key {key:?} re-derived by this publish; not carried forward");
@@ -454,6 +586,13 @@ pub(crate) async fn process_session_inner(
             frontmatter_additions.insert(key, value);
         }
     }
+    let distilled_body = match &follows_stem {
+        Some(stem) => {
+            frontmatter_additions.insert(FOLLOWS_KEY.to_string(), serde_yaml::Value::String(stem.clone()));
+            format!("{}{distilled_body}", render_follows_link(stem))
+        }
+        None => distilled_body,
+    };
 
     let note = NoteContent {
         title: title.clone(),
