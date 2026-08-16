@@ -542,3 +542,50 @@ quality frontmatter) → `98dea63` (daemon link sweep, 1057 files) → `7f6fb95`
 
 DB snapshots: `oracle.db.pre-phase0`, `oracle.db.pre-phase1-backfill`,
 `oracle.db.pre-phase2`.
+
+## Post-implementation finding: the auto-linker is a second writer of hub bodies
+
+Found by running the system live with the cortex daemon back up. Not a defect
+in any phase's code, and not something the design doc anticipated — it is a
+seam between this work and an existing subsystem.
+
+**What happens.** The builder renders a hub body as its members' claims
+VERBATIM. The daemon's `link` action then rewrites those same bodies, injecting
+wikilinks into the claim text (`agents` -> `[[agents]]`, `Ollama` ->
+`[[ollama]]`, `GitHub` -> `[[github|GitHub]]`). Observed live: 152 of the first
+400 changed hubs had body edits after one daemon sweep. The next builder run
+re-renders from claims, sees the injected text differ, and writes the verbatim
+version back — a third run reported `written=347 unchanged=175 reset=32
+stubs_kept=344`.
+
+**What it does NOT break.**
+
+- The builder is still deterministic and still idempotent: the "second run
+  writes zero bytes" criterion was verified with the daemon STOPPED, which is
+  the correct way to measure the builder in isolation, and it passed
+  byte-identically.
+- The run-level backstop behaved correctly under the churn. Those 32 resets
+  were NOT previously-rendered bodies (verified: **zero** hubs went
+  rendered -> stub across the run), so they correctly did not count against
+  `max-render-resets-per-run`. They were stub bodies the linker had dirtied,
+  restored to the canonical stub by branch 4.
+- There is no runaway loop: `hub` has zero references in
+  `cortex/src/daemon.rs`, so the builder only runs when invoked by hand. The
+  churn is per-invocation, not continuous.
+
+**What it does break.** The doc's ownership rule — "a hub body without
+`hub-body: manual` is builder-owned" — is not true in the live system. The
+linker is a second writer of builder-owned content, so hub bodies drift between
+builder runs and each builder run rewrites hundreds of files on a Syncthing'd
+vault.
+
+**Why there is no config-only fix.** `actions.linking.targets.{types,paths}`
+filters which notes are link TARGETS (linked to), not which notes the linker
+MODIFIES — `lint_linking` (`cortex/src/linking.rs:85-115`) uses those filters
+only to build the target title list, then scans and rewrites every note,
+`entity` hubs included. Excluding hub bodies from linker writes needs code.
+
+**Not fixed here** — it is outside this doc's scope and the choice is a design
+call (suppress the linker on `entity` notes; or have the renderer emit
+already-linked claim text; or make the builder's compare wikilink-insensitive).
+Flagged for the implementation audit.
