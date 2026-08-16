@@ -208,3 +208,153 @@ orchestrator's step on the daemon host.
   tolerated into a hard load failure on upgrade. That is the intended behavior
   (Rollout section names it); flagging so a laptop failure after `otto deploy`
   is read as the feature, not a regression.
+
+## Phase 2: deterministic hub bodies
+
+**Model:** opus
+
+Code only. No live-vault or live-DB command was run: every test drives a temp
+vault and an in-memory index. The first full builder run against
+`~/repos/scottidler/obsidian/` (and the live criteria that depend on it) is the
+orchestrator's step on the daemon host.
+
+### Design decisions
+
+- **`SearchIndex::hub_members_deliberate`** — `vault/src/search/graph.rs`. Both
+  filters (deliberate kinds; `src NOT LIKE 'entities/%'`) live in the SQL, so no
+  consumer can forget one. `hub_members` stays kind-agnostic for the graph tests
+  that use it as a generic inbound probe; production synthesis no longer calls
+  it (it now has zero production callers).
+- **The renderer is a separate pure module** — `cortex/src/hub/render.rs`, with
+  its tests in `cortex/src/hub/render/tests.rs`. No injection seam anywhere on
+  the body path: every renderer test feeds real `Claim` values and asserts on
+  emitted text. That is the structural fix for how rev 1 shipped broken (doubles
+  whose `_members` argument was ignored).
+- **`Vector::of` classifies through `vault::schema::NoteType`**, not a local
+  list of type strings (CLAUDE.md: schema is law). An unparseable/absent type is
+  `Other` and renders under neither section.
+- **One composition seam, `compose_hub_content(fm_block, title, body)`** —
+  `cortex/src/hub.rs`. Stub creation, a rendered body, and a stub reset all pass
+  through it, and `render_hub` is now built from it plus `stub_body(stub)`. That
+  is what makes "reset to the stub" byte-identical to "freshly stubbed": the two
+  cannot drift into an infinite rewrite loop over a newline. The stub-file bytes
+  are unchanged from before this phase (pinned by the pre-existing
+  `write_stubs_*` tests).
+- **`plan_hub_body` is pure and returns the bytes** —
+  `HubPlan { outcome, content, previously_rendered }`. The four write branches
+  are decided without touching the filesystem, which is what lets
+  `build_hub_bodies` compute EVERY outcome before writing ANY file (the
+  run-level backstop) and makes each branch directly testable.
+- **`previously_rendered` = the body's first H2 is `## Summary`** —
+  `hub::body_is_rendered`. Only the renderer emits that heading, so stub bodies,
+  the 134 refusal bodies, and the 15 Fabric `## ONE SENTENCE SUMMARY:` bodies
+  are all excluded from the backstop count, exactly as the doc requires (the
+  first run's ~124 refusal resets are expected, not a regression signal).
+- **A dry run does not open the oracle index at all** — `hub::run` returns
+  before `SearchIndex::open`. Skipping only the `upsert_entity` calls would
+  still have created the DB file and run `ensure_schema` on a fresh host; "a dry
+  run writes nothing anywhere" is the whole point of the gate.
+- **The digest's per-vector budget is one forward pass per vector**
+  (`render::vector_line`). An empty line (nothing fit, not even a truncated
+  first claim) costs 0 bytes, so the whole session budget cedes to sources.
+  Ceding is one-directional and computed from the emitted line's byte length,
+  so the arithmetic is exactly the doc's.
+- **Structural source-level tests** for the two invariants that are absences
+  rather than behaviors: no `fabric::` / `run_pattern` / `HubSynthesizer`
+  reference and no `fs::write(` anywhere in `hub.rs` / `hub/render.rs`
+  (`no_fabric_call_is_reachable_from_cortex_hub`). A future edit cannot quietly
+  reintroduce either.
+- **The retrieval contract has a negative control**
+  (`an_unbudgeted_digest_would_starve_the_second_vector`): with the byte budget
+  raised to 1 MB the same fixture's source vector IS truncated out of the
+  512-token window. Without it, the passing assertion could not distinguish
+  "the budget works" from "the fixture is small".
+- **Tokenizer fixture committed at
+  `cortex/tests/fixtures/bge-small-en-v1.5-tokenizer.json`** (711 KB, copied
+  from the local hf-hub cache) with `tokenizers = "0.23.1"` as a cortex
+  dev-dependency (the same version `vault::embedding::candle` loads). Offline,
+  no weights, runs in `otto ci`.
+
+### Deviations
+
+- **`render_hub_body` takes the hub TITLE as its first argument.** The doc's API
+  section writes `render_hub_body(members, caps)`, but the digest's definition
+  sentence is `<Title>: hub of N sources and M sessions.` - the title is an
+  input, not something recoverable from the members. Same effect, correct seam.
+- **`HubMember` carries `date`**, beyond the doc's
+  `{ path, title, note_type, claims }`. The doc's own member ordering (`date:`
+  descending, path tiebreak, undated last) cannot be implemented without it.
+- **A member bullet's wikilink is `([[<path minus .md>|<title>]])`**, not the
+  doc's literal `([[member]])`. A bare basename is ambiguous across two
+  same-named notes and does not resolve into a nested directory; the full
+  vault-relative path is a literal-path match that resolves unconditionally
+  (the same reasoning `repo_hub_wikilink_target` already carries), and the alias
+  keeps the render readable. A title containing `|`, `[`, or `]` drops the alias
+  rather than emitting broken markup.
+- **`synthesize_hub` is gone, not kept.** The doc says to keep "the file-handling
+  fail-safe in `synthesize_hub`"; its semantics are kept in full (frontmatter
+  preserved verbatim, a failure never overwrites, the same file is rewritten and
+  never re-slugged or deleted) but they now live in the pure `plan_hub_body`,
+  because the old function's shape was `(&impl HubSynthesizer)` and the trait is
+  deleted. The carried acceptance test is carried too, as
+  `a_run_where_every_member_is_unreadable_preserves_every_body`.
+- **`SynthOutcome` kept its name and grew to six variants** (`Manual`,
+  `Preserved`, `Rendered`, `Unchanged`, `Reset`, `StubKept`). Two variants
+  cannot express four branches, and the write/no-write split inside branches 3
+  and 4 is what the run report counts.
+- **`HubReport.synthesized` / `synth_preserved` are renamed** to the seven
+  per-branch counters the doc's run report requires
+  (`bodies_written` / `bodies_unchanged` / `bodies_reset` / `stubs_kept` /
+  `bodies_manual` / `bodies_preserved` / `members_skipped`), printed by
+  `sb cortex hub --apply --synthesize`.
+- **The stub-creation write also moved to `write_atomic`.** The doc names only
+  `hub.rs:522` (the body write), but the success criterion says *every* hub
+  write, and `write_stubs` had the identical torn-write exposure on a
+  Syncthing'd vault.
+- **`cortex::embed::summary_embed_text` extracted** (from the inline block in
+  `process_summary_batch`) and made public, so the retrieval-contract test
+  asserts against the REAL embed-text composition instead of a copy of it. The
+  byte-identical invariant it carries is now pinned by its own test.
+- **No live criteria are asserted here**: `grep -rl "don't have access…"
+  entities/ -> 0`, the ~160-hub written-body band, and the live second-run
+  zero-byte check all need the daemon host. Each has an equivalent temp-vault
+  test on the same code path.
+
+### Tradeoffs
+
+- **Source-level grep tests vs a type-level guarantee** for "zero Fabric calls"
+  and "no `fs::write`". A type-level guarantee would mean a capability wrapper
+  around the filesystem, which is far more machinery than this invariant is
+  worth; the grep is cheap, exact, and fails loudly on the next edit.
+- **Wikilink alias (`|<title>`) vs bare path target.** The alias adds bytes to
+  the body (never to the digest, which carries claims only) and can be dropped
+  by adversarial titles. Chose it because the body is read by a human in
+  Obsidian, where a wall of `[[knowledge/tech/2026-04-…]]` targets is unreadable.
+- **Six-variant `SynthOutcome` vs a `(branch, wrote: bool)` pair.** The flat
+  enum makes the run report a single match with no impossible combinations, at
+  the cost of two variants that differ only in whether bytes moved.
+- **`build_hub_bodies` holds all plans in memory before writing.** That is the
+  backstop's precondition, and it costs one `String` per changed hub (hundreds,
+  each a few KB) - trivial next to the file reads it already does.
+
+### Open questions
+
+- **The live verification must stop the cortex daemon first.** Carried forward
+  from Phase 0's open question and still load-bearing: the daemon rewrote
+  `cortex-quality` frontmatter onto all 46 new stubs within seconds of Phase 0's
+  `--apply`. The builder preserves frontmatter verbatim, so a daemon edit does
+  not fight the builder - but it DOES dirty the files between two builder runs,
+  and the "a second run writes zero bytes" criterion is a byte-compare of the
+  whole vault. Stop `cortex.service` for the verification, or compare hub files
+  only.
+- **The first live run's reset count will exceed the default backstop of 20 if
+  any of the resets land on previously-RENDERED bodies.** Today none can (no hub
+  carries a renderer-produced body yet), so the first run is safe at the
+  default. From the SECOND run on, a membership change that empties several
+  large hubs at once could legitimately exceed 20 and abort the run; the abort
+  message names the hubs and the fix is a config bump. Flagging so an abort is
+  read as the backstop working, not as a bug.
+- **`entities.render.*` is absent from the live `~/.config/sb/cortex.yml`.** The
+  Rust defaults are the designed values, so no config edit is required to run
+  Phase 2 - the template entry is commented-out documentation. Only a deliberate
+  tuning (e.g. raising `max-render-resets-per-run`) needs an edit.

@@ -253,6 +253,40 @@ impl SearchIndex {
         Ok(out)
     }
 
+    /// DELIBERATE member note paths of a hub: the `src` of every edge whose
+    /// `dst` is the hub note AND whose kind is a deliberate note->hub signal
+    /// (`wikilink` = the author linked it; `repo-member` / `creator-member` /
+    /// `source-member` = the note's own frontmatter names this hub), with every
+    /// hub-sourced edge excluded structurally (`src NOT LIKE 'entities/%'`).
+    ///
+    /// This is the membership the hub-body builder renders from, and the two
+    /// filters are load-bearing, not decoration. The kind-agnostic
+    /// [`hub_members`](Self::hub_members) also returns `semantic` (embedding
+    /// similarity) and `shared-tag` (co-tagged) edges - inferred, not asserted -
+    /// which would put a note in a hub body its author never associated with the
+    /// subject. And 1685 live `wikilink` edges into hubs have a HUB as their
+    /// `src`, so without the `entities/%` exclusion a hub body would be built
+    /// from other hub bodies (refusals included), feeding generated text back
+    /// into itself.
+    ///
+    /// Sorted by `src` for fetch determinism only; the renderer re-sorts by
+    /// `date:` descending with a path tiebreak.
+    pub fn hub_members_deliberate(&self, hub_path: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT src FROM edges
+             WHERE dst = ?1
+               AND kind IN ('wikilink','repo-member','creator-member','source-member')
+               AND src NOT LIKE 'entities/%'
+             ORDER BY src",
+        )?;
+        let rows = stmt.query_map(params![hub_path], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Upsert an `entities` row (Phase 3). `id` is the entity slug; `kind` is
     /// `concept`/`creator`/`source`/`tag`; `hub_path` is the stubbed hub note's
     /// vault path (when one exists); `ontotype` is the Phase-5 ontology class.

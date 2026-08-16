@@ -67,6 +67,33 @@ graph:
     - every
     - brief
 
+# `sb cortex entities --discover` (LLM glossary proposals) and, under
+# `render:`, the DETERMINISTIC hub-body builder run by
+# `sb cortex hub --synthesize --apply`. The builder makes zero LLM calls: a hub
+# body is its members' already-distilled claims, grouped by ingestion vector,
+# quoted and wikilinked. Defaults live in cortex/src/config.rs.
+entities:
+  render:
+    # Members rendered per `## From sources` / `## From your sessions` section
+    # before a deterministic `...and N more claim-bearing members` overflow
+    # line. Obsidian's backlinks pane keeps the full membership visible.
+    # Default 20.
+    # max-members-per-section: 20
+    # Claims rendered per member note, in note order. Default 3.
+    # max-claims-per-member: 3
+    # UTF-8 BYTE budget for the `## Summary` digest. Load-bearing for
+    # retrieval: the summary is the ONLY embedding surface a hub has and the
+    # encoder silently truncates at 512 tokens, so an unbounded digest makes
+    # the scarcer vector invisible to search. The budget is split per vector
+    # (sessions first, unused session bytes cede to sources). Default 1200
+    # (~254 tokens on this corpus - it binds well before the tokenizer does).
+    # summary-byte-budget: 1200
+    # Mass-reset backstop: if resetting the bodies of hubs the builder had
+    # PREVIOUSLY rendered would exceed this count, the run aborts before
+    # writing anything and names the hubs. Raise it only when the resets are
+    # genuinely intended. Default 20.
+    # max-render-resets-per-run: 20
+
 # `sb cortex associate`: groups harvest session notes sharing a
 # content-derived `slug:` (borg's harvest naming, v0.12.2) and, per pairwise
 # similarity, merges same-subject sessions or cross-links distinct-but-related

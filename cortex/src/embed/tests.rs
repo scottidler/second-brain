@@ -832,3 +832,19 @@ fn resolve_kinds_no_override_uses_config_defaults() {
     let kinds = resolve_kinds(None, &EmbedKindsConfig::default()).expect("resolve");
     assert_eq!(kinds, vec![EmbeddingKind::Summary, EmbeddingKind::TranscriptChunk]);
 }
+
+// --- entity-hub-two-vector-synthesis Phase 2 -------------------------------
+
+#[test]
+fn summary_embed_text_keeps_the_pre_capture_note_shape_byte_identical() {
+    // The staleness watermark keys on this text: a shape change re-embeds the
+    // whole vault, so a note WITHOUT a capture note must still produce exactly
+    // `title\n\nsummary` (or the bare summary when the title is empty).
+    assert_eq!(summary_embed_text("Title", "", "Summary."), "Title\n\nSummary.");
+    assert_eq!(summary_embed_text("", "", "Summary."), "Summary.");
+    assert_eq!(summary_embed_text("Title", "  ", "Summary."), "Title\n\nSummary.");
+    assert_eq!(
+        summary_embed_text("Title", "why I kept it", "Summary."),
+        "Title\n\nwhy I kept it\n\nSummary."
+    );
+}

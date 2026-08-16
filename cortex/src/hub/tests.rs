@@ -366,107 +366,6 @@ fn collect_stubs_skips_malformed_repo() {
     );
 }
 
-struct OkSynth(String);
-impl HubSynthesizer for OkSynth {
-    fn synthesize(&self, _title: &str, _members: &[String]) -> eyre::Result<String> {
-        Ok(self.0.clone())
-    }
-}
-struct ErrSynth;
-impl HubSynthesizer for ErrSynth {
-    fn synthesize(&self, _title: &str, _members: &[String]) -> eyre::Result<String> {
-        eyre::bail!("synthesis boom")
-    }
-}
-
-/// A synthesizer that records whether it was invoked, so a test can prove the
-/// memberless guard short-circuits BEFORE any LLM call.
-struct CountingSynth {
-    calls: std::cell::Cell<usize>,
-    body: String,
-}
-impl HubSynthesizer for CountingSynth {
-    fn synthesize(&self, _title: &str, _members: &[String]) -> eyre::Result<String> {
-        self.calls.set(self.calls.get() + 1);
-        Ok(self.body.clone())
-    }
-}
-
-#[test]
-fn synthesize_hub_skips_llm_when_memberless() {
-    // Regression: a repo hub with ZERO wired members must NOT be sent to the
-    // LLM. Live, feeding an empty member list produced a hallucinated body
-    // ("no member notes were provided") on the tatari-tv/okta-auth-py hub. The
-    // fail-safe leaves the stub body byte-intact and never calls the synth.
-    let dir = tempfile::tempdir().expect("tmp");
-    let hub = dir.path().join("okta-auth-py.md");
-    let stub_body = "---\ntitle: tatari-tv/okta-auth-py\ntype: entity\nontotype: repo\n---\n\n# tatari-tv/okta-auth-py\n\nstub body only\n";
-    std::fs::write(&hub, stub_body).expect("seed");
-
-    let synth = CountingSynth {
-        calls: std::cell::Cell::new(0),
-        body: "no member notes were provided (hallucination)".to_string(),
-    };
-    let out = synthesize_hub(&hub, "tatari-tv/okta-auth-py", &[], &synth).expect("synth");
-
-    assert_eq!(
-        out,
-        SynthOutcome::Preserved,
-        "zero members -> preserve, never synthesize"
-    );
-    assert_eq!(
-        synth.calls.get(),
-        0,
-        "the LLM synthesizer is NEVER invoked for a memberless hub"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&hub).expect("read"),
-        stub_body,
-        "stub body left byte-identical (no hallucinated overwrite)"
-    );
-}
-
-#[test]
-fn synthesize_hub_writes_body_preserves_frontmatter_and_is_failsafe() {
-    let dir = tempfile::tempdir().expect("tmp");
-    let hub = dir.path().join("repo-scottidler--loopr.md");
-    let original =
-        "---\ntitle: scottidler/loopr\ntype: entity\nontotype: repo\n---\n\n# scottidler/loopr\n\nstub body\n";
-    std::fs::write(&hub, original).expect("seed");
-
-    // Success: body rewritten, frontmatter preserved, same path (no re-slug).
-    let out = synthesize_hub(
-        &hub,
-        "scottidler/loopr",
-        &["a.md".to_string(), "b.md".to_string()],
-        &OkSynth("These 2 notes cover the loopr work.".to_string()),
-    )
-    .expect("synth");
-    assert_eq!(out, SynthOutcome::Synthesized);
-    let after = std::fs::read_to_string(&hub).expect("read");
-    assert!(
-        after.starts_with("---\ntitle: scottidler/loopr\ntype: entity\nontotype: repo\n---\n"),
-        "frontmatter preserved verbatim: {after}"
-    );
-    assert!(
-        after.contains("These 2 notes cover the loopr work."),
-        "body synthesized"
-    );
-    assert!(!after.contains("stub body"), "prior stub body replaced");
-    assert!(hub.exists(), "hub not deleted/re-slugged");
-
-    // Failure: prior body byte-identical (no write at all).
-    let before = std::fs::read_to_string(&hub).expect("read");
-    let out = synthesize_hub(&hub, "scottidler/loopr", &["a.md".to_string()], &ErrSynth).expect("synth");
-    assert_eq!(out, SynthOutcome::Preserved);
-    assert_eq!(
-        std::fs::read_to_string(&hub).expect("read"),
-        before,
-        "a failed synthesis leaves the body byte-identical"
-    );
-    assert!(hub.exists(), "hub still present after a failed synthesis");
-}
-
 #[test]
 fn frozen_corpus_hub_groupings_are_deterministic_across_sweeps() {
     // Phase 13 acceptance (3f frozen-corpus determinism), extended for Phase 4
@@ -619,25 +518,6 @@ fn hub_membership_is_monotonic_additions_only() {
     assert!(stubs_after.len() > stubs_before.len(), "growth adds stubs");
 }
 
-#[test]
-fn synthesize_hub_never_modifies_member_notes() {
-    // Phase 13 acceptance (immutability): synthesizing a hub touches ONLY the
-    // hub file - member notes are byte-identical after.
-    let dir = tempfile::tempdir().expect("tmp");
-    let hub = dir.path().join("repo-x--y.md");
-    std::fs::write(&hub, "---\ntitle: x/y\ntype: entity\n---\n\nstub\n").expect("hub");
-    let member = dir.path().join("m.md");
-    let member_content = "---\ntitle: M\ntype: session\n---\nmember body\n";
-    std::fs::write(&member, member_content).expect("member");
-    let members = vec![member.to_string_lossy().to_string()];
-    synthesize_hub(&hub, "x/y", &members, &OkSynth("synthesized body".to_string())).expect("synth");
-    assert_eq!(
-        std::fs::read_to_string(&member).expect("read"),
-        member_content,
-        "a member note is byte-identical after hub synthesis (membership never mutates the note)"
-    );
-}
-
 // --- entity-hub-two-vector-synthesis Phase 1 -------------------------------
 
 /// The divergence-killer. Before this phase the hub side and the graph side each
@@ -697,4 +577,491 @@ fn source_hub_path_is_flat_under_the_hub_dir() {
         source_hub_path("https://www.youtube.com/watch?v=1").as_deref(),
         Some("entities/youtube-com.md"),
     );
+}
+
+// --- entity-hub-two-vector-synthesis Phase 2 -------------------------------
+
+/// The live refusal marker: 134 hub bodies carry it today, all `quality=medium`,
+/// so oracle's stub filter passes them and serves them as search results.
+const REFUSAL: &str = "I don't have access to the actual content of those files";
+
+fn concept_stub(slug: &str) -> HubStub {
+    HubStub {
+        slug: slug.to_string(),
+        kind: HubKind::Concept,
+        title: slug.to_string(),
+    }
+}
+
+/// Write a hub note with an explicit body (and optional extra frontmatter keys).
+fn seed_hub(vault: &Path, slug: &str, extra_fm: &str, body: &str) -> std::path::PathBuf {
+    let rel = format!("{HUB_DIR}/{slug}.md");
+    let abs = vault.join(&rel);
+    std::fs::create_dir_all(abs.parent().expect("parent")).expect("mkdir");
+    let content = format!(
+        "---\ntitle: {slug}\ntype: entity\nontotype: technology\ndate: 2026-06-06\ntags: []\n{extra_fm}---\n\n# {slug}\n\n{body}\n"
+    );
+    std::fs::write(&abs, content).expect("seed hub");
+    abs
+}
+
+/// Write a member note carrying a real `## Claims` section.
+fn seed_member(vault: &Path, rel: &str, note_type: &str, date: &str, claims: &[&str]) {
+    let abs = vault.join(rel);
+    std::fs::create_dir_all(abs.parent().expect("parent")).expect("mkdir");
+    let bullets: String = claims.iter().map(|c| format!("- {c}\n")).collect();
+    let content = format!(
+        "---\ntitle: {title}\ntype: {note_type}\ndate: {date}\n---\n\n# {title}\n\n## Claims\n\n{bullets}",
+        title = rel.trim_end_matches(".md").rsplit('/').next().unwrap_or(rel),
+    );
+    std::fs::write(&abs, content).expect("seed member");
+}
+
+/// Register a note row in the index so `insert_edges`' resolve-or-skip rule
+/// accepts edges touching it.
+fn index_note(index: &SearchIndex, path: &str) {
+    index
+        .insert_test_note_graph(path, &[], "", "", "tech", "b", 100)
+        .expect("index note");
+}
+
+fn stats_of(pass: &BodyPass) -> HubReport {
+    let mut report = HubReport::default();
+    report.apply_body_stats(pass);
+    report
+}
+
+#[test]
+fn hub_body_renders_deliberate_membership_only_and_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let vault = dir.path();
+    let stub = concept_stub("claude");
+    let hub_rel = "entities/claude.md";
+    let (_r, _m) = write_stubs(vault, std::slice::from_ref(&stub), true, "2026-06-06").expect("stub");
+
+    seed_member(
+        vault,
+        "knowledge/tech/context-rot.md",
+        "article",
+        "2026-05-01",
+        &["Long contexts degrade recall past 60k tokens"],
+    );
+    seed_member(
+        vault,
+        "sessions/oracle-work.md",
+        "session",
+        "2026-08-01",
+        &["Vector-only retrieval beat equal-weight hybrid"],
+    );
+    seed_member(
+        vault,
+        "knowledge/tech/noise.md",
+        "article",
+        "2026-07-01",
+        &["inferred noise"],
+    );
+    seed_hub(vault, "agents", "", "## Summary\n\nanother hub body\n");
+    seed_member(
+        vault,
+        "entities/agents.md",
+        "entity",
+        "2026-07-01",
+        &["hub-to-hub claim"],
+    );
+
+    let mut index = SearchIndex::open_memory().expect("open");
+    for p in [
+        hub_rel,
+        "knowledge/tech/context-rot.md",
+        "sessions/oracle-work.md",
+        "knowledge/tech/noise.md",
+        "entities/agents.md",
+    ] {
+        index_note(&index, p);
+    }
+    index
+        .insert_edges(&[
+            vault::search::Edge::deterministic("knowledge/tech/context-rot.md", hub_rel, "wikilink", 1.0),
+            vault::search::Edge::deterministic("sessions/oracle-work.md", hub_rel, "repo-member", 1.0),
+            // Inferred, not deliberate.
+            vault::search::Edge::deterministic("knowledge/tech/noise.md", hub_rel, "semantic", 0.9),
+            // A hub linking a hub: would feed generated bodies back into hubs.
+            vault::search::Edge::deterministic("entities/agents.md", hub_rel, "wikilink", 1.0),
+        ])
+        .expect("edges");
+
+    let caps = RenderConfig::default();
+    let pass = build_hub_bodies(vault, &index, std::slice::from_ref(&stub), &caps).expect("build");
+    let report = stats_of(&pass);
+    assert_eq!(report.bodies_written, 1, "{report:?}");
+    assert_eq!(report.members_skipped, 0);
+
+    let body = std::fs::read_to_string(vault.join(hub_rel)).expect("read hub");
+    assert!(body.contains("## From sources"), "{body}");
+    assert!(body.contains("## From your sessions"), "{body}");
+    assert!(
+        body.contains("Long contexts degrade recall past 60k tokens ([[knowledge/tech/context-rot|context-rot]])"),
+        "claim TEXT + member wikilink: {body}"
+    );
+    assert!(
+        body.contains("Vector-only retrieval beat equal-weight hybrid"),
+        "{body}"
+    );
+    assert!(!body.contains("inferred noise"), "semantic membership excluded: {body}");
+    assert!(!body.contains("hub-to-hub claim"), "entities/% src excluded: {body}");
+    assert!(
+        body.starts_with("---\ntitle: claude\ntype: entity\nontotype: technology\ndate: 2026-06-06\ntags: []\n---\n"),
+        "frontmatter preserved verbatim: {body}"
+    );
+
+    // Second run, unchanged inputs: zero bytes written.
+    let pass2 = build_hub_bodies(vault, &index, &[stub], &caps).expect("build2");
+    let report2 = stats_of(&pass2);
+    assert_eq!(report2.bodies_written, 0, "{report2:?}");
+    assert_eq!(report2.bodies_unchanged, 1, "{report2:?}");
+    assert_eq!(
+        std::fs::read_to_string(vault.join(hub_rel)).expect("read hub"),
+        body,
+        "a re-run with unchanged inputs is byte-identical"
+    );
+}
+
+#[test]
+fn refusal_and_stale_rendered_bodies_reset_while_a_stub_is_kept_byte_identical() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let vault = dir.path();
+    let refusal_hub = seed_hub(vault, "getvoibe-com", "", REFUSAL);
+    let stale_hub = seed_hub(
+        vault,
+        "terraform",
+        "",
+        "## Summary\n\nterraform: hub of 1 source.\nSources: gone\n\n## From sources\n\n- gone ([[k/gone|gone]])",
+    );
+    let (_r, _m) = write_stubs(vault, &[concept_stub("langchain")], true, "2026-06-06").expect("stub");
+    let untouched_stub = std::fs::read_to_string(vault.join("entities/langchain.md")).expect("read");
+
+    let index = SearchIndex::open_memory().expect("open");
+    for p in [
+        "entities/getvoibe-com.md",
+        "entities/terraform.md",
+        "entities/langchain.md",
+    ] {
+        index_note(&index, p);
+    }
+
+    let stubs = vec![
+        concept_stub("getvoibe-com"),
+        concept_stub("terraform"),
+        concept_stub("langchain"),
+    ];
+    let pass = build_hub_bodies(vault, &index, &stubs, &RenderConfig::default()).expect("build");
+    let report = stats_of(&pass);
+    assert_eq!(report.bodies_reset, 2, "refusal + stale render both reset: {report:?}");
+    assert_eq!(report.stubs_kept, 1, "an existing stub is left alone: {report:?}");
+
+    let after_refusal = std::fs::read_to_string(&refusal_hub).expect("read");
+    assert!(!after_refusal.contains(REFUSAL), "refusal body gone: {after_refusal}");
+    assert!(
+        after_refusal.contains("Auto-stubbed by `sb cortex hub`"),
+        "reset to the stub sentence: {after_refusal}"
+    );
+    let after_stale = std::fs::read_to_string(&stale_hub).expect("read");
+    assert!(
+        !after_stale.contains("## From sources"),
+        "a rendered body whose claim-bearing members are gone is reset: {after_stale}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.join("entities/langchain.md")).expect("read"),
+        untouched_stub,
+        "a hub already carrying the stub keeps it byte-identical"
+    );
+}
+
+#[test]
+fn a_run_where_every_member_is_unreadable_preserves_every_body() {
+    // "nothing to say" and "could not find out" are different conditions: an IO
+    // error never licenses a reset. A vault-root misconfig makes EVERY member
+    // unreadable at once, which is exactly the mass-reset hazard this branch
+    // closes - so the fixture is a whole run of them, not one hub.
+    let dir = tempfile::tempdir().expect("tmp");
+    let vault = dir.path();
+    let mut index = SearchIndex::open_memory().expect("open");
+    let mut before = Vec::new();
+    let mut stubs = Vec::new();
+    let mut edges = Vec::new();
+    for slug in ["claude", "agents", "rag"] {
+        let hub = seed_hub(
+            vault,
+            slug,
+            "",
+            &format!("## Summary\n\n{slug}: hub of 1 source.\nSources: prior\n"),
+        );
+        before.push((hub.clone(), std::fs::read_to_string(&hub).expect("read")));
+        let hub_rel = format!("entities/{slug}.md");
+        let member_rel = format!("knowledge/tech/absent-{slug}.md");
+        index_note(&index, &hub_rel);
+        index_note(&index, &member_rel); // indexed, but NOT on disk
+        edges.push(vault::search::Edge::deterministic(member_rel, hub_rel, "wikilink", 1.0));
+        stubs.push(concept_stub(slug));
+    }
+    index.insert_edges(&edges).expect("edges");
+
+    let pass = build_hub_bodies(vault, &index, &stubs, &RenderConfig::default()).expect("build");
+    let report = stats_of(&pass);
+    assert_eq!(report.bodies_preserved, 3, "{report:?}");
+    assert_eq!(report.bodies_reset, 0, "an error is never a reset: {report:?}");
+    assert_eq!(
+        report.members_skipped, 3,
+        "the skipped members are reported: {report:?}"
+    );
+    for (path, content) in &before {
+        assert_eq!(
+            &std::fs::read_to_string(path).expect("read"),
+            content,
+            "every body is byte-identical after a member-load failure"
+        );
+    }
+}
+
+#[test]
+fn the_run_level_backstop_aborts_before_any_write() {
+    // The failure branch 2 cannot see: `parse_body_claims` is infallible, so a
+    // claim-parse regression "succeeds" everywhere with zero claims and would
+    // stub the whole hub layer in one silent pass.
+    let dir = tempfile::tempdir().expect("tmp");
+    let vault = dir.path();
+    let rendered =
+        "## Summary\n\nx: hub of 1 source.\nSources: prior claim\n\n## From sources\n\n- prior claim ([[k/a|a]])";
+    let slugs = ["a", "b", "c"];
+    let mut before = Vec::new();
+    let index = SearchIndex::open_memory().expect("open");
+    for slug in slugs {
+        let path = seed_hub(vault, slug, "", rendered);
+        before.push((path.clone(), std::fs::read_to_string(&path).expect("read")));
+        index_note(&index, &format!("entities/{slug}.md"));
+    }
+    let stubs: Vec<HubStub> = slugs.iter().map(|s| concept_stub(s)).collect();
+
+    let caps = RenderConfig {
+        max_render_resets_per_run: 2,
+        ..RenderConfig::default()
+    };
+    let err = build_hub_bodies(vault, &index, &stubs, &caps).expect_err("backstop must abort");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("max-render-resets-per-run"), "{msg}");
+    assert!(msg.contains("entities/a.md"), "the abort names the hubs: {msg}");
+    for (path, content) in &before {
+        assert_eq!(
+            &std::fs::read_to_string(path).expect("read"),
+            content,
+            "nothing is written when the backstop trips"
+        );
+    }
+
+    // Raising the max lets the intended resets through.
+    let caps = RenderConfig {
+        max_render_resets_per_run: 3,
+        ..RenderConfig::default()
+    };
+    let pass = build_hub_bodies(vault, &index, &stubs, &caps).expect("build");
+    assert_eq!(stats_of(&pass).bodies_reset, 3);
+}
+
+#[test]
+fn refusal_resets_do_not_count_against_the_backstop() {
+    // The first live run resets ~124 refusal bodies; only PREVIOUSLY RENDERED
+    // bodies (first H2 `## Summary`) are the regression signal.
+    let dir = tempfile::tempdir().expect("tmp");
+    let vault = dir.path();
+    let index = SearchIndex::open_memory().expect("open");
+    let mut stubs = Vec::new();
+    for slug in ["r1", "r2", "r3"] {
+        seed_hub(vault, slug, "", REFUSAL);
+        index_note(&index, &format!("entities/{slug}.md"));
+        stubs.push(concept_stub(slug));
+    }
+    let caps = RenderConfig {
+        max_render_resets_per_run: 0,
+        ..RenderConfig::default()
+    };
+    let pass = build_hub_bodies(vault, &index, &stubs, &caps).expect("refusal resets are expected, not a regression");
+    assert_eq!(stats_of(&pass).bodies_reset, 3);
+}
+
+#[test]
+fn manual_bodies_are_never_rewritten_while_hub_synthesized_ones_are() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let vault = dir.path();
+    let manual = seed_hub(vault, "manual-hub", "hub-body: manual\n", "A body Scott wrote by hand.");
+    let manual_before = std::fs::read_to_string(&manual).expect("read");
+    let synthesized = seed_hub(
+        vault,
+        "claude",
+        "hub-synthesized: 2026-07-02\n",
+        "## ONE SENTENCE SUMMARY:\n\nFabric boilerplate.",
+    );
+
+    seed_member(vault, "k/a.md", "article", "2026-05-01", &["a real source claim"]);
+    let mut index = SearchIndex::open_memory().expect("open");
+    for p in ["entities/manual-hub.md", "entities/claude.md", "k/a.md"] {
+        index_note(&index, p);
+    }
+    index
+        .insert_edges(&[
+            vault::search::Edge::deterministic("k/a.md", "entities/manual-hub.md", "wikilink", 1.0),
+            vault::search::Edge::deterministic("k/a.md", "entities/claude.md", "wikilink", 1.0),
+        ])
+        .expect("edges");
+
+    let stubs = vec![concept_stub("manual-hub"), concept_stub("claude")];
+    let pass = build_hub_bodies(vault, &index, &stubs, &RenderConfig::default()).expect("build");
+    let report = stats_of(&pass);
+    assert_eq!(report.bodies_manual, 1, "{report:?}");
+    assert_eq!(report.bodies_written, 1, "{report:?}");
+    assert_eq!(
+        std::fs::read_to_string(&manual).expect("read"),
+        manual_before,
+        "`hub-body: manual` is never touched"
+    );
+    let after = std::fs::read_to_string(&synthesized).expect("read");
+    assert!(
+        !after.contains("ONE SENTENCE SUMMARY"),
+        "a 2026-07-02 Fabric body is builder-owned and gets overwritten: {after}"
+    );
+    assert!(after.contains("a real source claim"), "{after}");
+    assert!(
+        after.contains("hub-synthesized: 2026-07-02"),
+        "the provenance stamp survives in the preserved frontmatter: {after}"
+    );
+}
+
+#[test]
+fn plan_hub_body_covers_the_four_branches() {
+    let raw = "---\ntitle: t\ntype: entity\n---\n\n# t\n\nold body\n";
+    let stub = "stub sentence";
+
+    let manual_raw = "---\ntitle: t\nhub-body: manual\n---\n\n# t\n\nhand written\n";
+    assert_eq!(
+        plan_hub_body(manual_raw, "t", Some("## Summary\n\nnew"), stub, false).outcome,
+        SynthOutcome::Manual
+    );
+
+    let preserved = plan_hub_body(raw, "t", None, stub, true);
+    assert_eq!(preserved.outcome, SynthOutcome::Preserved);
+    assert!(preserved.content.is_none(), "a preserved hub writes nothing");
+
+    let rendered = plan_hub_body(raw, "t", Some("## Summary\n\nnew"), stub, false);
+    assert_eq!(rendered.outcome, SynthOutcome::Rendered);
+    let content = rendered.content.expect("content");
+    assert!(
+        content.starts_with("---\ntitle: t\ntype: entity\n---\n"),
+        "frontmatter verbatim: {content}"
+    );
+    assert!(content.contains("# t\n\n## Summary\n\nnew\n"), "{content}");
+    // Byte-identical re-render writes nothing.
+    assert_eq!(
+        plan_hub_body(&content, "t", Some("## Summary\n\nnew"), stub, false).outcome,
+        SynthOutcome::Unchanged
+    );
+
+    let reset = plan_hub_body(raw, "t", None, stub, false);
+    assert_eq!(reset.outcome, SynthOutcome::Reset);
+    let content = reset.content.expect("content");
+    assert!(content.ends_with("# t\n\nstub sentence\n"), "{content}");
+    assert_eq!(
+        plan_hub_body(&content, "t", None, stub, false).outcome,
+        SynthOutcome::StubKept
+    );
+
+    // No frontmatter block: never overwritten.
+    let plan = plan_hub_body("# t\n\nbody with no frontmatter\n", "t", Some("x"), stub, false);
+    assert_eq!(plan.outcome, SynthOutcome::Preserved);
+    assert!(plan.content.is_none());
+}
+
+#[test]
+fn body_is_rendered_keys_on_the_first_h2() {
+    assert!(body_is_rendered("---\ntitle: t\n---\n\n# t\n\n## Summary\n\nx\n"));
+    assert!(!body_is_rendered(
+        "---\ntitle: t\n---\n\n# t\n\nAuto-stubbed by `sb cortex hub`.\n"
+    ));
+    assert!(!body_is_rendered(&format!("---\ntitle: t\n---\n\n# t\n\n{REFUSAL}\n")));
+    assert!(
+        !body_is_rendered("# t\n\n## ONE SENTENCE SUMMARY:\n\nFabric output\n"),
+        "a Fabric body is not a rendered body"
+    );
+}
+
+#[test]
+fn load_hub_member_reads_type_date_and_claims_and_errors_when_absent() {
+    let dir = tempfile::tempdir().expect("tmp");
+    seed_member(
+        dir.path(),
+        "k/a.md",
+        "youtube",
+        "2026-04-01",
+        &["claim one", "claim two"],
+    );
+    let member = load_hub_member(dir.path(), "k/a.md").expect("load");
+    assert_eq!(member.path, "k/a.md");
+    assert_eq!(member.title, "a");
+    assert_eq!(member.note_type, "youtube");
+    assert_eq!(member.date.as_deref(), Some("2026-04-01"));
+    assert_eq!(
+        member.claims.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+        vec!["claim one", "claim two"]
+    );
+    assert!(
+        load_hub_member(dir.path(), "k/missing.md").is_err(),
+        "a missing member is an ERROR, not an empty member"
+    );
+}
+
+#[test]
+fn dry_run_writes_no_vault_bytes_and_records_no_entities() {
+    // Truth in naming: `populate_entities` used to upsert oracle's `entities`
+    // table whenever the index opened, regardless of --apply. A dry run now
+    // never opens the index at all.
+    let dir = tempfile::tempdir().expect("tmp");
+    let vault = dir.path();
+    std::fs::create_dir_all(vault.join("knowledge")).expect("mkdir");
+    std::fs::write(
+        vault.join("knowledge/a.md"),
+        "---\ntitle: A\ntype: article\ncreator: Andrej Karpathy\n---\n\n# A\n",
+    )
+    .expect("note");
+
+    let config = crate::config::Config::default();
+    let opts = crate::opts::HubOpts {
+        apply: false,
+        synthesize: true,
+    };
+    let report = run(vault, &config, &opts).expect("dry run");
+    assert!(report.created > 0, "the dry run still REPORTS what it would stub");
+    assert_eq!(report.entities_recorded, 0, "no entities-table upsert on a dry run");
+    assert_eq!(report.bodies_written, 0);
+    assert!(!vault.join("entities").exists(), "a dry run creates no hub files");
+}
+
+#[test]
+fn no_fabric_call_is_reachable_from_cortex_hub() {
+    // Zero LLM calls in the hub pipeline is a design invariant, not a habit:
+    // `FabricHubSynthesizer` prompted the `summarize` pattern with a bare list
+    // of member PATHS, per hub, unbounded - which is how 134 hub bodies became
+    // the literal model refusal. Asserted structurally against the module's own
+    // source so a future edit cannot quietly reintroduce the call.
+    for (name, src) in [
+        ("hub.rs", include_str!("../hub.rs")),
+        ("hub/render.rs", include_str!("render.rs")),
+    ] {
+        for needle in ["fabric::", "run_pattern", "truncate_input", "HubSynthesizer"] {
+            assert!(!src.contains(needle), "cortex/src/{name} must not reference {needle}");
+        }
+        // Every hub write is atomic: this pass rewrites hundreds of files on a
+        // Syncthing'd vault, where a torn write propagates to every machine.
+        assert!(
+            !src.contains("fs::write("),
+            "cortex/src/{name} must write hub notes via vault::note::write_atomic, never fs::write"
+        );
+    }
 }

@@ -226,3 +226,42 @@ fn entities_typo_under_full_config_fails_loud() {
     let err = serde_yaml::from_str::<Config>(yaml).expect_err("typo under entities: must fail");
     assert!(format!("{err}").contains("unknown field"), "{err}");
 }
+
+// --- entity-hub-two-vector-synthesis Phase 2 -------------------------------
+
+#[test]
+fn entities_render_defaults_are_the_designed_bounds() {
+    let cfg = RenderConfig::default();
+    assert_eq!(cfg.max_members_per_section, 20);
+    assert_eq!(cfg.max_claims_per_member, 3);
+    assert_eq!(cfg.summary_byte_budget, 1_200);
+    assert_eq!(cfg.max_render_resets_per_run, 20);
+    assert_eq!(
+        EntitiesConfig::default().render.summary_byte_budget,
+        1_200,
+        "the nested substruct is defaulted from EntitiesConfig too"
+    );
+}
+
+#[test]
+fn entities_render_deserializes_all_four_kebab_case_keys() {
+    // `entities` is FLAT apart from this: `entities.render.*` is a nested
+    // substruct, not three loose fields.
+    let yaml = "entities:\n  render:\n    max-members-per-section: 5\n    max-claims-per-member: 1\n    summary-byte-budget: 400\n    max-render-resets-per-run: 3\n";
+    let cfg: Config = serde_yaml::from_str(yaml).expect("deserialize");
+    assert_eq!(cfg.entities.render.max_members_per_section, 5);
+    assert_eq!(cfg.entities.render.max_claims_per_member, 1);
+    assert_eq!(cfg.entities.render.summary_byte_budget, 400);
+    assert_eq!(cfg.entities.render.max_render_resets_per_run, 3);
+    // Sibling entities keys keep their defaults.
+    assert_eq!(cfg.entities.max_per_run, EntitiesConfig::default().max_per_run);
+}
+
+#[test]
+fn entities_render_rejects_unknown_field() {
+    // A typo'd render key would silently no-op an embedding-window bound or the
+    // mass-reset backstop; fail loud instead.
+    let yaml = "entities:\n  render:\n    summary-byte-budgett: 400\n";
+    let err = serde_yaml::from_str::<Config>(yaml).expect_err("typo under entities.render: must fail");
+    assert!(format!("{err}").contains("unknown field"), "{err}");
+}

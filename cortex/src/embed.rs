@@ -450,6 +450,35 @@ pub fn drop_kind(config: &Config, kind: &str) -> Result<usize> {
     Ok(deleted)
 }
 
+/// Assemble the text a note's SUMMARY embedding is computed over: `title` +
+/// `capture_note` + `summary`, each non-empty segment joined by a blank line.
+/// The title carries strong topical signal; the capture note ("why I captured
+/// this") makes the operator's own words semantically searchable.
+///
+/// BYTE-IDENTICAL INVARIANT (Phase 9): a note WITHOUT a capture note must
+/// produce the exact pre-Phase-9 text (`title\n\nsummary`, or the bare summary
+/// when the title is empty) or the staleness watermark treats every existing
+/// note as changed and re-embeds the whole vault. Empty segments are dropped
+/// before the join, so an empty capture note contributes nothing.
+///
+/// Public because it IS the retrieval contract's input: the hub-body renderer's
+/// `## Summary` digest only reaches the embedding through this composition, and
+/// the contract test asserts against the real thing rather than a copy of it.
+pub fn summary_embed_text(title: &str, capture_note: &str, summary: &str) -> String {
+    let title = title.trim();
+    let capture = capture_note.trim();
+    let summary = summary.trim();
+    let mut segments: Vec<&str> = Vec::with_capacity(3);
+    if !title.is_empty() {
+        segments.push(title);
+    }
+    if !capture.is_empty() {
+        segments.push(capture);
+    }
+    segments.push(summary);
+    segments.join("\n\n")
+}
+
 /// Phase A5: one batch of summary embeddings. Read auto-commit, embed
 /// outside any transaction, flush in one short upsert.
 fn process_summary_batch(
@@ -507,17 +536,7 @@ fn process_summary_batch(
         // does not treat every existing note as changed and re-embed the whole
         // vault. Because empty segments are dropped before the join, an empty
         // capture note contributes nothing and the result is unchanged.
-        let title = t.title.trim();
-        let capture = t.capture_note.trim();
-        let mut segments: Vec<&str> = Vec::with_capacity(3);
-        if !title.is_empty() {
-            segments.push(title);
-        }
-        if !capture.is_empty() {
-            segments.push(capture);
-        }
-        segments.push(summary);
-        let text = segments.join("\n\n");
+        let text = summary_embed_text(&t.title, &t.capture_note, summary);
         work.push(EmbedWork {
             note_path: t.note_path.clone(),
             text,

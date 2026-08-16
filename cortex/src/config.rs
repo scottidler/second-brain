@@ -63,6 +63,9 @@ pub struct EntitiesConfig {
     /// Daemon cadence (seconds) for the discovery tick. Default 86_400 (daily):
     /// vocabulary grows slowly and the pass is LLM-bound.
     pub discover_interval_secs: u64,
+    /// Bounds on the deterministic hub-body renderer (`sb cortex hub
+    /// --synthesize --apply`).
+    pub render: RenderConfig,
 }
 
 impl Default for EntitiesConfig {
@@ -73,6 +76,47 @@ impl Default for EntitiesConfig {
             max_input_tokens: 4_000,
             fabric_timeout_secs: 120,
             discover_interval_secs: 86_400,
+            render: RenderConfig::default(),
+        }
+    }
+}
+
+/// Bounds on the deterministic hub-body renderer
+/// (`docs/design/2026-08-15-entity-hub-two-vector-synthesis.md`, Phase 2). Two
+/// readability caps, one embedding-window bound, one mass-reset backstop.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub struct RenderConfig {
+    /// Members rendered per `## From ...` section before the deterministic
+    /// `...and N more claim-bearing members` overflow line. The top cohorts run
+    /// in the hundreds of members; the cap bounds the body while Obsidian's
+    /// backlinks pane keeps the full membership visible.
+    pub max_members_per_section: usize,
+    /// Claims rendered per member note (claims stay in note order).
+    pub max_claims_per_member: usize,
+    /// UTF-8 BYTE budget for the `## Summary` digest (definition sentence +
+    /// `Sessions:` / `Sources:` lines). Load-bearing for retrieval, not
+    /// decoration: the summary is the ONLY embedding surface a hub has, and the
+    /// encoder silently truncates at 512 tokens, so an unbounded digest makes
+    /// the second vector invisible to the live retriever. 1200 bytes is ~254
+    /// tokens on this corpus (4.73 chars/token) - it binds long before the
+    /// tokenizer does, which is the intended safety margin.
+    pub summary_byte_budget: usize,
+    /// Run-level backstop: if resetting the bodies of hubs the builder had
+    /// PREVIOUSLY rendered would exceed this count, the run aborts before
+    /// writing anything. Catches the failure mode a per-hub load-error check
+    /// cannot see - a claim-parse regression that "succeeds" everywhere with
+    /// zero claims and would stub the whole hub layer in one silent pass.
+    pub max_render_resets_per_run: usize,
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self {
+            max_members_per_section: 20,
+            max_claims_per_member: 3,
+            summary_byte_budget: 1_200,
+            max_render_resets_per_run: 20,
         }
     }
 }

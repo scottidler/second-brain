@@ -568,3 +568,83 @@ fn index_one_update_preserves_signal_columns() {
         .expect("summary");
     assert_eq!(summary, "Revised body.");
 }
+
+// --- entity-hub-two-vector-synthesis Phase 2 -------------------------------
+
+/// The structural half of the hub-body membership contract: only DELIBERATE
+/// note->hub kinds count, and a hub is never a member of a hub. Both filters
+/// live in SQL, not in a caller's convention, so no consumer can forget them.
+#[test]
+fn hub_members_deliberate_keeps_only_deliberate_note_to_hub_edges() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let hub = "entities/claude.md";
+    for path in [
+        hub,
+        "entities/agents.md",
+        "notes/wikilinked.md",
+        "notes/repo-member.md",
+        "notes/creator-member.md",
+        "notes/source-member.md",
+        "notes/semantic.md",
+        "notes/shared-tag.md",
+    ] {
+        index
+            .insert_test_note_graph(path, &[], "", "", "tech", "b", 100)
+            .expect("note");
+    }
+    let edges = vec![
+        Edge::deterministic("notes/wikilinked.md", hub, "wikilink", 1.0),
+        Edge::deterministic("notes/repo-member.md", hub, "repo-member", 1.0),
+        Edge::deterministic("notes/creator-member.md", hub, "creator-member", 1.0),
+        Edge::deterministic("notes/source-member.md", hub, "source-member", 1.0),
+        Edge::deterministic("notes/semantic.md", hub, "semantic", 0.9),
+        Edge::deterministic("notes/shared-tag.md", hub, "shared-tag", 0.5),
+        // A hub linking a hub: deliberate KIND, but it would feed hub bodies
+        // (refusals included) back into other hub bodies.
+        Edge::deterministic("entities/agents.md", hub, "wikilink", 1.0),
+        Edge::fact("entities/agents.md", hub, "relates-to", 1.0, "notes/x.md"),
+    ];
+    index.insert_edges(&edges).expect("insert");
+
+    assert_eq!(
+        index.hub_members_deliberate(hub).expect("members"),
+        vec![
+            "notes/creator-member.md".to_string(),
+            "notes/repo-member.md".to_string(),
+            "notes/source-member.md".to_string(),
+            "notes/wikilinked.md".to_string(),
+        ],
+        "deliberate note->hub kinds only, sorted by src, no entities/% src"
+    );
+    // The kind-agnostic probe still sees everything (graph tests use it as a
+    // generic inbound counter); only the builder's view is narrowed.
+    assert_eq!(
+        index.hub_members(hub).expect("members").len(),
+        7,
+        "hub_members stays kind-agnostic"
+    );
+}
+
+/// A hub with only inferred inbound (semantic / shared-tag) has ZERO builder
+/// membership - it keeps its stub rather than rendering claims from notes the
+/// author never associated with the subject.
+#[test]
+fn hub_members_deliberate_is_empty_for_inferred_only_membership() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let hub = "entities/every.md";
+    for path in [hub, "notes/a.md", "notes/b.md"] {
+        index
+            .insert_test_note_graph(path, &[], "", "", "tech", "b", 100)
+            .expect("note");
+    }
+    index
+        .insert_edges(&[
+            Edge::deterministic("notes/a.md", hub, "semantic", 0.9),
+            Edge::deterministic("notes/b.md", hub, "shared-tag", 0.4),
+        ])
+        .expect("insert");
+    assert!(
+        index.hub_members_deliberate(hub).expect("members").is_empty(),
+        "inferred edges are not membership"
+    );
+}

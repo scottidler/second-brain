@@ -626,12 +626,27 @@ impl CortexCli {
             }
             Command::Hub(a) => {
                 let apply = a.apply;
+                let synthesize = a.synthesize;
                 let report = cortex::hub::run(&vault_root, &config, &a.into())?;
                 if apply {
                     println!(
                         "hub complete: created={} existing={} entities_recorded={}",
                         report.created, report.existing, report.entities_recorded,
                     );
+                    if synthesize {
+                        // Per-branch counts, so a systematic member-load
+                        // breakage is visible instead of hiding in a total.
+                        println!(
+                            "hub bodies: written={} unchanged={} reset={} stubs_kept={} manual={} preserved={} members_skipped={}",
+                            report.bodies_written,
+                            report.bodies_unchanged,
+                            report.bodies_reset,
+                            report.stubs_kept,
+                            report.bodies_manual,
+                            report.bodies_preserved,
+                            report.members_skipped,
+                        );
+                    }
                 } else {
                     println!(
                         "hub dry-run: would create {} hub note(s) ({} already exist):",

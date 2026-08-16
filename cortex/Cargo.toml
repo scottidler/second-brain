@@ -32,6 +32,12 @@ sha2 = "0.11.0"
 [dev-dependencies]
 serial_test = { workspace = true }
 tempfile = { workspace = true }
+# The REAL BGE tokenizer, driven from the committed
+# `tests/fixtures/bge-small-en-v1.5-tokenizer.json`, so the hub retrieval
+# contract (both vectors inside the 512-token window) is asserted offline in
+# `otto ci`. Same version vault's Candle encoder loads; tokenization needs no
+# model weights.
+tokenizers = "0.23.1"
 
 [lints]
 workspace = true
