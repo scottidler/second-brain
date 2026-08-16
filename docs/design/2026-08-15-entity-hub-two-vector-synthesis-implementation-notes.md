@@ -444,3 +444,101 @@ daemon host.
 ### Open questions
 
 None.
+
+## Live verification (orchestrator, daemon host `desk`, 2026-08-16)
+
+Run from `target/release/sb` built at each phase, deliberately NOT
+`cargo install` — installing is a finalization action and the live runs did not
+need it. The cortex daemon was stopped for the backfill and the builder runs
+and restarted afterwards (`active`).
+
+### Phase 1 — `graph --backfill` (01:29 → 02:31, ~62 min)
+
+Run report: `full_rebuild=true notes=3123 semantic=30838 wikilink=14362
+shared_tag=125798 metadata=33016 repo_member=261 creator_member=1130
+source_member=1518 skipped=275` — all three membership kinds printed, so
+nothing is swallowed by the old `_ => {}` arm.
+
+| criterion | observed |
+|---|---|
+| `repo-member` > 200 | **261** (was 4) ✓ |
+| `wikilink` edges into `entities/every.md` | **0** (was 569) ✓ |
+| `creator-member` into `entities/every.md` | **1** ✓ |
+| `clyde://` source-member edges / dangling dsts | **0 / 0** ✓ |
+| `entities/youtube-com.md` source-member | **1030** (fanout cap would have zeroed it) ✓ |
+| unknown key under `graph:` / `entities:` | both fail load, naming the key ✓ |
+| no landed note body modified by the run | **0 files** with an mtime inside the backfill window ✓ |
+
+`fact` edges 359 → 468 rewritten by the pre-existing Fabric extraction
+(`facts scanned=1000 triples=9445 written=468 skipped=8977`), the plan's only
+LLM spend, as stated in-phase.
+
+### Phase 2 — builder (`hub --apply --synthesize`)
+
+Run 1: `written=522 unchanged=0 reset=303 stubs_kept=73 manual=0 preserved=0
+members_skipped=0` (sums to 898).
+Run 2: `written=0 unchanged=522 reset=0 stubs_kept=376` — `entities/` SHA-256
+manifest **byte-identical** across the two runs.
+
+| criterion | observed |
+|---|---|
+| refusal bodies | **134 → 0** ✓ |
+| `## From sources` / `## From your sessions` / both | 490 / 59 / 27 ✓ |
+| the 15 Fabric bodies rewritten | 0 `ONE SENTENCE SUMMARY` left ✓ |
+| rendered body parses to zero claims | 0 `## Claims` headings ✓ |
+| second run writes zero bytes | byte-identical ✓ |
+| flagless run read-only | vault AND `entities` table unchanged ✓ |
+| definition sentence | `Claude: hub of 345 sources and 63 sessions.` — the doc's measured 345/63 cohort ✓ |
+
+**End-to-end retrieval (the original ask).** After `oracle index` + `cortex
+embed` (825 hub embeddings refreshed), `knowledge_search` under the LIVE
+configured vector-first pipeline, queried with a claim that appears in
+`entities/claude.md` ONLY via its `## Summary` `Sessions:` line and its
+`## From your sessions` section (never in `## From sources`, verified by
+section-range grep), returns **`entities/claude.md` at rank 4 of 10**. Its
+`tldr` renders as the definition sentence, which is what round 3's M2 fix
+existed for. ✓
+
+### Phase 3 — `hub --asymmetry`
+
+`asymmetry: both=31 learned-not-applied=823 applied-not-read=28 unlinked=16
+(hubs=898)` — buckets sum to the hub count. `entities/claude.md` reports
+`both`. Two runs byte-identical; vault and `entities` table unchanged. ✓
+
+### Finding: the written-body count landed at 522, above the doc's ~480-510 band
+
+Phase 2's bullet says to check rather than shrug. Cause found: Phase 0's 46 new
+hub files triggered the live cortex daemon's link action at 01:10:46
+(`link: applied wikilink fixes to 1058 file(s)`), which inserted wikilinks
+pointing at the new hubs across the corpus BEFORE the backfill ran. Those are
+real `wikilink` membership edges, so more hubs cleared the claim-bearing bar
+than the pre-Phase-0 disk simulation predicted. Not a defect: the extra bodies
+are genuine membership, and the doc's own prediction was explicitly a
+simulation of a state that the daemon then changed. Recorded because the band
+is a stated tripwire.
+
+### Note on two different member counts
+
+`--asymmetry` reports `entities/claude.md` as `sources=436`, while its rendered
+digest says `345 sources`. Both are correct and measure different things: the
+report counts all deliberate members, the digest counts CLAIM-BEARING members,
+which is what the doc pins `N`/`M` to.
+
+### Acceptance criteria: no amendments
+
+Every criterion was executed. None turned out to be a doc defect, so nothing in
+the Acceptance Criteria section was rewritten. The one doc statement worth
+re-checking (round 5's M1 evidence that all 15 `hub-synthesized:` bodies carry
+Fabric boilerplate) was independently re-verified TRUE — an anchored grep
+initially showed only 4/15, but the other 11 carry the same markers as markdown
+headings (`## ONE SENTENCE SUMMARY:`), so the doc's conclusion stands and the
+first grep was wrong.
+
+### Vault git trail
+
+`89d95fa` (tag `pre-hub-phase0`) → `7973c85` (46 stubs) → `b8a1bbc` (daemon
+quality frontmatter) → `98dea63` (daemon link sweep, 1057 files) → `7f6fb95`
+(522 deterministic hub bodies).
+
+DB snapshots: `oracle.db.pre-phase0`, `oracle.db.pre-phase1-backfill`,
+`oracle.db.pre-phase2`.

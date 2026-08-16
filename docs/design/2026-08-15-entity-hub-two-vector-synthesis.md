@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler (via agent)
 **Date:** 2026-08-15
-**Status:** Draft (rev 2)
+**Status:** Implemented (rev 2)
 **Provenance:** Rewrite of the same-day rev 1 draft. Rev 1's measurements were
 independently re-verified against the live vault and oracle index and carry
 over (three corrected, noted inline). Rev 1's mechanism (per-hub LLM prose
