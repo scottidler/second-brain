@@ -179,18 +179,32 @@ pub fn slugify(value: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// Extract the host from a source URL (mirrors the graph pass's `source_host`).
-fn source_host(source: &str) -> Option<String> {
-    if source.is_empty() {
+/// Host of a note's `source:` URL — the ONE host implementation both the Source
+/// hub stub and the graph pass's `source-member` edge read. Delegates to
+/// `vault::search::extract_host` (which owns the parsing and its tests), so the
+/// hub and graph layers cannot disagree about what a host is. Before this there
+/// were two copies with different signatures: the hub side returned `None` on
+/// schemeless input, the graph side lowercased it and passed it through, so the
+/// hub minted nothing exactly where the graph yielded a bucket key.
+///
+/// `None` on schemeless input (`clyde://<uuid>`, bare provenance markers) is the
+/// deliberate contract: `collect_stubs` cannot mint a hub for those, so an edge
+/// pointed at one would be dropped forever by resolve-or-skip.
+pub fn source_host(source: &str) -> Option<String> {
+    vault::search::extract_host(source)
+}
+
+/// Vault-relative path of the Source hub for a note's `source:` URL, or `None`
+/// when the source has no host (see [`source_host`]). Mirrors `repo_hub_path`:
+/// the single place that turns a frontmatter value into a hub path, so the
+/// `source-member` edge `dst` is byte-identical to the stub's `hub_path()` by
+/// construction (pinned by `source_hub_path_matches_stub_hub_path`).
+pub fn source_hub_path(source: &str) -> Option<String> {
+    let slug = slugify(&source_host(source)?);
+    if slug.is_empty() {
         return None;
     }
-    let stripped = source
-        .strip_prefix("https://")
-        .or_else(|| source.strip_prefix("http://"))?;
-    let host = stripped.split('/').next().unwrap_or(stripped);
-    let host = host.split('?').next().unwrap_or(host);
-    let host = host.strip_prefix("www.").unwrap_or(host);
-    if host.is_empty() { None } else { Some(host.to_lowercase()) }
+    Some(format!("{HUB_DIR}/{slug}.md"))
 }
 
 /// Derive the full set of hub stubs from the glossary + the scanned notes.

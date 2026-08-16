@@ -45,9 +45,13 @@ const KIND_SHARED_SOURCE: &str = "shared-source";
 const KIND_SHARED_DOMAIN: &str = "shared-domain";
 /// Note -> repo hub membership (harvest-clyde-sessions design, Phase 10).
 const KIND_REPO_MEMBER: &str = "repo-member";
-/// Repo membership is a strong deterministic signal (unlike a rarity-weighted
-/// shared tag), so it rides at full weight.
-const REPO_MEMBER_WEIGHT: f32 = 1.0;
+/// Note -> creator hub membership (entity-hub-two-vector-synthesis, Phase 1).
+const KIND_CREATOR_MEMBER: &str = "creator-member";
+/// Note -> source-host hub membership (entity-hub-two-vector-synthesis, Phase 1).
+const KIND_SOURCE_MEMBER: &str = "source-member";
+/// Hub membership is a strong deterministic signal (unlike a rarity-weighted
+/// shared tag), so every `*-member` kind rides at full weight.
+const MEMBER_WEIGHT: f32 = 1.0;
 
 const WIKILINK_WEIGHT: f32 = 1.0;
 
@@ -60,6 +64,12 @@ pub struct GraphStats {
     pub wikilink: usize,
     pub shared_tag: usize,
     pub metadata: usize,
+    /// note -> `entities/repos/<org>/<repo>.md` membership edges.
+    pub repo_member: usize,
+    /// note -> `entities/<creator-slug>.md` membership edges.
+    pub creator_member: usize,
+    /// note -> `entities/<source-host-slug>.md` membership edges.
+    pub source_member: usize,
     pub skipped: usize,
 }
 
@@ -99,13 +109,16 @@ pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<Graph
 
     drop(lock);
     log::info!(
-        "graph complete: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={} skipped={}",
+        "graph complete: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={} repo_member={} creator_member={} source_member={} skipped={}",
         stats.full_rebuild,
         stats.notes_processed,
         stats.semantic,
         stats.wikilink,
         stats.shared_tag,
         stats.metadata,
+        stats.repo_member,
+        stats.creator_member,
+        stats.source_member,
         stats.skipped,
     );
     Ok(stats)
@@ -181,7 +194,7 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
     // incremental targets to find their pair partners).
     let tag_buckets = invert(&rows, |r| r.tags.clone());
     let creator_buckets = invert(&rows, |r| single(&r.creator));
-    let source_buckets = invert(&rows, |r| single(&source_host(&r.source)));
+    let source_buckets = invert(&rows, |r| single(&source_bucket_key(&r.source)));
     let domain_buckets = invert(&rows, |r| single(&r.domain));
 
     // Determine which notes' edges to rebuild. Per-note staleness (mirroring
@@ -254,8 +267,19 @@ fn build_edges_for(
         edges.push(Edge::deterministic(src.clone(), neighbor, KIND_SEMANTIC, cosine));
     }
 
-    // --- wikilink (resolved targets only) ---
+    // --- wikilink (resolved targets only, stopwords dropped) ---
+    //
+    // The stopword is consulted HERE, on the RAW slug straight out of
+    // `extract_wikilinks`, BEFORE `resolve_note_path`. Checking after resolve
+    // would be wrong twice over: `resolve_wikilink`'s last fallback is a bare
+    // `LIKE '%target%'`, so a stoplisted word can resolve to an arbitrary note,
+    // and the resolved PATH no longer carries the word that has to be judged.
+    // Case-insensitive so `[[Every]]` cannot slip past a lowercase entry.
     for slug in vault::search::extract_wikilinks(&row.body) {
+        if is_wikilink_stopword(&slug, cfg) {
+            log::trace!("wikilink: dropping stoplisted target {slug:?} in {src}");
+            continue;
+        }
         if let Some(resolved) = index.resolve_note_path(&slug)? {
             edges.push(Edge::deterministic(
                 src.clone(),
@@ -314,7 +338,7 @@ fn build_edges_for(
     metadata_edges(
         &mut edges,
         src,
-        &source_host(&row.source),
+        &source_bucket_key(&row.source),
         source_buckets,
         KIND_SHARED_SOURCE,
         cfg.source_weight,
@@ -364,11 +388,70 @@ fn build_edges_for(
             src.clone(),
             hub_path,
             KIND_REPO_MEMBER,
-            REPO_MEMBER_WEIGHT,
+            MEMBER_WEIGHT,
+        ));
+    }
+
+    // --- creator-member: note -> creator hub (entity-hub-two-vector-synthesis,
+    // Phase 1). Same shape as repo-member: linear note->hub routing, NOT a
+    // note<->note bucket, so `fanout_cap` deliberately does NOT apply. The cap
+    // exists to stop quadratic pairwise blow-up in `metadata_edges`; copying it
+    // here would emit NOTHING for exactly the largest creator hubs, which is the
+    // opposite of what a membership primitive is for. The over-cap hub routing
+    // at the shared-tag block above is the precedent this follows.
+    //
+    // The dst is byte-identical to `HubStub::hub_path()` for a Creator stub
+    // because that stub's slug IS `slugify(creator)` (`hub.rs` `collect_stubs`).
+    // A creator whose slug is empty (punctuation-only) mints no hub, so it emits
+    // no edge rather than pointing at `entities/.md`.
+    if !row.creator.is_empty() {
+        let slug = crate::hub::slugify(&row.creator);
+        if slug.is_empty() {
+            log::trace!(
+                "creator-member: creator {:?} on {src} slugifies empty; no edge",
+                row.creator
+            );
+        } else {
+            edges.push(Edge::deterministic(
+                src.clone(),
+                format!("{}/{}.md", crate::hub::HUB_DIR, slug),
+                KIND_CREATOR_MEMBER,
+                MEMBER_WEIGHT,
+            ));
+        }
+    }
+
+    // --- source-member: note -> source-host hub (same phase, same no-cap
+    // reasoning; `www.youtube.com` alone holds >1000 notes and is the single
+    // host over the cap, so a copied cap would zero the largest source hub).
+    //
+    // `hub::source_hub_path` is the ONE function that turns a `source:` value
+    // into a hub path — the stub side reads the same host through
+    // `hub::source_host` — so this dst can never drift from the minted hub.
+    // `None` (schemeless: the 261 `clyde://` sessions and 21 provenance markers)
+    // emits no edge: `collect_stubs` cannot mint those hubs, so the edge would be
+    // dropped forever by resolve-or-skip. Sessions get membership via
+    // `repo-member`.
+    if let Some(hub_path) = crate::hub::source_hub_path(&row.source) {
+        edges.push(Edge::deterministic(
+            src.clone(),
+            hub_path,
+            KIND_SOURCE_MEMBER,
+            MEMBER_WEIGHT,
         ));
     }
 
     Ok(edges)
+}
+
+/// Is this raw wikilink target stoplisted? Case-insensitive against
+/// `graph.wikilink-stopwords`, which names common English words that
+/// case-insensitively collide with a short hub title (`every` matching
+/// `entities/every.md` minted 569 false wikilink edges).
+fn is_wikilink_stopword(slug: &str, cfg: &crate::config::GraphConfig) -> bool {
+    cfg.wikilink_stopwords
+        .iter()
+        .any(|stop| stop.eq_ignore_ascii_case(slug))
 }
 
 /// Emit fixed-weight metadata edges from `src` to every other note sharing the
@@ -424,23 +507,23 @@ fn single(value: &str) -> Vec<String> {
     if value.is_empty() { vec![] } else { vec![value.to_string()] }
 }
 
-/// Extract the host from a source URL (mirrors `vault::search`'s private
-/// `extract_host`): strip scheme, drop path/query, drop `www.`. Returns the
-/// input lowercased when it is not URL-shaped (so non-URL sources still
-/// bucket by exact value).
-fn source_host(source: &str) -> String {
-    if source.is_empty() {
-        return String::new();
-    }
-    let stripped = source
+/// Bucket key for the note<->note `shared-source` layer: the HOST when the
+/// source is URL-shaped, else the raw value lowercased (a non-URL source still
+/// buckets by exact value, which is what makes co-provenance markers group).
+///
+/// Host extraction itself is delegated to `vault::search::extract_host` — the
+/// single host implementation, also behind `hub::source_hub_path` — so this
+/// layer and the `source-member` hub layer can never disagree on what a host is.
+/// The URL-shaped/schemeless SPLIT stays here because it is this layer's own
+/// policy, not a fact about hosts: the hub layer must skip schemeless input, the
+/// bucket layer must keep it.
+fn source_bucket_key(source: &str) -> String {
+    match source
         .strip_prefix("https://")
-        .or_else(|| source.strip_prefix("http://"));
-    match stripped {
-        Some(rest) => {
-            let host = rest.split('/').next().unwrap_or(rest);
-            let host = host.split('?').next().unwrap_or(host);
-            host.strip_prefix("www.").unwrap_or(host).to_lowercase()
-        }
+        .or_else(|| source.strip_prefix("http://"))
+    {
+        // URL-shaped: the host, or empty (no bucket) when there is no host.
+        Some(_) => vault::search::extract_host(source).unwrap_or_default(),
         None => source.to_lowercase(),
     }
 }
@@ -452,6 +535,11 @@ fn tally(stats: &mut GraphStats, edges: &[Edge]) {
             KIND_WIKILINK => stats.wikilink += 1,
             KIND_SHARED_TAG => stats.shared_tag += 1,
             KIND_SHARED_CREATOR | KIND_SHARED_SOURCE | KIND_SHARED_DOMAIN => stats.metadata += 1,
+            // Explicit arms, not the catch-all: the `_ => {}` below hid
+            // `repo-member` from every run report since Phase 10 shipped.
+            KIND_REPO_MEMBER => stats.repo_member += 1,
+            KIND_CREATOR_MEMBER => stats.creator_member += 1,
+            KIND_SOURCE_MEMBER => stats.source_member += 1,
             _ => {}
         }
     }

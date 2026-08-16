@@ -637,3 +637,64 @@ fn synthesize_hub_never_modifies_member_notes() {
         "a member note is byte-identical after hub synthesis (membership never mutates the note)"
     );
 }
+
+// --- entity-hub-two-vector-synthesis Phase 1 -------------------------------
+
+/// The divergence-killer. Before this phase the hub side and the graph side each
+/// carried their own host parser with DIFFERENT signatures, so the hub minted
+/// nothing exactly where the graph produced a bucket key. Now a Source stub's
+/// on-disk path and the `source-member` edge's `dst` come from one seam, and
+/// this pins them equal on the shapes that actually differ (`www.`, query
+/// string, uppercase, port, deep path).
+#[test]
+fn source_hub_path_matches_stub_hub_path() {
+    let urls = [
+        "https://www.youtube.com/watch?v=abc",
+        "https://youtube.com/x",
+        "http://Example.COM/deep/path?q=1",
+        "https://every.to/chain-of-thought",
+        "https://localhost:8080/x",
+    ];
+    for url in urls {
+        let host = source_host(url).unwrap_or_else(|| panic!("host for {url}"));
+        let stub = HubStub {
+            slug: slugify(&host),
+            kind: HubKind::Source,
+            title: host,
+        };
+        assert_eq!(
+            Some(stub.hub_path()),
+            source_hub_path(url),
+            "the stub path and the edge dst must be byte-identical for {url}"
+        );
+    }
+}
+
+/// Schemeless input is the contract's `None`: `collect_stubs` cannot mint those
+/// hubs, so `source_hub_path` must refuse to name one. `clyde://` is the only
+/// non-http scheme in the corpus (261 session notes); the rest are provenance
+/// markers, not publishers.
+#[test]
+fn source_hub_path_is_none_for_schemeless_and_hostless_input() {
+    for value in [
+        "",
+        "clyde://0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8",
+        "pais-migration",
+        "youtube-transcript",
+        "https://",
+    ] {
+        assert_eq!(source_hub_path(value), None, "{value:?} names no source hub");
+        assert_eq!(source_host(value), None, "{value:?} has no host");
+    }
+}
+
+/// `source_hub_path` produces a FLAT `entities/<slug>.md`, the same namespace
+/// Concept/Creator/Tag hubs share (deliberately: one hub per subject). Repo hubs
+/// are the only nested kind.
+#[test]
+fn source_hub_path_is_flat_under_the_hub_dir() {
+    assert_eq!(
+        source_hub_path("https://www.youtube.com/watch?v=1").as_deref(),
+        Some("entities/youtube-com.md"),
+    );
+}

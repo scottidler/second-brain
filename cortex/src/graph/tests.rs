@@ -415,3 +415,311 @@ fn repo_member_edges_are_monotonic_across_incremental_builds() {
         "1 prior (A->X) + 2 new (B->X, B->Y); nothing removed across the incremental sweep"
     );
 }
+
+// --- entity-hub-two-vector-synthesis Phase 1 -------------------------------
+
+/// A `cfg()` with the design's seeded stopwords, so the stoplisted tests read
+/// the same shape the shipped `cortex.yml.example` configures.
+fn cfg_stoplisted() -> GraphConfig {
+    GraphConfig {
+        wikilink_stopwords: vec!["every".to_string(), "brief".to_string()],
+        ..cfg()
+    }
+}
+
+/// Stub a flat hub note (`entities/<slug>.md`) so `insert_edges` can resolve a
+/// membership edge's `dst`. Empty domain: hubs must not form shared-domain
+/// edges among themselves and pollute the kind-agnostic `hub_members` probe.
+fn stub_hub(index: &SearchIndex, slug: &str) -> String {
+    let path = format!("{}/{slug}.md", crate::hub::HUB_DIR);
+    index
+        .insert_test_note_graph(&path, &[], "", "", "", "hub", 100)
+        .expect("hub note");
+    path
+}
+
+/// The stopword's whole point: a common English word the auto-linker turned
+/// into `[[Every]]` mints NO wikilink edge, while the note's real `creator:`
+/// mints a deliberate `creator-member` edge into the SAME hub. Both halves in
+/// one test because shipping the stopword without the primitive would strip
+/// `entities/every.md` from 569 members to zero.
+#[test]
+fn stoplisted_wikilink_mints_no_edge_while_creator_member_does() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let every_hub = stub_hub(&index, "every");
+    // Body carries the auto-linker's `[[Every]]` (capitalized: the match must be
+    // case-insensitive) AND the note's creator is the every.to publication.
+    index
+        .insert_test_note_graph("notes/a.md", &[], "", "Every", "tech", "read on [[Every]] today", 100)
+        .expect("a");
+
+    let stats = build(&mut index, &cfg_stoplisted(), true).expect("build");
+
+    assert_eq!(
+        index.count_edges(Some("wikilink")).expect("count"),
+        0,
+        "the stoplisted [[Every]] mints no wikilink edge"
+    );
+    assert_eq!(stats.wikilink, 0);
+    assert_eq!(
+        index.hub_members(&every_hub).expect("members"),
+        vec!["notes/a.md".to_string()],
+        "the hub keeps a deliberate member via creator-member, not the prose match"
+    );
+    assert_eq!(stats.creator_member, 1);
+}
+
+/// Control for the test above: the machinery is not vacuously passing. With an
+/// EMPTY stopword list (the code default), the very same `[[Every]]` DOES mint a
+/// wikilink edge — so the suppression is the config, not a broken fixture.
+#[test]
+fn unstoplisted_wikilink_still_mints_an_edge() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    stub_hub(&index, "every");
+    index
+        .insert_test_note_graph("notes/a.md", &[], "", "", "tech", "read on [[Every]] today", 100)
+        .expect("a");
+    assert!(
+        cfg().wikilink_stopwords.is_empty(),
+        "the code default suppresses nothing"
+    );
+
+    let stats = build(&mut index, &cfg(), true).expect("build");
+
+    assert_eq!(stats.wikilink, 1, "with no stopword configured the prose match links");
+}
+
+/// Landed note bodies are NEVER retracted by this phase (the harvest doc's
+/// binding rule): the stopword drops the EDGE, and the `[[Every]]` markup stays
+/// byte-identical in the body so Obsidian keeps rendering it.
+#[test]
+fn stoplisted_wikilink_leaves_the_note_body_byte_identical() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    stub_hub(&index, "every");
+    let body = "read on [[Every]] today";
+    index
+        .insert_test_note_graph("notes/a.md", &[], "", "", "tech", body, 100)
+        .expect("a");
+    let before: Vec<String> = index
+        .graph_note_rows()
+        .expect("rows")
+        .iter()
+        .map(|r| r.body.clone())
+        .collect();
+
+    build(&mut index, &cfg_stoplisted(), true).expect("build");
+
+    let after: Vec<String> = index
+        .graph_note_rows()
+        .expect("rows")
+        .iter()
+        .map(|r| r.body.clone())
+        .collect();
+    assert_eq!(before, after, "the graph pass rewrites no note body");
+    assert!(
+        after.iter().any(|b| b == body),
+        "the landed [[Every]] markup survives verbatim"
+    );
+}
+
+/// The fan-out-cap regression the design names by hand: `www.youtube.com` holds
+/// 1026 notes and is the only host over the cap (100), so a `source-member` edge
+/// that copied `metadata_edges`' cap would silently zero the LARGEST source hub.
+/// Fixture: 5 notes over a cap of 3. The note<->note `shared-source` layer is
+/// correctly capped to nothing; the note->hub layer emits every edge.
+#[test]
+fn source_member_ignores_the_fanout_cap_that_zeroes_the_largest_host() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let hub = stub_hub(&index, "youtube-com");
+    for i in 0..5 {
+        index
+            .insert_test_note_graph(
+                &format!("notes/{i}.md"),
+                &[],
+                &format!("https://www.youtube.com/watch?v={i}"),
+                "",
+                "",
+                "x",
+                100,
+            )
+            .expect("note");
+    }
+
+    let stats = build(&mut index, &cfg(), true).expect("build");
+
+    assert_eq!(
+        index.count_edges(Some("shared-source")).expect("count"),
+        0,
+        "the pairwise bucket IS capped (5 > cap 3) - unchanged behavior"
+    );
+    assert_eq!(
+        stats.source_member, 5,
+        "every note joins the host hub regardless of cap"
+    );
+    assert_eq!(
+        index.hub_members(&hub).expect("members").len(),
+        5,
+        "the largest source hub has non-zero membership"
+    );
+}
+
+/// The `www.` strip and the query string are the host implementation's job, and
+/// there is now exactly one of them: two YouTube URLs written differently land
+/// on the SAME `entities/youtube-com.md` hub.
+#[test]
+fn source_member_normalizes_www_and_query_to_one_hub() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let hub = stub_hub(&index, "youtube-com");
+    index
+        .insert_test_note_graph("notes/a.md", &[], "https://www.youtube.com/watch?v=1", "", "", "x", 100)
+        .expect("a");
+    index
+        .insert_test_note_graph("notes/b.md", &[], "https://youtube.com/watch?v=2", "", "", "y", 100)
+        .expect("b");
+
+    build(&mut index, &cfg(), true).expect("build");
+
+    assert_eq!(
+        index.hub_members(&hub).expect("members"),
+        vec!["notes/a.md".to_string(), "notes/b.md".to_string()],
+    );
+}
+
+/// The 261 `clyde://<uuid>` session notes: schemeless (non-http) sources have no
+/// host, `collect_stubs` can never mint their hub, so the edge builder must emit
+/// NOTHING rather than a dangling target that resolve-or-skip drops every run.
+#[test]
+fn schemeless_source_emits_no_source_member_edge_and_no_dangling_target() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    index
+        .insert_test_note_graph(
+            "harvest/session.md",
+            &[],
+            "clyde://0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8",
+            "",
+            "",
+            "session body",
+            100,
+        )
+        .expect("session");
+
+    let stats = build(&mut index, &cfg(), true).expect("build");
+
+    assert_eq!(stats.source_member, 0, "no source-member edge for a schemeless source");
+    assert_eq!(index.count_edges(Some("source-member")).expect("count"), 0);
+    assert_eq!(
+        stats.skipped, 0,
+        "nothing was even attempted-and-dropped: no dangling dst was built"
+    );
+}
+
+/// A creator whose slug the hub layer cannot mint (punctuation only) emits no
+/// edge rather than pointing at `entities/.md`.
+#[test]
+fn creator_that_slugifies_empty_emits_no_creator_member_edge() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    index
+        .insert_test_note_graph("notes/a.md", &[], "", "!!!", "", "x", 100)
+        .expect("a");
+
+    let stats = build(&mut index, &cfg(), true).expect("build");
+
+    assert_eq!(stats.creator_member, 0);
+    assert_eq!(index.count_edges(Some("creator-member")).expect("count"), 0);
+}
+
+/// The `creator-member` dst must be BYTE-IDENTICAL to the path `cortex hub`
+/// stubs for that creator, or resolve-or-skip drops the edge and the hub
+/// synthesizes memberless. Asserted against the real `HubStub` path, not a
+/// hand-written string.
+#[test]
+fn creator_member_dst_matches_the_minted_creator_hub_path() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let creator = "Dan Shipper & Co.";
+    let hub = stub_hub(&index, &crate::hub::slugify(creator));
+    index
+        .insert_test_note_graph("notes/a.md", &[], "", creator, "", "x", 100)
+        .expect("a");
+
+    build(&mut index, &cfg(), true).expect("build");
+
+    assert_eq!(
+        index.hub_members(&hub).expect("members"),
+        vec!["notes/a.md".to_string()],
+        "the edge resolved, so its dst matched the stub path exactly"
+    );
+}
+
+/// The run report must SHOW the three membership kinds. `tally`'s `_ => {}` arm
+/// swallowed `repo-member` from every report since Phase 10 shipped; explicit
+/// arms are the fix, and this pins all three at once.
+#[test]
+fn run_report_counts_all_three_membership_kinds() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let repo_hub = crate::hub::repo_hub_path("scottidler/loopr");
+    index
+        .insert_test_note_graph(&repo_hub, &[], "", "", "", "hub", 100)
+        .expect("repo hub");
+    stub_hub(&index, "every");
+    stub_hub(&index, "youtube-com");
+    index_repo_session(&index, "harvest/session.md", Some("scottidler/loopr"), None);
+    index
+        .insert_test_note_graph(
+            "notes/a.md",
+            &[],
+            "https://www.youtube.com/watch?v=1",
+            "Every",
+            "",
+            "x",
+            100,
+        )
+        .expect("a");
+
+    let stats = build(&mut index, &cfg_stoplisted(), true).expect("build");
+
+    assert_eq!(stats.repo_member, 1, "repo-member is no longer swallowed");
+    assert_eq!(stats.creator_member, 1);
+    assert_eq!(stats.source_member, 1);
+    // The report agrees with the table it describes.
+    assert_eq!(
+        index.count_edges(Some("repo-member")).expect("c"),
+        stats.repo_member as i64
+    );
+    assert_eq!(
+        index.count_edges(Some("creator-member")).expect("c"),
+        stats.creator_member as i64
+    );
+    assert_eq!(
+        index.count_edges(Some("source-member")).expect("c"),
+        stats.source_member as i64
+    );
+}
+
+/// `shared-source` bucketing is UNCHANGED by the shared-host refactor: a
+/// schemeless source still buckets by its exact lowercased value (that is how
+/// co-provenance markers group), even though the hub layer skips it.
+#[test]
+fn schemeless_sources_still_share_a_shared_source_bucket() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    index
+        .insert_test_note_graph("notes/a.md", &[], "Pais-Migration", "", "", "x", 100)
+        .expect("a");
+    index
+        .insert_test_note_graph("notes/b.md", &[], "pais-migration", "", "", "y", 100)
+        .expect("b");
+
+    build(&mut index, &cfg(), true).expect("build");
+
+    let neighbors = index
+        .expand_graph(
+            &["notes/a.md".to_string()],
+            1,
+            Some(&["shared-source".to_string()]),
+            0.0,
+        )
+        .expect("e");
+    assert!(
+        neighbors.iter().any(|r| r.path == "notes/b.md"),
+        "case-folded schemeless sources still bucket together"
+    );
+}

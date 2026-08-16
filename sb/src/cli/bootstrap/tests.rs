@@ -182,6 +182,18 @@ fn cortex_template_parses_as_typed_config() {
         .expect("cortex.yml.example must parse as cortex::config::Config");
 }
 
+/// The stopword is only useful if the shipped starter config actually carries
+/// it: the Rust default is empty by design, so a fresh `sb bootstrap` gets the
+/// suppression from THIS file or not at all.
+#[test]
+fn cortex_template_seeds_the_wikilink_stopwords() {
+    let cfg = serde_yaml::from_str::<cortex::config::Config>(CORTEX_TEMPLATE).expect("parse");
+    assert_eq!(
+        cfg.graph.wikilink_stopwords,
+        vec!["every".to_string(), "brief".to_string()],
+    );
+}
+
 #[test]
 fn oracle_template_parses_as_typed_config() {
     serde_yaml::from_str::<oracle::Config>(ORACLE_TEMPLATE).expect("oracle.yml.example must parse as oracle::Config");

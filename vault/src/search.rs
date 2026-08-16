@@ -432,8 +432,15 @@ pub fn extract_wikilinks(body: &str) -> Vec<String> {
     targets
 }
 
-/// Extract hostname from a URL string
-fn extract_host(url: &str) -> Option<String> {
+/// Extract hostname from a URL string: strip the scheme, drop path/query, drop
+/// a leading `www.`, lowercase. `None` when the input carries no `http(s)://`
+/// scheme or resolves to an empty host.
+///
+/// `pub` so cortex's hub/graph layers derive source hubs from the SAME host
+/// implementation this crate's stats use (single source of host truth); before
+/// this there were two divergent copies in cortex that disagreed on schemeless
+/// input.
+pub fn extract_host(url: &str) -> Option<String> {
     // Simple extraction without pulling in the url crate
     let stripped = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
     let host = stripped.split('/').next()?;

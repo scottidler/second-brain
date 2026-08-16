@@ -172,3 +172,57 @@ fn test_embed_kinds_explicit_claim_true_enables_claim() {
     assert!(cfg.embed.kinds.summary, "summary stays default ON");
     assert!(cfg.embed.kinds.transcript_chunk, "transcript-chunk stays default ON");
 }
+
+// --- entity-hub-two-vector-synthesis Phase 1 -------------------------------
+
+#[test]
+fn graph_wikilink_stopwords_default_empty() {
+    // Code never silently suppresses a link: the default is empty and the
+    // shipped `cortex.yml.example` is what seeds the measured offenders.
+    assert!(GraphConfig::default().wikilink_stopwords.is_empty());
+}
+
+#[test]
+fn graph_wikilink_stopwords_deserializes_kebab_case() {
+    let yaml = "wikilink-stopwords:\n  - every\n  - brief\n";
+    let cfg: GraphConfig = serde_yaml::from_str(yaml).expect("deserialize");
+    assert_eq!(cfg.wikilink_stopwords, vec!["every".to_string(), "brief".to_string()]);
+}
+
+#[test]
+fn graph_wikilink_stopwords_load_under_full_config() {
+    // The shape `Config::load_from_file` actually parses.
+    let yaml = "graph:\n  wikilink-stopwords:\n    - every\n";
+    let cfg: Config = serde_yaml::from_str(yaml).expect("deserialize");
+    assert_eq!(cfg.graph.wikilink_stopwords, vec!["every".to_string()]);
+}
+
+#[test]
+fn graph_config_rejects_unknown_field() {
+    // Without deny_unknown_fields a typo'd `wikilink-stopwords` would silently
+    // no-op the stopword and a backfill would reinstate every false edge.
+    let yaml = "wikilink-stopwrods:\n  - every\n"; // "stopwrods" typo
+    let err = serde_yaml::from_str::<GraphConfig>(yaml).expect_err("typo'd key must fail");
+    assert!(format!("{err}").contains("unknown field"), "{err}");
+}
+
+#[test]
+fn graph_typo_under_full_config_fails_loud() {
+    let yaml = "graph:\n  wikilink-stopwrods:\n    - every\n";
+    let err = serde_yaml::from_str::<Config>(yaml).expect_err("typo under graph: must fail");
+    assert!(format!("{err}").contains("unknown field"), "{err}");
+}
+
+#[test]
+fn entities_config_rejects_unknown_field() {
+    let yaml = "max-per-runn: 10\n"; // "runn" typo
+    let err = serde_yaml::from_str::<EntitiesConfig>(yaml).expect_err("typo'd key must fail");
+    assert!(format!("{err}").contains("unknown field"), "{err}");
+}
+
+#[test]
+fn entities_typo_under_full_config_fails_loud() {
+    let yaml = "entities:\n  max-per-runn: 10\n";
+    let err = serde_yaml::from_str::<Config>(yaml).expect_err("typo under entities: must fail");
+    assert!(format!("{err}").contains("unknown field"), "{err}");
+}

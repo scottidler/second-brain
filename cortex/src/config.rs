@@ -50,7 +50,7 @@ impl Default for Config {
 /// `entity-proposals.yml`. Bounded by `max_per_run` (notes per pass) so a
 /// backlog never fans unbounded LLM calls; daemon cadence defaults to daily.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct EntitiesConfig {
     /// Fabric pattern that extracts entity names from a note body.
     pub fabric_pattern: String,
@@ -84,7 +84,7 @@ impl Default for EntitiesConfig {
 /// "calibrate against the labeled query set" open questions are a config edit.
 /// Defaults are the design doc's suggested starting values.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct GraphConfig {
     /// Daemon cadence (seconds) for the graph tick. Runs after the embed tick
     /// so semantic edges see fresh vectors. Default 900 (15 min).
@@ -131,6 +131,19 @@ pub struct GraphConfig {
     /// Minimum cosine for a cluster-bridge edge from an isolated note to its
     /// nearest semantic neighbor.
     pub bridge_min_cosine: f32,
+    /// Wikilink targets the graph pass refuses to turn into an edge, matched
+    /// case-insensitively on the RAW `[[target]]` before resolution. The
+    /// auto-linker's blunt `min-word-length` gate case-insensitively rewrites
+    /// common English words into links to short-titled hubs (`every` alone
+    /// minted 569 false `wikilink` edges into `entities/every.md`), and landed
+    /// bodies are never retracted, so the graph layer has to refuse them at
+    /// build time or a backfill reinstates them forever.
+    ///
+    /// This lives under `graph:` deliberately: the graph builder must not read
+    /// the auto-linker's `actions.linking.*` namespace. Defaults EMPTY — code
+    /// never silently suppresses a link; the shipped `cortex.yml.example` seeds
+    /// the two measured offenders.
+    pub wikilink_stopwords: Vec<String>,
 }
 
 impl Default for GraphConfig {
@@ -167,6 +180,7 @@ impl Default for GraphConfig {
                 .map(|s| s.to_string())
                 .collect(),
             bridge_min_cosine: 0.5,
+            wikilink_stopwords: Vec::new(),
         }
     }
 }

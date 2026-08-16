@@ -348,8 +348,9 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 // via cadence so semantic edges see fresh vectors.
                 match tokio::task::block_in_place(|| crate::graph::daemon_tick(vault_root, config)) {
                     Ok(stats) if stats.notes_processed > 0 => log::info!(
-                        "daemon graph tick: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={}",
+                        "daemon graph tick: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={} repo_member={} creator_member={} source_member={}",
                         stats.full_rebuild, stats.notes_processed, stats.semantic, stats.wikilink, stats.shared_tag, stats.metadata,
+                        stats.repo_member, stats.creator_member, stats.source_member,
                     ),
                     Ok(_) => {
                         // Idle tick - no changed notes. Stay quiet.

@@ -546,13 +546,16 @@ impl CortexCli {
             Command::Graph(a) => {
                 let stats = cortex::graph::run(&vault_root, &config, &a.into())?;
                 println!(
-                    "graph complete: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={} skipped={}",
+                    "graph complete: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={} repo_member={} creator_member={} source_member={} skipped={}",
                     stats.full_rebuild,
                     stats.notes_processed,
                     stats.semantic,
                     stats.wikilink,
                     stats.shared_tag,
                     stats.metadata,
+                    stats.repo_member,
+                    stats.creator_member,
+                    stats.source_member,
                     stats.skipped,
                 );
             }

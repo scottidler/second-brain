@@ -54,6 +54,18 @@ graph:
   # the separate graph tick. In-process so it cannot collide with the embed tick
   # on the shared embed lock (a separate systemd timer would). Default 604800 (weekly).
   # fact-interval-secs: 604800
+  # Wikilink targets that never become an edge, matched case-insensitively on
+  # the RAW [[target]] before resolution. The auto-linker's blunt
+  # `min-word-length` gate rewrites common English words into links to
+  # short-titled hubs, and landed note bodies are never retracted - so a word
+  # listed here stops minting membership on the next `graph --backfill` even
+  # though the [[link]] keeps rendering in Obsidian. The code default is EMPTY
+  # (nothing is suppressed unless you say so); these two are the measured
+  # offenders on Scott's corpus (`every` alone minted 569 false edges into
+  # entities/every.md, the every.to publication hub).
+  wikilink-stopwords:
+    - every
+    - brief
 
 # `sb cortex associate`: groups harvest session notes sharing a
 # content-derived `slug:` (borg's harvest naming, v0.12.2) and, per pairwise
