@@ -358,3 +358,89 @@ orchestrator's step on the daemon host.
   Rust defaults are the designed values, so no config edit is required to run
   Phase 2 - the template entry is commented-out documentation. Only a deliberate
   tuning (e.g. raising `max-render-resets-per-run`) needs an edit.
+
+## Phase 3: asymmetry report
+
+**Model:** sonnet
+
+Code only. No live-vault or live-DB command was run: every test drives a temp
+vault and an in-memory `SearchIndex`. `entities/claude.md` reporting `both`
+against the live corpus is the one criterion the orchestrator verifies on the
+daemon host.
+
+### Design decisions
+
+- **New submodule `cortex/src/hub/asymmetry.rs`**, mirroring how Phase 2 put
+  the renderer in its own pure module (`cortex/src/hub/render.rs`). `hub.rs`
+  re-exports `AsymmetryBucket`, `AsymmetryReport`, `AsymmetryRow`,
+  `AsymmetryTotals`, `build_asymmetry_report` the same way it re-exports the
+  render types.
+- **`build_asymmetry_report` reuses `SearchIndex::hub_members_deliberate` and
+  `hub::load_hub_member` verbatim** - the exact membership query and member
+  loader Phase 2's body builder reads from. No second membership query: the
+  design explicitly calls this out, and a second query could silently drift
+  from the builder's view of reality.
+- **Classification needs only `note_type`, not claims** - `load_hub_member`
+  still parses `## Claims` (it is the one existing, tested loader), but the
+  asymmetry report counts raw deliberate membership per vector, not
+  claim-bearing membership (Phase 2's claim-bearing filter is a DIFFERENT,
+  narrower set used for body rendering). Classifying through
+  `hub::Vector::of(&member.note_type)` keeps the vector definition in the ONE
+  place the design pins it (schema is law).
+- **`--asymmetry` is checked FIRST inside `hub::run`, before `write_stubs` and
+  before any apply/synthesize branch, and returns early.** This is what makes
+  the read-only contract hold even under a combined
+  `--asymmetry --apply --synthesize` invocation: the flag short-circuits
+  before any write path exists to fall into, rather than relying on every
+  downstream branch individually declining to write.
+- **`AsymmetryReport::render()` lives in cortex, not `sb`.** `sb/AGENTS.md`
+  pins stdio to `sb`, but the "two runs produce byte-identical output"
+  criterion needs a pure, directly-testable serialization - the same pattern
+  `bridge::apply_bridge`'s `report.diff` field already uses (a library
+  produces the string, `sb` only `print!`s it).
+- **Structural read-only guard** (`asymmetry_report_is_read_only_by_construction`)
+  mirrors `no_fabric_call_is_reachable_from_cortex_hub`: greps the module's own
+  source for `fs::write(`, `write_atomic`, `INSERT INTO`, `upsert_entity`,
+  `.execute(` and asserts none appear, so a future edit cannot quietly turn the
+  report into a writer.
+- **An unmaterialized stub (no hub file on disk) is excluded from the report
+  entirely, not counted as `unlinked`** - mirrors the body builder's
+  `abs.exists()` gate in `build_hub_bodies`, and keeps "the four buckets sum to
+  the hub count" meaning the count of hubs that actually exist.
+
+### Deviations
+
+- **No test exercises `cortex::hub::run` with `opts.asymmetry = true`.**
+  `Config::oracle_db_path()` is `vault::paths::oracle_db_path()` - a hardcoded
+  `~/.local/share/oracle/oracle.db`, not overridable per test `Config`. Every
+  existing hub test that needs an index (`build_hub_bodies`,
+  `populate_entities`, ...) calls the lower-level function directly against
+  `SearchIndex::open_memory()` for exactly this reason; the one existing test
+  that calls `run()` at the top level (`dry_run_writes_no_vault_bytes_...`)
+  only works because `opts.apply = false` returns before the index is ever
+  opened. Testing `--asymmetry` at the `run()` level would open the REAL live
+  oracle DB - forbidden under this phase's no-live-DB constraint and simply
+  wrong to do from a unit test regardless. Tests instead drive
+  `build_asymmetry_report` directly (same code path `run()` calls), which is
+  the identical seam Phase 1 and Phase 2 already used for their own DB-backed
+  assertions.
+
+### Tradeoffs
+
+- **Reusing `load_hub_member` (which parses claims) vs. a lighter
+  type-only loader.** The asymmetry report only needs `note_type` per member,
+  so parsing claims is unused work. Chose reuse over a second loader: the
+  report is IO-bound already (one query + N file reads, same as the body
+  builder), the extra parse cost is negligible next to the file read it
+  already does, and a second, narrower loader would be a second place to keep
+  in sync with `HubMember`'s shape.
+- **Skip-and-log on an unreadable member vs. propagating the error.** The
+  report never aborts on one bad file (matches the read-only/best-effort
+  posture the design implies for a report command); a hub still lands in
+  exactly one bucket from whatever membership DID load. Unlike Phase 2's body
+  builder, there is no "Preserved" branch to fall back to here - there is
+  nothing to preserve, since nothing is ever written.
+
+### Open questions
+
+None.

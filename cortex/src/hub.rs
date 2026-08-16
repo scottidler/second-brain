@@ -21,8 +21,10 @@ use vault::search::SearchIndex;
 use crate::config::{Config, RenderConfig};
 use crate::opts::HubOpts;
 
+pub mod asymmetry;
 pub mod render;
 
+pub use asymmetry::{AsymmetryBucket, AsymmetryReport, AsymmetryRow, AsymmetryTotals, build_asymmetry_report};
 pub use render::{HubMember, Vector, render_hub_body};
 
 /// Directory (vault-relative) that holds every entity hub note. Scanned and
@@ -175,6 +177,11 @@ pub struct HubReport {
     pub bodies_preserved: usize,
     /// Member notes skipped across the run as missing/unreadable.
     pub members_skipped: usize,
+    /// Populated only when `--asymmetry` was requested (Phase 3): the
+    /// read-only per-hub source/session membership split. `None` for every
+    /// other invocation - this run never touches the vault or the entities
+    /// table.
+    pub asymmetry: Option<AsymmetryReport>,
 }
 
 /// Slugify an arbitrary surface form (creator name, source host) into a
@@ -410,9 +417,10 @@ pub fn populate_entities(index: &SearchIndex, stubs: &[HubStub], materialized: &
 /// Stub/refresh hub notes and populate the `entities` table.
 pub fn run(vault_root: &Path, config: &Config, opts: &HubOpts) -> Result<HubReport> {
     log::debug!(
-        "cortex::hub::run: vault_root={} apply={}",
+        "cortex::hub::run: vault_root={} apply={} asymmetry={}",
         vault_root.display(),
-        opts.apply
+        opts.apply,
+        opts.asymmetry
     );
 
     let glossary = crate::linking::load_glossary(&vault::paths::glossary())?;
@@ -420,6 +428,21 @@ pub fn run(vault_root: &Path, config: &Config, opts: &HubOpts) -> Result<HubRepo
     let notes = crate::vault::scan_vault(vault_root, &config.vault)?;
     let stubs = collect_stubs(&glossary.concepts, &alias_targets, &notes, config.graph.fanout_cap);
     log::info!("cortex::hub: {} candidate hub(s)", stubs.len());
+
+    // `--asymmetry` is checked FIRST and returns early. It is read-only by
+    // contract (Phase 3): a combined `--asymmetry --apply --synthesize`
+    // invocation must still write nothing, so this branch never falls through
+    // into `write_stubs`/`populate_entities`/`build_hub_bodies` below.
+    if opts.asymmetry {
+        log::info!("cortex::hub: --asymmetry - read-only report, no vault or entities-table write");
+        let index = SearchIndex::open(&config.oracle_db_path())
+            .wrap_err("cortex::hub --asymmetry: oracle index unavailable")?;
+        let asymmetry_report = build_asymmetry_report(vault_root, &stubs, &index)?;
+        return Ok(HubReport {
+            asymmetry: Some(asymmetry_report),
+            ..HubReport::default()
+        });
+    }
 
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let (mut report, materialized) = write_stubs(vault_root, &stubs, opts.apply, &today)?;

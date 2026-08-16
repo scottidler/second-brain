@@ -1035,6 +1035,7 @@ fn dry_run_writes_no_vault_bytes_and_records_no_entities() {
     let opts = crate::opts::HubOpts {
         apply: false,
         synthesize: true,
+        asymmetry: false,
     };
     let report = run(vault, &config, &opts).expect("dry run");
     assert!(report.created > 0, "the dry run still REPORTS what it would stub");

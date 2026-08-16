@@ -367,12 +367,19 @@ pub struct HubArgs {
     /// (requires --apply; a failed pass preserves the prior body).
     #[arg(long)]
     pub synthesize: bool,
+    /// Report each hub's source/session membership split
+    /// (both/learned-not-applied/applied-not-read/unlinked). Read-only:
+    /// writes nothing to the vault or the index, regardless of
+    /// --apply/--synthesize.
+    #[arg(long)]
+    pub asymmetry: bool,
 }
 impl From<HubArgs> for opts::HubOpts {
     fn from(a: HubArgs) -> Self {
         Self {
             apply: a.apply,
             synthesize: a.synthesize,
+            asymmetry: a.asymmetry,
         }
     }
 }
@@ -627,8 +634,13 @@ impl CortexCli {
             Command::Hub(a) => {
                 let apply = a.apply;
                 let synthesize = a.synthesize;
+                let asymmetry = a.asymmetry;
                 let report = cortex::hub::run(&vault_root, &config, &a.into())?;
-                if apply {
+                if asymmetry {
+                    if let Some(asymmetry_report) = &report.asymmetry {
+                        print!("{}", asymmetry_report.render());
+                    }
+                } else if apply {
                     println!(
                         "hub complete: created={} existing={} entities_recorded={}",
                         report.created, report.existing, report.entities_recorded,

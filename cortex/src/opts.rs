@@ -205,6 +205,12 @@ pub struct HubOpts {
     /// Re-synthesize each materialized hub's body from its membership (Phase
     /// 12). Requires `apply` (it writes note bodies) + the oracle index.
     pub synthesize: bool,
+    /// Report each hub's source/session membership split, classified
+    /// both/learned-not-applied/applied-not-read/unlinked (Phase 3:
+    /// entity-hub-two-vector-synthesis). Read-only: never writes the vault or
+    /// the entities table, regardless of `apply`/`synthesize` - checked first
+    /// so a combined invocation still writes nothing.
+    pub asymmetry: bool,
 }
 
 #[derive(Debug, Clone)]

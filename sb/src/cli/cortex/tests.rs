@@ -18,6 +18,12 @@ struct LinkHarness {
     link: LinkArgs,
 }
 
+#[derive(Parser)]
+struct HubHarness {
+    #[command(flatten)]
+    hub: HubArgs,
+}
+
 #[test]
 fn lint_format_rejects_unknown_value() {
     let Err(err) = LintHarness::try_parse_from(["sb", "--format", "yaml"]) else {
@@ -85,4 +91,42 @@ fn link_scan_defaults_to_all() {
         panic!("default parse must succeed");
     };
     assert_eq!(parsed.link.scan, cortex::opts::ScanScope::All);
+}
+
+// --- entity-hub-two-vector-synthesis Phase 3: --asymmetry CLI wiring ------
+
+#[test]
+fn hub_args_default_to_no_flags() {
+    let Ok(parsed) = HubHarness::try_parse_from(["sb"]) else {
+        panic!("default parse must succeed");
+    };
+    assert!(!parsed.hub.apply);
+    assert!(!parsed.hub.synthesize);
+    assert!(!parsed.hub.asymmetry, "--asymmetry defaults to false");
+}
+
+#[test]
+fn hub_args_asymmetry_flag_parses_and_threads_into_opts() {
+    let Ok(parsed) = HubHarness::try_parse_from(["sb", "--asymmetry"]) else {
+        panic!("--asymmetry must parse");
+    };
+    assert!(parsed.hub.asymmetry);
+    assert!(!parsed.hub.apply);
+    assert!(!parsed.hub.synthesize);
+
+    let opts: cortex::opts::HubOpts = parsed.hub.into();
+    assert!(opts.asymmetry, "the flag threads through HubArgs -> HubOpts");
+}
+
+#[test]
+fn hub_args_asymmetry_combines_with_apply_and_synthesize_at_parse_time() {
+    // Nothing here enforces the read-only contract at the parse layer (that is
+    // cortex::hub::run's job - --asymmetry is checked first and short-circuits
+    // before any write path). Clap just has to accept the combination.
+    let Ok(parsed) = HubHarness::try_parse_from(["sb", "--apply", "--synthesize", "--asymmetry"]) else {
+        panic!("combined flags must parse");
+    };
+    assert!(parsed.hub.apply);
+    assert!(parsed.hub.synthesize);
+    assert!(parsed.hub.asymmetry);
 }
