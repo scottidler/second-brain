@@ -119,6 +119,15 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
         if crate::scope::is_authored(note) {
             continue;
         }
+        // Never rewrite a hub body: the hub builder renders member claims
+        // VERBATIM and byte-compares against its own render, so a linker
+        // edit here makes every subsequent builder run rewrite the file -
+        // a churn loop across hundreds of Syncthing'd files. Hubs remain
+        // link TARGETS (the note_titles list above still includes them);
+        // their bodies already wikilink every member.
+        if note.path.starts_with(crate::hub::HUB_DIR) {
+            continue;
+        }
         let existing_links = extract_existing_links(&note.body);
         // Lowercase the body + build the offset map ONCE per note, reused by
         // every candidate term below (was rebuilt per (note, term) pair).

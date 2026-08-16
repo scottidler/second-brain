@@ -699,3 +699,52 @@ fn concept_recall_every_glossary_concept_mentioned_gets_linked() {
         "out-of-glossary term is the coverage gap, not linked: {n4}"
     );
 }
+
+#[test]
+fn hub_bodies_are_skipped_for_writes_but_stay_link_targets() {
+    // The hub builder renders member claims VERBATIM and byte-compares
+    // against its own render; a linker edit to a hub body makes every
+    // subsequent builder run rewrite the file (the linker-builder churn
+    // loop). Hub bodies get no suggestions and no writes; hubs remain
+    // link TARGETS for other notes.
+    let v = TestVault::new();
+    v.add_note(
+        "entities/rust.md",
+        "---\ntitle: Rust\ntype: entity\nontotype: concept\ndate: 2026-08-16\ntags: []\n---\n## Summary\nRust: hub of 1 sources.\n\n## From sources\n- See also the Python Guide for comparisons. ([[rust-guide]])\n",
+    );
+    let hub_before = v.read("entities/rust.md");
+    let notes = v.scan();
+    let config = v.config().actions.linking;
+
+    let report = lint_linking(&notes, &config);
+    // "Python Guide" in the hub body is a linkable mention; without the
+    // hub skip the linker would suggest (and apply) an edit there.
+    let hub_suggestions: Vec<_> = report
+        .violations
+        .iter()
+        .filter(|vi| vi.path.starts_with("entities"))
+        .map(|vi| vi.message.clone())
+        .collect();
+    assert!(
+        hub_suggestions.is_empty(),
+        "linker suggested hub-body edits: {hub_suggestions:?}"
+    );
+
+    // The hub stays a TARGET: rust-guide.md's "Rust programming" mention
+    // points at the hub's stem.
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|vi| vi.path.to_string_lossy() == "rust-guide.md" && vi.message.contains("[[rust]]")),
+        "hub must remain a link target for other notes"
+    );
+
+    // And apply leaves the hub byte-identical.
+    apply_linking(v.root(), &notes, &config).expect("apply");
+    assert_eq!(
+        v.read("entities/rust.md"),
+        hub_before,
+        "hub body must not be rewritten by the linker"
+    );
+}
