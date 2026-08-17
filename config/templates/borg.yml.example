@@ -152,6 +152,13 @@ harvest:
   # 2026-07-02 catalog: one-shots are <=3 messages, substantive threads >=29,
   # so 6 sits inside that gap with margin.
   min-msgs: 6
+  # Dormancy horizon: a session is harvestable once idle this long (1d, 24h).
+  # Forwarded to `clyde session export --dormant-after`. Omitting the key
+  # keeps 7d (clyde's own default). CAVEAT: selection also requires clyde's
+  # enrichment to have run, and the nightly clyde-enrich.service gates on ITS
+  # own --dormant-after (7d unless its unit carries an override) - the
+  # effective latency is the max of the two, so lower both together.
+  dormant-after: 1d
   # Regex patterns matched against a session's title/first-prompt; a match
   # excludes the candidate before scoring (e.g. auto-fired security reviews,
   # bare "sure"/empty prompts, navigational lookups). Space/repeated-flag

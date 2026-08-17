@@ -9,6 +9,9 @@ use borg::opts;
 
 pub mod extension;
 
+#[cfg(test)]
+mod tests;
+
 static HELP_TEXT: LazyLock<String> = LazyLock::new(get_tool_validation_help);
 
 #[derive(Args)]
@@ -152,6 +155,12 @@ pub struct HarvestCliArgs {
     /// from the cursor.
     #[arg(long)]
     pub limit: Option<usize>,
+    /// Dormancy override: treat a session as harvestable once idle this long
+    /// (1d, 24h). Forwarded to clyde session export as --dormant-after.
+    /// Precedence: this flag > BORG_HARVEST_DORMANT_AFTER env >
+    /// harvest.dormant-after config.
+    #[arg(long, env = "BORG_HARVEST_DORMANT_AFTER")]
+    pub dormant_after: Option<String>,
     /// Re-distill and re-publish in-scope already-published sessions. Part of
     /// the watermark invariant ("I want a fresh distillation"), so it is
     /// contract surface, not a hidden flag.
@@ -631,7 +640,9 @@ impl BorgCli {
                     // neither, the harvest.mode config default decides (DryRun
                     // out of the box, per Rollout Plan).
                     let dry_run = config.harvest.mode.resolve_dry_run(args.dry_run, args.live);
-                    let report = borg::harvest::run(&config, args.since, args.limit, args.force, dry_run).await?;
+                    let report =
+                        borg::harvest::run(&config, args.since, args.limit, args.force, dry_run, args.dormant_after)
+                            .await?;
                     print_harvest_report(&report);
                     Ok(())
                 }

@@ -26,6 +26,15 @@ const DEFAULT_INITIAL_SINCE: &str = "7d";
 /// `initial-since`.
 const DEFAULT_THREAD_WINDOW: &str = "2h";
 
+/// Dormancy horizon passed to `clyde session export --dormant-after`: a
+/// session counts as dormant (harvestable) once idle this long. Matches
+/// clyde's own CLI default so omitting the key changes nothing. NOTE: the
+/// selection gate also requires `enrich-status: ok`, and clyde's nightly
+/// enrich sweep gates on ITS own `--dormant-after` (default 7d in the
+/// `clyde-enrich.service` unit), so the effective harvest latency is the
+/// max of the two horizons - lowering this alone is not enough.
+const DEFAULT_DORMANT_AFTER: &str = "7d";
+
 /// Selection floor on `n-msgs` (design doc: Selection signals): a session
 /// with fewer messages than this is a one-shot, not substantive enough to
 /// earn a note. Tuned (Phase 3) against the real 2026-07-02 catalog slice:
@@ -104,6 +113,13 @@ pub struct HarvestConfig {
     /// Selection floor: a session with fewer than this many messages is a
     /// one-shot, not worth a note.
     pub min_msgs: usize,
+    /// Dormancy horizon: a session is harvestable once idle this long
+    /// (`1d`, `24h`). Passed to `clyde session export --dormant-after`, which
+    /// computes the export's `dormant` field the selection gate reads. The
+    /// CLI flag `--dormant-after` (or `BORG_HARVEST_DORMANT_AFTER`) overrides
+    /// this per invocation. See `DEFAULT_DORMANT_AFTER` for the clyde-enrich
+    /// coupling caveat.
+    pub dormant_after: String,
     /// Regex patterns matched against a session's title/first-prompt; a
     /// match excludes the candidate before scoring (e.g. auto-fired security
     /// reviews, bare "sure"/empty prompts, navigational lookups). A plain
@@ -145,6 +161,7 @@ impl Default for HarvestConfig {
             initial_since: DEFAULT_INITIAL_SINCE.to_string(),
             mode: HarvestMode::default(),
             min_msgs: DEFAULT_MIN_MSGS,
+            dormant_after: DEFAULT_DORMANT_AFTER.to_string(),
             exclude_patterns: Vec::new(),
             thread_window: DEFAULT_THREAD_WINDOW.to_string(),
             token_cap: DEFAULT_TOKEN_CAP,

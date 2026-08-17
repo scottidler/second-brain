@@ -494,9 +494,13 @@ pub async fn run(
     limit: Option<usize>,
     force: bool,
     dry_run: bool,
+    dormant_after: Option<String>,
 ) -> Result<HarvestReport> {
     let state_path = vault::paths::borg_harvest_state();
-    let reader = reader::ClydeExportReader::new(config.harvest.clyde_binary.clone());
+    // Dormancy precedence: CLI flag / env override > harvest.dormant-after
+    // config (whose default matches clyde's own 7d).
+    let dormant_after = dormant_after.unwrap_or_else(|| config.harvest.dormant_after.clone());
+    let reader = reader::ClydeExportReader::new(config.harvest.clyde_binary.clone()).with_dormant_after(dormant_after);
     run_with(&reader, config, &state_path, since, limit, force, dry_run).await
 }
 

@@ -869,6 +869,9 @@ fn test_harvest_config_default_values() {
     // Retuned in Phase 3 against the real 2026-07-02 catalog (one-shots <=3,
     // substantive threads >=29); 6 sits in that gap.
     assert_eq!(h.min_msgs, 6);
+    // Matches clyde's own --dormant-after default, so an omitted key changes
+    // nothing about which sessions export as dormant.
+    assert_eq!(h.dormant_after, "7d");
     assert_eq!(h.token_cap, 12_000);
     assert!(h.exclude_patterns.is_empty());
     assert_eq!(h.model, "");
@@ -882,6 +885,13 @@ fn test_harvest_config_default_values() {
     // box - a fresh install with nothing to bootstrap still gets a valid,
     // complete timer service unit.
     assert!(h.env_bootstrap.is_none());
+}
+
+#[test]
+fn test_harvest_config_dormant_after_parses() {
+    let yaml = "harvest:\n  dormant-after: 1d\n";
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    assert_eq!(config.harvest.dormant_after, "1d");
 }
 
 #[test]

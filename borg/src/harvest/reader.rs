@@ -47,6 +47,9 @@ pub trait ExportReader {
 pub struct ClydeExportReader {
     binary: PathBuf,
     timeout_secs: u64,
+    /// `--dormant-after` span forwarded to every clyde invocation. `None`
+    /// omits the flag, leaving clyde's own default (7d) in force.
+    dormant_after: Option<String>,
 }
 
 impl ClydeExportReader {
@@ -54,6 +57,7 @@ impl ClydeExportReader {
         Self {
             binary: binary.into(),
             timeout_secs: DEFAULT_CLYDE_TIMEOUT_SECS,
+            dormant_after: None,
         }
     }
 
@@ -61,7 +65,15 @@ impl ClydeExportReader {
         Self {
             binary: binary.into(),
             timeout_secs,
+            dormant_after: None,
         }
+    }
+
+    /// Set the `--dormant-after` span forwarded to clyde (config
+    /// `harvest.dormant-after`, or the CLI/env override).
+    pub fn with_dormant_after(mut self, span: impl Into<String>) -> Self {
+        self.dormant_after = Some(span.into());
+        self
     }
 
     /// Run `clyde session export <args>` and return its stdout bytes. Loud on
@@ -137,13 +149,23 @@ impl ExportReader for ClydeExportReader {
             args.push("--limit".to_string());
             args.push(n.to_string());
         }
+        if let Some(span) = &self.dormant_after {
+            args.push("--dormant-after".to_string());
+            args.push(span.clone());
+        }
         let bytes = self.run(&args).await?;
         parse_export(&bytes)
     }
 
     async fn export_with_body(&self, id: &str) -> Result<SessionRecord> {
         log::debug!("harvest::ClydeExportReader::export_with_body: id={id}");
-        let args = vec!["--id".to_string(), id.to_string(), "--with-body".to_string()];
+        let mut args = vec!["--id".to_string(), id.to_string(), "--with-body".to_string()];
+        // Same span as the bulk path so the single-record `dormant` field is
+        // computed against the same horizon.
+        if let Some(span) = &self.dormant_after {
+            args.push("--dormant-after".to_string());
+            args.push(span.clone());
+        }
         let bytes = self.run(&args).await?;
         let mut parsed = parse_export(&bytes)?;
         // A single-session `--with-body` export whose one record is malformed
