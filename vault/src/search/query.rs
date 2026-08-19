@@ -45,10 +45,15 @@ impl super::SearchIndex {
 
         let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
         let mut stmt = self.conn.prepare(&sql)?;
+        // Collect with propagation, NOT `filter_map(warn_row)`: sqlite reports a
+        // malformed MATCH expression on the first step, so swallowing per row
+        // turns "your query is invalid" into "there are no results" - a
+        // fail-open search. Callers that can tolerate no results (classify's
+        // similarity lookup) decide that for themselves.
         let rows = stmt
             .query_map(params_refs.as_slice(), NoteRow::from_row)?
-            .filter_map(warn_row)
-            .collect();
+            .collect::<rusqlite::Result<Vec<NoteRow>>>()
+            .wrap_err_with(|| format!("fts5 search failed for query {query:?}"))?;
 
         Ok(rows)
     }
@@ -61,10 +66,26 @@ impl super::SearchIndex {
             return Ok(vec![]);
         }
 
-        // Build OR query from extracted terms
-        let fts_query = terms.join(" OR ");
+        // Build OR query from extracted terms. Each term is QUOTED: they are
+        // literals harvested from note bodies, so slugs, UUIDs and hyphenated
+        // names are the norm, and an unquoted one takes the whole MATCH down.
+        let fts_query = terms.iter().map(|t| fts_quote(t)).collect::<Vec<_>>().join(" OR ");
 
         self.search(&fts_query, None, None, None, Some(limit as u32))
+    }
+
+    /// `find_similar` for callers that treat "no similar notes" and "the query
+    /// blew up" the same way (cortex's classify context). Logs the error at
+    /// ERROR and yields an empty list, so the degradation is visible in the
+    /// journal instead of looking like a vault with nothing similar in it.
+    pub fn find_similar_lossy(&self, content: &str, limit: usize) -> Vec<NoteRow> {
+        match self.find_similar(content, limit) {
+            Ok(rows) => rows,
+            Err(e) => {
+                log::error!("find_similar failed, continuing with no similarity context: {e:#}");
+                Vec::new()
+            }
+        }
     }
 
     /// List notes with optional filters (no full-text search)

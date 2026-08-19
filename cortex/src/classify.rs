@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use eyre::Result;
 use serde::Deserialize;
 
-use crate::config::{Config, FabricConfig};
+use crate::config::{Config, FabricConfig, FrontmatterConfig};
 use crate::opts::ClassifyOpts;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::scope::insert_frontmatter_fields;
@@ -66,6 +66,7 @@ pub fn run_with_notes(
             notes,
             &config.actions.classify,
             &config.fabric,
+            &config.actions.frontmatter,
             opts.force,
             opts.review_only,
             opts.reclassify_domain.as_deref(),
@@ -74,7 +75,13 @@ pub fn run_with_notes(
     } else {
         // Dry-run writes nothing, so the written-paths list is always empty.
         Ok((
-            lint_classify(notes, &config.actions.classify, &config.fabric, search_ref),
+            lint_classify(
+                notes,
+                &config.actions.classify,
+                &config.fabric,
+                &config.actions.frontmatter,
+                search_ref,
+            ),
             Vec::new(),
         ))
     }
@@ -288,11 +295,12 @@ pub fn lint_classify(
     notes: &[Note],
     config: &ClassifyConfig,
     fabric: &FabricConfig,
+    frontmatter: &FrontmatterConfig,
     search_index: Option<&SearchIndex>,
 ) -> Report {
     let mut report = Report::default();
     let inbox_notes = filter_inbox_notes(notes, false, false);
-    let unclassified_notes = filter_unclassified_notes(notes);
+    let unclassified_notes = filter_unclassified_notes(notes, frontmatter);
     let all_targets: Vec<&Note> = inbox_notes
         .iter()
         .copied()
@@ -382,6 +390,7 @@ pub fn apply_classify(
     notes: &[Note],
     config: &ClassifyConfig,
     fabric: &FabricConfig,
+    frontmatter: &FrontmatterConfig,
     force: bool,
     review_only: bool,
     reclassify_domain: Option<&str>,
@@ -391,7 +400,7 @@ pub fn apply_classify(
         filter_domain_notes(notes, domain)
     } else {
         let inbox = filter_inbox_notes(notes, force, review_only);
-        let unclassified = filter_unclassified_notes(notes);
+        let unclassified = filter_unclassified_notes(notes, frontmatter);
         inbox.into_iter().chain(unclassified).collect()
     };
     let is_reclassify = reclassify_domain.is_some();
@@ -688,9 +697,12 @@ fn build_llm_context(note: &Note, config: &ClassifyConfig, index: &SearchIndex) 
     let title = note.frontmatter.title.as_deref().unwrap_or("Untitled");
     let tags = note.frontmatter.tags.as_ref().map(|t| t.join(", ")).unwrap_or_default();
 
-    // Find similar notes via FTS5
-    let similar_text = match index.find_similar(&note.body, config.similar_notes_limit) {
-        Ok(results) if !results.is_empty() => {
+    // Find similar notes via FTS5. `_lossy` because a classification is still
+    // worth attempting without similarity context - but it logs at ERROR, so a
+    // broken query can never masquerade as "nothing similar in the vault" the
+    // way the unquoted-hyphen MATCH bug did.
+    let similar_text = match index.find_similar_lossy(&note.body, config.similar_notes_limit) {
+        results if !results.is_empty() => {
             let lines: Vec<String> = results
                 .iter()
                 .map(|r| format!("- \"{}\" (domain: {})", r.title, r.domain))
@@ -892,8 +904,15 @@ fn filter_inbox_notes(notes: &[Note], force: bool, review_only: bool) -> Vec<&No
         .collect()
 }
 
-/// Filter notes in notes/ that are missing a domain field (orphaned by reingest or other means).
-fn filter_unclassified_notes(notes: &[Note]) -> Vec<&Note> {
+/// Filter notes in notes/ that are missing a domain field (orphaned by reingest
+/// or other means), EXCLUDING paths that `frontmatter.path-exempt` excuses from
+/// carrying a domain at all.
+///
+/// Without the exemption check this selected every `notes/ai/**` digest on every
+/// cycle - they are exempt from `domain` by config, so they can never become
+/// "classified" - burning one LLM call per digest per cycle and logging
+/// `held for review (low confidence)` in perpetuity.
+fn filter_unclassified_notes<'a>(notes: &'a [Note], frontmatter: &FrontmatterConfig) -> Vec<&'a Note> {
     notes
         .iter()
         .filter(|n| {
@@ -901,6 +920,7 @@ fn filter_unclassified_notes(notes: &[Note]) -> Vec<&Note> {
             path_str.starts_with("notes/") || path_str.starts_with("notes\\")
         })
         .filter(|n| n.frontmatter.domain.is_none())
+        .filter(|n| !crate::frontmatter::path_exempts_field("domain", &n.path, frontmatter))
         .collect()
 }
 

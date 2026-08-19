@@ -104,11 +104,33 @@ pub(crate) fn optional_row<T>(result: rusqlite::Result<T>) -> Result<Option<T>> 
 pub(crate) fn warn_row<T>(result: rusqlite::Result<T>) -> Option<T> {
     match result {
         Ok(value) => Some(value),
+        // A `SqliteFailure` here is the STATEMENT failing mid-step, not one bad
+        // row: sqlite reports a malformed FTS5 MATCH on the first `next()`, so
+        // every row "fails" and the caller sees an empty result set. That is how
+        // a broken query (`xda-developers` unquoted) read as "no similar notes"
+        // for months behind a WARN. ERROR so it cannot hide again; the FTS path
+        // in `query::search` propagates instead of dropping.
+        Err(e @ rusqlite::Error::SqliteFailure(..)) => {
+            log::error!("sqlite statement failed mid-iteration (results are INCOMPLETE): {e}");
+            None
+        }
         Err(e) => {
             log::warn!("dropping unreadable sqlite row: {e}");
             None
         }
     }
+}
+
+/// Quote one literal term for an FTS5 MATCH expression.
+///
+/// FTS5 barewords cannot contain `-`, `:`, or `"`, and `AND`/`OR`/`NOT`/`NEAR`
+/// are operators - an unquoted `xda-developers` or `dfb3bc2f-6dc0-…` aborts the
+/// whole MATCH with `no such column: developers`. Wrapping each term in double
+/// quotes makes it an FTS5 string (a phrase over the tokenizer's output), which
+/// is exactly the "match these words in order" semantics a literal term wants.
+/// Internal double quotes are escaped by doubling, per FTS5 syntax.
+pub(crate) fn fts_quote(term: &str) -> String {
+    format!("\"{}\"", term.replace('"', "\"\""))
 }
 
 /// Extract a string value from the frontmatter extra map (for cortex-* fields)

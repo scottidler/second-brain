@@ -648,3 +648,85 @@ fn hub_members_deliberate_is_empty_for_inferred_only_membership() {
         "inferred edges are not membership"
     );
 }
+
+// ---- FTS5 term quoting: the "no such column" fail-open ----
+
+#[test]
+fn fts_quote_wraps_and_escapes() {
+    assert_eq!(fts_quote("plain"), "\"plain\"");
+    assert_eq!(fts_quote("xda-developers"), "\"xda-developers\"");
+    assert_eq!(fts_quote("say \"hi\""), "\"say \"\"hi\"\"\"");
+}
+
+#[test]
+fn find_similar_survives_hyphenated_and_uuid_terms() {
+    // The exact shapes that aborted the MATCH in production: a hyphenated host
+    // (`no such column: developers`), a note slug (`no such column: plugin`),
+    // and a UUID (`no such column: 6dc0`).
+    let index = SearchIndex::open_memory().expect("open");
+
+    let body = "captured from xda-developers about cli-plugin-marketplace-sync-incident-and-fix-options \
+                during session dfb3bc2f-6dc0-4151-bf48-4789bad13782 on tatari-tv infrastructure";
+    insert_test_note(
+        &index,
+        "notes/hyphenated.md",
+        "Hyphenated Title",
+        "tech",
+        &["tech"],
+        body,
+    );
+
+    let hits = index
+        .find_similar(body, 5)
+        .expect("hyphenated terms must not abort the MATCH");
+    assert!(
+        hits.iter().any(|r| r.path == "notes/hyphenated.md"),
+        "expected the source note back, got {:?}",
+        hits.iter().map(|r| &r.path).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn find_similar_survives_operator_keywords_and_colons() {
+    let index = SearchIndex::open_memory().expect("open");
+
+    // `and`/`or`/`near` are FTS5 operators; `07:51` and `scott:idler` are the
+    // colon shape that reads as a column filter.
+    let body = "meeting at 07:51 near the office about scott:idler and marquee or clyde tooling";
+    insert_test_note(&index, "notes/operators.md", "Operators", "tech", &["tech"], body);
+
+    let hits = index
+        .find_similar(body, 5)
+        .expect("operator words must not abort the MATCH");
+    assert!(hits.iter().any(|r| r.path == "notes/operators.md"));
+}
+
+#[test]
+fn search_propagates_a_malformed_match_instead_of_returning_empty() {
+    let index = SearchIndex::open_memory().expect("open");
+    insert_test_note(
+        &index,
+        "notes/present.md",
+        "Present",
+        "tech",
+        &["tech"],
+        "some body text",
+    );
+
+    // A raw unquoted hyphenated bareword: sqlite rejects it mid-step. The old
+    // code swallowed that per row and returned Ok(vec![]) - a fail-open search.
+    let err = index
+        .search("xda-developers", None, None, None, Some(5))
+        .expect_err("a malformed MATCH must be an error, not an empty result set");
+    assert!(
+        format!("{err:#}").contains("fts5 search failed"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn find_similar_lossy_degrades_to_empty_without_panicking() {
+    let index = SearchIndex::open_memory().expect("open");
+    // Nothing indexed: no hits, no error, no panic.
+    assert!(index.find_similar_lossy("anything at all", 5).is_empty());
+}

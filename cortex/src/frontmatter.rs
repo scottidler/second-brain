@@ -195,16 +195,30 @@ fn is_field_required(field: &str, note: &Note, config: &FrontmatterConfig) -> bo
     }
 
     // Check path-based exemptions
-    for (pattern, exempt_fields) in &config.path_exempt {
-        if let Ok(glob) = glob::Pattern::new(pattern)
-            && glob.matches_path(&note.path)
-            && exempt_fields.iter().any(|f| f == field)
-        {
-            return false;
-        }
+    if path_exempts_field(field, &note.path, config) {
+        return false;
     }
 
     true
+}
+
+/// Does `frontmatter.path-exempt` excuse `path` from carrying `field`?
+///
+/// Public because classify needs the SAME answer: `notes/ai/**` is exempt from
+/// `domain`, so a domain-less digest is correct, not "unclassified". Reading the
+/// globs in a second place would drift, and the drift cost real money - classify
+/// re-ran an LLM pass over every exempt digest on every daemon cycle and logged
+/// `held for review (low confidence)` forever.
+pub fn path_exempts_field(field: &str, path: &Path, config: &FrontmatterConfig) -> bool {
+    for (pattern, exempt_fields) in &config.path_exempt {
+        if let Ok(glob) = glob::Pattern::new(pattern)
+            && glob.matches_path(path)
+            && exempt_fields.iter().any(|f| f == field)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Validate an enum field value against allowed values.

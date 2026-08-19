@@ -299,7 +299,7 @@ fn test_filter_unclassified_notes_selects_domainless_in_notes() {
     let inbox = NoteBuilder::new("inbox/new.md").title("New").build();
     let notes = vec![domainless, classified, inbox];
 
-    let filtered = filter_unclassified_notes(&notes);
+    let filtered = filter_unclassified_notes(&notes, &FrontmatterConfig::default());
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].path.to_string_lossy(), "notes/orphaned.md");
 }
@@ -309,7 +309,7 @@ fn test_filter_unclassified_notes_ignores_inbox() {
     let inbox_no_domain = NoteBuilder::new("inbox/test.md").title("Test").build();
     let notes = vec![inbox_no_domain];
 
-    let filtered = filter_unclassified_notes(&notes);
+    let filtered = filter_unclassified_notes(&notes, &FrontmatterConfig::default());
     assert_eq!(filtered.len(), 0);
 }
 
@@ -331,6 +331,7 @@ fn test_catchup_classify_enriches_in_place() {
         &notes,
         &config.actions.classify,
         &config.fabric,
+        &config.actions.frontmatter,
         false,
         false,
         None,
@@ -376,7 +377,7 @@ fn test_lint_classify_includes_unclassified_notes() {
 
     let config = test_config();
     let fabric = FabricConfig::default();
-    let report = lint_classify(&notes, &config, &fabric, None);
+    let report = lint_classify(&notes, &config, &fabric, &FrontmatterConfig::default(), None);
     // Both should produce violations
     let paths: Vec<String> = report
         .violations
@@ -385,4 +386,47 @@ fn test_lint_classify_includes_unclassified_notes() {
         .collect();
     assert!(paths.iter().any(|p| p.contains("inbox/test.md")));
     assert!(paths.iter().any(|p| p.contains("notes/orphan.md")));
+}
+
+// ---- catch-up scope: path-exempt notes are not "unclassified" ----
+
+#[test]
+fn unclassified_filter_skips_domain_exempt_paths() {
+    use std::collections::HashMap;
+
+    let vault = crate::testutil::TestVault::new();
+    vault.add_note(
+        "notes/ai/daily/2026-07-10.md",
+        "---\ntitle: Daily\ndate: 2026-07-10\ntype: daily\norigin: generated\ntags: []\n---\n\nbody\n",
+    );
+    vault.add_note(
+        "notes/genuinely-unclassified.md",
+        "---\ntitle: Orphan\ndate: 2026-07-10\ntype: note\norigin: assisted\ntags: []\n---\n\nbody\n",
+    );
+    let notes = vault.scan();
+
+    // With no exemptions configured, both are candidates.
+    let bare = FrontmatterConfig::default();
+    let picked = filter_unclassified_notes(&notes, &bare);
+    assert_eq!(
+        picked.len(),
+        2,
+        "got {:?}",
+        picked.iter().map(|n| &n.path).collect::<Vec<_>>()
+    );
+
+    // With the live config's `notes/ai/** -> [domain]` exemption, the digest is
+    // correctly domain-less and must NOT be re-classified every cycle.
+    let mut path_exempt = HashMap::new();
+    path_exempt.insert(
+        "notes/ai/**".to_string(),
+        vec!["domain".to_string(), "origin".to_string()],
+    );
+    let exempting = FrontmatterConfig {
+        path_exempt,
+        ..FrontmatterConfig::default()
+    };
+    let picked = filter_unclassified_notes(&notes, &exempting);
+    assert_eq!(picked.len(), 1);
+    assert!(picked[0].path.ends_with("genuinely-unclassified.md"));
 }
