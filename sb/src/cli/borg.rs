@@ -354,10 +354,13 @@ pub struct RetentionCliArgs {
 }
 #[derive(Subcommand)]
 pub enum RetentionAction {
-    /// Sweep aged-off trace directories
+    /// Sweep aged-off trace directories and raw-input sidecars
     Sweep {
         #[arg(long)]
         dry_run: bool,
+        /// Sweep ONLY the vault's raw-input sidecars, leaving staging alone.
+        #[arg(long)]
+        sidecars_only: bool,
     },
     /// Report trace counts and disk usage
     Status,
@@ -549,28 +552,56 @@ impl BorgCli {
                 Ok(())
             }
             Some(Command::Retention(args)) => match args.action {
-                RetentionAction::Sweep { dry_run } => {
-                    let result = borg::retention::sweep(&config, dry_run)?;
+                RetentionAction::Sweep { dry_run, sidecars_only } => {
                     let action = if dry_run { "Would delete" } else { "Deleted" };
-                    println!(
-                        "Scanned {} traces, kept {}, {} {} (freed {} bytes)",
-                        result.scanned,
-                        result.kept,
-                        action.to_ascii_lowercase(),
-                        result.deleted.len(),
-                        result.bytes_freed
-                    );
-                    for name in &result.deleted {
-                        println!("  {action}: {name}");
+                    if !sidecars_only {
+                        let result = borg::retention::sweep(&config, dry_run)?;
+                        println!(
+                            "Scanned {} traces, kept {}, {} {} (freed {} bytes)",
+                            result.scanned,
+                            result.kept,
+                            action.to_ascii_lowercase(),
+                            result.deleted.len(),
+                            result.bytes_freed
+                        );
+                        for name in &result.deleted {
+                            println!("  {action}: {name}");
+                        }
+                    }
+                    let sidecars = borg::retention::sweep_sidecars(&config, dry_run)?;
+                    if sidecars.enabled {
+                        println!(
+                            "Scanned {} sidecars, kept {}, {} {} (freed {} bytes)",
+                            sidecars.scanned,
+                            sidecars.kept,
+                            action.to_ascii_lowercase(),
+                            sidecars.deleted.len(),
+                            sidecars.bytes_freed
+                        );
+                        for name in &sidecars.deleted {
+                            println!("  {action}: {name}");
+                        }
+                    } else {
+                        println!("Sidecar sweep disabled (intake.retention-days=0)");
                     }
                     Ok(())
                 }
                 RetentionAction::Status => {
                     let report = borg::retention::status(&config)?;
-                    println!("Staging root: {}", report.root.display());
-                    println!("Traces:       {}", report.traces);
-                    println!("Rejected:     {}", report.rejected);
-                    println!("Disk usage:   {} bytes", report.total_bytes);
+                    println!("Staging root:   {}", report.root.display());
+                    println!("Traces:         {}", report.traces);
+                    println!("Rejected:       {}", report.rejected);
+                    println!("Disk usage:     {} bytes", report.total_bytes);
+                    let sidecars = borg::retention::sidecar_status(&config)?;
+                    let window = if sidecars.retention_days == 0 {
+                        "forever (sweep disabled)".to_string()
+                    } else {
+                        format!("{} days", sidecars.retention_days)
+                    };
+                    println!("Sidecar dir:    {}", sidecars.dir.display());
+                    println!("Sidecar files:  {}", sidecars.files);
+                    println!("Sidecar bytes:  {}", sidecars.total_bytes);
+                    println!("Sidecar window: {window}");
                     Ok(())
                 }
             },

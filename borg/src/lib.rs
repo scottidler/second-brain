@@ -450,6 +450,16 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
         });
     }
 
+    // Raw-input sidecar retention. Returns immediately (Ok) when the window is
+    // disabled, so a `intake.retention-days: 0` config is not an error state.
+    {
+        let cfg = config.clone();
+        tasks.spawn(async move {
+            retention::run_sidecar_sweep(cfg).await;
+            Ok::<(), eyre::Report>(())
+        });
+    }
+
     Ok((
         ServerStartup {
             addr,

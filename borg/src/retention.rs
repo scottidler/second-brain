@@ -1,7 +1,16 @@
-//! Staging retention: sweep trace directories older than the configured
-//! windows. Successful traces age at `staging.retention_days`; rejected
-//! traces (those with a `rejection.yml` sidecar) keep a longer window so
-//! the operator has extra time to investigate.
+//! Retention: sweep aged-off artifacts under the configured windows.
+//!
+//! Two independent stores, two windows:
+//!
+//! - Staging trace directories under `staging.root`. Successful traces age at
+//!   `staging.retention_days`; rejected traces (those with a `rejection.yml`
+//!   sidecar) keep a longer window so the operator has extra time to
+//!   investigate. See [`sweep`].
+//! - Raw-input sidecars at `<vault>/system/intake/<trace>.txt`, written at the
+//!   door by `vault::intake::write_raw_input`, aged at `intake.retention_days`.
+//!   See [`sweep_sidecars`]. These had no window before that config knob
+//!   existed, so the vault grew one file per trace forever (1975 files / 75 MB
+//!   by 2026-08) and `git add -A` snapshots swept them into the vault repo.
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use eyre::{Context, Result};
@@ -9,6 +18,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::config::{Config, StagingLayout};
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
+use tokio::time::interval;
 
 /// Parse a frontmatter `ingested:` value to a calendar date, accepting BOTH
 /// shapes that exist in the vault today: the bare `%Y-%m-%d` written by the
@@ -128,6 +140,162 @@ pub fn status(config: &Config) -> Result<StatusReport> {
         report.total_bytes += dir_size(&path).unwrap_or(0);
     }
     Ok(report)
+}
+
+/// How often the daemon's background sidecar sweep wakes up. Daily: the window
+/// is measured in days, so anything finer just re-scans a directory that cannot
+/// have changed its answer yet.
+const SIDECAR_SWEEP_INTERVAL_SECS: u64 = 86_400;
+
+#[derive(Debug, Clone)]
+pub struct SidecarSweepResult {
+    pub scanned: usize,
+    pub deleted: Vec<String>,
+    pub kept: usize,
+    pub bytes_freed: u64,
+    /// `false` when `intake.retention_days` is 0 (keep forever): nothing was
+    /// scanned and nothing deleted, which is DIFFERENT from a clean sweep.
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SidecarReport {
+    pub files: usize,
+    pub total_bytes: u64,
+    pub dir: PathBuf,
+    pub retention_days: u32,
+}
+
+/// Sweep raw-input sidecars (`<vault>/system/intake/*.txt`) whose mtime is
+/// older than `intake.retention_days`. `dry_run=true` reports what would be
+/// deleted without touching disk. `retention_days == 0` means keep forever and
+/// short-circuits with `enabled: false`.
+///
+/// Deliberately separate from [`sweep`]: the staged copy of the same bytes is
+/// governed by `staging.*`, and folding the two together would let one store's
+/// window silently delete the other store's data.
+pub fn sweep_sidecars(config: &Config, dry_run: bool) -> Result<SidecarSweepResult> {
+    let days = config.intake.retention_days;
+    log::debug!("retention::sweep_sidecars: retention_days={days} dry_run={dry_run}");
+    let mut result = SidecarSweepResult {
+        scanned: 0,
+        deleted: Vec::new(),
+        kept: 0,
+        bytes_freed: 0,
+        enabled: days > 0,
+    };
+    if !result.enabled {
+        log::debug!("retention::sweep_sidecars: intake.retention-days=0, keeping sidecars forever");
+        return Ok(result);
+    }
+    let vault_root = config.vault_root().context("resolve vault root for sidecar sweep")?;
+    let dir = vault::intake::intake_raw_dir(&vault_root);
+    if !dir.is_dir() {
+        return Ok(result);
+    }
+    let now = Utc::now();
+    let window = Duration::days(days.min(3650) as i64);
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("read_dir {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_file() || path.extension().and_then(|e| e.to_str()) != Some("txt") {
+            continue;
+        }
+        result.scanned += 1;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(mtime) = dir_mtime(&path) else {
+            result.kept += 1;
+            continue;
+        };
+        if now - mtime < window {
+            result.kept += 1;
+            continue;
+        }
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        result.deleted.push(name);
+        result.bytes_freed += size;
+        if !dry_run {
+            std::fs::remove_file(&path).with_context(|| format!("remove_file {}", path.display()))?;
+        }
+    }
+    Ok(result)
+}
+
+/// Snapshot totals for the raw-input sidecar directory (count, bytes, window).
+pub fn sidecar_status(config: &Config) -> Result<SidecarReport> {
+    let vault_root = config.vault_root().context("resolve vault root for sidecar status")?;
+    let dir = vault::intake::intake_raw_dir(&vault_root);
+    let mut report = SidecarReport {
+        files: 0,
+        total_bytes: 0,
+        dir: dir.clone(),
+        retention_days: config.intake.retention_days,
+    };
+    if !dir.is_dir() {
+        return Ok(report);
+    }
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("read_dir {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_file() || path.extension().and_then(|e| e.to_str()) != Some("txt") {
+            continue;
+        }
+        report.files += 1;
+        report.total_bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+    }
+    Ok(report)
+}
+
+/// Background task entry point for the sidecar sweep: one pass immediately at
+/// startup (tokio's `interval` fires its first tick right away), then every
+/// [`SIDECAR_SWEEP_INTERVAL_SECS`]. Errors are logged and the loop continues.
+///
+/// This task sweeps ONLY the vault-side sidecars. Staging trace directories
+/// stay operator-driven via `sb borg retention sweep`, because auto-firing that
+/// window for the first time against an unswept, hundreds-of-MB stages tree is
+/// a surprise deletion, not a maintenance task.
+pub async fn run_sidecar_sweep(config: Arc<Config>) {
+    if config.intake.retention_days == 0 {
+        log::info!("retention: sidecar sweep disabled (intake.retention-days=0)");
+        return;
+    }
+    log::info!(
+        "retention: sidecar sweep starting (interval={}s, window={}d)",
+        SIDECAR_SWEEP_INTERVAL_SECS,
+        config.intake.retention_days
+    );
+    let mut ticker = interval(StdDuration::from_secs(SIDECAR_SWEEP_INTERVAL_SECS));
+    loop {
+        ticker.tick().await;
+        let cfg = config.clone();
+        let result = tokio::task::spawn_blocking(move || sweep_sidecars(&cfg, false))
+            .await
+            .unwrap_or_else(|join_err| {
+                log::error!("retention: sidecar sweep join error: {join_err}");
+                Ok(SidecarSweepResult {
+                    scanned: 0,
+                    deleted: Vec::new(),
+                    kept: 0,
+                    bytes_freed: 0,
+                    enabled: true,
+                })
+            });
+        match result {
+            Ok(r) if r.deleted.is_empty() => {
+                log::debug!("retention: sidecar sweep clean (scanned={} kept={})", r.scanned, r.kept);
+            }
+            Ok(r) => {
+                log::info!(
+                    "retention: sidecar sweep deleted {} file(s), freed {} bytes (scanned={} kept={})",
+                    r.deleted.len(),
+                    r.bytes_freed,
+                    r.scanned,
+                    r.kept
+                );
+            }
+            Err(e) => log::warn!("retention: sidecar sweep failed: {e:#}"),
+        }
+    }
 }
 
 fn trace_parent(root: &Path, layout: StagingLayout) -> PathBuf {
