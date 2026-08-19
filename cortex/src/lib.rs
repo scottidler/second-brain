@@ -30,17 +30,19 @@ pub mod report;
 pub mod scope;
 pub mod startup;
 pub mod state;
+pub mod stopwords;
 pub mod summarize;
 pub mod sweep;
 pub mod tags;
 pub mod testutil;
+pub mod unlink;
 pub mod vault;
 
 use eyre::Result;
 use std::path::Path;
 
 use config::Config;
-use opts::{LinkOpts, LintOpts};
+use opts::{LinkOpts, LintOpts, UnlinkOpts};
 use report::{LintApplyReport, Report};
 use vault::{Note, scan_vault};
 
@@ -307,20 +309,66 @@ pub fn link_with_notes(all_notes: &[Note], vault_root: &Path, config: &Config, o
     linking_config.entities.concepts.extend(glossary.concepts);
     linking_config.aliases.extend(glossary.aliases);
 
+    // The stopword vocabulary is read HERE, at the composition root, exactly
+    // as the glossary above is - `linking` itself never reads `GraphConfig`.
+    // One list, two consumers (this writer and `graph`'s edge builder), so
+    // the two can never disagree about which `[[target]]` is legitimate.
+    let stopwords = stopwords::Stopwords::new(&config.graph.wikilink_stopwords);
+
     if opts.apply {
         // `applied_paths` carries the real, byte-changed paths - the ONLY
         // thing a caller (the daemon's oscillation fingerprint) may use.
         // `applied` (a plain count) stays for CLI text that only needs "N
         // file(s)"; both derive from the same `apply_linking` return.
-        let written = linking::apply_linking(vault_root, &notes, &linking_config)?;
+        let written = linking::apply_linking(vault_root, &notes, &linking_config, &stopwords)?;
         Ok(Report {
             applied: written.len(),
             applied_paths: written,
             ..Default::default()
         })
     } else {
-        Ok(linking::lint_linking(&notes, &linking_config))
+        Ok(linking::lint_linking(&notes, &linking_config, &stopwords))
     }
+}
+
+/// Retract stoplisted wikilink markup the auto-linker already landed.
+///
+/// The scan-then-delegate entry point, mirroring `link`.
+pub fn unlink(vault_root: &Path, config: &Config, opts: &UnlinkOpts) -> Result<unlink::UnlinkStats> {
+    log::info!(
+        "starting unlink command (vault_root={} apply={})",
+        vault_root.display(),
+        opts.apply
+    );
+    let all_notes = scan_vault(vault_root, &config.vault)?;
+    unlink_with_notes(&all_notes, vault_root, config, opts)
+}
+
+/// Same as `unlink`, but takes an already-scanned note list.
+pub fn unlink_with_notes(
+    all_notes: &[Note],
+    vault_root: &Path,
+    config: &Config,
+    opts: &UnlinkOpts,
+) -> Result<unlink::UnlinkStats> {
+    log::debug!(
+        "unlink_with_notes: vault_root={} note_count={} apply={}",
+        vault_root.display(),
+        all_notes.len(),
+        opts.apply
+    );
+    let exclude_patterns = parse_patterns(&config.vault.exclude);
+    let include_patterns = parse_patterns(&config.vault.include);
+    let notes: Vec<Note> = all_notes
+        .iter()
+        .filter(|n| !is_excluded(n, &exclude_patterns, &include_patterns))
+        .cloned()
+        .collect();
+
+    // Same single vocabulary the writer is gated on - the sweep must retract
+    // exactly the set the linker is now refusing to write.
+    let stopwords = stopwords::Stopwords::new(&config.graph.wikilink_stopwords);
+    unlink::run_with_notes(vault_root, &notes, &stopwords, opts.apply, opts.include_authored)
 }
 
 #[cfg(test)]

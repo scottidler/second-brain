@@ -81,7 +81,7 @@ fn linking_fixture() -> (crate::config::LinkingConfig, Vec<Note>) {
 fn run_link_scope(scan_for: Vec<String>) -> std::collections::HashSet<String> {
     let (mut config, notes) = linking_fixture();
     config.scan_for = scan_for;
-    let report = crate::linking::lint_linking(&notes, &config);
+    let report = crate::linking::lint_linking(&notes, &config, &crate::stopwords::Stopwords::default());
     report.violations.into_iter().map(|v| v.rule).collect()
 }
 

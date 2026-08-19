@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 
 use crate::config::{LinkingConfig, LinkingFilter};
 use crate::report::{Fix, Report, Severity, Violation};
+use crate::stopwords::Stopwords;
 use crate::vault::Note;
 
 /// The concept glossary + alias table, loaded from `glossary.yml` (Phase 2 of
@@ -83,7 +84,14 @@ static EXISTING_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]").expect("valid wikilink regex"));
 
 /// Run wikilink inference on all notes.
-pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
+///
+/// `stopwords` is the shared vocabulary (`crate::stopwords`) of targets this
+/// linker must never write. It is judged on the TARGET (the note stem /
+/// entity / concept slug that lands inside `[[…]]`), never on the prose
+/// surface form - the exact thing `crate::graph` judges when it decides
+/// whether landed markup mints an edge. Gating anywhere else would let the
+/// two layers disagree about the same `[[target]]`.
+pub fn lint_linking(notes: &[Note], config: &LinkingConfig, stopwords: &Stopwords) -> Report {
     let mut report = Report::default();
 
     // Build entity lists from config + note titles, filtering by target rules
@@ -101,6 +109,13 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
                 return None;
             }
             let stem = n.path.file_stem()?.to_str()?.to_string();
+            // Drop the whole CANDIDATE, not the individual mention: a
+            // stoplisted stem is never a link target, so it never reaches
+            // `find_mention` and no `Fix::AddWikilink` can be emitted for it.
+            if stopwords.contains(&stem) {
+                log::trace!("linking: stoplisted target {stem:?} is not a link candidate");
+                return None;
+            }
             let raw_title = n.frontmatter.title.clone().unwrap_or_else(|| stem.clone());
             // Strip wikilink brackets from titles (some notes have title: "[[foo]]")
             let title = raw_title.trim_start_matches("[[").trim_end_matches("]]").to_string();
@@ -166,6 +181,9 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
         // Match known people entities
         if scan_for.contains("people") || scan_for.contains("all") {
             for person in &config.entities.people {
+                if stopwords.contains(person) {
+                    continue;
+                }
                 if existing_links.contains(&person.to_lowercase()) {
                     continue;
                 }
@@ -188,6 +206,9 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
         // Match known project entities
         if scan_for.contains("projects") || scan_for.contains("all") {
             for project in &config.entities.projects {
+                if stopwords.contains(project) {
+                    continue;
+                }
                 if existing_links.contains(&project.to_lowercase()) {
                     continue;
                 }
@@ -212,6 +233,9 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
         // differs). Plus alias surface forms -> canonical slug as piped links.
         if scan_for.contains("concepts") || scan_for.contains("all") {
             for slug in &config.entities.concepts {
+                if stopwords.contains(slug) {
+                    continue;
+                }
                 if existing_links.contains(&slug.to_lowercase()) {
                     continue;
                 }
@@ -234,6 +258,11 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
             }
 
             for (alias_surface, slug) in &config.aliases {
+                // Judged on the SLUG: an alias emits `[[slug|surface]]`, so
+                // the slug is the raw target the graph layer will see.
+                if stopwords.contains(slug) {
+                    continue;
+                }
                 if existing_links.contains(&slug.to_lowercase()) {
                     continue;
                 }
@@ -268,13 +297,19 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
 /// appliable - `find_mention` (detection) and `insert_first_wikilink`
 /// (mutation) can disagree on a differently-sliced body, so a reported
 /// suggestion can leave `new_content == content` and never write.
-pub fn apply_linking(vault_root: &Path, notes: &[Note], config: &LinkingConfig) -> eyre::Result<Vec<String>> {
+pub fn apply_linking(
+    vault_root: &Path,
+    notes: &[Note],
+    config: &LinkingConfig,
+    stopwords: &Stopwords,
+) -> eyre::Result<Vec<String>> {
     log::debug!(
-        "linking::apply_linking: vault_root={} notes={}",
+        "linking::apply_linking: vault_root={} notes={} stopwords={}",
         vault_root.display(),
-        notes.len()
+        notes.len(),
+        stopwords.len()
     );
-    let report = lint_linking(notes, config);
+    let report = lint_linking(notes, config, stopwords);
     let mut written = Vec::new();
 
     // Group fixes by file, carrying (target, surface) so the apply step can
@@ -469,7 +504,11 @@ fn in_link_destination(text: &str, pos: usize) -> bool {
 /// True if `pos` sits inside code: a fenced block (odd count of ``` fences
 /// above), an indented (4-space / tab) code line, or an inline `` `code` ``
 /// span (odd backtick count before `pos` on the line).
-fn in_code_context(text: &str, pos: usize) -> bool {
+///
+/// `pub(crate)` for `crate::unlink`: the retraction sweep must refuse to
+/// rewrite the same regions this linker refuses to write into, or it would
+/// edit `[[…]]` that appears inside a code sample as source material.
+pub(crate) fn in_code_context(text: &str, pos: usize) -> bool {
     let (ls, _) = line_bounds(text, pos);
     let fences = text[..ls].lines().filter(|l| l.trim_start().starts_with("```")).count();
     if fences % 2 == 1 {

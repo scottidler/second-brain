@@ -27,7 +27,7 @@ fn test_concept_linking_on_vault() {
     let notes = v.scan();
     let config = v.config().actions.linking;
 
-    let report = lint_linking(&notes, &config);
+    let report = lint_linking(&notes, &config, &Stopwords::default());
     // rust-guide.md body mentions "Python Guide" - should suggest linking
     assert!(
         report
@@ -45,7 +45,7 @@ fn test_person_entity_on_vault() {
     let notes = v.scan();
     let config = v.config().actions.linking;
 
-    let report = lint_linking(&notes, &config);
+    let report = lint_linking(&notes, &config, &Stopwords::default());
     // daily-standup.md mentions "John Smith"
     assert!(
         report
@@ -61,7 +61,7 @@ fn test_already_linked_not_suggested() {
     let notes = v.scan();
     let config = v.config().actions.linking;
 
-    let report = lint_linking(&notes, &config);
+    let report = lint_linking(&notes, &config, &Stopwords::default());
     // python-guide.md already has [[rust-guide]] - should NOT suggest it again
     assert!(
         !report
@@ -163,7 +163,7 @@ fn note_with_body(path: &str, body: &str) -> Note {
 fn glossary_concept_is_flagged_for_linking() {
     let cfg = glossary_config(&["langchain"], &[]);
     let notes = vec![note_with_body("notes/x.md", "We use LangChain in production.")];
-    let report = lint_linking(&notes, &cfg);
+    let report = lint_linking(&notes, &cfg, &Stopwords::default());
     assert!(
         report
             .violations
@@ -180,7 +180,7 @@ fn alias_is_flagged_as_piped_link() {
         "notes/x.md",
         "Retrieval-Augmented Generation is everywhere.",
     )];
-    let report = lint_linking(&notes, &cfg);
+    let report = lint_linking(&notes, &cfg, &Stopwords::default());
     let v = report
         .violations
         .iter()
@@ -200,7 +200,7 @@ fn glossary_does_not_double_link_existing() {
     let cfg = glossary_config(&["langchain"], &[]);
     // Body already links it -> no new violation.
     let notes = vec![note_with_body("notes/x.md", "We use [[langchain]] here.")];
-    let report = lint_linking(&notes, &cfg);
+    let report = lint_linking(&notes, &cfg, &Stopwords::default());
     assert!(
         !report.violations.iter().any(|v| v.rule == "linking.glossary"),
         "already-linked concept is not re-flagged"
@@ -212,10 +212,166 @@ fn glossary_does_not_self_link_hub_note() {
     let cfg = glossary_config(&["langchain"], &[]);
     // The note IS the langchain hub note (stem == slug) -> never self-link.
     let notes = vec![note_with_body("notes/langchain.md", "LangChain is a framework.")];
-    let report = lint_linking(&notes, &cfg);
+    let report = lint_linking(&notes, &cfg, &Stopwords::default());
     assert!(
         !report.violations.iter().any(|v| v.rule == "linking.glossary"),
         "a concept's own hub note is never self-linked"
+    );
+}
+
+// --- the stopword gate on the WRITER --------------------------------------
+//
+// The graph layer already refuses to mint an edge for a stoplisted target
+// (`graph::tests::stoplisted_wikilink_mints_no_edge_while_creator_member_does`).
+// These pin the other half: the linker must never WRITE one either, or every
+// sweep re-lands the markup the graph is busy ignoring.
+
+fn stops(list: &[&str]) -> Stopwords {
+    Stopwords::new(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+}
+
+#[test]
+fn stoplisted_note_title_is_never_a_link_candidate() {
+    // The real defect: `entities/every.md` has a 5-char title, which clears
+    // the blunt `min-word-length` gate, so the linker rewrote the English
+    // word "every" into `[[every]]` across 707 files.
+    let notes = vec![
+        note_with_body("entities/every.md", "Hub note for the creator entity every."),
+        note_with_body("notes/a.md", "I read that every single day."),
+    ];
+    let cfg = LinkingConfig {
+        scan_for: vec!["concepts".to_string()],
+        min_word_length: 5,
+        ..Default::default()
+    };
+
+    let ungated = lint_linking(&notes, &cfg, &Stopwords::default());
+    assert!(
+        ungated
+            .violations
+            .iter()
+            .any(|v| v.rule == "linking.concept" && v.message.contains("[[every]]")),
+        "control: with no stopword the linker still wants to write [[every]]"
+    );
+
+    let gated = lint_linking(&notes, &cfg, &stops(&["every"]));
+    assert!(
+        !gated.violations.iter().any(|v| v.message.contains("[[every]]")),
+        "the stoplisted target is dropped as a CANDIDATE, so no fix is emitted"
+    );
+}
+
+#[test]
+fn the_gate_is_case_insensitive_on_the_target() {
+    let notes = vec![
+        note_with_body("entities/Every.md", "hub"),
+        note_with_body("notes/a.md", "I read that every single day."),
+    ];
+    let cfg = LinkingConfig {
+        scan_for: vec!["concepts".to_string()],
+        min_word_length: 5,
+        ..Default::default()
+    };
+
+    let report = lint_linking(&notes, &cfg, &stops(&["every"]));
+    assert!(
+        report.violations.is_empty(),
+        "a lowercase config entry catches an uppercase stem, got {:?}",
+        report.violations
+    );
+}
+
+#[test]
+fn stoplisted_people_projects_concepts_and_aliases_are_all_gated() {
+    let mut cfg = LinkingConfig {
+        scan_for: vec!["people".to_string(), "projects".to_string(), "concepts".to_string()],
+        min_word_length: 3,
+        ..Default::default()
+    };
+    cfg.entities.people = vec!["every".to_string()];
+    cfg.entities.projects = vec!["every".to_string()];
+    cfg.entities.concepts = vec!["every".to_string()];
+    // An alias emits `[[every|Every day]]`, so it is judged on the SLUG.
+    cfg.aliases = [("Every day".to_string(), "every".to_string())].into_iter().collect();
+    let notes = vec![note_with_body("notes/a.md", "Every day I read every thing.")];
+
+    assert!(
+        !lint_linking(&notes, &cfg, &Stopwords::default()).violations.is_empty(),
+        "control: ungated, at least one candidate list wants to link it"
+    );
+    assert!(
+        lint_linking(&notes, &cfg, &stops(&["every"])).violations.is_empty(),
+        "every candidate source consults the same vocabulary"
+    );
+}
+
+#[test]
+fn a_non_stoplisted_target_still_links_normally() {
+    // The gate must be surgical: stoplisting `every` must not suppress
+    // unrelated candidates in the same pass.
+    let cfg = glossary_config(&["langchain"], &[]);
+    let notes = vec![note_with_body("notes/x.md", "We use LangChain in production.")];
+
+    let report = lint_linking(&notes, &cfg, &stops(&["every"]));
+    assert!(
+        report.violations.iter().any(|v| v.rule == "linking.glossary"),
+        "an unrelated concept is untouched by the stopword"
+    );
+}
+
+#[test]
+fn the_gate_holds_through_apply_so_the_sweep_is_not_undone() {
+    // The round trip that matters operationally: `sb cortex unlink` strips
+    // the landed markup, and the very next `sb cortex link --apply` must not
+    // put it back. Without the writer gate the sweep is pure churn.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("entities")).expect("mkdir");
+    std::fs::write(
+        root.join("entities/every.md"),
+        "---\ntitle: Every\ntype: entity\n---\nHub note.\n",
+    )
+    .expect("write hub");
+    std::fs::create_dir_all(root.join("notes")).expect("mkdir notes");
+    std::fs::write(
+        root.join("notes/a.md"),
+        "---\ntitle: A\ntype: note\n---\nI read [[every]] single day.\n",
+    )
+    .expect("write note");
+
+    let vault_config = crate::config::VaultConfig {
+        root_path: None,
+        ignore: vec![".git".to_string(), ".obsidian".to_string()],
+        exclude: Vec::new(),
+        include: Vec::new(),
+    };
+    let cfg = LinkingConfig {
+        scan_for: vec!["concepts".to_string()],
+        min_word_length: 5,
+        ..Default::default()
+    };
+    let stopwords = stops(&["every"]);
+
+    // 1. Sweep retracts the landed markup.
+    let notes = crate::vault::scan_vault(root, &vault_config).expect("scan");
+    let stats = crate::unlink::run_with_notes(root, &notes, &stopwords, true, false).expect("sweep");
+    assert_eq!(stats.occurrences, 1);
+    assert!(
+        std::fs::read_to_string(root.join("notes/a.md"))
+            .expect("read")
+            .contains("I read every single day."),
+        "markup retracted"
+    );
+
+    // 2. The gated linker leaves it retracted.
+    let notes = crate::vault::scan_vault(root, &vault_config).expect("rescan");
+    let written = apply_linking(root, &notes, &cfg, &stopwords).expect("apply");
+    assert!(written.is_empty(), "gated linker re-linked nothing, got {written:?}");
+    assert!(
+        std::fs::read_to_string(root.join("notes/a.md"))
+            .expect("read")
+            .contains("I read every single day."),
+        "still retracted after a full link --apply pass"
     );
 }
 
@@ -452,7 +608,7 @@ fn every_lint_linking_suggestion_is_appliable() {
         ),
         note_with_body("notes/b.md", "A note with the word foo_langchain_bar embedded oddly."),
     ];
-    let report = lint_linking(&notes, &cfg);
+    let report = lint_linking(&notes, &cfg, &Stopwords::default());
     assert!(
         !report.violations.is_empty(),
         "fixture should produce at least one suggestion"
@@ -504,7 +660,7 @@ fn two_consecutive_link_passes_converge_to_zero_writes() {
     };
 
     let notes = crate::vault::scan_vault(root, &vault_config).expect("scan vault");
-    let written_first = apply_linking(root, &notes, &cfg).expect("apply linking");
+    let written_first = apply_linking(root, &notes, &cfg, &Stopwords::default()).expect("apply linking");
     assert_eq!(
         written_first,
         vec!["a.md".to_string()],
@@ -515,7 +671,7 @@ fn two_consecutive_link_passes_converge_to_zero_writes() {
     // per-cycle rescan), then run the SAME pass again with no edits in
     // between.
     let notes2 = crate::vault::scan_vault(root, &vault_config).expect("scan vault");
-    let written_second = apply_linking(root, &notes2, &cfg).expect("apply linking");
+    let written_second = apply_linking(root, &notes2, &cfg, &Stopwords::default()).expect("apply linking");
     assert!(
         written_second.is_empty(),
         "steady state: second pass writes nothing, got {written_second:?}"
@@ -569,7 +725,7 @@ fn apply_linking_is_add_only_never_removes_or_alters_content() {
         include: Vec::new(),
     };
     let notes = crate::vault::scan_vault(root, &vault_config).expect("scan");
-    apply_linking(root, &notes, &cfg).expect("apply");
+    apply_linking(root, &notes, &cfg, &Stopwords::default()).expect("apply");
 
     let after = std::fs::read_to_string(root.join("a.md")).expect("read");
     assert!(
@@ -618,7 +774,7 @@ fn apply_linking_across_growing_sweeps_never_removes_prior_links() {
 
     // Sweep 1: a.md mentions langchain -> gets linked.
     let notes1 = crate::vault::scan_vault(root, &vault_config).expect("scan1");
-    let written1 = apply_linking(root, &notes1, &cfg).expect("apply1");
+    let written1 = apply_linking(root, &notes1, &cfg, &Stopwords::default()).expect("apply1");
     assert_eq!(written1, vec!["a.md".to_string()], "sweep 1 links a.md");
     let a_after_sweep1 = std::fs::read_to_string(root.join("a.md")).expect("read a after sweep1");
     assert!(a_after_sweep1.contains("[[langchain"), "sweep 1 landed the link");
@@ -631,7 +787,7 @@ fn apply_linking_across_growing_sweeps_never_removes_prior_links() {
     )
     .expect("w");
     let notes2 = crate::vault::scan_vault(root, &vault_config).expect("scan2");
-    let written2 = apply_linking(root, &notes2, &cfg).expect("apply2");
+    let written2 = apply_linking(root, &notes2, &cfg, &Stopwords::default()).expect("apply2");
     assert_eq!(
         written2,
         vec!["b.md".to_string()],
@@ -681,7 +837,7 @@ fn concept_recall_every_glossary_concept_mentioned_gets_linked() {
         include: Vec::new(),
     };
     let notes = crate::vault::scan_vault(root, &vault_config).expect("scan");
-    apply_linking(root, &notes, &cfg).expect("apply");
+    apply_linking(root, &notes, &cfg, &Stopwords::default()).expect("apply");
 
     // Recall over the three notes with an in-glossary mention: all linked.
     for name in ["n1.md", "n2.md", "n3.md"] {
@@ -716,7 +872,7 @@ fn hub_bodies_are_skipped_for_writes_but_stay_link_targets() {
     let notes = v.scan();
     let config = v.config().actions.linking;
 
-    let report = lint_linking(&notes, &config);
+    let report = lint_linking(&notes, &config, &Stopwords::default());
     // "Python Guide" in the hub body is a linkable mention; without the
     // hub skip the linker would suggest (and apply) an edit there.
     let hub_suggestions: Vec<_> = report
@@ -741,7 +897,7 @@ fn hub_bodies_are_skipped_for_writes_but_stay_link_targets() {
     );
 
     // And apply leaves the hub byte-identical.
-    apply_linking(v.root(), &notes, &config).expect("apply");
+    apply_linking(v.root(), &notes, &config, &Stopwords::default()).expect("apply");
     assert_eq!(
         v.read("entities/rust.md"),
         hub_before,

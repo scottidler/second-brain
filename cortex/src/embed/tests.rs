@@ -37,6 +37,8 @@ fn process_batch_returns_zero_when_no_stale_targets() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("process");
     assert_eq!(stats.scanned, 0);
@@ -70,6 +72,8 @@ fn process_batch_embeds_stale_summary_rows() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("process");
     assert_eq!(stats.scanned, 2);
@@ -101,6 +105,8 @@ fn process_batch_prefixes_title_to_summary() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("process");
     assert_eq!(stats.embedded, 1);
@@ -201,6 +207,8 @@ fn process_transcript_batch_embeds_video_article_from_staging_ignoring_in_note_s
         staging.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("process");
 
@@ -257,6 +265,8 @@ fn process_transcript_batch_missing_staged_file_degrades_to_sentinel_skip() {
         staging.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("tick1");
     assert_eq!(t1.scanned, 1);
@@ -281,6 +291,8 @@ fn process_transcript_batch_missing_staged_file_degrades_to_sentinel_skip() {
         staging.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("tick2");
     assert_eq!(t2.scanned, 0, "sentinel must stop the re-scan; no error loop");
@@ -316,6 +328,8 @@ fn process_transcript_batch_expired_staged_file_degrades_to_sentinel_skip() {
         staging.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("process");
     assert_eq!(stats.scanned, 1);
@@ -357,6 +371,8 @@ fn process_transcript_batch_verbatim_kind_still_reads_in_note_section() {
         staging.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("process");
 
@@ -402,6 +418,8 @@ fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("tick1");
     assert_eq!(t1.scanned, 1);
@@ -426,6 +444,8 @@ fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("tick2");
     assert_eq!(t2.scanned, 0, "tick-2 must not re-scan the previously-skipped note");
@@ -459,6 +479,8 @@ fn process_batch_skips_notes_with_empty_summary() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("process");
     assert_eq!(stats.scanned, 0, "SQL filter must exclude empty-summary notes");
@@ -573,7 +595,7 @@ fn embed_in_sub_batches_caps_inputs_and_preserves_order() {
     let texts: Vec<String> = (0..250).map(|i| format!("doc-{i}")).collect();
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
 
-    let vectors = embed_in_sub_batches(&m, &refs, 64).expect("embed");
+    let vectors = embed_in_sub_batches(&m, &refs, 64, 1).expect("embed");
 
     assert_eq!(vectors.len(), 250, "must return one vector per input");
 
@@ -597,7 +619,7 @@ fn embed_in_sub_batches_caps_inputs_and_preserves_order() {
 #[test]
 fn embed_in_sub_batches_handles_empty_input() {
     let m = CountingMockEmbedder::new();
-    let vectors = embed_in_sub_batches(&m, &[], 64).expect("embed");
+    let vectors = embed_in_sub_batches(&m, &[], 64, 1).expect("embed");
     assert!(vectors.is_empty());
     assert!(m.calls().is_empty(), "no embed_batch call for empty input");
 }
@@ -607,7 +629,7 @@ fn embed_in_sub_batches_treats_zero_cap_as_no_cap() {
     let m = CountingMockEmbedder::new();
     let texts: Vec<String> = (0..30).map(|i| format!("doc-{i}")).collect();
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-    let vectors = embed_in_sub_batches(&m, &refs, 0).expect("embed");
+    let vectors = embed_in_sub_batches(&m, &refs, 0, 1).expect("embed");
     assert_eq!(vectors.len(), 30);
     let calls = m.calls();
     assert_eq!(calls, vec![30], "cap=0 means one call with the full input");
@@ -637,6 +659,8 @@ fn summary_embed_text_is_byte_identical_when_no_capture_note() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("process");
 
@@ -671,6 +695,8 @@ fn summary_embed_text_splices_capture_note_when_present() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("process");
 
@@ -712,6 +738,8 @@ fn process_claim_batch_embeds_notes_with_claims() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("process");
 
@@ -748,6 +776,8 @@ fn process_claim_batch_splits_oversized_claim_sets_into_multiple_rows() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
+        DEFAULT_MAX_CHUNKS_PER_TICK,
+        1,
     )
     .expect("process");
 
@@ -847,4 +877,118 @@ fn summary_embed_text_keeps_the_pre_capture_note_shape_byte_identical() {
         summary_embed_text("Title", "why I kept it", "Summary."),
         "Title\n\nwhy I kept it\n\nSummary."
     );
+}
+
+// --- per-tick chunk ceiling (2026-08-18 governance-starvation fix) ----------
+//
+// The incident: `batch_size` bounds NOTES, so a tick's real work was
+// `64 notes x unbounded chunks`. One tick ran two days on an AVX-only host,
+// held the shared rayon pool, and starved classify. These pin the bound.
+
+fn tw(path: &str, chunks: usize) -> TranscriptWork {
+    TranscriptWork {
+        note_path: path.to_string(),
+        chunks: (0..chunks).map(|i| format!("chunk {i}")).collect(),
+        source_modified_at: 100,
+    }
+}
+
+fn total_chunks(work: &[TranscriptWork]) -> usize {
+    work.iter().map(|w| w.chunks.len()).sum()
+}
+
+#[test]
+fn cap_zero_disables_the_ceiling() {
+    let work = vec![tw("a.md", 500), tw("b.md", 500)];
+    let out = cap_work_by_chunks(work, 0);
+    assert_eq!(out.len(), 2, "0 means no cap");
+    assert_eq!(total_chunks(&out), 1000);
+}
+
+#[test]
+fn work_under_the_cap_passes_through_untouched() {
+    let work = vec![tw("a.md", 10), tw("b.md", 20)];
+    let out = cap_work_by_chunks(work, 512);
+    assert_eq!(out.len(), 2);
+    assert_eq!(total_chunks(&out), 30);
+}
+
+#[test]
+fn truncates_on_a_note_boundary_never_mid_note() {
+    // The write phase replaces a note's ENTIRE chunk set, so a partially
+    // embedded note would land a truncated set and then read as complete.
+    // Every kept note must therefore keep ALL of its chunks.
+    let work = vec![tw("a.md", 300), tw("b.md", 300), tw("c.md", 300)];
+    let out = cap_work_by_chunks(work, 512);
+    assert_eq!(out.len(), 1, "b would overshoot 512, so it is deferred whole");
+    assert_eq!(out[0].note_path, "a.md");
+    assert_eq!(out[0].chunks.len(), 300, "the kept note keeps every chunk");
+}
+
+#[test]
+fn packs_as_many_whole_notes_as_fit() {
+    let work = vec![tw("a.md", 200), tw("b.md", 200), tw("c.md", 200)];
+    let out = cap_work_by_chunks(work, 512);
+    assert_eq!(out.len(), 2, "400 fits, 600 does not");
+    assert_eq!(total_chunks(&out), 400);
+}
+
+#[test]
+fn a_single_oversized_note_still_makes_progress() {
+    // Regression guard against a livelock: if the cap could defer a note that
+    // alone exceeds it, that note would be deferred forever and never embed.
+    let work = vec![tw("huge.md", 5000)];
+    let out = cap_work_by_chunks(work, 512);
+    assert_eq!(out.len(), 1, "the lone oversized note is the deliberate exception");
+    assert_eq!(out[0].chunks.len(), 5000, "and it embeds whole, not truncated");
+}
+
+#[test]
+fn oversized_first_note_does_not_drag_others_along() {
+    let work = vec![tw("huge.md", 5000), tw("small.md", 5)];
+    let out = cap_work_by_chunks(work, 512);
+    assert_eq!(out.len(), 1, "only the oversized note; the rest defer");
+    assert_eq!(out[0].note_path, "huge.md");
+}
+
+// --- dedicated inference pool ----------------------------------------------
+
+#[test]
+fn inference_runs_off_the_global_rayon_pool() {
+    // The invariant the incident was missing: candle's matmul fan-out must not
+    // land on the pool `classify`/`quality`/`autotag` run their par_iter on.
+    // `install` reparents the closure, so inside it the current thread must be
+    // a worker of OUR pool, not of the global one.
+    let name = in_inference_pool(2, || {
+        std::thread::current().name().map(|s| s.to_string()).unwrap_or_default()
+    });
+    assert!(
+        name.starts_with("embed-infer-"),
+        "inference must run on the dedicated pool, got thread name {name:?}"
+    );
+
+    // And it is a DIFFERENT pool from the global one. Asserted by identity of
+    // width across calls rather than an absolute number: the pool is a
+    // process-wide OnceLock, so a sibling test in this binary may have built it
+    // first (which `in_inference_pool` now warns about instead of silently
+    // ignoring). What must hold is that inference has its OWN bounded pool.
+    let inner = in_inference_pool(2, rayon::current_num_threads);
+    let global = rayon::current_num_threads();
+    assert!(inner > 0, "the inference pool has workers");
+    assert!(
+        inner <= DEFAULT_INFERENCE_WORKERS.max(2),
+        "the inference pool stays small ({inner}), never core-count-wide"
+    );
+    assert_ne!(
+        inner, global,
+        "inference must not be running on the global pool ({global} threads)"
+    );
+}
+
+#[test]
+fn inference_pool_propagates_errors_not_panics() {
+    // `embed_in_sub_batches` calls the model inside the pool; a model error has
+    // to travel back out as Err rather than poisoning a pool worker.
+    let out: Result<()> = in_inference_pool(2, || eyre::bail!("model exploded"));
+    assert!(out.is_err());
 }

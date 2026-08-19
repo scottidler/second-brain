@@ -175,18 +175,26 @@ pub struct GraphConfig {
     /// Minimum cosine for a cluster-bridge edge from an isolated note to its
     /// nearest semantic neighbor.
     pub bridge_min_cosine: f32,
-    /// Wikilink targets the graph pass refuses to turn into an edge, matched
+    /// Wikilink targets that must never become a link, matched
     /// case-insensitively on the RAW `[[target]]` before resolution. The
     /// auto-linker's blunt `min-word-length` gate case-insensitively rewrites
     /// common English words into links to short-titled hubs (`every` alone
-    /// minted 569 false `wikilink` edges into `entities/every.md`), and landed
-    /// bodies are never retracted, so the graph layer has to refuse them at
-    /// build time or a backfill reinstates them forever.
+    /// minted 569 false `wikilink` edges into `entities/every.md` and landed
+    /// `[[every]]` in 707 note bodies).
     ///
-    /// This lives under `graph:` deliberately: the graph builder must not read
-    /// the auto-linker's `actions.linking.*` namespace. Defaults EMPTY — code
-    /// never silently suppresses a link; the shipped `cortex.yml.example` seeds
-    /// the two measured offenders.
+    /// THREE consumers, one list, via the `crate::stopwords::Stopwords`
+    /// predicate — a second copy of this vocabulary would guarantee drift:
+    ///
+    /// - `crate::linking` refuses to WRITE the markup (the writer gate),
+    /// - `crate::graph` refuses to mint an EDGE from markup that landed,
+    /// - `crate::unlink` retracts landed markup on operator request.
+    ///
+    /// This lives under `graph:` for compatibility with what is already
+    /// deployed, and because it is not the auto-linker's private knob either;
+    /// no consumer reads it directly — `cortex::link`/`cortex::unlink` read it
+    /// at the composition root and thread it in, exactly as they do the
+    /// glossary. Defaults EMPTY — code never silently suppresses a link; the
+    /// shipped `cortex.yml.example` seeds the two measured offenders.
     pub wikilink_stopwords: Vec<String>,
 }
 
@@ -246,8 +254,28 @@ impl Default for GraphConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct EmbedConfig {
+    /// Size of the DEDICATED inference thread pool (`embed::inference_pool`).
+    ///
+    /// 0 used to mean "let the backend pick", which is
+    /// `min(8, available_parallelism)`: 8 replicas on a 32-core box, all
+    /// contending for the global rayon pool
+    /// that every governance action also uses. That contention is what starved
+    /// classify for two days on 2026-08-16. Inference now runs in its own pool
+    /// sized by this value, so governance is isolated from it by construction;
+    /// a small number is right on a scalar-kernel host where extra replicas buy
+    /// throughput they cannot cash in.
     pub workers: usize,
     pub max_chunks_per_call: usize,
+    /// Hard ceiling on chunks embedded in a single tick, across all notes.
+    ///
+    /// `batch_size` bounds NOTES (64 by default), not chunks, and one long
+    /// transcript can chunk into hundreds - so a tick had no wall-clock bound
+    /// at all. On an AVX-only host (no vectorized gemm microkernel) that is how
+    /// one tick became a two-day run with no log line between start and finish.
+    /// Truncating the flattened chunk list to this cap makes each tick bounded
+    /// and spreads the same total work across ticks; the notes that do not fit
+    /// keep their stale marker and are picked up next tick. 0 disables the cap.
+    pub max_chunks_per_tick: usize,
     /// Daemon cadence (seconds) between embed ticks. CLAUDE.md documents the
     /// embed cadence as configurable (default 10 min); the previous
     /// `daemon_cadence` ignored its config argument and hardcoded the value.
@@ -273,6 +301,7 @@ impl Default for EmbedConfig {
         Self {
             workers: 0,
             max_chunks_per_call: crate::embed::DEFAULT_MAX_CHUNKS_PER_CALL,
+            max_chunks_per_tick: crate::embed::DEFAULT_MAX_CHUNKS_PER_TICK,
             cadence_secs: crate::embed::DEFAULT_CADENCE_SECS,
             kinds: EmbedKindsConfig::default(),
             staging_root: vault::paths::borg_stages_dir(),

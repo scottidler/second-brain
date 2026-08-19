@@ -190,6 +190,11 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
     let rows = index.graph_note_rows()?;
     let by_path: HashMap<String, GraphNoteRow> = rows.iter().map(|r| (r.path.clone(), r.clone())).collect();
 
+    // The shared vocabulary, built once per pass. Same list the auto-linker
+    // is gated on (`crate::stopwords`), so a target that can never be
+    // written can never mint an edge either.
+    let stopwords = crate::stopwords::Stopwords::new(&cfg.wikilink_stopwords);
+
     // Inverted indexes over the whole corpus (cheap; needed even for
     // incremental targets to find their pair partners).
     let tag_buckets = invert(&rows, |r| r.tags.clone());
@@ -228,6 +233,7 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
             index,
             row,
             cfg,
+            &stopwords,
             &tag_buckets,
             &creator_buckets,
             &source_buckets,
@@ -254,6 +260,7 @@ fn build_edges_for(
     index: &SearchIndex,
     row: &GraphNoteRow,
     cfg: &crate::config::GraphConfig,
+    stopwords: &crate::stopwords::Stopwords,
     tag_buckets: &HashMap<String, Vec<String>>,
     creator_buckets: &HashMap<String, Vec<String>>,
     source_buckets: &HashMap<String, Vec<String>>,
@@ -276,7 +283,7 @@ fn build_edges_for(
     // and the resolved PATH no longer carries the word that has to be judged.
     // Case-insensitive so `[[Every]]` cannot slip past a lowercase entry.
     for slug in vault::search::extract_wikilinks(&row.body) {
-        if is_wikilink_stopword(&slug, cfg) {
+        if stopwords.contains(&slug) {
             log::trace!("wikilink: dropping stoplisted target {slug:?} in {src}");
             continue;
         }
@@ -442,16 +449,6 @@ fn build_edges_for(
     }
 
     Ok(edges)
-}
-
-/// Is this raw wikilink target stoplisted? Case-insensitive against
-/// `graph.wikilink-stopwords`, which names common English words that
-/// case-insensitively collide with a short hub title (`every` matching
-/// `entities/every.md` minted 569 false wikilink edges).
-fn is_wikilink_stopword(slug: &str, cfg: &crate::config::GraphConfig) -> bool {
-    cfg.wikilink_stopwords
-        .iter()
-        .any(|stop| stop.eq_ignore_ascii_case(slug))
 }
 
 /// Emit fixed-weight metadata edges from `src` to every other note sharing the

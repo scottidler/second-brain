@@ -61,6 +61,8 @@ pub enum Command {
     Lint(LintArgs),
     /// Scan for and create wikilinks
     Link(LinkArgs),
+    /// Strip stoplisted wikilinks the auto-linker already landed
+    Unlink(UnlinkArgs),
     /// Generate intelligence (daily/weekly notes)
     Intel(IntelArgs),
     /// Vault state fingerprinting
@@ -183,6 +185,30 @@ impl From<LinkArgs> for opts::LinkOpts {
         Self {
             apply: a.apply,
             scan: a.scan,
+        }
+    }
+}
+
+/// Retract wikilinks whose target is in `graph.wikilink-stopwords`.
+///
+/// The inverse of `link --apply`, for markup that landed before the writer
+/// was gated. Reports by default; `--apply` edits note bodies.
+#[derive(Args)]
+pub struct UnlinkArgs {
+    #[arg(long)]
+    pub apply: bool,
+    /// Also retract inside `origin: authored` notes. Off by default: the
+    /// linker exempts authored notes, so a link there is normally the
+    /// author's own. Use it to clean up links the linker wrote into authored
+    /// notes before that exemption existed.
+    #[arg(long)]
+    pub include_authored: bool,
+}
+impl From<UnlinkArgs> for opts::UnlinkOpts {
+    fn from(a: UnlinkArgs) -> Self {
+        Self {
+            apply: a.apply,
+            include_authored: a.include_authored,
         }
     }
 }
@@ -491,6 +517,10 @@ impl CortexCli {
                         println!("{line}");
                     }
                 }
+            }
+            Command::Unlink(a) => {
+                let stats = cortex::unlink(&vault_root, &config, &a.into())?;
+                print_unlink_stats(&stats);
             }
             Command::Intel(a) => {
                 let report = cortex::intel::run(&vault_root, &config, &a.into())?;
@@ -831,6 +861,32 @@ fn print_state_report(r: &cortex::state::StateReport) {
                 );
             }
         }
+    }
+}
+
+fn print_unlink_stats(s: &cortex::unlink::UnlinkStats) {
+    if s.changes.is_empty() {
+        println!("No stoplisted wikilinks found in {} note(s).", s.scanned);
+        return;
+    }
+    for change in &s.changes {
+        println!(
+            "  {} [[{}]] x{}",
+            change.path.display(),
+            change.target,
+            change.occurrences
+        );
+    }
+    if s.applied {
+        println!(
+            "Retracted {} wikilink(s) across {} file(s).",
+            s.occurrences, s.files_changed
+        );
+    } else {
+        println!(
+            "Dry run: would retract {} wikilink(s) across {} file(s). Re-run with --apply.",
+            s.occurrences, s.files_changed
+        );
     }
 }
 

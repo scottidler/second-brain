@@ -86,6 +86,23 @@ pub struct LinkOpts {
 }
 
 #[derive(Debug, Clone)]
+pub struct UnlinkOpts {
+    /// Rewrite note bodies (default: report only). The sweep edits landed
+    /// prose, so it reports first and writes only when asked.
+    pub apply: bool,
+
+    /// Also retract inside `origin: authored` notes.
+    ///
+    /// Off by default because the linker exempts authored notes, so a
+    /// `[[target]]` there is normally Scott's own. But the exemption landed
+    /// in `fa3f9a8` (2026-06-12), one day AFTER `entities/every.md` was
+    /// minted (obsidian `017363e3`, 2026-06-11), so links written into
+    /// authored notes during that window are linker damage, not prose.
+    /// Opt in to clean those up.
+    pub include_authored: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct IntelOpts {
     /// Which artifact to generate.
     pub mode: crate::intel::IntelMode,

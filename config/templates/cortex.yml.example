@@ -23,6 +23,21 @@ embedding:
 # oracle.yml's per-method `enabled` flags). An explicit `sb cortex embed --kind
 # claim` still forces claim embedding regardless of this toggle (CLI > config).
 embed:
+  # Size of the DEDICATED inference thread pool. Candle's matmul fans out on
+  # rayon; embed installs its own pool so that fan-out can never consume the
+  # workers governance actions (classify/lint/link/quality/auto-tag) run their
+  # par_iter on. 0 means "small fixed default" (2), NOT core count: "as many
+  # replicas as cores" is what caused the contention this pool exists to
+  # prevent. Read once per process - restart the daemon to change it.
+  # workers: 2
+  # Hard ceiling on chunks embedded per tick, across all notes. `batch-size`
+  # bounds NOTES (64), not chunks, and one long transcript can chunk into
+  # hundreds - so a tick had no wall-clock bound at all. On 2026-08-16 a single
+  # tick on an AVX-only host ran for TWO DAYS, held the shared rayon pool, and
+  # starved classify so 50 harvested notes sat unfiled while systemd still
+  # reported the daemon `active (running)`. Truncation is free: deferred notes
+  # keep their stale marker and lead the next tick. 0 disables the cap.
+  # max-chunks-per-tick: 512
   kinds:
     summary: true
     transcript-chunk: true
@@ -54,15 +69,18 @@ graph:
   # the separate graph tick. In-process so it cannot collide with the embed tick
   # on the shared embed lock (a separate systemd timer would). Default 604800 (weekly).
   # fact-interval-secs: 604800
-  # Wikilink targets that never become an edge, matched case-insensitively on
-  # the RAW [[target]] before resolution. The auto-linker's blunt
+  # Wikilink targets that must never become a link, matched case-insensitively
+  # on the RAW [[target]] before resolution. The auto-linker's blunt
   # `min-word-length` gate rewrites common English words into links to
-  # short-titled hubs, and landed note bodies are never retracted - so a word
-  # listed here stops minting membership on the next `graph --backfill` even
-  # though the [[link]] keeps rendering in Obsidian. The code default is EMPTY
-  # (nothing is suppressed unless you say so); these two are the measured
-  # offenders on Scott's corpus (`every` alone minted 569 false edges into
-  # entities/every.md, the every.to publication hub).
+  # short-titled hubs. One list, three consumers:
+  #   - `sb cortex link`   refuses to WRITE the markup,
+  #   - `sb cortex graph`  refuses to mint an EDGE from markup already landed,
+  #   - `sb cortex unlink` retracts landed markup (reports by default,
+  #                        rewrites note bodies with --apply).
+  # The code default is EMPTY (nothing is suppressed unless you say so); these
+  # two are the measured offenders on Scott's corpus (`every` alone minted 569
+  # false edges into entities/every.md - the every.to publication hub - and
+  # landed [[every]] in 707 note bodies).
   wikilink-stopwords:
     - every
     - brief
@@ -138,8 +156,11 @@ daemon:
   # Environment="RAYON_NUM_THREADS=N" (candle's gemm degree reads the same
   # var, so this also bounds embedding fan-out). 0 (default) omits the line
   # entirely and lets rayon pick its own platform default. Set this to a
-  # per-host tuning value (e.g. nproc/4) if bulk sweeps/embeds are pegging
-  # every core.
+  # per-host tuning value (e.g. nproc/4) if bulk sweeps are pegging every core.
+  # This pool serves GOVERNANCE only - embed inference has its own pool
+  # (`embed.workers`), so it no longer needs to be starved down to protect
+  # against a runaway embed. Do not set this small on a many-core box: that
+  # throttles every sweep to guard against what pool isolation already prevents.
   # rayon-threads: 8
   # Optional secret/env bootstrap for the installed systemd unit: `command`'s
   # stdout is captured into `env-file` via an `ExecStartPre` shell redirect,

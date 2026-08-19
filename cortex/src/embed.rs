@@ -69,6 +69,74 @@ pub const DEFAULT_CADENCE_SECS: u64 = 600;
 /// replica pool. See docs/design/2026-05-19-cortex-embed-memory-bounding.md.
 pub const DEFAULT_MAX_CHUNKS_PER_CALL: usize = 64;
 
+/// Cap on total chunks embedded in a single tick, across all notes.
+///
+/// `DEFAULT_MAX_CHUNKS_PER_CALL` bounds peak MEMORY per model call; this
+/// bounds the tick's WALL CLOCK, which is a different failure. `batch_size`
+/// counts notes, so a tick's real work is `64 notes × (however many chunks
+/// each transcript yields)` - unbounded. On 2026-08-16 a single tick on an
+/// AVX-only host (scalar gemm microkernel, no vectorized f32 path) ran for
+/// two days holding the whole rayon pool, and because the batch logs nothing
+/// between start and finish it was invisible: the daemon read as healthy
+/// while classify never ran again.
+///
+/// Truncating at this cap costs nothing in total work - the notes that do not
+/// fit keep their stale marker and are picked up next tick - and converts one
+/// unbounded run into a predictable series.
+pub const DEFAULT_MAX_CHUNKS_PER_TICK: usize = 512;
+
+/// The dedicated inference pool, built once per process.
+///
+/// Every model call goes through [`in_inference_pool`], which installs this
+/// pool for the duration of the call. Candle's matmul fans out on rayon, and
+/// `ThreadPool::install` reparents that fan-out onto THIS pool instead of the
+/// global one - so inference physically cannot consume the workers that
+/// `cortex::autotag`, `cortex::quality`, `classify`, and the lint passes run
+/// their `par_iter` on.
+///
+/// This is the invariant the 2026-08-16 incident was missing. Inference on an
+/// AVX-only host is slow and will stay slow (no vectorized gemm microkernel
+/// exists for a CPU without FMA); the defect was never the latency, it was
+/// that the latency was load-bearing for governance. Slow is acceptable.
+/// Slow-and-shared is not.
+static INFERENCE_POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+
+/// Run `f` on the dedicated inference pool.
+///
+/// `workers` is `embed.workers`; 0 falls back to a small fixed default rather
+/// than `available_parallelism`, because "as many replicas as cores" is the
+/// setting that caused the contention in the first place.
+fn in_inference_pool<T, F: FnOnce() -> T + Send>(workers: usize, f: F) -> T
+where
+    T: Send,
+{
+    let requested = if workers == 0 { DEFAULT_INFERENCE_WORKERS } else { workers };
+    let pool = INFERENCE_POOL.get_or_init(|| {
+        log::info!("cortex::embed: building dedicated inference pool: threads={requested}");
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(requested)
+            .thread_name(|i| format!("embed-infer-{i}"))
+            .build()
+            .expect("failed to build the embed inference thread pool")
+    });
+    // The pool is process-wide and built once, so the FIRST caller's size wins.
+    // Say so out loud instead of silently ignoring a later value: a config knob
+    // that quietly does nothing is worse than one that is loudly pinned.
+    let actual = pool.current_num_threads();
+    if actual != requested {
+        log::warn!(
+            "cortex::embed: inference pool already built with {actual} thread(s); ignoring request for {requested} \
+             (embed.workers is read once per process - restart to change it)"
+        );
+    }
+    pool.install(f)
+}
+
+/// Pool size when `embed.workers` is 0. Deliberately small and NOT derived
+/// from core count: on a scalar-kernel host extra replicas do not convert into
+/// throughput, they just widen the window where inference is holding threads.
+pub const DEFAULT_INFERENCE_WORKERS: usize = 2;
+
 /// One pass / batch of work the embed loop produces. Surfaced so the
 /// daemon and CLI can both log uniformly.
 #[derive(Debug, Default, Clone, Copy)]
@@ -186,6 +254,8 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
                 &config.embed.staging_root,
                 opts.batch_size,
                 config.embed.max_chunks_per_call,
+                config.embed.max_chunks_per_tick,
+                config.embed.workers,
             )?;
             total.merge(&batch_stats);
             if batch_stats.scanned == 0 {
@@ -318,6 +388,8 @@ pub fn daemon_tick_with_model(vault_root: &Path, config: &Config, model: &dyn Em
                 &config.embed.staging_root,
                 DEFAULT_BATCH_SIZE,
                 config.embed.max_chunks_per_call,
+                config.embed.max_chunks_per_tick,
+                config.embed.workers,
             )?;
             total.merge(&batch_stats);
             if batch_stats.scanned == 0 {
@@ -374,11 +446,19 @@ pub fn process_batch(
     staging_root: &Path,
     batch_size: usize,
     max_chunks_per_call: usize,
+    max_chunks_per_tick: usize,
+    workers: usize,
 ) -> Result<EmbedStats> {
     match kind {
-        EmbeddingKind::Summary => {
-            process_summary_batch(index, model, model_version, vault_root, batch_size, max_chunks_per_call)
-        }
+        EmbeddingKind::Summary => process_summary_batch(
+            index,
+            model,
+            model_version,
+            vault_root,
+            batch_size,
+            max_chunks_per_call,
+            workers,
+        ),
         EmbeddingKind::TranscriptChunk => process_transcript_batch(
             index,
             model,
@@ -387,8 +467,18 @@ pub fn process_batch(
             staging_root,
             batch_size,
             max_chunks_per_call,
+            max_chunks_per_tick,
+            workers,
         ),
-        EmbeddingKind::Claim => process_claim_batch(index, model, model_version, batch_size, max_chunks_per_call),
+        EmbeddingKind::Claim => process_claim_batch(
+            index,
+            model,
+            model_version,
+            batch_size,
+            max_chunks_per_call,
+            max_chunks_per_tick,
+            workers,
+        ),
     }
 }
 
@@ -488,6 +578,7 @@ fn process_summary_batch(
     _vault_root: &Path,
     batch_size: usize,
     max_chunks_per_call: usize,
+    workers: usize,
 ) -> Result<EmbedStats> {
     let mut stats = EmbedStats::default();
 
@@ -559,7 +650,7 @@ fn process_summary_batch(
     // `vectors.len() == work.len()` invariant holds. Stale rows retry
     // next tick.
     let texts: Vec<&str> = work.iter().map(|w| w.text.as_str()).collect();
-    let vectors = match embed_in_sub_batches(model, &texts, max_chunks_per_call) {
+    let vectors = match embed_in_sub_batches(model, &texts, max_chunks_per_call, workers) {
         Ok(v) => v,
         Err(e) => {
             log::error!("cortex::embed: embed_batch failed: {e}");
@@ -616,6 +707,8 @@ fn process_transcript_batch(
     staging_root: &Path,
     batch_size: usize,
     max_chunks_per_call: usize,
+    max_chunks_per_tick: usize,
+    workers: usize,
 ) -> Result<EmbedStats> {
     log::debug!(
         "cortex::embed::process_transcript_batch: vault_root={} staging_root={} batch_size={}",
@@ -706,8 +799,14 @@ fn process_transcript_batch(
     // daemon (observed 2026-05-19). Any failure aborts the whole tick;
     // the write phase below depends on
     // `flat_vectors.len() == flat.len()` for cursor alignment.
+    // Apply the per-tick chunk ceiling by dropping whole notes off the tail.
+    // Truncating at a NOTE boundary (never mid-note) is load-bearing: the write
+    // phase replaces a note's ENTIRE chunk set, so a half-embedded note would
+    // land a truncated set and then read as complete. Dropped notes keep their
+    // stale marker and lead the next tick.
+    let work = cap_work_by_chunks(work, max_chunks_per_tick);
     let flat: Vec<&str> = work.iter().flat_map(|w| w.chunks.iter().map(|s| s.as_str())).collect();
-    let flat_vectors = match embed_in_sub_batches(model, &flat, max_chunks_per_call) {
+    let flat_vectors = match embed_in_sub_batches(model, &flat, max_chunks_per_call, workers) {
         Ok(v) => v,
         Err(e) => {
             log::error!("cortex::embed: embed_batch failed for transcripts: {e}");
@@ -766,6 +865,8 @@ fn process_claim_batch(
     model_version: &str,
     batch_size: usize,
     max_chunks_per_call: usize,
+    max_chunks_per_tick: usize,
+    workers: usize,
 ) -> Result<EmbedStats> {
     let mut stats = EmbedStats::default();
 
@@ -808,8 +909,14 @@ fn process_claim_batch(
     }
 
     // ---- 2. INFERENCE PHASE (no SQLite contact). ----
+    // Apply the per-tick chunk ceiling by dropping whole notes off the tail.
+    // Truncating at a NOTE boundary (never mid-note) is load-bearing: the write
+    // phase replaces a note's ENTIRE chunk set, so a half-embedded note would
+    // land a truncated set and then read as complete. Dropped notes keep their
+    // stale marker and lead the next tick.
+    let work = cap_work_by_chunks(work, max_chunks_per_tick);
     let flat: Vec<&str> = work.iter().flat_map(|w| w.chunks.iter().map(|s| s.as_str())).collect();
-    let flat_vectors = match embed_in_sub_batches(model, &flat, max_chunks_per_call) {
+    let flat_vectors = match embed_in_sub_batches(model, &flat, max_chunks_per_call, workers) {
         Ok(v) => v,
         Err(e) => {
             log::error!("cortex::embed: embed_batch failed for claims: {e}");
@@ -908,23 +1015,77 @@ const CHUNK_OVERLAP_TOKENS: usize = 50;
 /// in this call are discarded - callers depend on
 /// `result.len() == texts.len()` and a partial result would break
 /// downstream cursor alignment (see `process_transcript_batch`).
+/// Drop whole notes off the tail of `work` until the total chunk count fits
+/// `cap`. `cap == 0` disables the ceiling.
+///
+/// Always keeps at least one note: a single note whose transcript alone exceeds
+/// the cap must still make progress, or it would be skipped forever and its
+/// embeddings would never exist. That one note is the deliberate exception to
+/// the bound, and it is logged as such.
+fn cap_work_by_chunks(work: Vec<TranscriptWork>, cap: usize) -> Vec<TranscriptWork> {
+    if cap == 0 {
+        return work;
+    }
+    let total: usize = work.iter().map(|w| w.chunks.len()).sum();
+    if total <= cap {
+        return work;
+    }
+    let mut kept: Vec<TranscriptWork> = Vec::new();
+    let mut running = 0usize;
+    for w in work {
+        let n = w.chunks.len();
+        if !kept.is_empty() && running + n > cap {
+            break;
+        }
+        running += n;
+        kept.push(w);
+        if running >= cap {
+            break;
+        }
+    }
+    if kept.len() == 1 && running > cap {
+        log::warn!(
+            "cortex::embed: {} alone yields {} chunk(s), over the {} per-tick cap; embedding it anyway so it can converge",
+            kept[0].note_path,
+            running,
+            cap,
+        );
+    }
+    log::info!(
+        "cortex::embed: per-tick cap {} chunk(s): embedding {} note(s)/{} chunk(s) now, deferring the rest of {} total",
+        cap,
+        kept.len(),
+        running,
+        total,
+    );
+    kept
+}
+
 fn embed_in_sub_batches(
     model: &dyn EmbeddingModel,
     texts: &[&str],
     max_chunks_per_call: usize,
+    workers: usize,
 ) -> Result<Vec<Vec<f32>>> {
     log::debug!(
-        "cortex::embed::embed_in_sub_batches: total={} max_per_call={}",
+        "cortex::embed::embed_in_sub_batches: total={} max_per_call={} workers={}",
         texts.len(),
         max_chunks_per_call,
+        workers,
     );
     if texts.is_empty() {
         return Ok(Vec::new());
     }
     let cap = if max_chunks_per_call == 0 { texts.len() } else { max_chunks_per_call };
-    let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
-    for sub in texts.chunks(cap) {
-        let part = model.embed_batch(sub)?;
+    let total = texts.len();
+    let started = std::time::Instant::now();
+    let mut out: Vec<Vec<f32>> = Vec::with_capacity(total);
+    for (i, sub) in texts.chunks(cap).enumerate() {
+        // EVERY model call is reparented onto the dedicated pool. Doing it
+        // here, at the single choke point all three kind-batches funnel
+        // through, is what makes the isolation total: a future caller cannot
+        // forget to wrap it.
+        let part = in_inference_pool(workers, || model.embed_batch(sub))?;
         if part.len() != sub.len() {
             eyre::bail!(
                 "embed_batch returned {} vectors for {} inputs in sub-batch",
@@ -933,6 +1094,16 @@ fn embed_in_sub_batches(
             );
         }
         out.extend(part);
+        // Progress, not just start/finish. The two-day tick was invisible
+        // precisely because this loop was silent: there was no way to tell a
+        // wedged daemon from a slow one without attaching a debugger.
+        log::info!(
+            "cortex::embed: inference progress {}/{} chunk(s), sub-batch {} in {:?}",
+            out.len(),
+            total,
+            i + 1,
+            started.elapsed(),
+        );
     }
     Ok(out)
 }
