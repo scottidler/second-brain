@@ -192,5 +192,16 @@ harvest:
   #   command: manifest age decrypt ~/repos/scottidler/keep/.secrets -f env
   #   env-file: /run/user/1000/sb-harvest.env
 
+# Intake - raw-input sidecars. Every trace gets <vault>/system/intake/<trace>.txt
+# holding the verbatim bytes it arrived with (or a short descriptor for binary
+# input). Nothing in the pipeline READS these; they exist so you can answer
+# "what exactly did borg receive for trace X?" after the fact.
+intake:
+  # Days to keep a sidecar, from its mtime. 0 = keep forever (no sweep). This is
+  # a forensics window, not an archive: nothing reads these files, so a short
+  # window is the point. Swept daily by the daemon and on demand via
+  # `sb borg retention sweep [--sidecars-only] [--dry-run]`.
+  retention-days: 21
+
 # Log level: trace | debug | info | warn | error
 log-level: info

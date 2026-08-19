@@ -219,6 +219,8 @@ pub struct Config {
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub harvest: HarvestConfig,
+    #[serde(default)]
+    pub intake: IntakeConfig,
     pub log_level: Option<String>,
 }
 
@@ -810,6 +812,30 @@ impl Default for SlideThresholds {
     }
 }
 
+/// Intake-side settings. Today this is just the retention window for the
+/// raw-input sidecars (`<vault>/system/intake/<trace>.txt`) written by
+/// `vault::intake::write_raw_input` at the door. Those sidecars had no window
+/// at all before this section existed: `retention::sweep` only ever walked
+/// `staging.root`, so the vault accumulated one file per trace forever.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct IntakeConfig {
+    /// Days to keep a raw-input sidecar, measured from its mtime. `0` disables
+    /// the sweep entirely (keep forever). 21 days is a forensics window, not an
+    /// archive: the sidecar is never read by the pipeline, so the only question
+    /// it answers ("what bytes did trace X arrive with?") has a short shelf
+    /// life. Raise it past `staging.retention_days` only if you want the
+    /// sidecar to outlive the staged copy of the same bytes
+    /// (`<staging.root>/<trace>/body.txt`).
+    pub retention_days: u32,
+}
+
+impl Default for IntakeConfig {
+    fn default() -> Self {
+        Self { retention_days: 21 }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct StagingConfig {
@@ -848,8 +874,8 @@ impl Default for StagingConfig {
         Self {
             enabled: false,
             root: vault::paths::borg_stages_dir(),
-            retention_days: 60,
-            rejected_retention_days: 90,
+            retention_days: 14,
+            rejected_retention_days: 21,
             layout: StagingLayout::default(),
             max_size_gb: 20,
             size_alert_threshold_pct: 80,
