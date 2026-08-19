@@ -103,3 +103,37 @@ fn test_apply_naming_renames_files() {
     assert!(v.exists("my-awesome-note.md"));
     assert!(!v.exists("My Awesome Note.md"));
 }
+
+// ---- ASCII folding: the "would clobber" self-rename loop ----
+
+#[test]
+fn to_slug_ascii_folds_accented_latin() {
+    assert_eq!(
+        to_slug("tobi-lütke-made-a-20-year-old-codebase-53-faster-overnight-heres-how.md"),
+        "tobi-lutke-made-a-20-year-old-codebase-53-faster-overnight-heres-how"
+    );
+    assert_eq!(to_slug("michael-labbé.md"), "michael-labbe");
+    assert_eq!(to_slug("tom-dörr.md"), "tom-dorr");
+}
+
+#[test]
+fn to_slug_output_is_always_a_valid_slug() {
+    // The loop this fixes: `is_valid_slug` rejected the name, `to_slug` handed
+    // back the SAME name, so the violation could never be fixed. Every
+    // suggestion must now pass the validator that asked for it.
+    for name in [
+        "tobi-lütke-made-a-20-year-old-codebase.md",
+        "real-time-metaprogramming-michael-labbé-handmade-network.md",
+        "Mixed Case With Ümlauts.md",
+    ] {
+        let slug = to_slug(name);
+        assert!(is_valid_slug(&slug), "to_slug({name:?}) -> {slug:?} is not valid");
+    }
+}
+
+#[test]
+fn to_slug_drops_non_latin_it_cannot_fold() {
+    // cortex's fixer is ASCII-only by design; vault::hygiene owns the
+    // ingest-side fallback that keeps such a title from becoming empty.
+    assert_eq!(to_slug("日本語-notes.md"), "notes");
+}

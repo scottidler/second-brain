@@ -1,4 +1,5 @@
 use crate::schema::Domain;
+use unicode_normalization::UnicodeNormalization;
 
 /// Legacy folder-to-domain mapping for backward compat with old Fabric patterns
 /// and any other code that might emit the old emoji folder paths.
@@ -74,9 +75,71 @@ pub fn normalize_text_input(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
-/// Lowercase, strip apostrophes, replace non-alphanumeric with hyphens,
-/// collapse consecutive hyphens, and trim leading/trailing hyphens.
+/// ASCII-fold a string for slug use: decompose accented Latin characters and
+/// drop the combining marks, so `ü` becomes `u` and `é` becomes `e`.
+///
+/// Slugs are the vault's filenames, and a filename is compared, typed, globbed,
+/// and shell-completed. `cortex::naming::is_valid_slug` has always required
+/// ASCII, while this module's `sanitize_slug` kept every Unicode alphanumeric -
+/// so borg minted `tobi-lütke-….md`, cortex flagged it forever, and its fixer
+/// proposed the byte-identical name it already had (the "would clobber" rename
+/// loop). Folding here makes the producer agree with the validator.
+///
+/// Characters with no decomposition (`ß`, `æ`, CJK, Cyrillic) survive this step
+/// unchanged; `sanitize_slug`'s ASCII filter is what finally drops them, and it
+/// keeps the unfolded slug rather than returning an empty stem.
+fn ascii_fold(input: &str) -> String {
+    input
+        .nfd()
+        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+        .collect()
+}
+
+/// Lowercase, ASCII-fold, strip apostrophes, replace non-alphanumeric with
+/// hyphens, collapse consecutive hyphens, and trim leading/trailing hyphens.
+///
+/// The output is ASCII whenever folding can get there: `Tobi Lütke` becomes
+/// `tobi-lutke`, not `tobi-lütke`. A string that folds to nothing (an all-CJK
+/// title, say) keeps its unfolded slug instead of collapsing to an empty stem,
+/// because an empty filename is worse than a non-ASCII one.
 fn sanitize_slug(input: &str) -> String {
+    let folded = ascii_fold(&input.to_lowercase());
+    let sanitized: String = folded
+        .chars()
+        .filter(|c| *c != '\'')
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect();
+
+    // Collapse consecutive hyphens
+    let mut result = String::new();
+    let mut prev_hyphen = false;
+    for c in sanitized.chars() {
+        if c == '-' {
+            if !prev_hyphen {
+                result.push(c);
+            }
+            prev_hyphen = true;
+        } else {
+            result.push(c);
+            prev_hyphen = false;
+        }
+    }
+
+    let ascii = result.trim_matches('-').to_string();
+    if !ascii.is_empty() || input.trim().is_empty() {
+        return ascii;
+    }
+
+    // Folding erased everything (no Latin decomposition available), so fall back
+    // to the Unicode-permissive slug this function used to return. Rare, and
+    // strictly better than naming a note "".
+    log::warn!("sanitize_slug: {input:?} folds to empty ASCII; keeping the unfolded slug");
+    unicode_slug(input)
+}
+
+/// The pre-folding slug: keeps every Unicode alphanumeric. Only the empty-fold
+/// fallback in `sanitize_slug` uses it.
+fn unicode_slug(input: &str) -> String {
     let sanitized: String = input
         .to_lowercase()
         .chars()
@@ -84,7 +147,6 @@ fn sanitize_slug(input: &str) -> String {
         .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
         .collect();
 
-    // Collapse consecutive hyphens
     let mut result = String::new();
     let mut prev_hyphen = false;
     for c in sanitized.chars() {

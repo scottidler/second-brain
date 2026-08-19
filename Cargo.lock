@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "borg"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "arboard",
  "async-trait",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "cortex"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "chrono",
  "clap",
@@ -1410,6 +1410,7 @@ dependencies = [
  "tempfile",
  "tokenizers 0.23.1",
  "tokio",
+ "unicode-normalization",
  "ureq",
  "url",
  "vault",
@@ -1951,7 +1952,7 @@ dependencies = [
 
 [[package]]
 name = "distillers"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4967,7 +4968,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oracle"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "chrono",
  "clap",
@@ -6400,7 +6401,7 @@ dependencies = [
 
 [[package]]
 name = "sb"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "borg",
  "chrono",
@@ -7329,7 +7330,7 @@ dependencies = [
 
 [[package]]
 name = "strip-transcripts"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "chrono",
  "clap",
@@ -8402,7 +8403,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vault"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -8430,6 +8431,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokenizers 0.23.1",
  "tokio",
+ "unicode-normalization",
  "walkdir",
 ]
 

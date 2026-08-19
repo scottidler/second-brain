@@ -2,16 +2,52 @@ use super::*;
 
 #[test]
 fn sanitize_filename_does_not_panic_on_multibyte_at_cut() {
-    // sanitize_slug keeps non-ASCII alphanumerics, so a long title of
-    // multi-byte chars must not panic when truncated at the byte limit.
+    // sanitize_slug ASCII-FOLDS accented Latin now, so 200 "ñ" reduce to "n"
+    // and the byte cut lands on ASCII. Kept as a panic regression test: the
+    // fallback path and the pre-truncation slug can still hold multi-byte data.
     let title = "ñ".repeat(200);
     let out = sanitize_filename(&title);
     assert!(out.chars().count() <= MAX_FILENAME_LEN);
-    assert!(out.chars().all(|c| c == 'ñ' || c == '-'));
+    assert!(out.chars().all(|c| c == 'n' || c == '-'), "got {out:?}");
 
     // A cut that would land mid-codepoint at exactly MAX_FILENAME_LEN bytes.
     let mixed = format!("{}ñ{}", "a".repeat(MAX_FILENAME_LEN - 1), "b".repeat(50));
     let _ = sanitize_filename(&mixed); // must not panic
+}
+
+#[test]
+fn sanitize_filename_ascii_folds_accented_latin() {
+    // The four names that made cortex's naming pass loop forever.
+    assert_eq!(
+        sanitize_filename("Tobi Lütke made a 20-year-old codebase 53% faster overnight"),
+        "tobi-lutke-made-a-20-year-old-codebase-53-faster-overnight"
+    );
+    assert_eq!(sanitize_filename("Michael Labbé"), "michael-labbe");
+    assert_eq!(sanitize_filename("Tom Dörr"), "tom-dorr");
+    assert!(
+        sanitize_filename("Tobi Lütke").is_ascii(),
+        "folded slug must be pure ASCII"
+    );
+}
+
+#[test]
+fn sanitize_filename_keeps_unfolded_slug_when_folding_empties_it() {
+    // Nothing to decompose: rather than name the note "", keep the old
+    // Unicode-permissive slug.
+    assert_eq!(sanitize_filename("日本語"), "日本語");
+    assert_eq!(sanitize_filename("Привет"), "привет");
+}
+
+#[test]
+fn sanitize_filename_empty_input_stays_empty() {
+    assert_eq!(sanitize_filename(""), "");
+    assert_eq!(sanitize_filename("   "), "");
+}
+
+#[test]
+fn sanitize_tag_is_ascii_folded_too() {
+    // Tags are the same slug alphabet; `ai-llm` style, never `café`.
+    assert_eq!(sanitize_tag("Café"), "cafe");
 }
 
 #[test]

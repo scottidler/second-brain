@@ -1,23 +1,37 @@
 use regex::Regex;
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::config::NamingConfig;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::vault::Note;
 
 /// Convert a filename to lowercase-hyphenated slug.
+///
+/// ASCII-folds accented Latin characters (`ü` -> `u`) so the suggestion agrees
+/// with [`is_valid_slug`], which has always required ASCII. Before folding, a
+/// name like `tobi-lütke-….md` was BOTH a violation and its own suggested fix:
+/// the fixer proposed the byte-identical name, the executor saw the destination
+/// already existed, and every daemon cycle logged a "would clobber" skip that
+/// could never converge. Folding is the same one `vault::hygiene::sanitize_slug`
+/// applies at ingest, so producer and validator agree on one alphabet.
 pub fn to_slug(filename: &str) -> String {
     let stem = filename.strip_suffix(".md").unwrap_or(filename);
+    let folded: String = stem
+        .nfd()
+        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+        .collect();
 
-    let slug: String = stem
+    let slug: String = folded
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() {
-                c.to_lowercase().next().unwrap_or(c)
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
             } else if c == ' ' || c == '_' || c == '-' {
                 '-'
             } else {
-                // Drop non-alphanumeric, non-separator chars
+                // Drop everything else: punctuation, and any non-ASCII char
+                // folding could not reduce to ASCII.
                 '\0'
             }
         })
@@ -165,6 +179,16 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
 
         if let Some(parent) = abs_to.parent() {
             std::fs::create_dir_all(parent)?;
+        }
+
+        // A no-op rename is not a clobber. Reaching the guard below with
+        // `from == to` is how the Unicode-slug loop reported a conflict against
+        // the very file it was renaming; short-circuit so a future divergence
+        // between `to_slug` and `is_valid_slug` degrades to silence, not to a
+        // warning every cycle forever.
+        if abs_from == abs_to {
+            log::debug!("naming: {} already matches its slug; nothing to rename", from.display());
+            continue;
         }
 
         if abs_to.exists() {
