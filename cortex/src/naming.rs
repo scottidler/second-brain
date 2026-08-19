@@ -261,16 +261,24 @@ pub(crate) fn update_wikilinks_batch(
         let mut new_content = content.clone();
 
         for (old_stem, new_stem) in &rename_map {
-            // Wikilinks are case-insensitive in Obsidian, match all case variants
-            let pattern = format!(r"\[\[{}\]\]", regex::escape(old_stem));
-            if let Ok(re) = Regex::new(&format!("(?i){pattern}")) {
-                new_content = re.replace_all(&new_content, format!("[[{new_stem}]]")).to_string();
-            }
-
-            // Also handle [[link|display text]] format
-            let pipe_pattern = format!(r"\[\[{}\|", regex::escape(old_stem));
-            if let Ok(re) = Regex::new(&format!("(?i){pipe_pattern}")) {
-                new_content = re.replace_all(&new_content, format!("[[{new_stem}|")).to_string();
+            // One pattern for every shape a link to this note can take, because
+            // matching only the bare stem is what left the entity hubs pointing
+            // at `[[notes/michael-labbé-…|…]]` after the ASCII-fold renames:
+            //
+            //   1: an optional folder prefix (`notes/`) - hub bodies use
+            //      path-form targets, so it must be preserved, not dropped,
+            //   2: an optional `#heading` / `^block-id` suffix,
+            //   3: an optional `|display text`.
+            //
+            // Wikilinks are case-insensitive in Obsidian, hence `(?i)`.
+            let pattern = format!(
+                r"(?i)\[\[((?:[^\[\]|#^]*/)?){}((?:[#^][^\[\]|]*)?)((?:\|[^\[\]]*)?)\]\]",
+                regex::escape(old_stem)
+            );
+            if let Ok(re) = Regex::new(&pattern) {
+                new_content = re
+                    .replace_all(&new_content, format!("[[${{1}}{new_stem}${{2}}${{3}}]]"))
+                    .to_string();
             }
         }
 

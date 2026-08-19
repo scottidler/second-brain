@@ -137,3 +137,74 @@ fn to_slug_drops_non_latin_it_cannot_fold() {
     // ingest-side fallback that keeps such a title from becoming empty.
     assert_eq!(to_slug("日本語-notes.md"), "notes");
 }
+
+// ---- post-rename wikilink rewrite: every link shape ----
+
+/// Rewrite one file's links for a single rename and hand back the new bytes.
+/// Uses the shared TestVault so the note list comes from a real scan.
+fn relink(body: &str, from: &str, to: &str) -> String {
+    let v = crate::testutil::TestVault::new();
+    let holder = "link-holder.md";
+    v.add_note(
+        holder,
+        &format!("---\ntitle: Holder\ndate: 2026-08-19\ntype: note\ndomain: tech\norigin: authored\ntags: []\n---\n\n{body}\n"),
+    );
+    let notes = v.scan();
+    let renames = vec![(
+        std::path::PathBuf::from(format!("notes/{from}.md")),
+        std::path::PathBuf::from(format!("notes/{to}.md")),
+    )];
+    update_wikilinks_batch(v.root(), &notes, &renames).expect("relink");
+    // Body only: the assertions are about link markup, not frontmatter.
+    let written = v.read(holder);
+    written
+        .rsplit_once("---\n")
+        .map(|(_, body)| body.trim().to_string())
+        .unwrap_or(written)
+}
+
+#[test]
+fn relink_rewrites_bare_and_piped_targets() {
+    assert_eq!(
+        relink("see [[old-name]] here", "old-name", "new-name"),
+        "see [[new-name]] here"
+    );
+    assert_eq!(
+        relink("see [[old-name|Old Name]] here", "old-name", "new-name"),
+        "see [[new-name|Old Name]] here"
+    );
+}
+
+#[test]
+fn relink_preserves_a_path_form_prefix() {
+    // The hub-body shape that dangled after the ASCII-fold rename.
+    assert_eq!(
+        relink("([[notes/old-name|Old Name]])", "old-name", "new-name"),
+        "([[notes/new-name|Old Name]])"
+    );
+    assert_eq!(
+        relink("[[notes/old-name]]", "old-name", "new-name"),
+        "[[notes/new-name]]"
+    );
+}
+
+#[test]
+fn relink_preserves_heading_block_and_embed_syntax() {
+    assert_eq!(
+        relink("[[old-name#Summary]]", "old-name", "new-name"),
+        "[[new-name#Summary]]"
+    );
+    assert_eq!(
+        relink("[[old-name^abc123|quote]]", "old-name", "new-name"),
+        "[[new-name^abc123|quote]]"
+    );
+    assert_eq!(relink("![[old-name]]", "old-name", "new-name"), "![[new-name]]");
+}
+
+#[test]
+fn relink_leaves_unrelated_targets_alone() {
+    assert_eq!(
+        relink("[[old-name-extended]] and [[other]]", "old-name", "new-name"),
+        "[[old-name-extended]] and [[other]]"
+    );
+}
