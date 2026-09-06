@@ -563,3 +563,29 @@ None. Four panel rounds (architect + staff engineer, 2026-09-05, run dir `/tmp/r
 - `docs/design/2026-05-20-shakedown-v0.8.5-cleanup.md:144` and `2026-05-24-install-pipeline.md:72` (prior mentions of `--prune-legacy-config`).
 - `docs/design/2026-07-07-distillation-output-restore.md` (transcript-in-staging contract; S7).
 - `docs/design/2026-07-05-cortex-daemon-oscillation-loop.md` (the day `cortex.service.bak` was made).
+
+### Found by the new CI workflow on its first runs, 2026-09-06
+
+R4 existed to make CI check what `otto ci` checks. Its first three runs each
+failed on a different pre-existing portability defect, none of them caused by
+this work. That is the workflow doing its job on day one.
+
+- **The repo's rustfmt config lived in `$HOME`.** No `rustfmt.toml` existed at
+  the repo root, so rustfmt walked up to `~/.rustfmt.toml` (`max_width = 120`).
+  `cargo fmt --all --check` therefore passed only on a machine carrying that
+  file; CI checks out to `/__w/...`, fell back to the 100-column default, and
+  demanded rewraps in untouched files. Fixed: `rustfmt.toml` committed at the
+  root with the two values that home config set.
+- **Eleven cortex tests read the developer's real `~/.config/sb/`.**
+  `startup::*`, `daemon::*` and `sweep::*` fail in a clean container with
+  `missing canonical-tags vocabulary at /github/home/.config/sb/canonical-tags.yml`,
+  and the first failure poisons the suite's shared env lock, cascading into the
+  other ten. Worked around in CI by provisioning `canonical-tags.yml` and
+  `tag-mapping.yml` from the repo's `config/` before the test step. **Not
+  fixed:** those tests should use a tempdir and `XDG_CONFIG_HOME` like
+  `cortex/src/sweep/tests.rs:160-190` already does, rather than depending on
+  machine state. That is a follow-up, not part of this doc.
+- **The CI toolchain pin was stale** relative to the box the repo is developed
+  on (1.96.0 vs 1.98.0). Harmless for `release.yml`, which only builds, but this
+  workflow runs `clippy -D warnings`, and lint sets move between releases.
+  Fixed: `RUST_VERSION: 1.98.0` in `ci.yml` only.
