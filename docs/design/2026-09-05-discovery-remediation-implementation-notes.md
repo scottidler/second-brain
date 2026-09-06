@@ -620,3 +620,61 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
   criterion names; nothing under `~/.config/{borg,cortex,second-brain}` was
   deleted. Running `--apply` (S4 in the operator runbook) is Scott's to do,
   gated on this phase's code being deployed.
+
+## Phase 11: `system` tag group (F6)
+### Design decisions
+- `config/canonical-tags.yml:110`: added `system: []` beside `diy: []`, matching
+  the existing pattern for domains that have no canonical tags of their own yet
+  (the grouping is documentation; `vault::canonical::CanonicalTagsFile::all_tags`
+  flattens across groups, so the empty list changes no runtime behavior).
+- `vault/src/canonical/tests.rs::test_canonical_tags_groups_match_domain` —
+  parses the *repo* copy of the YAML via `include_str!("../../../config/canonical-tags.yml")`
+  (not the deployed `~/.config/sb/` copy, which drifts on its own schedule),
+  then asserts both directions: every group key parses as a `Domain` via
+  `Domain::from_str` (`vault/src/schema.rs:78`), and every `Domain::all()`
+  variant has a matching group key via `Domain::as_str()`. Bidirectional so
+  neither a stray/misspelled group key nor a `Domain` variant added later
+  without a group key can land silently.
+
+### Deviations
+- None. Implemented at the exact file:line the doc names.
+
+### Tradeoffs
+- `include_str!` of the repo path vs. reading `vault::paths::canonical_tags()`
+  (the deployed `~/.config/sb/canonical-tags.yml`) at test time — chose the
+  embedded/compile-time copy so the test is deterministic and sandboxed (no
+  dependency on a machine's `~/.config/sb/` state, no ordering requirement
+  against `sb bootstrap`), matching the doc's own phrasing ("parse the
+  embedded `config/canonical-tags.yml`").
+
+### Open questions
+- None.
+
+### Success criteria (observed)
+1. `cargo test --workspace --features vault/vec canonical` — all `canonical::tests::*`
+   pass, including the new `test_canonical_tags_groups_match_domain`
+   (`vault` lib test binary: `test result: ok. 20 passed; 0 failed`).
+2. Break-the-test check: renamed the `system` group key to `sytem` in
+   `config/canonical-tags.yml`, reran
+   `cargo test --workspace --features vault/vec test_canonical_tags_groups_match_domain`
+   — FAILED as expected:
+   `thread 'canonical::tests::test_canonical_tags_groups_match_domain' panicked
+   at vault/src/canonical/tests.rs:222:50: group key 'sytem' is not a valid
+   Domain variant`. Reverted the typo; the same test then passed again
+   (`test result: ok. 1 passed; 0 failed`).
+3. Built `target/debug/sb` (`cargo build -p sb --bin sb --features vault/vec`
+   — the workspace has no top-level `vec` feature, `sb`/`vault` do, so the CI
+   task's `--features vec` becomes `--features vault/vec` at the `cargo build`
+   call site; `otto ci`'s own `cargo test --workspace --features vec` invocation
+   is unaffected since workspace-level `--features vec` resolves the same way
+   through feature unification). Ran that binary's `bootstrap --force` (refreshed
+   `~/.config/sb/canonical-tags.yml` from the embedded copy; failed later at
+   the systemd `daemon-reload` step with "Operation not permitted" connecting
+   to the user D-Bus session — expected in this sandboxed environment, not
+   related to this phase, and the canonical-tags refresh had already
+   succeeded and was verified byte-identical to the repo copy via `diff`
+   before that unrelated failure). Then ran `sb doctor`, which printed
+   `✅ [shared config] canonical-tags.yml: matches binary`. `sb doctor` also
+   printed `❌ [vault] legacy oracle DB at ... refusing to create an empty
+   index (runbook R1 moves it)` — the expected Phase 9 fail-closed guard;
+   left untouched per instructions.

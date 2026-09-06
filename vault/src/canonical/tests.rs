@@ -204,3 +204,29 @@ fn test_load_tag_mapping_yaml() {
     assert_eq!(mapping.get("claudecodeai"), Some(&None));
     assert_eq!(mapping.get("rust"), Some(&Some("rust".to_string())));
 }
+
+// ---- group keys <-> Domain parity ----
+
+// The `tags:` map's keys are documentation groupings, not read by any consumer
+// (`all_tags()` flattens across groups); this test is what keeps them pinned
+// to `Domain` so a missing/renamed group can't drift silently again.
+#[test]
+fn test_canonical_tags_groups_match_domain() {
+    use crate::schema::Domain;
+    use std::str::FromStr;
+
+    let yaml = include_str!("../../../config/canonical-tags.yml");
+    let file: CanonicalTagsFile = serde_yaml::from_str(yaml).expect("parse failed");
+
+    for key in file.tags.keys() {
+        Domain::from_str(key).unwrap_or_else(|_| panic!("group key '{key}' is not a valid Domain variant"));
+    }
+
+    for domain in Domain::all() {
+        let key = domain.as_str();
+        assert!(
+            file.tags.contains_key(key),
+            "Domain::{domain:?} (\"{key}\") has no group key in canonical-tags.yml"
+        );
+    }
+}
