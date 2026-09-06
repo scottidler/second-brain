@@ -589,3 +589,19 @@ this work. That is the workflow doing its job on day one.
   on (1.96.0 vs 1.98.0). Harmless for `release.yml`, which only builds, but this
   workflow runs `clippy -D warnings`, and lint sets move between releases.
   Fixed: `RUST_VERSION: 1.98.0` in `ci.yml` only.
+
+### Verified complete, 2026-09-06, desk
+
+Runbook run and acceptance criteria measured after `v0.14.11` deployed:
+
+- `otto ci` green; CI green on `bb043c7`; tag `v0.14.11` on `origin/main`, not orphaned.
+- `sb doctor` exit 0. Its only Warn is `oldest inbox note ... is 1503h old`, which is R5 firing on a note awaiting triage: the check working, as the criterion says. Output carries `maxTokens`, four `[data dir]` lines, and `frontmatter gaps (cortex lint policy): domain=1, origin=13, tags=290`, equal to `sb cortex lint`'s row counts for the same three fields by an independent path.
+- `sb cortex lint | grep -c 'not valid'` = 0 (was 2016).
+- Vault: `origin: human` 0 (was 87); `domain-ai` in `home.md` 0; `inbox/.md` gone; vault `.github/workflows/ci.yml` gone; Templater syntax in `system/templates` 0; `sb cortex schema --check` exit 0.
+- Host: legacy `~/.local/share/oracle` gone; `~/.local/share/sb/oracle/oracle.db` present; indexed count 3456, identical to the pre-move reading, so the move lost nothing; systemd cortex files 1; patterns 26 (and still 26 after the deploy's `bootstrap --force`, so the facet orphans did not return); borg unit renders `--log-level info`.
+- **Phase 15's re-stamp criterion now passes for real.** After cortex restarted on the new config it parses 3498 notes rather than 3509 -- exactly the eleven templates fewer -- with no `system/templates` lines in `cortex.log` since the restart and no `cortex-` stamps in `daily.md`. The earlier reading was taken against a daemon that had never reloaded its config and proved nothing; this one does.
+
+Not done, and why:
+
+- **S4** (`sb bootstrap --prune-legacy-config --apply`). The verb works and its dry run lists exactly `borg`, `cortex`, `second-brain`, but the apply deletes through `borg::rkvr::remove`, and rkvr cannot create its archive directory under the agent sandbox (`Read-only file system`). It fails closed on the first directory, so nothing was deleted. Needs to be run by hand.
+- **S7**. The YouTube source is gone, so the transcript cannot be regenerated. Left in place.
