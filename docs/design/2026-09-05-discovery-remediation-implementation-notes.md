@@ -898,3 +898,70 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
 - Both push-gated success criteria (`gh workflow view ci` lists the workflow;
   first run on `main` is green, warm-cache duration recorded) are
   DEFERRED-TO-PUSH per the assignment; not attempted in this phase.
+
+## Phase 14: dotfiles (F4, F2 config, S2 config, `Inbox/**` casing)
+
+### Design decisions
+- Repo: `~/repos/scottidler/dotfiles`, files `HOME/.config/sb/{borg,cortex}.yml`
+  (symlinked live into `~/.config/sb/`; confirmed with `diff` against the
+  `~/.config/sb/*` symlink targets before and after editing — identical, so the
+  edit is live for the running cortex daemon on its next 300 s tick with no
+  restart).
+- `cortex.yml:20-25`: deleted the `schema:` block entirely. `Config` is
+  `#[serde(default)]` at struct level (`cortex/src/config.rs:8`), so the
+  missing key falls back to `SchemaConfig::default()` (enum-derived).
+- `cortex.yml:39`: `"Inbox/**"` -> `"inbox/**"` (capital I never matched
+  `inbox/`).
+- `cortex.yml actions.frontmatter.path-exempt`: added `"entities/**": [domain,
+  origin]`.
+- `cortex.yml vault.ignore`: added `.claude` and `templates`.
+- `cortex.yml migrations`: added the `v4-legacy-values` entry verbatim after
+  `v3-domain-expansion`, per the doc's literal YAML block.
+- `borg.yml:121`: `log-level: debug` -> `log-level: info`.
+- Staging: `borg.yml` carried an unrelated, pre-existing, uncommitted hunk (a
+  `fabric:` block rewrite to a bare `binary: fabric` PATH-resolved name plus a
+  `max-tokens: 16384` addition) already dirty in the working tree before this
+  phase touched the file. Used `git add -p` to stage only the `log-level`
+  hunk, leaving the fabric-block hunk unstaged so it does not ride along in
+  this phase's commit. `cortex.yml`'s diff contained only this phase's five
+  edits, so it was staged whole.
+
+### Deviations
+- None. Every edit matches the doc's line numbers and content exactly
+  (`cortex.yml:20-25`, `:39`, `path-exempt`, `vault.ignore`, `migrations:`
+  after `v3-domain-expansion`; `borg.yml:121`).
+
+### Tradeoffs
+- None.
+
+### Open questions
+- None.
+
+### Success criteria (verified against the freshly built
+  `second-brain/main/target/debug/sb`, not the stale `~/.cargo/bin/sb`)
+- `sb doctor 2>/dev/null | grep '\[config\]'`: PASS — all three lines print
+  `✅ [config] {borg,cortex,oracle}: ... (parses as typed Config)`.
+- `sb cortex lint 2>/dev/null | grep -c 'not valid'`: PASS — 89 (doc's expected
+  value; was 2016 before this phase per Phase 7's "Observed on main" note).
+- `grep -c '\[frontmatter.required.domain\]'` = 2 (<= 10, PASS); `grep -c
+  '\[frontmatter.required.origin\]'` = 14 (<= 30, PASS); `grep -c '\.claude/'`
+  = 0 (PASS, was 2).
+  - "`sb doctor` shows the same two numbers with no rebuild": UNVERIFIED. Root
+    cause: `sb/src/cli/checks.rs::vault_findings` (`:731-785`) opens the oracle
+    `SearchIndex` before calling `frontmatter_policy_findings` (`:784`), and
+    Phase 9's fail-closed legacy-oracle guard (`SearchIndex::open`) hits an
+    `Err` on this host (the legacy DB at `~/.local/share/oracle` still exists;
+    the new `~/.local/share/sb/oracle` path does not) — `vault_findings`
+    early-returns at that `Err` arm (`:757-760`) and never reaches the
+    frontmatter-gaps `Info` line. This is the same pre-existing, intentional
+    Phase 9 condition the assignment named ("cleared by operator runbook R1
+    which Scott runs by hand"); per explicit instruction I did not touch
+    `~/.local/share/oracle` or `~/.local/share/sb/oracle` to clear it. The
+    config-driven policy itself is proven by the lint numbers above (no
+    rebuild between the pre-edit 920/931 and post-edit 2/14); only doctor's
+    independent-path echo of those same numbers is blocked by the unrelated
+    R1 prerequisite.
+- `sb cortex migrate 2>/dev/null` (dry run, no `--apply`): PASS — `grep -c
+  "would rename origin: 'human'"` = 87, `grep -c "would rename origin:
+  'ai-generated'"` = 1, `grep -c "would rename status: 'resolved-workaround'"`
+  = 1. All three match the doc's expected counts exactly.
