@@ -76,8 +76,12 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --features vec
 
-      # Mirrors the `bloat` task (.otto.yml:22-49).
+      # Mirrors the `bloat` task (.otto.yml:22-49). Needs an explicit bash:
+      # the loop below feeds `find` in through process substitution, which is
+      # a bashism, and GitHub's default shell in a container is `sh -e` (dash
+      # on debian:bookworm), where it is a syntax error.
       - name: Check file line counts
+        shell: bash
         run: |
           LIMIT="${BLOAT_MAX_LINES:-1500}"
           FAILED=0
