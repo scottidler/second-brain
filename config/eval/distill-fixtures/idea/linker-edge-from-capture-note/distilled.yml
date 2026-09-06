@@ -9,6 +9,6 @@ claims:
 tags: []
 links: []
 meta:
-  extractor: distill-passthrough-v1
+  extractor: distill-idea-v2
   model: synthetic-fixture
   produced-at: "2026-07-05T00:00:00Z"

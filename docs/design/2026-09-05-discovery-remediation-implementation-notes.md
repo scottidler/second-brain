@@ -47,3 +47,37 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
 
 ### Open questions
 - None.
+
+## Phase 1: Delete the passthrough stub (S5)
+
+### Design decisions
+- `git rm distillers/src/passthrough.rs distillers/src/passthrough/tests.rs`
+  and removed both the `pub mod passthrough;` and
+  `pub use passthrough::PassthroughDistiller;` lines from
+  `distillers/src/lib.rs:17,37`.
+- Rewrote the dead-code comment at `distillers/src/dispatcher.rs:169-173`
+  (the `PassthroughDistiller` mention above the `VoiceNote` match arm) to
+  drop the now-nonexistent-type reference, keeping only the still-true
+  routing note about `VoiceNote`'s own Fabric-backed distiller.
+- Reworded the matching comment at
+  `borg/src/stages/distill/tests.rs:136-138` (above
+  `distill_stage_handles_image_through_image_distiller`) the same way: it
+  named `PassthroughDistiller` as what Image *used to* route through; the
+  comment now just states the current routing and fallback behavior.
+- Retagged
+  `config/eval/distill-fixtures/idea/linker-edge-from-capture-note/distilled.yml:12`
+  `meta.extractor` from `distill-passthrough-v1` to `distill-idea-v2` since
+  the fixture's `IdeaDistiller` is the live extractor for that path.
+- Left `borg::stages::extract::PassthroughExtractor`
+  (`borg/src/stages/extract.rs:25`) untouched — a distinct, live Stage-1
+  extractor, out of this phase's scope per the doc's explicit instruction.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- None — this phase is a pure deletion with no design choice beyond what
+  the doc specified.
+
+### Open questions
+- None.

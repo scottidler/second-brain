@@ -168,9 +168,6 @@ impl<F: FabricCaller + Clone> Dispatch for Dispatcher<F> {
             DistillKind::Image => self.image.distill(inputs).await,
             // Phase 9c-voicenote: VoiceNote now routes to its own Fabric-backed
             // distiller with map-reduce orchestration for long Groq transcripts.
-            // `PassthroughDistiller` has zero consumers from this point forward;
-            // the type stays in the crate as a stub but is no longer a field on
-            // the dispatcher (no kind routes to it).
             DistillKind::VoiceNote => self.voicenote.distill(inputs).await,
             DistillKind::Article => self.article.distill(inputs).await,
             DistillKind::Repo => self.repo.distill(inputs).await,

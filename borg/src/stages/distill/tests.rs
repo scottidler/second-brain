@@ -133,9 +133,9 @@ async fn distill_stage_handles_vocabulary_through_idea_distiller() {
 
 #[tokio::test]
 async fn distill_stage_handles_image_through_image_distiller() {
-    // Phase 9c-image: Image now routes to ImageDistiller (Fabric-backed),
-    // not PassthroughDistiller. With a stub FakeFabric (no canned response)
-    // the call falls back; the fallback path mirrors the live extractor id.
+    // Phase 9c-image: Image routes to ImageDistiller (Fabric-backed). With a
+    // stub FakeFabric (no canned response) the call falls back; the fallback
+    // path mirrors the live extractor id.
     let stage = make_stage();
     let distilled = stage
         .distill(IngestKind::Image, "ocr'd text", None, None, None)
