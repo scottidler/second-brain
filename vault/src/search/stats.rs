@@ -168,7 +168,10 @@ impl super::SearchIndex {
     }
 
     fn compute_schema_gaps(&self) -> Result<Vec<(String, u64)>> {
-        let fields = ["domain", "note_type", "origin", "status"];
+        // `status` dropped (Phase 7, F5): optional per `status-values.md` and
+        // `frontmatter.md`, so an empty `status` is not a gap. The other
+        // three stay required raw-index counts for oracle's `vault_overview`.
+        let fields = ["domain", "note_type", "origin"];
         let mut gaps = Vec::new();
         for field in fields {
             let count: u64 =

@@ -16,9 +16,18 @@ impl Default for ScanConfig {
         // frontmatter, so without this exclusion every consumer of
         // `scan_vault` would index them as live knowledge.
         Self {
-            ignore: [".git", ".obsidian", ".cortex", "assets", "attachments", "quarantine"]
-                .map(String::from)
-                .to_vec(),
+            ignore: [
+                ".git",
+                ".obsidian",
+                ".cortex",
+                "assets",
+                "attachments",
+                "quarantine",
+                ".claude",
+                "templates",
+            ]
+            .map(String::from)
+            .to_vec(),
         }
     }
 }

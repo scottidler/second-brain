@@ -742,23 +742,14 @@ fn vault_findings() -> Vec<Finding> {
                 stats.total_notes,
                 stats.by_domain.len()
             )));
-            let total_gaps: u64 = stats.schema_gaps.iter().map(|(_, n)| n).sum();
-            if total_gaps > 0 {
-                let detail = stats
-                    .schema_gaps
-                    .iter()
-                    .filter(|(_, n)| *n > 0)
-                    .map(|(field, n)| format!("{field}={n}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                findings.push(Finding::info(format!("schema gaps: {detail}")));
-            }
         }
         Err(e) => findings.push(Finding::warn(
             format!("vault stats query failed: {e}"),
             "sb oracle stats".to_string(),
         )),
     }
+
+    findings.extend(frontmatter_policy_findings());
 
     match db.embedding_coverage() {
         Ok(cov) => {
@@ -786,6 +777,67 @@ fn vault_findings() -> Vec<Finding> {
             format!("embedding coverage query failed: {e}"),
             "sb cortex embed --backfill".to_string(),
         )),
+    }
+
+    findings
+}
+
+/// Doctor's frontmatter-policy signal, sourced from cortex's own lint
+/// policy rather than a second copy of it. Enters through `cortex::lint`
+/// (not `scan_vault` + `lint_frontmatter` directly) so the exclude/include
+/// filter cortex's CLI applies (`lintable_notes` in `cortex::lib`) is the
+/// same set doctor counts over - a direct `scan_vault` call would count the
+/// larger ignore-only set instead.
+fn frontmatter_policy_findings() -> Vec<Finding> {
+    let cortex_config = match cortex::config::Config::load(None) {
+        Ok(c) => c,
+        Err(e) => {
+            return vec![Finding::warn(
+                format!("could not load cortex config: {e}"),
+                "sb bootstrap".to_string(),
+            )];
+        }
+    };
+    let vault_root = match cortex_config.vault_root(None) {
+        Ok(p) => p,
+        Err(e) => {
+            return vec![Finding::warn(
+                format!("could not resolve vault root for cortex lint: {e}"),
+                "set `vault.root-path` in cortex.yml".to_string(),
+            )];
+        }
+    };
+    let opts = cortex::opts::LintOpts {
+        apply: false,
+        format: cortex::opts::LintFormat::Human,
+        rule: vec!["frontmatter".to_string()],
+        path: None,
+    };
+    let report = match cortex::lint(&vault_root, &cortex_config, &opts) {
+        Ok((report, _apply)) => report,
+        Err(e) => {
+            return vec![Finding::warn(
+                format!("cortex lint (frontmatter) failed: {e}"),
+                "sb cortex lint --rule frontmatter".to_string(),
+            )];
+        }
+    };
+
+    let mut findings = Vec::new();
+    let required = report.count_by_rule_prefix("frontmatter.required.");
+    let domain = required.get("domain").copied().unwrap_or(0);
+    let origin = required.get("origin").copied().unwrap_or(0);
+    let tags = required.get("tags").copied().unwrap_or(0);
+    findings.push(Finding::info(format!(
+        "frontmatter gaps (cortex lint policy): domain={domain}, origin={origin}, tags={tags}"
+    )));
+
+    let enum_violations: u64 = report.count_by_rule_prefix("frontmatter.enum.").values().sum();
+    if enum_violations > 0 {
+        findings.push(Finding::warn(
+            format!("{enum_violations} frontmatter enum violations"),
+            "sb cortex lint --rule frontmatter".to_string(),
+        ));
     }
 
     findings

@@ -356,3 +356,61 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
   every sb log (the `env_logger` `DualWriter` path has the same shape) and not
   in this phase's scope, but this phase is the first to put the rotator under a
   multi-process log.
+
+## Phase 7: Doctor reports cortex lint's frontmatter policy + `.claude`/`templates` ignore (F5)
+
+### Design decisions
+- `Report::count_by_rule_prefix` — `cortex/src/report.rs` — new method groups
+  violations by the rule-string suffix after a caller-supplied prefix
+  (`"frontmatter.required."` -> `{domain, origin, tags}`), so doctor reads
+  cortex's own rule-naming convention (`format!("frontmatter.required.{field}")`
+  / `format!("frontmatter.enum.{field}")` in `cortex::frontmatter`) instead of
+  a second copy of the field list.
+- `frontmatter_policy_findings` — `sb/src/cli/checks.rs` — new helper, called
+  from `vault_findings`. Loads `cortex::config::Config::load(None)`, resolves
+  `vault_root` via `Config::vault_root(None)` (same resolver every other `sb
+  cortex` subcommand uses), then calls `cortex::lint(&vault_root, &config,
+  &LintOpts { rule: vec!["frontmatter".into()], apply: false, format:
+  LintFormat::Human, path: None })` — the CLI's own entry point, not
+  `scan_vault` + `lint_frontmatter` directly, so the `vault.exclude`/`include`
+  filter (`lintable_notes` in `cortex::lib::lint_with_notes`) applies and
+  doctor counts the same set `sb cortex lint` prints (verified: both count
+  920/931/289 for domain/origin/tags, see Success criteria below).
+- Dropped the old `stats.schema_gaps` Info line from `vault_findings`: doctor
+  now emits one frontmatter signal (the policy the daemon enforces), not two
+  competing ones (raw index emptiness vs. lint policy).
+- `vault/src/search/stats.rs::compute_schema_gaps` — dropped `status` from the
+  three-field raw-gap scan (`domain`, `note_type`, `origin` remain); `status`
+  is optional per `status-values.md`/`frontmatter.md`, so an empty `status` was
+  never a real gap. `stats()` (and therefore oracle's `vault_overview`) keeps
+  the field name `schema_gaps` and the other three counts unchanged.
+- `cortex::config::Config::load_from_file` — `cortex/src/config.rs` —
+  `log::warn!("schema: overrides the enum-derived vocabulary; delete it unless
+  you mean to")` when the raw YAML parses to a mapping containing a top-level
+  `schema` key, checked via a `serde_yaml::Value` parse of the same `content`
+  string before the typed `Self` parse (so the warn fires whether or not the
+  block itself is well-formed enough to deserialize into `SchemaConfig`).
+- `vault::config::ScanConfig::default().ignore` gained `.claude` and
+  `templates` (oracle's full-index scan path,
+  `vault/src/search/index.rs::ScanConfig::default()`); `oracle::config::
+  default_ignore_dirs` (the watcher's list) gained `.claude` (it already had
+  `templates`). The two lists now agree on both directories.
+
+### Deviations
+- None. Implemented at the exact seam the doc specifies (`cortex::lint`, not
+  `scan_vault` + `lint_frontmatter`); no static/enum exempt list was added
+  anywhere — the entity exemption stays a cortex.yml line, deferred to
+  Phase 14 as directed.
+
+### Tradeoffs
+- `count_by_rule_prefix` returns a `BTreeMap<String, u64>` keyed by the bare
+  suffix (`"domain"`, `"origin"`) rather than the full rule string, so a
+  caller cannot distinguish `"frontmatter.required.domain"` from a
+  differently-prefixed rule that happened to end in `.domain` — acceptable
+  because the two call sites in this phase pass prefixes wide enough
+  (`"frontmatter.required."`, `"frontmatter.enum."`) that no collision is
+  possible under the current rule-naming convention, and the unit test pins
+  that convention.
+
+### Open questions
+- None.

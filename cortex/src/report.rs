@@ -1,5 +1,6 @@
 use colored::Colorize;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -201,5 +202,59 @@ impl Report {
     /// Render the report as a JSON string for sb to print.
     pub fn format_json(&self) -> eyre::Result<String> {
         Ok(serde_json::to_string_pretty(&self.violations)?)
+    }
+
+    /// Count violations whose `rule` starts with `prefix`, keyed by the
+    /// remainder of the rule string after the prefix (e.g. `prefix =
+    /// "frontmatter.required."` on a rule `"frontmatter.required.domain"`
+    /// keys the count under `"domain"`). Lets a caller (doctor) report
+    /// per-field/per-enum tallies from cortex's own policy engine without a
+    /// second copy of the rule-name convention.
+    pub fn count_by_rule_prefix(&self, prefix: &str) -> BTreeMap<String, u64> {
+        let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        for violation in &self.violations {
+            if let Some(suffix) = violation.rule.strip_prefix(prefix) {
+                *counts.entry(suffix.to_string()).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn violation(rule: &str) -> Violation {
+        Violation {
+            path: PathBuf::from("note.md"),
+            rule: rule.to_string(),
+            severity: Severity::Warning,
+            message: String::new(),
+            fix: None,
+        }
+    }
+
+    #[test]
+    fn count_by_rule_prefix_groups_by_suffix_and_ignores_other_prefixes() {
+        let report = Report {
+            violations: vec![
+                violation("frontmatter.required.domain"),
+                violation("frontmatter.required.domain"),
+                violation("frontmatter.required.origin"),
+                violation("tags.non-canonical"),
+            ],
+            applied: 0,
+            applied_paths: Vec::new(),
+        };
+
+        let required = report.count_by_rule_prefix("frontmatter.required.");
+        let expected: BTreeMap<String, u64> = [("domain".to_string(), 2), ("origin".to_string(), 1)]
+            .into_iter()
+            .collect();
+        assert_eq!(required, expected);
+
+        let enums = report.count_by_rule_prefix("frontmatter.enum.");
+        assert!(enums.is_empty());
     }
 }

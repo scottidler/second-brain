@@ -414,7 +414,7 @@ fn default_debounce_secs() -> u64 {
 }
 
 fn default_ignore_dirs() -> Vec<String> {
-    vec![".git".into(), ".obsidian".into(), "templates".into()]
+    vec![".git".into(), ".obsidian".into(), "templates".into(), ".claude".into()]
 }
 
 fn default_log_level() -> String {

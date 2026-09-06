@@ -1047,6 +1047,16 @@ impl Config {
 
     fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(path.as_ref()).context("failed to read config file")?;
+        // A lingering top-level `schema:` block silently overrides the
+        // enum-derived vocabulary (`SchemaConfig::default`, built from
+        // `vault::schema`) with a hand-written copy that can drift from the
+        // enums. Warn so a leftover block is visible instead of quietly
+        // governing lint (Phase 7, F5).
+        if let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(&content)
+            && map.contains_key(serde_yaml::Value::String("schema".to_string()))
+        {
+            log::warn!("schema: overrides the enum-derived vocabulary; delete it unless you mean to");
+        }
         let config: Self = serde_yaml::from_str(&content).context("failed to parse config file")?;
         log::info!("loaded config: {}", path.as_ref().display());
         Ok(config)
