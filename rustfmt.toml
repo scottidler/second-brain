@@ -1,0 +1,10 @@
+# Pin the repo's formatting in the repo.
+#
+# Without this file rustfmt walks up past the repo root and picks up
+# ~/.rustfmt.toml, so `cargo fmt` agreed with itself only on a machine that
+# happened to have that file. CI checks out to /__w/... where no ancestor
+# config exists, fell back to the 100-column default, and demanded rewraps in
+# files nobody had touched. These are the two values that home config actually
+# set; everything else is rustfmt's default.
+max_width = 120
+single_line_if_else_max_width = 80

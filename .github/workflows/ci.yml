@@ -6,11 +6,10 @@ on:
   pull_request:
 
 env:
-  # Must match the toolchain the repo is developed on, or `otto ci` green stops
-  # implying CI green: 1.96.0's rustfmt rewraps method chains that 1.98.0's
-  # leaves alone, so the first run of this workflow failed `fmt --all --check`
-  # on files no one had touched. release.yml can stay pinned lower because it
-  # only builds; this workflow is the one that runs fmt and clippy.
+  # Matches the toolchain the repo is developed on. release.yml can stay pinned
+  # lower because it only builds; this workflow runs clippy with -D warnings,
+  # and lint sets move between releases, so `otto ci` green only implies CI
+  # green when the two run the same compiler.
   RUST_VERSION: 1.98.0
   CARGO_TERM_COLOR: always
   # See .otto.yml `bloat` task: keep this in sync with BLOAT_MAX_LINES.
