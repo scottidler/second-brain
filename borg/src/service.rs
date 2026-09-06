@@ -212,9 +212,11 @@ Type=simple
         service.push_str(&format!("EnvironmentFile=-{}\n", bootstrap.env_file.display()));
     }
 
+    let log_level = config.log_level.as_deref().unwrap_or("info");
+
     service.push_str(&format!(
         r#"Environment="PATH={home}/.local/share/mise/shims:{home}/.local/bin:{home}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart={exe_path} borg --log-level debug daemon --start
+ExecStart={exe_path} borg --log-level {log_level} daemon --start
 Restart=always
 RestartSec=5
 WorkingDirectory={home}

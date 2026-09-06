@@ -268,3 +268,31 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
 
 ### Open questions
 - None.
+
+## Phase 5: borg unit log level from config (S2a)
+
+### Design decisions
+- `borg::service::render_systemd_unit` (`borg/src/service.rs:186`) now
+  derives `log_level` from `config.log_level.as_deref().unwrap_or("info")`
+  and interpolates it into `ExecStart=... borg --log-level {log_level}
+  daemon --start`, replacing the hardcoded `debug` literal. Mirrors
+  `cortex::daemon::render_systemd_unit` (`cortex/src/daemon.rs:896,936`),
+  modulo the `Option<String>` vs plain `String` field shape (borg's
+  `Config::log_level` is `Option<String>`; cortex's is a non-optional
+  `String` with its own default elsewhere).
+- Left `borg/src/config.rs:224`'s `log_level: Option<String>` field
+  definition untouched: the doc's ask was to make the existing field a live
+  knob, not to change its type or add a default at the config layer (the
+  `unwrap_or("info")` fallback lives at the render seam, same as every other
+  optional daemon knob rendered in this file).
+
+### Deviations
+- None. Implemented at the exact line the doc names
+  (`borg/src/service.rs:217`, content-relocated by prior phases but the same
+  `ExecStart=` line).
+
+### Tradeoffs
+- None beyond what's already described above.
+
+### Open questions
+- None.

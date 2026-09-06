@@ -5,6 +5,42 @@ fn cfg() -> Config {
     Config::default()
 }
 
+/// A default config (no `log-level` set) must render `--log-level info`, and
+/// must never emit the old hardcoded `--log-level debug`.
+#[test]
+fn render_systemd_unit_defaults_log_level_to_info() {
+    let home = Path::new("/home/tester");
+    let vault = Path::new("/home/tester/repos/scottidler/obsidian");
+    let data = Path::new("/home/tester/.local/share/sb");
+    let unit = render_systemd_unit("/home/tester/.cargo/bin/sb", home, vault, data, &cfg());
+
+    assert!(
+        unit.contains("--log-level info"),
+        "default config must render --log-level info:\n{unit}"
+    );
+    assert!(
+        !unit.contains("log-level debug"),
+        "default config must never render log-level debug:\n{unit}"
+    );
+}
+
+/// `borg.yml`'s `log-level` field must reach the rendered unit.
+#[test]
+fn render_systemd_unit_carries_configured_log_level() {
+    let mut config = cfg();
+    config.log_level = Some("debug".to_string());
+
+    let home = Path::new("/home/tester");
+    let vault = Path::new("/home/tester/repos/scottidler/obsidian");
+    let data = Path::new("/home/tester/.local/share/sb");
+    let unit = render_systemd_unit("/home/tester/.cargo/bin/sb", home, vault, data, &config);
+
+    assert!(
+        unit.contains("--log-level debug"),
+        "log_level: Some(\"debug\") must render --log-level debug:\n{unit}"
+    );
+}
+
 /// With no `daemon.env_bootstrap` configured, `borg.service` must omit BOTH
 /// the `ExecStartPre` decrypt AND the `EnvironmentFile` directive - a host
 /// with nothing to bootstrap still gets a valid, complete unit.
