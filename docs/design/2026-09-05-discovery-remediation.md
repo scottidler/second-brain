@@ -603,5 +603,5 @@ Runbook run and acceptance criteria measured after `v0.14.11` deployed:
 
 Not done, and why:
 
-- **S4** (`sb bootstrap --prune-legacy-config --apply`). The verb works and its dry run lists exactly `borg`, `cortex`, `second-brain`, but the apply deletes through `borg::rkvr::remove`, and rkvr cannot create its archive directory under the agent sandbox (`Read-only file system`). It fails closed on the first directory, so nothing was deleted. Needs to be run by hand.
+- **S4 is done** (run by hand 2026-09-06 08:24). The agent could not run it: the apply deletes through `borg::rkvr::remove`, and rkvr cannot create its archive directory under the agent sandbox (`Read-only file system`), which failed closed on the first directory. Run from a normal shell it archived all three through rkvr and removed them; `~/.config/{borg,cortex,second-brain}` are gone and `sb doctor` still resolves all three configs from `~/.config/sb/`, exit 0.
 - **S7**. The YouTube source is gone, so the transcript cannot be regenerated. Left in place.
