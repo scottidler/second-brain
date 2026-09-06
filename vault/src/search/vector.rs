@@ -159,8 +159,8 @@ pub(crate) fn encode_embedding_bytes(vector: &[f32]) -> Vec<u8> {
 fn dot_product_from_bytes(query_vec: &[f32], stored: &[u8]) -> f32 {
     debug_assert_eq!(stored.len(), query_vec.len() * 4);
     let mut dot = 0.0_f32;
-    for (i, chunk) in stored.chunks_exact(4).enumerate() {
-        let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for (i, chunk) in stored.as_chunks::<4>().0.iter().enumerate() {
+        let v = f32::from_le_bytes(*chunk);
         dot += query_vec[i] * v;
     }
     dot
@@ -322,8 +322,10 @@ impl SearchIndex {
             eyre::bail!("note {note_path} summary embedding BLOB length not a multiple of 4");
         }
         let query_vec: Vec<f32> = own_bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
 
         // Scan every other note's summary vector for the active model.
@@ -385,8 +387,10 @@ impl SearchIndex {
         }
 
         let vec_a: Vec<f32> = bytes_a
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         let cosine = dot_product_from_bytes(&vec_a, &bytes_b);
         Ok(Some(cosine))

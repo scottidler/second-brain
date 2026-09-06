@@ -39,6 +39,12 @@ impl<F: FabricCaller + ?Sized> FabricCaller for std::sync::Arc<F> {
 #[derive(Debug, Clone)]
 pub struct FabricShell {
     pub binary: String,
+    /// Output-token ceiling handed to every call as `--maxTokens=<n>`. 0 means
+    /// "leave it to fabric", which is the safe value on an unpatched fabric
+    /// that has no such flag. Lives on the CALLER, not on `FabricRequest`: it
+    /// is a transport setting uniform across every pattern, so putting it here
+    /// keeps the ~10 `FabricRequest` construction sites untouched.
+    pub max_tokens: usize,
     /// NAME of the env var (or file path) holding the Anthropic credential the
     /// fabric child needs under the literal name `ANTHROPIC_API_KEY`. Threaded
     /// from the caller's `FabricConfig.api-key` (which borg/cortex mirror from
@@ -47,10 +53,22 @@ pub struct FabricShell {
 }
 
 impl FabricShell {
+    /// Construct with no output-token ceiling (fabric's own default).
     pub fn new(binary: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             binary: binary.into(),
             api_key: api_key.into(),
+            max_tokens: 0,
+        }
+    }
+
+    /// Construct with an explicit output-token ceiling. See
+    /// [`FabricShell::max_tokens`].
+    pub fn with_max_tokens(binary: impl Into<String>, api_key: impl Into<String>, max_tokens: usize) -> Self {
+        Self {
+            binary: binary.into(),
+            api_key: api_key.into(),
+            max_tokens,
         }
     }
 }
@@ -60,6 +78,7 @@ impl FabricCaller for FabricShell {
     async fn call(&self, request: FabricRequest) -> Result<String> {
         let binary = self.binary.clone();
         let api_key = self.api_key.clone();
+        let max_tokens = self.max_tokens;
         let FabricRequest {
             pattern,
             input,
@@ -68,15 +87,25 @@ impl FabricCaller for FabricShell {
             timeout_secs,
         } = request;
         log::debug!(
-            "FabricShell::call: pattern={} model={} max_chars={} timeout_secs={} input_len={}",
+            "FabricShell::call: pattern={} model={} max_chars={} timeout_secs={} max_tokens={} input_len={}",
             pattern,
             model,
             max_chars,
             timeout_secs,
+            max_tokens,
             input.len()
         );
         tokio::task::spawn_blocking(move || {
-            vault::fabric::run_pattern(&pattern, &input, &binary, &api_key, &model, max_chars, timeout_secs)
+            vault::fabric::run_pattern_with_max_tokens(
+                &pattern,
+                &input,
+                &binary,
+                &api_key,
+                &model,
+                max_chars,
+                timeout_secs,
+                max_tokens,
+            )
         })
         .await
         .context("fabric task panicked")?

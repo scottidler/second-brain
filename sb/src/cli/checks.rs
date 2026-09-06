@@ -272,6 +272,7 @@ const SIGNAL_RS_INSTALL_HINT: &str =
 fn external_binaries_findings() -> Vec<Finding> {
     let mut findings = Vec::new();
     findings.extend(fabric_cli_findings());
+    findings.extend(fabric_max_tokens_findings());
     findings.extend(fabric_default_patterns_findings());
     findings.extend(fabric_live_probe_findings());
     if let Ok(config) = borg::config::load_config::<borg::config::Config>(None)
@@ -291,6 +292,41 @@ fn fabric_cli_findings() -> Vec<Finding> {
         }
         _ => vec![Finding::error("fabric CLI not found on PATH", FABRIC_INSTALL_HINT)],
     }
+}
+
+/// Verifies the installed fabric supports `--maxTokens`.
+///
+/// Borg passes `--maxTokens` on every pattern call (`fabric.max-tokens` in
+/// borg.yml) because upstream fabric pins Anthropic requests to a hardcoded
+/// 4096, and thinking tokens are billed against that same budget, so
+/// `distill-video` gets truncated mid-YAML while fabric still exits 0. The
+/// flag exists only on a fabric carrying danielmiessler/Fabric#2207.
+///
+/// This check exists because the failure is otherwise SILENT-ish and easy to
+/// reintroduce: mise pins `github:danielmiessler/fabric` and its shims dir
+/// precedes `~/.local/bin` in the daemon's PATH, so a `mise install` re-sync
+/// puts an unpatched fabric back in front. Without this, the next symptom
+/// would be broken video notes, not a failed check.
+fn fabric_max_tokens_findings() -> Vec<Finding> {
+    let Ok(out) = Command::new("fabric").arg("--help").output() else {
+        // The CLI-missing case is already covered by fabric_cli_findings.
+        return Vec::new();
+    };
+    // --help writes to stdout on some builds and stderr on others; check both.
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    if text.contains("--maxTokens") {
+        return vec![Finding::ok(
+            "fabric supports --maxTokens (output ceiling is raisable)".to_string(),
+        )];
+    }
+    vec![Finding::error(
+        "installed fabric has no --maxTokens flag; every Anthropic call is capped at 4096 \
+         and large distillations will truncate mid-document while fabric exits 0",
+        "install the patched build: cd ~/repos/scottidler/Fabric && \
+         go build -ldflags=\"-s -w\" -o ~/.local/bin/fabric ./cmd/fabric \
+         (and check `which fabric`: mise shims precede ~/.local/bin on PATH)",
+    )]
 }
 
 /// Verifies Daniel Miessler's default fabric patterns are present.

@@ -57,7 +57,11 @@ pub async fn backfill(vault_root: &Path, config: &Config, opts: &SummarizeOpts) 
         ));
     }
 
-    let fabric = FabricShell::new(config.fabric.binary.clone(), config.fabric.api_key.clone());
+    let fabric = FabricShell::with_max_tokens(
+        config.fabric.binary.clone(),
+        config.fabric.api_key.clone(),
+        config.fabric.max_tokens,
+    );
     let article_config = ArticleConfig {
         model: config.fabric.model.clone(),
         max_chars: config.fabric.max_content_chars,

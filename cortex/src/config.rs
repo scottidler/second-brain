@@ -372,6 +372,11 @@ pub struct FabricConfig {
     pub model: String,
     #[serde(rename = "max-content-chars")]
     pub max_content_chars: usize,
+    /// Output-token ceiling passed to fabric as `--maxTokens=<n>`; 0 leaves
+    /// fabric's own default. Mirrors borg's knob of the same name; see
+    /// `borg::config::FabricConfig::max_tokens` for why it is load-bearing.
+    #[serde(rename = "max-tokens")]
+    pub max_tokens: usize,
     #[serde(rename = "timeout-secs")]
     pub timeout_secs: u64,
     /// NAME of the env var (or a file path) holding the Anthropic credential
@@ -389,6 +394,7 @@ impl Default for FabricConfig {
             binary: "fabric".to_string(),
             model: String::new(),
             max_content_chars: 32_000,
+            max_tokens: 16384,
             timeout_secs: 120,
             api_key: "ANTHROPIC_API_KEY".to_string(),
         }

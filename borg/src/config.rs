@@ -982,6 +982,18 @@ pub struct FabricConfig {
     pub condense_pattern: String,
     pub tag_pattern: String,
     pub max_content_chars: usize,
+    /// Output-token ceiling passed to fabric as `--maxTokens=<n>`; 0 leaves
+    /// fabric's own default in place.
+    ///
+    /// Upstream fabric hardcodes 4096 for every Anthropic call and ships no
+    /// flag to change it, so this knob only bites on a fabric carrying
+    /// danielmiessler/Fabric#2207 (scottidler/Fabric). It is load-bearing
+    /// because thinking tokens are billed against the SAME budget as the text:
+    /// `distill-video` was measured wanting 2,860 text tokens while the model
+    /// spent 1,562-4,095 thinking, so at 4096 the YAML was cut mid-scalar and
+    /// fabric still exited 0. Raising the ceiling is what makes the single call
+    /// fit; see docs/design/2026-08-30-video-distill-token-budget.md.
+    pub max_tokens: usize,
     /// Per-call timeout in seconds for `fabric -p <pattern>` LLM completions.
     /// URL scrapes (`fabric -u`, `markitdown`) and YouTube transcript fetches
     /// (`fabric -y`) use their own pipeline-level timeouts so a stuck fetch
@@ -1007,6 +1019,7 @@ impl Default for FabricConfig {
             condense_pattern: "condense.md".to_string(),
             tag_pattern: "create_tags".to_string(),
             max_content_chars: 100000,
+            max_tokens: 16384,
             timeout_secs: 600,
             api_key: "ANTHROPIC_API_KEY".to_string(),
         }

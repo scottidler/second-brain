@@ -50,7 +50,7 @@ fn resolve_pattern(name: &str) -> String {
 
 pub async fn run_pattern(pattern: &str, input: &str, config: &FabricConfig) -> Result<String> {
     let resolved = resolve_pattern(pattern);
-    vault::fabric::run_pattern(
+    vault::fabric::run_pattern_with_max_tokens(
         &resolved,
         input,
         &config.binary,
@@ -58,6 +58,7 @@ pub async fn run_pattern(pattern: &str, input: &str, config: &FabricConfig) -> R
         &config.model,
         config.max_content_chars,
         config.timeout_secs,
+        config.max_tokens,
     )
 }
 

@@ -111,6 +111,7 @@ impl Telegram {
     /// starting the pipeline (preserves message ordering).
     /// On failure or `TELEGRAM_TIMEOUT_MS` timeout (per Design Invariant 2),
     /// logs a warning and returns `Err(())`.
+    #[allow(clippy::result_unit_err)] // Err(()) is a deliberate delivery-failed sentinel, not an underspecified error.
     pub async fn processing(&self, trace_id: &str, description: &str, override_chat_id: Option<i64>) -> Result<(), ()> {
         if real_notifications_disabled() {
             log::debug!("notify::Telegram::processing: suppressed under test (trace={trace_id})");
@@ -428,6 +429,7 @@ impl Signal {
     /// `Ok(())` on success so callers can await delivery before starting the
     /// pipeline (preserves ordering with the pipeline's first downstream
     /// step). Logs a warn and returns `Err(())` on failure or timeout.
+    #[allow(clippy::result_unit_err)] // Err(()) is a deliberate delivery-failed sentinel, not an underspecified error.
     pub async fn processing(
         &self,
         trace_id: &str,

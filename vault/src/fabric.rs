@@ -68,11 +68,24 @@ pub fn resolve_pattern(name: &str) -> String {
 ///
 /// Factored out so it is unit-testable via `Command::get_envs()` without
 /// spawning fabric.
-fn build_fabric_command(binary: &str, pattern: &str, model: &str, api_key_env: &str) -> Command {
+fn build_fabric_command(binary: &str, pattern: &str, model: &str, api_key_env: &str, max_tokens: usize) -> Command {
     let mut cmd = Command::new(resolve_binary(binary));
     cmd.args(["-p", &resolve_pattern(pattern)]);
     if !model.is_empty() {
         cmd.args(["-m", model]);
+    }
+    // `--maxTokens` raises the model's output ceiling. Upstream fabric pins
+    // every Anthropic call to a hardcoded 4096 and ships NO flag to change it,
+    // so this argument only exists on a fabric carrying
+    // danielmiessler/Fabric#2207 (scottidler/Fabric). 0 means "don't pass it",
+    // which keeps this compatible with an unpatched fabric on PATH.
+    //
+    // Why it matters: thinking tokens are billed against the same max_tokens
+    // budget as the text, so a pattern emitting a large document can be
+    // starved by the model's own deliberation and truncated mid-YAML. fabric
+    // exits 0 on that truncation, so it arrives as a silent partial.
+    if max_tokens > 0 {
+        cmd.arg(format!("--maxTokens={max_tokens}"));
     }
     if !api_key_env.is_empty() {
         match crate::config::resolve_secret(api_key_env) {
@@ -108,11 +121,31 @@ pub fn run_pattern(
     max_chars: usize,
     timeout_secs: u64,
 ) -> Result<String> {
+    run_pattern_with_max_tokens(pattern, input, binary, api_key_env, model, max_chars, timeout_secs, 0)
+}
+
+/// [`run_pattern`] plus an explicit output-token ceiling.
+///
+/// `max_tokens` of 0 means "leave it to fabric", which is what [`run_pattern`]
+/// passes, so every existing caller keeps its current behavior. A non-zero
+/// value appends `--maxTokens=<n>`, a flag that exists only on a fabric
+/// carrying the patch in danielmiessler/Fabric#2207.
+#[allow(clippy::too_many_arguments)]
+pub fn run_pattern_with_max_tokens(
+    pattern: &str,
+    input: &str,
+    binary: &str,
+    api_key_env: &str,
+    model: &str,
+    max_chars: usize,
+    timeout_secs: u64,
+    max_tokens: usize,
+) -> Result<String> {
     log::debug!(
-        "fabric::run_pattern: pattern={pattern} binary={binary} api_key_env={api_key_env} model={model} max_chars={max_chars} timeout_secs={timeout_secs} input_len={}",
+        "fabric::run_pattern: pattern={pattern} binary={binary} api_key_env={api_key_env} model={model} max_chars={max_chars} timeout_secs={timeout_secs} max_tokens={max_tokens} input_len={}",
         input.len()
     );
-    let mut cmd = build_fabric_command(binary, pattern, model, api_key_env);
+    let mut cmd = build_fabric_command(binary, pattern, model, api_key_env, max_tokens);
 
     let child = cmd.spawn().context("Failed to spawn fabric binary")?;
 
