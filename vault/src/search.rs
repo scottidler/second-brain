@@ -367,9 +367,43 @@ pub use rerank::{MockReranker, Reranker, project_batch_ms, rerank_paths};
 #[cfg(feature = "vec-candle")]
 pub use rerank::{CandleCrossEncoder, get_or_load_reranker, prefetch_reranker};
 
+/// Typed errors `SearchIndex` returns as `eyre::Report` sources (the
+/// `FabricError` pattern in `vault::fabric`): callers keep the `eyre::Result`
+/// signature and downcast when they need to branch on the specific cause.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SearchError {
+    /// The oracle DB has moved under `~/.local/share/sb/oracle/` but this host
+    /// still holds the pre-move DB at `~/.local/share/oracle/`. Opening would
+    /// silently create an empty index and orphan every embedding, so refuse.
+    #[error(
+        "legacy oracle DB at {legacy} but the current path is {new}; \
+         refusing to create an empty index (runbook R1 moves it)"
+    )]
+    LegacyOracleDb { legacy: PathBuf, new: PathBuf },
+}
+
 impl SearchIndex {
     /// Open (or create) the search index at the given path
     pub fn open(db_path: &Path) -> Result<Self> {
+        // Fail-closed guard, FIRST: this must run before `create_dir_all`
+        // below, or merely *checking* would mint `~/.local/share/sb/oracle/`
+        // and runbook R1's `mv -T` would then nest the legacy dir inside it.
+        // Every opener (cortex daemon and one-shots, `oracle serve/index/call/
+        // stats/eval`, `sb doctor`) funnels through here, so no process can
+        // create an empty DB while the pre-move one still exists. No
+        // auto-migration: concurrent openers have no lock, and a lost race
+        // would cost a full re-embed.
+        if db_path == crate::paths::oracle_db_path()
+            && !db_path.exists()
+            && crate::paths::legacy_oracle_dir().join("oracle.db").exists()
+        {
+            return Err(SearchError::LegacyOracleDb {
+                legacy: crate::paths::legacy_oracle_dir(),
+                new: db_path.to_path_buf(),
+            }
+            .into());
+        }
+
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
                 .wrap_err_with(|| format!("Failed to create db directory: {}", parent.display()))?;

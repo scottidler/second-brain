@@ -121,6 +121,35 @@ fn dir_size_of_missing_dir_is_zero() {
 }
 
 #[test]
+fn oracle_paths_land_under_the_sb_data_namespace() {
+    // R1: the oracle DB moved from `~/.local/share/oracle/` into the same
+    // `sb/` namespace borg's data already lives in. `legacy_oracle_dir` is
+    // the pre-move location, and must NOT follow.
+    let db = oracle_db_path();
+    assert!(
+        db.ends_with("sb/oracle/oracle.db"),
+        "oracle_db_path() = {}",
+        db.display()
+    );
+    let cache = oracle_eval_cache_path();
+    assert!(
+        cache.ends_with("sb/oracle/eval-cache.db"),
+        "oracle_eval_cache_path() = {}",
+        cache.display()
+    );
+    assert_eq!(db.parent(), cache.parent());
+
+    let legacy = legacy_oracle_dir();
+    assert!(legacy.ends_with("oracle"), "legacy_oracle_dir() = {}", legacy.display());
+    assert!(
+        !legacy.ends_with("sb/oracle"),
+        "legacy_oracle_dir() must stay the pre-move path, got {}",
+        legacy.display()
+    );
+    assert_ne!(legacy, db.parent().unwrap());
+}
+
+#[test]
 fn all_config_files_land_under_config_root() {
     let root = config_root();
     assert_eq!(borg_config(), root.join("borg.yml"));

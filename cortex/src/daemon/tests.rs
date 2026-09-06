@@ -1148,6 +1148,53 @@ fn test_render_systemd_unit_omits_bootstrap_and_rayon_when_unset() {
     assert!(unit.contains("ExecStart="));
 }
 
+/// X3: cortex writes the oracle DB under `~/.local/share/sb/`, so the unit's
+/// `ReadWritePaths` must name that data dir alongside the vault or
+/// `ProtectHome=read-only` blocks every embed write. Borg's unit already does.
+#[serial_test::serial(xdg_data_home)]
+#[test]
+fn test_render_systemd_unit_readwritepaths_covers_vault_and_data_dir() {
+    let xdg_tmp = tempfile::tempdir().expect("xdg tmpdir");
+    let prior = std::env::var_os("XDG_DATA_HOME");
+    // SAFETY: serialized by `serial_test::serial(xdg_data_home)`; no
+    // concurrent reader of the env exists while this runs.
+    unsafe { std::env::set_var("XDG_DATA_HOME", xdg_tmp.path()) };
+
+    let result = std::panic::catch_unwind(|| {
+        let config = Config::default();
+        let home = std::path::Path::new("/home/user");
+        let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
+        let vault_root = std::path::Path::new("/home/user/vault");
+
+        let unit = render_systemd_unit(home, binary, vault_root, &config);
+
+        let line = unit
+            .lines()
+            .find(|l| l.starts_with("ReadWritePaths="))
+            .unwrap_or_else(|| panic!("no ReadWritePaths line:\n{unit}"));
+        let data_dir = xdg_tmp.path().join("sb");
+        assert!(line.contains("/home/user/vault"), "vault missing from {line}");
+        assert!(
+            line.contains(&data_dir.display().to_string()),
+            "data dir {} missing from {line}",
+            data_dir.display()
+        );
+        // The oracle DB cortex writes must fall inside the granted path.
+        assert!(vault::paths::oracle_db_path().starts_with(&data_dir));
+    });
+
+    // SAFETY: same serialization as above.
+    unsafe {
+        match prior {
+            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+    }
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 /// PATH hygiene (Phase 5, 2026-07-20 harvest-completion): fabric is
 /// mise-managed, so its shim dir must be on PATH and FIRST (mise-managed
 /// tools win over any stale duplicate); the retired `~/go/bin` hand-built

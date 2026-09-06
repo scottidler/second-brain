@@ -375,12 +375,17 @@ pub fn borg_harvest_state() -> PathBuf {
 /// writer) resolve here so the two crates can never desync on the file
 /// they open.
 ///
-/// `~/.local/share/oracle/oracle.db` on Linux. Panics only when
-/// `xdg_data_dir()` returns `None` (see [`borg_signal_state_dir`]).
+/// `~/.local/share/sb/oracle/oracle.db` on Linux - under the `sb/` data
+/// namespace like borg's, not the top-level `~/.local/share/oracle/` this
+/// used to resolve to. The one-time move of an existing DB is an operator
+/// step (runbook R1); [`SearchIndex::open`](crate::search::SearchIndex::open)
+/// refuses to create this file while [`legacy_oracle_dir`] still holds one.
+/// Panics only when `xdg_data_dir()` returns `None` (see
+/// [`borg_signal_state_dir`]).
 pub fn oracle_db_path() -> PathBuf {
     xdg_data_dir()
         .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
-        .join("oracle")
+        .join("sb/oracle")
         .join("oracle.db")
 }
 
@@ -388,11 +393,28 @@ pub fn oracle_db_path() -> PathBuf {
 /// dir. Used as the fallback when the configured DB path has no parent; never
 /// a relative `eval-cache.db` (which would write under CWD). Panics only when
 /// `xdg_data_dir()` returns `None`, same as [`oracle_db_path`].
+///
+/// `~/.local/share/sb/oracle/eval-cache.db` on Linux.
 pub fn oracle_eval_cache_path() -> PathBuf {
     xdg_data_dir()
         .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
-        .join("oracle")
+        .join("sb/oracle")
         .join("eval-cache.db")
+}
+
+/// The pre-`sb/` oracle data dir, `~/.local/share/oracle/`. Not a path
+/// anything writes: it exists so the fail-closed guard in
+/// [`SearchIndex::open`](crate::search::SearchIndex::open) and `sb doctor`
+/// can both detect a host that has not yet run runbook step R1 (stop cortex,
+/// `mv -T ~/.local/share/oracle ~/.local/share/sb/oracle`). There is
+/// deliberately no auto-migration - two openers can start concurrently with
+/// no lock, and a lost race would create an empty DB and force a full
+/// re-embed. Panics only when `xdg_data_dir()` returns `None`, same as
+/// [`oracle_db_path`].
+pub fn legacy_oracle_dir() -> PathBuf {
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("oracle")
 }
 
 /// Resolve the vault root with explicit precedence: CLI > config > marker-gated CWD.

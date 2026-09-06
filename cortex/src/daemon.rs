@@ -895,6 +895,14 @@ fn render_systemd_unit(home: &Path, binary: &Path, vault_root: &Path, config: &C
     let vault = vault_root.display();
     let log_level = &config.log_level;
 
+    // Cortex writes under the sb data namespace too (the oracle DB it is the
+    // sole embeddings writer for lives at `~/.local/share/sb/oracle/`), so the
+    // unit must name it alongside the vault or `ProtectHome=read-only` blocks
+    // every embed write. Matches borg's unit (`borg/src/service.rs`).
+    let data = vault::paths::xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("sb");
+
     let mut config_flag = String::new();
     let config_path = vault::paths::cortex_config();
     if config_path.exists() {
@@ -942,13 +950,14 @@ fn render_systemd_unit(home: &Path, binary: &Path, vault_root: &Path, config: &C
          NoNewPrivileges=true\n\
          ProtectSystem=strict\n\
          ProtectHome=read-only\n\
-         ReadWritePaths={vault}\n\
+         ReadWritePaths={vault} {data}\n\
          PrivateTmp=true\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
         binary = binary.display(),
         home = home.display(),
+        data = data.display(),
     ));
 
     service

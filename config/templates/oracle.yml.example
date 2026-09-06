@@ -3,7 +3,7 @@
 # Full schema: see oracle/src/config.rs in the second-brain workspace.
 #
 # Note: the SQLite DB path is NOT configurable here. It is fixed at
-# ~/.local/share/oracle/oracle.db and owned by vault::paths::oracle_db_path,
+# ~/.local/share/sb/oracle/oracle.db and owned by vault::paths::oracle_db_path,
 # so oracle (reader) and cortex (the embeddings writer) can never desync.
 
 # Vault root. Set root-path to your Obsidian vault, or leave it commented out and
@@ -28,7 +28,7 @@ inbound-recompute-interval-secs: 600
 # Logging — written via tracing-subscriber. Stays out of stdout (MCP JSON-RPC contract).
 logging:
   level: info
-  # file: ~/.local/share/oracle/logs/oracle.log
+  # file: ~/.local/share/sb/oracle.log
 
 # Retrieval pipeline — composed for any knowledge_search query that arrives with
 # no explicit `mode`. An explicit per-call `mode` (bm25/vector/hybrid/graph/

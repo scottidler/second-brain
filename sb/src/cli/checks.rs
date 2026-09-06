@@ -280,6 +280,9 @@ const INBOX_STALE_SECS: u64 = 48 * 3600;
 /// above); these are the same kind of hardcoded ceiling.
 const DATA_DIR_LOGS_WARN_BYTES: u64 = 512 * 1024 * 1024;
 const DATA_DIR_TOTAL_WARN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Remedy for both places the pre-R1 oracle data dir surfaces: the `data dir`
+/// section's Warn and the Error the `SearchIndex::open` guard produces.
+const LEGACY_ORACLE_REMEDY: &str = "runbook R1: stop cortex, mv -T ~/.local/share/oracle ~/.local/share/sb/oracle";
 const SIGNAL_RS_INSTALL_HINT: &str =
     "cargo install --git https://github.com/scottidler/signal-rs --bin signal-rs --tag v0.2.1";
 
@@ -742,6 +745,12 @@ fn vault_findings() -> Vec<Finding> {
     };
     let db = match vault::search::SearchIndex::open(&config.db_path()) {
         Ok(db) => db,
+        // The fail-closed legacy-oracle-DB guard is an Error, not a Warn:
+        // `sb oracle index` would not fix it, the runbook move would, and
+        // until it runs every opener (cortex daemon included) refuses.
+        Err(e) if e.downcast_ref::<vault::search::SearchError>().is_some() => {
+            return vec![Finding::error(format!("{e}"), LEGACY_ORACLE_REMEDY.to_string())];
+        }
         Err(e) => {
             return vec![Finding::warn(
                 format!("oracle SQLite index not openable: {e}"),
@@ -895,9 +904,9 @@ const ORACLE_DIR_ALLOWED_FILES: &[&str] = &["oracle.db", "oracle.db-wal", "oracl
 /// size crosses a threshold - this is a "where did my disk go" signal, not a
 /// health check, so nothing here can fail `sb doctor`.
 ///
-/// Built to be extended: Phase 9 (oracle data dir move under `sb/`) adds a
-/// `Finding::warn` here for a legacy `~/.local/share/oracle/` directory left
-/// behind by an unfinished migration.
+/// One exception to "info-only": a `Finding::warn` for a legacy
+/// `~/.local/share/oracle/` directory left behind by an unfinished migration
+/// (runbook R1).
 fn data_dir_findings() -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut total_bytes: u64 = 0;
@@ -941,9 +950,7 @@ fn data_dir_findings() -> Vec<Finding> {
         ));
     }
 
-    // `oracle_db_path()`'s parent: today `~/.local/share/oracle/` (pre Phase
-    // 9); after Phase 9 moves the DB under `sb/`, this line follows with no
-    // code change here.
+    // `oracle_db_path()`'s parent: `~/.local/share/sb/oracle/`.
     let oracle_dir = vault::paths::oracle_db_path().parent().map(Path::to_path_buf);
     let oracle_bytes = oracle_dir.as_ref().map(|dir| vault::paths::dir_size(dir)).unwrap_or(0);
     total_bytes += oracle_bytes;
@@ -963,6 +970,21 @@ fn data_dir_findings() -> Vec<Finding> {
                 ));
             }
         }
+    }
+
+    // The pre-R1 data dir. Present means the operator move has not run yet;
+    // the guard in `SearchIndex::open` is what makes that state safe, this is
+    // what makes it visible.
+    let legacy_dir = vault::paths::legacy_oracle_dir();
+    if legacy_dir.join("oracle.db").exists() {
+        findings.push(Finding::warn(
+            format!(
+                "legacy oracle data dir present at {} ({}); see runbook R1",
+                legacy_dir.display(),
+                human_bytes(vault::paths::dir_size(&legacy_dir)),
+            ),
+            LEGACY_ORACLE_REMEDY.to_string(),
+        ));
     }
 
     if total_bytes > DATA_DIR_TOTAL_WARN_BYTES {

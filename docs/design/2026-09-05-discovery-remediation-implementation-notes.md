@@ -488,3 +488,82 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
 
 ### Open questions
 - None.
+
+## Phase 9: Oracle data dir under `sb/` (R1)
+
+### Design decisions
+- `SearchError` is a `thiserror` enum returned as an `eyre::Report` source —
+  `vault/src/search.rs:SearchError::LegacyOracleDb` — mirroring `FabricError`
+  in `vault/src/fabric.rs`. Every `SearchIndex::open` caller keeps its
+  `eyre::Result` signature; only the one caller that needs to branch on the
+  specific cause (`sb doctor`) downcasts. No signature churn across the
+  workspace for one typed case.
+- The guard is the literal first statement of `SearchIndex::open`, before the
+  `create_dir_all(parent)` — `vault/src/search.rs:SearchIndex::open`. A test
+  asserts the destination dir still does not exist after a refused open, so
+  the ordering is pinned, not just commented. Without it, merely *checking*
+  would mint `~/.local/share/sb/oracle/` and runbook R1's `mv -T` would nest
+  the legacy dir inside it.
+- The remedy string is one const shared by both surfaces —
+  `sb/src/cli/checks.rs:LEGACY_ORACLE_REMEDY`. The `data dir` Warn and the
+  `vault` Error print the identical `mv -T` command, so an operator reading
+  either finds the same instruction.
+- Doctor maps only the typed guard error to `Finding::error`; every other
+  `SearchIndex::open` failure keeps its existing `Finding::warn(.., "sb oracle
+  index")` — `sb/src/cli/checks.rs`. `sb oracle index` would not fix the
+  legacy state, so pointing at it would be a wrong remedy.
+- `cortex/src/classify.rs` keeps `.ok()` (Tier-2 similar-note context is
+  optional) but gains `.inspect_err(|e| log::warn!(..))`, naming the DB path
+  and stating that classify continues without Tier-2 context.
+- `render_systemd_unit` resolves the data dir as `xdg_data_dir()/sb` with the
+  same `.expect(...)` panic message the rest of `vault::paths` uses —
+  `cortex/src/daemon.rs:render_systemd_unit`. Not a config field: the unit
+  must grant exactly the namespace `vault::paths` resolves to, and a second
+  knob could drift from it.
+
+### Deviations
+- Also updated `config/templates/oracle.yml.example:31`, the commented
+  `logging.file:` example, from `~/.local/share/oracle/logs/oracle.log` to
+  `~/.local/share/sb/oracle.log`. The phase scope named only line 6, but line
+  31 pointed into a directory runbook step S1 deletes outright, and the real
+  `oracle serve` log has been at `~/.local/share/sb/oracle.log` since Phase 7.
+  Leaving a stale example in the same file being corrected for the same reason
+  would have been a trap.
+- Added a fourth guard test beyond the doc's three cases
+  (`legacy_oracle_guard_leaves_other_paths_alone`): a non-oracle DB path opens
+  normally even with the legacy DB present. Pins the `path == oracle_db_path()`
+  half of the condition, which the three specified cases never exercise.
+- Added `serial_test` to `vault`'s dev-dependencies. The guard tests mutate
+  `XDG_DATA_HOME`, which is process-global; `vault` had no serialization
+  primitive for env mutation (its existing `CWD_LOCK` covers CWD only).
+
+### Tradeoffs
+- Typed `SearchError` enum vs. string-matching the error text in doctor: the
+  enum costs a new public type in `vault::search`, but the alternative is the
+  exact anti-pattern `FabricError::is_timeout` was written to kill (a real
+  error containing "legacy oracle" could masquerade as the guard).
+- Fail-closed guard vs. auto-migration at open (doc Alternative 2): the guard
+  makes a concurrent-opener race harmless instead of racing it. Cost is a
+  deliberately broken host between the deploy and the operator move; a lost
+  auto-migration race would cost the whole embedding corpus.
+- Guard test asserts on the destination directory's absence rather than
+  mocking `create_dir_all`: cheaper and it tests the real ordering, but it
+  means the test depends on an `XDG_DATA_HOME` redirect and is Linux-gated
+  (same limitation as the existing `cortex/src/sweep/tests.rs` precedent).
+
+### Open questions
+- **This host is now in the guarded state, pending runbook R1.** Nothing under
+  `~/.local/share/oracle` or `~/.local/share/sb/oracle` was touched by this
+  phase, by design. `~/.local/share/oracle/oracle.db` still exists (1.1 GB),
+  `~/.local/share/sb/oracle` does not, and the freshly built binary's `sb
+  doctor` reports (verbatim):
+  `❌ [vault] legacy oracle DB at /home/saidler/.local/share/oracle but the current path is /home/saidler/.local/share/sb/oracle/oracle.db; refusing to create an empty index (runbook R1 moves it)`
+  plus the matching `data dir` Warn. That is the guard working as specified.
+  Verified after the run that `~/.local/share/sb/oracle` still does not exist.
+  The installed `~/.cargo/bin/sb` is still the pre-Phase-9 binary (no `bump`,
+  no `otto deploy` in this phase), so the live cortex daemon is unaffected
+  until deploy. Runbook R1 (stop cortex, confirm no `sb oracle serve` process,
+  `mv -T`) is Scott's to run by hand.
+- The fourth success criterion — `sb doctor` shows the recorded note count
+  after the move + deploy — is DEFERRED-TO-RUNBOOK. It cannot be checked
+  before R1 runs.

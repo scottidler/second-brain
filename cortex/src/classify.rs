@@ -57,7 +57,17 @@ pub fn run_with_notes(
     // table (one-way data flow; oracle's VaultWatcher owns index refresh).
     // Writing it made cortex+oracle concurrent cross-process writers.
     let db_path = config.oracle_db_path();
-    let search_index = SearchIndex::open(&db_path).ok();
+    // `.ok()` by design - Tier-2 context is optional and classify still runs
+    // without it - but the degradation must be visible, not silent (the
+    // fail-closed legacy-oracle-DB guard lands here as an Err).
+    let search_index = SearchIndex::open(&db_path)
+        .inspect_err(|e| {
+            log::warn!(
+                "classify::run_with_notes: oracle index unavailable at {}, continuing without Tier-2 similar-note context: {e}",
+                db_path.display(),
+            );
+        })
+        .ok();
     let search_ref = search_index.as_ref();
 
     if opts.apply {
