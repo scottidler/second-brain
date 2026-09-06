@@ -3,6 +3,23 @@ pub use vault::hygiene::{normalize_text_input, sanitize_filename, sanitize_tag};
 use crate::config::CanonicalRule;
 use url::Url;
 
+/// Resolve a note's filename stem from its title, one layer above
+/// `vault::hygiene::sanitize_filename`: a title that sanitizes to empty (e.g.
+/// one made entirely of box-drawing/decorative characters `sanitize_filename`
+/// strips to nothing) falls back to `untitled-<trace_id>` rather than
+/// publishing `inbox/.md`. Trace ids are `vault::trace::generate` output
+/// (`{prefix}-{8 hex}`), so the fallback is always a valid, unique-by-trace
+/// slug. This is the one seam every note-publish call site goes through.
+pub fn note_filename(title: &str, trace_id: &str) -> String {
+    let stem = sanitize_filename(title);
+    if stem.is_empty() {
+        log::debug!("note_filename: title sanitized to empty, falling back to untitled-{trace_id}");
+        format!("untitled-{trace_id}")
+    } else {
+        stem
+    }
+}
+
 const TRACKING_PARAMS: &[&str] = &[
     "utm_source",
     "utm_medium",

@@ -25,12 +25,13 @@ const SESSION_SLUG_SUFFIX_LEN: usize = 8;
 /// 2026-07-24). The distiller's content-derived slug names the note's real
 /// subject; the generic clyde title is only the fallback when the distiller
 /// omitted a slug. Returns `(stem, used_title_fallback)` so the caller can WARN
-/// on the fallback. Both branches pass through `hygiene::sanitize_filename` for
-/// filesystem safety, so the returned stem is always a safe filename base.
-pub(crate) fn harvest_slug_stem(slug: Option<&str>, title: &str) -> (String, bool) {
+/// on the fallback. Both branches pass through `hygiene::note_filename` for
+/// filesystem safety and the empty-slug fallback, so the returned stem is
+/// always a safe, non-empty filename base.
+pub(crate) fn harvest_slug_stem(slug: Option<&str>, title: &str, trace_id: &str) -> (String, bool) {
     match slug.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(slug) => (hygiene::sanitize_filename(slug), false),
-        None => (hygiene::sanitize_filename(title), true),
+        Some(slug) => (hygiene::note_filename(slug, trace_id), false),
+        None => (hygiene::note_filename(title, trace_id), true),
     }
 }
 
@@ -508,7 +509,7 @@ pub(crate) async fn process_session_inner(
     // visible. The chosen stem is persisted as frontmatter `slug:` so it is
     // stable across re-harvest and gives the collision-association check
     // something to match on.
-    let (slug_stem, used_title_fallback) = harvest_slug_stem(distilled.slug.as_deref(), &title);
+    let (slug_stem, used_title_fallback) = harvest_slug_stem(distilled.slug.as_deref(), &title, trace_id);
     if used_title_fallback {
         log::warn!(
             "[{trace_id}] session distiller emitted no slug; falling back to title-slug filename (title={title:?})"

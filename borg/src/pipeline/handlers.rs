@@ -795,7 +795,7 @@ pub(crate) async fn process_image_inner(
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
-    let note_filename = format!("{}.md", hygiene::sanitize_filename(&title));
+    let note_filename = format!("{}.md", hygiene::note_filename(&title, trace_id));
 
     let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
@@ -1024,7 +1024,7 @@ pub(crate) async fn process_audio_inner(
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
-    let note_filename = format!("{}.md", hygiene::sanitize_filename(&title));
+    let note_filename = format!("{}.md", hygiene::note_filename(&title, trace_id));
 
     let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
@@ -1240,7 +1240,7 @@ pub(crate) async fn process_document_file_inner(
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
-    let note_filename = format!("{}.md", hygiene::sanitize_filename(&title));
+    let note_filename = format!("{}.md", hygiene::note_filename(&title, trace_id));
 
     let dest_path = config.inbox_dir()?;
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;

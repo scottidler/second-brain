@@ -258,6 +258,7 @@ fn harvest_slug_stem_prefers_content_slug() {
     let (stem, fallback) = harvest_slug_stem(
         Some("slack-cli-idcache-groups-list-vs-string-bug"),
         "Review Slack thread",
+        "hv-abc12345",
     );
     assert_eq!(stem, "slack-cli-idcache-groups-list-vs-string-bug");
     assert!(!fallback);
@@ -267,7 +268,7 @@ fn harvest_slug_stem_prefers_content_slug() {
 fn harvest_slug_stem_sanitizes_a_dirty_slug() {
     // Spaces/punctuation/case in a slug are sanitized to a safe stem, still no
     // fallback (the distiller DID emit a slug).
-    let (stem, fallback) = harvest_slug_stem(Some("Has Spaces & Junk!"), "irrelevant title");
+    let (stem, fallback) = harvest_slug_stem(Some("Has Spaces & Junk!"), "irrelevant title", "hv-abc12345");
     assert_eq!(stem, "has-spaces-junk");
     assert!(!fallback);
 }
@@ -276,13 +277,24 @@ fn harvest_slug_stem_sanitizes_a_dirty_slug() {
 fn harvest_slug_stem_falls_back_to_title_when_slug_absent_or_blank() {
     // None and whitespace-only both fall back to the title-slug, flagged so the
     // caller WARNs.
-    let (stem_none, fb_none) = harvest_slug_stem(None, "Review Slack Thread");
+    let (stem_none, fb_none) = harvest_slug_stem(None, "Review Slack Thread", "hv-abc12345");
     assert_eq!(stem_none, "review-slack-thread");
     assert!(fb_none);
 
-    let (stem_blank, fb_blank) = harvest_slug_stem(Some("   "), "Review Slack Thread");
+    let (stem_blank, fb_blank) = harvest_slug_stem(Some("   "), "Review Slack Thread", "hv-abc12345");
     assert_eq!(stem_blank, "review-slack-thread");
     assert!(fb_blank);
+}
+
+#[test]
+fn harvest_slug_stem_falls_back_to_trace_id_when_title_sanitizes_to_empty() {
+    // Slug absent AND the title sanitizes to empty (box-drawing/decorative
+    // characters only): the empty-slug fallback (F1) wins over the plain
+    // title-slug fallback.
+    let title = "\u{2500}".repeat(10);
+    let (stem, used_title_fallback) = harvest_slug_stem(None, &title, "hv-abc12345");
+    assert_eq!(stem, "untitled-hv-abc12345");
+    assert!(used_title_fallback);
 }
 
 #[test]

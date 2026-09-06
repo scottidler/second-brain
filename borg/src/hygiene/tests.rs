@@ -137,3 +137,24 @@ fn test_clean_url_invalid() {
     let result = clean_url("not a url");
     assert!(result.is_err());
 }
+
+#[test]
+fn test_note_filename_empty_title_falls_back_to_trace_id() {
+    let result = note_filename("", "tg-2280a3");
+    assert_eq!(result, "untitled-tg-2280a3");
+}
+
+#[test]
+fn test_note_filename_box_drawing_title_falls_back_to_trace_id() {
+    // Ten U+2500 (BOX DRAWINGS LIGHT HORIZONTAL): sanitize_filename strips
+    // every char, leaving an empty slug - same fallback as an empty title.
+    let title = "\u{2500}".repeat(10);
+    let result = note_filename(&title, "tg-2280a3");
+    assert_eq!(result, "untitled-tg-2280a3");
+}
+
+#[test]
+fn test_note_filename_normal_title_is_not_replaced() {
+    let result = note_filename("Hello World", "tg-2280a3");
+    assert_eq!(result, "hello-world");
+}

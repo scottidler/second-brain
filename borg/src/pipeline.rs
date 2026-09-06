@@ -893,7 +893,7 @@ async fn process_url_inner(
     // body and we use that instead - the slide body is the user-visible
     // value of the slide pipeline. The Distilled-derived frontmatter
     // additions (cortex-video-*, distilled flag) still apply.
-    let filename_stub = hygiene::sanitize_filename(&title);
+    let filename_stub = hygiene::note_filename(&title, trace_id);
     let vault_root_resolved: PathBuf = config.vault_root()?;
     // Transcript-emission policy (2026-07-07 distillation-output-restore). Every
     // URL kind renders here: Video, Repo, and Article publish transcript-free
@@ -983,7 +983,7 @@ async fn process_url_inner(
     };
 
     let rendered = markdown::render_note(&note, &config.frontmatter);
-    let filename = format!("{}.md", hygiene::sanitize_filename(&title));
+    let filename = format!("{}.md", hygiene::note_filename(&title, trace_id));
 
     // Resolve write path: reingest preserves the original location, new ingests go to inbox
     let dest_path = match reingest_dest {

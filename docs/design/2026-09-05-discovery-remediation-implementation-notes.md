@@ -204,3 +204,67 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
 
 ### Open questions
 - None.
+
+## Phase 4: Empty-slug publish fallback (F1)
+
+### Design decisions
+- `borg::hygiene::note_filename(title, trace_id) -> String` (`borg/src/hygiene.rs`):
+  `sanitize_filename(title)`, or `format!("untitled-{trace_id}")` when that
+  sanitizes to empty. Logs `log::debug!` only on the fallback branch (the
+  doc's explicit instruction — this is a two-line conditional formatter, not
+  the entry/exit-logged case the function-level debug-logging rule targets).
+  Placed beside the `pub use vault::hygiene::{...}` re-export it wraps, so
+  the one borg-owned seam over the vault primitive lives next to what it
+  wraps.
+- Replaced all nine note-publish call sites with `hygiene::note_filename(&title, trace_id)`:
+  `borg/src/pipeline.rs:896,986` (both use the in-scope `&str` `trace_id`
+  parameter of `process_url_inner`); `borg/src/pipeline/text.rs:170,323,696`;
+  `borg/src/pipeline/handlers.rs:798,1027,1243` (variable named
+  `note_filename` at these three sites — shadows-by-name only the function
+  it calls, not a conflict since the call is `hygiene::note_filename(...)`).
+- `borg/src/pipeline/session.rs`: `harvest_slug_stem` grew a third parameter,
+  `trace_id: &str`, and both its match arms (previously `hygiene::sanitize_filename(slug)`
+  / `hygiene::sanitize_filename(title)`) now call `hygiene::note_filename(slug, trace_id)`
+  / `hygiene::note_filename(title, trace_id)` — same slug-then-title
+  preference order, each branch's result individually wrapped through the
+  empty-fallback seam ("wrap the result", per the doc). Call site at
+  (then-)line 512 passes the in-scope `trace_id: &str`. Reworded the doc
+  comment at (then-)line 28 from "Both branches pass through
+  `hygiene::sanitize_filename`..." to name `hygiene::note_filename` and the
+  non-empty guarantee, per the doc's explicit instruction that this phase's
+  criterion depends on it.
+- Left `borg/src/assets.rs:15,26` untouched (asset names, a different
+  contract per the doc) and left `vault::hygiene::sanitize_filename` plus its
+  test `sanitize_filename_empty_input_stays_empty` unchanged — the primitive
+  is correct, the guard belongs one layer up in borg.
+- Tests added to `borg/src/hygiene/tests.rs`: empty title -> `untitled-tg-2280a3`;
+  a ten-character U+2500 (box-drawing) title -> same; `"Hello World"` ->
+  `hello-world` (negative case, confirming the fallback does not fire for a
+  normal title).
+- Added a fourth case to `borg/src/pipeline/session/tests.rs`
+  (`harvest_slug_stem_falls_back_to_trace_id_when_title_sanitizes_to_empty`)
+  covering the new empty-fallback branch now reachable through
+  `harvest_slug_stem`, alongside updating its three existing tests for the
+  new `trace_id` parameter.
+- Integration test `borg/tests/empty_slug_publish_falls_back_to_trace_id.rs`:
+  drives the real `borg::pipeline::process_content` entry point (not a unit
+  stub) with `ContentKind::Text` carrying a ten-U+2500 title, using the same
+  `common::XdgSandbox` / `common::test_config` / permit-pool-init harness the
+  other `borg/tests/` regression guards use, and asserts the landed note's
+  filename stem starts with `untitled-`.
+
+### Deviations
+- None from the doc's Phase 4 bullets — implemented at the seam the doc
+  names (`borg::hygiene::note_filename`), same nine call sites, same
+  `session.rs` "keep slug-then-title order, wrap the result" shape.
+
+### Tradeoffs
+- `harvest_slug_stem` took an added `trace_id: &str` parameter rather than
+  computing the fallback at its single call site: the function already owns
+  the slug-vs-title decision and is the one place that should own turning
+  either result into a guaranteed-non-empty stem, matching the doc's
+  "wrap the result" phrasing literally (the wrap happens inside the function
+  that produces the result, not after it returns).
+
+### Open questions
+- None.
