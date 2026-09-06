@@ -19,6 +19,7 @@ env_logger = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = "0.2.4"
 dirs = { workspace = true }
 shellexpand = { workspace = true }
 colored = { workspace = true }

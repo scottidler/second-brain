@@ -296,3 +296,63 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
 
 ### Open questions
 - None.
+
+## Phase 6: Rotate the `oracle serve` log (S2b)
+
+### Design decisions
+- The drop counter reaches the shutdown line through a process-global probe in
+  `vault::logging` (`set_dropped_log_lines_probe` / `dropped_log_lines`,
+  `vault/src/logging.rs:116-136`) rather than a `serve()` argument. `sb` owns
+  the `NonBlocking` writer and `oracle` writes the shutdown line; `oracle` is
+  upstream of `sb`, and the guard lives in `main`, not in the frame that calls
+  `oracle::serve`. Threading it would mean a new parameter on `serve` plus a
+  field carried through `Cli::run` for one integer. The writer stack is already
+  process-global (one `tracing` subscriber per process), so the counter that
+  belongs to it lives in the crate both sides depend on. Reads 0 when unset,
+  which is exactly right for every synchronous logger path.
+- `rotating_non_blocking` (`sb/src/logger.rs`) is a separate seam from
+  `init_tracing_to_file` so the rotation test can drive the real writer stack
+  without `tracing_subscriber::fmt().init()`, which is process-global and would
+  poison every other test in the `sb` binary. Same split vault already uses for
+  `rotating_log_writer` vs `setup_logging`.
+- `vault::logging::rotating_log_writer` and both rotation constants became
+  `pub` instead of sb re-declaring 50 MiB x 5. One rotator, one policy.
+
+### Deviations
+- **Success criterion 3 as literally written cannot pass, before or after this
+  phase.** `sb oracle serve </dev/null` exits **1**, not 0: rmcp fails the MCP
+  handshake on an immediate stdin EOF (`Error: connection closed: initialize
+  request`) at `server.serve(transport).await?`, which is before
+  `service.waiting()` and therefore before the shutdown line. Verified
+  pre-existing by running the stale `~/.cargo/bin/sb` (built from Phase 5 code)
+  the same way: also exit 1, same error. Smoked instead by feeding a valid
+  `initialize` + `notifications/initialized` on stdin and then closing it,
+  which is what the criterion was reaching for (transport ends after indexing,
+  clean shutdown): exit **0**, and the last line of `~/.local/share/sb/oracle.log`
+  is `2026-09-06T06:10:04.768867Z  INFO oracle: MCP server shutting down
+  dropped_log_lines=0`, matching the criterion's regex.
+- `tracing-appender` resolved to **0.2.5**, not the 0.2.4 the doc cites.
+  `Cargo.lock` delta is +29 lines / 3 new packages: `tracing-appender 0.2.5`,
+  `crossbeam-channel 0.5.17` (the one the doc predicted), and `symlink 0.1.0`
+  (a 0.2.5 dependency of the time-based `rolling` appender we do not use).
+- Test lives at `sb/src/logger/tests.rs` (new `#[cfg(test)] mod tests;` beside
+  `logger.rs`), matching `vault/src/logging/tests.rs`; the doc did not name a
+  location.
+
+### Tradeoffs
+- Rotation test writes a real 52 MiB through the real stack into a tempdir
+  (0.05 s observed) rather than parameterising the byte cap for the test. A
+  test-only cap would prove a different constant than production uses.
+- 1 MiB chunks in the test, not log-sized lines: the lossy channel is bounded at
+  128,000 entries, so 54 big writes cannot drop, and the test asserts
+  `dropped_lines() == 0` so a future channel-bound change fails loudly instead
+  of silently testing a truncated file.
+
+### Open questions
+- Two `sb oracle serve` processes (one per Claude Code session) write the same
+  `~/.local/share/sb/oracle.log` concurrently, and now both do so through
+  `FileRotate`. Whichever crosses 50 MiB renames the file under the other, which
+  then keeps writing to the renamed inode until it restarts. Pre-existing for
+  every sb log (the `env_logger` `DualWriter` path has the same shape) and not
+  in this phase's scope, but this phase is the first to put the rotator under a
+  multi-process log.

@@ -5,6 +5,7 @@ use file_rotate::{ContentLimit, FileRotate};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::sync::OnceLock;
 
 /// Per-file byte cap for the rotated daemon log. Chosen so a debug-level
 /// day of daemon activity (the pre-fix live unit ran `--log-level debug`
@@ -12,11 +13,11 @@ use std::path::Path;
 /// well within a day at info level; see the Phase 6 implementation notes
 /// (`docs/design/2026-07-05-cortex-daemon-oscillation-loop-implementation-notes.md`)
 /// for the measured info-level rate this was picked against.
-const LOG_ROTATE_MAX_BYTES: usize = 50 * 1024 * 1024; // 50 MiB per file
+pub const LOG_ROTATE_MAX_BYTES: usize = 50 * 1024 * 1024; // 50 MiB per file
 /// Number of ROTATED backups retained, in addition to the active file
 /// (so total on-disk cap = `(LOG_ROTATE_MAX_FILES + 1) * LOG_ROTATE_MAX_BYTES`
 /// = ~300 MiB, versus the pre-fix unrotated 16 GB).
-const LOG_ROTATE_MAX_FILES: usize = 5;
+pub const LOG_ROTATE_MAX_FILES: usize = 5;
 
 /// Resolve log level from: CLI flag > LOG_LEVEL env > config file > "info"
 pub fn resolve_log_level(cli_level: Option<&str>, config_level: Option<&str>) -> String {
@@ -32,11 +33,14 @@ pub fn resolve_log_level(cli_level: Option<&str>, config_level: Option<&str>) ->
     "info".to_string()
 }
 
-/// Build the rotating file writer used as the file half of `DualWriter`.
+/// Build the rotating file writer used as the file half of `DualWriter`,
+/// and by `sb`'s `oracle serve` tracing writer (behind
+/// `tracing_appender::non_blocking`). Exposed so no caller re-declares the
+/// 50 MiB x 5 policy: one rotator, one set of constants.
 /// No logger init here (pure aside from opening/creating `log_file_path` and
 /// its parent dir) so tests can drive rotation directly without touching the
 /// process-global `env_logger`/`log` singleton.
-fn rotating_log_writer(log_file_path: &Path) -> FileRotate<AppendCount> {
+pub fn rotating_log_writer(log_file_path: &Path) -> FileRotate<AppendCount> {
     // No log::debug! here: this runs before env_logger::Builder::init(), so
     // the `log` facade has no installed logger yet and the record would be
     // silently dropped. The rotation settings are logged from `setup_logging`
@@ -107,6 +111,28 @@ pub fn setup_logging_stderr(log_level: &str) -> Result<()> {
         .target(env_logger::Target::Stderr)
         .init();
     Ok(())
+}
+
+/// Probe installed by whoever owns the process's non-blocking log writer,
+/// read by whoever writes the shutdown line. The writer stack is already
+/// process-global (one `tracing` subscriber per process), and the crate that
+/// installs it (`sb`) is downstream of the crate that reports at shutdown
+/// (`oracle`), so the counter cannot be threaded as an argument - it lives
+/// here, in the crate both depend on.
+static DROPPED_LOG_LINES: OnceLock<Box<dyn Fn() -> u64 + Send + Sync>> = OnceLock::new();
+
+/// Register the drop counter of a non-blocking log writer. Called once, from
+/// the process's logger initializer. A second call is ignored: two writers in
+/// one process would already have panicked installing two global subscribers.
+pub fn set_dropped_log_lines_probe(probe: Box<dyn Fn() -> u64 + Send + Sync>) {
+    let _ = DROPPED_LOG_LINES.set(probe);
+}
+
+/// Log lines the non-blocking writer dropped because its channel was full.
+/// Zero when no probe is installed (every logger path but `oracle serve`
+/// writes synchronously and cannot drop).
+pub fn dropped_log_lines() -> u64 {
+    DROPPED_LOG_LINES.get().map_or(0, |probe| probe())
 }
 
 struct DualWriter {

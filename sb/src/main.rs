@@ -18,13 +18,20 @@ async fn main() -> Result<()> {
     error::install(verbose);
 
     let cli = Cli::parse();
-    logger::init_for(&cli)?;
+    // `oracle serve` logs through a background writer thread; this guard is what
+    // flushes it. Bound here, in the only frame that outlives both the command
+    // and its shutdown log line. `None` on every other path.
+    let _log_guard = logger::init_for(&cli)?;
     // A command that already printed its own failure returns `SilentFailure`;
     // map it to exit code 1 here (the one place exit codes are decided) instead
     // of `std::process::exit` deep in a print helper.
     match cli.cmd.run().await {
         Ok(()) => Ok(()),
-        Err(e) if e.downcast_ref::<error::SilentFailure>().is_some() => std::process::exit(1),
+        Err(e) if e.downcast_ref::<error::SilentFailure>().is_some() => {
+            // `process::exit` runs no destructors, so flush the log writer by hand.
+            drop(_log_guard);
+            std::process::exit(1)
+        }
         Err(e) => Err(e),
     }
 }

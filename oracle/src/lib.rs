@@ -116,7 +116,14 @@ pub async fn serve(config: Config) -> Result<()> {
 
     tracing::info!("MCP server started, waiting for requests...");
     service.waiting().await?;
-    tracing::info!("MCP server shutting down");
+    // The drop count is the price of the lossy non-blocking log writer (`sb`'s
+    // `logger::rotating_non_blocking`): non-zero means log lines were thrown
+    // away under burst, not that requests were dropped. Zero on every path
+    // that logs synchronously.
+    tracing::info!(
+        "MCP server shutting down dropped_log_lines={}",
+        vault::logging::dropped_log_lines()
+    );
 
     Ok(())
 }

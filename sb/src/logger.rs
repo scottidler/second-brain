@@ -1,5 +1,6 @@
 use eyre::{Context, Result};
 use std::path::PathBuf;
+use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::EnvFilter;
 use vault::paths::CliConfig;
 
@@ -22,7 +23,12 @@ use crate::cli::{Cli, Cmd};
 ///   status: true
 ///   borg-daemon-status: true
 /// ```
-pub fn init_for(cli: &Cli) -> Result<()> {
+///
+/// Returns the `oracle serve` writer thread's `WorkerGuard` (`None` on every
+/// other path, which writes synchronously). The caller must hold it for the
+/// life of the process: dropping it is what flushes the background writer,
+/// and `main` is the only frame that outlives the shutdown log line.
+pub fn init_for(cli: &Cli) -> Result<Option<WorkerGuard>> {
     let cli_cfg = CliConfig::load();
     let (name, level) = name_and_level(cli, &cli_cfg);
     let path = log_path(&name);
@@ -30,12 +36,12 @@ pub fn init_for(cli: &Cli) -> Result<()> {
     // The `oracle serve` MCP server uses tracing, not log; route it to the
     // tracing-subscriber file writer. Everything else goes through env_logger.
     if matches!(&cli.cmd, Cmd::Oracle(c) if matches!(c.command, crate::cli::oracle::Commands::Serve)) {
-        return init_tracing_to_file(&path, &level);
+        return init_tracing_to_file(&path, &level).map(Some);
     }
     if routes_to_stderr_only(cli, &cli_cfg) {
-        return vault::logging::setup_logging_stderr(&level);
+        return vault::logging::setup_logging_stderr(&level).map(|()| None);
     }
-    vault::logging::setup_logging(&path, &level)
+    vault::logging::setup_logging(&path, &level).map(|()| None)
 }
 
 /// True when this invocation should log to stderr only, not to the
@@ -187,18 +193,33 @@ fn resolve_level(root: Option<&str>, sub: Option<&str>, cli_yaml: Option<&str>, 
     cli_yaml.map(str::to_string).unwrap_or_else(|| "info".into())
 }
 
-fn init_tracing_to_file(log_path: &std::path::Path, level: &str) -> Result<()> {
-    let filter = EnvFilter::new(level);
-
+/// Build the `oracle serve` writer stack: the shared 50 MiB x 5 `FileRotate`
+/// (`vault::logging::rotating_log_writer`, the same rotator every other sb log
+/// uses) behind `tracing_appender::non_blocking`. The non-blocking layer hands
+/// every write to one background thread, so a rotation `rename` never runs on
+/// a tokio worker and there is no writer `Mutex` for MCP requests to contend
+/// or poison.
+///
+/// The channel stays lossy (tracing-appender's default): a bounded blocking
+/// channel would turn a disk hiccup mid-rotation into backpressure on the MCP
+/// request path, and a request must never wait on a log line. Drops are made
+/// visible instead of silent - the writer's `ErrorCounter` is registered as
+/// `vault::logging`'s drop probe and reported in the shutdown line.
+fn rotating_non_blocking(log_path: &std::path::Path) -> Result<(NonBlocking, WorkerGuard)> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent).context("Failed to create log directory")?;
     }
+    Ok(tracing_appender::non_blocking(vault::logging::rotating_log_writer(
+        log_path,
+    )))
+}
 
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .context("Failed to open log file")?;
+fn init_tracing_to_file(log_path: &std::path::Path, level: &str) -> Result<WorkerGuard> {
+    let filter = EnvFilter::new(level);
+
+    let (writer, guard) = rotating_non_blocking(log_path)?;
+    let counter = writer.error_counter();
+    vault::logging::set_dropped_log_lines_probe(Box::new(move || counter.dropped_lines() as u64));
 
     // `tracing_subscriber::fmt().init()` already bridges the `log` facade into
     // tracing: its `tracing-log` default feature is enabled (see Cargo.toml),
@@ -210,9 +231,12 @@ fn init_tracing_to_file(log_path: &std::path::Path, level: &str) -> Result<()> {
     // internal `.expect("Unable to install global subscriber")`.
     tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(file)
+        .with_writer(writer)
         .with_ansi(false)
         .init();
 
-    Ok(())
+    Ok(guard)
 }
+
+#[cfg(test)]
+mod tests;
