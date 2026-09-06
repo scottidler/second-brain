@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler (via agent)
 **Date:** 2026-09-05
-**Status:** In Review (author passes done; review panel closed 2026-09-05 after four rounds with zero blockers; awaiting Scott's go). Caveat on rounds 4-5: the staff seat (Codex) hung twice on the full prompt and returned only on a narrowed one; its round-5 re-run against the current text confirmed its own round-3 blocker closed and raised no new one. Rounds 1-3 ran both seats at full depth and every finding from them is dispositioned below. Run dir: `/tmp/review-panel/ZwHkq29D`.
+**Status:** Implemented (2026-09-06: phases 0-15 built, one commit each, `otto ci` green; three criteria amended post-build and one bullet blocked upstream, all recorded under Acceptance Criteria; the operator runbook and the deploy remain Scott's to run). Review panel closed 2026-09-05 after four rounds with zero blockers. Caveat on rounds 4-5: the staff seat (Codex) hung twice on the full prompt and returned only on a narrowed one; its round-5 re-run against the current text confirmed its own round-3 blocker closed and raised no new one. Rounds 1-3 ran both seats at full depth and every finding from them is dispositioned below. Run dir: `/tmp/review-panel/ZwHkq29D`.
 **Review Passes Completed:** 5/5 + panel r1-r4 (pass 2: every line ref re-checked against `f97718f`, every runnable criterion executed on desk and recorded as `Observed on main`; pass 3: phase-count wording, `bin/agents-map` as the one script both otto and CI call, reverse-check scope narrowed; pass 4: excalidraw rename dropped because the daemon's auto-apply naming lint would undo it, `rkvr::remove` visibility, the stale-inbox Warn reconciled with the "no Warn" acceptance criterion, S2 reinstall ordered after the dotfiles phase; pass 5: voice lint, phase-count wording, panel dispatched)
 
 ## Summary
@@ -421,6 +421,33 @@ Run against desk when all phases and the runbook are done.
 - [ ] On desk: `test -d ~/.local/share/oracle` fails; `test -f ~/.local/share/sb/oracle/oracle.db` succeeds; `ls -d ~/.config/{borg,cortex,second-brain}` all fail; `ls ~/.config/systemd/user | grep -c cortex` = 1; `ls ~/.config/sb/patterns | wc -l` = 26.
 
 Observed on main, 2026-09-05, desk: `sb doctor` exit 0 with 2 Info and 0 Warn, `maxTokens` count 0, `[data dir]` count 0, `schema gaps: domain=1048, note_type=5, origin=1195, status=1088`; lint `not valid` count 2016; vault 87 / exists / 1 / exists; host: `~/.local/share/oracle` exists (1.1 GB), `~/.local/share/sb/oracle` absent, 3 legacy config dirs, `grep -c cortex` = 6, patterns = 30.
+
+### Post-build status, 2026-09-06
+
+Measured after phase 15, before the deploy and before the operator runbook:
+
+- `otto agents-map` exit 0; `otto ci` green on `main` at `8064ce6`. **PASS.**
+- `sb cortex lint | grep -c 'not valid'` = 0 (was 2016). **PASS.**
+- Vault: `origin: human` files 0 (was 87); `domain-ai` in `home.md` 0; `inbox/.md` absent; vault `.github/workflows/ci.yml` absent. **PASS.**
+- `sb doctor` and the desk host row: **DEFERRED.** Both depend on the deploy and the operator runbook, neither of which has run. `sb doctor` currently prints the Phase 9 legacy-oracle Error by design and returns before its `frontmatter gaps` line; runbook R1 clears it.
+
+### Criterion amendments (post-build)
+
+Three criteria were written as commands that cannot pass as literally spelled. Each was executed, the failure reproduced against unmodified code, and the criterion corrected here rather than the implementation bent to fit it.
+
+- **Phase 6, criterion 3** said `timeout 300 sb oracle serve </dev/null` exits 0 and writes the shutdown line. It exits 1: rmcp fails the MCP handshake on immediate stdin EOF (`Error: connection closed: initialize request`) at `server.serve(transport).await?`, before `service.waiting()`, so the shutdown line is never reached. Reproduced with the pre-Phase-6 binary, so it is not caused by the rotation work. **Amended to:** drive a real `initialize` + `notifications/initialized` on stdin, then EOF. Observed: exit 0, last line `MCP server shutting down dropped_log_lines=0`.
+- **Phases 4, 5, 7-12** wrote test criteria as `cargo test -p <crate> <name>`. `-p <crate>` alone does not compile in this workspace: `vault::search` is behind the `vec` feature and the consumer crates do not forward it. **Amended to:** `cargo test --workspace --features vec <name>`, which is what `.otto.yml`'s test task already runs.
+- **Phase 15**, the two-tick re-stamp criterion, assumed the running cortex daemon would pick up Phase 14's `vault.ignore: templates` without a restart. It does not: `cortex.service` has run since 2026-09-03 07:58:31 and reads its config at start, so at 2026-09-06 01:32:52 (twelve minutes after the config landed) it was still emitting `system/templates/*` lines. The `grep -c 'cortex-' system/templates/daily.md` = 0 reading after two ticks is therefore **not** evidence the ignore worked. **Amended to:** re-check after cortex restarts, i.e. after runbook step S2.
+
+### Blocked
+
+- **Phase 15, S7.** `sb borg reingest --source https://www.youtube.com/shorts/iDISCSQn6mI` returns `fetch-failed`; `yt-dlp` on the same URL returns `ERROR: [youtube] iDISCSQn6mI: This video is unavailable`. The source video no longer exists, so the transcript cannot be regenerated. `notes/prompt-caching-cuts-claude-code-bills-by-80.md` keeps its `## Transcript` section. The doc's own reason for choosing reingest over `bin/strip-transcripts` was that stripping would destroy the note's only copy; with the source dead that reasoning now argues for leaving the section in place. Scott's call.
+
+### Follow-up found during the build, not fixed
+
+- `sb/src/cli/checks.rs`: `frontmatter_policy_findings()` sits after the oracle-index open in `vault_findings`, so an index-open failure suppresses it even though it reads markdown through `cortex::lint` and never touches the index. Visible today because the Phase 9 guard is active. Self-clears at runbook R1; moving the call up beside `schema_docs_findings()` would decouple it.
+- `~/.local/share/sb/oracle.log` is written by every concurrent `sb oracle serve` process, and Phase 6 put a `FileRotate` under it. Whichever process crosses 50 MiB renames the file under the others, which keep writing to the renamed inode until restart. Pre-existing shape for every sb log; Phase 6 is the first to add rotation to a multi-process one.
+- Root `CLAUDE.md` does not mention `sb cortex schema` or that four of the five schema docs are now generated.
 
 ## Resolved Decisions
 
