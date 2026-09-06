@@ -567,3 +567,56 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
 - The fourth success criterion — `sb doctor` shows the recorded note count
   after the move + deploy — is DEFERRED-TO-RUNBOOK. It cannot be checked
   before R1 runs.
+
+## Phase 10: `sb bootstrap --prune-legacy-config` (S4)
+
+### Design decisions
+- `prune_legacy(apply: bool) -> Report` lives in `sb/src/cli/bootstrap/migrate.rs`
+  beside `migrate_legacy_layout`, reusing the same `Report { lines, had_conflicts }`
+  type: `had_conflicts` doubles as "had refusal(s)" for this call path, so
+  callers don't need a second report shape.
+- Fail-closed per directory, two independent gates before any delete is even
+  considered: (1) `.migrated-to-sb` marker present (proof `migrate_legacy_layout`
+  ran against it), (2) every file recursively under the directory is one of
+  the seven known basenames (`sb/src/cli/bootstrap/migrate.rs::KNOWN_BASENAMES`,
+  taken verbatim from the `plans` array at `:74-100`), a `.md` file under a
+  `patterns/` subdirectory, or the marker itself. Either gate failing refuses
+  the *entire* directory (no partial delete) and the message names the
+  stranger file(s) so the operator can look before acting.
+- Deletion goes through `borg::rkvr::remove(std::slice::from_ref(&dir))`
+  (`borg/src/rkvr.rs:22`, widened from `pub(crate)` to `pub`) passing the
+  whole directory as a single path; `prune_legacy` itself never calls
+  `remove_dir_all` — that call lives inside `rkvr::remove`'s own std-fallback
+  branch, which only fires when the `rkvr` binary isn't on PATH.
+- `--prune-legacy-config` is a standalone action on `BootstrapArgs`: when
+  present, `bootstrap::run` prints the report and returns immediately,
+  skipping systemd install, model prefetch, and extension steps — mirroring
+  `sb cortex migrate` being its own subcommand rather than a step folded into
+  a larger pipeline. `--apply` is dry-run-off, same polarity as
+  `cortex migrate --apply`.
+
+### Deviations
+- None. The doc's shape (`prune_legacy(apply) -> Report`, `--prune-legacy-config`
+  + `--apply` flags, fail-closed per dir, `borg::rkvr::remove`, never
+  `remove_dir_all`) matched the codebase seams as specced.
+
+### Tradeoffs
+- Recursive stranger detection walks every file under each legacy dir (not
+  just top-level) so a stray file nested inside, say, a legacy `patterns/`
+  subdirectory's own subdirectory would still be caught; the cost is a small
+  hand-rolled `list_files_recursive` (no `walkdir` dep in `sb`/`borg`) instead
+  of pulling in the crate `vault::paths::dir_size` already depends on.
+- `prune_legacy` never bails/errors on a refusal (unlike `migrate_legacy_layout`,
+  which bails the whole `sb bootstrap` run on `had_conflicts`): a refusal here
+  just skips that one directory and reports why, so `borg`/`second-brain`
+  still get evaluated even if `cortex` were somehow contaminated. Chose
+  per-directory independence over an all-or-nothing gate since the runbook
+  step (S4) expects the common case (three clean dirs) to proceed without an
+  operator having to intervene for an unrelated one.
+
+### Open questions
+- None. `sb bootstrap --prune-legacy-config` (dry-run, no `--apply`) was run
+  on desk and returned exactly the three legacy dirs the doc's success
+  criterion names; nothing under `~/.config/{borg,cortex,second-brain}` was
+  deleted. Running `--apply` (S4 in the operator runbook) is Scott's to do,
+  gated on this phase's code being deployed.

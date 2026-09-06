@@ -23,6 +23,20 @@ pub struct BootstrapArgs {
     #[arg(long)]
     pub migrate: bool,
 
+    /// Preview (default) or, with `--apply`, delete legacy config directories
+    /// (~/.config/{borg,cortex,obsidian-cortex,oracle,second-brain}) that
+    /// have already been migrated into ~/.config/sb/. Fail-closed per
+    /// directory: refuses (and names the file) if anything beyond the
+    /// migrated files, `patterns/*.md`, and the `.migrated-to-sb` marker is
+    /// present. Standalone action - runs no other bootstrap step.
+    #[arg(long)]
+    pub prune_legacy_config: bool,
+
+    /// Perform the deletion instead of previewing it. Only meaningful with
+    /// `--prune-legacy-config`.
+    #[arg(long)]
+    pub apply: bool,
+
     /// Sign + install the Firefox capture extension after standard bootstrap.
     /// First run on a machine: requires sudo for the policy-file write.
     /// Subsequent runs are unattended; pair with `otto deploy` for auto-refresh.
@@ -157,6 +171,21 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
 ];
 
 pub async fn run(args: BootstrapArgs) -> Result<()> {
+    if args.prune_legacy_config {
+        let report = migrate::prune_legacy(args.apply).context("prune legacy config directories")?;
+        if report.lines.is_empty() {
+            println!("No migrated legacy config directories found.");
+        }
+        for line in &report.lines {
+            println!("{line}");
+        }
+        if !args.apply {
+            println!();
+            println!("Dry run only; rerun with --apply to delete.");
+        }
+        return Ok(());
+    }
+
     // Auto-migrate on first invocation that detects a legacy directory, unless
     // --migrate was passed explicitly (which forces it regardless of detection).
     if args.migrate || migrate::legacy_detected() {

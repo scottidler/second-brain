@@ -2,8 +2,9 @@
 //! into the unified ~/.config/sb/ layout.
 //!
 //! Invariants:
-//! - Never deletes a legacy file. A future `sb bootstrap --prune-legacy-config`
-//!   verb (out of scope here) is the cleanup.
+//! - Never deletes a legacy file at migration time. Cleanup is a separate,
+//!   explicit step: `sb bootstrap --prune-legacy-config [--apply]`
+//!   (`prune_legacy` below), fail-closed on anything it does not recognize.
 //! - Idempotent: a marker file `.migrated-to-sb` is dropped in each migrated
 //!   legacy directory so a re-run noops.
 //! - Conflict-safe: if the new path exists and content differs from the legacy
@@ -121,6 +122,126 @@ pub fn migrate_legacy_layout() -> Result<Report> {
     }
 
     Ok(report)
+}
+
+/// Basenames `migrate_legacy_layout`'s `plans` array copies out of a legacy
+/// directory (the seven file targets above), regardless of which legacy
+/// directory happened to carry them. A file by one of these names sitting
+/// in a legacy dir is known migration residue, not a stranger.
+const KNOWN_BASENAMES: &[&str] = &[
+    "borg.yml",
+    "cortex.yml",
+    "obsidian-cortex.yml",
+    "oracle.yml",
+    "canonical-tags.yml",
+    "tag-mapping.yml",
+    "tag-proposals.yml",
+];
+
+/// Preview (default) or apply (`apply = true`) deletion of legacy config
+/// directories that have already been migrated into `~/.config/sb/`.
+///
+/// Fail-closed per directory: a directory is only ever a delete candidate if
+/// it carries the `.migrated-to-sb` marker (proof `migrate_legacy_layout` ran
+/// against it) AND every file inside it is one of the known migration
+/// artifacts (`KNOWN_BASENAMES`, a `patterns/**/*.md` fabric pattern, or the
+/// marker itself). Any other file refuses the whole directory and names the
+/// stranger - never a partial delete. Deletion goes through
+/// `borg::rkvr::remove`, which archives via `rkvr rmrf` when installed
+/// (recoverable) or falls back to a WARN + plain removal when not; this
+/// function never calls `remove_dir_all` itself.
+pub fn prune_legacy(apply: bool) -> Result<Report> {
+    let Some(config_root) = vault::paths::xdg_config_dir() else {
+        eyre::bail!("xdg_config_dir() returned None");
+    };
+
+    let mut report = Report::default();
+
+    for legacy_dir in LEGACY_DIRS {
+        let dir = config_root.join(legacy_dir);
+        if !dir.exists() {
+            continue;
+        }
+
+        if !dir.join(MARKER).exists() {
+            report.had_conflicts = true;
+            report.lines.push(format!(
+                "refused: {} has no {MARKER} marker (never migrated; leave it alone)",
+                dir.display()
+            ));
+            continue;
+        }
+
+        let files = list_files_recursive(&dir)?;
+        let strangers: Vec<String> = files
+            .iter()
+            .filter(|f| !is_known_file(&dir, f))
+            .map(|f| f.strip_prefix(&dir).unwrap_or(f).display().to_string())
+            .collect();
+        if !strangers.is_empty() {
+            report.had_conflicts = true;
+            report.lines.push(format!(
+                "refused: {} contains unknown file(s): {}",
+                dir.display(),
+                strangers.join(", ")
+            ));
+            continue;
+        }
+
+        if apply {
+            borg::rkvr::remove(std::slice::from_ref(&dir)).with_context(|| format!("remove {}", dir.display()))?;
+            report.lines.push(format!("removed: {}", dir.display()));
+        } else {
+            report.lines.push(format!("would remove: {}", dir.display()));
+        }
+    }
+
+    Ok(report)
+}
+
+/// Every file (not directory) under `dir`, recursively.
+fn list_files_recursive(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in std::fs::read_dir(&current).with_context(|| format!("read {}", current.display()))? {
+            let entry = entry.with_context(|| format!("read entry in {}", current.display()))?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// True if `file` (an absolute path under `dir`) is a recognized migration
+/// artifact: the marker, a top-level file matching `KNOWN_BASENAMES`, or any
+/// `.md` file under a `patterns/` subdirectory (borg's fabric patterns).
+fn is_known_file(dir: &Path, file: &Path) -> bool {
+    let Ok(rel) = file.strip_prefix(dir) else {
+        return false;
+    };
+    if rel == Path::new(MARKER) {
+        return true;
+    }
+    let mut parts = rel.components();
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if first.as_os_str() == "patterns" {
+        return rel.extension().and_then(|e| e.to_str()) == Some("md");
+    }
+    // Anything else must be a top-level file (exactly one path component)
+    // whose basename is one of the known migration targets.
+    if parts.next().is_none()
+        && let Some(name) = rel.to_str()
+    {
+        return KNOWN_BASENAMES.contains(&name);
+    }
+    false
 }
 
 fn copy_file_with_rewrite(src: &Path, dst: &Path, report: &mut Report) -> Result<()> {

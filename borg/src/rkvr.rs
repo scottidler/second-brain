@@ -19,7 +19,7 @@ use eyre::{Context, Result};
 /// - `rkvr` on PATH and succeeds -> archived, recoverable.
 /// - `rkvr` not on PATH -> WARN + non-recoverable std removal.
 /// - `rkvr` present but exits non-zero -> error (no silent fallback).
-pub(crate) fn remove<P: AsRef<Path>>(paths: &[P]) -> Result<()> {
+pub fn remove<P: AsRef<Path>>(paths: &[P]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
