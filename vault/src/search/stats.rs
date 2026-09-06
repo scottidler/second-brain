@@ -484,6 +484,21 @@ impl super::SearchIndex {
         Ok(rows)
     }
 
+    /// Get the oldest (by `modified_at`) note still sitting in the inbox,
+    /// excluding dotfiles (`inbox/.claude/...`) which are tooling, not
+    /// unclassified content. Used by `sb doctor` to Warn on notes stuck past
+    /// the daemon's classify cadence.
+    pub fn inbox_oldest(&self) -> Result<Option<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, modified_at FROM notes WHERE path LIKE 'inbox/%' AND path NOT LIKE 'inbox/.%' ORDER BY modified_at ASC LIMIT 1",
+        )?;
+        let row = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .next()
+            .transpose()?;
+        Ok(row)
+    }
+
     /// Get notes that need review (cortex-needs-review = true)
     pub fn notes_needing_review(&self, limit: Option<u32>) -> Result<Vec<NoteRow>> {
         let limit = limit.unwrap_or(50);

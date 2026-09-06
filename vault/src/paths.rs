@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use eyre::{Result, eyre};
 use serde::{Deserialize, Deserializer};
+use walkdir::WalkDir;
 
 /// Subdirectory under `xdg_config_dir()` that owns every sb config file.
 pub const SB_DIR: &str = "sb";
@@ -80,6 +81,23 @@ where
 {
     let raw = PathBuf::deserialize(deserializer)?;
     Ok(expand_tilde(raw))
+}
+
+/// Sum the size in bytes of every regular file under `root`, recursing into
+/// subdirectories. Does not follow symlinks (a cycle would hang `sb doctor`;
+/// a symlinked file's target size would double-count storage that isn't
+/// actually inside `root`). A missing or unreadable `root` (and any
+/// unreadable entry within it) contributes 0, not an error - this is a
+/// doctor Info/Warn signal, not a build-breaking check.
+pub fn dir_size(root: &Path) -> u64 {
+    WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|metadata| metadata.len())
+        .sum()
 }
 
 /// `~/.config/sb/` (XDG on every platform via [`xdg_config_dir`]).

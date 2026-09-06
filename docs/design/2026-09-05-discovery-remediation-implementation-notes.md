@@ -414,3 +414,77 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
 
 ### Open questions
 - None.
+
+## Phase 8: Doctor stale-inbox Warn and data-dir section (R5, R6)
+
+### Design decisions
+- `SearchIndex::inbox_oldest` — `vault/src/search/stats.rs` — the exact query
+  the doc specifies (`WHERE path LIKE 'inbox/%' AND path NOT LIKE 'inbox/.%'
+  ORDER BY modified_at ASC LIMIT 1`), returning `Result<Option<(String, i64)>>`.
+  Placed beside the pre-existing `inbox_notes` (which does NOT exclude
+  `inbox/.%` dotfiles — that method answers a different question and was left
+  untouched).
+- `INBOX_STALE_SECS: u64 = 48 * 3600` — `sb/src/cli/checks.rs` — placed next to
+  `FABRIC_PROBE_TIMEOUT_SECS` per the doc, carrying the scar-tissue rationale
+  comment (daemon classifies every 300s; `cortex::classify::mark_needs_review`
+  at `classify.rs:963` deliberately leaves a no-signal/low-confidence note
+  unclassified rather than guessing, so silence past 48h means a human needs
+  to look).
+- `inbox_stale_finding` — `sb/src/cli/checks.rs` — new helper called from
+  `vault_findings` (reuses the already-open `SearchIndex` handle rather than
+  opening a second one). Emits `Finding::ok` when the inbox is empty or the
+  oldest note is within the window, `Finding::warn` otherwise.
+- `vault::paths::dir_size` — walks with `WalkDir::new(root).follow_links(false)`
+  (matching the existing `note::collect_md_paths` convention), summing
+  `metadata.len()` over regular files only. A missing/unreadable root
+  contributes 0, not an error — this is a doctor Info/Warn signal, not a
+  build-breaking check, and errors are `filter_map`'d out.
+- New `data dir` doctor section (`data_dir_findings`, registered in
+  `all_sections()`): four `Finding::info` lines — `stages` (via
+  `vault::paths::borg_stages_dir()`), `receipts.db` (via
+  `vault::receipts::receipts_db_path()`, sized as a single file — `dir_size`
+  works unchanged on a file path since `WalkDir` over a file yields exactly
+  that one entry), `logs` (see below), `oracle` (via
+  `vault::paths::oracle_db_path().parent()`). `Finding::warn` when logs exceed
+  `DATA_DIR_LOGS_WARN_BYTES` (512 MiB) or the summed total exceeds
+  `DATA_DIR_TOTAL_WARN_BYTES` (2 GiB); `Finding::warn("stray backup in oracle
+  dir: <name>")` for any top-level file in the oracle dir other than
+  `oracle.db{,-wal,-shm}`/`eval-cache.db` (`ORACLE_DIR_ALLOWED_FILES`).
+- `sum_matching_files` — `sb/src/cli/checks.rs` — new non-recursive helper for
+  the `logs` line specifically: logs land flat under
+  `xdg_data_dir()/sb/*.log*` (`.log`, `.log.1`, ... from `FileRotate`, per
+  `sb/src/logger.rs::log_path`), not nested per subsystem, so this reads only
+  the top-level directory entries and filters by `name.contains(".log")`
+  rather than recursing with `dir_size`.
+- `oracle_db_path().parent()` is used verbatim (not a new `sb_oracle_dir()`
+  constant) so the `oracle` Info line and the stray-file scan need no code
+  change when Phase 9 repoints `oracle_db_path()` at `sb/oracle/`: today it
+  resolves the legacy `~/.local/share/oracle/` dir; after Phase 9 lands it
+  resolves the new location automatically. Phase 9's own "legacy oracle dir
+  present" `Finding::warn` is a *separate* new push into this same section
+  (using its own `legacy_oracle_dir()`), not a change to any Phase 8 code.
+
+### Deviations
+- None. Implemented at the exact seam the doc specifies.
+
+### Tradeoffs
+- `dir_size` reports the sum of *logical* file sizes (`metadata.len()`), not
+  disk-block usage. Measured on `~/.local/share/sb/borg/stages` (23,963 trace
+  dirs, 24,973 files): `dir_size` / the doctor `stages:` line reports 46.9 MB,
+  while `du -sh` on the same directory reports 234 MB (matching the design
+  doc's own recorded observation, presumably also taken with `du`). Confirmed
+  by direct measurement (`find -printf '%s\n' | awk '{s+=$1}'` = 49,198,447
+  bytes = 46.9 MB, agreeing with `dir_size`): with ~25k mostly-small files,
+  filesystem block-rounding inflates `du`'s block-count view roughly 5x over
+  the logical byte sum. This is by design, not a bug — the doc's own spec
+  says "walkdir sum" (logical size), and a disk-usage-accurate number would
+  need `st_blocks`, which isn't portable and isn't what was asked for.
+- Wall-clock cost of `dir_size` over that same stages dir (24,973 files, one
+  process instance): **333.8 ms**, measured with a temporary `Instant`/
+  `eprintln!` wrapped around the call in a live `sb doctor` run, then removed
+  before commit. Under the doc's 1-second concern threshold — no depth cap or
+  caching implemented (per instructions: measure and record only, don't
+  implement a cap in this phase).
+
+### Open questions
+- None.

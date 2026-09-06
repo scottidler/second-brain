@@ -115,6 +115,10 @@ pub fn all_sections() -> Vec<Section> {
             name: "vault",
             findings: vault_findings(),
         },
+        Section {
+            name: "data dir",
+            findings: data_dir_findings(),
+        },
     ]
 }
 
@@ -263,6 +267,19 @@ const FABRIC_INSTALL_HINT: &str = "go install github.com/danielmiessler/fabric/c
 /// Wall-clock bound for the live fabric probe. A real `summarize` on a 4-byte
 /// input returns in a couple of seconds; this is the network-hang ceiling.
 const FABRIC_PROBE_TIMEOUT_SECS: u64 = 30;
+/// The cortex daemon's classify sweep runs every 300 s
+/// (`cortex.yml classify.interval-secs`), so a note that has sat in `inbox/`
+/// past 48 h has been offered to the classifier hundreds of times already.
+/// It is either stuck (a classifier error) or low-confidence: `mark_needs_review`
+/// (`cortex/src/classify.rs:963`) deliberately leaves a no-signal or
+/// low-confidence note unclassified rather than guessing, so silence past this
+/// window means a human needs to look, not that the daemon will eventually
+/// catch up. Doctor thresholds are consts, not config (no `doctor:` section).
+const INBOX_STALE_SECS: u64 = 48 * 3600;
+/// `data dir` section thresholds. Doctor has no config file (see the const
+/// above); these are the same kind of hardcoded ceiling.
+const DATA_DIR_LOGS_WARN_BYTES: u64 = 512 * 1024 * 1024;
+const DATA_DIR_TOTAL_WARN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const SIGNAL_RS_INSTALL_HINT: &str =
     "cargo install --git https://github.com/scottidler/signal-rs --bin signal-rs --tag v0.2.1";
 
@@ -750,6 +767,7 @@ fn vault_findings() -> Vec<Finding> {
     }
 
     findings.extend(frontmatter_policy_findings());
+    findings.push(inbox_stale_finding(&db));
 
     match db.embedding_coverage() {
         Ok(cov) => {
@@ -841,6 +859,140 @@ fn frontmatter_policy_findings() -> Vec<Finding> {
     }
 
     findings
+}
+
+/// Warn when the oldest inbox note has sat unclassified past `INBOX_STALE_SECS`.
+/// See `INBOX_STALE_SECS` for the rationale. `inbox_oldest` already excludes
+/// `inbox/.claude/...` dotfiles (tooling, not unclassified content).
+fn inbox_stale_finding(db: &vault::search::SearchIndex) -> Finding {
+    match db.inbox_oldest() {
+        Ok(Some((path, modified_at))) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let age_secs = (now - modified_at).max(0) as u64;
+            if age_secs > INBOX_STALE_SECS {
+                Finding::warn(
+                    format!("oldest inbox note {path} is {}h old", age_secs / 3600),
+                    "sb cortex classify, or assign a domain by hand".to_string(),
+                )
+            } else {
+                Finding::ok(format!("oldest inbox note {path} is {}h old", age_secs / 3600))
+            }
+        }
+        Ok(None) => Finding::ok("inbox is empty".to_string()),
+        Err(e) => Finding::warn(format!("inbox_oldest query failed: {e}"), "sb oracle index".to_string()),
+    }
+}
+
+/// Filenames tolerated directly inside the oracle data dir. Anything else
+/// there (a hand-copied backup, a stray `.db-journal`, etc.) is dead weight
+/// riding along in the same directory `SearchIndex::open` manages.
+const ORACLE_DIR_ALLOWED_FILES: &[&str] = &["oracle.db", "oracle.db-wal", "oracle.db-shm", "eval-cache.db"];
+
+/// Disk-footprint section for sb's own data directories. Info-only unless a
+/// size crosses a threshold - this is a "where did my disk go" signal, not a
+/// health check, so nothing here can fail `sb doctor`.
+///
+/// Built to be extended: Phase 9 (oracle data dir move under `sb/`) adds a
+/// `Finding::warn` here for a legacy `~/.local/share/oracle/` directory left
+/// behind by an unfinished migration.
+fn data_dir_findings() -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut total_bytes: u64 = 0;
+
+    let stages_dir = vault::paths::borg_stages_dir();
+    let stages_bytes = vault::paths::dir_size(&stages_dir);
+    total_bytes += stages_bytes;
+    findings.push(Finding::info(format!(
+        "stages: {} ({})",
+        human_bytes(stages_bytes),
+        stages_dir.display()
+    )));
+
+    let (receipts_bytes, receipts_path) = match vault::receipts::receipts_db_path() {
+        Ok(path) => (vault::paths::dir_size(&path), Some(path)),
+        Err(_) => (0, None),
+    };
+    total_bytes += receipts_bytes;
+    findings.push(Finding::info(match &receipts_path {
+        Some(path) => format!("receipts.db: {} ({})", human_bytes(receipts_bytes), path.display()),
+        None => "receipts.db: could not resolve path (HOME/XDG_DATA_HOME unset)".to_string(),
+    }));
+
+    // Logs land flat under `xdg_data_dir()/sb/*.log*` (`.log`, `.log.1`, ...
+    // from `FileRotate`), not nested per subsystem - see `sb/src/logger.rs`.
+    let logs_dir = vault::paths::xdg_data_dir().map(|d| d.join("sb"));
+    let logs_bytes = logs_dir
+        .as_ref()
+        .map(|dir| sum_matching_files(dir, |name| name.contains(".log")))
+        .unwrap_or(0);
+    total_bytes += logs_bytes;
+    findings.push(Finding::info(format!("logs: {}", human_bytes(logs_bytes))));
+    if logs_bytes > DATA_DIR_LOGS_WARN_BYTES {
+        findings.push(Finding::warn(
+            format!(
+                "logs total {} exceeds {}",
+                human_bytes(logs_bytes),
+                human_bytes(DATA_DIR_LOGS_WARN_BYTES)
+            ),
+            "prune or archive old *.log.N files under ~/.local/share/sb/".to_string(),
+        ));
+    }
+
+    // `oracle_db_path()`'s parent: today `~/.local/share/oracle/` (pre Phase
+    // 9); after Phase 9 moves the DB under `sb/`, this line follows with no
+    // code change here.
+    let oracle_dir = vault::paths::oracle_db_path().parent().map(Path::to_path_buf);
+    let oracle_bytes = oracle_dir.as_ref().map(|dir| vault::paths::dir_size(dir)).unwrap_or(0);
+    total_bytes += oracle_bytes;
+    findings.push(Finding::info(format!("oracle: {}", human_bytes(oracle_bytes))));
+
+    if let Some(dir) = &oracle_dir
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+            if is_file && !ORACLE_DIR_ALLOWED_FILES.contains(&name.as_ref()) {
+                findings.push(Finding::warn(
+                    format!("stray backup in oracle dir: {name}"),
+                    format!("remove or relocate {}", entry.path().display()),
+                ));
+            }
+        }
+    }
+
+    if total_bytes > DATA_DIR_TOTAL_WARN_BYTES {
+        findings.push(Finding::warn(
+            format!(
+                "sb data dir total {} exceeds {}",
+                human_bytes(total_bytes),
+                human_bytes(DATA_DIR_TOTAL_WARN_BYTES)
+            ),
+            "review stages/receipts.db/logs/oracle sizes above".to_string(),
+        ));
+    }
+
+    findings
+}
+
+/// Sum the sizes of top-level files (not recursing into subdirectories) whose
+/// filename matches `pred`. Used for the `sb/*.log*` glob - rotated logs sit
+/// flat alongside the live file, not nested under a `logs/` subdirectory.
+fn sum_matching_files(dir: &Path, pred: impl Fn(&str) -> bool) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .filter(|entry| pred(&entry.file_name().to_string_lossy()))
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|metadata| metadata.len())
+        .sum()
 }
 
 /// Telegram doctor section. Was missing pre-Phase 5 despite Telegram being

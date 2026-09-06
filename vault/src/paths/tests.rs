@@ -105,6 +105,22 @@ fn deserialize_tilde_pathbuf_expands_tilde_in_yaml() {
 }
 
 #[test]
+fn dir_size_sums_nested_files() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), vec![0u8; 10]).unwrap();
+    std::fs::create_dir(tmp.path().join("sub")).unwrap();
+    std::fs::write(tmp.path().join("sub").join("b.txt"), vec![0u8; 20]).unwrap();
+
+    assert_eq!(dir_size(tmp.path()), 30);
+}
+
+#[test]
+fn dir_size_of_missing_dir_is_zero() {
+    let tmp = TempDir::new().unwrap();
+    assert_eq!(dir_size(&tmp.path().join("does-not-exist")), 0);
+}
+
+#[test]
 fn all_config_files_land_under_config_root() {
     let root = config_root();
     assert_eq!(borg_config(), root.join("borg.yml"));

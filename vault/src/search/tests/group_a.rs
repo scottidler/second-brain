@@ -280,6 +280,47 @@ fn test_inbox_notes() {
 }
 
 #[test]
+fn test_inbox_oldest() {
+    let index = SearchIndex::open_memory().expect("open");
+    // dotfile: excluded even though it is the oldest by modified_at
+    index
+        .conn
+        .execute(
+            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('inbox/.claude/loop.md', 'Loop', '', 'article', 'assisted', '', '2026-01-01', '[]', '', '', '', '', 100)",
+            [],
+        )
+        .expect("insert dotfile note");
+    index
+        .conn
+        .execute(
+            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('inbox/newer.md', 'Newer', '', 'article', 'assisted', '', '2026-03-21', '[]', '', '', '', '', 300)",
+            [],
+        )
+        .expect("insert newer note");
+    index
+        .conn
+        .execute(
+            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('inbox/oldest.md', 'Oldest', '', 'article', 'assisted', '', '2026-01-15', '[]', '', '', '', '', 200)",
+            [],
+        )
+        .expect("insert oldest note");
+
+    let oldest = index.inbox_oldest().expect("inbox_oldest").expect("some row");
+    assert_eq!(oldest.0, "inbox/oldest.md");
+    assert_eq!(oldest.1, 200);
+}
+
+#[test]
+fn test_inbox_oldest_empty() {
+    let index = SearchIndex::open_memory().expect("open");
+    let oldest = index.inbox_oldest().expect("inbox_oldest");
+    assert!(oldest.is_none());
+}
+
+#[test]
 fn test_quality_distribution() {
     let index = SearchIndex::open_memory().expect("open");
     index
