@@ -9,7 +9,7 @@ borg owns durable capture, multi-channel ingest, and the staged pipeline that pu
 ## Entry Points
 
 - `serve_init(config, version) -> (ServerStartup, ServerHandle)` (`lib.rs`) — bootstraps Telegram/Discord/ntfy/Signal transports, watchdog, and the HTTP listener (port 8181).
-- HTTP endpoints (`routes.rs`): `POST /ingest` (JSON), `POST /ingest/file` (multipart), `POST /note` (JSON), `GET /health`, `GET /health/audit`.
+- HTTP endpoints (`routes.rs`): `POST /ingest` (JSON), `POST /ingest/file` (multipart), `POST /note` (JSON), `GET /trace/{trace_id}` (`routes.rs:211`, a receipts row's terminal state — replay/reingest poll this because the receipts DB is per-host), `GET /health`, `GET /health/audit`. `/ingest`, `/ingest/file`, `/note`, and `/trace/{trace_id}` sit behind `routes::require_auth` (`routes.rs:49`), wired as a `route_layer` over that subrouter in `build_router` (`lib.rs:104`); `/health` and `/health/audit` stay open for probes/dashboard.
 - CLI helpers: `note(config, text, tags)`, `ingest_file(config, file_path, tags, force)` → `IngestOutcome` (`lib.rs`).
 - Pipeline dispatch: `pipeline::process_content(content, tags, method, force, config, trace_id) -> IngestResult`.
 
@@ -38,11 +38,11 @@ borg owns durable capture, multi-channel ingest, and the staged pipeline that pu
 
 **Sources (transports):** `telegram.rs`, `discord.rs`, `ntfy.rs`, `github.rs` (+`github/`), `youtube.rs`, `slides.rs`, `jina.rs`, `signal.rs` (+`signal/`).
 
-**Core pipeline:** `pipeline.rs` (+`pipeline/`), `stages.rs` (+`stages/`), `intake.rs` (+`intake/`), `receipts.rs` (+`receipts/`), `router.rs`, `routes.rs`, `triage.rs`, `replay.rs` (+`replay/`), `backfill.rs` (+`backfill/`).
+**Core pipeline:** `pipeline.rs` (+`pipeline/`), `stages.rs` (+`stages/`), `intake.rs` (+`intake/`), `receipts.rs` (+`receipts/`), `router.rs`, `routes.rs`, `dispatch.rs` (per-transport pipeline-run + notify boilerplate shared by telegram/ntfy/routes), `triage.rs`, `replay.rs` (+`replay/`), `backfill.rs` (+`backfill/`), `harvest.rs` (+`harvest/`, `sb borg harvest`: pull-based ingestion from clyde session exports).
 
-**Infrastructure:** `notify.rs` (+`notify/`), `watchdog.rs` (+`watchdog/`), `migrate.rs`, `config.rs`, `health.rs`, `startup.rs`, `retention.rs` (+`retention/`), `blocklist.rs` (+`blocklist/`), `rkvr.rs` (+`rkvr/`).
+**Infrastructure:** `notify.rs` (+`notify/`), `watchdog.rs` (+`watchdog/`), `migrate.rs`, `config.rs`, `health.rs`, `startup.rs`, `retention.rs` (+`retention/`), `blocklist.rs` (+`blocklist/`), `rkvr.rs` (+`rkvr/`), `service.rs` (systemd unit install/uninstall + render, `install_systemd`/`render_systemd_unit`), `backoff.rs` (`ExponentialBackoff` for transport reconnect).
 
-**Content/extract:** `markdown.rs`, `quality.rs`, `description.rs`, `hygiene.rs`, `assets.rs`, `ocr.rs`, `transcription.rs` (+`transcription/`), `extraction.rs`, `fabric.rs`, `audit.rs`.
+**Content/extract:** `markdown.rs`, `quality.rs`, `description.rs`, `hygiene.rs`, `assets.rs`, `ocr.rs`, `transcription.rs` (+`transcription/`), `extraction.rs`, `fabric.rs`, `audit.rs`, `byline.rs` (deterministic author extraction from raw HTML), `readability.rs` (in-process clean-article extraction: `dom_smoothie` + `htmd`, replaces the `defuddle` shell-out), `thread.rs` (LLM-free thread/social-post title construction), `dedupe.rs` (`sb borg dedupe-sessions`: retire surplus harvest-session-note forks by trace identity), `eval.rs` (+`eval/`, `sb borg eval`: distillation-quality eval harness against golden fixtures).
 
 **Extension lifecycle:** `extension.rs` + `extension/{manifest,schema,sign,install}` — Firefox .xpi manifest/schema/signing (see root CLAUDE.md for the full lifecycle contract).
 

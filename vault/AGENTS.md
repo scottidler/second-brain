@@ -14,13 +14,13 @@ The single source of truth for the Obsidian-vault domain schema (Domain / NoteTy
 - `vault::paths::{expand_tilde, deserialize_tilde_pathbuf, config_root, resolve_vault_root}`.
 - `vault::ledger` — borg's dedup log helpers; `vault::receipts::FailureStage` (the seven terminal stages).
 - `vault::embedding::{EmbeddingModel, load_active_model, embed_query}` (Candle / fastembed, feature-gated).
-- `vault::distilled::Distilled { summary, claims, tags, links, kind_specific, meta, transcript }`.
+- `vault::distilled::Distilled { summary, tldr, slug, enumeration, key_ideas, claims, tags, links, kind_specific, meta, transcript }`.
 - `vault::watcher::VaultWatcher::start(vault_root, config, applying_flag)` — debounced change stream.
 
 ## Contracts & Invariants
 
 - **Schema is law.** `vault::schema` enums are THE source of truth — never hardcode `"ai"`/`"article"`/`"authored"` strings in consumer crates; import the enums.
-- **L2 Distilled contract** `{summary, claims, tags, links, kind_specific, meta, transcript}` is the finalized extractor output consumed by renderers (`distillers`) and borg's publish stage.
+- **L2 Distilled contract** `{summary, tldr, slug, enumeration, key_ideas, claims, tags, links, kind_specific, meta, transcript}` is the finalized extractor output consumed by renderers (`distillers`) and borg's publish stage.
 - **Tilde expansion at the boundary.** Any user-supplied path MUST pass through `expand_tilde` / `deserialize_tilde_pathbuf` before a filesystem call. For `PathBuf` config fields use `#[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]`.
 - **Vault-root precedence:** CLI override > config (`vault.root-path`) > marker-gated CWD (a `.obsidian/` dir must exist). No silent CWD fallback.
 - **`embedding_config` pins `active_model` + `active_dim`** (384 for bge-small-en-v1.5); both cortex and oracle read these on dispatch so they never drift.
@@ -46,4 +46,4 @@ The single source of truth for the Obsidian-vault domain schema (Domain / NoteTy
 - **Embeddings/distilled:** `embedding.rs` (+`embedding/`), `distilled.rs` (+`distilled/`).
 - **Search:** `search.rs` (+`search/`) — see `src/search/AGENTS.md`.
 - **Tags/hygiene:** `canonical.rs`, `hygiene.rs`.
-- **Misc:** `watcher.rs`, `rss.rs` (+`rss/`), `logging.rs`, `config.rs`, `fabric.rs`.
+- **Misc:** `watcher.rs`, `rss.rs` (+`rss/`), `logging.rs`, `config.rs`, `fabric.rs`, `text.rs` (char-accurate, panic-free string truncation), `tombstone.rs` (the shared soft-retire tombstone shape written by `cortex::association` and `borg::dedupe`).

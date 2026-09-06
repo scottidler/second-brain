@@ -50,5 +50,5 @@ Per-kind Stage-2 processors that take a Stage-1 transcript (markitdown / VTT / t
 ## Module Map
 
 - `lib.rs` (`DistillExtractor`, `DistillInputs`), `dispatcher.rs` (`Dispatcher<F>`, `Dispatch`, `DistillKind`), `render.rs`.
-- Per-kind: `article.rs`, `repo.rs`, `video.rs`, `thread.rs`, `image.rs`, `voicenote.rs`, `idea.rs`, `passthrough.rs`.
-- Support: `fabric.rs` (`FabricCaller`/`FabricShell`/`FakeFabric`), `text.rs`, `validate.rs`.
+- Per-kind: `article.rs`, `repo.rs`, `video.rs`, `thread.rs`, `image.rs`, `voicenote.rs`, `idea.rs`, `session.rs` (Claude Code session distiller: head+tail windowing over a harvested transcript cluster).
+- Support: `fabric.rs` (`FabricCaller`/`FabricShell`/`FakeFabric`), `text.rs`, `validate.rs`, `parse.rs` (shared parse helpers: fence stripping, token estimation, common `Pattern*` YAML leaf structs).

@@ -136,3 +136,71 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
 ### Open questions
 - None: the design doc's own success criteria for this phase are "exit 1
   here, exit 0 after Phase 3", which is exactly what was observed.
+
+## Phase 3: Repo doc drift (F10)
+
+### Design decisions
+- Root `CLAUDE.md:16` distillers list corrected to `(article, repo, video,
+  thread, image, voicenote, session, idea)`, matching the eight files actually
+  present in `distillers/src/` post-Phase-1.
+- Root `CLAUDE.md:25` corrected to `borg::service::install_systemd`
+  (`borg/src/service.rs:240`), plus the pure renderer `render_systemd_unit`
+  at `:186` — verified both line numbers against source.
+- Root `CLAUDE.md:52` and `vault/AGENTS.md:17,23` Distilled contract corrected
+  to `{ summary, tldr, slug, enumeration, key_ideas, claims, tags, links,
+  kind_specific, meta, transcript }`, matching `vault::distilled::Distilled`'s
+  actual field order in `vault/src/distilled.rs`.
+- Root `CLAUDE.md:55` L2 patterns line rewritten to the doc's prescribed
+  prose ("chunk/reduce triples for article, video, thread, session,
+  voicenote; `distill-repo`, `distill-image`; nine support patterns; 26
+  files") — verified by listing `borg/patterns/` (26 files: 5 kinds x 3
+  chunk/main/reduce = 15, + `distill-repo` + `distill-image` = 17, + 9
+  support patterns = 26).
+- `borg/AGENTS.md` Entry Points: added `GET /trace/{trace_id}`
+  (`routes.rs:211`, `trace_state`) and named the auth gate
+  (`routes::require_auth`, `routes.rs:49`) as a `route_layer` wired in
+  `build_router` (`lib.rs:104-127`) over `/ingest`, `/ingest/file`, `/note`,
+  and `/trace/{trace_id}`; `/health`/`/health/audit` stay open — verified
+  against the actual router-assembly code, not just the doc's claim.
+- Module-map rows added/removed across five AGENTS.md files, one line each,
+  written from each module's own doc comment (read every file's header
+  before writing its purpose, per instruction — none guessed from filename
+  alone):
+  - `vault/AGENTS.md`: added `text.rs`, `tombstone.rs`.
+  - `borg/AGENTS.md`: added `backoff.rs`, `byline.rs`, `dedupe.rs`,
+    `dispatch.rs`, `eval.rs` (+`eval/`), `harvest.rs` (+`harvest/`),
+    `readability.rs`, `service.rs`, `thread.rs`.
+  - `cortex/AGENTS.md`: removed `hygiene.rs` (file does not exist in
+    `cortex/src/`; the doc's own S5-adjacent stale-row target); added
+    `association.rs`, `bridge.rs`, `entities.rs`, `graph.rs`, `hub.rs`
+    (+`hub/render.rs`, `hub/asymmetry.rs`), `memgraph.rs` under a new
+    "Knowledge graph (graph-augmented-memory)" grouping line (the six
+    modules share one design lineage, so grouped rather than scattered
+    across the existing groups).
+  - `oracle/AGENTS.md`: added `eval.rs` (+`eval/`).
+  - `distillers/AGENTS.md`: removed `passthrough.rs` (deleted by Phase 1);
+    added `session.rs`, `parse.rs`.
+  - `sb/AGENTS.md`: no change, per the doc ("none missing").
+
+### Deviations
+- None from the doc's Phase 3 bullets. The doc's own note that `f97718f`
+  line numbers "confirmed" the routes.rs `:211`/`:49` numbers were re-checked
+  against current `HEAD` (98e9543) content, not assumed stale.
+
+### Tradeoffs
+- Grouped the six new cortex knowledge-graph modules under one new bullet
+  rather than folding them individually into the existing
+  Classification/Quality/Lifecycle groups: they share a single design
+  lineage (`graph-augmented-memory`, `entity-hub-two-vector-synthesis`,
+  `MemGraphRAG`) that none of the existing group labels name, and a future
+  reader scanning the module map benefits more from that grouping than from
+  matching the shortest possible diff.
+- `hub/render.rs` and `hub/asymmetry.rs` documented inline within the
+  `hub.rs` row (`hub.rs (+hub/render.rs, hub/asymmetry.rs)`) rather than as
+  separate top-level rows: the Phase 2 reverse check only requires top-level
+  `<crate>/src/*.rs` files to be documented (nested files are out of its
+  scope per the doc), so this satisfies the lint while still surfacing both
+  files for a human reader, matching the doc's own bracketed instruction.
+
+### Open questions
+- None.

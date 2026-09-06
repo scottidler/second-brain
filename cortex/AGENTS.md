@@ -52,8 +52,9 @@ Each command exposes `run(vault_root, config, opts)` returning typed reports/out
 
 - **Root/orchestration:** `lib.rs` (`lint`/`link` dispatch), `daemon.rs` (event loop, watcher, systemd, tick scheduling, cycle detection).
 - **Classification & linking:** `classify.rs`, `autotag.rs`, `scope.rs`, `naming.rs`, `tags.rs`; `linking.rs`, `links.rs`, `unlink.rs`, `stopwords.rs`, `intel.rs`.
-- **Quality:** `quality.rs`, `duplicates.rs`, `hygiene.rs`, `frontmatter.rs`.
+- **Quality:** `quality.rs`, `duplicates.rs`, `frontmatter.rs`.
 - **Embeddings:** `embed.rs` (+`embed/`).
+- **Knowledge graph (graph-augmented-memory):** `graph.rs` (builds the materialized `edges` table oracle's graph retrieval reads), `entities.rs` (`sb cortex entities --discover`: proposes new glossary entries into `entity-proposals.yml`), `hub.rs` (+`hub/`: `sb cortex hub` stubs/refreshes `entities/*.md` hub notes; `hub/render.rs` is the deterministic claims-by-vector body assembly, `hub/asymmetry.rs` is the read-vs-applied classifier), `association.rs` (`cortex associate`: groups+merges harvest session notes by slug/similarity), `bridge.rs` (`sb cortex bridge-backfill`/`bridge-apply`: one-time historical multi-repo hub backfill), `memgraph.rs` (typed `fact` edges + consolidation agents, Phase 5 MemGraphRAG).
 - **Lifecycle:** `sweep.rs` (+`sweep/`), `summarize.rs` (+`summarize/`), `migrate.rs`, `state.rs`, `report.rs`.
 - **Infra/config:** `config.rs` (schema source of truth), `vault.rs` (`scan_vault` adapter), `startup.rs` (`validate_canonical_assets` gate), `llm.rs`, `fabric.rs`, `opts.rs`, `testutil.rs`.
 

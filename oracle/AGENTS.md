@@ -41,3 +41,4 @@ Defined as `#[tool]` methods on `OracleMcpServer` (`server.rs`); request types +
 - `tools.rs` — request types; `SearchMode` (Bm25/Vector/Hybrid/Graph/GraphHybrid); `DetailLevel` (from vault).
 - `transform.rs` — query-transform stage (HyDE / multi-query); shells to `vault::fabric` (oracle owns the LLM call, `vault` stays LLM-free).
 - `config.rs` — vault root, db path, watcher + inbound-recompute config, and `RetrievalConfig` (the `retrieval:` pipeline); YAML load.
+- `eval.rs` (+`eval/`) — `sb oracle eval`: relevance-lift harness measuring whether graph-augmented retrieval beats the `hybrid` baseline via a pooled, blind LLM judge.
