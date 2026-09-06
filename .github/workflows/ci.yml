@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  RUST_VERSION: 1.96.0
+  CARGO_TERM_COLOR: always
+  # See .otto.yml `bloat` task: keep this in sync with BLOAT_MAX_LINES.
+  BLOAT_MAX_LINES: "1500"
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y curl build-essential git pkg-config libssl-dev \
+            cmake protobuf-compiler clang libclang-dev
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Mark workspace as safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ env.RUST_VERSION }}
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          . "$HOME/.cargo/env"
+          rustup component add clippy rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
+          shared-key: ci
+
+      # Mirrors `otto check` (.otto.yml:55-71) + `otto test` (.otto.yml:73-76).
+      # `otto lint` (whitespace -r) is skipped: Scott's own binary, not
+      # installable in CI.
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Check compilation
+        run: cargo check --workspace --all-targets --features vec
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --features vec -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --features vec
+
+      # Mirrors the `bloat` task (.otto.yml:22-49).
+      - name: Check file line counts
+        run: |
+          LIMIT="${BLOAT_MAX_LINES:-1500}"
+          FAILED=0
+          echo "=== Checking file line counts (limit: $LIMIT) ==="
+          while IFS= read -r file; do
+            lines=$(wc -l < "$file")
+            if [ "$lines" -gt "$LIMIT" ]; then
+              delta=$((lines - LIMIT))
+              echo "  FAIL: $file ($lines lines, +$delta over limit)"
+              FAILED=1
+            fi
+          done < <(find . -type f \( -name "*.rs" -o -name "*.py" -o -name "*.js" -o -name "*.ts" \) \
+            -not -path "*/target/*" \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.venv/*" \
+            -not -path "*/__pycache__/*" \
+            -not -path "*/dist/*" \
+            -not -path "*/build/*" \
+            -not -path "*/.git/*")
+          if [ "$FAILED" -eq 1 ]; then
+            echo ""
+            echo "Decompose these files into modules before proceeding."
+            exit 1
+          fi
+          echo "All files within $LIMIT line limit"
+
+      # Mirrors the `agents-map` task (.otto.yml:50-53): CI and otto call the
+      # same script, so there is one implementation.
+      - name: Lint AGENTS.md module maps
+        run: bin/agents-map

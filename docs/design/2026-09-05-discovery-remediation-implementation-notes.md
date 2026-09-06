@@ -811,3 +811,90 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
   `⚠️  [vault] system/schemas/*-values.md drifted from binary (system/schemas/domain-values.md, system/schemas/type-values.md, system/schemas/origin-values.md, system/schemas/status-values.md)`
   with `-> sb cortex schema --render`. Before the reorder the Warn would have been
   unreachable behind the guard's `return`.
+
+## Phase 13: PR-time CI (R4)
+### Design decisions
+- New `.github/workflows/ci.yml`, one job (`ci`), mirrors `release.yml:17-54`
+  exactly for the container/apt/rustup/cache shape (`RUST_VERSION: 1.96.0`,
+  `debian:bookworm`, `Swatinem/rust-cache@v2` with `shared-key: ci` instead of
+  the release workflow's per-target key, since this workflow builds one
+  target-less job) — `.github/workflows/ci.yml`.
+- Step order follows the assignment's literal ordering (fmt, check, clippy,
+  test, bloat, agents-map) rather than `.otto.yml`'s internal `check` task
+  order (check, clippy, fmt); all four are independent checks so order has no
+  behavioral effect, and fmt-first surfaces the cheapest failure fastest in CI.
+- `bloat` and `agents-map` steps inline/call the same logic as their `.otto.yml`
+  tasks rather than invoking `otto` itself in CI (otto is not installed in the
+  `debian:bookworm` container and installing it was out of scope for this
+  phase) — `bloat` is the verbatim shell body from `.otto.yml:24-48`;
+  `agents-map` invokes `bin/agents-map` by path, the same script `.otto.yml:53`
+  calls, so there is exactly one implementation as the doc requires.
+- `on: push: branches: [main]` plus bare `pull_request` (all PR types, matching
+  the doc's "PR-time CI" framing; no path filters, since every crate in the
+  workspace can affect any other via the shared `vault` lib).
+- Added `rustup component add clippy rustfmt` (not present in `release.yml`,
+  which never runs clippy/fmt) since this workflow's step list requires both.
+
+### Deviations
+- None from the phase's scope. `release.yml`'s per-matrix-target build/package/
+  release steps are correctly absent here; this workflow is check-only, not a
+  release build.
+
+### Tradeoffs
+- Inlining `bloat`'s shell body vs. installing `otto` in the container: chose
+  inlining because the doc explicitly says "the `bloat` loop inlined," and
+  installing a second binary (otto) into the CI container was not itself in
+  the addition list under Architecture.
+
+### Open questions
+- None.
+
+### Local validation (both push-gated success criteria are DEFERRED-TO-PUSH)
+- `yl .github/workflows/ci.yml`: 3 line-length errors (lines over 80 chars).
+  The already-committed `.github/workflows/release.yml` fails the identical
+  check with the same count (3 long lines) under the same linter with no
+  project-level `yl` config present, so this is pre-existing, unenforced
+  style in this repo, not a defect introduced here.
+- `python3 -c "import yaml; yaml.safe_load(open(...))"`: parses with no error.
+- Step list vs. `.otto.yml` `check`/`test` tasks: `cargo fmt --all --check`,
+  `cargo check --workspace --all-targets --features vec`,
+  `cargo clippy --workspace --all-targets --features vec -- -D warnings`,
+  `cargo test --workspace --features vec` all textually identical to
+  `.otto.yml:63-76`. `bloat` step body textually identical to `.otto.yml:25-48`
+  (including `BLOAT_MAX_LINES` default and the same `find` exclusions).
+  `agents-map` step calls `bin/agents-map`, the same invocation as
+  `.otto.yml:53`. `lint` (`whitespace -r`) intentionally omitted per the
+  assignment (Scott's own binary, not installable in CI).
+- `bin/agents-map` confirmed executable (`-rwxrwxr-x`) and invoked by relative
+  path from repo root, matching `.otto.yml:53`'s invocation.
+- `otto ci` run locally: exit 0, all of `lint, bloat, agents-map, check, test`
+  passed (`ci` finished successfully; 410 passed in vault's lib tests,
+  `candle_bert_matches_sentence_transformers_reference` ran and passed
+  (offline, fixture-based), `candle_bert_rss_plateaus_across_1000_calls` and
+  `perf_scan_vault_thousand_notes` both `ignored`).
+- Offline-test-path claim verified by direct inspection, not just by running
+  the suite once:
+  - `vault/tests/regression/candle/parity.rs`: reads
+    `tests/fixtures/bge-reference.json`; on read failure it `eprintln!`s a hint
+    and returns (skip, not fail) rather than downloading anything. Confirmed
+    `git ls-files vault/tests/fixtures/` is empty in this worktree, i.e. the
+    fixture is not committed, so this test skips in a fresh CI checkout by
+    construction (it happened to pass locally because a previously-generated
+    fixture file sits untracked in this dev tree).
+  - `vault/src/embedding/candle/tests.rs`: the real-model parity test reads
+    `CANDLE_TESTS_REAL` and returns early (skip) unless it equals `"1"`; CI
+    workflow sets no such env var, so it is always skipped in CI.
+  - `vault/tests/candle-bounded.rs` and `vault/tests/perf.rs`: both carry
+    `#[ignore]` (confirmed by grep), so `cargo test` does not run them by
+    default; the workflow issues plain `cargo test`, no `-- --ignored`.
+  - `cortex/tests/hub_retrieval_contract.rs`: loads
+    `tests/fixtures/bge-small-en-v1.5-tokenizer.json` via `Tokenizer::from_file`
+    (a real, committed ~711 KB file per its own doc comment, unlike the candle
+    fixture above) and never calls out to a model-weights download; tokenizing
+    needs no inference. Confirmed no `download`/`network`/hf-hub calls in the
+    file.
+  - Net: the default `cargo test --workspace --features vec` path in this CI
+    workflow makes zero network calls.
+- Both push-gated success criteria (`gh workflow view ci` lists the workflow;
+  first run on `main` is green, warm-cache duration recorded) are
+  DEFERRED-TO-PUSH per the assignment; not attempted in this phase.
