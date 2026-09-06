@@ -965,3 +965,70 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
   "would rename origin: 'human'"` = 87, `grep -c "would rename origin:
   'ai-generated'"` = 1, `grep -c "would rename status: 'resolved-workaround'"`
   = 1. All three match the doc's expected counts exactly.
+
+## Phase 15: Vault repo edits
+
+### Design decisions
+- F9's new `work/` row was placed between `entities/` and `system/` in both
+  `CLAUDE.md` and `README.md` — keeps content dirs grouped together with the
+  operational `system/` row last, matching the existing (non-alphabetical)
+  ordering already in both tables.
+- README.md's `work/` table row was written unquoted (`| work/ |`, not
+  `` | `work/` | ``) even though every other README row backtick-quotes the
+  folder name — the phase's own success criterion (`grep -c '^| work/'
+  CLAUDE.md README.md` = 1 each) pins the literal unquoted line start, so the
+  one row breaks the table's quoting convention to satisfy the stated check.
+- `frontmatter.md`'s new "entity hubs carry no domain/origin/status" line
+  (Phase 12's deferred hand edit) was written as plain prose with no wikilink
+  — the doc's quoted text is bare prose; an invented `[[domain-values]]`
+  cross-reference would have pointed at a heading that render_all doesn't
+  create.
+- `daily.md`'s pushups/situps became the literal `20` the doc specifies
+  (not the old `workWeekNum + 10` formula's typical output) — doc's F7 bullet
+  states the number outright, so no attempt was made to compute an
+  equivalent starting value.
+
+### Deviations
+- **S7 (reingest) could not complete: the source YouTube video is gone.**
+  `sb borg reingest --source https://www.youtube.com/shorts/iDISCSQn6mI`
+  returned `Failed: fetch-failed`. Root cause confirmed independently of the
+  reingest path: a direct `yt-dlp --skip-download --simulate` against the
+  same URL returns `ERROR: [youtube] iDISCSQn6mI: This video is unavailable`
+  — YouTube's own API says the video no longer exists (this is not a sandbox
+  or network-egress artifact; the request reached YouTube and got a real
+  answer). `sb borg log --trace <trace>` confirms `status: failed`,
+  `failure_stage: fetch-failed`. Because the pipeline never reaches the
+  publish step, `notes/prompt-caching-cuts-claude-code-bills-by-80.md` is
+  byte-identical to its pre-phase state: the `## Transcript` section is still
+  present (count 1, not the doc's target 0), and the file produced no `git
+  diff`, so it was not staged (nothing to stage — content matches HEAD).
+  This is the one bullet of Phase 15 left undone; it requires either the
+  video coming back or Scott choosing a different remediation for that one
+  note (a different source, or one of the rejected alternatives such as
+  hand-stripping the transcript).
+- **Shell `grep` gave an intermittently wrong (0) count for the literal
+  string `entities/` in `README.md`**, even immediately after independent
+  confirmation (via `sed -n '13p'`, `od -c`, and Python's `str.count`/
+  `re.findall`) that the exact bytes `entities/` are present exactly once,
+  with no non-ASCII characters. The same `grep -c entities` call also failed
+  against a byte-identical copy of the file in the scratch directory on a
+  later invocation despite succeeding on an earlier one — non-deterministic,
+  not a content problem. Verified via Python throughout instead; every other
+  grep-based criterion in this phase reproduced correctly across repeated
+  calls. Recorded here as a real, unexplained tooling anomaly rather than
+  silently working around it.
+
+### Tradeoffs
+- None beyond what's recorded above.
+
+### Open questions
+- S7's note (`notes/prompt-caching-cuts-claude-code-bills-by-80.md`) still
+  carries its `## Transcript` section because the source video is gone from
+  YouTube. Scott's call: leave the note as-is (it already has a transcript,
+  just not a freshly regenerated one), or pick a different remediation path
+  for this one note.
+- The `sleep 660` two-tick re-stamp check was started in the background;
+  first reading (immediately after the templates rewrite) is `cortex- count
+  = 0`. Second reading (after ~11 minutes / two daemon ticks) will be
+  reported separately once the background wait completes — not blocking this
+  writeup.
