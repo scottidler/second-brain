@@ -633,19 +633,7 @@ impl OracleMcpServer {
         description = "List all valid schema values - domains, note types, origins, statuses, and ingest methods. Use this to understand what filter values are available."
     )]
     async fn schema_info(&self, _params: Parameters<SchemaInfoRequest>) -> Result<CallToolResult, McpError> {
-        let domains: Vec<&str> = Domain::all().iter().map(|d| d.as_str()).collect();
-        let note_types: Vec<&str> = NoteType::all().iter().map(|t| t.as_str()).collect();
-        let origins: Vec<&str> = Origin::all().iter().map(|o| o.as_str()).collect();
-        let statuses: Vec<&str> = Status::all().iter().map(|s| s.as_str()).collect();
-        let methods: Vec<&str> = Method::all().iter().map(|m| m.as_str()).collect();
-
-        Ok(CallToolResult::success(vec![Content::json(json!({
-            "domains": domains,
-            "note_types": note_types,
-            "origins": origins,
-            "statuses": statuses,
-            "methods": methods,
-        }))?]))
+        Ok(CallToolResult::success(vec![Content::json(schema_info_payload())?]))
     }
 
     /// Trigger a reindex of the vault
@@ -1080,6 +1068,31 @@ impl ServerHandler for OracleMcpServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info
     }
+}
+
+/// The `schema_info` payload: every schema enum rendered as `{value,
+/// description}` pairs so a caller learns what a value MEANS, not just that it
+/// exists. Split out of the tool method so the shape is unit-testable without
+/// standing up an MCP server or opening the search index.
+pub fn schema_info_payload() -> serde_json::Value {
+    json!({
+        "domains": schema_values(Domain::all(), Domain::as_str, Domain::description),
+        "note_types": schema_values(NoteType::all(), NoteType::as_str, NoteType::description),
+        "origins": schema_values(Origin::all(), Origin::as_str, Origin::description),
+        "statuses": schema_values(Status::all(), Status::as_str, Status::description),
+        "methods": schema_values(Method::all(), Method::as_str, Method::description),
+    })
+}
+
+fn schema_values<T>(
+    items: &'static [T],
+    value: fn(&T) -> &'static str,
+    description: fn(&T) -> &'static str,
+) -> Vec<serde_json::Value> {
+    items
+        .iter()
+        .map(|item| json!({ "value": value(item), "description": description(item) }))
+        .collect()
 }
 
 #[cfg(test)]

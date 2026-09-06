@@ -768,7 +768,9 @@ fn trace_block_unparseable_expires_is_null_window() {
 /// `schema_info` derives `note_types` from `NoteType::all()`, so a new
 /// schema variant (`NoteType::Session`) must appear here with zero
 /// oracle-side wiring. If this ever fails, `schema_info` stopped deriving
-/// from the schema enum and started hardcoding a list.
+/// from the schema enum and started hardcoding a list. Rows are
+/// `{value, description}` objects as of the discovery-remediation F3 change,
+/// so the assertion reads `v["value"]`, not the bare string.
 #[tokio::test]
 async fn schema_info_includes_session_note_type() {
     let db = SearchIndex::open_memory().expect("open db");
@@ -781,8 +783,10 @@ async fn schema_info_includes_session_note_type() {
     let parsed = first_content_as_json(&result);
     let note_types = parsed["note_types"].as_array().expect("note_types array");
     assert!(
-        note_types.iter().any(|v| v == "session"),
-        "note_types must include 'session': {note_types:?}"
+        note_types
+            .iter()
+            .any(|v| v["value"] == json!("session") && v["description"].as_str().is_some_and(|d| !d.is_empty())),
+        "note_types must include a described 'session' row: {note_types:?}"
     );
 }
 
@@ -802,4 +806,38 @@ fn format_note_carries_trace_block_at_every_level() {
             "trace block missing at {level:?}"
         );
     }
+}
+
+/// `schema_info` must emit `{value, description}` pairs, not bare strings: a
+/// caller learns what a value MEANS. All five enums are covered, and every
+/// description is non-empty.
+#[test]
+fn schema_info_payload_emits_value_description_pairs() {
+    let payload = schema_info_payload();
+    for key in ["domains", "note_types", "origins", "statuses", "methods"] {
+        let rows = payload[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} is not an array"));
+        assert!(!rows.is_empty(), "{key} is empty");
+        for row in rows {
+            let value = row["value"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} row has no value: {row}"));
+            let description = row["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} row {value} has no description"));
+            assert!(!value.is_empty(), "{key} row has an empty value");
+            assert!(!description.is_empty(), "{key} row {value} has an empty description");
+        }
+    }
+    assert_eq!(
+        payload["note_types"]
+            .as_array()
+            .expect("note_types array")
+            .iter()
+            .filter(|row| row["value"] == json!("entity"))
+            .count(),
+        1,
+        "entity is a note type"
+    );
 }

@@ -51,6 +51,27 @@ impl Domain {
         }
     }
 
+    /// Human-readable gloss for this domain, rendered into
+    /// `system/schemas/domain-values.md` by `sb cortex schema` and returned by
+    /// oracle's `schema_info`. Exhaustive on purpose: a new variant cannot ship
+    /// undescribed.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Ai => "AI, LLMs, agents, prompting, AI tools",
+            Self::Tech => "Programming, CLI tools, DevOps, SRE, Docker, Kubernetes, infrastructure",
+            Self::Football => "Coaching, schemes, plays, drills, film notes",
+            Self::Work => "Platform engineering, career, leadership, team management",
+            Self::Writing => "Fiction projects, craft essays, poetry",
+            Self::Music => "Electronic music production, instruments",
+            Self::Spanish => "Language learning, vocabulary, grammar",
+            Self::Life => "Health, fitness, motivation, psychology, habits, personal development, culture",
+            Self::Homelab => "Self-hosting, home networking, Plex, NAS, Unifi, pfSense, home automation",
+            Self::Diy => "Building, woodworking, construction, knots, furniture, crafts",
+            Self::Resources => "Books, general reference material (not a catch-all)",
+            Self::System => "Vault operations, templates, schemas, dashboards",
+        }
+    }
+
     pub fn all() -> &'static [Self] {
         &[
             Self::Ai,
@@ -163,6 +184,43 @@ impl NoteType {
             Self::Digest => "digest",
             Self::Review => "review",
             Self::Session => "session",
+        }
+    }
+
+    /// Human-readable gloss for this note type, rendered into
+    /// `system/schemas/type-values.md` by `sb cortex schema` and returned by
+    /// oracle's `schema_info`. Exhaustive on purpose: a new variant cannot ship
+    /// undescribed.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Youtube => "YouTube video summary",
+            Self::Article => "Blog post, news article, web content",
+            Self::Github => "GitHub repository or project",
+            Self::Social => "X/Twitter or other social-media post (Reddit has its own type)",
+            Self::Reddit => "Reddit post or comment thread",
+            Self::Image => "Captured image, distilled from its extracted text and visual content",
+            Self::Pdf => "PDF document capture",
+            Self::Audio => "Voice note or other audio capture, distilled from its transcript",
+            Self::Note => "Original thought, evergreen note, general",
+            Self::Vocab => "Vocabulary word (English or Spanish)",
+            Self::Document => "Office document or other non-PDF file capture",
+            Self::Code => "Code snippet or source file capture",
+            Self::Book => "Book note or review",
+            Self::Video => "Non-YouTube video content",
+            Self::Research => "Deep dive research output",
+            Self::Daily => "Daily journal entry",
+            Self::Meeting => "Meeting notes or transcript",
+            Self::Moc => "Map of Content, index note",
+            Self::Link => "Bookmarked URL with light annotation",
+            Self::Poem => "Creative writing, poetry",
+            Self::System => "Vault operational note",
+            Self::Entity => {
+                "Entity hub (concept, creator, or source) stubbed by `sb cortex hub`; \
+                 carries no `domain`, `origin`, or `status`"
+            }
+            Self::Digest => "Periodic intel digest produced by `sb cortex intel`",
+            Self::Review => "Vault review note produced by `sb cortex intel`",
+            Self::Session => "Distilled Claude Code session, pulled by `sb borg harvest`",
         }
     }
 
@@ -305,6 +363,27 @@ impl Origin {
         }
     }
 
+    /// Human-readable gloss for this origin, rendered into
+    /// `system/schemas/origin-values.md` by `sb cortex schema` and returned by
+    /// oracle's `schema_info`. Exhaustive on purpose: a new variant cannot ship
+    /// undescribed.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Authored => {
+                "Scott decided it exists and did the thinking: daily notes, original thoughts, \
+                 meeting notes typed by hand"
+            }
+            Self::Assisted => {
+                "Scott's impetus, machine's hands: borg ingestions, transcript summaries, \
+                 research compiled from sources"
+            }
+            Self::Generated => {
+                "AI decided it exists and did the thinking: vault pattern analysis, theme \
+                 extraction, digest generation"
+            }
+        }
+    }
+
     pub fn all() -> &'static [Self] {
         &[Self::Authored, Self::Assisted, Self::Generated]
     }
@@ -345,6 +424,19 @@ impl Status {
             Self::Reading => "reading",
             Self::Reviewed => "reviewed",
             Self::Starred => "starred",
+        }
+    }
+
+    /// Human-readable gloss for this status, rendered into
+    /// `system/schemas/status-values.md` by `sb cortex schema` and returned by
+    /// oracle's `schema_info`. Exhaustive on purpose: a new variant cannot ship
+    /// undescribed.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Unread => "Ingested but not yet looked at",
+            Self::Reading => "Currently reading or reviewing",
+            Self::Reviewed => "Read and processed",
+            Self::Starred => "High value, reference often",
         }
     }
 
@@ -401,6 +493,24 @@ impl Method {
             Self::Signal => "signal",
             Self::Manual => "manual",
             Self::Harvest => "harvest",
+        }
+    }
+
+    /// Human-readable gloss for this ingest method. No `*-values.md` file is
+    /// rendered for `Method` (the four generated schema docs cover domain,
+    /// type, origin, status); this feeds oracle's `schema_info`. Exhaustive on
+    /// purpose: a new variant cannot ship undescribed.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Telegram => "Telegram message to the borg bot",
+            Self::Discord => "Discord message to the borg bot",
+            Self::Http => "HTTP POST to borg's ingest endpoint (Firefox extension, scripts)",
+            Self::Clipboard => "Clipboard capture from the desktop hotkey client",
+            Self::Cli => "`sb borg ingest` run by hand",
+            Self::Ntfy => "ntfy topic subscription",
+            Self::Signal => "Signal Note-to-Self or allowlisted peer DM",
+            Self::Manual => "Written by hand in the vault; never passed through borg",
+            Self::Harvest => "Nightly `sb borg harvest` pull from clyde's session export",
         }
     }
 

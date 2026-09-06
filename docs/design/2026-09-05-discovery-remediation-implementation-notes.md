@@ -678,3 +678,136 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
    printed `❌ [vault] legacy oracle DB at ... refusing to create an empty
    index (runbook R1 moves it)` — the expected Phase 9 fail-closed guard;
    left untouched per instructions.
+
+## Phase 12: Schema docs rendered from `vault::schema` (F3)
+
+### Design decisions
+- `description(&self) -> &'static str` added to all five enums with an exhaustive
+  `match` — `vault/src/schema.rs::{Domain,NoteType,Origin,Status,Method}::description` —
+  so a new variant cannot ship undescribed. Text seeded from the vault's
+  `system/schemas/*-values.md` tables; ten `NoteType` variants (entity, session,
+  digest, review, image, pdf, reddit, audio, document, code) and four `Method`
+  variants (harvest, signal, discord, ntfy) got fresh prose because the vault
+  doc never listed them (it carried 15 of 25 note types).
+- `NoteType::Entity`'s description states the hub contract verbatim: "carries no
+  `domain`, `origin`, or `status`". Pinned by
+  `vault/src/schema/tests.rs::entity_description_states_the_hub_contract` so the
+  clause cannot be paraphrased away; cortex.yml's `entities/**` path-exempt
+  (Phase 14) is the enforcing half of the same rule.
+- Drift comparison neutralises exactly one field — `cortex/src/schema_docs.rs::matches_render`
+  re-renders using the `generated-at` value the on-disk file already carries, then
+  compares byte-for-byte. A naive bytes-vs-disk compare would report drift on every
+  run because the timestamp always moves. Consequence: an unchanged file is never
+  rewritten, so `generated-at` records the last real content change rather than the
+  last time anyone ran the verb. A file with no `generated-at:` in its leading
+  frontmatter (the hand-written originals) can never match, which is the right answer.
+  `cortex/src/schema_docs.rs::disk_generated_at` only reads the leading frontmatter
+  block, so a `generated-at:` mentioned in the body cannot spoof the comparison.
+- The schema-doc drift check runs FIRST in `sb/src/cli/checks.rs::vault_findings`,
+  before the oracle config load. That function had three early `return vec![...]`
+  paths (the Phase 9 legacy-oracle-DB guard among them); on this host the guard
+  fires, so a finding appended after them would never be reachable. The three
+  early returns now push onto the accumulated `findings` and return it.
+- `oracle::server::schema_info_payload` split out of the `#[tool]` method
+  (`oracle/src/server.rs`) so the `{value, description}` shape is unit-testable
+  without an MCP server or an open search index — which matters on a host where
+  the Phase 9 guard refuses to open the index at all.
+- Snapshot fixtures live at `cortex/src/schema_docs/fixtures/*.md` with an
+  `#[ignore]` regen test, mirroring `cortex/src/sweep/fixtures/cold-notes-expected.md`
+  and `sweep/tests.rs::regenerate_cold_report_snapshot`.
+- `cortex/AGENTS.md` Module Map gained a `schema_docs.rs` entry: Phase 2's
+  `bin/agents-map` lint fails `otto ci` on any undocumented module (it did, and
+  this is the fix).
+
+### Deviations
+- Design doc names the frontmatter keys as `type`/`domain`/`origin`/`generated-at`/
+  `generator`/`pinned`. The renderer also emits `title`, `date`, and `tags: [obsidian]`.
+  Reason: cortex.yml's `frontmatter.required` is `[title, date, type, domain, origin, tags]`.
+  `system/**` is lint-excluded today, so nothing forces it, but shipping a
+  policy-violating file from a generator is the wrong default. `date` is the date
+  half of `generated-at`, from the same input, so the two can never disagree.
+- `origin-values.md`'s "## The Key Distinction" prose is preserved as a second
+  `const` (`ORIGIN_KEY_DISTINCTION`) rendered between the table and the Rules block,
+  via an `extra: Option<&'static str>` field on `DocSpec`. The spec described one
+  Rules const per file; folding this section into the Rules const produced a
+  nested "Rules:" inside "## Rules". Same content, correct structure.
+- The `origin-values.md` table loses its four-column shape (Value / Who decided it
+  exists? / Who did the thinking? / Example) and `type-values.md` loses its "Typical
+  origin" column, because the spec's contract is "the values table from the enum
+  (value, description)". The dropped columns' content is folded into the
+  `Origin::description` strings; the type doc's typical-origin hints are gone (they
+  were advisory and partly wrong — `entity`, `digest`, `session` had no row at all).
+- Two Rules lines were rewritten rather than carried verbatim, because a generated
+  file cannot instruct the reader to edit it: domain's "New domain values require
+  updating this file, the obsidian-borg classifier, and any Bases views" ->
+  "added to `Domain` in `vault/src/schema.rs`; this file and any Bases views follow
+  from there", and type's "any Dataview queries" -> "any Bases views" (the vault
+  moved off Dataview). The stale "Values are single lowercase words. No hyphens,
+  no underscores." line is dropped as instructed, pinned by
+  `rules_blocks_drop_the_stale_no_hyphens_rule`.
+- `oracle/src/server/tests.rs::schema_info_includes_session_note_type` pinned the
+  OLD bare-string shape (`note_types.iter().any(|v| v == "session")`) and failed
+  once the payload became objects. Inverted in place to assert
+  `v["value"] == "session"` with a non-empty `description`, with the doc comment
+  updated to say why — not deleted, not left green by accident.
+- Criterion 2 was demonstrated against a temp copy of `system/schemas/` rather than
+  the live vault, so the vault worktree was never touched at all (no render-then-
+  restore). Rendering into the real vault is Phase 15's F3 step.
+
+### Tradeoffs
+- Neutralising `generated-at` in the compare, vs. dropping the field entirely: keeping
+  it costs the special-case in `matches_render` but preserves a real "when did this
+  last change" signal in the file. Dropping it would have made the compare trivially
+  byte-exact and lost that.
+- Rewrite-on-drift only, vs. always rewrite under `--render`: only-on-drift keeps the
+  vault (Syncthing'd, git-tracked) free of no-op commits from a timestamp bump. Cost
+  is that `--render` reports `unchanged` rather than `written` for a file that is
+  already correct, which reads slightly oddly for a verb named "render".
+- `Method` gets a `description()` with no corresponding `*-values.md` file. Skipping
+  it would have kept the enum surface smaller; including it makes `schema_info`
+  uniform across all five enums, which is the tool's whole point.
+
+### Open questions
+- Root `CLAUDE.md` does not mention `sb cortex schema` or that four of the five
+  schema docs are now generated. Phase 10's scope explicitly included a CLAUDE.md
+  edit; Phase 12's did not, so it was left alone. Worth a line in a later phase or
+  the finalization commit.
+- The four rendered files will land in the vault in Phase 15, replacing hand-written
+  files whose `date: 2026-03-17` and `origin: authored` become `date: <render day>`
+  and `origin: generated`. That is intended, but it is a visible metadata change on
+  four long-lived notes.
+
+### Observed output
+- `otto ci`: green (`✅ All CI checks passed!`). One intermediate failure fixed
+  inline: `agents-map` reported `FAIL: cortex/AGENTS.md: schema_docs.rs undocumented`,
+  plus `cargo fmt` diffs in the three new test blocks.
+- Criterion 1 — `cargo test --workspace --features vec schema_docs`:
+  `test result: ok. 10 passed; 0 failed; 1 ignored` (the ignored one is the
+  fixture-regeneration test).
+- Criterion 2 — against a temp copy of the vault's `system/schemas/`
+  (`diff -r` against the real directory: IDENTICAL before the run):
+  `sb cortex --vault <tmp> schema --check` printed four `drifted` lines and
+  `exit=1`; `--render` printed four `written` lines and `exit=0`; a second
+  `--check` printed four `unchanged` lines and `exit=0`; a bare
+  `sb cortex schema` (no flag) also printed `unchanged` and `exit=0`, confirming
+  `--check` is the default. `frontmatter.md` in the temp copy stayed byte-identical
+  to the vault's. `git -C ~/repos/scottidler/obsidian status --porcelain system/schemas/`
+  is empty: the vault worktree was never modified.
+- Criterion 3 — `sb oracle call schema_info` could NOT be run on this host: the
+  Phase 9 fail-closed guard refuses, exactly as designed
+  (`Error: Failed to open database / legacy oracle DB at ~/.local/share/oracle but
+  the current path is ~/.local/share/sb/oracle/oracle.db; refusing to create an
+  empty index (runbook R1 moves it)`, exit 1). Proved instead by
+  `oracle/src/server/tests.rs::schema_info_payload_emits_value_description_pairs`,
+  which asserts every one of the five keys (`domains`, `note_types`, `origins`,
+  `statuses`, `methods`) is an array of `{value, description}` objects with
+  non-empty descriptions — 53 description fields in total, well over the
+  criterion's threshold of 5. `cargo test --workspace --features vec schema_info`:
+  `test result: ok. 2 passed; 0 failed`.
+- Doctor, on this host (Phase 9 guard live), prints BOTH findings in the `vault`
+  section, which is the point of moving the schema check ahead of the early returns:
+  `❌ [vault] legacy oracle DB at /home/saidler/.local/share/oracle ... (runbook R1 moves it)`
+  then
+  `⚠️  [vault] system/schemas/*-values.md drifted from binary (system/schemas/domain-values.md, system/schemas/type-values.md, system/schemas/origin-values.md, system/schemas/status-values.md)`
+  with `-> sb cortex schema --render`. Before the reorder the Warn would have been
+  unreachable behind the guard's `return`.

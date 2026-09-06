@@ -729,18 +729,24 @@ fn receipts_summary() -> Result<String, String> {
 }
 
 fn vault_findings() -> Vec<Finding> {
+    // The schema-doc drift check runs FIRST and unconditionally: it reads four
+    // markdown files, not the oracle index, so it must survive every early
+    // return below (the legacy-oracle-DB guard among them).
+    let mut findings = schema_docs_findings();
+
     // Open the oracle SQLite index and pull two readings: total note count
     // (and schema gaps) and embedding coverage. Read-only.
     let config = match oracle::Config::load(None) {
         Ok(c) => c,
         Err(e) => {
-            return vec![Finding::error(
+            findings.push(Finding::error(
                 format!("could not load oracle config: {e}"),
                 format!(
                     "ensure {} exists (sb bootstrap)",
                     vault::paths::oracle_config().display()
                 ),
-            )];
+            ));
+            return findings;
         }
     };
     let db = match vault::search::SearchIndex::open(&config.db_path()) {
@@ -749,17 +755,17 @@ fn vault_findings() -> Vec<Finding> {
         // `sb oracle index` would not fix it, the runbook move would, and
         // until it runs every opener (cortex daemon included) refuses.
         Err(e) if e.downcast_ref::<vault::search::SearchError>().is_some() => {
-            return vec![Finding::error(format!("{e}"), LEGACY_ORACLE_REMEDY.to_string())];
+            findings.push(Finding::error(format!("{e}"), LEGACY_ORACLE_REMEDY.to_string()));
+            return findings;
         }
         Err(e) => {
-            return vec![Finding::warn(
+            findings.push(Finding::warn(
                 format!("oracle SQLite index not openable: {e}"),
                 "sb oracle index".to_string(),
-            )];
+            ));
+            return findings;
         }
     };
-
-    let mut findings = Vec::new();
 
     match db.stats() {
         Ok(stats) => {
@@ -815,6 +821,44 @@ fn vault_findings() -> Vec<Finding> {
 /// filter cortex's CLI applies (`lintable_notes` in `cortex::lib`) is the
 /// same set doctor counts over - a direct `scan_vault` call would count the
 /// larger ignore-only set instead.
+/// Are the four generated `system/schemas/*-values.md` files still what the
+/// binary renders? Same compare `sb cortex schema --check` runs, so doctor and
+/// the verb can never disagree. Mirrors `shared_config_findings`.
+fn schema_docs_findings() -> Vec<Finding> {
+    let cortex_config = match cortex::config::Config::load(None) {
+        Ok(c) => c,
+        Err(e) => {
+            return vec![Finding::warn(
+                format!("could not load cortex config for the schema-doc check: {e}"),
+                "sb bootstrap".to_string(),
+            )];
+        }
+    };
+    let vault_root = match cortex_config.vault_root(None) {
+        Ok(p) => p,
+        Err(e) => {
+            return vec![Finding::warn(
+                format!("could not resolve vault root for the schema-doc check: {e}"),
+                "set `vault.root-path` in cortex.yml".to_string(),
+            )];
+        }
+    };
+    match cortex::schema_docs::render_all(&vault_root, false) {
+        Ok(report) if report.drifted() => vec![Finding::warn(
+            format!(
+                "system/schemas/*-values.md drifted from binary ({})",
+                report.drifted_paths().join(", ")
+            ),
+            "sb cortex schema --render".to_string(),
+        )],
+        Ok(_) => vec![Finding::ok("system/schemas/*-values.md: matches binary".to_string())],
+        Err(e) => vec![Finding::warn(
+            format!("schema-doc drift check failed: {e}"),
+            "sb cortex schema --check".to_string(),
+        )],
+    }
+}
+
 fn frontmatter_policy_findings() -> Vec<Finding> {
     let cortex_config = match cortex::config::Config::load(None) {
         Ok(c) => c,

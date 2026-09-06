@@ -27,6 +27,7 @@ pub mod naming;
 pub mod opts;
 pub mod quality;
 pub mod report;
+pub mod schema_docs;
 pub mod scope;
 pub mod startup;
 pub mod state;

@@ -127,3 +127,43 @@ fn validate_repo_slug_accepts_org_repo_and_rejects_malformed() {
     assert!(!validate_repo_slug("a/"), "empty repo component");
     assert!(!validate_repo_slug("/b"), "empty org component");
 }
+
+/// Every variant of every schema enum carries a non-empty, non-duplicated
+/// description. The `match` arms are exhaustive, so a new variant fails to
+/// compile without one; this guards the softer failure of an empty or
+/// copy-pasted string.
+#[test]
+fn every_schema_variant_has_a_distinct_description() {
+    fn check<T: std::fmt::Debug>(kind: &str, items: &[T], describe: impl Fn(&T) -> &'static str) {
+        let mut seen: Vec<&'static str> = Vec::new();
+        for item in items {
+            let desc = describe(item);
+            assert!(
+                !desc.trim().is_empty(),
+                "{kind} variant {item:?} has an empty description"
+            );
+            assert!(
+                !seen.contains(&desc),
+                "{kind} variant {item:?} reuses another variant's description: {desc}"
+            );
+            seen.push(desc);
+        }
+    }
+    check("Domain", Domain::all(), Domain::description);
+    check("NoteType", NoteType::all(), NoteType::description);
+    check("Origin", Origin::all(), Origin::description);
+    check("Status", Status::all(), Status::description);
+    check("Method", Method::all(), Method::description);
+}
+
+/// The `Entity` hub contract is stated in the description that ships to the
+/// vault doc and to oracle's `schema_info`; cortex.yml's `entities/**`
+/// path-exempt is the enforcing half of the same rule.
+#[test]
+fn entity_description_states_the_hub_contract() {
+    let desc = NoteType::Entity.description();
+    assert!(
+        desc.contains("carries no `domain`, `origin`, or `status`"),
+        "Entity description must state the hub contract, got: {desc}"
+    );
+}

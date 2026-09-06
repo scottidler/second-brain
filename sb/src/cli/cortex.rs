@@ -73,6 +73,8 @@ pub enum Command {
     Migrate(MigrateArgs),
     /// Sweep tags: consolidate to canonical vocabulary
     Sweep(SweepArgs),
+    /// Render system/schemas/*-values.md from the schema enums (--check by default)
+    Schema(SchemaArgs),
     /// Distill legacy notes into the structured L2 contract (backfill)
     Summarize(SummarizeArgs),
     /// Embed note summaries (and Phase B transcripts) into the search DB
@@ -301,6 +303,17 @@ impl From<MigrateArgs> for opts::MigrateOpts {
             plan: a.plan,
         }
     }
+}
+
+#[derive(Args)]
+pub struct SchemaArgs {
+    /// Write the four generated value docs into the vault.
+    #[arg(long)]
+    pub render: bool,
+    /// Report drift and write nothing; exit 1 if any file differs. The default
+    /// when neither flag is given.
+    #[arg(long, conflicts_with = "render")]
+    pub check: bool,
 }
 
 #[derive(Args)]
@@ -550,6 +563,17 @@ impl CortexCli {
             Command::Sweep(a) => {
                 let report = cortex::sweep::run(&vault_root, &config, &a.into())?;
                 print_sweep_report(&report);
+            }
+            Command::Schema(a) => {
+                log::debug!("cortex schema: render={} check={}", a.render, a.check);
+                // --check is the default: the verb is a drift gate first and a
+                // writer second, so a bare `sb cortex schema` never touches the
+                // vault.
+                let report = cortex::schema_docs::render_all(&vault_root, a.render)?;
+                print_schema_report(&report);
+                if report.drifted() {
+                    return Err(crate::error::SilentFailure.into());
+                }
             }
             Command::Summarize(a) => {
                 let summary = cortex::summarize::run(&vault_root, &config, &a.into()).await?;
@@ -886,6 +910,24 @@ fn print_unlink_stats(s: &cortex::unlink::UnlinkStats) {
         println!(
             "Dry run: would retract {} wikilink(s) across {} file(s). Re-run with --apply.",
             s.occurrences, s.files_changed
+        );
+    }
+}
+
+fn print_schema_report(r: &cortex::schema_docs::RenderReport) {
+    use cortex::schema_docs::Outcome;
+    for file in &r.files {
+        let (label, path) = match file.outcome {
+            Outcome::Unchanged => ("unchanged".dimmed(), file.path.as_str().dimmed()),
+            Outcome::Drifted => ("drifted".yellow(), file.path.as_str().yellow()),
+            Outcome::Written => ("written".green(), file.path.as_str().green()),
+        };
+        println!("{label:>9}  {path}");
+    }
+    if r.drifted() {
+        println!(
+            "\n{} file(s) differ from the binary. Run `sb cortex schema --render` to update them.",
+            r.drifted_paths().len()
         );
     }
 }
