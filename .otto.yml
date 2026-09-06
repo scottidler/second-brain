@@ -47,6 +47,11 @@ tasks:
       fi
       echo "All files within $LIMIT line limit"
 
+  agents-map:
+    help: "Lint AGENTS.md module maps against the crate source trees"
+    bash: |
+      bin/agents-map
+
   check:
     help: "Run all quality checks (compile, clippy, format)"
     bash: |
@@ -180,7 +185,7 @@ tasks:
 
   ci:
     help: "Full CI pipeline (lint + bloat + check + test in parallel)"
-    before: [lint, bloat, check, test]
+    before: [lint, bloat, agents-map, check, test]
     bash: |
       echo "✅ All CI checks passed!"
 

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Lints AGENTS.md module maps against the actual crate source trees.
+#
+# Forward check (every AGENTS.md): every backticked `*.rs` token named in the
+# file must resolve, by basename, to an actual file somewhere under that
+# file's crate (basename search, not path-prefix search: nested AGENTS.md
+# files name parent-dir modules like `pipeline.rs`, and sb/AGENTS.md names
+# cli/*.rs files by bare name).
+#
+# Reverse check (crate-root AGENTS.md only): every top-level <crate>/src/*.rs
+# file, except lib.rs/main.rs/tests.rs/testutil.rs, must appear by basename
+# somewhere in that crate's AGENTS.md. Nested module files (e.g.
+# borg/src/config/harvest.rs) are not required; the maps list top-level
+# modules only.
+set -euo pipefail
+
+FAILED=0
+
+echo "=== AGENTS.md module-map lint ==="
+
+while IFS= read -r agents_md; do
+  crate="${agents_md%%/*}"
+
+  # ---- forward check ----
+  while IFS= read -r tok; do
+    [ -n "$tok" ] || continue
+    base="$(basename "$tok")"
+    if ! find "$crate" -name "$base" -not -path '*/target/*' | grep -q .; then
+      echo "FAIL: $agents_md: $tok not found"
+      FAILED=1
+    fi
+  done < <(grep -oE '`[A-Za-z0-9_./-]+\.rs`' "$agents_md" | tr -d '`' | sort -u)
+
+  # ---- reverse check (crate-root AGENTS.md only) ----
+  if [ "$agents_md" = "$crate/AGENTS.md" ]; then
+    while IFS= read -r src_file; do
+      base="$(basename "$src_file")"
+      case "$base" in
+        lib.rs|main.rs|tests.rs|testutil.rs) continue ;;
+      esac
+      if ! grep -qF "$base" "$agents_md"; then
+        echo "FAIL: $agents_md: $base undocumented"
+        FAILED=1
+      fi
+    done < <(find "$crate/src" -maxdepth 1 -name '*.rs' -not -path '*/target/*' | sort)
+  fi
+done < <(find . -name AGENTS.md -not -path '*/target/*' | sed 's|^\./||' | sort)
+
+if [ "$FAILED" -eq 1 ]; then
+  echo ""
+  echo "Fix the module-map tables (or the source tree) before proceeding."
+  exit 1
+fi
+
+echo "All AGENTS.md module maps check out"

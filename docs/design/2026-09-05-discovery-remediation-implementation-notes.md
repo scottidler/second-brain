@@ -81,3 +81,58 @@ Design doc: `docs/design/2026-09-05-discovery-remediation.md`
 
 ### Open questions
 - None.
+
+## Phase 2: AGENTS.md module-map lint (R3)
+
+### Design decisions
+- `bin/agents-map` (bash, executable, same `FAIL:`/loop/`exit 1` shape as the
+  `bloat` task): forward check extracts backticked ``` `token.rs` ``` tokens
+  from every `AGENTS.md` (`grep -oE '`[A-Za-z0-9_./-]+\.rs`'`, trailing
+  backtick required so refs like `` `borg/src/service.rs:240` `` — which end
+  in a line number before the closing backtick — never match); each token
+  resolves by basename via `find <crate> -name <basename> -not -path
+  '*/target/*'`, where `<crate>` is the AGENTS.md path's first path
+  component. Basename (not path-prefix) resolution is load-bearing: nested
+  AGENTS.md files name parent-dir modules (`borg/src/pipeline/AGENTS.md`
+  names `pipeline.rs`, which actually lives at `borg/src/pipeline.rs`, a
+  sibling of the `pipeline/` dir, not inside it) and `sb/AGENTS.md` names
+  `cli/*.rs` files by bare name.
+- Reverse check runs only when `agents_md` path equals `<crate>/AGENTS.md`
+  exactly (crate-root, not nested): for each `<crate>/src/*.rs` at
+  `-maxdepth 1`, excluding `lib.rs`/`main.rs`/`tests.rs`/`testutil.rs`, a
+  plain `grep -qF <basename>` against the AGENTS.md file must hit; `FAIL:
+  <agents.md>: <file> undocumented` otherwise. Plain substring match (not
+  backtick-anchored) per the doc's literal wording ("must appear ...
+  somewhere in that file"); verified no false-positive substring collisions
+  across the current six crate-root files.
+- `.otto.yml`: new `agents-map` task (`bin/agents-map`, one line), wired into
+  `ci: before` as `[lint, bloat, agents-map, check, test]` (after `bloat`,
+  before `check`, per the doc).
+
+### Deviations
+- **Expected drift, not a defect, from the doc's `f97718f` measurement.**
+  Phase 1 (`4eaf9d5`) deleted `distillers/src/passthrough.rs` after the doc's
+  numbers were taken, so the forward check now reports **two** misses instead
+  of the doc's one: `cortex/AGENTS.md: hygiene.rs not found` (the doc's
+  original catch) and `distillers/AGENTS.md: passthrough.rs not found` (new,
+  caused by Phase 1). Phase 3 already plans to remove that row, so no action
+  taken here. The reverse check independently found exactly 20 undocumented
+  files, matching the doc's count precisely (9 in `borg/AGENTS.md`, 6 in
+  `cortex/AGENTS.md`, 2 in `distillers/AGENTS.md`, 1 in `oracle/AGENTS.md`, 2
+  in `vault/AGENTS.md`) — see the exact FAIL lines in the phase report.
+- Same effect, correct seam: the doc's Phase 2 bullet writes the reverse
+  check as "appear by basename somewhere in that file" without specifying a
+  match mechanism; implemented as a literal substring `grep -F`, which is the
+  simplest faithful reading and matches every basename actually present with
+  no observed false hit or false miss against the current tree.
+
+### Tradeoffs
+- Substring `grep -F` vs. requiring backtick-wrapped tokens for the reverse
+  check: chose substring, per the doc's literal "appear ... somewhere" wording
+  (not "appear backticked"). A backtick-anchored variant would be stricter
+  but is not what Phase 2 specified; Phase 3 is free to backtick every row it
+  adds regardless of which reading is enforced.
+
+### Open questions
+- None: the design doc's own success criteria for this phase are "exit 1
+  here, exit 0 after Phase 3", which is exactly what was observed.
