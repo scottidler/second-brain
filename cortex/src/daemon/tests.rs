@@ -1,6 +1,5 @@
 use super::*;
 use crate::config::{Config, DaemonConfig, EnvBootstrapConfig};
-use crate::testutil::ENV_LOCK;
 use chrono::Datelike;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -380,7 +379,11 @@ fn intel_sweep_two_writer_fight_no_longer_reproduces() {
     // suite-wide lock so this can't race `startup/tests.rs`'s env mutation
     // under parallel `cargo test` (2026-07-05 cortex-daemon-oscillation-loop
     // design doc, Phase 1/7).
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = crate::testutil::lock_env();
+    // Provision a private XDG_CONFIG_HOME: `intel::run` and `sweep::*`
+    // call `validate_canonical_assets`, which would otherwise resolve the
+    // developer's real ~/.config/sb/ and fail in any clean checkout.
+    let _cfg = crate::testutil::hermetic_config_home();
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");
     let vault_root = vault_dir.path();
     let assets_dir = tempfile::tempdir().expect("assets tmpdir");
@@ -473,7 +476,11 @@ fn periodic_sweep_fingerprint_converges_after_phase2() {
     // See the lock comment on `intel_sweep_two_writer_fight_no_longer_reproduces` -
     // this fixture's "intel" and "sweep" arms both hit
     // `validate_canonical_assets()` against the REAL env.
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = crate::testutil::lock_env();
+    // Provision a private XDG_CONFIG_HOME: `intel::run` and `sweep::*`
+    // call `validate_canonical_assets`, which would otherwise resolve the
+    // developer's real ~/.config/sb/ and fail in any clean checkout.
+    let _cfg = crate::testutil::hermetic_config_home();
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");
     let vault_root = vault_dir.path();
     let assets_dir = tempfile::tempdir().expect("assets tmpdir");
@@ -565,7 +572,11 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     // The "sweep" arm calls `validate_canonical_assets()` against the REAL
     // env - see the lock comment on
     // `intel_sweep_two_writer_fight_no_longer_reproduces`.
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = crate::testutil::lock_env();
+    // Provision a private XDG_CONFIG_HOME: `intel::run` and `sweep::*`
+    // call `validate_canonical_assets`, which would otherwise resolve the
+    // developer's real ~/.config/sb/ and fail in any clean checkout.
+    let _cfg = crate::testutil::hermetic_config_home();
 
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");
     let vault_root = vault_dir.path();
@@ -888,7 +899,11 @@ async fn scheduled_intel_write_under_applying_guard_does_not_clear_latch() {
         // `intel_sweep_two_writer_fight_no_longer_reproduces`. Scoped to drop
         // BEFORE the `.await` below - a `std::sync::Mutex` guard must never
         // span an `.await` point.
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = crate::testutil::lock_env();
+        // Provision a private XDG_CONFIG_HOME: `intel::run` and `sweep::*`
+        // call `validate_canonical_assets`, which would otherwise resolve the
+        // developer's real ~/.config/sb/ and fail in any clean checkout.
+        let _cfg = crate::testutil::hermetic_config_home();
         crate::intel::run(vault_root, &config, &intel_opts).expect("scheduled intel run");
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -926,7 +941,11 @@ fn configured_actions_no_mutation_scans_vault_exactly_once() {
     // `enable` flag), which calls `validate_canonical_assets()` against the
     // REAL env - see the lock comment on
     // `intel_sweep_two_writer_fight_no_longer_reproduces`.
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = crate::testutil::lock_env();
+    // Provision a private XDG_CONFIG_HOME: `intel::run` and `sweep::*`
+    // call `validate_canonical_assets`, which would otherwise resolve the
+    // developer's real ~/.config/sb/ and fail in any clean checkout.
+    let _cfg = crate::testutil::hermetic_config_home();
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");
     let vault_root = vault_dir.path();
 

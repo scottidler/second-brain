@@ -41,3 +41,13 @@ fn test_oracle_serve_writer_rotates_past_the_byte_cap() {
 fn test_dropped_log_lines_is_zero_without_a_probe() {
     assert_eq!(vault::logging::dropped_log_lines(), 0);
 }
+
+#[test]
+fn pid_scoped_log_path_isolates_each_serve_process() {
+    let base = std::path::Path::new("/tmp/sb/oracle.log");
+    let scoped = super::pid_scoped_log_path(base);
+    let expected = format!("oracle-{}.log", std::process::id());
+    assert_eq!(scoped.file_name().unwrap().to_str().unwrap(), expected);
+    assert_eq!(scoped.parent(), base.parent(), "must stay in the same directory");
+    assert_ne!(scoped, base, "must not collide with the shared oracle.log");
+}

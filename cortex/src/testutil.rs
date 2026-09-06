@@ -31,6 +31,89 @@ use std::sync::Mutex;
 /// per-file private one, closing the race suite-wide.
 pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Acquire [`ENV_LOCK`] without propagating poisoning.
+///
+/// `ENV_LOCK.lock().expect("env lock")` turns ONE failing test into every
+/// later test that touches the env var also failing, with `PoisonError`
+/// instead of the real cause. That is exactly what happened the first time
+/// CI ran in a clean container: three `daemon::tests` failed for a real
+/// reason and eight `startup`/`sweep` tests then failed for no reason at
+/// all, burying the actual defect. The lock guards an `()` - there is no
+/// state to corrupt - so recovering the guard is always safe.
+pub fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Redirect `XDG_CONFIG_HOME` at a temp dir, restoring it on drop.
+pub struct EnvGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    pub fn set(key: &'static str, value: &Path) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: intentional env mutation for path-resolution tests, held
+        // under `lock_env()` so no other test reads the var mid-mutation.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: restore env to avoid leaking state into later tests.
+        unsafe {
+            match self.original.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+/// A private `XDG_CONFIG_HOME` holding valid canonical-tag assets.
+///
+/// `crate::startup::validate_canonical_assets` resolves
+/// `config_root()/canonical-tags.yml` and `tag-mapping.yml`, and so does
+/// everything that calls it: `intel::run`, `sweep::run`/`migrate`/
+/// `scan_proposals`, and `classify::run`. Tests that let those resolve to the
+/// developer's REAL `~/.config/sb/` pass only on a machine where
+/// `sb bootstrap` has run, and fail in any clean checkout or container. Hold
+/// one of these instead: the assets are minimal but valid, so the validation
+/// passes on its own terms rather than on machine state.
+///
+/// Keep the binding alive for the whole test (`let _cfg = ...`, never `let _ =`),
+/// and take `lock_env()` first.
+pub struct HermeticConfigHome {
+    _dir: tempfile::TempDir,
+    _guard: EnvGuard,
+}
+
+pub fn hermetic_config_home() -> HermeticConfigHome {
+    let dir = tempfile::tempdir().expect("config home tmpdir");
+    let sb = dir.path().join("sb");
+    fs::create_dir_all(&sb).expect("create config root");
+    fs::write(
+        sb.join("canonical-tags.yml"),
+        "max-per-note: 7
+tags: {}
+",
+    )
+    .expect("write canonical-tags.yml");
+    fs::write(
+        sb.join("tag-mapping.yml"),
+        "{}
+",
+    )
+    .expect("write tag-mapping.yml");
+    let guard = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+    HermeticConfigHome {
+        _dir: dir,
+        _guard: guard,
+    }
+}
+
 use crate::config::{
     ActionsConfig, AssociationConfig, AutoTagConfig, BackfillConfig, BrokenLinksConfig, Config, DaemonConfig,
     DuplicatesConfig, FabricConfig, FrontmatterConfig, IntelConfig, LinkingConfig, LinkingEntities, LlmConfig,

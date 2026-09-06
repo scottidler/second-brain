@@ -36,7 +36,19 @@ pub fn init_for(cli: &Cli) -> Result<Option<WorkerGuard>> {
     // The `oracle serve` MCP server uses tracing, not log; route it to the
     // tracing-subscriber file writer. Everything else goes through env_logger.
     if matches!(&cli.cmd, Cmd::Oracle(c) if matches!(c.command, crate::cli::oracle::Commands::Serve)) {
-        return init_tracing_to_file(&path, &level).map(Some);
+        // Per-process log, NOT the shared `oracle.log`. Every MCP client
+        // spawns its own `sb oracle serve`, so this path routinely has a
+        // dozen live writers; with one shared file behind a size rotator,
+        // whichever writer crosses the limit renames the file out from under
+        // the others, which then keep appending to an unlinked inode until
+        // they exit. Those lines are lost silently. One file per pid removes
+        // the race by construction, and dead pids are swept here so the set
+        // stays bounded by the number of servers actually running.
+        let serve_path = pid_scoped_log_path(&path);
+        if let Some(dir) = serve_path.parent() {
+            vault::logging::prune_dead_pid_logs(dir, &name);
+        }
+        return init_tracing_to_file(&serve_path, &level).map(Some);
     }
     if routes_to_stderr_only(cli, &cli_cfg) {
         return vault::logging::setup_logging_stderr(&level).map(|()| None);
@@ -191,6 +203,12 @@ fn resolve_level(root: Option<&str>, sub: Option<&str>, cli_yaml: Option<&str>, 
         return "debug".into();
     }
     cli_yaml.map(str::to_string).unwrap_or_else(|| "info".into())
+}
+
+/// `<dir>/<stem>.log` -> `<dir>/<stem>-<pid>.log`.
+fn pid_scoped_log_path(path: &std::path::Path) -> std::path::PathBuf {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("oracle");
+    path.with_file_name(format!("{stem}-{}.log", std::process::id()))
 }
 
 /// Build the `oracle serve` writer stack: the shared 50 MiB x 5 `FileRotate`

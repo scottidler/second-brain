@@ -40,6 +40,44 @@ pub fn resolve_log_level(cli_level: Option<&str>, config_level: Option<&str>) ->
 /// No logger init here (pure aside from opening/creating `log_file_path` and
 /// its parent dir) so tests can drive rotation directly without touching the
 /// process-global `env_logger`/`log` singleton.
+/// Delete `<stem>-<pid>.log*` files in `dir` whose pid is no longer running.
+///
+/// Companion to the per-process log path below: without a sweep, every
+/// `sb oracle serve` a client ever spawned would leave a file behind. Called
+/// at serve startup, so the set stays bounded by the number of LIVE servers.
+/// Best-effort by design - a log we cannot read or remove is skipped, never
+/// fatal, because failing to tidy a log must not stop a server from starting.
+pub fn prune_dead_pid_logs(dir: &Path, stem: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(rest) = name.strip_prefix(&format!("{stem}-")) else {
+            continue;
+        };
+        // `<pid>.log` and its rotations `<pid>.log.1` ... `<pid>.log.5`.
+        let Some(pid_str) = rest.split(".log").next() else {
+            continue;
+        };
+        let Ok(pid) = pid_str.parse::<u32>() else { continue };
+        if !pid_is_alive(pid) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// True when `/proc/<pid>` exists. Linux-only, which is what sb targets; on
+/// any other platform this returns true so nothing is ever deleted wrongly.
+fn pid_is_alive(pid: u32) -> bool {
+    if cfg!(target_os = "linux") {
+        Path::new(&format!("/proc/{pid}")).exists()
+    } else {
+        true
+    }
+}
+
 pub fn rotating_log_writer(log_file_path: &Path) -> FileRotate<AppendCount> {
     // No log::debug! here: this runs before env_logger::Builder::init(), so
     // the `log` facade has no installed logger yet and the record would be

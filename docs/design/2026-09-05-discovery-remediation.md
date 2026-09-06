@@ -443,152 +443,21 @@ Three criteria were written as commands that cannot pass as literally spelled. E
 
 - **Phase 15, S7.** `sb borg reingest --source https://www.youtube.com/shorts/iDISCSQn6mI` returns `fetch-failed`; `yt-dlp` on the same URL returns `ERROR: [youtube] iDISCSQn6mI: This video is unavailable`. The source video no longer exists, so the transcript cannot be regenerated. `notes/prompt-caching-cuts-claude-code-bills-by-80.md` keeps its `## Transcript` section. The doc's own reason for choosing reingest over `bin/strip-transcripts` was that stripping would destroy the note's only copy; with the source dead that reasoning now argues for leaving the section in place. Scott's call.
 
-### Follow-up found during the build, not fixed
+### Follow-ups found during the build, all fixed 2026-09-06
 
-- `sb/src/cli/checks.rs`: `frontmatter_policy_findings()` sits after the oracle-index open in `vault_findings`, so an index-open failure suppresses it even though it reads markdown through `cortex::lint` and never touches the index. Visible today because the Phase 9 guard is active. Self-clears at runbook R1; moving the call up beside `schema_docs_findings()` would decouple it.
-- `~/.local/share/sb/oracle.log` is written by every concurrent `sb oracle serve` process, and Phase 6 put a `FileRotate` under it. Whichever process crosses 50 MiB renames the file under the others, which keep writing to the renamed inode until restart. Pre-existing shape for every sb log; Phase 6 is the first to add rotation to a multi-process one.
-- Root `CLAUDE.md` does not mention `sb cortex schema` or that four of the five schema docs are now generated.
-
-## Resolved Decisions
-
-- 2026-09-05 **S7 re-scoped to one reingest.** Verification: 103 `## Transcript` sections; 53 keep transcripts by design (social/image/note), 44 are quarantined and unscanned, 5 are pre-cutoff legacy bodies `strip-transcripts` refuses. The one in-scope note has no staged copy, so stripping would delete its only transcript. Reingest regenerates both.
-- 2026-09-05 **R2 is a delete, not a derivation.** `sb/src/cli/bootstrap/tests.rs:31 patterns_array_matches_source_tree` already guards the table; the explicit-list choice is documented at `bootstrap.rs:45-48`. The four `facet-*` files are a May 2026 experiment (commit `2594dd5`) with zero references anywhere.
-- 2026-09-05 **S3 is an rm.** `cortex.service.bak` is operator-made (no code writes `.bak`); an uninstall/install cycle would delete the live unit mid-run.
-- 2026-09-05 **F2 goes through `sb cortex migrate`, config-driven.** `sb borg migrate` skips `journal/` (`skip-folders`), where all 87 live. The two stray values ride the same `v4-legacy-values` entry.
-- 2026-09-05 **F7 rewrites to core Templates syntax.** No Templater install. `tp.user.workweek()` called a script that no longer exists; the two computed fields become plain numbers.
-- 2026-09-05 **R1 has no auto-migration.** Concurrent starters, no lock, and `otto deploy` bootstraps with daemons live. Operator move with cortex stopped.
-- 2026-09-05 **R7 ships first with a decision record.** The token-budget doc rejects a fork as the final fix; the fork is accepted as the interim guard (Scott's `borg.yml` comment already says so and names `sb doctor` as the guard). The addendum lands in that doc's Resolved Decisions in Phase 0.
-- 2026-09-05 **Doctor thresholds are consts.** Doctor has no config file; `FABRIC_PROBE_TIMEOUT_SECS` and the borg 24 h window are consts. Same for `INBOX_STALE_SECS` and the data-dir limits.
-- 2026-09-05 **Schema docs: four generated, one hand-written.** `frontmatter.md`'s field tables are not in code; generating them would invent a second schema. The four `*-values.md` files are pure enum listings.
-- 2026-09-05 (panel r1, both seats) **R1 gets a fail-closed guard in `SearchIndex::open`.** The runbook rule "never deploy first" was the only control on the highest-impact failure; both seats named `sb doctor`, `sb oracle call/index/stats`, and cortex one-shots as openers the `pgrep` gate misses. The guard makes every one of them refuse rather than create an empty DB. Folded in.
-- 2026-09-05 (panel r1, both seats) **Phase 6 uses `tracing-appender::non_blocking`.** The earlier "do not add the crate" line assumed a `Mutex<FileRotate>` MakeWriter was enough; both seats verified it locks inline on the tokio worker and panics on poison. One new dependency, accepted. Folded in.
-- 2026-09-05 (panel r1, both seats) **F5 exempt sets corrected.** `System` removed from domain-exempt (system notes carry `domain: system`); `Daily` removed from origin-exempt (cortex.yml requires it; 86 missing is a real gap). Sets now mirror the live cortex.yml exemptions. Folded in.
-- 2026-09-05 (panel r1, staff) **Phase 2 resolver is basename search; Phase 3 lists all 20 undocumented modules.** Measured by hand; the seat's enumeration matched. Folded in.
-- 2026-09-05 (panel r1, staff) **Phase 15 stages by path.** The vault worktree carries 146 unrelated entries. Folded in.
-- 2026-09-05 (panel r1, staff) **The `Config::load` schema warn lives in Phase 7**, not "either phase". One repo, one commit per phase. Folded in.
-- 2026-09-05 (panel r1, architect) **F7 `{{date:YYYY-MM-DD}}` stands.** The seat asserted core Templates has no per-use format. Obsidian help (Templates) documents the colon-plus-Moment-tokens syntax with that exact example. Pushed back with the citation.
-- 2026-09-05 (panel r1, synthesis) **Daily stays origin-exempt-free because F2 fixes it.** The synthesis found the 86 empty-origin daily rows are `origin: human` in the files, which is F2's exact target. Folded in; the Non-Goal that called it "a separate decision" was wrong and is rewritten.
-- 2026-09-05 (panel r1, synthesis) **`Digest`/`Review` stay domain-exempt.** The synthesis proposed `[Entity, Daily]` only. Rejected: the 31 digests without a domain are every digest since 2026-07-10, current intel output omits it, and cortex.yml `path-exempt: notes/ai/**` already exempts them for lint. Doctor and lint must not disagree on the same notes. Pushed back with the date breakdown.
-- 2026-09-05 (panel r1 + r2, synthesis) **`templates` goes into BOTH ignore lists; the author's r1 pushback was wrong.** The r1 disposition said cortex does not re-stamp `daily.md` because cortex.yml excludes `system/**` and the stamps' mtime is 2026-08-15. Both facts were true and the conclusion was wrong: `vault.exclude` filters only `lintable_notes` in `lib.rs`; the daemon's quality arm (`daemon.rs:780`) writes over the unfiltered scan, idempotently, so mtime never moves. The exclude landed in dotfiles `490a54f` on 2026-05-21 and the stamps were written 2026-08-15, three months later, with the exclude in force. Retracted. `ScanConfig::default()` gets `templates` for oracle's index (Phase 7); cortex.yml `vault.ignore` gets `templates` for the daemon (Phase 14); Phase 15's criterion re-checks after two ticks.
-- 2026-09-05 (panel r1, synthesis) **`borg.yml` does name the fork and the guard** (`borg.yml:63-75`). The synthesis said it does not. Pushed back with the line range.
-- 2026-09-05 (panel r2, both seats) **F5 derives from cortex's policy engine; no enum exempt lists.** The r1 fold hardcoded `domain_exempt`/`origin_exempt` in `vault::schema`, a third copy of a rule cortex.yml owns and `path_exempts_field` already had to de-duplicate once. Doctor reports cortex lint's own counts (the r2 wording said "calls `lint_frontmatter`"; superseded by the r3 entry below, which routes through `cortex::lint` so the exclude/include filter applies); the entity exemption is one cortex.yml line (Phase 14). Criterion compares doctor to `sb cortex lint` output and requires the config edit to move both with no rebuild. Folded in.
-- 2026-09-05 (panel r2, both seats) **Guard sits before `create_dir_all`; runbook uses `mv -T` with a destination preflight.** Folded in.
-- 2026-09-05 (panel r2, both seats) **`WorkerGuard` is owned by `main`, `lossy(false)` (superseded by the r3 entry below: stays lossy, drops counted), serve smoke is `sb oracle serve </dev/null`.** `oracle::serve` cannot hold a guard created in `logger::init_for`; `sb oracle call` never touches the tracing writer. Folded in.
-- 2026-09-05 (panel r2, staff) **Phase 4 count is 10 calls with `(`; 11 without** (the `session.rs:28` comment). Criterion tightened. Folded in.
-- 2026-09-05 (panel r2, staff) **Phase 15 lists every path by name; 88 files, 89 violations.** Folded in.
-- 2026-09-05 (panel r2, staff) **`classify.rs:60` degrades silently on the guard error**; a `log::warn!` is added in Phase 9. Doctor maps the typed guard error to Error, other open failures stay Warn. Folded in.
-- 2026-09-05 (panel r2, architect) **Basename resolver can false-PASS on a duplicate basename within one crate.** Accepted as a known limit: `find <crate>` scopes it per crate, the reverse check still catches undocumented files, and the lint's job is stale-name detection, not identity. Recorded, not fixed.
-- 2026-09-05 (panel r3, staff) **Doctor enters through `cortex::lint`, not `scan_vault` + `lint_frontmatter`.** The r2 fold would have linted the ignore-only set (3,509 files) where the CLI lints the exclude/include-filtered set (3,429). `cortex::lint` with `rule=["frontmatter"]` is the CLI's own path; the only addition is `Report::count_by_rule_prefix`. `lint_frontmatter` was already `pub`; the doc's "was pub(crate)" was wrong. Folded in.
-- 2026-09-05 (panel r3, both seats) **`non_blocking` stays lossy; drops are counted and logged.** `lossy(false)` would let a stalled disk backpressure MCP request handling through the log channel. Default lossy plus `ErrorCounter::dropped_lines()` in the shutdown line keeps the request path free and the loss visible. `WorkerGuard::drop` flush is bounded (100 ms + 1 s) and the doc says so. Folded in.
-- 2026-09-05 (panel r3, staff) **Stale text fixed:** Rollout order now places S1/S3 before R1; the Risks row no longer names `sb oracle call` as the smoke; the index-row observation is 2 + 11, not 4. Folded in.
-- 2026-09-05 (panel r1, staff) **Side findings dispositioned as X1-X5** in the Goals table with their coupling, so they are requested-scope decisions Scott can strike, not silent inclusions.
-
-## Alternatives Considered
-
-### Alternative 1: Derive the bootstrap PATTERNS table with `include_dir!`
-- **Description:** replace the hand list with a directory macro.
-- **Why not chosen:** already rejected in code (`bootstrap.rs:45-48`: an explicit list makes adding a pattern a reviewable change) and already guarded by a test. Nothing to fix.
-
-### Alternative 2: Auto-migrate the oracle DB at `SearchIndex::open`
-- **Description:** if the legacy path exists and the new one does not, move at first open.
-- **Cons:** cortex daemon and `sb oracle serve` can open concurrently with no lock; `otto deploy` runs bootstrap with daemons live. A lost race creates an empty DB and a full re-embed.
-- **Why not chosen:** a fail-closed guard at the same chokepoint (refuse to open, never move) gives the safety without the race; the one-time move stays an atomic directory rename by the operator.
-
-### Alternative 7: `tracing_appender::rolling::RollingFileAppender`
-- **Description:** use tracing-appender's own rotator for `oracle serve`.
-- **Cons:** rolls by time (hourly/daily/never), not by size; a second rotation policy beside `vault::logging`'s 50 MiB x 5.
-- **Why not chosen:** siblings behave identically. `FileRotate` stays the one rotator; only `non_blocking` is taken from tracing-appender.
-
-### Alternative 3: Install Templater
-- **Description:** add the community plugin, restore `workweek.js`, keep the templates as written.
-- **Cons:** plugin dependency for two substitutions core already does; settings live in git-ignored `data.json`; one arithmetic field.
-- **Why not chosen:** core syntax removes the dependency; the arithmetic becomes a number.
-
-### Alternative 4: Strip the 104 transcripts with `bin/strip-transcripts`
-- **Description:** run the existing one-shot tool.
-- **Why not chosen:** see Resolved Decisions (S7). It would touch exactly one note and destroy its only transcript.
-
-### Alternative 5: Generate `frontmatter.md` too
-- **Description:** render all five schema docs.
-- **Why not chosen:** the field tables (universal, source, creator, daily, book, meeting) exist only in that doc; generating them means inventing a field registry that has no consumer. Parked with a revisit condition: if a field registry lands for another reason, render this file from it.
-
-### Alternative 6: Make the doctor thresholds configurable
-- **Description:** a `doctor:` section in `cli.yml`.
-- **Why not chosen:** doctor has no config today and its two existing thresholds are consts. Config drives behavior when behavior varies per host; a stale-inbox threshold does not.
-
-## Technical Considerations
-
-### Dependencies
-- One new direct dependency: `tracing-appender` in `sb` (Phase 6, `non_blocking` only; pulls `crossbeam-channel` into `Cargo.lock`). `walkdir` is already a vault dep; `file-rotate` already in vault; `rkvr` is in borg; `glob` is already in cortex.
-- `sb/Cargo.toml` already depends on `borg` (for `rkvr`) and `vault`.
-
-### Performance
-- `dir_size` over `~/.local/share/sb/borg/stages` walks 23,963 trace dirs (234 MB). Measured cost is a doctor concern only; if it exceeds a second, cap depth or cache. Record the measurement in implementation notes.
-- Phase 7's `.claude` ignore shrinks the index by 2 rows.
-
-### Security
-- `--prune-legacy-config` deletes under `~/.config`. Fail closed on any unknown file; recoverable delete via rkvr; dry-run default.
-- R1 moves the only copy of the embeddings. WAL and SHM move with it; the `pgrep` gate blocks the move while any reader is open.
-
-### Testing Strategy
-- Every code phase carries unit tests named in its criteria, and at least one break-the-test check recorded in implementation notes (Phases 2, 11).
-- `otto ci` after every phase; Phase 13 adds the same gate in GitHub Actions.
-- Host-state criteria are run by hand in the runbook with the verify column.
-
-### Rollout Plan
-- Phases 0-13 land on `main` one commit each; `bump && otto deploy` after Phase 0, after Phase 8, and after Phase 13. Phase 9 is built and merged, then the R1 runbook step moves the DB with cortex stopped, then Phase 9's binary is deployed (the runbook row says exactly this). If the order slips and Phase 9 is deployed first, its guard makes the daemon fail loudly rather than corrupt anything. Phase 14 is a dotfiles commit; Phase 15 a vault commit by Scott.
-- Ship order forced: R7 -> R3 -> F10; S5 -> F10; F1 -> `git rm inbox/.md`; F4 (dotfiles) -> F2 apply; S1 and S3 -> R1 move (the directory rename must carry only the four live files) -> Phase 9 deploy; Phase 12 code -> F3 render; Phase 14 -> Phase 15.
-
-## Risks and Mitigations
-
-| Risk | Likelihood | Impact | Mitigation |
-|------|------------|--------|------------|
-| Phase 9 binary deployed before the R1 move | Med | Low (was High) | `SearchIndex::open` refuses to create the new DB while the legacy one exists; cortex fails loudly on restart; the move clears it. Criterion "indexed count equals the recorded pre-move count" |
-| `--prune-legacy-config` deletes something unmigrated | Low | Med | Fail closed on strangers; rkvr recoverable delete; dry-run default |
-| `oracle serve` log drops lines under a burst (lossy channel) or at shutdown (bounded flush) | Low | Low | Drop count logged at shutdown; `WorkerGuard` owned by `main` and dropped before `process::exit`; rotation test writes past the limit; smoke `sb oracle serve </dev/null` asserts the shutdown line |
-| Extensionless `[[domains]]` vs `[[domains.base]]` resolution differs in Obsidian | Med | Low | Runbook F8 verifies all six links in the app |
-| `cargo test` in CI needs network for candle | Low | Med | Default path is offline by inspection; first run proves it |
-| F2 apply rewrites 87 journal files: Syncthing churn on other devices | Low | Low | One-time; commit immediately |
-| Deleting `cortex.yml` `schema:` changes lint from 2016 Errors to 89 real ones, exposing F2 | Certain | Positive | F2 is the next step in the same phase pair |
-
-## Open Questions
-
-None. Four panel rounds (architect + staff engineer, 2026-09-05, run dir `/tmp/review-panel/ZwHkq29D`): every finding is folded or pushed back with evidence in Resolved Decisions; the final round returned no blockers from either seat. The one decision that is Scott's, not the panel's: whether to keep rows X1-X5 (verification side findings) in scope. They are in the doc as included; strike any row to remove it.
-
-## References
-
-- Discovery brief and research brief: session scratchpad `discovery-brief.md`, `research-brief.md` (2026-09-05).
-- `docs/design/2026-06-09-codebase-review-remediation.md` (the precedent remediation doc).
-- `docs/design/2026-08-30-video-distill-token-budget.md` (R7's parent design).
-- `docs/design/2026-05-20-shakedown-v0.8.5-cleanup.md:144` and `2026-05-24-install-pipeline.md:72` (prior mentions of `--prune-legacy-config`).
-- `docs/design/2026-07-07-distillation-output-restore.md` (transcript-in-staging contract; S7).
-- `docs/design/2026-07-05-cortex-daemon-oscillation-loop.md` (the day `cortex.service.bak` was made).
-
-### Found by the new CI workflow on its first runs, 2026-09-06
-
-R4 existed to make CI check what `otto ci` checks. Its first three runs each
-failed on a different pre-existing portability defect, none of them caused by
-this work. That is the workflow doing its job on day one.
-
-- **The repo's rustfmt config lived in `$HOME`.** No `rustfmt.toml` existed at
-  the repo root, so rustfmt walked up to `~/.rustfmt.toml` (`max_width = 120`).
-  `cargo fmt --all --check` therefore passed only on a machine carrying that
-  file; CI checks out to `/__w/...`, fell back to the 100-column default, and
-  demanded rewraps in untouched files. Fixed: `rustfmt.toml` committed at the
-  root with the two values that home config set.
-- **Eleven cortex tests read the developer's real `~/.config/sb/`.**
-  `startup::*`, `daemon::*` and `sweep::*` fail in a clean container with
-  `missing canonical-tags vocabulary at /github/home/.config/sb/canonical-tags.yml`,
-  and the first failure poisons the suite's shared env lock, cascading into the
-  other ten. Worked around in CI by provisioning `canonical-tags.yml` and
-  `tag-mapping.yml` from the repo's `config/` before the test step. **Not
-  fixed:** those tests should use a tempdir and `XDG_CONFIG_HOME` like
-  `cortex/src/sweep/tests.rs:160-190` already does, rather than depending on
-  machine state. That is a follow-up, not part of this doc.
-- **The CI toolchain pin was stale** relative to the box the repo is developed
-  on (1.96.0 vs 1.98.0). Harmless for `release.yml`, which only builds, but this
-  workflow runs `clippy -D warnings`, and lint sets move between releases.
-  Fixed: `RUST_VERSION: 1.98.0` in `ci.yml` only.
+- `sb/src/cli/checks.rs`: `frontmatter_policy_findings()` sat after the oracle-index
+  open in `vault_findings`, so an index-open failure suppressed a check that reads
+  markdown through `cortex::lint` and never touches the index. Moved above the open,
+  beside `schema_docs_findings()`, where it survives every early return.
+- `~/.local/share/sb/oracle.log` was written by every concurrent `sb oracle serve`
+  (eleven live during this work) with a size rotator underneath, so whichever process
+  crossed 50 MiB renamed the file out from under the others, which kept appending to
+  an unlinked inode until exit, losing those lines silently. `sb oracle serve` now
+  writes `oracle-<pid>.log`, which removes the race by construction, and sweeps
+  dead-pid logs at startup (`vault::logging::prune_dead_pid_logs`) so the set stays
+  bounded by the number of servers actually running. The singleton daemons keep the
+  shared path.
+- The non-hermetic cortex tests: see the entry above.
 
 ### Verified complete, 2026-09-06, desk
 

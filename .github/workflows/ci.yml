@@ -59,20 +59,6 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --features vec -- -D warnings
 
-      # Several cortex tests (startup::*, daemon::*, sweep::*) read the real
-      # ~/.config/sb/ instead of a tempdir, so they pass on a developer box
-      # only because `sb bootstrap` has provisioned it there. In a clean
-      # container they fail with "missing canonical-tags vocabulary", and the
-      # first failure poisons the suite's shared env lock, cascading into the
-      # rest. Provision the same two files `sb bootstrap` installs, from the
-      # repo's own source of truth, so CI reproduces the dev precondition.
-      # The non-hermetic tests are the real defect; fixing them is its own
-      # change and is recorded in the discovery-remediation design doc.
-      - name: Provision shared config the cortex tests expect
-        run: |
-          mkdir -p "$HOME/.config/sb"
-          cp config/canonical-tags.yml config/tag-mapping.yml "$HOME/.config/sb/"
-
       - name: Run tests
         run: cargo test --workspace --features vec
 

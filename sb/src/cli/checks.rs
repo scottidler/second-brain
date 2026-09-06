@@ -733,6 +733,12 @@ fn vault_findings() -> Vec<Finding> {
     // markdown files, not the oracle index, so it must survive every early
     // return below (the legacy-oracle-DB guard among them).
     let mut findings = schema_docs_findings();
+    // Both of these read markdown and the vault filesystem, never the oracle
+    // index, so they run BEFORE it is opened and survive every early return
+    // below (the legacy-oracle-DB guard among them). They used to sit after
+    // the open, which meant an index problem silently took the frontmatter
+    // policy report down with it.
+    findings.extend(frontmatter_policy_findings());
 
     // Open the oracle SQLite index and pull two readings: total note count
     // (and schema gaps) and embedding coverage. Read-only.
@@ -781,7 +787,6 @@ fn vault_findings() -> Vec<Finding> {
         )),
     }
 
-    findings.extend(frontmatter_policy_findings());
     findings.push(inbox_stale_finding(&db));
 
     match db.embedding_coverage() {

@@ -67,3 +67,39 @@ fn test_resolve_log_level_falls_back_to_default() {
     let level = resolve_log_level(None, None);
     assert_eq!(level, "info");
 }
+
+#[test]
+fn prune_dead_pid_logs_keeps_live_and_removes_dead() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let root = dir.path();
+    let live = std::process::id();
+    // A live server's log and one of its rotations, plus a dead one.
+    for name in [
+        format!("oracle-{live}.log"),
+        format!("oracle-{live}.log.1"),
+        "oracle-999999999.log".to_string(),
+        "oracle-999999999.log.2".to_string(),
+    ] {
+        std::fs::write(root.join(name), b"x").expect("write log");
+    }
+    // Unrelated files must survive: a different stem, and a non-pid name.
+    std::fs::write(root.join("cortex-1.log"), b"x").expect("write other stem");
+    std::fs::write(root.join("oracle.log"), b"x").expect("write shared log");
+
+    super::prune_dead_pid_logs(root, "oracle");
+
+    assert!(root.join(format!("oracle-{live}.log")).exists(), "live log removed");
+    assert!(
+        root.join(format!("oracle-{live}.log.1")).exists(),
+        "live rotation removed"
+    );
+    assert!(!root.join("oracle-999999999.log").exists(), "dead log kept");
+    assert!(!root.join("oracle-999999999.log.2").exists(), "dead rotation kept");
+    assert!(root.join("cortex-1.log").exists(), "other stem removed");
+    assert!(root.join("oracle.log").exists(), "non-pid log removed");
+}
+
+#[test]
+fn prune_dead_pid_logs_on_missing_dir_is_not_fatal() {
+    super::prune_dead_pid_logs(std::path::Path::new("/nonexistent/xyzzy"), "oracle");
+}

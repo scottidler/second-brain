@@ -4,7 +4,6 @@ use super::*;
 // `XDG_CONFIG_HOME` (or resolves it indirectly) acquires the SAME
 // `crate::testutil::ENV_LOCK` - see that static's doc comment for the race
 // this closes.
-use crate::testutil::ENV_LOCK;
 
 struct EnvGuard {
     key: &'static str,
@@ -37,7 +36,7 @@ fn load_inner_defaults_when_primary_config_missing() {
     // 2026-07-24 cortex-association-sweep design, Phase 1 fail-closed loader:
     // a MISSING config file still defaults (this half of the contract is
     // unchanged - only the present-but-unparseable half hard-errors now).
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = crate::testutil::lock_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
     // No cortex.yml written under tmp/sb/ - the primary path does not exist.
@@ -51,7 +50,7 @@ fn load_inner_fails_loud_on_present_but_unparseable_config() {
     // The fail-closed fix itself: a PRESENT config with a typo'd key must
     // hard-error, never silently fall back to defaults (the pre-Phase-1 bug -
     // a typo ran the daemon on defaults with zero visible signal).
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = crate::testutil::lock_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
 

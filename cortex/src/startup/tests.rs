@@ -6,33 +6,7 @@ use super::*;
 // `crate::testutil::ENV_LOCK` before touching the env var. See that static's
 // doc comment for the race this closes (2026-07-05
 // cortex-daemon-oscillation-loop design doc, Phase 7).
-use crate::testutil::ENV_LOCK;
-
-struct EnvGuard {
-    key: &'static str,
-    original: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &std::path::Path) -> Self {
-        let original = std::env::var_os(key);
-        // SAFETY: intentional env mutation for path-resolution tests.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, original }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: restore env to avoid leaking state.
-        unsafe {
-            match self.original.take() {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
+use crate::testutil::EnvGuard;
 
 fn write_minimal_canonical_assets(root: &std::path::Path) {
     std::fs::create_dir_all(root).expect("create dir");
@@ -42,7 +16,7 @@ fn write_minimal_canonical_assets(root: &std::path::Path) {
 
 #[test]
 fn errors_when_canonical_tags_missing() {
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = crate::testutil::lock_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
 
@@ -57,7 +31,7 @@ fn errors_when_canonical_tags_missing() {
 
 #[test]
 fn errors_when_tag_mapping_missing() {
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = crate::testutil::lock_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
 
@@ -73,7 +47,7 @@ fn errors_when_tag_mapping_missing() {
 
 #[test]
 fn errors_when_canonical_tags_malformed() {
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = crate::testutil::lock_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
 
@@ -92,7 +66,7 @@ fn errors_when_canonical_tags_malformed() {
 
 #[test]
 fn ok_when_canonical_assets_present_and_valid() {
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = crate::testutil::lock_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
 
