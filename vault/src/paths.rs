@@ -24,7 +24,6 @@
 use std::path::{Path, PathBuf};
 
 use eyre::{Result, eyre};
-use serde::{Deserialize, Deserializer};
 use walkdir::WalkDir;
 
 /// Subdirectory under `xdg_config_dir()` that owns every sb config file.
@@ -65,23 +64,15 @@ pub fn xdg_data_dir() -> Option<PathBuf> {
 /// config must pass through this (or a serde wrapper that calls it) before
 /// it reaches the filesystem.
 ///
-/// Non-tilde paths pass through untouched.
-pub fn expand_tilde(path: impl AsRef<Path>) -> PathBuf {
-    let s = path.as_ref().to_string_lossy();
-    PathBuf::from(shellexpand::tilde(s.as_ref()).as_ref())
-}
-
+/// Non-tilde paths pass through untouched. Re-exported from the shared
+/// `expand-tilde` crate; see its docs for `~otheruser` and no-home-dir edge
+/// cases.
+///
 /// `#[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]`
-/// for `PathBuf` config fields. Runs the deserialized value through
-/// [`expand_tilde`] so a literal `~/...` in YAML becomes a real absolute
-/// path the moment the config loads.
-pub fn deserialize_tilde_pathbuf<'de, D>(deserializer: D) -> std::result::Result<PathBuf, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw = PathBuf::deserialize(deserializer)?;
-    Ok(expand_tilde(raw))
-}
+/// for `PathBuf` config fields runs the deserialized value through this so a
+/// literal `~/...` in YAML becomes a real absolute path the moment the
+/// config loads.
+pub use expand_tilde::{deserialize_tilde_pathbuf, expand_tilde};
 
 /// Sum the size in bytes of every regular file under `root`, recursing into
 /// subdirectories. Does not follow symlinks (a cycle would hang `sb doctor`;

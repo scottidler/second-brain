@@ -36,6 +36,7 @@ rusqlite = { workspace = true, optional = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 env_logger = { workspace = true }
+expand-tilde = { workspace = true, features = ["serde"] }
 eyre = { workspace = true }
 fs2 = { workspace = true }
 log = { workspace = true }

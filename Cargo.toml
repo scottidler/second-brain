@@ -34,6 +34,7 @@ clap = { version = "4.6", features = ["derive", "env"] }
 colored = "3.1"
 dirs = "6.0"
 env_logger = "0.11"
+expand-tilde = { git = "ssh://git@github.com/scottidler/expand-tilde", tag = "v0.1.0", version = "0.1.0" }
 eyre = "0.6"
 fs2 = "0.4"
 log = "0.4"
