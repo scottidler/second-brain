@@ -85,6 +85,24 @@ fn test_render_includes_ingested_field() {
         rendered.contains("ingested: "),
         "ingested field should be present on fresh ingest"
     );
+    // Homogeneous offset datetime, never the bare `date:` form: a mixed
+    // ingested column makes Bases infer two property types (see render_note).
+    let ingested = rendered
+        .lines()
+        .find_map(|l| l.strip_prefix("ingested: "))
+        .expect("ingested line");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(ingested).is_ok(),
+        "ingested must be an offset datetime, got {ingested:?}"
+    );
+    let date = rendered
+        .lines()
+        .find_map(|l| l.strip_prefix("date: "))
+        .expect("date line");
+    assert!(
+        ingested.starts_with(date) && ingested.len() > date.len(),
+        "ingested {ingested:?} should extend date {date:?} with a time + offset"
+    );
 }
 
 #[test]
