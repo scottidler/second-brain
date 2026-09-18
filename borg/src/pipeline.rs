@@ -28,7 +28,7 @@ use vault::schema::CORTEX_PRESERVE_KEYS;
 pub mod atomic;
 mod inflight;
 pub mod permits;
-use atomic::{apply_cortex_fields, apply_ingested_date, apply_original_date, write_atomic};
+use atomic::{apply_cortex_fields, apply_original_date, write_atomic};
 use inflight::InflightGuard;
 
 mod handlers;
@@ -1012,16 +1012,11 @@ async fn process_url_inner(
             cortex_fields.iter().map(|(k, _)| k).collect::<Vec<_>>()
         );
     }
-    // `ingested:` records when borg LAST processed this note, to second
-    // precision in the configured local timezone (ISO-8601 with offset, e.g.
-    // 2026-06-05T08:27:25-07:00). Unconditional on every publish (original
-    // ingest AND reingest) so views can sort/window by when borg did the work
-    // rather than when the content was originally learned. The precise form
-    // lets the borg-ledger.base view sort chronologically; `date:` remains the
-    // original content date.
-    let log_timestamp = now.format("%Y-%m-%dT%H:%M:%S%:z").to_string();
-    final_str = apply_ingested_date(&final_str, &log_timestamp);
-    log::debug!("[{trace_id}] Set ingested: {log_timestamp}");
+    // No `ingested:` re-stamp here. `final_str` began as `render_note` output
+    // (:985), and that renderer is the field's single writer - it already
+    // stamped this publish's instant. Patching a second, independently
+    // formatted value over it is how the field came to have two spellings.
+    // `date:` remains the original content date, restored above.
 
     // Note-size hard gate (2026-07-07 distillation-output-restore, Phase 3):
     // with `## Transcript` gone from video/article/repo publish, an oversize

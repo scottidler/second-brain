@@ -226,3 +226,21 @@ fn parse_repo_and_three_state_repos_touched() {
         "empty list is Some(vec![]), distinct from omitted None"
     );
 }
+
+#[test]
+fn ingested_stamp_is_offset_datetime_to_the_second() {
+    let dt = chrono::DateTime::parse_from_rfc3339("2026-09-17T08:27:25-07:00").expect("parse");
+    let stamp = IngestedStamp::from_datetime(&dt);
+    assert_eq!(stamp.as_str(), "2026-09-17T08:27:25-07:00");
+    assert_eq!(stamp.to_string(), "2026-09-17T08:27:25-07:00");
+    // Round-trips as RFC-3339, which is what the ledger view sorts on.
+    assert!(chrono::DateTime::parse_from_rfc3339(stamp.as_str()).is_ok());
+}
+
+#[test]
+fn ingested_stamp_carries_the_offset_not_utc() {
+    let utc = chrono::DateTime::parse_from_rfc3339("2026-09-17T15:27:25Z").expect("parse");
+    let stamp =
+        IngestedStamp::from_datetime(&utc.with_timezone(&chrono::FixedOffset::west_opt(7 * 3600).expect("offset")));
+    assert_eq!(stamp.as_str(), "2026-09-17T08:27:25-07:00");
+}

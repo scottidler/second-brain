@@ -15,6 +15,44 @@ fn scalar_to_string(val: serde_yaml::Value) -> Option<String> {
     }
 }
 
+/// The one spelling of the `ingested:` frontmatter value: second-precision
+/// ISO-8601 with a numeric offset, e.g. `2026-09-17T08:27:25-07:00`.
+///
+/// The format literal lived at four hand-written sites (borg's renderer, its
+/// publish path, and both backfill converters). `markdown::render_note`
+/// spelled it `%Y-%m-%d` while only the URL pipeline re-stamped the offset
+/// form, so harvest notes kept the date-only value and `borg-ledger.base`
+/// inferred two property types for one column and sorted them apart. Four
+/// writers spelling a string by hand agree only by luck, so this is the only
+/// constructor: there is no second spelling left to drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestedStamp(String);
+
+impl IngestedStamp {
+    const FORMAT: &'static str = "%Y-%m-%dT%H:%M:%S%:z";
+
+    /// Stamp an instant in whatever timezone the caller resolved. Generic over
+    /// `TimeZone` so borg can pass a `chrono_tz::Tz` datetime without vault
+    /// taking a chrono-tz dependency.
+    pub fn from_datetime<Tz>(dt: &chrono::DateTime<Tz>) -> Self
+    where
+        Tz: chrono::TimeZone,
+        Tz::Offset: std::fmt::Display,
+    {
+        Self(dt.format(Self::FORMAT).to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for IngestedStamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Parsed frontmatter. Known fields extracted; everything else in extra.
 #[derive(Debug, Clone, Default)]
 pub struct Frontmatter {

@@ -142,14 +142,11 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         .unwrap_or(chrono_tz::America::Los_Angeles);
     let now = Utc::now().with_timezone(&tz);
     let date = now.format("%Y-%m-%d").to_string();
-    // `ingested:` is second-precision ISO-8601 with offset, NOT the bare
-    // `date:` form: `borg-ledger.base` sorts the column lexically, and a
-    // column that mixes `2026-09-17` with `2026-09-17T08:27:25-07:00` makes
-    // Bases infer two different property types and sort them separately.
-    // Writing it here (rather than only in `pipeline::publish_note`) keeps
-    // every publish path homogeneous - `pipeline::session` writes
-    // `render_note` output straight to disk and never re-stamps.
-    let ingested = now.format("%Y-%m-%dT%H:%M:%S%:z").to_string();
+    // `ingested:` is written HERE and nowhere else: this is the sole emitter
+    // for every publish path, including `pipeline::session`, which writes
+    // `render_note` output straight to disk. `vault::frontmatter::IngestedStamp`
+    // owns the spelling (see its docs for the two-format defect).
+    let ingested = vault::frontmatter::IngestedStamp::from_datetime(&now);
 
     let mut all_tags = frontmatter_config.default_tags.clone();
     all_tags.extend(note.tags.clone());

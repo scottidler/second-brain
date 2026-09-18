@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
+use vault::frontmatter::IngestedStamp;
 
 /// Outcome of a backfill run. `dry_run = true` populates `would_backfill`;
 /// `dry_run = false` populates `backfilled`. Splitting the two disambiguates
@@ -117,7 +118,7 @@ fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
 /// failure so a single malformed row never aborts the whole backfill.
 pub(crate) fn local_from_utc(received_at: &str, tz: Tz) -> Option<String> {
     let dt = chrono::DateTime::parse_from_rfc3339(received_at.trim()).ok()?;
-    Some(dt.with_timezone(&tz).format("%Y-%m-%dT%H:%M:%S%:z").to_string())
+    Some(IngestedStamp::from_datetime(&dt.with_timezone(&tz)).to_string())
 }
 
 /// Promote a date-only `date:` value (`2026-05-11`) to a homogenized local
@@ -127,7 +128,7 @@ pub(crate) fn local_date_midnight(date: &str, tz: Tz) -> Option<String> {
     let nd = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").ok()?;
     let ndt = nd.and_hms_opt(0, 0, 0)?;
     let local = tz.from_local_datetime(&ndt).earliest()?;
-    Some(local.format("%Y-%m-%dT%H:%M:%S%:z").to_string())
+    Some(IngestedStamp::from_datetime(&local).to_string())
 }
 
 /// Skip notes whose mtime is within `min_age` of now - guards against
