@@ -500,7 +500,9 @@ fn fts5_schema_migrates_from_old_schema() {
     assert_eq!(title, "Legacy");
 
     // FTS5 was rebuilt: the legacy body should still be searchable.
-    let hits = index.search("legacy", None, None, None, None).expect("search");
+    let hits = index
+        .search("legacy", None, None, false, None, None, None)
+        .expect("search");
     assert!(
         hits.iter().any(|n| n.path == "notes/legacy.md"),
         "post-migration FTS5 must still surface legacy rows: got {hits:?}"
@@ -517,7 +519,9 @@ fn fts5_search_hits_claims_column() {
     index.index_one(&note, 100).expect("index_one");
 
     // FTS5 query for the claim-only term should find this note.
-    let hits = index.search("xenomorphism", None, None, None, None).expect("search");
+    let hits = index
+        .search("xenomorphism", None, None, false, None, None, None)
+        .expect("search");
     assert!(
         hits.iter().any(|n| n.path == "notes/distinctclaim.md"),
         "expected FTS5 to index claims column; got {hits:?}"

@@ -225,7 +225,7 @@ impl super::SearchIndex {
             .collect()
         };
 
-        let recent_notes = self.list_notes(Some(domain), None, None, None, None, Some(limit))?;
+        let recent_notes = self.list_notes(Some(domain), None, false, None, None, None, None, Some(limit))?;
 
         Ok(DomainBrief {
             domain: domain.to_string(),
@@ -269,7 +269,7 @@ impl super::SearchIndex {
 
     /// Get exemplar notes for a domain (recent, well-classified notes)
     pub fn domain_exemplars(&self, domain: &str, limit: usize) -> Result<Vec<NoteRow>> {
-        self.list_notes(Some(domain), None, None, None, None, Some(limit as u32))
+        self.list_notes(Some(domain), None, false, None, None, None, None, Some(limit as u32))
     }
 
     /// Find notes matching a specific tag, optionally filtered by domain

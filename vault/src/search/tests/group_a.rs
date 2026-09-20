@@ -757,7 +757,7 @@ fn search_propagates_a_malformed_match_instead_of_returning_empty() {
     // A raw unquoted hyphenated bareword: sqlite rejects it mid-step. The old
     // code swallowed that per row and returned Ok(vec![]) - a fail-open search.
     let err = index
-        .search("xda-developers", None, None, None, Some(5))
+        .search("xda-developers", None, None, false, None, None, Some(5))
         .expect_err("a malformed MATCH must be an error, not an empty result set");
     assert!(
         format!("{err:#}").contains("fts5 search failed"),

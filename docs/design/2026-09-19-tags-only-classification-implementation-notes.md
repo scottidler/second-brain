@@ -245,3 +245,58 @@ P4's `grep -lE '^tags: \[' $(grep -rl '^domain:' notes work system) | wc -l`
   `domain: resources`.
 
 Amended to `'^tags: \[[^]]'` over `notes work`. Observed: **0**.
+
+## Phase 5: Tags facet in the index
+
+Landed as two commits because the facet half was green and self-contained
+while the filter threading was still in flight; keeping the tree green mattered
+more than the one-commit-per-phase convention.
+
+### Design decisions
+
+- **`push_tags_filter` is one shared helper, not a clause repeated per query**
+  (`vault/src/search/query.rs`). It takes the caller's `notes` alias because the
+  correlated subquery has to join back to it, and it owns both semantics: OR is
+  `EXISTS (SELECT 1 FROM note_tags ...)`, AND is a `count(DISTINCT tag) = n`
+  subquery. Both go through `idx_note_tags_tag`.
+- **`Some(&[])` means "no filter", not "match nothing".** A caller threading an
+  unset list through several layers would otherwise get zero rows with no
+  indication why.
+- **Delete-then-insert in `sync_note_tags`** rather than diffing: a note carries
+  at most `max-per-note` tags, so the churn is bounded and there is one code
+  path instead of three.
+- **The SAVEPOINT wraps `index_one`, not `index_one_inner`.** The public entry
+  point is the one that must be atomic; splitting the body out keeps the
+  savepoint bookkeeping in four lines instead of threaded through 200.
+- **`tags = ''` normalized to `[]` at index time.** The empty string is not
+  valid JSON, so `json_each` errors on it; 303 live rows had it. AC4's standing
+  invariant (facet count == `json_each` count) cannot hold otherwise.
+
+### Deviations
+
+- **The oracle MCP request structs do NOT get `tags` in this phase.** The doc
+  assigns oracle tool params to P8, and P5 names only
+  `oracle/src/server/pipeline.rs::note_matches_filters`. The four oracle call
+  sites that now reach the new signatures pass `None, false` with a comment
+  naming P8 as the phase that wires `req.tags` through.
+- **`tags_all` is a plain `bool` parameter beside `tags`,** as the doc's API
+  Design specifies, rather than a filter struct. It costs two arguments at 39
+  call sites; a struct would have read better but diverges from the doc and
+  from how `domain`/`note_type`/`status` are already threaded.
+
+### Tradeoffs
+
+- **Call-site churn was taken rather than adding `_with_tags` siblings.** A
+  sibling per function would have left every existing call untouched, but P11
+  would then have to collapse two functions per filter surface, and the doc's
+  "takes `tags` beside it" reading is the direct one.
+
+### Open questions
+
+- None.
+
+### Deferred operator steps
+
+- `sb oracle index --force` per host, to populate `note_tags` for the existing
+  3,742 rows. A plain `sb oracle index` skips unchanged files and would leave
+  the table empty. Not run yet.

@@ -441,6 +441,9 @@ impl OracleMcpServer {
         let notes = db
             .list_notes(
                 req.domain.as_ref().map(|d| d.as_str()),
+                // P8 wires `req.tags` here; P5 only makes the filter exist.
+                None,
+                false,
                 req.note_type.as_ref().map(|t| t.as_str()),
                 req.status.as_ref().map(|s| s.as_str()),
                 req.after.as_deref(),
@@ -774,6 +777,8 @@ impl OracleMcpServer {
             .recent_notes(
                 req.days,
                 req.domain.as_ref().map(|d| d.as_str()),
+                None,
+                false,
                 req.note_type.as_ref().map(|t| t.as_str()),
                 req.limit,
             )

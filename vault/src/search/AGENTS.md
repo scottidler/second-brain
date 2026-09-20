@@ -36,6 +36,10 @@ SQLite-backed search for vault notes: BM25 via FTS5, brute-force cosine vector s
 - **Transcript eligibility** is generated from `NoteType::transcript_eligible()` — never hardcode the type list in SQL.
 - **BLOB validation:** `validate_embedding_bytes(bytes, dim)` checks `len == dim*4` before the dot loop (no OOB reads).
 - **Atomic embedding writes:** `upsert_embeddings_batch` is a single `BEGIN IMMEDIATE … COMMIT` so hybrid search never sees half-replaced vectors.
+- **Atomic per-note indexing:** `index_one` wraps the `notes` upsert and its `note_tags` maintenance in one SAVEPOINT. `index_changed` has no enclosing transaction, so a failed facet write must roll the note row back with it or the two tables disagree.
+- **`note_tags` is the tags facet, `notes.tags` is the JSON for FTS.** Both are written by `index_one` from the same list; a tag filter goes through the facet (`push_tags_filter`, an indexed `EXISTS` subquery) rather than `json_each`, which is a full scan plus parse. The facet rows are deleted with the note in both stale-removal paths.
+- **Every indexed row's `tags` is valid JSON.** A note with no `tags` key stores `[]`, never `''`; the empty string is not valid JSON and made `json_each` error on 303 rows.
+- **An empty tag list is not a filter.** `push_tags_filter` treats `Some(&[])` as no filter, so a caller threading an unset list never silently gets zero rows.
 
 ## Patterns
 

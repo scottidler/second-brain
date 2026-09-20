@@ -278,7 +278,9 @@ fn hybrid_recovers_union_top3_with_transcript_chunks() {
     let mut recovered = 0;
     let total = transcript_queries().len();
     for q in transcript_queries() {
-        let bm25 = index.search(q, None, None, None, Some(K_RRF_INPUT)).expect("bm25");
+        let bm25 = index
+            .search(q, None, None, false, None, None, Some(K_RRF_INPUT))
+            .expect("bm25");
         let q_vec = m.embed_one(q).expect("q vec");
         let vec_hits = index.search_vector(&q_vec, K_RRF_INPUT, None, None, None).expect("vec");
 
@@ -315,7 +317,9 @@ fn hybrid_recovers_union_top3() {
     let mut recovered = 0;
     let total = queries().len();
     for q in queries() {
-        let bm25 = index.search(q, None, None, None, Some(K_RRF_INPUT)).expect("bm25");
+        let bm25 = index
+            .search(q, None, None, false, None, None, Some(K_RRF_INPUT))
+            .expect("bm25");
         let q_vec = m.embed_one(q).expect("q");
         let vec_hits = index.search_vector(&q_vec, K_RRF_INPUT, None, None, None).expect("vec");
 

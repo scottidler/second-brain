@@ -35,7 +35,7 @@ impl OracleMcpServer {
         k: u32,
     ) -> Result<Vec<String>, McpError> {
         let rows = db
-            .search(query, domain, note_type, status, Some(k))
+            .search(query, domain, None, false, note_type, status, Some(k))
             .map_err(Self::err)?;
         Ok(rows.iter().map(|n| n.path.clone()).collect())
     }
@@ -135,7 +135,7 @@ impl OracleMcpServer {
     ) -> Result<Vec<NoteRow>, McpError> {
         match mode {
             SearchMode::Bm25 => db
-                .search(query, domain, note_type, status, Some(limit))
+                .search(query, domain, None, false, note_type, status, Some(limit))
                 .map_err(Self::err),
             SearchMode::Vector => {
                 let paths = self.vector_paths(db, query, domain, note_type, status, limit)?;

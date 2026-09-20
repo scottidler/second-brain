@@ -1,11 +1,52 @@
 use super::*;
 
+/// Append a `tags` filter to a WHERE clause being built, against the
+/// `note_tags` facet so it is an index lookup rather than a JSON scan.
+///
+/// `tags_all = false` (the default) is OR across the list: the note carries at
+/// least one of them. `tags_all = true` is AND: it carries all of them. An
+/// empty list is treated as no filter, so a caller passing `Some(&[])` does
+/// not silently get zero rows.
+///
+/// `alias` is the `notes` alias in the caller's query (`n` or `notes`), since
+/// the correlated subquery has to join back to it.
+pub(crate) fn push_tags_filter(
+    sql: &mut String,
+    param_values: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+    param_idx: &mut usize,
+    alias: &str,
+    tags: Option<&[String]>,
+    tags_all: bool,
+) {
+    let Some(tags) = tags.filter(|t| !t.is_empty()) else {
+        return;
+    };
+    let placeholders: Vec<String> = (0..tags.len()).map(|i| format!("?{}", *param_idx + i)).collect();
+    let list = placeholders.join(", ");
+    if tags_all {
+        sql.push_str(&format!(
+            " AND (SELECT count(DISTINCT t.tag) FROM note_tags t WHERE t.path = {alias}.path AND t.tag IN ({list})) = {}",
+            tags.len()
+        ));
+    } else {
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM note_tags t WHERE t.path = {alias}.path AND t.tag IN ({list}))"
+        ));
+    }
+    for tag in tags {
+        param_values.push(Box::new(tag.clone()));
+    }
+    *param_idx += tags.len();
+}
+
 impl super::SearchIndex {
     /// Full-text search across notes
     pub fn search(
         &self,
         query: &str,
         domain: Option<&str>,
+        tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
         limit: Option<u32>,
@@ -29,6 +70,7 @@ impl super::SearchIndex {
             param_values.push(Box::new(d.to_string()));
             param_idx += 1;
         }
+        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "n", tags, tags_all);
         if let Some(t) = note_type {
             sql.push_str(&format!(" AND n.note_type = ?{param_idx}"));
             param_values.push(Box::new(t.to_string()));
@@ -71,7 +113,7 @@ impl super::SearchIndex {
         // names are the norm, and an unquoted one takes the whole MATCH down.
         let fts_query = terms.iter().map(|t| fts_quote(t)).collect::<Vec<_>>().join(" OR ");
 
-        self.search(&fts_query, None, None, None, Some(limit as u32))
+        self.search(&fts_query, None, None, false, None, None, Some(limit as u32))
     }
 
     /// `find_similar` for callers that treat "no similar notes" and "the query
@@ -92,6 +134,8 @@ impl super::SearchIndex {
     pub fn list_notes(
         &self,
         domain: Option<&str>,
+        tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
         after: Option<&str>,
@@ -114,6 +158,7 @@ impl super::SearchIndex {
             param_values.push(Box::new(d.to_string()));
             param_idx += 1;
         }
+        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
         if let Some(t) = note_type {
             sql.push_str(&format!(" AND note_type = ?{param_idx}"));
             param_values.push(Box::new(t.to_string()));
@@ -183,6 +228,8 @@ impl super::SearchIndex {
         &self,
         days: Option<u32>,
         domain: Option<&str>,
+        tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
@@ -195,7 +242,16 @@ impl super::SearchIndex {
             .map(|d| d.format("%Y-%m-%d").to_string())
             .unwrap_or_default();
 
-        self.list_notes(domain, note_type, None, Some(&cutoff), None, Some(limit))
+        self.list_notes(
+            domain,
+            tags,
+            tags_all,
+            note_type,
+            None,
+            Some(&cutoff),
+            None,
+            Some(limit),
+        )
     }
 
     /// Find outbound wikilinks from a note's body

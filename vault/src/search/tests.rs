@@ -439,3 +439,93 @@ fn index_is_atomic_per_note() {
         .expect("count");
     assert_eq!(rows, 0, "the notes row survived a failed facet write");
 }
+
+#[test]
+fn list_notes_filters_by_tag_or_and_and() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&tagged_note("notes/a.md", &["rust", "ai"]), 1)
+        .expect("a");
+    index.index_one(&tagged_note("notes/b.md", &["rust"]), 1).expect("b");
+    index.index_one(&tagged_note("notes/c.md", &["cooking"]), 1).expect("c");
+
+    let paths = |rows: Vec<NoteRow>| {
+        let mut p: Vec<String> = rows.into_iter().map(|r| r.path).collect();
+        p.sort();
+        p
+    };
+
+    // OR (the default): either tag.
+    let rust_or_cooking = vec!["rust".to_string(), "cooking".to_string()];
+    let rows = index
+        .list_notes(None, Some(&rust_or_cooking), false, None, None, None, None, None)
+        .expect("or");
+    assert_eq!(
+        paths(rows),
+        vec![
+            "notes/a.md".to_string(),
+            "notes/b.md".to_string(),
+            "notes/c.md".to_string()
+        ]
+    );
+
+    // AND: every tag.
+    let rust_and_ai = vec!["rust".to_string(), "ai".to_string()];
+    let rows = index
+        .list_notes(None, Some(&rust_and_ai), true, None, None, None, None, None)
+        .expect("and");
+    assert_eq!(paths(rows), vec!["notes/a.md".to_string()]);
+
+    // An empty list is NOT a filter that matches nothing.
+    let rows = index
+        .list_notes(None, Some(&[]), false, None, None, None, None, None)
+        .expect("empty");
+    assert_eq!(rows.len(), 3, "an empty tag list must not filter everything out");
+
+    // No filter at all.
+    let rows = index
+        .list_notes(None, None, false, None, None, None, None, None)
+        .expect("none");
+    assert_eq!(rows.len(), 3);
+}
+
+#[test]
+fn domain_members_are_tag_members() {
+    // The migration's invariant, in miniature: every note carrying `domain: x`
+    // also carries `x` as a tag. Subset, not equality, because a tag legitimately
+    // exists outside its domain (measured on the live index: 5 notes carry
+    // `writing` without `domain: writing`).
+    use crate::frontmatter::Frontmatter;
+    use std::path::PathBuf;
+    let index = SearchIndex::open_memory().expect("open");
+    let migrated = |path: &str, domain: &str, tags: &[&str]| Note {
+        path: PathBuf::from(path),
+        frontmatter: Frontmatter {
+            title: Some(path.to_string()),
+            domain: Some(domain.to_string()),
+            tags: Some(tags.iter().map(|t| t.to_string()).collect()),
+            ..Frontmatter::default()
+        },
+        body: "body".to_string(),
+        raw: "---\n---\nbody".to_string(),
+    };
+    index
+        .index_one(&migrated("notes/a.md", "tech", &["tech", "rust"]), 1)
+        .expect("a");
+    index
+        .index_one(&migrated("notes/b.md", "tech", &["tech"]), 1)
+        .expect("b");
+    // A tag outside its domain: allowed, which is why this is a subset check.
+    index.index_one(&tagged_note("notes/c.md", &["tech"]), 1).expect("c");
+
+    let orphans: i64 = index
+        .conn
+        .query_row(
+            "SELECT count(*) FROM notes WHERE domain = 'tech' \
+             AND path NOT IN (SELECT path FROM note_tags WHERE tag = 'tech')",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(orphans, 0, "a domain member is missing its tag");
+}
