@@ -1091,4 +1091,65 @@ fn borg_owned_key_policy_matches_the_declaration() {
     // (design doc: "a deliberate ownership change"), so it must be in the
     // owned set AND excluded explicitly at merge time.
     assert!(owned.contains(STATUS_KEY));
+    // `tags` is the second such key, added by the tags-only design doc's P3:
+    // owned and rewritten by `render_note`, but MERGED rather than replaced on
+    // a session replace, so a replay cannot strip a tag cortex or the
+    // domain-as-tag migration added. Same shape as `status`: in the owned set,
+    // handled explicitly in `read_prior_frontmatter`.
+    assert!(owned.contains(TAGS_KEY));
+    assert!(
+        vault::schema::CORTEX_PRESERVE_KEYS.contains(&TAGS_KEY),
+        "the URL reingest path must preserve tags too, or the two paths disagree"
+    );
+}
+
+#[test]
+fn session_replace_merges_tags() {
+    // `read_prior_frontmatter` captures the prior list instead of carrying it
+    // as an opaque key, so the call site can union it with the fresh one.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let note = dir.path().join("session.md");
+    std::fs::write(
+        &note,
+        "---\ntitle: S\ntype: session\ntags:\n  - ai\n  - rust\nstatus: read\ndomain: tech\n---\nBody.\n",
+    )
+    .expect("write");
+
+    let prior = read_prior_frontmatter(&note).expect("read prior");
+    assert_eq!(
+        prior.tags,
+        Some(vec!["ai".to_string(), "rust".to_string()]),
+        "prior tags must be captured for the union"
+    );
+    assert!(
+        !prior.carried.contains_key(TAGS_KEY),
+        "tags must not also be carried verbatim, or the union would be bypassed"
+    );
+    // The union itself, as the call site performs it: preserved first, fresh
+    // appended, deduped.
+    let fresh = vec!["rust".to_string(), "claude".to_string()];
+    let mut merged: Vec<String> = Vec::new();
+    for tag in prior.tags.clone().unwrap_or_default().into_iter().chain(fresh) {
+        if !merged.contains(&tag) {
+            merged.push(tag);
+        }
+    }
+    assert_eq!(
+        merged,
+        vec!["ai".to_string(), "rust".to_string(), "claude".to_string()],
+        "a replace must not strip `ai`"
+    );
+}
+
+#[test]
+fn session_preserve_read_failure_aborts_the_replace() {
+    // The session path has always failed closed; P3 makes the URL path agree.
+    // Both are asserted so the two cannot drift apart again.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("gone.md");
+    assert!(read_prior_frontmatter(&missing).is_err());
+
+    let unparseable = dir.path().join("bad.md");
+    std::fs::write(&unparseable, "---\ntitle: [unterminated\n---\nBody.\n").expect("write");
+    assert!(read_prior_frontmatter(&unparseable).is_err());
 }

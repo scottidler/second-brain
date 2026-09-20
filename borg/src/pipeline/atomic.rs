@@ -13,6 +13,7 @@
 //!    and writes it once via `write_atomic`. There is no window during
 //!    which the file on disk is missing the date or cortex fields.
 
+use crate::pipeline::publish::FieldValue;
 use eyre::Result;
 use std::path::{Path, PathBuf};
 use vault::schema::CORTEX_PRESERVE_KEYS;
@@ -201,12 +202,64 @@ fn insert_or_replace_field(rendered: &str, key: &str, value: &str, anchors: &[&s
     result
 }
 
+/// Remove `key` from a frontmatter line list, in either on-disk list form,
+/// and return whatever list value it held. A scalar yields an empty vec.
+///
+/// The old single-line `retain` could not do this: it left a block list's
+/// `- item` bullets orphaned under the next key.
+fn remove_key(lines: &mut Vec<String>, key: &str) -> Vec<String> {
+    let prefix = format!("{key}:");
+    let Some(idx) = lines.iter().position(|line| line.starts_with(&prefix)) else {
+        return Vec::new();
+    };
+    let rest = lines[idx][prefix.len()..].trim().to_string();
+    lines.remove(idx);
+
+    if let Some(body) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return body
+            .split(',')
+            .map(|item| item.trim().trim_matches(['"', '\'']).to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+    }
+    if !rest.is_empty() {
+        return Vec::new();
+    }
+    let mut items = Vec::new();
+    while idx < lines.len() {
+        let Some(item) = lines[idx].trim().strip_prefix("- ") else {
+            break;
+        };
+        items.push(item.trim().trim_matches(['"', '\'']).to_string());
+        lines.remove(idx);
+    }
+    items
+}
+
+/// Union two lists, `preserved` first, deduped, capped.
+fn union_capped(preserved: &[String], fresh: &[String], max_per_note: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in preserved.iter().chain(fresh.iter()) {
+        if !out.contains(item) {
+            out.push(item.clone());
+        }
+    }
+    if out.len() > max_per_note {
+        log::info!(
+            "union_capped: truncating {} merged values to the {max_per_note} cap; the fresh set loses the overflow",
+            out.len()
+        );
+        out.truncate(max_per_note);
+    }
+    out
+}
+
 /// Apply (insert or replace) the given cortex-managed frontmatter fields
 /// in `rendered`. Returns `rendered` unchanged when no `---` frontmatter
 /// is present. Pure-string form of the previous `patch_cortex_fields`
 /// helper. Only keys present in `CORTEX_PRESERVE_KEYS` are accepted; the
 /// caller is expected to filter before calling.
-pub fn apply_cortex_fields(rendered: &str, fields: &[(String, String)]) -> String {
+pub fn apply_cortex_fields(rendered: &str, fields: &[(String, FieldValue)], max_per_note: usize) -> String {
     let trimmed = rendered.trim_start();
     if !trimmed.starts_with("---") {
         return rendered.to_string();
@@ -224,8 +277,30 @@ pub fn apply_cortex_fields(rendered: &str, fields: &[(String, String)]) -> Strin
         if !CORTEX_PRESERVE_KEYS.contains(&key.as_str()) {
             continue;
         }
-        lines.retain(|line| !line.starts_with(&format!("{key}:")));
-        lines.push(format!("{key}: {value}"));
+        match value {
+            FieldValue::Scalar(v) => {
+                remove_key(&mut lines, key);
+                lines.push(format!("{key}: {v}"));
+            }
+            FieldValue::List(preserved) => {
+                // Union, preserved first: a refetch never removes a tag that
+                // cortex or the migration put on the note. The fresh set is
+                // what this publish just rendered, so it is read back out of
+                // `lines` before the key is removed.
+                let fresh = remove_key(&mut lines, key);
+                let merged = union_capped(preserved, &fresh, max_per_note);
+                if merged != fresh {
+                    log::info!(
+                        "apply_cortex_fields: {key} merged {} preserved + {} fresh -> {} (cap {max_per_note})",
+                        preserved.len(),
+                        fresh.len(),
+                        merged.len()
+                    );
+                }
+                lines.push(format!("{key}:"));
+                lines.extend(merged.into_iter().map(|item| format!("  - {item}")));
+            }
+        }
     }
 
     let offset = rendered.len() - trimmed.len();

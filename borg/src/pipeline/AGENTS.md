@@ -32,6 +32,8 @@ Each type handler (`process_url`, `process_image`, `process_audio`, `process_doc
 6. **Inflight guard dedupes concurrent duplicates.** On non-force runs, `InflightGuard::try_acquire(canonical_url)` is held for the rest of the URL handler; a concurrent second attempt returns `Duplicate{original_date:"inflight"}` (a success for receipts). Force runs skip the guard.
 7. **Cross-restart dedup** checks the ledger for a prior success of the canonical URL after the inflight guard passes.
 8. **Atomic publish.** Stage 3 writes to a temp file, applies frontmatter, then renames — no half-written note ever lands in the vault.
+9. **Preserved fields are read list-aware and fail CLOSED.** `publish::read_cortex_fields` returns `Vec<(String, FieldValue)>`, parsing inline `[a, b]`, block `- item`, and quoted forms, and returns `Err` on an unreadable note. Both reingest paths abort rather than publish a note that silently lost its preserved fields; the URL path used to swallow the error and return an empty set.
+10. **`tags` merges, it does not replace.** It is the one key in both `RENDER_NOTE_KEYS` and `CORTEX_PRESERVE_KEYS`: `apply_cortex_fields` unions preserved with fresh, preserved first, capped at `max-per-note`, and the session path does the same through `PriorFrontmatter.tags`. A note already at the cap keeps its tags and the fresh set is dropped with a log line, deliberately, so a refetch never rewrites classification silently. `--retag` is the explicit refresh.
 
 ## Patterns
 

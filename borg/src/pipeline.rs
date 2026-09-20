@@ -575,7 +575,7 @@ async fn process_url_inner(
     let log_time = now.format("%H:%M").to_string();
 
     let mut original_date: Option<String> = None;
-    let mut cortex_fields: Vec<(String, String)> = Vec::new();
+    let mut cortex_fields: Vec<(String, publish::FieldValue)> = Vec::new();
     let mut old_slides_frontmatter: Vec<String> = Vec::new();
     // Phase 3: instead of deleting the old note up front (which would create
     // a window where the vault has no copy of the URL's note while the rest
@@ -635,7 +635,10 @@ async fn process_url_inner(
         });
         if let Some(ref old_path) = old_note_path {
             original_date = read_note_date(old_path);
-            cortex_fields = read_cortex_fields(old_path);
+            // Fails the reingest CLOSED (design doc P3): publishing a note
+            // that silently lost its preserved fields is worse than not
+            // publishing, and the old note is left untouched either way.
+            cortex_fields = read_cortex_fields(old_path)?;
             reingest_dest = old_path.parent().map(|p| p.to_path_buf());
             // Capture the old note's `slides:` frontmatter list BEFORE removing it
             // so reingest cleanup can find any orphaned slide attachments.
@@ -1008,7 +1011,14 @@ async fn process_url_inner(
         log::info!("[{trace_id}] Restored original date: {orig_date}");
     }
     if !cortex_fields.is_empty() {
-        final_str = apply_cortex_fields(&final_str, &cortex_fields);
+        // The cap bounds the tags union. `usize::MAX` when no vocabulary is
+        // loaded: we cannot know the cap, and inventing one would silently
+        // drop a preserved tag.
+        let max_per_note = match tags::get_or_init_canonical(config).await {
+            Some(state) => state.canon.max_per_note,
+            None => usize::MAX,
+        };
+        final_str = apply_cortex_fields(&final_str, &cortex_fields, max_per_note);
         log::info!(
             "[{trace_id}] Restored cortex fields: {:?}",
             cortex_fields.iter().map(|(k, _)| k).collect::<Vec<_>>()

@@ -68,10 +68,10 @@ fn test_compose_then_write_atomic_is_complete_in_one_write() {
     let rendered = "---\ntitle: Example\ndate: 2026-05-08\n---\nBody text.\n";
     let composed = apply_original_date(rendered, "2026-04-19");
     let cortex_fields = vec![
-        ("domain".to_string(), "ai".to_string()),
-        ("cortex-quality".to_string(), "ok".to_string()),
+        ("domain".to_string(), FieldValue::Scalar("ai".to_string())),
+        ("cortex-quality".to_string(), FieldValue::Scalar("ok".to_string())),
     ];
-    let composed = apply_cortex_fields(&composed, &cortex_fields);
+    let composed = apply_cortex_fields(&composed, &cortex_fields, 8);
     write_atomic(&dest, composed.as_bytes()).expect("write");
 
     let contents = std::fs::read_to_string(&dest).unwrap();
@@ -161,10 +161,10 @@ fn test_apply_original_date_noop_when_no_date_line() {
 fn test_apply_cortex_fields_inserts_fields() {
     let input = "---\ntitle: Test\nsource: \"https://x\"\n---\nBody.\n";
     let fields = vec![
-        ("domain".to_string(), "ai".to_string()),
-        ("cortex-quality".to_string(), "ok".to_string()),
+        ("domain".to_string(), FieldValue::Scalar("ai".to_string())),
+        ("cortex-quality".to_string(), FieldValue::Scalar("ok".to_string())),
     ];
-    let out = apply_cortex_fields(input, &fields);
+    let out = apply_cortex_fields(input, &fields, 8);
     assert!(out.contains("domain: ai"));
     assert!(out.contains("cortex-quality: ok"));
     assert!(out.contains("title: Test"));
@@ -175,8 +175,8 @@ fn test_apply_cortex_fields_inserts_fields() {
 #[test]
 fn test_apply_cortex_fields_replaces_existing() {
     let input = "---\ntitle: T\ndomain: tech\n---\nBody.\n";
-    let fields = vec![("domain".to_string(), "ai".to_string())];
-    let out = apply_cortex_fields(input, &fields);
+    let fields = vec![("domain".to_string(), FieldValue::Scalar("ai".to_string()))];
+    let out = apply_cortex_fields(input, &fields, 8);
     assert!(out.contains("domain: ai"));
     assert!(!out.contains("domain: tech"));
 }
@@ -184,9 +184,80 @@ fn test_apply_cortex_fields_replaces_existing() {
 #[test]
 fn test_apply_cortex_fields_no_frontmatter_is_noop() {
     let input = "no frontmatter here";
-    let fields = vec![("domain".to_string(), "ai".to_string())];
-    let out = apply_cortex_fields(input, &fields);
+    let fields = vec![("domain".to_string(), FieldValue::Scalar("ai".to_string()))];
+    let out = apply_cortex_fields(input, &fields, 8);
     assert_eq!(out, input);
+}
+
+#[test]
+fn reingest_keeps_cortex_added_tag() {
+    // The URL reingest path: the fresh publish rendered [rust], the note on
+    // disk carried [rust, ai] because cortex or the migration added `ai`.
+    // The union keeps `ai`; a replace would have dropped it.
+    let rendered = "---\ntitle: T\ntags:\n  - rust\n---\nBody.\n";
+    let preserved = vec![(
+        "tags".to_string(),
+        FieldValue::List(vec!["rust".to_string(), "ai".to_string()]),
+    )];
+    let out = apply_cortex_fields(rendered, &preserved, 8);
+    assert!(out.contains("  - ai"), "cortex-added tag was dropped:\n{out}");
+    assert!(out.contains("  - rust"), "fresh tag was dropped:\n{out}");
+    assert_eq!(out.matches("tags:").count(), 1, "duplicated the tags key:\n{out}");
+    assert!(!out.contains("- rust\n  - rust"), "duplicated a tag:\n{out}");
+}
+
+#[test]
+fn reingest_merges_an_inline_fresh_list_into_block_form() {
+    // `render_note` writes block form, but a note written by cortex before
+    // P4 is inline. Either way the merged result is one block list.
+    let rendered = "---\ntitle: T\ntags: [rust]\n---\nBody.\n";
+    let preserved = vec![("tags".to_string(), FieldValue::List(vec!["ai".to_string()]))];
+    let out = apply_cortex_fields(rendered, &preserved, 8);
+    assert!(out.contains("tags:\n  - ai\n  - rust"), "expected block form:\n{out}");
+    assert!(!out.contains("tags: ["), "inline form survived:\n{out}");
+}
+
+#[test]
+fn union_at_cap_keeps_preserved_and_logs() {
+    // A note already at the cap keeps its tags and the fresh set is dropped.
+    // Deliberate: a refetch never rewrites classification silently.
+    let rendered = "---\ntitle: T\ntags:\n  - fresh-one\n  - fresh-two\n---\nBody.\n";
+    let preserved = vec![(
+        "tags".to_string(),
+        FieldValue::List(vec!["kept-a".to_string(), "kept-b".to_string()]),
+    )];
+    let out = apply_cortex_fields(rendered, &preserved, 2);
+    assert!(out.contains("  - kept-a"), "preserved tag lost at the cap:\n{out}");
+    assert!(out.contains("  - kept-b"), "preserved tag lost at the cap:\n{out}");
+    assert!(!out.contains("fresh-one"), "cap was exceeded:\n{out}");
+    assert!(!out.contains("fresh-two"), "cap was exceeded:\n{out}");
+}
+
+#[test]
+fn block_list_bullets_are_not_orphaned_on_replace() {
+    // Regression on the old single-line `retain`: removing `tags:` left its
+    // `- item` bullets dangling under whatever key came next.
+    let rendered = "---\ntitle: T\ntags:\n  - fresh\nstatus: unread\n---\nBody.\n";
+    let preserved = vec![("tags".to_string(), FieldValue::List(vec!["kept".to_string()]))];
+    let out = apply_cortex_fields(rendered, &preserved, 8);
+
+    // Both values belong in the union. What must not happen is a bullet left
+    // dangling under some OTHER key once `tags:` moves to the end.
+    let fm = out.split("\n---").next().expect("frontmatter");
+    let mut under_tags = false;
+    for line in fm.lines() {
+        if line.starts_with("tags:") {
+            under_tags = true;
+            continue;
+        }
+        if line.trim_start().starts_with("- ") {
+            assert!(under_tags, "orphaned bullet {line:?} under a non-list key:\n{out}");
+            continue;
+        }
+        under_tags = false;
+    }
+    assert!(fm.contains("status: unread"), "unrelated key was eaten:\n{out}");
+    assert_eq!(fm.matches("  - ").count(), 2, "expected the merged pair:\n{out}");
 }
 
 #[test]
@@ -194,8 +265,8 @@ fn test_apply_cortex_fields_filters_unknown_keys() {
     let input = "---\ntitle: T\n---\nBody.\n";
     // `not-a-cortex-key` is not in CORTEX_PRESERVE_KEYS and must be
     // ignored.
-    let fields = vec![("not-a-cortex-key".to_string(), "value".to_string())];
-    let out = apply_cortex_fields(input, &fields);
+    let fields = vec![("not-a-cortex-key".to_string(), FieldValue::Scalar("value".to_string()))];
+    let out = apply_cortex_fields(input, &fields, 8);
     assert!(!out.contains("not-a-cortex-key"));
 }
 
@@ -216,7 +287,8 @@ fn test_reingest_failure_before_publish_preserves_old_note() {
     // Simulate the captured metadata path - the publish step never runs
     // because the pipeline returned Err before reaching write_atomic.
     let _captured_date = "2026-04-01".to_string();
-    let _captured_cortex: Vec<(String, String)> = vec![("domain".to_string(), "ai".to_string())];
+    let _captured_cortex: Vec<(String, FieldValue)> =
+        vec![("domain".to_string(), FieldValue::Scalar("ai".to_string()))];
     let pipeline_result: Result<()> = Err(eyre::eyre!("simulated mid-pipeline failure"));
     assert!(pipeline_result.is_err(), "pipeline failed before publish");
 

@@ -131,17 +131,46 @@ pub(crate) fn read_note_date(path: &std::path::Path) -> Option<String> {
     None
 }
 
-/// Read cortex-managed fields from frontmatter.
-/// Assumes all values are single-line (inline YAML). This holds for all current
-/// cortex fields: `cortex-quality-issues` uses inline arrays like `[no-outbound-links]`.
-pub(crate) fn read_cortex_fields(path: &std::path::Path) -> Vec<(String, String)> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+/// A preserved frontmatter value. `tags` arrives as a list in either on-disk
+/// form; everything else on `CORTEX_PRESERVE_KEYS` is a scalar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldValue {
+    Scalar(String),
+    List(Vec<String>),
+}
+
+/// Strip the surrounding quotes YAML allows on a scalar or a list item. Kept
+/// deliberately narrow: this is a frontmatter line, not arbitrary YAML, and a
+/// full parse here would reject notes the rest of the pipeline tolerates.
+fn unquote(raw: &str) -> String {
+    let trimmed = raw.trim();
+    for quote in ['"', '\''] {
+        if trimmed.len() >= 2 && trimmed.starts_with(quote) && trimmed.ends_with(quote) {
+            return trimmed[1..trimmed.len() - 1].to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Split an inline `[a, b]` list body into its items.
+fn split_inline_list(body: &str) -> Vec<String> {
+    body.split(',').map(unquote).filter(|item| !item.is_empty()).collect()
+}
+
+/// Read cortex-managed fields from frontmatter, list-aware.
+///
+/// Fails CLOSED. The URL reingest path used to swallow a read error and return
+/// an empty set, which published a note that had silently lost its preserved
+/// fields; the session path has always failed closed. Both now agree.
+pub(crate) fn read_cortex_fields(path: &std::path::Path) -> eyre::Result<Vec<(String, FieldValue)>> {
+    use eyre::Context;
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("read preserved cortex fields from {}", path.display()))?;
+
     let mut fields = Vec::new();
     let mut in_frontmatter = false;
-    for line in content.lines() {
+    let mut lines = content.lines().peekable();
+    while let Some(line) = lines.next() {
         if line.trim() == "---" {
             if in_frontmatter {
                 break;
@@ -152,11 +181,30 @@ pub(crate) fn read_cortex_fields(path: &std::path::Path) -> Vec<(String, String)
         if !in_frontmatter {
             continue;
         }
-        for key in CORTEX_PRESERVE_KEYS {
-            if let Some(val) = line.strip_prefix(&format!("{key}:")) {
-                fields.push((key.to_string(), val.trim().to_string()));
-            }
+        let Some(key) = CORTEX_PRESERVE_KEYS.iter().find(|k| line.starts_with(&format!("{k}:"))) else {
+            continue;
+        };
+        let rest = line[key.len() + 1..].trim();
+
+        // Inline list: `key: [a, b]`.
+        if let Some(body) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+            fields.push((key.to_string(), FieldValue::List(split_inline_list(body))));
+            continue;
         }
+        // Block list: a bare `key:` followed by `- item` lines.
+        if rest.is_empty() {
+            let mut items = Vec::new();
+            while let Some(next) = lines.peek() {
+                let Some(item) = next.trim().strip_prefix("- ") else {
+                    break;
+                };
+                items.push(unquote(item));
+                lines.next();
+            }
+            fields.push((key.to_string(), FieldValue::List(items)));
+            continue;
+        }
+        fields.push((key.to_string(), FieldValue::Scalar(unquote(rest))));
     }
-    fields
+    Ok(fields)
 }

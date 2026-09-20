@@ -95,3 +95,32 @@ Turning the Bash sandbox off for the session (`/sandbox`) restores the cache.
 ### Deferred operator steps (not run by this phase)
 
 - None. Phase 2 is unwired by design: nothing calls the classifier until P6 (borg) and P7 (cortex), and no config file references it yet.
+
+## Phase 3: Reingest preserves tags
+
+### Design decisions
+
+- **`FieldValue` is generic over the preserve keys, not special-cased to `tags`** (`borg/src/pipeline/publish.rs`). `read_cortex_fields` decides list-vs-scalar from the on-disk shape, so `cortex-quality-issues: [no-outbound-links]` now parses as `List(["no-outbound-links"])` rather than the raw string `"[no-outbound-links]"`. It round-trips identically either way; making the parser shape-driven avoids a key-name special case that the next list-valued cortex key would have to remember to add itself to.
+- **`remove_key` replaces the old single-line `retain`** (`borg/src/pipeline/atomic.rs`). The previous code removed only the `key:` line, which for a block list left its `- item` bullets orphaned under whatever key followed. `remove_key` removes the key *and* its list body in either form, and returns the value it removed, which is how `apply_cortex_fields` gets the freshly rendered tags to union against. `block_list_bullets_are_not_orphaned_on_replace` pins it.
+- **The merged list is always written in block form.** `render_note` and `Frontmatter::to_yaml` already write block; cortex switches in P4. Writing block here means a reingest of a pre-P4 inline note normalizes it on the way through, which is the same direction P4 takes the vault.
+- **`max_per_note` is `usize::MAX` when no vocabulary is loaded** (`borg/src/pipeline.rs`). The cap has to come from the loaded `CanonicalSet`; if there is none, the honest behavior is not to truncate. Inventing a default would silently drop a preserved tag on a host whose vocabulary failed to load.
+- **The session path captures `tags` rather than carrying it** (`borg/src/pipeline/session.rs`). `PriorFrontmatter` gains a `tags` field beside `status`, the existing precedent for a `RENDER_NOTE_KEYS` key that a replace does not simply rewrite. The union happens at the call site, where the fresh list exists; the test asserts `tags` is NOT in `prior.carried`, since being carried verbatim would bypass the merge entirely.
+
+### Deviations
+
+- **The URL-path fail-closed change alters an existing contract deliberately.** `read_cortex_fields` returned `Vec` and swallowed read errors; it now returns `Result` and propagates. The doc calls for this (P3: "a preserve read failure fails closed on both paths"), but it means a reingest of a note that became unreadable between resolve and publish now fails the trace instead of publishing a stripped note. That is the intent.
+- **`test_read_cortex_fields_none_present` was renamed, not deleted.** Its fixture carries `tags:\n  - rust`, which was "no preserve keys present" before P3 and is now exactly one. It is `test_read_cortex_fields_reads_a_block_tag_list` and asserts the new answer.
+- **`borg_owned_key_policy_matches_the_declaration` gained two asserts** rather than being rewritten: `tags` is in the owned set, and `tags` is in `CORTEX_PRESERVE_KEYS`. The second is the cross-path guard: if a later change removes it from one list and not the other, the two reingest paths silently disagree about whether a tag survives.
+
+### Tradeoffs
+
+- **A note at the cap keeps its preserved tags and drops the fresh ones**, as the doc specifies. The alternative (fresh wins at the cap) would let a refetch silently rewrite classification, which is the failure the phase exists to prevent. Logged at info, and `--retag` is the explicit refresh.
+- **`unquote` strips quotes without a YAML parse.** A real parse would reject notes the rest of the pipeline tolerates, and this runs on a frontmatter line, not arbitrary YAML. The narrow version handles the quoted forms actually found in the vault.
+
+### Open questions
+
+- None.
+
+### Deferred operator steps (not run by this phase)
+
+- None in this phase, but the ordering matters: P3 must be deployed (`otto deploy`) before P4's migration runs, or a URL reingest in the window between them drops a freshly migrated tag. The design doc's Rollout step 2 says the same.

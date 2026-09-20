@@ -124,7 +124,15 @@ pub(crate) fn borg_owned_keys() -> HashSet<&'static str> {
 
 /// What a replace carries off the note it is about to overwrite: every
 /// non-borg-owned frontmatter key, verbatim, plus the prior `status:` value.
+const TAGS_KEY: &str = "tags";
+
 struct PriorFrontmatter {
+    /// The prior `tags:` list. Nominally borg-owned (it is in
+    /// `RENDER_NOTE_KEYS`), but on a REPLACE it merges rather than being
+    /// rewritten, the same exception `status:` already carries: a replay must
+    /// not strip a tag cortex or the domain-as-tag migration added. The union
+    /// happens at the call site, where the fresh list exists.
+    tags: Option<Vec<String>>,
     /// The prior `status:` value, RAW (not parsed through
     /// `vault::schema::Status`) so an off-schema operator value survives
     /// byte-for-byte instead of being silently reset to `unread`.
@@ -157,6 +165,7 @@ fn read_prior_frontmatter(path: &Path) -> Result<PriorFrontmatter> {
         );
         return Ok(PriorFrontmatter {
             status: None,
+            tags: None,
             follows: None,
             carried: BTreeMap::new(),
         });
@@ -166,6 +175,7 @@ fn read_prior_frontmatter(path: &Path) -> Result<PriorFrontmatter> {
 
     let owned = borg_owned_keys();
     let mut status = None;
+    let mut tags = None;
     let mut follows = None;
     let mut carried = BTreeMap::new();
     for (key, value) in map {
@@ -178,6 +188,17 @@ fn read_prior_frontmatter(path: &Path) -> Result<PriorFrontmatter> {
         };
         if key == STATUS_KEY {
             status = Some(value);
+            continue;
+        }
+        if key == TAGS_KEY {
+            // Captured, not carried: the union against the fresh list happens
+            // at the call site. A non-sequence `tags:` is dropped rather than
+            // propagated, the same way a non-string `follows:` is.
+            tags = value.as_sequence().map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<String>>()
+            });
             continue;
         }
         if key == FOLLOWS_KEY {
@@ -201,6 +222,7 @@ fn read_prior_frontmatter(path: &Path) -> Result<PriorFrontmatter> {
     );
     Ok(PriorFrontmatter {
         status,
+        tags,
         follows,
         carried,
     })
@@ -578,6 +600,22 @@ pub(crate) async fn process_session_inner(
         }
         if follows_stem.is_none() {
             follows_stem = prior.follows;
+        }
+        if let Some(prior_tags) = prior.tags {
+            // Union, preserved first, matching the URL reingest path. A
+            // replace must not strip a tag cortex or the domain-as-tag
+            // migration added, and this is the only key in `RENDER_NOTE_KEYS`
+            // that merges instead of being rewritten.
+            let fresh = std::mem::take(&mut all_tags);
+            for tag in prior_tags.into_iter().chain(fresh) {
+                if !all_tags.contains(&tag) {
+                    all_tags.push(tag);
+                }
+            }
+            if let Some(state) = crate::pipeline::tags::get_or_init_canonical(config).await {
+                all_tags.truncate(state.canon.max_per_note);
+            }
+            log::debug!("[{trace_id}] session replace merged tags -> {all_tags:?}");
         }
         for (key, value) in prior.carried {
             if frontmatter_additions.contains_key(&key) {

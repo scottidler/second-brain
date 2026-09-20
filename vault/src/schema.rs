@@ -5,8 +5,14 @@ use std::str::FromStr;
 /// Frontmatter keys owned by cortex. Borg preserves these across reingest so a
 /// fetch of an already-classified URL does not strip the classification work.
 /// Single source of truth; do not duplicate this list.
+/// `tags` is the one key on this list that MERGES rather than replaces: a
+/// reingest unions the preserved list with the freshly derived one, preserved
+/// first, capped at `max-per-note`. Every other key here is carried forward
+/// verbatim. Without it a refetch would strip tags cortex or a migration
+/// added, which is the failure the tags-only design doc's P3 exists to close.
 pub const CORTEX_PRESERVE_KEYS: &[&str] = &[
     "domain",
+    "tags",
     "status",
     "cortex-classified",
     "cortex-classified-by",

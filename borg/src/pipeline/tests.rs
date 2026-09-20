@@ -720,23 +720,44 @@ fn test_read_cortex_fields_all_present() {
         )
         .unwrap();
 
-    let fields = read_cortex_fields(&note);
+    let fields = read_cortex_fields(&note).expect("read");
     assert_eq!(fields.len(), 7);
-    assert!(fields.iter().any(|(k, v)| k == "domain" && v == "tech"));
-    assert!(fields.iter().any(|(k, v)| k == "status" && v == "read"));
-    assert!(fields.iter().any(|(k, v)| k == "cortex-classified" && v == "true"));
+    assert!(fields.iter().any(|(k, v)| k == "domain" && *v == scalar("tech")));
+    assert!(fields.iter().any(|(k, v)| k == "status" && *v == scalar("read")));
     assert!(
         fields
             .iter()
-            .any(|(k, v)| k == "cortex-classified-by" && v == "deterministic")
+            .any(|(k, v)| k == "cortex-classified" && *v == scalar("true"))
     );
-    assert!(fields.iter().any(|(k, v)| k == "cortex-confidence" && v == "high"));
-    assert!(fields.iter().any(|(k, v)| k == "cortex-quality" && v == "medium"));
     assert!(
         fields
             .iter()
-            .any(|(k, v)| k == "cortex-quality-issues" && v == "[no-outbound-links]")
+            .any(|(k, v)| k == "cortex-classified-by" && *v == scalar("deterministic"))
     );
+    assert!(
+        fields
+            .iter()
+            .any(|(k, v)| k == "cortex-confidence" && *v == scalar("high"))
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|(k, v)| k == "cortex-quality" && *v == scalar("medium"))
+    );
+    // Now parsed as a list rather than the raw `[...]` string.
+    assert!(
+        fields
+            .iter()
+            .any(|(k, v)| k == "cortex-quality-issues" && *v == list(&["no-outbound-links"]))
+    );
+}
+
+fn scalar(v: &str) -> FieldValue {
+    FieldValue::Scalar(v.to_string())
+}
+
+fn list(items: &[&str]) -> FieldValue {
+    FieldValue::List(items.iter().map(|s| s.to_string()).collect())
 }
 
 #[test]
@@ -745,13 +766,15 @@ fn test_read_cortex_fields_partial() {
     let note = dir.path().join("test.md");
     std::fs::write(&note, "---\ntitle: Test\ndate: 2026-03-20\ndomain: ai\n---\nBody.\n").unwrap();
 
-    let fields = read_cortex_fields(&note);
+    let fields = read_cortex_fields(&note).expect("read");
     assert_eq!(fields.len(), 1);
-    assert_eq!(fields[0], ("domain".to_string(), "ai".to_string()));
+    assert_eq!(fields[0], ("domain".to_string(), scalar("ai")));
 }
 
 #[test]
-fn test_read_cortex_fields_none_present() {
+fn test_read_cortex_fields_reads_a_block_tag_list() {
+    // Was `test_read_cortex_fields_none_present`: `tags` joined
+    // CORTEX_PRESERVE_KEYS in P3, so this note now yields exactly one field.
     let dir = tempfile::tempdir().unwrap();
     let note = dir.path().join("test.md");
     std::fs::write(
@@ -760,8 +783,8 @@ fn test_read_cortex_fields_none_present() {
     )
     .unwrap();
 
-    let fields = read_cortex_fields(&note);
-    assert!(fields.is_empty());
+    let fields = read_cortex_fields(&note).expect("read");
+    assert_eq!(fields, vec![("tags".to_string(), list(&["rust"]))]);
 }
 
 #[test]
@@ -770,14 +793,47 @@ fn test_read_cortex_fields_no_frontmatter() {
     let note = dir.path().join("test.md");
     std::fs::write(&note, "Just plain text, no frontmatter.\n").unwrap();
 
-    let fields = read_cortex_fields(&note);
+    let fields = read_cortex_fields(&note).expect("read");
     assert!(fields.is_empty());
 }
 
 #[test]
-fn test_read_cortex_fields_missing_file() {
-    let fields = read_cortex_fields(std::path::Path::new("/tmp/nonexistent-cortex-test.md"));
-    assert!(fields.is_empty());
+fn preserve_read_failure_aborts_reingest() {
+    // Fails CLOSED. The URL path used to swallow this and return an empty
+    // set, publishing a note that had silently lost every preserved field.
+    let err = read_cortex_fields(std::path::Path::new("/tmp/nonexistent-cortex-test.md"));
+    assert!(err.is_err(), "an unreadable note must not read as 'no fields'");
+}
+
+#[test]
+fn read_cortex_fields_round_trips_block_inline_and_quoted_lists() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let block = dir.path().join("block.md");
+    std::fs::write(&block, "---\ntags:\n  - rust\n  - ai\ndomain: tech\n---\nBody.\n").unwrap();
+    let fields = read_cortex_fields(&block).expect("read");
+    assert!(fields.contains(&("tags".to_string(), list(&["rust", "ai"]))));
+    assert!(fields.contains(&("domain".to_string(), scalar("tech"))));
+
+    let inline = dir.path().join("inline.md");
+    std::fs::write(&inline, "---\ntags: [rust, ai]\n---\nBody.\n").unwrap();
+    let fields = read_cortex_fields(&inline).expect("read");
+    assert_eq!(fields, vec![("tags".to_string(), list(&["rust", "ai"]))]);
+
+    let quoted = dir.path().join("quoted.md");
+    std::fs::write(
+        &quoted,
+        "---\ntags:\n  - \"rust\"\n  - 'ai'\ndomain: \"tech\"\n---\nBody.\n",
+    )
+    .unwrap();
+    let fields = read_cortex_fields(&quoted).expect("read");
+    assert!(fields.contains(&("tags".to_string(), list(&["rust", "ai"]))));
+    assert!(fields.contains(&("domain".to_string(), scalar("tech"))));
+
+    let empty_inline = dir.path().join("empty.md");
+    std::fs::write(&empty_inline, "---\ntags: []\n---\nBody.\n").unwrap();
+    let fields = read_cortex_fields(&empty_inline).expect("read");
+    assert_eq!(fields, vec![("tags".to_string(), FieldValue::List(Vec::new()))]);
 }
 
 // Phase 3 of borg-pipeline-resilience: the previous patch_cortex_fields
