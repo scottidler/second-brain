@@ -66,6 +66,14 @@ which disables the wrapper from both places it is configured (`.zshenv:63`
 and `~/.cargo/config.toml`'s `build.rustc-wrapper`) and compiles uncached.
 Turning the Bash sandbox off for the session (`/sandbox`) restores the cache.
 
+**RESOLVED 2026-09-20. Do not use the workaround above.** Setting
+`sandbox.network.allowAllUnixSockets: true` in `~/.claude/settings.json` lifts
+the `socket(AF_UNIX)` denial for the whole sandbox, and `otto ci` runs green
+with the wrapper in place. One trap: cargo caches the failed wrapper probe, so
+delete `target/.rustc_info.json` if the EPERM survives the setting. Full
+history, dead ends, and citations: `~/repos/.claude/refs/sccache-sandbox.md`
+and the vault note `notes/sccache-broken-in-claude-code-sandbox.md`.
+
 ## Phase 2: Shared tag classifier, unwired
 
 ### Design decisions
