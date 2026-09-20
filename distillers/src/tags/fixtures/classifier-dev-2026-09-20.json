@@ -1,0 +1,102 @@
+{
+  "recorded": "2026-09-20",
+  "source": "docs/design/2026-09-19-tags-only-classification.md, Phase 0 and Phase 0b",
+  "note": [
+    "Recorded classifier.dev response, replayed by the ClassifierDev tests so they never",
+    "touch the network. The vocabulary is the P1 117-tag set, sorted and split evenly into",
+    "two shards because the API's `labels` ceiling is 100 (Phase 0: 'Tool schema: labels max",
+    "100, inputs max 1,000'). The even split is pinned by Phase 0b / panel r4 OQ8: the trial",
+    "validated a 59/58 partition, and a greedy 100/17 split is an untested co-label context.",
+    "Each shard's `scores` map carries only the labels the Phase 0 record preserved; every",
+    "omitted label scored below the recorded sub-cap floor and is therefore below threshold,",
+    "which is all the merge needs to know."
+  ],
+  "endpoint": "https://classifier.dev/v1/classify",
+  "model": "jev-1.13.0",
+  "tier": "fast",
+  "threshold": 0.9,
+  "max_per_note": 8,
+  "shards": {
+    "a": ["agents", "ai", "ai-safety", "air-raid", "anthropic", "api", "architecture", "auth", "automation", "autonomous-agents", "battery", "blocking", "books", "career", "chatgpt", "claude", "cli", "coaching", "college-football", "context-engineering", "cooking", "counter", "creative-writing", "css", "cursor", "daily-notes", "data", "database", "defense", "design", "devops", "diy", "docker", "drills", "enterprise-ai", "entertainment", "exercise", "fiction", "finance", "fitness", "football", "future-of-work", "gaming", "gemini", "git", "github", "hardware", "health", "high-school-football", "home-automation", "homelab", "human-ai-collaboration", "infrastructure", "inside-zone", "iot", "knowledge-management", "kubernetes", "language-learning", "life"],
+    "b": ["linux", "llm", "markdown", "mcp", "multi-agent", "music", "neovim", "networking", "nfl", "nix", "noita", "note-taking", "nutrition", "obsidian", "offense", "offensive-line", "open-source", "openai", "outside-zone", "para-method", "parenting", "pass-protection", "performance", "pkm", "politics", "privacy", "productivity", "programming", "prompt-engineering", "python", "quarterback", "reading", "research", "rpo", "rust", "saas", "sandboxing", "science", "second-brain", "security", "software-engineering", "spanish", "spread-offense", "synth", "tech", "templates", "terminal", "travel", "tutorial", "typescript", "vibe-coding", "voice", "web-development", "webassembly", "work", "workflow", "writing", "youth-football"]
+  },
+  "inputs": [
+    {
+      "id": "ollama-open-webui",
+      "summary": "Self-hosting Ollama with Open WebUI for private local LLM inference."
+    },
+    {
+      "id": "ci-security-review",
+      "summary": "Adding an automated security review job to a GitHub Actions CI pipeline."
+    }
+  ],
+  "responses": {
+    "a": {
+      "tier": "fast",
+      "model": "jev-1.13.0",
+      "modelsUsed": ["jev-1.13.0"],
+      "results": [
+        {
+          "model": "jev-1.13.0",
+          "scores": {
+            "ai": 0.98,
+            "hardware": 0.89,
+            "infrastructure": 0.84
+          }
+        },
+        {
+          "model": "jev-1.13.0",
+          "scores": {
+            "github": 0.97,
+            "devops": 0.96,
+            "git": 0.91,
+            "automation": 0.89,
+            "infrastructure": 0.89,
+            "auth": 0.78,
+            "defense": 0.71
+          }
+        }
+      ],
+      "usage": { "classifications": 2, "escalated": 0, "ms": 192 }
+    },
+    "b": {
+      "tier": "fast",
+      "model": "jev-1.13.0",
+      "modelsUsed": ["jev-1.13.0"],
+      "results": [
+        {
+          "model": "jev-1.13.0",
+          "scores": {
+            "llm": 0.97,
+            "privacy": 0.97,
+            "open-source": 0.79,
+            "programming": 0.76
+          }
+        },
+        {
+          "model": "jev-1.13.0",
+          "scores": {
+            "security": 0.98,
+            "programming": 0.97,
+            "software-engineering": 0.97,
+            "rust": 0.95,
+            "productivity": 0.75
+          }
+        }
+      ],
+      "usage": { "classifications": 2, "escalated": 0, "ms": 192 }
+    }
+  },
+  "expected": [
+    {
+      "id": "ollama-open-webui",
+      "tags": ["ai", "llm", "privacy"],
+      "confidence": "high"
+    },
+    {
+      "id": "ci-security-review",
+      "tags": ["security", "github", "programming", "software-engineering", "devops", "rust", "git"],
+      "confidence": "high"
+    }
+  ]
+}

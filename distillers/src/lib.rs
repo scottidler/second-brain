@@ -17,6 +17,7 @@ pub mod image;
 pub mod render;
 pub mod repo;
 pub mod session;
+pub mod tags;
 pub mod text;
 pub mod thread;
 pub mod validate;

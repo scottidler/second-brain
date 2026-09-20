@@ -13,9 +13,14 @@ eyre = { workspace = true }
 log = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
 futures = "0.3.32"
+# Blocking HTTP for the classifier.dev tag classifier. Same client and version
+# cortex already uses (`cortex/src/llm.rs`), so no new crate enters the
+# workspace; `reqwest` stays borg-only.
+ureq = { version = "3.2.0", features = ["json"] }
 url = { workspace = true }
 
 [dev-dependencies]

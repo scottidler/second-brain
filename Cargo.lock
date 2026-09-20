@@ -1970,8 +1970,10 @@ dependencies = [
  "log",
  "regex",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tokio",
+ "ureq",
  "url",
  "vault",
 ]
