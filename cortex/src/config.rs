@@ -22,6 +22,7 @@ pub struct Config {
     pub embed: EmbedConfig,
     pub graph: GraphConfig,
     pub entities: EntitiesConfig,
+    pub tags: TagsSection,
 }
 
 impl Default for Config {
@@ -41,6 +42,7 @@ impl Default for Config {
             embed: EmbedConfig::default(),
             graph: GraphConfig::default(),
             entities: EntitiesConfig::default(),
+            tags: TagsSection::default(),
         }
     }
 }
@@ -472,8 +474,6 @@ pub struct ActionsConfig {
     #[serde(rename = "broken-links")]
     pub broken_links: BrokenLinksConfig,
     pub quality: QualityConfig,
-    #[serde(rename = "auto-tag")]
-    pub auto_tag: AutoTagConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -542,6 +542,17 @@ impl Default for TagsConfig {
             aliases: HashMap::new(),
         }
     }
+}
+
+/// The top-level `tags:` block, identical in `cortex.yml` and `borg.yml`; both
+/// parse `classifier` through `distillers::tags::TagsClassifierConfig`. It is
+/// top-level rather than under `actions.tags` because the classifier is not a
+/// lint rule - `classify` is what runs it. The vocabulary paths stay on
+/// `sweep` so cortex keeps one source of truth for them.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct TagsSection {
+    pub classifier: distillers::tags::TagsClassifierConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -792,38 +803,6 @@ impl Default for AssociationConfig {
             min_quiescence_secs: 600,
             exclude: Vec::new(),
             interval_secs: 3_600,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(default)]
-pub struct AutoTagConfig {
-    pub enabled: bool,
-    #[serde(rename = "min-tags-threshold")]
-    pub min_tags_threshold: usize,
-    #[serde(rename = "canonical-tags")]
-    pub canonical_tags: Vec<String>,
-    #[serde(rename = "fabric-pattern")]
-    pub fabric_pattern: Option<String>,
-    #[serde(rename = "auto-derive-top-n")]
-    pub auto_derive_top_n: usize,
-    #[serde(rename = "max-input-tokens")]
-    pub max_input_tokens: usize,
-    #[serde(rename = "fabric-timeout-secs")]
-    pub fabric_timeout_secs: u64,
-}
-
-impl Default for AutoTagConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            min_tags_threshold: 3,
-            canonical_tags: Vec::new(),
-            fabric_pattern: None,
-            auto_derive_top_n: 50,
-            max_input_tokens: 50000,
-            fabric_timeout_secs: 120,
         }
     }
 }

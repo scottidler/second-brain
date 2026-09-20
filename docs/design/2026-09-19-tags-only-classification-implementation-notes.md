@@ -354,3 +354,90 @@ Both new tests were verified to FAIL when their production code path is reverted
 - `cargo test --workspace --features vec -- ingest_tags_are_repeatable_under_deterministic ingest_tags_are_stable_under_distiller_drift retag_never_removes_no_classifier_tags reingest_keeps_cortex_added_tag session_replace_merges_tags`: all 5 pass (AC3's exact command).
 - `otto ci`: green (build, full test suite, clippy, fmt all pass).
 - The classifier.dev "no non-canonical tag, at most `max-per-note`" criterion against the recorded fixture is P2's own `outputs_are_canonical_and_capped` test (`distillers/src/tags/tests.rs`), unchanged by this phase and still green in the full run - not re-implemented here.
+
+## Phase 7: Cortex classify through the classifier
+
+### Design decisions
+
+- **`classify_note` returns `ClassifyResult { tags: TagOutput, domain: Option<Domain>, reason }`, and the domain tiers only run for a note that is going to be written** (`cortex/src/classify.rs`). Tags are classified first; a `Low` result returns immediately with `domain: None`. Deriving a domain for a note the classifier held would spend a Fabric call on a note that stays in `inbox/`. The three domain tiers are unchanged in substance - `domain_by_tags` (the `tag_domain_map`, now read over the FRESH tag set rather than whatever the note carried), then `domain_by_source`, then `domain_by_llm` - and each returns `Option<(Domain, String)>` instead of a whole `ClassifyResult`.
+- **`cortex::classify::ClassifyConfidence` and `ClassifyMethod` were deleted, not kept beside `distillers::tags::{Confidence, TagMethod}`.** Two enums spelling the same three values is the two-signals problem this doc exists to remove. The LLM tier's `confidence_threshold` survives inside `parse_llm_result`, which now returns `None` below the threshold instead of handing back a `Low` result the caller had to re-interpret.
+- **`Classifiers` (primary + `fallback` + vocabulary + protect list) is built ONCE per run**, in `run_with_notes`, and threaded into `lint_classify` / `apply_classify`. Per-note construction would reload two YAML files thousands of times. `Classifiers::classify` never returns `Err`: a primary failure runs the fallback, and a fallback failure is a `Low` result, which holds the note exactly the way "no signal" always has.
+- **`apply_classify` / `lint_classify` now take `&Config` and `&ClassifyOpts` instead of four unpacked config structs and three loose flags.** `--retag` and the classifier pair would have made `apply_classify` an 11-parameter function. Nothing outside `classify.rs` and its tests calls either.
+- **`--retag` skips a note entirely when the classifier returns `Low`, rather than writing the previous tags back with fresh provenance.** Caught by `retag_replaces_and_never_writes_empty`: `apply_retag` correctly returns the previous tags, but stamping `cortex-confidence: low` beside them would rewrite the note to record that a classification did not happen.
+- **`write_fields` is one helper for the four in-place write shapes** (retag, catch-up, reclassify, and the pre-promotion enrichment reads it too), carrying the byte guard and the per-note warn-and-skip that catch-up and reclassify each had their own copy of.
+- **`build_enrichment_fields` writes `tags` as the P3 union and omits the key when the union is empty**; `--retag` is the one replace path and does not go through it. `status: unread` is written by the enrichment path only - a retag of an already-read note must not reset it.
+- **The `tags:` block in `cortex.yml` is top-level, mirroring `borg.yml`, not `actions.tags.classifier`.** `actions.*` are lint/apply RULES that `lint` and the daemon dispatch; the classifier is infrastructure `classify` uses. The vocabulary paths stay on `sweep`, so cortex keeps one source of truth for them rather than borg's `tags.canonical-path` shape.
+- **`hermetic_config_home` now writes a small REAL vocabulary** (`cortex/src/testutil.rs`), not `tags: {}`. Classification is tags-first now, so an empty vocabulary silently turns every classify assertion in every hermetic test into "held for review" instead of exercising the path under test.
+
+### Deviations
+
+- **`autotag.rs`'s config went with it.** The doc says "`autotag.rs` deleted"; `AutoTagConfig`, `ActionsConfig.auto_tag`, the `--rule auto-tag` arm in `lib::lint`, and the daemon's `"auto-tag"` arm had no other reader and would have failed the build. The dotfiles `cortex.yml` entries (`actions.auto-tag` and `daemon.actions.auto-tag`) were removed in the same commit as the classifier block: leaving the daemon one would have logged `unknown daemon action: auto-tag` every cycle.
+- **`union_capped` is duplicated in cortex rather than shared with borg's** (`borg::pipeline::atomic::union_capped`). Six lines, and hoisting borg's copy into `vault` or `distillers` is a borg change this phase has no other reason to make. Both carry a comment naming the other.
+- **`filter_retag_notes` strips the vault root from an absolute argument instead of matching on the path tail.** The first implementation matched a tail and the LIVE run caught it: `notes/home.md` also ends with `/home.md`, so a retag over the 36 ex-`resources` notes selected 37, the extra being the vault-root index note `home.md`. Fixed and pinned by `retag_absolute_paths_match_on_a_path_boundary`. The operator command expands to ABSOLUTE paths (`grep -l` prints them), so this path is the normal one, not an edge case.
+- **The summary line under `--retag` reads `(applied 0 fix(es))` while writing files.** Pre-existing: `report.rs` counts violations carrying a `Fix`, and retag/catch-up/reclassify violations are all `fix: None`. The write count is real and correct in `report.applied_paths`. Not changed here - it would touch the catch-up and reclassify output too.
+
+### Tradeoffs
+
+- **The domain tier chain was kept rather than reduced to `tag_domain_map` alone.** The doc's P7 line says `domain` is "still written from `tag_domain_map`", which is tier 1a; deleting tiers 1b and 2 would be deleting domain-reading code before P11 and would break G3's undoability. Cost: a note whose tags map to no domain still reaches the Fabric tier once, at promotion time only.
+- **`cortex-classified-by` records the TAG method, not the domain tier.** A note can be `deterministic` in that key while its domain came from the LLM tier. The doc pins this ("`cortex-classified-by` is written as the method name"), and after P11 the domain tier is gone; recording both would mean a second key with a four-phase life.
+
+### Open questions
+
+1. **`CLASSIFY_API_KEY` is rejected by classifier.dev with HTTP 401 `invalid_api_key`, so no note in this phase was tagged by the classifier.** Verified not to be ours: the decrypted value is unchanged and well-formed (144 chars, no whitespace or quotes - the same length this doc recorded at HTTP 200 earlier the same day), and raw `curl` with `Authorization: Bearer` gets the identical 401. The keyless public tier answers `429 rate_limit_day` ("20000 fast classifications per IP per day") on this host, spent by the P0b trial. The design doc's risk table has a REOPENED row carrying this evidence. Scott needs to create or re-issue a workspace key at `classifier.dev/app/keys`; nothing in second-brain or `keep` can fix it. Until then every classify call falls through to `deterministic` with a visible WARN, which is the designed behavior.
+2. **The 19 hand-assigned tags are not protected from a later `--retag`.** They are ordinary canonical tags, so once the key works, `sb cortex classify --retag <those 19>` would REPLACE them with whatever clears 0.9. That is the documented semantics of the flag, not a defect, but it is worth knowing before anyone re-runs the retag "now that the classifier works". The vault commit is the undo.
+3. **A note promoted on tags whose tags map to no domain is selected by `filter_unclassified_notes` on every daemon tick.** Measured: exactly 1 such note today (`notes/barcode-label-on-clear-plastic-bag.md`, tagged `note-taking`, promoted by the first tick after the restart). The byte guard means it writes nothing and never enters the oscillation fingerprint, but it costs one classifier call per tick per such note until P11 makes that filter tag-based. The filter is explicitly P11's in the doc, so it was left alone; flagging it because P7 is what creates this population.
+
+### Executed 2026-09-20 (operator steps were run, not deferred)
+
+1. `systemctl --user stop borg cortex`. Both were already down from P6; `cortex.service` was in state `failed` - root cause read from the journal, not guessed: the P4-era stop at 13:23 sent SIGTERM while an embed sub-batch was mid-inference, the stop timed out, systemd SIGKILLed it (`Failed with result 'timeout'`). Cleared with `reset-failed` before the restart.
+2. Vault snapshot `3598e260` with the daemons down. The one pending change folded in was a daemon-applied tag REORDER on `notes/claude-sandbox-loosened-for-sccache-and-installs.md` (same tag set), stated in the commit message.
+3. `otto deploy` from the worktree; `~/.cargo/bin/sb` installed cleanly this time (the `Read-only file system` failure recorded under P4 did not recur - the sandbox write set now covers `~/.cargo/bin`). Verified with `sb cortex classify --help` showing `--retag`, not with `--version`, which reports the last TAG and cannot distinguish two builds inside one phase.
+4. Dry run, the phase's own criterion: `sb cortex classify` over the live vault reports **1 target note**, an inbox note, and **0 "would classify" lines for already-classified notes**. Re-run after the daemon promoted it: 1 target, 1 `would catch-up classify`, still 0 `would classify`.
+5. `sb cortex classify --retag $(grep -lE '^domain: *"?resources"?' notes/*.md) --apply`: **17 notes retagged** (all deterministic, all High, every tag set identical to what the note already carried - the classifier was unreachable, so the fallback simply re-confirmed the existing canonical tags and rewrote `cortex-classified-by: llm` -> `deterministic`), **19 left untouched** ("the classifier returned none").
+6. Those 19 hand-assigned against Addendum A (list below), then `sb cortex sweep --migrate` normalized the nine whose tag ORDER differed from canonical order; a second dry run reports 0. Every one of the 36 now carries at least one canonical tag from its Addendum A bucket.
+7. `find . -name '*.sync-conflict*' | wc -l` == **0**.
+8. `systemctl --user start borg cortex`; both `active`. The first tick promoted `inbox/barcode-label-on-clear-plastic-bag.md` to `notes/` on `note-taking` at high confidence with no domain key - the first live promotion decided by tag confidence rather than by a domain. No `unknown daemon action` in the journal.
+9. Vault commits `3598e260` (snapshot), `79876d08` (retag + hand assignment), `91fc9917` (the daemon's promotion, committed rather than left as a half-moved file).
+
+### The 36 ex-`resources` notes: auto vs. hand
+
+**Auto (17)** - confirmed by the `deterministic` fallback, tags unchanged, provenance rewritten:
+`20-outstanding-sci-fi-movies-included-with-prime` (science, fiction) · `5-indie-sci-fi-films-youve-never-heard-of-vol-1-no-spoilers` (llm, science, fiction, travel) · `dairy-queens-starkiss-treats-are-only-available-at-some-locations` (cooking) · `eating-all-your-veggies-makes-you-strong-in-noita` (noita) · `getting-into-the-tree-from-the-start-of-any-run` (noita) · `how-to-easily-defeat-the-dragon-boss-in-noita` (noita) · `how-to-host-ai-locally-ollama-and-open-webui` (privacy, security) · `more-of-the-best-minimal-slot-wand-builds-in-noita` (noita) · `muffin-tin-hack-waffle-magic` (cooking) · `nobel-prize-winner-warns-this-isn-t-our-universe-james-webb-found-something` (science) · `off-the-grid-upcoming-battle-royale-gunzilla-games` (gaming) · `severance-by-anonymous-on-apple-books` (books) · `simulating-natural-selection` (science, books) · `the-best-minimal-slot-wand-builds` (noita) · `the-rise-of-the-dad-game-semi-ramblomatic` (gaming) · `upper-middle-lower-class-in-charts-percentages-income-by-state` (data, finance) · `what-game-theory-reveals-about-life-the-universe-and-everything` (science).
+
+Note: "auto" here means the DETERMINISTIC path re-derived them from the tags the note already carried. Zero notes were tagged by `classifier-dev`, because of open question 1.
+
+**Hand-assigned (19)** - these carried no tags at all, so `Deterministic` had no candidate and correctly returned nothing:
+
+| note | tags assigned | Addendum A bucket |
+|---|---|---|
+| `heretic-official-trailer-hd-a24` | entertainment | entertainment |
+| `cant-find-anything-good-on-netflix-try-the-secret-menu-to-find-movies-and-shows-cnet` | entertainment | entertainment |
+| `hugo-awards-best-novel` | reading, books, fiction | entertainment |
+| `nebula-awards-best-novel` | reading, books, fiction | entertainment |
+| `illium` | reading, books, fiction | entertainment (Scott, OQ2: kept, retagged into the entertainment bucket) |
+| `boeing-last-week-tonight-with-john-oliver-hbo` | finance, politics | politics and money |
+| `ufos-last-week-tonight-with-john-oliver-hbo` | politics | politics and money |
+| `trump-hands-over-secret-epstein-file-collection` | politics | politics and money |
+| `why-is-this-generation-struggling-so-much-scott-galloway-modern-wisdom-podcast-543` | finance, politics | politics and money |
+| `does-anyone-care-about-men-s-struggles-richard-reeves-modern-wisdom-podcast-537` | life, politics | politics and money |
+| `fastcompanycom` | finance, politics | politics and money (Red Lobster and private equity) |
+| `homeowner-finds-massive-cave-beneath-his-house` | science | science - the note Addendum B2 named in advance: it peaks at `entertainment 0.87` and clears nothing |
+| `use-these-10-obsidian-tips-to-level-up-your-note-taking-productivity` | note-taking, obsidian, pkm | pkm |
+| `the-fun-and-efficient-note-taking-system-i-use-in-my-phd` | note-taking, pkm | pkm |
+| `3d-raised-relief-map-prints-colorful-vintage-prints` | design | misc ("any canonical") |
+| `portlandmaps-6505-se-cesar-e-chavez-blvd` | data | misc |
+| `highlights-sweden-vs-canada-2024` | entertainment | misc - no `hockey` or `sports` tag exists in the 117-tag vocabulary |
+| `when-karma-hits-back-at-you-instantly-bullsonwallstreet-trading-memes` | finance, entertainment | misc (Scott, OQ2: kept unless he says otherwise) |
+| `home` | pkm | index (`pkm` or exempt) |
+
+### Success criteria
+
+| criterion | result |
+|---|---|
+| `promotion_gates_on_confidence` | PASS - one inbox fixture, three runs: High promotes, Medium promotes, Low holds with `cortex-needs-review: true` and no `cortex-classified` key |
+| `deterministic_fallback_preserves_tier_one` | PASS - primary forced to error, real `Deterministic` fallback over the note's own canonical tags, note promotes with `cortex-classified-by: deterministic` |
+| `retag_replaces_and_never_writes_empty` | PASS - protected `work` survives, unprotected `rust` is replaced, and a second pass with an empty/Low result writes nothing |
+| `cargo test -p cortex` green (baseline 531) | PASS - **537** lib tests + 3 integration (6 autotag tests deleted, 12 added or split) |
+| live `sb cortex classify` without `--apply` reports 0 "would classify" for already-classified notes | PASS - output recorded in operator step 4 |
+| the 36 ex-`resources` notes each carry at least one tag, from Addendum A where the classifier reaches 0.9 and by hand otherwise, recording which were hand-assigned | PASS on the outcome (0 of 36 carry no tag), with the classifier contributing NOTHING: 17 confirmed by the deterministic fallback, 19 hand-assigned, 0 by `classifier-dev`. Open question 1 is why |
+| `otto ci` green | PASS |

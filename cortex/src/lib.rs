@@ -5,7 +5,6 @@
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 
 pub mod association;
-pub mod autotag;
 pub mod bridge;
 pub mod classify;
 pub mod config;
@@ -223,23 +222,6 @@ pub fn lint_with_notes(
                 vault_root,
                 &lintable_notes,
                 &config.actions.quality,
-            )?);
-        }
-    }
-
-    if rules.contains(&"auto-tag") {
-        report.merge(autotag::lint_autotag(
-            &lintable_notes,
-            &all_notes,
-            &config.actions.auto_tag,
-        ));
-        if opts.apply {
-            written_paths.extend(autotag::apply_autotag(
-                vault_root,
-                &lintable_notes,
-                &all_notes,
-                &config.actions.auto_tag,
-                &config.fabric,
             )?);
         }
     }

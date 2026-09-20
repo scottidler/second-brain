@@ -140,6 +140,10 @@ pub struct ClassifyArgs {
     pub review_only: bool,
     #[arg(long)]
     pub reclassify_domain: Option<String>,
+    /// Re-run the tag classifier over these notes, replacing their tags.
+    /// Space-separated vault-relative paths or globs.
+    #[arg(long, num_args = 1.., value_delimiter = None)]
+    pub retag: Vec<String>,
 }
 impl From<ClassifyArgs> for opts::ClassifyOpts {
     fn from(a: ClassifyArgs) -> Self {
@@ -149,6 +153,7 @@ impl From<ClassifyArgs> for opts::ClassifyOpts {
             force: a.force,
             review_only: a.review_only,
             reclassify_domain: a.reclassify_domain,
+            retag: a.retag,
         }
     }
 }

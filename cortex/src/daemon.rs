@@ -483,6 +483,7 @@ fn classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonConfi
         force: false,
         review_only: false,
         reclassify_domain: None,
+        retag: Vec::new(),
     };
     match crate::classify::run(vault_root, config, &opts) {
         Ok((_report, written)) => {
@@ -531,11 +532,11 @@ fn configured_actions(
 /// re-scanned unconditionally - while skipping the rescan whenever nothing
 /// changed. `classify` runs first by design (it MOVES notes to their final
 /// locations via promotion), so a non-empty `promoted` list marks the cache
-/// dirty before any reader (lint/link/broken-links/duplicates/auto-tag/
+/// dirty before any reader (lint/link/broken-links/duplicates/
 /// quality/sweep) runs.
 ///
 /// Scoped to the actions that actually read vault-wide `&[Note]` state today:
-/// classify, lint, link, broken-links, duplicates, auto-tag, quality, sweep.
+/// classify, lint, link, broken-links, duplicates, quality, sweep.
 /// `intel` and `state` are deliberately NOT wired into the shared cache here -
 /// `intel` keeps its own independent scan (its idempotency/skip-regeneration
 /// logic is Phase 2's concern, not this phase's, and folding it in risks a
@@ -598,6 +599,7 @@ where
                     force: false,
                     review_only: false,
                     reclassify_domain: None,
+                    retag: Vec::new(),
                 };
                 match crate::classify::run_with_notes(&notes, vault_root, config, &opts) {
                     Ok((_report, written)) => {
@@ -745,32 +747,6 @@ where
                     let report = crate::duplicates::lint_duplicates(&notes, &config.actions.duplicates);
                     if !report.is_empty() {
                         log::info!("[daemon] duplicates: {} violation(s)", report.violations.len());
-                    }
-                }
-            }
-            "auto-tag" => {
-                let auto = daemon_config.is_enabled("auto-tag");
-                if auto {
-                    match crate::autotag::apply_autotag(
-                        vault_root,
-                        &notes,
-                        &notes,
-                        &config.actions.auto_tag,
-                        &config.fabric,
-                    ) {
-                        Ok(paths) if !paths.is_empty() => {
-                            log::info!("auto-applied auto-tag: {} fix(es)", paths.len());
-                            log::info!("[daemon] auto-applied auto-tag: {} fix(es)", paths.len());
-                            fingerprint.add("auto-tag", paths);
-                            dirty = true;
-                        }
-                        Ok(_) => {}
-                        Err(e) => log::error!("auto-tag apply failed: {e}"),
-                    }
-                } else {
-                    let report = crate::autotag::lint_autotag(&notes, &notes, &config.actions.auto_tag);
-                    if !report.is_empty() {
-                        log::info!("[daemon] auto-tag: {} suggestion(s)", report.violations.len());
                     }
                 }
             }

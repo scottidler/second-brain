@@ -17,6 +17,12 @@ pub struct ClassifyOpts {
 
     /// Reclassify all notes with this domain (e.g., --reclassify-domain resources)
     pub reclassify_domain: Option<String>,
+
+    /// Re-run the tag classifier over these notes with REPLACE semantics:
+    /// the fresh tag set wins outright, except for `no-classifier-tags` and
+    /// except when the fresh result is empty or Low. Vault-relative paths or
+    /// globs over them.
+    pub retag: Vec<String>,
 }
 
 /// Output shape for `cortex lint`. Clap rejects unknown values at parse
@@ -35,7 +41,7 @@ pub struct LintOpts {
     /// Output format: human (default), json
     pub format: LintFormat,
 
-    /// Run only specific rule(s): naming, frontmatter, tags, scope, broken-links, duplicates, quality, auto-tag
+    /// Run only specific rule(s): naming, frontmatter, tags, scope, broken-links, duplicates, quality
     pub rule: Vec<String>,
 
     /// Lint only files matching glob pattern

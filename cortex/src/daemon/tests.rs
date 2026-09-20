@@ -517,7 +517,7 @@ fn periodic_sweep_fingerprint_converges_after_phase2() {
 /// Phase 7 (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`), the
 /// structural guard the whole doc exists to enforce: two consecutive
 /// periodic sweeps with the FULL default action set enabled - classify,
-/// link, duplicates, intel, auto-tag, sweep, broken-links, lint, state,
+/// link, duplicates, intel, sweep, broken-links, lint, state,
 /// quality - must produce an EMPTY `SweepFingerprint` on the second sweep.
 ///
 /// `periodic_sweep_fingerprint_converges_after_phase2` (above) only proves
@@ -529,7 +529,7 @@ fn periodic_sweep_fingerprint_converges_after_phase2() {
 /// The fixture deliberately exercises a REAL fixable violation per action
 /// where the action can produce one (classify promotes an inbox note; lint's
 /// naming/frontmatter/tags rules rename/fill-title/alias-rewrite; link
-/// inserts a glossary-concept wikilink; duplicates/quality/auto-tag stamp
+/// inserts a glossary-concept wikilink; duplicates/quality stamp
 /// idempotent `cortex-*` frontmatter fields; sweep strips one deliberately
 /// non-canonical, non-aliased tag). `broken-links` and `state` never
 /// contribute to the fingerprint by design (the first is read-only, the
@@ -618,20 +618,14 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
                 min_word_length: 3,
                 ..crate::config::LinkingConfig::default()
             },
-            auto_tag: crate::config::AutoTagConfig {
-                enabled: true,
-                canonical_tags: vec!["kubernetes".to_string()],
-                ..crate::config::AutoTagConfig::default()
-            },
             ..crate::config::ActionsConfig::default()
         },
-        // Point fabric at a binary that does not exist so classify's Tier-2 LLM
-        // path (`classify_by_llm` -> `fabric::is_available`) is deterministically
+        // Point fabric at a binary that does not exist so the DOMAIN Tier-2 LLM
+        // path (`domain_by_llm` -> `fabric::is_available`) is deterministically
         // OFF on every machine. Without this, a dev host that happens to have a
-        // populated oracle index AND a real `fabric` binary would LLM-classify
-        // the no-signal inbox note below instead of exercising `mark_needs_review`
-        // - the exact path this test must pin. The fixture's auto-tag never uses
-        // fabric (its `fabric_pattern` is None), so this only disables Tier-2.
+        // populated oracle index AND a real `fabric` binary would reach the
+        // network mid-test. Tag classification is `deterministic` by config
+        // default, so nothing else here calls out.
         fabric: crate::config::FabricConfig {
             binary: "cortex-test-no-fabric-binary".to_string(),
             ..crate::config::FabricConfig::default()
@@ -647,7 +641,6 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
         "link",
         "duplicates",
         "intel",
-        "auto-tag",
         "sweep",
         "broken-links",
         "state",
@@ -674,7 +667,7 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     // `filter_inbox_notes` re-selects it every cycle; the pre-Phase-8 code
     // rewrote it (byte-identically, new mtime) on EVERY cycle - the perpetual
     // self-write the zero-writes assertion below now catches. `origin: authored`
-    // keeps quality/link/auto-tag/duplicates off it, so classify is the ONLY
+    // keeps quality/link/duplicates off it, so classify is the ONLY
     // action that ever touches it. --
     std::fs::write(
         inbox_dir.join("mystery.md"),
@@ -732,8 +725,7 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     )
     .expect("write dup-b note");
 
-    // -- auto-tag: few tags, assisted origin, body mentions the one
-    // configured canonical tag ("kubernetes") verbatim. --
+    // -- quality/link: assisted origin, body mentions a glossary concept. --
     std::fs::write(
         vault_root.join("k8s-notes.md"),
         "---\ntitle: K8s Notes\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - programming\n---\nNotes about kubernetes clusters and pods for the on-call rotation, see [[langchain]] too.\n",
@@ -933,7 +925,7 @@ async fn scheduled_intel_write_under_applying_guard_does_not_clear_latch() {
 /// false in every arm that checks it), which guarantees zero writes
 /// regardless of what a scan would find. Before Phase 5 this cycle issued one
 /// independent `scan_vault` call per scanning action (classify, lint, link,
-/// duplicates, auto-tag, quality, sweep - broken-links included) every time it
+/// duplicates, quality, sweep - broken-links included) every time it
 /// ran; the shared cache collapses that to exactly one call.
 #[test]
 fn configured_actions_no_mutation_scans_vault_exactly_once() {
@@ -958,7 +950,6 @@ fn configured_actions_no_mutation_scans_vault_exactly_once() {
         "link",
         "broken-links",
         "duplicates",
-        "auto-tag",
         "quality",
         "sweep",
     ] {
@@ -999,6 +990,12 @@ fn configured_actions_no_mutation_scans_vault_exactly_once() {
 /// "classify-with-promotions", before lint consumes the (now stale) cache.
 #[test]
 fn configured_actions_rescans_once_after_classify_promotion() {
+    // classify now loads the canonical vocabulary to build its tag classifier,
+    // so this test reads XDG_CONFIG_HOME like every other classify path: take
+    // the env lock and provision a hermetic config home, or a concurrently
+    // running test's guard decides whether `rust` is a canonical tag here.
+    let _lock = crate::testutil::lock_env();
+    let _cfg = crate::testutil::hermetic_config_home();
     let vault_dir = tempfile::tempdir().expect("vault tmpdir");
     let vault_root = vault_dir.path();
     let inbox_dir = vault_root.join("inbox");

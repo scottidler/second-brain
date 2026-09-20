@@ -94,10 +94,23 @@ pub fn hermetic_config_home() -> HermeticConfigHome {
     let dir = tempfile::tempdir().expect("config home tmpdir");
     let sb = dir.path().join("sb");
     fs::create_dir_all(&sb).expect("create config root");
+    // A small but REAL vocabulary, not `tags: {}`. Classification is
+    // tags-first now: an empty vocabulary makes every note unclassifiable, so
+    // an empty one would silently turn every classify assertion in every
+    // hermetic test into "held for review" rather than exercising the path
+    // under test. These are the tags the daemon and classify fixtures use.
     fs::write(
         sb.join("canonical-tags.yml"),
         "max-per-note: 7
-tags: {}
+tags:
+  tech:
+    - rust
+    - cli
+    - programming
+    - kubernetes
+  ai:
+    - ai
+    - llm
 ",
     )
     .expect("write canonical-tags.yml");
@@ -115,10 +128,9 @@ tags: {}
 }
 
 use crate::config::{
-    ActionsConfig, AssociationConfig, AutoTagConfig, BackfillConfig, BrokenLinksConfig, Config, DaemonConfig,
-    DuplicatesConfig, FabricConfig, FrontmatterConfig, IntelConfig, LinkingConfig, LinkingEntities, LlmConfig,
-    NamingConfig, QualityConfig, SchemaConfig, ScopeConfig, ScopeMatch, ScopeRule, StateConfig, SweepConfig,
-    TagsConfig, VaultConfig,
+    ActionsConfig, AssociationConfig, BackfillConfig, BrokenLinksConfig, Config, DaemonConfig, DuplicatesConfig,
+    FabricConfig, FrontmatterConfig, IntelConfig, LinkingConfig, LinkingEntities, LlmConfig, NamingConfig,
+    QualityConfig, SchemaConfig, ScopeConfig, ScopeMatch, ScopeRule, StateConfig, SweepConfig, TagsConfig, VaultConfig,
 };
 use crate::vault::{self, Frontmatter, Note};
 
@@ -413,10 +425,6 @@ impl TestVault {
                     check_urls: false,
                 },
                 quality: QualityConfig { min_word_count: 50 },
-                auto_tag: AutoTagConfig {
-                    enabled: false,
-                    ..AutoTagConfig::default()
-                },
             },
             state: StateConfig {
                 cache_dir: ".cortex".to_string(),
@@ -430,6 +438,7 @@ impl TestVault {
             embed: crate::config::EmbedConfig::default(),
             graph: crate::config::GraphConfig::default(),
             entities: crate::config::EntitiesConfig::default(),
+            tags: crate::config::TagsSection::default(),
         }
     }
 
