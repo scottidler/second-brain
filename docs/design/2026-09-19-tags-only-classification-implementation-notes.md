@@ -632,3 +632,154 @@ pass, per the standing "there is no my-side" instruction)
 | `system/views/cold-notes.md` renders | PASS |
 | `cargo test -p cortex` green (baseline 537) | PASS - 541 |
 | `otto ci` green | PASS |
+
+## Phase 10: Vault and config artifacts
+
+**Model:** sonnet. **Stores:** notes, cfg (obsidian and dotfiles commits).
+This phase replaced artifacts only; no `second-brain` code or config
+changed, so this notes-file append is the only `second-brain` commit for
+this phase.
+
+### Design decisions
+
+- Ran the full operator sequence: `systemctl --user stop borg cortex`,
+  vault tree confirmed clean (no snapshot commit needed), edits, obsidian
+  commit, dotfiles commit, `find . -name '*.sync-conflict*'` == 0, `systemctl
+  --user start borg cortex`, live `sb cortex lint`/`schema --check` re-run
+  from `~/repos/scottidler/obsidian` (never from the worktree, per the
+  `cortex` bare-arg rewrite gotcha).
+- `.base` views: `all-notes`, `borg-ledger`, `unread` gained a `tags`
+  property/column in place of `domain`; `work.base` already carried `tags`
+  and only lost its `domain` column. No filter changed on any of the four
+  (`system/views/all-notes.base`, `system/views/borg-ledger.base:1-18`,
+  `system/views/unread.base`, `system/views/work.base`).
+- `borg-ledger.base` carries `domain` in three more places than the doc bullet's
+  single "column" wording implies: two `order:` list entries (`Ledger` and `By
+  Method` sub-views) and a third sub-view's `name`/`groupBy` (`By Domain` ->
+  `By Tag`, `groupBy.property: domain` -> `tags`). The Phase 10 success
+  criterion is a literal `grep -rlw domain` over `system/views`, which fails on
+  any of these three even though they are not the file's top-level "column" -
+  fixed all three, not just the declared-properties block.
+- `system/views/domains.base` renamed to `system/views/tags.base` via `git mv`
+  (preserves history) with `groupBy: property: tags`; the filter changed from
+  `domain != null AND domain != "system"` to `tags != null` since `system` was
+  never propagated as a tag (nothing to exclude).
+- `system/views/untriaged.base` filter: `domain == null OR domain == ""` ->
+  `tags == null OR tags.isEmpty()` (covers both a bare `tags:` key, which
+  parses as null, and an explicit `tags: []`).
+- `home.md:41` linked `[[domains.base]]`; renaming the file would have broken
+  that link, so it was updated to `[[tags.base]]` in the same commit even
+  though `home.md` is not named in the P10 bullet - it is a direct consequence
+  of the rename this phase makes, not scope creep, and leaving it broken would
+  fail "don't leave vault artifacts broken" silently.
+- `system/schemas/frontmatter.md`: `domain` row moved out of the required set
+  (Required: yes -> no, description changed to "Legacy topic-area field,
+  superseded by tags... not required"); `tags` row description updated to
+  reflect the new required-non-empty semantics and the exempt-path list;
+  `See also` line gained `[[tag-values]]`; the Deprecated Fields `folder ->
+  domain` row changed to `folder -> (dropped)` since `cortex.yml` no longer
+  auto-renames it (matches the migrations change below).
+- Vault `README.md` and `CLAUDE.md`: replaced `domain`-as-primary-field
+  language with `tags` in the Organization/Key Fields/Pipeline/Sweeper
+  Rules/Classification Heuristics sections. `CLAUDE.md` keeps three domain
+  mentions intentionally: the `**domain**` Key Fields row (now marked legacy,
+  not required, still describes the live enum values), the daily-notes
+  exemption note, and the `vault` crate schema-enum sentence (`Domain,
+  NoteType, Origin, Status, Method` - the enum is not deleted this phase, so
+  the sentence stays accurate). The Classification Heuristics table's
+  `knowledge -> life` row was renamed to match `config/canonical-tags.yml`'s
+  live mapping (`life: [life]`); the `resources` row was dropped from the
+  table because `resources` is explicitly not propagated as a tag (Data
+  Model, G7) and has no tag equivalent to heuristic-map onto.
+- 10 templates (`book.md`, `frontmatter.md`, `idea.md`, `link.md`, `moc.md`,
+  `note.md`, `presentation.md`, `slack-post.md`, `vocab.md`, `work-note.md`)
+  and `bin/wn:30` each lost their single `domain:`/`domain: <value>` line;
+  nothing else in those files changed.
+- `cortex.yml`: `required` dropped `domain`; `exempt.daily` and all three
+  `path-exempt` entries (`inbox/**`, `notes/ai/**`, `entities/**`) gained
+  `tags` alongside their existing `domain` entry (1:1 carry-over, matching the
+  doc's own future-state table at line 144); a new `"system/**": [tags]`
+  path-exempt entry was added (system/** was never exempt from `domain`, so
+  this is additive, not carried-over); `actions.tags.canonical` (the 11-entry
+  legacy list, dead since P9 moved vocabulary loading to
+  `config/canonical-tags.yml`) was deleted; `actions.tags.aliases` was kept
+  because it is non-empty (`k8s`, `kube`, `nix`); `v3-domain-expansion` was
+  deleted whole; the `folder: domain` line was deleted from
+  `v2-field-renames` only, leaving the rest of that migration's renames
+  intact.
+- `borg.yml`: deleted the single dead `fallback-domain: inbox` line under
+  `routing:`; confirmed zero readers in `borg/src` before deleting (`grep -rn
+  "fallback.domain\|fallback_domain" borg/src distillers/src vault/src` ==
+  empty), and confirmed no Rust struct field exists for it at all (not even
+  behind a default) - it was accepted and silently dropped by serde on every
+  prior load.
+- Both dotfiles edits landed through `git add -p`/hunk-selection rather than
+  whole-file `git add`, because `borg.yml` and (transitively checked)
+  `cortex.yml` already carried unrelated uncommitted drift (a fabric
+  binary-path rework) in the shared worktree; only the `fallback-domain` hunk
+  and the full `cortex.yml` diff (which had no unrelated changes) were
+  staged and committed.
+
+### Deviations
+
+- None from the design doc bullet itself. The doc's own P10 bullet undercounts
+  where `domain` appears in `borg-ledger.base` (see Design decisions above);
+  this is a doc-wording gap, not a deviation in the implementation, and the
+  fix follows the doc's own success criterion (the literal grep) rather than
+  its narrower prose.
+
+### Tradeoffs
+
+- `tags.base`'s filter (`tags != null`) is looser than `domains.base`'s old
+  filter (`domain != null AND domain != "system"`): it does not exclude any
+  tag value by name. Chosen because no tag plays `system`'s role (the design
+  explicitly keeps `system` and `resources` out of tag propagation), so there
+  is nothing parallel to exclude; adding a speculative exclusion for a value
+  that cannot appear would be dead configuration.
+- `untriaged.base`'s new filter uses Obsidian Bases' `isEmpty()` list function
+  by inference from the Bases formula surface (list-emptiness checks are a
+  documented Bases capability), not by executing it inside Obsidian - this
+  environment cannot render `.base` files to confirm exact runtime syntax.
+  Recorded as an open question below rather than asserted as verified.
+
+### Open questions
+
+- `system/views/untriaged.base` and `system/views/tags.base`'s tag-empty/
+  tag-non-null filter expressions (`tags == null`, `tags.isEmpty()`, `tags !=
+  null`) could not be rendered in Obsidian from this environment. Scott
+  should open both views once in the Obsidian app and confirm they populate
+  as expected; if the function name differs, only those two filter lines need
+  correction.
+
+### Live verification (2026-09-20, operator sequence run from
+`~/repos/scottidler/obsidian`, both daemons stopped for the edit window)
+
+- Success criteria, observed after both commits and daemon restart:
+  - `grep -rlw domain system/views system/templates bin | wc -l`: **0**
+    (down from 6 files before this phase's edits).
+  - `sb cortex lint` `frontmatter.required.domain`: **0** (down from the
+    brief's pre-phase measurement of 4; expected, since `domain` left the
+    `required` list entirely rather than being backfilled onto those 4
+    notes).
+  - `grep -c fallback-domain ~/.config/sb/borg.yml`: **0**.
+  - `grep -c 'folder: domain' ~/.config/sb/cortex.yml`: **0** (down from 1).
+  - Live `~/.config/sb/{borg,cortex}.yml` confirmed as symlinks into the
+    dotfiles repo and `grep`-verified post-commit to carry the edits.
+- `frontmatter.required.tags`: **1,057 -> 4** (`home.md`, real empty
+  `tags: []` on a non-exempt root file; `journal/2022/08/2022-08-05.md`,
+  `type: note` rather than `type: daily` so the daily exemption does not
+  apply, and genuinely empty tags; two `test_folder/*SpecialCharacters*.md`
+  fixtures). All four are true positives, not exemption gaps - the
+  order-of-magnitude drop P9 asked this phase to produce landed as
+  predicted (915 `entities/**` + 88 `journal/` + 50 `notes/` + 1 `system/`
+  false positives from P9 are now exempt).
+- `tags.non-canonical` / `tags.cap` / `tags.format`: unchanged at 0/0/0
+  (config change only touched `required`/`path-exempt`/`canonical`/
+  migrations, not the lint rules P9 added).
+- `sb cortex schema --check`: exit 0, all 5 docs `unchanged` (this phase did
+  not touch schema rendering).
+- `find . -name '*.sync-conflict*' | wc -l`: **0**, before and after.
+- `systemctl --user is-active borg cortex` after restart: `active active`.
+- No `second-brain` code, `Cargo.toml`, or `config/` files were touched;
+  `otto ci` was not re-run because nothing in the workspace changed (the
+  P9 baseline of 541 `cortex` tests and a green `otto ci` stands).
