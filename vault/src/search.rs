@@ -573,6 +573,9 @@ impl EmbeddingCoverage {
 pub struct VaultStats {
     pub total_notes: u64,
     pub by_domain: Vec<(String, u64)>,
+    /// Top 20 tags by note count, over the `note_tags` facet (P8, beside
+    /// `by_domain`; `by_domain` is deleted in P11, `by_tag` stays).
+    pub by_tag: Vec<(String, u64)>,
     pub by_type: Vec<(String, u64)>,
     pub by_status: Vec<(String, u64)>,
     pub schema_gaps: Vec<(String, u64)>,
@@ -582,6 +585,18 @@ pub struct VaultStats {
 #[derive(Debug, Serialize)]
 pub struct DomainBrief {
     pub domain: String,
+    pub total_notes: u64,
+    pub unread: u64,
+    pub starred: u64,
+    pub by_type: Vec<(String, u64)>,
+    pub recent: Vec<NoteRow>,
+}
+
+/// Statistics and recent notes for a single tag - the `tags` counterpart to
+/// `DomainBrief` (P8, beside `domain_brief`; `DomainBrief` is deleted in P11).
+#[derive(Debug, Serialize)]
+pub struct TagBrief {
+    pub tag: String,
     pub total_notes: u64,
     pub unread: u64,
     pub starred: u64,

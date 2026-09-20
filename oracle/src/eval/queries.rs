@@ -25,6 +25,10 @@ pub struct EvalQuery {
     /// Optional schema filter passed to search.
     #[serde(default)]
     pub domain: Option<String>,
+    /// Optional tags filter passed to search (P8, beside `domain`; OR across
+    /// the list).
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
     /// Calibration marker. `None` = not a calibration query. `Some(map)` = a
     /// calibration query; the map is note-path -> graded human label (0..3) and
     /// may be empty while awaiting labels (filled via `--emit-calibration`).

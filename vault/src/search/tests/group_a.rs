@@ -62,10 +62,10 @@ fn test_tag_search_exact() {
     insert_test_note(&index, "notes/b.md", "Rust Web", "tech", &["rust", "web"], "body");
     insert_test_note(&index, "notes/c.md", "Python ML", "ai", &["python", "ml"], "body");
 
-    let results = index.tag_search("rust", None, None).expect("tag_search");
+    let results = index.tag_search("rust", None, None, false, None).expect("tag_search");
     assert_eq!(results.len(), 2);
 
-    let results = index.tag_search("python", None, None).expect("tag_search");
+    let results = index.tag_search("python", None, None, false, None).expect("tag_search");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].path, "notes/c.md");
 }
@@ -76,7 +76,9 @@ fn test_tag_search_prefix() {
     insert_test_note(&index, "notes/a.md", "Rust CLI", "tech", &["rust", "rust-cli"], "body");
     insert_test_note(&index, "notes/b.md", "Ruby", "tech", &["ruby"], "body");
 
-    let results = index.tag_search("rust*", None, None).expect("tag_search prefix");
+    let results = index
+        .tag_search("rust*", None, None, false, None)
+        .expect("tag_search prefix");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].path, "notes/a.md");
 }
@@ -87,7 +89,9 @@ fn test_tag_search_with_domain_filter() {
     insert_test_note(&index, "notes/a.md", "AI Rust", "ai", &["rust"], "body");
     insert_test_note(&index, "notes/b.md", "Tech Rust", "tech", &["rust"], "body");
 
-    let results = index.tag_search("rust", Some("ai"), None).expect("tag_search domain");
+    let results = index
+        .tag_search("rust", Some("ai"), None, false, None)
+        .expect("tag_search domain");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].path, "notes/a.md");
 }
@@ -394,7 +398,7 @@ fn test_classify_stats() {
             )
             .expect("insert");
 
-    let stats = index.classify_stats(None).expect("classify_stats");
+    let stats = index.classify_stats(None, None, false).expect("classify_stats");
     assert_eq!(stats.total_classified, 1);
     assert_eq!(stats.pending_review, 1);
     assert_eq!(stats.inbox_count, 1);
@@ -403,12 +407,14 @@ fn test_classify_stats() {
     // Domain filter is parameterized: a value with SQL-special characters must
     // be treated as data (matching nothing here), never interpolated as SQL.
     let filtered = index
-        .classify_stats(Some("tech' OR '1'='1"))
+        .classify_stats(Some("tech' OR '1'='1"), None, false)
         .expect("classify_stats with injection-shaped domain must not error");
     assert_eq!(filtered.total_classified, 0);
 
     // And a legitimate domain filter still narrows correctly.
-    let tech = index.classify_stats(Some("tech")).expect("classify_stats tech");
+    let tech = index
+        .classify_stats(Some("tech"), None, false)
+        .expect("classify_stats tech");
     assert_eq!(tech.total_classified, 1);
 }
 

@@ -49,6 +49,10 @@ pub struct KnowledgeSearchRequest {
     #[schemars(description = "Filter by domain")]
     pub domain: Option<Domain>,
 
+    /// Filter to notes carrying any of these tags (OR across the list)
+    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    pub tags: Option<Vec<String>>,
+
     /// Filter by note type
     #[schemars(description = "Filter by note type")]
     pub note_type: Option<NoteType>,
@@ -130,6 +134,10 @@ pub struct ListNotesRequest {
     /// Filter by domain
     #[schemars(description = "Filter by domain")]
     pub domain: Option<Domain>,
+
+    /// Filter to notes carrying any of these tags (OR across the list)
+    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    pub tags: Option<Vec<String>>,
 
     /// Filter by note type
     #[schemars(description = "Filter by note type")]
@@ -223,12 +231,36 @@ pub struct TagSearchRequest {
     #[schemars(description = "Filter to a specific domain")]
     pub domain: Option<Domain>,
 
+    /// Additionally require the note to carry any of these tags (OR across
+    /// the list) - a sibling filter beside `domain`, distinct from the
+    /// primary `tag` match above.
+    #[schemars(description = "Additionally filter to notes carrying any of these tags (OR across the list)")]
+    pub tags: Option<Vec<String>>,
+
     /// How much content to return per note
     #[schemars(description = "Detail level for returned notes. Default: metadata")]
     pub detail: Option<DetailLevel>,
 
     /// Maximum number of results
     #[schemars(description = "Maximum number of results (default: 20)")]
+    pub limit: Option<u32>,
+}
+
+/// Get a briefing on a specific tag - stats, recent notes, unread count.
+/// The `tags` counterpart to `domain_brief` (P8; `domain_brief` is deleted
+/// in P11).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TagBriefRequest {
+    /// The tag to get a briefing on
+    #[schemars(description = "Tag to brief on")]
+    pub tag: String,
+
+    /// How much content to return per note in the recent list
+    #[schemars(description = "Detail level for recent notes. Default: tldr")]
+    pub detail: Option<DetailLevel>,
+
+    /// Number of recent notes to include
+    #[schemars(description = "Number of recent notes to include (default: 10)")]
     pub limit: Option<u32>,
 }
 
@@ -249,6 +281,10 @@ pub struct FindSimilarRequest {
     #[schemars(description = "Restrict results to a specific domain")]
     pub domain: Option<Domain>,
 
+    /// Filter to notes carrying any of these tags (OR across the list)
+    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    pub tags: Option<Vec<String>>,
+
     /// How much content to return per note
     #[schemars(description = "Detail level for returned notes. Default: tldr")]
     pub detail: Option<DetailLevel>,
@@ -268,6 +304,10 @@ pub struct RecentActivityRequest {
     /// Filter by domain
     #[schemars(description = "Filter to a specific domain")]
     pub domain: Option<Domain>,
+
+    /// Filter to notes carrying any of these tags (OR across the list)
+    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    pub tags: Option<Vec<String>>,
 
     /// Filter by note type
     #[schemars(description = "Filter to a specific note type")]
@@ -320,6 +360,10 @@ pub struct CreatorBrowseRequest {
     #[schemars(description = "Filter to a specific domain")]
     pub domain: Option<Domain>,
 
+    /// Filter to notes carrying any of these tags (OR across the list)
+    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    pub tags: Option<Vec<String>>,
+
     /// How much content to return per note
     #[schemars(description = "Detail level for returned notes. Default: metadata")]
     pub detail: Option<DetailLevel>,
@@ -341,6 +385,10 @@ pub struct SourceBrowseRequest {
     /// Filter by vault domain
     #[schemars(description = "Filter to a specific vault domain")]
     pub domain: Option<Domain>,
+
+    /// Filter to notes carrying any of these tags (OR across the list)
+    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    pub tags: Option<Vec<String>>,
 
     /// How much content to return per note
     #[schemars(description = "Detail level for returned notes. Default: metadata")]
@@ -418,6 +466,10 @@ pub struct ClassifyStatusRequest {
     /// Filter to a specific domain
     #[schemars(description = "Filter statistics to a specific domain")]
     pub domain: Option<Domain>,
+
+    /// Filter statistics to notes carrying any of these tags (OR across the list)
+    #[schemars(description = "Filter statistics to notes carrying any of these tags (OR across the list)")]
+    pub tags: Option<Vec<String>>,
 }
 
 /// List all valid schema values (domains, note types, origins, statuses, methods).

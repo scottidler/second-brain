@@ -1153,3 +1153,199 @@ fn cortex_upsert_after_stale_flag_replaces_old_row_atomically() {
         "post-upsert the row must not appear as stale: {paths:?}"
     );
 }
+
+// --- Phase 8: tags siblings beside domain in stats.rs -----------------------
+
+/// Build a fully-populated `Note` for the P8 tags-sibling tests below:
+/// domain, creator, source, tags, and (when `classified`) the `cortex-*`
+/// extra keys `index_one` reads into the `classified`/`classified_by`
+/// columns (`index.rs:167-170`).
+fn siblings_note(path: &str, domain: &str, creator: &str, source: &str, tags: &[&str], classified: bool) -> Note {
+    use crate::frontmatter::Frontmatter;
+    use std::path::PathBuf;
+    let mut extra = std::collections::HashMap::new();
+    if classified {
+        extra.insert("cortex-classified".to_string(), serde_yaml::Value::Bool(true));
+        extra.insert(
+            "cortex-classified-by".to_string(),
+            serde_yaml::Value::String("deterministic".to_string()),
+        );
+    }
+    Note {
+        path: PathBuf::from(path),
+        frontmatter: Frontmatter {
+            title: Some(path.to_string()),
+            note_type: Some("article".to_string()),
+            origin: Some("assisted".to_string()),
+            domain: Some(domain.to_string()),
+            creator: Some(creator.to_string()),
+            source: Some(source.to_string()),
+            tags: Some(tags.iter().map(|t| t.to_string()).collect()),
+            extra,
+            ..Frontmatter::default()
+        },
+        body: "body".to_string(),
+        raw: "---\n---\nbody".to_string(),
+    }
+}
+
+#[test]
+fn tag_search_narrows_by_tags_sibling_beside_domain() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&siblings_note("notes/a.md", "tech", "", "", &["rust", "ai"], false), 1)
+        .expect("a");
+    index
+        .index_one(&siblings_note("notes/b.md", "tech", "", "", &["rust"], false), 1)
+        .expect("b");
+
+    // Primary `tag` matches both; the `tags` sibling narrows to the one that
+    // also carries `ai`.
+    let narrowed = index
+        .tag_search("rust", None, Some(&["ai".to_string()]), false, None)
+        .expect("narrowed");
+    assert_eq!(narrowed.len(), 1);
+    assert_eq!(narrowed[0].path, "notes/a.md");
+
+    let unfiltered = index.tag_search("rust", None, None, false, None).expect("unfiltered");
+    assert_eq!(unfiltered.len(), 2);
+}
+
+#[test]
+fn notes_by_creator_narrows_by_tags_sibling() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(
+            &siblings_note("notes/a.md", "tech", "acme", "https://example.com/a", &["rust"], false),
+            1,
+        )
+        .expect("a");
+    index
+        .index_one(
+            &siblings_note(
+                "notes/b.md",
+                "tech",
+                "acme",
+                "https://example.com/b",
+                &["cooking"],
+                false,
+            ),
+            1,
+        )
+        .expect("b");
+
+    let rows = index
+        .notes_by_creator("acme", None, Some(&["rust".to_string()]), false, None)
+        .expect("filtered");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path, "notes/a.md");
+
+    let all = index
+        .notes_by_creator("acme", None, None, false, None)
+        .expect("unfiltered");
+    assert_eq!(all.len(), 2);
+}
+
+#[test]
+fn notes_by_source_domain_narrows_by_tags_sibling() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(
+            &siblings_note("notes/a.md", "tech", "acme", "https://example.com/a", &["rust"], false),
+            1,
+        )
+        .expect("a");
+    index
+        .index_one(
+            &siblings_note(
+                "notes/b.md",
+                "tech",
+                "acme",
+                "https://example.com/b",
+                &["cooking"],
+                false,
+            ),
+            1,
+        )
+        .expect("b");
+
+    let rows = index
+        .notes_by_source_domain("example.com", None, Some(&["cooking".to_string()]), false, None)
+        .expect("filtered");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path, "notes/b.md");
+}
+
+#[test]
+fn classify_stats_narrows_by_tags_sibling() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&siblings_note("notes/a.md", "tech", "", "", &["rust"], true), 1)
+        .expect("a");
+    index
+        .index_one(&siblings_note("notes/b.md", "tech", "", "", &["cooking"], true), 1)
+        .expect("b");
+
+    let rust_only = index
+        .classify_stats(None, Some(&["rust".to_string()]), false)
+        .expect("rust");
+    assert_eq!(rust_only.total_classified, 1);
+
+    let both = index.classify_stats(None, None, false).expect("unfiltered");
+    assert_eq!(both.total_classified, 2);
+}
+
+#[test]
+fn tag_brief_mirrors_domain_brief_shape() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(
+            &siblings_note("notes/a.md", "tech", "", "", &["privacy", "ai"], false),
+            1,
+        )
+        .expect("a");
+    index
+        .index_one(&siblings_note("notes/b.md", "tech", "", "", &["privacy"], false), 1)
+        .expect("b");
+    index
+        .index_one(&siblings_note("notes/c.md", "tech", "", "", &["ai"], false), 1)
+        .expect("c");
+
+    let brief = index.tag_brief("privacy", None).expect("tag_brief");
+    assert_eq!(brief.tag, "privacy");
+    assert_eq!(brief.total_notes, 2);
+    assert_eq!(brief.recent.len(), 2);
+    let paths: std::collections::HashSet<&str> = brief.recent.iter().map(|n| n.path.as_str()).collect();
+    assert!(paths.contains("notes/a.md") && paths.contains("notes/b.md"));
+}
+
+#[test]
+fn stats_by_tag_reports_top_20() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&siblings_note("notes/a.md", "tech", "", "", &["rust", "ai"], false), 1)
+        .expect("a");
+    index
+        .index_one(&siblings_note("notes/b.md", "tech", "", "", &["rust"], false), 1)
+        .expect("b");
+
+    let stats = index.stats().expect("stats");
+    let by_tag: std::collections::HashMap<&str, u64> = stats.by_tag.iter().map(|(t, c)| (t.as_str(), *c)).collect();
+    assert_eq!(by_tag.get("rust"), Some(&2));
+    assert_eq!(by_tag.get("ai"), Some(&1));
+}
+
+#[test]
+fn schema_gaps_reports_a_tags_gap_via_the_note_tags_facet() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&siblings_note("notes/a.md", "tech", "", "", &["rust"], false), 1)
+        .expect("a");
+    index
+        .index_one(&siblings_note("notes/b.md", "tech", "", "", &[], false), 1)
+        .expect("b");
+
+    let stats = index.stats().expect("stats");
+    let gaps: std::collections::HashMap<&str, u64> = stats.schema_gaps.iter().map(|(f, c)| (f.as_str(), *c)).collect();
+    assert_eq!(gaps.get("tags"), Some(&1), "exactly one note has no note_tags rows");
+}

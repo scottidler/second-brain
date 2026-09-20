@@ -103,7 +103,9 @@ fn search_vector_returns_closest_summary_first() {
     upsert_summary(&index, &m, "notes/c.md", "kubernetes operator pattern", 100);
 
     let q = m.embed_one("durable execution temporal").expect("query");
-    let hits = index.search_vector(&q, 3, None, None, None).expect("search");
+    let hits = index
+        .search_vector(&q, 3, None, None, false, None, None)
+        .expect("search");
     assert_eq!(hits.len(), 3);
     // The exact match seed is the deterministic mock hash; we just need to
     // verify that the same string (notes/a.md's summary text starts with
@@ -142,7 +144,9 @@ fn search_vector_ties_break_by_path_deterministically() {
         }
         let q = m.embed_one("anything").expect("q");
 
-        let all = index.search_vector(&q, 3, None, None, None).expect("search");
+        let all = index
+            .search_vector(&q, 3, None, None, false, None, None)
+            .expect("search");
         let paths: Vec<&str> = all.iter().map(|h| h.note_path.as_str()).collect();
         assert_eq!(
             paths,
@@ -150,7 +154,9 @@ fn search_vector_ties_break_by_path_deterministically() {
             "tied distances must order by path asc"
         );
 
-        let top2 = index.search_vector(&q, 2, None, None, None).expect("search");
+        let top2 = index
+            .search_vector(&q, 2, None, None, false, None, None)
+            .expect("search");
         let p2: Vec<&str> = top2.iter().map(|h| h.note_path.as_str()).collect();
         assert_eq!(
             p2,
@@ -170,7 +176,9 @@ fn search_vector_respects_limit() {
         upsert_summary(&index, &m, &path, &format!("text {i}"), 100);
     }
     let q = m.embed_one("query").expect("q");
-    let hits = index.search_vector(&q, 2, None, None, None).expect("search");
+    let hits = index
+        .search_vector(&q, 2, None, None, false, None, None)
+        .expect("search");
     assert_eq!(hits.len(), 2);
 }
 
@@ -184,13 +192,45 @@ fn search_vector_filters_by_domain() {
     upsert_summary(&index, &m, "notes/life.md", "temporal", 100);
     let q = m.embed_one("temporal").expect("q");
 
-    let tech_hits = index.search_vector(&q, 10, Some("tech"), None, None).expect("tech");
+    let tech_hits = index
+        .search_vector(&q, 10, Some("tech"), None, false, None, None)
+        .expect("tech");
     assert_eq!(tech_hits.len(), 1);
     assert_eq!(tech_hits[0].note_path, "notes/tech.md");
 
-    let life_hits = index.search_vector(&q, 10, Some("life"), None, None).expect("life");
+    let life_hits = index
+        .search_vector(&q, 10, Some("life"), None, false, None, None)
+        .expect("life");
     assert_eq!(life_hits.len(), 1);
     assert_eq!(life_hits[0].note_path, "notes/life.md");
+}
+
+#[test]
+fn search_vector_filters_by_tags() {
+    // `insert_note` writes the bare `notes` row directly (this module tests
+    // below the `index_one` facet-sync seam), so the `note_tags` facet rows
+    // `push_tags_filter` reads have to be inserted here too.
+    let index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-test-v1");
+    insert_note(&index, "notes/privacy.md", "tech", "article", 100);
+    insert_note(&index, "notes/other.md", "tech", "article", 100);
+    index
+        .conn
+        .execute(
+            "INSERT INTO note_tags (path, tag) VALUES (?1, ?2)",
+            params!["notes/privacy.md", "privacy"],
+        )
+        .expect("insert note_tags");
+    upsert_summary(&index, &m, "notes/privacy.md", "temporal", 100);
+    upsert_summary(&index, &m, "notes/other.md", "temporal", 100);
+    let q = m.embed_one("temporal").expect("q");
+
+    let tags = vec!["privacy".to_string()];
+    let hits = index
+        .search_vector(&q, 10, None, Some(&tags), false, None, None)
+        .expect("privacy");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].note_path, "notes/privacy.md");
 }
 
 #[test]
@@ -199,7 +239,9 @@ fn search_vector_rejects_dim_mismatch_against_active_model() {
     // active_dim defaults to 384; pass a 16-dim query and expect a clean
     // error (not a panic).
     let q = vec![0.0_f32; 16];
-    let err = index.search_vector(&q, 5, None, None, None).expect_err("dim mismatch");
+    let err = index
+        .search_vector(&q, 5, None, None, false, None, None)
+        .expect_err("dim mismatch");
     assert!(format!("{err}").contains("does not match"));
 }
 
@@ -519,7 +561,9 @@ fn search_vector_returns_no_row_for_examined_sentinel_note() {
     upsert_summary(&index, &m, "notes/real.md", "durable execution temporal", 100);
 
     let q = m.embed_one("durable execution").expect("q");
-    let hits = index.search_vector(&q, 10, None, None, None).expect("search");
+    let hits = index
+        .search_vector(&q, 10, None, None, false, None, None)
+        .expect("search");
     let paths: Vec<&str> = hits.iter().map(|h| h.note_path.as_str()).collect();
     assert!(paths.contains(&"notes/real.md"), "the embedded note must be found");
     assert!(
@@ -688,7 +732,9 @@ fn search_vector_returns_one_row_per_note_when_chunks_exist() {
         .expect("swap");
 
     let q = m.embed_one("query").expect("q");
-    let hits = index.search_vector(&q, 10, None, None, None).expect("search");
+    let hits = index
+        .search_vector(&q, 10, None, None, false, None, None)
+        .expect("search");
     // Even though 4 rows back this note (1 summary + 3 chunks), the
     // result must contain exactly one entry for it.
     let v_hits: Vec<&VectorHit> = hits.iter().filter(|h| h.note_path == "notes/v.md").collect();
@@ -725,7 +771,9 @@ fn search_vector_max_pool_picks_best_representation_min_distance() {
         )
         .expect("swap");
 
-    let hits = index.search_vector(&q_vec, 10, None, None, None).expect("search");
+    let hits = index
+        .search_vector(&q_vec, 10, None, None, false, None, None)
+        .expect("search");
     let h = hits
         .iter()
         .find(|h| h.note_path == "notes/note.md")

@@ -175,6 +175,7 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) ->
     let mut runs = Vec::with_capacity(queries.queries.len());
     for q in &queries.queries {
         let domain = q.domain.as_deref();
+        let tags = q.tags.as_deref();
         let mut run = QueryRun::default();
         let handle = server.db_handle();
         let guard = handle.lock().map_err(|e| eyre!("db lock poisoned: {e}"))?;
@@ -185,6 +186,7 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) ->
                     *m,
                     &q.query,
                     domain,
+                    tags,
                     None,
                     None,
                     opts.k,
@@ -204,6 +206,7 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) ->
                 SearchMode::GraphHybrid,
                 &q.query,
                 domain,
+                tags,
                 None,
                 None,
                 opts.k,
@@ -218,7 +221,7 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) ->
         // The live operator-configured pipeline (the shipped default and any
         // rerank/transform the operator has turned on).
         let configured = server
-            .run_configured_pipeline(&guard, &q.query, domain, None, None, opts.k)
+            .run_configured_pipeline(&guard, &q.query, domain, tags, None, None, opts.k)
             .map_err(|e| eyre!("run_configured_pipeline: {e}"))?;
         run.ranked.insert(
             CONFIGURED_LABEL.to_string(),

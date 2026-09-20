@@ -188,9 +188,12 @@ impl SearchIndex {
     /// a note whose summary answered the query. Not implemented until the
     /// eval demands it - see the Phase 9 measurement step.
     ///
-    /// The note-side filters (`domain`, `note_type`, `status`) are
+    /// The note-side filters (`domain`, `tags`, `note_type`, `status`) are
     /// pushed into SQL so the scan only visits rows that pass them;
-    /// the dot-product loop then ranks the survivors.
+    /// the dot-product loop then ranks the survivors. `tags` is an
+    /// `EXISTS`/count subquery against the `note_tags` facet via the shared
+    /// `push_tags_filter` helper (`query.rs`) - same OR/AND semantics as
+    /// `search`/`list_notes`/`recent_notes`.
     ///
     /// Performance contract: at ~25 K total rows (21 K summary + a
     /// handful of chunks for transcript-eligible notes at the three-
@@ -201,6 +204,8 @@ impl SearchIndex {
         query_vec: &[f32],
         limit: u32,
         domain: Option<&str>,
+        tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<Vec<VectorHit>> {
@@ -227,6 +232,7 @@ impl SearchIndex {
             param_values.push(Box::new(d.to_string()));
             param_idx += 1;
         }
+        super::query::push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "n", tags, tags_all);
         if let Some(t) = note_type {
             sql.push_str(&format!(" AND n.note_type = ?{param_idx}"));
             param_values.push(Box::new(t.to_string()));

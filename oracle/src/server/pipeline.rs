@@ -25,17 +25,19 @@ enum RerankOutcome {
 }
 
 impl OracleMcpServer {
+    #[allow(clippy::too_many_arguments)]
     fn bm25_paths(
         &self,
         db: &SearchIndex,
         query: &str,
         domain: Option<&str>,
+        tags: Option<&[String]>,
         note_type: Option<&str>,
         status: Option<&str>,
         k: u32,
     ) -> Result<Vec<String>, McpError> {
         let rows = db
-            .search(query, domain, None, false, note_type, status, Some(k))
+            .search(query, domain, tags, false, note_type, status, Some(k))
             .map_err(Self::err)?;
         Ok(rows.iter().map(|n| n.path.clone()).collect())
     }
@@ -45,11 +47,13 @@ impl OracleMcpServer {
     /// **before** mapping to `Vec<String>` — the warning needs the hit structs,
     /// which are dropped at the path-map boundary, so it cannot be hoisted into
     /// the caller. Shared by `run_search_mode` and `run_pipeline`.
+    #[allow(clippy::too_many_arguments)]
     fn vector_paths(
         &self,
         db: &SearchIndex,
         query: &str,
         domain: Option<&str>,
+        tags: Option<&[String]>,
         note_type: Option<&str>,
         status: Option<&str>,
         k: u32,
@@ -57,7 +61,7 @@ impl OracleMcpServer {
         let active_model = db.active_embedding_model().map_err(Self::err)?;
         let q_vec = vault::embedding::embed_query(query, &active_model).map_err(Self::err)?;
         let hits = db
-            .search_vector(&q_vec, k, domain, note_type, status)
+            .search_vector(&q_vec, k, domain, tags, false, note_type, status)
             .map_err(Self::err)?;
         self.warn_if_no_embeddings(db, &hits)?;
         Ok(hits.iter().map(|h| h.note_path.clone()).collect())
@@ -75,6 +79,7 @@ impl OracleMcpServer {
         db: &SearchIndex,
         seed_paths: &[String],
         domain: Option<&str>,
+        tags: Option<&[String]>,
         note_type: Option<&str>,
         status: Option<&str>,
         hops: u8,
@@ -107,7 +112,7 @@ impl OracleMcpServer {
         });
         let mut graph_paths: Vec<String> = Vec::new();
         for (path, _) in scored {
-            if Self::note_matches_filters(db, &path, domain, note_type, status)? {
+            if Self::note_matches_filters(db, &path, domain, tags, note_type, status)? {
                 graph_paths.push(path);
             }
         }
@@ -120,12 +125,14 @@ impl OracleMcpServer {
     /// retrieval path (no divergent re-implementation). `expand_hops` /
     /// `edge_kinds` / `min_edge_weight` are only consulted by the graph modes.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn run_search_mode(
         &self,
         db: &SearchIndex,
         mode: SearchMode,
         query: &str,
         domain: Option<&str>,
+        tags: Option<&[String]>,
         note_type: Option<&str>,
         status: Option<&str>,
         limit: u32,
@@ -135,15 +142,17 @@ impl OracleMcpServer {
     ) -> Result<Vec<NoteRow>, McpError> {
         match mode {
             SearchMode::Bm25 => db
-                .search(query, domain, None, false, note_type, status, Some(limit))
+                .search(query, domain, tags, false, note_type, status, Some(limit))
                 .map_err(Self::err),
             SearchMode::Vector => {
-                let paths = self.vector_paths(db, query, domain, note_type, status, limit)?;
+                let paths = self.vector_paths(db, query, domain, tags, note_type, status, limit)?;
                 Self::resolve_note_paths(db, paths.iter().map(|p| p.as_str()))
             }
             SearchMode::Hybrid => {
-                let bm25_paths = self.bm25_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
-                let vec_paths = self.vector_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
+                let bm25_paths =
+                    self.bm25_paths(db, query, domain, tags, note_type, status, vault::search::K_RRF_INPUT)?;
+                let vec_paths =
+                    self.vector_paths(db, query, domain, tags, note_type, status, vault::search::K_RRF_INPUT)?;
                 let fused = vault::search::reciprocal_rank_fusion(
                     &[&bm25_paths, &vec_paths],
                     vault::search::RRF_K,
@@ -155,6 +164,7 @@ impl OracleMcpServer {
                 db,
                 query,
                 domain,
+                tags,
                 note_type,
                 status,
                 limit,
@@ -185,6 +195,7 @@ impl OracleMcpServer {
         db: &SearchIndex,
         query: &str,
         domain: Option<&str>,
+        tags: Option<&[String]>,
         note_type: Option<&str>,
         status: Option<&str>,
         limit: u32,
@@ -193,8 +204,8 @@ impl OracleMcpServer {
         min_weight: f32,
         include_base_lists: bool,
     ) -> Result<Vec<NoteRow>, McpError> {
-        let bm25_paths = self.bm25_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
-        let vec_paths = self.vector_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
+        let bm25_paths = self.bm25_paths(db, query, domain, tags, note_type, status, vault::search::K_RRF_INPUT)?;
+        let vec_paths = self.vector_paths(db, query, domain, tags, note_type, status, vault::search::K_RRF_INPUT)?;
 
         // Seed list = the hybrid-fused order; seed rank feeds w_seed.
         let seed_fused = vault::search::reciprocal_rank_fusion(
@@ -210,6 +221,7 @@ impl OracleMcpServer {
             db,
             &seed_paths,
             domain,
+            tags,
             note_type,
             status,
             hops,
@@ -234,11 +246,13 @@ impl OracleMcpServer {
     /// Run the operator-configured pipeline (`self.config.retrieval`). The
     /// `configured` target of `sb oracle eval` calls this so the eval scores the
     /// exact live pipeline `knowledge_search` runs for a no-`mode` query.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_configured_pipeline(
         &self,
         db: &SearchIndex,
         query: &str,
         domain: Option<&str>,
+        tags: Option<&[String]>,
         note_type: Option<&str>,
         status: Option<&str>,
         limit: u32,
@@ -250,6 +264,7 @@ impl OracleMcpServer {
             query,
             &queries,
             domain,
+            tags,
             note_type,
             status,
             limit,
@@ -282,6 +297,7 @@ impl OracleMcpServer {
     /// method/stage is gated by its `enabled` flag in `cfg`. Shares the BM25 /
     /// vector / graph primitives with `run_search_mode`, so the legacy modes and
     /// the configured pipeline never diverge.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_pipeline(
         &self,
         db: &SearchIndex,
@@ -289,6 +305,7 @@ impl OracleMcpServer {
         query: &str,
         queries: &[String],
         domain: Option<&str>,
+        tags: Option<&[String]>,
         note_type: Option<&str>,
         status: Option<&str>,
         limit: u32,
@@ -318,21 +335,21 @@ impl OracleMcpServer {
         if cfg.methods.vector.enabled {
             let per_variant = queries
                 .iter()
-                .map(|q| self.vector_paths(db, q, domain, note_type, status, cfg.methods.vector.top_k))
+                .map(|q| self.vector_paths(db, q, domain, tags, note_type, status, cfg.methods.vector.top_k))
                 .collect::<Result<Vec<_>, _>>()?;
             lists.push((crate::transform::union_lists(per_variant), 1.0));
         }
         if cfg.methods.bm25.enabled {
             let per_variant = queries
                 .iter()
-                .map(|q| self.bm25_paths(db, q, domain, note_type, status, cfg.methods.bm25.top_k))
+                .map(|q| self.bm25_paths(db, q, domain, tags, note_type, status, cfg.methods.bm25.top_k))
                 .collect::<Result<Vec<_>, _>>()?;
             lists.push((crate::transform::union_lists(per_variant), cfg.methods.bm25.weight));
         }
         if cfg.methods.graph.enabled {
             let per_variant = queries
                 .iter()
-                .map(|q| self.pipeline_graph_paths(db, cfg, q, domain, note_type, status))
+                .map(|q| self.pipeline_graph_paths(db, cfg, q, domain, tags, note_type, status))
                 .collect::<Result<Vec<_>, _>>()?;
             lists.push((crate::transform::union_lists(per_variant), cfg.methods.graph.weight));
         }
@@ -419,17 +436,19 @@ impl OracleMcpServer {
     /// graph modes - then expand with the operator-configured graph params and
     /// cap at the method's `top-k`. Off by default, so this runs only when the
     /// operator explicitly enables graph; it re-runs bm25/vector for the seed.
+    #[allow(clippy::too_many_arguments)]
     fn pipeline_graph_paths(
         &self,
         db: &SearchIndex,
         cfg: &RetrievalConfig,
         query: &str,
         domain: Option<&str>,
+        tags: Option<&[String]>,
         note_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<Vec<String>, McpError> {
-        let bm25 = self.bm25_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
-        let vec = self.vector_paths(db, query, domain, note_type, status, vault::search::K_RRF_INPUT)?;
+        let bm25 = self.bm25_paths(db, query, domain, tags, note_type, status, vault::search::K_RRF_INPUT)?;
+        let vec = self.vector_paths(db, query, domain, tags, note_type, status, vault::search::K_RRF_INPUT)?;
         let seed =
             vault::search::reciprocal_rank_fusion(&[&bm25, &vec], cfg.fusion.k, vault::search::K_RRF_INPUT as usize);
         let seed_paths: Vec<String> = seed.iter().map(|h| h.note_path.clone()).collect();
@@ -437,6 +456,7 @@ impl OracleMcpServer {
             db,
             &seed_paths,
             domain,
+            tags,
             note_type,
             status,
             // Honor the same hard cap as the per-call graph modes: a misconfigured
@@ -561,18 +581,31 @@ impl OracleMcpServer {
     }
 
     /// True when the note at `path` matches the (optional) schema filters.
-    /// A missing note fails the check (it cannot be a valid result).
+    /// A missing note fails the check (it cannot be a valid result). `tags`
+    /// is OR semantics (any one tag matches), matching the `push_tags_filter`
+    /// default used everywhere else the `tags` filter appears - checked
+    /// against the resolved `NoteRow`'s JSON `tags` column rather than the
+    /// `note_tags` facet, since the row is already loaded here.
     fn note_matches_filters(
         db: &SearchIndex,
         path: &str,
         domain: Option<&str>,
+        tags: Option<&[String]>,
         note_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<bool, McpError> {
         let Some(note) = db.get_note(path).map_err(Self::err)? else {
             return Ok(false);
         };
+        let tags_ok = match tags {
+            None | Some([]) => true,
+            Some(wanted) => {
+                let note_tags: Vec<String> = serde_json::from_str(&note.tags).unwrap_or_default();
+                wanted.iter().any(|t| note_tags.contains(t))
+            }
+        };
         let ok = domain.is_none_or(|d| note.domain == d)
+            && tags_ok
             && note_type.is_none_or(|t| note.note_type == t)
             && status.is_none_or(|s| note.status == s);
         Ok(ok)

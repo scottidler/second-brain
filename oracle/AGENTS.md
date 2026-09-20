@@ -13,7 +13,9 @@ oracle owns knowledge retrieval from the ingested vault, exposed as MCP tools ov
 
 ## MCP Tool Surface
 
-Defined as `#[tool]` methods on `OracleMcpServer` (`server.rs`); request types + `SearchMode` in `tools.rs`. Tools: `knowledge_search`, `note_read`, `list_notes`, `vault_overview`, `domain_brief`, `ingest_history`, `failure_history`, `schema_info`, `reindex`, `tag_search`, `find_similar`, `recent_activity`, `find_links`, `creator_browse`, `source_browse`, `inbox_status`, `quality_report`, `duplicate_groups`, `classify_status`.
+Defined as `#[tool]` methods on `OracleMcpServer` (`server.rs`); request types + `SearchMode` in `tools.rs`. Tools: `knowledge_search`, `note_read`, `list_notes`, `vault_overview`, `domain_brief`, `tag_brief`, `ingest_history`, `failure_history`, `schema_info`, `reindex`, `tag_search`, `find_similar`, `recent_activity`, `find_links`, `creator_browse`, `source_browse`, `inbox_status`, `quality_report`, `duplicate_groups`, `classify_status`.
+
+- **`tags` is a sibling filter beside `domain`** (tags-only design, Phase 8) on `knowledge_search`, `list_notes`, `tag_search`, `find_similar`, `recent_activity`, `creator_browse`, `source_browse`, `classify_status`: `Option<Vec<String>>`, OR semantics across the list. Two exceptions, both by design: `ingest_history` (the ledger never carried tags) and `domain_brief` (its counterpart is the separate `tag_brief` tool, not a field on `domain_brief`). `every_domain_param_has_a_tags_sibling` (`server/tests.rs`) enforces this over the schemars output, not a hand-maintained list. `vault_overview.by_tag` and `schema_info.tags` (from the canonical vocabulary, loaded live) sit beside `by_domain` / `domains`. `domain` and everything named here as its sibling are deleted in P11; `tags` stays.
 
 ## Contracts & Invariants
 

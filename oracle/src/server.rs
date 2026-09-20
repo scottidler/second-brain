@@ -88,6 +88,10 @@ impl OracleMcpServer {
                 let req: DomainBriefRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
                 self.domain_brief(Parameters(req)).await
             }
+            "tag_brief" => {
+                let req: TagBriefRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.tag_brief(Parameters(req)).await
+            }
             "ingest_history" => {
                 let req: IngestHistoryRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
                 self.ingest_history(Parameters(req)).await
@@ -339,6 +343,7 @@ impl OracleMcpServer {
         let limit = req.limit.unwrap_or(10);
 
         let domain = req.domain.as_ref().map(|d| d.as_str());
+        let tags = req.tags.as_deref();
         let note_type = req.note_type.as_ref().map(|t| t.as_str());
         let status = req.status.as_ref().map(|s| s.as_str());
 
@@ -368,6 +373,7 @@ impl OracleMcpServer {
                     mode,
                     &req.query,
                     domain,
+                    tags,
                     note_type,
                     status,
                     limit,
@@ -381,6 +387,7 @@ impl OracleMcpServer {
                     &req.query,
                     pre_queries.as_deref().unwrap_or_default(),
                     domain,
+                    tags,
                     note_type,
                     status,
                     limit,
@@ -441,8 +448,7 @@ impl OracleMcpServer {
         let notes = db
             .list_notes(
                 req.domain.as_ref().map(|d| d.as_str()),
-                // P8 wires `req.tags` here; P5 only makes the filter exist.
-                None,
+                req.tags.as_deref(),
                 false,
                 req.note_type.as_ref().map(|t| t.as_str()),
                 req.status.as_ref().map(|s| s.as_str()),
@@ -489,6 +495,34 @@ impl OracleMcpServer {
 
         Ok(CallToolResult::success(vec![Content::json(json!({
             "domain": brief.domain,
+            "total_notes": brief.total_notes,
+            "unread": brief.unread,
+            "starred": brief.starred,
+            "by_type": brief.by_type,
+            "results": results,
+        }))?]))
+    }
+
+    /// Get a briefing on a specific tag - the `tags` counterpart to
+    /// `domain_brief` (P8, beside it; `domain_brief` is deleted in P11).
+    #[tool(
+        description = "Get a briefing on a specific tag - total notes, unread count, starred count, type breakdown, and recent notes. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+    )]
+    async fn tag_brief(&self, params: Parameters<TagBriefRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let detail_level = req.detail.unwrap_or(DetailLevel::Tldr);
+
+        let db = self.db.lock().map_err(Self::err)?;
+        let brief = db.tag_brief(&req.tag, req.limit).map_err(Self::err)?;
+
+        let results: Vec<serde_json::Value> = brief
+            .recent
+            .iter()
+            .map(|n| Self::format_note(n, &detail_level))
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::json(json!({
+            "tag": brief.tag,
             "total_notes": brief.total_notes,
             "unread": brief.unread,
             "starred": brief.starred,
@@ -633,10 +667,13 @@ impl OracleMcpServer {
 
     /// List all valid schema values
     #[tool(
-        description = "List all valid schema values - domains, note types, origins, statuses, and ingest methods. Use this to understand what filter values are available."
+        description = "List all valid schema values - domains, tags, note types, origins, statuses, and ingest methods. Use this to understand what filter values are available."
     )]
     async fn schema_info(&self, _params: Parameters<SchemaInfoRequest>) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::json(schema_info_payload())?]))
+        let tags = load_canonical_tags();
+        Ok(CallToolResult::success(vec![Content::json(schema_info_payload(
+            &tags,
+        ))?]))
     }
 
     /// Trigger a reindex of the vault
@@ -662,7 +699,13 @@ impl OracleMcpServer {
             Some(tag) => {
                 let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
                 let notes = db
-                    .tag_search(&tag, req.domain.as_ref().map(|d| d.as_str()), req.limit)
+                    .tag_search(
+                        &tag,
+                        req.domain.as_ref().map(|d| d.as_str()),
+                        req.tags.as_deref(),
+                        false,
+                        req.limit,
+                    )
                     .map_err(Self::err)?;
 
                 let results: Vec<serde_json::Value> =
@@ -729,10 +772,11 @@ impl OracleMcpServer {
         };
 
         // Over-fetch a candidate pool BEFORE the post-filters so a selective
-        // domain filter or the self-note exclusion cannot shrink the result
-        // below `limit` (the previous fetch-exactly-`limit` could return 0 with
-        // matches present). With no post-filter active the pool is exactly `limit`.
-        let filtering = req.domain.is_some() || req.path.is_some();
+        // domain/tags filter or the self-note exclusion cannot shrink the
+        // result below `limit` (the previous fetch-exactly-`limit` could
+        // return 0 with matches present). With no post-filter active the
+        // pool is exactly `limit`.
+        let filtering = req.domain.is_some() || req.tags.is_some() || req.path.is_some();
         let fetch = if filtering {
             (limit as usize)
                 .saturating_mul(FIND_SIMILAR_OVERFETCH)
@@ -746,6 +790,20 @@ impl OracleMcpServer {
         if let Some(ref domain) = req.domain {
             let d = domain.as_str();
             notes.retain(|n| n.domain == d);
+        }
+
+        // Filter by tags if requested (OR across the list, same default as
+        // every other `tags` filter). `find_similar` has no vault-layer tags
+        // param (FTS5 term extraction, not a schema-filtered query), so this
+        // is a post-filter over the resolved rows, matching the domain filter
+        // just above.
+        if let Some(wanted) = &req.tags
+            && !wanted.is_empty()
+        {
+            notes.retain(|n| {
+                let note_tags: Vec<String> = serde_json::from_str(&n.tags).unwrap_or_default();
+                wanted.iter().any(|t| note_tags.contains(t))
+            });
         }
 
         // Exclude the source note if searching by path
@@ -777,7 +835,7 @@ impl OracleMcpServer {
             .recent_notes(
                 req.days,
                 req.domain.as_ref().map(|d| d.as_str()),
-                None,
+                req.tags.as_deref(),
                 false,
                 req.note_type.as_ref().map(|t| t.as_str()),
                 req.limit,
@@ -860,7 +918,13 @@ impl OracleMcpServer {
             Some(creator) => {
                 let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
                 let notes = db
-                    .notes_by_creator(&creator, req.domain.as_ref().map(|d| d.as_str()), req.limit)
+                    .notes_by_creator(
+                        &creator,
+                        req.domain.as_ref().map(|d| d.as_str()),
+                        req.tags.as_deref(),
+                        false,
+                        req.limit,
+                    )
                     .map_err(Self::err)?;
                 let results: Vec<serde_json::Value> =
                     notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
@@ -905,7 +969,13 @@ impl OracleMcpServer {
             Some(host) => {
                 let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
                 let notes = db
-                    .notes_by_source_domain(&host, req.domain.as_ref().map(|d| d.as_str()), req.limit)
+                    .notes_by_source_domain(
+                        &host,
+                        req.domain.as_ref().map(|d| d.as_str()),
+                        req.tags.as_deref(),
+                        false,
+                        req.limit,
+                    )
                     .map_err(Self::err)?;
                 let results: Vec<serde_json::Value> =
                     notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
@@ -954,7 +1024,17 @@ impl OracleMcpServer {
         let review_results: Vec<serde_json::Value> =
             review.iter().map(|n| Self::format_note(n, &detail_level)).collect();
 
-        let classified: u64 = inbox.iter().filter(|n| !n.domain.is_empty()).count() as u64;
+        // P8: classified is a tags heuristic now, not a domain one - tags are
+        // the classification axis borg/cortex write to (`domain` stops being
+        // the signal here; it is dropped from the notes payload in P11).
+        let classified: u64 = inbox
+            .iter()
+            .filter(|n| {
+                !serde_json::from_str::<Vec<String>>(&n.tags)
+                    .unwrap_or_default()
+                    .is_empty()
+            })
+            .count() as u64;
 
         Ok(CallToolResult::success(vec![Content::json(json!({
             "inbox_count": inbox_results.len(),
@@ -1041,7 +1121,7 @@ impl OracleMcpServer {
         let req = params.0;
         let db = self.db.lock().map_err(Self::err)?;
         let stats = db
-            .classify_stats(req.domain.as_ref().map(|d| d.as_str()))
+            .classify_stats(req.domain.as_ref().map(|d| d.as_str()), req.tags.as_deref(), false)
             .map_err(Self::err)?;
 
         Ok(CallToolResult::success(vec![Content::json(&stats)?]))
@@ -1078,15 +1158,38 @@ impl ServerHandler for OracleMcpServer {
 /// The `schema_info` payload: every schema enum rendered as `{value,
 /// description}` pairs so a caller learns what a value MEANS, not just that it
 /// exists. Split out of the tool method so the shape is unit-testable without
-/// standing up an MCP server or opening the search index.
-pub fn schema_info_payload() -> serde_json::Value {
+/// standing up an MCP server or opening the search index. `tags` (P8, beside
+/// `domains`; `domains` is deleted in P11) is data-driven, not a Rust enum -
+/// the caller loads it from the canonical vocabulary and passes it in, so this
+/// function stays pure and testable with no filesystem access.
+pub fn schema_info_payload(tags: &[String]) -> serde_json::Value {
     json!({
         "domains": schema_values(Domain::all(), Domain::as_str, Domain::description),
+        "tags": tags,
         "note_types": schema_values(NoteType::all(), NoteType::as_str, NoteType::description),
         "origins": schema_values(Origin::all(), Origin::as_str, Origin::description),
         "statuses": schema_values(Status::all(), Status::as_str, Status::description),
         "methods": schema_values(Method::all(), Method::as_str, Method::description),
     })
+}
+
+/// Load the canonical tag vocabulary (`~/.config/sb/canonical-tags.yml`) for
+/// `schema_info`, sorted for a stable payload. Soft-fails to an empty list
+/// with a `warn!` rather than erroring the tool: `schema_info` is purely
+/// informational, and a host with no vocabulary deployed yet (or a hermetic
+/// test environment) must not turn every other schema value unreachable.
+fn load_canonical_tags() -> Vec<String> {
+    match vault::canonical::CanonicalTagsFile::load(&vault::paths::canonical_tags()) {
+        Ok(file) => {
+            let mut tags: Vec<String> = file.all_tags().into_iter().collect();
+            tags.sort();
+            tags
+        }
+        Err(e) => {
+            warn!("schema_info: failed to load canonical tags vocabulary: {e}");
+            Vec::new()
+        }
+    }
 }
 
 fn schema_values<T>(

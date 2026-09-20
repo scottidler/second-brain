@@ -6,11 +6,16 @@ use vault::note::Note;
 use vault::search::{Edge, MockReranker, SearchIndex};
 
 fn seed(db: &SearchIndex, path: &str, body: &str) {
+    seed_tagged(db, path, body, &[]);
+}
+
+fn seed_tagged(db: &SearchIndex, path: &str, body: &str, tags: &[&str]) {
     let fm = Frontmatter {
         title: Some(path.to_string()),
         note_type: Some("article".to_string()),
         origin: Some("assisted".to_string()),
         domain: Some("ai".to_string()),
+        tags: (!tags.is_empty()).then(|| tags.iter().map(|t| t.to_string()).collect()),
         ..Frontmatter::default()
     };
     let note = Note {
@@ -106,7 +111,7 @@ fn run_configured_pipeline_runs_the_configured_bm25_retriever() {
     let handle = server.db_handle();
     let guard = handle.lock().expect("lock");
     let rows = server
-        .run_configured_pipeline(&guard, "transformer", None, None, None, 10)
+        .run_configured_pipeline(&guard, "transformer", None, None, None, None, 10)
         .expect("configured pipeline");
     let paths: Vec<String> = rows.iter().map(|r| r.path.clone()).collect();
     assert!(
@@ -141,12 +146,40 @@ fn run_pipeline_drops_a_fully_demoted_zero_weight_method() {
             None,
             None,
             None,
+            None,
             10,
         )
         .expect("run_pipeline");
     assert!(
         rows.is_empty(),
         "a fully-demoted (0.0-weight) sole method must yield no results: {rows:?}"
+    );
+}
+
+/// P8: `tags` narrows the configured (bm25-only, hermetic) pipeline exactly
+/// like `domain` already does, threaded through `run_pipeline` -> `bm25_paths`
+/// -> `SearchIndex::search`'s `push_tags_filter`.
+#[test]
+fn run_configured_pipeline_filters_by_tags() {
+    let db = SearchIndex::open_memory().expect("db");
+    seed_tagged(&db, "notes/hit.md", "transformer attention mechanism", &["privacy"]);
+    seed_tagged(&db, "notes/miss.md", "transformer attention mechanism", &["cooking"]);
+    let cfg = Config {
+        retrieval: bm25_only_retrieval(0.3),
+        ..Default::default()
+    };
+    let server = OracleMcpServer::new(cfg, db);
+    let handle = server.db_handle();
+    let guard = handle.lock().expect("lock");
+    let tags = vec!["privacy".to_string()];
+    let rows = server
+        .run_configured_pipeline(&guard, "transformer", None, Some(&tags), None, None, 10)
+        .expect("configured pipeline");
+    let paths: Vec<String> = rows.iter().map(|r| r.path.clone()).collect();
+    assert_eq!(
+        paths,
+        vec!["notes/hit.md".to_string()],
+        "tags filter must exclude notes/miss.md: {paths:?}"
     );
 }
 
@@ -199,7 +232,7 @@ fn expand_to_graph_paths_applies_seed_weight_and_hop_decay() {
     let handle = server.db_handle();
     let guard = handle.lock().expect("lock");
     let paths = server
-        .expand_to_graph_paths(&guard, &seeds, None, None, None, 2, None, 0.0, 0.5)
+        .expand_to_graph_paths(&guard, &seeds, None, None, None, None, 2, None, 0.0, 0.5)
         .expect("expand");
 
     // Scores: aa = 1.0*1.0*1.0 = 1.0; mid = 1.0; bb = 0.5(seed rank 1)*1.0*1.0 = 0.5;

@@ -625,6 +625,7 @@ fn note_returning_tools_advertise_trace_block() {
         "note_read",
         "list_notes",
         "domain_brief",
+        "tag_brief",
         "tag_search",
         "find_similar",
         "recent_activity",
@@ -813,7 +814,7 @@ fn format_note_carries_trace_block_at_every_level() {
 /// description is non-empty.
 #[test]
 fn schema_info_payload_emits_value_description_pairs() {
-    let payload = schema_info_payload();
+    let payload = schema_info_payload(&[]);
     for key in ["domains", "note_types", "origins", "statuses", "methods"] {
         let rows = payload[key]
             .as_array()
@@ -839,5 +840,160 @@ fn schema_info_payload_emits_value_description_pairs() {
             .count(),
         1,
         "entity is a note type"
+    );
+}
+
+// --- Phase 8: MCP request structs and CLI gain tags siblings ---------------
+
+fn seed_tagged_article(db: &SearchIndex, path: &str, title: &str, body: &str, tags: &[&str]) {
+    let fm = Frontmatter {
+        title: Some(title.to_string()),
+        note_type: Some("article".to_string()),
+        origin: Some("assisted".to_string()),
+        domain: Some("ai".to_string()),
+        tags: Some(tags.iter().map(|t| t.to_string()).collect()),
+        ..Frontmatter::default()
+    };
+    let note = Note {
+        path: PathBuf::from(path),
+        frontmatter: fm,
+        body: body.to_string(),
+        raw: format!("---\n---\n{body}"),
+    };
+    db.index_one(&note, 100).expect("seed note");
+}
+
+/// P8 success criterion, live-check counterpart: a `knowledge_search` call
+/// carrying both a text query and a `tags` filter must return the note that
+/// matches both, and exclude a same-text note that doesn't carry the tag.
+/// `mode: bm25` keeps this hermetic (no embedding model).
+#[tokio::test]
+async fn knowledge_search_filters_by_tags() {
+    let db = SearchIndex::open_memory().expect("open db");
+    seed_tagged_article(
+        &db,
+        "notes/ollama.md",
+        "Ollama",
+        "How to host ai locally: ollama and open-webui.",
+        &["privacy", "security"],
+    );
+    seed_tagged_article(
+        &db,
+        "notes/ollama-unrelated.md",
+        "Ollama mention",
+        "How to host ai locally: ollama and open-webui.",
+        &["cooking"],
+    );
+    let server = OracleMcpServer::new(Config::default(), db);
+
+    let result = server
+        .dispatch(
+            "knowledge_search",
+            json!({"query": "ollama", "tags": ["privacy"], "mode": "bm25"}),
+        )
+        .await
+        .expect("knowledge_search dispatch");
+    assert_ne!(result.is_error, Some(true), "knowledge_search returned an error");
+
+    let parsed = first_content_as_json(&result);
+    let paths: Vec<&str> = parsed["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|r| r["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["notes/ollama.md"],
+        "tags filter must select the Ollama fixture: {paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_notes_filters_by_tags() {
+    let db = SearchIndex::open_memory().expect("open db");
+    seed_tagged_article(&db, "notes/a.md", "A", "body", &["rust"]);
+    seed_tagged_article(&db, "notes/b.md", "B", "body", &["cooking"]);
+    let server = OracleMcpServer::new(Config::default(), db);
+
+    let result = server
+        .dispatch("list_notes", json!({"tags": ["rust"]}))
+        .await
+        .expect("list_notes dispatch");
+    let parsed = first_content_as_json(&result);
+    assert_eq!(parsed["count"], json!(1));
+    assert_eq!(parsed["results"][0]["path"], json!("notes/a.md"));
+}
+
+#[tokio::test]
+async fn tag_brief_dispatch_returns_expected_shape() {
+    let db = SearchIndex::open_memory().expect("open db");
+    seed_tagged_article(&db, "notes/a.md", "A", "body", &["privacy"]);
+    seed_tagged_article(&db, "notes/b.md", "B", "body", &["privacy"]);
+    let server = OracleMcpServer::new(Config::default(), db);
+
+    let result = server
+        .dispatch("tag_brief", json!({"tag": "privacy"}))
+        .await
+        .expect("tag_brief dispatch");
+    assert_ne!(result.is_error, Some(true), "tag_brief returned an error");
+    let parsed = first_content_as_json(&result);
+    assert_eq!(parsed["tag"], json!("privacy"));
+    assert_eq!(parsed["total_notes"], json!(2));
+    assert_eq!(parsed["results"].as_array().expect("results").len(), 2);
+}
+
+/// `schema_info` includes a `tags` key driven by whatever vocabulary the
+/// caller loaded (the pure formatter takes it as a parameter; the async tool
+/// method does the file IO). Sorted, since `load_canonical_tags` sorts too.
+#[test]
+fn schema_info_includes_tags_from_the_vocabulary() {
+    let tags = vec!["privacy".to_string(), "rust".to_string()];
+    let payload = schema_info_payload(&tags);
+    assert_eq!(payload["tags"], json!(["privacy", "rust"]));
+}
+
+/// P8 success criterion: every MCP request struct with a `domain` filter also
+/// has a `tags` filter beside it (G6). Checked over the schemars-derived tool
+/// input schemas, not a hand-maintained list, so a future request struct with
+/// `domain` and no `tags` fails this test automatically.
+///
+/// Two tools are exempt, both per the design doc's own API Design section
+/// (`docs/design/2026-09-19-tags-only-classification.md`):
+/// - `ingest_history`: the ledger never carried a tags column; `domain` is
+///   dropped in P11 with no sibling.
+/// - `domain_brief`: `tags` gets its own tool, `tag_brief`, not a field on
+///   this one.
+#[test]
+fn every_domain_param_has_a_tags_sibling() {
+    const EXEMPT: &[&str] = &["ingest_history", "domain_brief"];
+    let tools = OracleMcpServer::list_tools();
+    assert!(!tools.is_empty(), "router advertised no tools");
+    let mut checked = 0;
+    for tool in &tools {
+        let Some(props) = tool.input_schema.get("properties").and_then(|p| p.as_object()) else {
+            continue;
+        };
+        if !props.contains_key("domain") {
+            continue;
+        }
+        checked += 1;
+        if EXEMPT.contains(&tool.name.as_ref()) {
+            assert!(
+                !props.contains_key("tags"),
+                "tool {:?} is on the exempt list but now HAS a tags field - remove it from EXEMPT",
+                tool.name
+            );
+            continue;
+        }
+        assert!(
+            props.contains_key("tags"),
+            "tool {:?} has a domain filter with no tags sibling",
+            tool.name
+        );
+    }
+    assert!(
+        checked > 0,
+        "no tool with a domain filter was found - test is not exercising anything"
     );
 }

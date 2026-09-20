@@ -160,6 +160,11 @@ fn print_vault_stats(config: &oracle::Config, stats: &vault::search::VaultStats)
         println!("  {domain:<15} {count}");
     }
 
+    println!("\nBy tag (top 20):");
+    for (tag, count) in &stats.by_tag {
+        println!("  {tag:<15} {count}");
+    }
+
     println!("\nBy type:");
     for (note_type, count) in &stats.by_type {
         println!("  {note_type:<15} {count}");

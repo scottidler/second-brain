@@ -1,3 +1,4 @@
+use super::query::push_tags_filter;
 use super::*;
 
 impl super::SearchIndex {
@@ -124,6 +125,7 @@ impl super::SearchIndex {
             .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
 
         let domain_counts = self.count_by_column("domain")?;
+        let tag_counts = self.top_tags(20)?;
         let type_counts = self.count_by_column("note_type")?;
         let status_counts = self.count_by_column("status")?;
 
@@ -132,10 +134,27 @@ impl super::SearchIndex {
         Ok(VaultStats {
             total_notes: total,
             by_domain: domain_counts,
+            by_tag: tag_counts,
             by_type: type_counts,
             by_status: status_counts,
             schema_gaps,
         })
+    }
+
+    /// Top `limit` tags by note count, over the `note_tags` facet (an index
+    /// lookup, not the `tag_stats()` full-table JSON scan - `vault_overview`
+    /// only ever needs the top 20, per the design's `by_tag` bullet).
+    fn top_tags(&self, limit: u32) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tag, COUNT(*) as cnt FROM note_tags GROUP BY tag ORDER BY cnt DESC LIMIT ?1")?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .filter_map(warn_row)
+            .collect();
+        Ok(rows)
     }
 
     /// Coverage of the `note_embeddings` table relative to `notes`. Used by
@@ -171,6 +190,7 @@ impl super::SearchIndex {
         // `status` dropped (Phase 7, F5): optional per `status-values.md` and
         // `frontmatter.md`, so an empty `status` is not a gap. The other
         // three stay required raw-index counts for oracle's `vault_overview`.
+        // `tags` (P8) joins them: `domain` is dropped in P11, `tags` stays.
         let fields = ["domain", "note_type", "origin"];
         let mut gaps = Vec::new();
         for field in fields {
@@ -183,6 +203,19 @@ impl super::SearchIndex {
                 gaps.push((field.to_string(), count));
             }
         }
+
+        // `tags` is a facet, not a scalar TEXT column: index time normalizes
+        // `tags = ''` to `'[]'` (P5), so the empty-string check above cannot
+        // see it. "No tags" means no `note_tags` row for the path at all.
+        let tags_gap: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM notes WHERE NOT EXISTS (SELECT 1 FROM note_tags WHERE note_tags.path = notes.path)",
+            [],
+            |row| row.get(0),
+        )?;
+        if tags_gap > 0 {
+            gaps.push(("tags".to_string(), tags_gap));
+        }
+
         Ok(gaps)
     }
 
@@ -237,6 +270,60 @@ impl super::SearchIndex {
         })
     }
 
+    /// Get notes for a specific tag with stats - the `tags` counterpart to
+    /// `domain_brief` (P8, beside it; `domain_brief` is deleted in P11).
+    /// Membership is the `note_tags` facet (an index lookup), not a JSON scan.
+    pub fn tag_brief(&self, tag: &str, limit: Option<u32>) -> Result<TagBrief> {
+        let limit = limit.unwrap_or(10);
+        let tags_arg = [tag.to_string()];
+
+        let total: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM notes WHERE EXISTS (SELECT 1 FROM note_tags t WHERE t.path = notes.path AND t.tag = ?1)",
+            params![tag],
+            |row| row.get(0),
+        )?;
+
+        let unread: u64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM notes WHERE status = '{}' AND EXISTS (SELECT 1 FROM note_tags t WHERE t.path = notes.path AND t.tag = ?1)",
+                crate::schema::Status::Unread.as_str()
+            ),
+            params![tag],
+            |row| row.get(0),
+        )?;
+
+        let starred: u64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM notes WHERE status = '{}' AND EXISTS (SELECT 1 FROM note_tags t WHERE t.path = notes.path AND t.tag = ?1)",
+                crate::schema::Status::Starred.as_str()
+            ),
+            params![tag],
+            |row| row.get(0),
+        )?;
+
+        let type_counts = {
+            let mut stmt = self.conn.prepare(
+                "SELECT note_type, COUNT(*) FROM notes WHERE note_type != '' AND EXISTS (SELECT 1 FROM note_tags t WHERE t.path = notes.path AND t.tag = ?1) GROUP BY note_type ORDER BY COUNT(*) DESC",
+            )?;
+            stmt.query_map(params![tag], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .filter_map(warn_row)
+            .collect()
+        };
+
+        let recent_notes = self.list_notes(None, Some(&tags_arg), false, None, None, None, None, Some(limit))?;
+
+        Ok(TagBrief {
+            tag: tag.to_string(),
+            total_notes: total,
+            unread,
+            starred,
+            by_type: type_counts,
+            recent: recent_notes,
+        })
+    }
+
     /// Get domain distribution: how many notes per domain
     pub fn domain_stats(&self) -> Result<HashMap<String, u64>> {
         let counts = self.count_by_column("domain")?;
@@ -272,8 +359,19 @@ impl super::SearchIndex {
         self.list_notes(Some(domain), None, false, None, None, None, None, Some(limit as u32))
     }
 
-    /// Find notes matching a specific tag, optionally filtered by domain
-    pub fn tag_search(&self, tag: &str, domain: Option<&str>, limit: Option<u32>) -> Result<Vec<NoteRow>> {
+    /// Find notes matching a specific tag, optionally filtered by domain and/or
+    /// a `tags` sibling filter (beside `domain`, P8; OR/AND per `tags_all`).
+    /// `tag` itself stays a Rust-side prefix/exact match over the JSON column
+    /// (the `note_tags` facet has no prefix index); `tags` is the exact-match
+    /// facet filter shared with `search`/`list_notes`/`recent_notes`.
+    pub fn tag_search(
+        &self,
+        tag: &str,
+        domain: Option<&str>,
+        tags: Option<&[String]>,
+        tags_all: bool,
+        limit: Option<u32>,
+    ) -> Result<Vec<NoteRow>> {
         log::debug!("search::tag_search: tag={tag} domain={domain:?} limit={limit:?}");
         let limit = limit.unwrap_or(20);
 
@@ -290,6 +388,7 @@ impl super::SearchIndex {
             param_values.push(Box::new(d.to_string()));
             param_idx += 1;
         }
+        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
         let _ = param_idx;
 
         sql.push_str(" ORDER BY date DESC");
@@ -398,7 +497,14 @@ impl super::SearchIndex {
     }
 
     /// Get notes by a specific creator
-    pub fn notes_by_creator(&self, creator: &str, domain: Option<&str>, limit: Option<u32>) -> Result<Vec<NoteRow>> {
+    pub fn notes_by_creator(
+        &self,
+        creator: &str,
+        domain: Option<&str>,
+        tags: Option<&[String]>,
+        tags_all: bool,
+        limit: Option<u32>,
+    ) -> Result<Vec<NoteRow>> {
         let limit = limit.unwrap_or(20);
         let mut sql = String::from(
             "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
@@ -413,6 +519,7 @@ impl super::SearchIndex {
             param_values.push(Box::new(d.to_string()));
             param_idx += 1;
         }
+        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
         let _ = param_idx;
 
         sql.push_str(&format!(" ORDER BY date DESC LIMIT {limit}"));
@@ -445,7 +552,14 @@ impl super::SearchIndex {
     }
 
     /// Get notes from a specific source domain
-    pub fn notes_by_source_domain(&self, host: &str, domain: Option<&str>, limit: Option<u32>) -> Result<Vec<NoteRow>> {
+    pub fn notes_by_source_domain(
+        &self,
+        host: &str,
+        domain: Option<&str>,
+        tags: Option<&[String]>,
+        tags_all: bool,
+        limit: Option<u32>,
+    ) -> Result<Vec<NoteRow>> {
         let limit = limit.unwrap_or(20);
         let mut sql = String::from(
             "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
@@ -460,6 +574,7 @@ impl super::SearchIndex {
             param_values.push(Box::new(d.to_string()));
             param_idx += 1;
         }
+        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
         let _ = param_idx;
 
         sql.push_str(&format!(" ORDER BY date DESC LIMIT {limit}"));
@@ -590,23 +705,61 @@ impl super::SearchIndex {
         Ok(result)
     }
 
-    /// Get classification pipeline statistics
-    pub fn classify_stats(&self, domain: Option<&str>) -> Result<ClassifyStats> {
-        // Parameterize the domain filter instead of interpolating it raw (this
-        // was the only unparameterized caller-supplied value in the crate). The
-        // `(?1 IS NULL OR domain = ?1)` idiom binds `Option<&str>` directly:
-        // `None` -> NULL -> the predicate is always true (unfiltered).
-        let total_classified: u64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM notes WHERE classified = 1 AND (?1 IS NULL OR domain = ?1)",
-            params![domain],
-            |row| row.get(0),
-        )?;
+    /// `classify_stats`'s shared filter builder: `base_where` AND an optional
+    /// `domain = ?` AND an optional `tags` facet filter (`push_tags_filter`).
+    /// Returns the finished SQL plus its bound parameters, ready for
+    /// `query_row` (a `COUNT(*)`) or `query_map` (a `GROUP BY`) callers.
+    fn classify_filtered_sql(
+        &self,
+        select: &str,
+        base_where: &str,
+        domain: Option<&str>,
+        tags: Option<&[String]>,
+        tags_all: bool,
+        group_by: Option<&str>,
+    ) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+        let mut sql = format!("SELECT {select} FROM notes WHERE {base_where}");
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+        let mut param_idx = 1;
+        if let Some(d) = domain {
+            sql.push_str(&format!(" AND domain = ?{param_idx}"));
+            param_values.push(Box::new(d.to_string()));
+            param_idx += 1;
+        }
+        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
+        let _ = param_idx;
+        if let Some(g) = group_by {
+            sql.push_str(&format!(" GROUP BY {g} ORDER BY COUNT(*) DESC"));
+        }
+        (sql, param_values)
+    }
+
+    /// Get classification pipeline statistics. `domain` and `tags` (P8, beside
+    /// it) both narrow `total_classified`, `by_method`, `by_confidence`, and
+    /// `pending_review` - `by_domain`, `inbox_count`, and `unclassified` stay
+    /// unfiltered breakdowns, matching `domain`'s existing (pre-P8) behavior.
+    pub fn classify_stats(
+        &self,
+        domain: Option<&str>,
+        tags: Option<&[String]>,
+        tags_all: bool,
+    ) -> Result<ClassifyStats> {
+        let (sql, params) = self.classify_filtered_sql("COUNT(*)", "classified = 1", domain, tags, tags_all, None);
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let total_classified: u64 = self.conn.query_row(&sql, params_refs.as_slice(), |row| row.get(0))?;
 
         let by_method = {
-            let mut stmt = self.conn.prepare(
-                "SELECT classified_by, COUNT(*) FROM notes WHERE classified = 1 AND classified_by != '' AND (?1 IS NULL OR domain = ?1) GROUP BY classified_by ORDER BY COUNT(*) DESC"
-            )?;
-            stmt.query_map(params![domain], |row| {
+            let (sql, params) = self.classify_filtered_sql(
+                "classified_by, COUNT(*)",
+                "classified = 1 AND classified_by != ''",
+                domain,
+                tags,
+                tags_all,
+                Some("classified_by"),
+            );
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = self.conn.prepare(&sql)?;
+            stmt.query_map(params_refs.as_slice(), |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
             .filter_map(warn_row)
@@ -614,10 +767,17 @@ impl super::SearchIndex {
         };
 
         let by_confidence = {
-            let mut stmt = self.conn.prepare(
-                "SELECT confidence, COUNT(*) FROM notes WHERE classified = 1 AND confidence != '' AND (?1 IS NULL OR domain = ?1) GROUP BY confidence ORDER BY COUNT(*) DESC"
-            )?;
-            stmt.query_map(params![domain], |row| {
+            let (sql, params) = self.classify_filtered_sql(
+                "confidence, COUNT(*)",
+                "classified = 1 AND confidence != ''",
+                domain,
+                tags,
+                tags_all,
+                Some("confidence"),
+            );
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = self.conn.prepare(&sql)?;
+            stmt.query_map(params_refs.as_slice(), |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
             .filter_map(warn_row)
@@ -633,11 +793,9 @@ impl super::SearchIndex {
                 .collect()
         };
 
-        let pending_review: u64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM notes WHERE needs_review = 1 AND (?1 IS NULL OR domain = ?1)",
-            params![domain],
-            |row| row.get(0),
-        )?;
+        let (sql, params) = self.classify_filtered_sql("COUNT(*)", "needs_review = 1", domain, tags, tags_all, None);
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let pending_review: u64 = self.conn.query_row(&sql, params_refs.as_slice(), |row| row.get(0))?;
 
         let inbox_count: u64 =
             self.conn

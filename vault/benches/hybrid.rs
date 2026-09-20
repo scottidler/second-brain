@@ -67,7 +67,9 @@ fn hybrid_dispatch(c: &mut Criterion) {
             let bm25 = index
                 .search(&q, None, None, false, None, None, Some(K_RRF_INPUT))
                 .expect("bm25");
-            let vec_hits = index.search_vector(&q_vec, K_RRF_INPUT, None, None, None).expect("vec");
+            let vec_hits = index
+                .search_vector(&q_vec, K_RRF_INPUT, None, None, false, None, None)
+                .expect("vec");
             let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
             let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();
             let _fused = reciprocal_rank_fusion(&[&bm25_paths, &vec_paths], RRF_K, 10);
