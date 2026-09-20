@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use eyre::{Context, Result, eyre};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use vault::canonical::{self, CanonicalSet, TagMapping};
 
 #[cfg(test)]
@@ -139,7 +139,7 @@ pub trait TagClassifier: Send + Sync {
 
 // ---------------------------------------------------------------- config
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ClassifierKind {
     #[default]
@@ -149,7 +149,7 @@ pub enum ClassifierKind {
 }
 
 /// The `tags.classifier` block, identical in `borg.yml` and `cortex.yml`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct TagsClassifierConfig {
     pub classifier: ClassifierKind,

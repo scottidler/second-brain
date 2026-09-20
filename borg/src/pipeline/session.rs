@@ -71,7 +71,22 @@ fn harvest_publish_path(dir: &std::path::Path, slug_stem: &str, primary_id: &str
 /// the value carried off the note being replaced), rather than leaving the
 /// generic carry-forward loop touch it. See [`FOLLOWS_KEY`] /
 /// [`resolve_follows_stem`].
-const SESSION_OWNED_KEYS: &[&str] = &["repo", "trace-expires", "slug", "harvest-body-hash", "follows"];
+const SESSION_OWNED_KEYS: &[&str] = &[
+    "repo",
+    "trace-expires",
+    "slug",
+    "harvest-body-hash",
+    "follows",
+    // Governance keys (design doc: "Why governance signals leave `tags`"):
+    // re-derived fresh on every publish, same as the rest of this list, not
+    // carried forward from the note being replaced. `redacted` is omitted
+    // (not written `false`) when there is nothing to flag, so a replace that
+    // clears every redaction must not let a stale `true` survive as a
+    // generic carried key either.
+    "scope",
+    "redacted",
+    "author-tags",
+];
 
 /// Frontmatter keys `distillers::render` contributes for a session note
 /// (`distillers/src/render.rs`, the `KindPayload::Session` arm plus the two
@@ -457,20 +472,36 @@ pub(crate) async fn process_session_inner(
     )
     .await;
 
-    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
-    all_tags.extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
-    finalize_tags(&mut all_tags, config).await;
+    // `title` is present-null in the contract; a null OR empty title falls back
+    // to `Session <id>` (the null case is new in harvest-completion Phase 1;
+    // the empty-string case is preserved). Resolved here (rather than at its
+    // original spot below) because the tag classifier needs it too.
+    let title = match primary.title.as_deref() {
+        Some(t) if !t.trim().is_empty() => t.to_string(),
+        _ => format!("Session {primary_id}"),
+    };
+
+    // Candidates built before anything merges them (provenance is lost after
+    // that point). Operator-supplied tags are author-side; the distiller
+    // output is model-side, scored against the summary.
+    let mut sources = TagSources::new(&title, &distilled.summary);
+    sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    sources
+        .model
+        .extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    let outcome = finalize_tags(sources, config).await;
+    let mut all_tags = outcome.tags;
+    let tags_degraded = outcome.degraded;
 
     // Scope + redaction are governance signals the design mandates on EVERY
-    // harvest note ("work sessions included, scope-tagged"; "a session with
-    // a nonzero [redaction] count gets a redacted-source tag"). Neither is in
-    // the 110-tag canonical interest vocabulary `finalize_tags` filters
-    // against, so they are appended AFTER canonicalization rather than
-    // risking silent drop (see implementation notes, Deviations).
-    all_tags.push(if primary.scope == "work" { "scope-work" } else { "scope-personal" }.to_string());
-    if members.iter().any(|m| m.redaction_count > 0) {
-        all_tags.push("redacted-source".to_string());
-    }
+    // harvest note ("work sessions included"; "a session with a nonzero
+    // [redaction] count is flagged"), but they are facts about a harvest
+    // note's provenance, not interests, so they are `scope`/`redacted`
+    // FRONTMATTER KEYS rather than tags pushed after canonicalization -
+    // design doc "Why governance signals leave `tags`", amending the
+    // 2026-07-17 harvest doc's "scope-tagged" wording (Open Question 4).
+    let scope = if primary.scope == "work" { "work" } else { "personal" }.to_string();
+    let redacted = members.iter().any(|m| m.redaction_count > 0);
     all_tags.sort();
     all_tags.dedup();
 
@@ -498,14 +529,6 @@ pub(crate) async fn process_session_inner(
         rendered_distilled.body_markdown.clone()
     };
 
-    // `title` is present-null in the contract; a null OR empty title falls back
-    // to `Session <id>` (the null case is new in harvest-completion Phase 1;
-    // the empty-string case is preserved).
-    let title = match primary.title.as_deref() {
-        Some(t) if !t.trim().is_empty() => t.to_string(),
-        _ => format!("Session {primary_id}"),
-    };
-
     let tz = config.frontmatter.timezone_tz();
     let now = chrono::Utc::now().with_timezone(&tz);
     let mut frontmatter_additions = rendered_distilled.frontmatter_additions;
@@ -523,6 +546,11 @@ pub(crate) async fn process_session_inner(
     );
     let expires = retention::trace_expires_for(now.date_naive(), config.staging.retention_days);
     frontmatter_additions.insert("trace-expires".to_string(), serde_yaml::Value::String(expires));
+    frontmatter_additions.insert("scope".to_string(), serde_yaml::Value::String(scope));
+    if redacted {
+        frontmatter_additions.insert("redacted".to_string(), serde_yaml::Value::Bool(true));
+    }
+    frontmatter_additions = insert_author_tags(frontmatter_additions, &outcome.author_tags);
 
     // harvest-content-slug-naming (2026-07-24): the note's filename is the
     // distiller's content-derived slug (naming the real subject/outcome), NOT
@@ -679,7 +707,7 @@ pub(crate) async fn process_session_inner(
         title,
         all_tags,
         trace_id,
-        distilled.meta.validation.is_degraded(),
+        distilled.meta.validation.is_degraded() || tags_degraded,
     )
 }
 

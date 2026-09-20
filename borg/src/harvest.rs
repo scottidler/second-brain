@@ -106,7 +106,8 @@ pub struct ThreadDecision {
     /// Full bulk-metadata records for every member (repo, scope, title,
     /// duration, redaction-count, dates), in `created` order. Phase 5 needs
     /// these for `SessionMetadata`, the note's frontmatter (`repo:`,
-    /// `scope-*`/`redacted-source` tags), and the thread footer, without
+    /// `scope:`/`redacted:` keys - tags-only-classification P6 moved these
+    /// off `scope-*`/`redacted-source` tags), and the thread footer, without
     /// re-deriving them from `member_ids`. Carries no `body` (bulk metadata
     /// only) - Phase 5 fetches transcript bodies separately.
     pub members: Vec<SessionRecord>,

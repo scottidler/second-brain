@@ -980,7 +980,6 @@ pub struct FabricConfig {
     pub summarize_pattern_youtube: String,
     pub summarize_pattern_article: String,
     pub condense_pattern: String,
-    pub tag_pattern: String,
     pub max_content_chars: usize,
     /// Output-token ceiling passed to fabric as `--maxTokens=<n>`; 0 leaves
     /// fabric's own default in place.
@@ -1017,7 +1016,6 @@ impl Default for FabricConfig {
             summarize_pattern_youtube: "obsidian-note.md".to_string(),
             summarize_pattern_article: "obsidian-note.md".to_string(),
             condense_pattern: "condense.md".to_string(),
-            tag_pattern: "create_tags".to_string(),
             max_content_chars: 100000,
             max_tokens: 16384,
             timeout_secs: 600,
@@ -1194,6 +1192,10 @@ pub struct TagsConfig {
     pub canonical_path: String,
     pub mapping_path: String,
     pub reject_concatenated: bool,
+    /// The closed-vocabulary classifier that assigns tags at ingest. Same
+    /// block, same shape, in `cortex.yml`; both parse it through
+    /// `distillers::tags::TagsClassifierConfig`.
+    pub classifier: distillers::tags::TagsClassifierConfig,
 }
 
 impl Default for TagsConfig {
@@ -1202,6 +1204,7 @@ impl Default for TagsConfig {
             canonical_path: vault::paths::canonical_tags().display().to_string(),
             mapping_path: vault::paths::tag_mapping().display().to_string(),
             reject_concatenated: true,
+            classifier: distillers::tags::TagsClassifierConfig::default(),
         }
     }
 }

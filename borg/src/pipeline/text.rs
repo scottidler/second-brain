@@ -123,18 +123,17 @@ pub(crate) async fn process_text_inner(
         crate::stages::distill::distill_for_publish_idea(&config.fabric, &config.staging, trace_id, text, Some(&title))
             .await;
 
-    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
-    all_tags.extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
-
-    // Generate tags via Fabric (driven by the distilled summary so we send
-    // less text over the wire than the raw input would).
-    if use_fabric {
-        match fabric::generate_tags(&distilled.summary, &config.fabric).await {
-            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
-            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
-        }
-    }
-    finalize_tags(&mut all_tags, config).await;
+    // Candidates built before anything merges them (provenance is lost after
+    // that point). Operator-supplied tags are author-side; the distiller
+    // output is model-side, scored against the summary.
+    let mut sources = TagSources::new(&title, &distilled.summary);
+    sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    sources
+        .model
+        .extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    let outcome = finalize_tags(sources, config).await;
+    let all_tags = outcome.tags;
+    let tags_degraded = outcome.degraded;
 
     // Text/idea is a verbatim-preservation kind: the full input is the note's
     // only persistent source, so it keeps its in-note `## Transcript`.
@@ -161,7 +160,7 @@ pub(crate) async fn process_text_inner(
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
         distilled_body: Some(rendered_distilled.body_markdown),
-        frontmatter_additions: rendered_distilled.frontmatter_additions,
+        frontmatter_additions: insert_author_tags(rendered_distilled.frontmatter_additions, &outcome.author_tags),
         origin: None,
         status: None,
     };
@@ -185,7 +184,7 @@ pub(crate) async fn process_text_inner(
         title,
         all_tags,
         trace_id,
-        distilled.meta.validation.is_degraded(),
+        distilled.meta.validation.is_degraded() || tags_degraded,
     )
 }
 
@@ -282,16 +281,24 @@ pub(crate) async fn process_vocab(
     )
     .await;
 
-    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
-    all_tags.extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    // Candidates built before anything merges them (provenance is lost after
+    // that point). Operator-supplied tags are author-side; the distiller
+    // output and the deterministic `<language>-vocab` marker are model-side.
     let vocab_tag = match &content_type {
         ContentType::VocabDefine { language, .. } | ContentType::VocabClarify { language, .. } => {
             format!("{language}-vocab")
         }
         _ => "vocab".to_string(),
     };
-    all_tags.push(hygiene::sanitize_tag(&vocab_tag));
-    finalize_tags(&mut all_tags, config).await;
+    let mut sources = TagSources::new(&title, &distilled.summary);
+    sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    sources
+        .model
+        .extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    sources.model.push(hygiene::sanitize_tag(&vocab_tag));
+    let outcome = finalize_tags(sources, config).await;
+    let all_tags = outcome.tags;
+    let tags_degraded = outcome.degraded;
 
     // Vocabulary is a verbatim-preservation kind: keeps its in-note transcript.
     let rendered_distilled = distillers::render(
@@ -314,7 +321,7 @@ pub(crate) async fn process_vocab(
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
         distilled_body: Some(rendered_distilled.body_markdown),
-        frontmatter_additions: rendered_distilled.frontmatter_additions,
+        frontmatter_additions: insert_author_tags(rendered_distilled.frontmatter_additions, &outcome.author_tags),
         origin: None,
         status: None,
     };
@@ -338,7 +345,7 @@ pub(crate) async fn process_vocab(
         title,
         all_tags,
         trace_id,
-        distilled.meta.validation.is_degraded(),
+        distilled.meta.validation.is_degraded() || tags_degraded,
     )
 }
 
@@ -657,20 +664,20 @@ pub(crate) async fn process_code_snippet(
 
     let title = generate_code_title(text, language, use_fabric, config).await;
 
-    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
-    all_tags.push("code-snippet".to_string());
+    // Candidates built before anything merges them (provenance is lost after
+    // that point). Operator-supplied tags are author-side; the deterministic
+    // `code-snippet`/language markers have no separable provenance, so
+    // `model` is the safe default (they are non-canonical anyway, and the
+    // classifier drops them the same way `filter_and_cap` used to).
+    let mut sources = TagSources::new(&title, text);
+    sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    sources.model.push("code-snippet".to_string());
     if !language.is_empty() {
-        all_tags.push(hygiene::sanitize_tag(language));
+        sources.model.push(hygiene::sanitize_tag(language));
     }
-
-    // Generate additional tags via Fabric
-    if use_fabric {
-        match fabric::generate_tags(text, &config.fabric).await {
-            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
-            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
-        }
-    }
-    finalize_tags(&mut all_tags, config).await;
+    let outcome = finalize_tags(sources, config).await;
+    let all_tags = outcome.tags;
+    let tags_degraded = outcome.degraded;
 
     // Build fenced code block as the summary
     let summary = format!("```{language}\n{text}\n```");
@@ -689,6 +696,7 @@ pub(crate) async fn process_code_snippet(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        frontmatter_additions: insert_author_tags(std::collections::BTreeMap::new(), &outcome.author_tags),
         ..NoteContent::default()
     };
 
@@ -715,7 +723,7 @@ pub(crate) async fn process_code_snippet(
         title,
         all_tags,
         trace_id,
-        false,
+        tags_degraded,
     )
 }
 

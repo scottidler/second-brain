@@ -693,7 +693,6 @@ pub(crate) async fn process_image_inner(
     }
 
     // Merge results: vision preferred over tesseract for title
-    let use_fabric = fabric::is_available(&config.fabric);
     let title = vision
         .as_ref()
         .and_then(|v| (!v.suggested_title.is_empty()).then_some(v.suggested_title.clone()))
@@ -742,30 +741,25 @@ pub(crate) async fn process_image_inner(
     )
     .await;
 
-    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
-    all_tags.push("image".to_string());
-    all_tags.extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
-
-    // Include vision tags
+    // Candidates built before anything merges them (provenance is lost after
+    // that point, and the classifier needs it). Operator-supplied tags are
+    // author-side, same as the URL path's caller-supplied tags; vision's
+    // suggestions are a model guess derived from the image content, same
+    // bucket as the distiller output.
+    let mut sources = TagSources::new(&title, &distilled.summary);
+    sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    sources.model.push("image".to_string());
+    sources
+        .model
+        .extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
     if let Some(ref v) = vision {
-        all_tags.extend(v.suggested_tags.iter().map(|t| hygiene::sanitize_tag(t)));
+        sources
+            .model
+            .extend(v.suggested_tags.iter().map(|t| hygiene::sanitize_tag(t)));
     }
-
-    // Generate tags via Fabric from the distilled summary (denser than the
-    // raw Vision+OCR concat, so cheaper and more on-topic). Falls back to
-    // the filename when distillation produced no summary.
-    let tag_source = if !distilled.summary.is_empty() {
-        distilled.summary.clone()
-    } else {
-        format!("Image file: {filename}")
-    };
-    if use_fabric {
-        match fabric::generate_tags(&tag_source, &config.fabric).await {
-            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
-            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
-        }
-    }
-    finalize_tags(&mut all_tags, config).await;
+    let outcome = finalize_tags(sources, config).await;
+    let all_tags = outcome.tags;
+    let tags_degraded = outcome.degraded;
 
     // Image is a verbatim-preservation kind: the Vision+OCR text is the note's
     // only persistent source, so it keeps its in-note `## Transcript`.
@@ -789,7 +783,7 @@ pub(crate) async fn process_image_inner(
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
         distilled_body: Some(rendered_distilled.body_markdown),
-        frontmatter_additions: rendered_distilled.frontmatter_additions,
+        frontmatter_additions: insert_author_tags(rendered_distilled.frontmatter_additions, &outcome.author_tags),
         origin: None,
         status: None,
     };
@@ -816,7 +810,7 @@ pub(crate) async fn process_image_inner(
         title,
         all_tags,
         trace_id,
-        distilled.meta.validation.is_degraded(),
+        distilled.meta.validation.is_degraded() || tags_degraded,
     )
 }
 
@@ -971,27 +965,24 @@ pub(crate) async fn process_audio_inner(
     )
     .await;
 
-    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
-    all_tags.push("audio".to_string());
-    all_tags.extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
-
-    // Generate tags via Fabric from the distilled summary (denser than the
-    // raw transcript; falls back to filename when distillation produced no
-    // summary or transcript was empty).
-    let tag_source = if !distilled.summary.is_empty() {
+    // Candidates built before anything merges them (provenance is lost after
+    // that point). Operator-supplied tags are author-side; the transcript
+    // (used as classifier `text` when there is no summary yet) and the
+    // distiller output are model-side.
+    let text_for_classifier = if !distilled.summary.is_empty() {
         distilled.summary.clone()
-    } else if !transcript_text.is_empty() {
-        transcript_text.clone()
     } else {
-        format!("Audio file: {filename}")
+        transcript_text.clone()
     };
-    if use_fabric {
-        match fabric::generate_tags(&tag_source, &config.fabric).await {
-            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
-            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
-        }
-    }
-    finalize_tags(&mut all_tags, config).await;
+    let mut sources = TagSources::new(&title, &text_for_classifier);
+    sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    sources.model.push("audio".to_string());
+    sources
+        .model
+        .extend(distilled.tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    let outcome = finalize_tags(sources, config).await;
+    let all_tags = outcome.tags;
+    let tags_degraded = outcome.degraded;
 
     // Audio/VoiceNote is a verbatim-preservation kind: the transcript is the
     // note's only persistent source, so it keeps its in-note `## Transcript`.
@@ -1018,7 +1009,7 @@ pub(crate) async fn process_audio_inner(
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
         distilled_body: Some(rendered_distilled.body_markdown),
-        frontmatter_additions: rendered_distilled.frontmatter_additions,
+        frontmatter_additions: insert_author_tags(rendered_distilled.frontmatter_additions, &outcome.author_tags),
         origin: None,
         status: None,
     };
@@ -1042,7 +1033,7 @@ pub(crate) async fn process_audio_inner(
         title,
         all_tags,
         trace_id,
-        distilled.meta.validation.is_degraded(),
+        distilled.meta.validation.is_degraded() || tags_degraded,
     )
 }
 
@@ -1189,9 +1180,6 @@ pub(crate) async fn process_document_file_inner(
         title_from_filename(filename)
     };
 
-    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
-    all_tags.push(kind.default_tag().to_string());
-
     // Summarize via fabric
     let summary = if use_fabric && !extracted_text.is_empty() {
         match fabric::summarize(&extracted_text, false, &config.fabric).await {
@@ -1208,20 +1196,22 @@ pub(crate) async fn process_document_file_inner(
         String::new()
     };
 
-    // Generate tags via Fabric
-    let tag_source = if !extracted_text.is_empty() {
+    // Candidates built before anything merges them (provenance is lost after
+    // that point). Operator-supplied tags are author-side; the file-kind
+    // marker has no separable provenance, so `model` is the safe default.
+    let text_for_classifier = if !summary.is_empty() {
+        summary.clone()
+    } else if !extracted_text.is_empty() {
         extracted_text.clone()
     } else {
         format!("{} file: {filename}", kind.label())
     };
-
-    if use_fabric {
-        match fabric::generate_tags(&tag_source, &config.fabric).await {
-            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
-            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
-        }
-    }
-    finalize_tags(&mut all_tags, config).await;
+    let mut sources = TagSources::new(&title, &text_for_classifier);
+    sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    sources.model.push(kind.default_tag().to_string());
+    let outcome = finalize_tags(sources, config).await;
+    let all_tags = outcome.tags;
+    let tags_degraded = outcome.degraded;
 
     let note = NoteContent {
         title: title.clone(),
@@ -1236,6 +1226,7 @@ pub(crate) async fn process_document_file_inner(
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
         capture_note,
+        frontmatter_additions: insert_author_tags(std::collections::BTreeMap::new(), &outcome.author_tags),
         ..NoteContent::default()
     };
 
@@ -1262,6 +1253,6 @@ pub(crate) async fn process_document_file_inner(
         title,
         all_tags,
         trace_id,
-        false,
+        tags_degraded,
     )
 }

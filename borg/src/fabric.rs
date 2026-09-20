@@ -338,16 +338,6 @@ fn find_break_point(text: &str, search_start: usize, end: usize) -> usize {
     end
 }
 
-pub async fn generate_tags(content: &str, config: &FabricConfig) -> Result<Vec<String>> {
-    let output = run_pattern(&config.tag_pattern, content, config).await?;
-    let tags: Vec<String> = output
-        .split_whitespace()
-        .map(|t| t.trim_matches('#').to_string())
-        .filter(|t| !t.is_empty())
-        .collect();
-    Ok(tags)
-}
-
 pub fn is_available(config: &FabricConfig) -> bool {
     vault::fabric::is_available(&config.binary)
 }

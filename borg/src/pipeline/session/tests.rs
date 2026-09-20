@@ -209,7 +209,11 @@ async fn process_session_inner_publishes_note_with_trace_and_source() {
     assert!(contents.contains("status: unread"), "{contents}");
     assert!(contents.contains("repo:"), "{contents}");
     assert!(contents.contains("tatari-tv/marquee"), "{contents}");
-    assert!(contents.contains("scope-work"), "{contents}");
+    // tags-only-classification P6: scope is a frontmatter KEY, not a tag
+    // pushed after canonicalization - see `session_governance_is_keys_not_tags`
+    // for the dedicated positive/negative assertion.
+    assert!(contents.contains("scope: work"), "{contents}");
+    assert!(!contents.contains("scope-work"), "{contents}");
     // Two members: the richer per-member footer should be present.
     assert!(contents.contains("## Session Details"), "{contents}");
 
@@ -218,7 +222,7 @@ async fn process_session_inner_publishes_note_with_trace_and_source() {
 }
 
 #[tokio::test]
-async fn process_session_inner_tags_redacted_source_when_any_member_redacted() {
+async fn process_session_inner_writes_redacted_key_when_any_member_redacted() {
     let _sandbox = XdgSandbox::new().await;
     let vault_dir = TempDir::new().unwrap();
     let staging_dir = TempDir::new().unwrap();
@@ -244,9 +248,71 @@ async fn process_session_inner_tags_redacted_source_when_any_member_redacted() {
     .expect("process_session_inner should succeed");
 
     let contents = std::fs::read_to_string(result.note_path.expect("note_path")).expect("read note");
-    assert!(contents.contains("redacted-source"), "{contents}");
+    // tags-only-classification P6: redaction is a frontmatter KEY, not a tag.
+    assert!(contents.contains("redacted: true"), "{contents}");
+    assert!(!contents.contains("redacted-source"), "{contents}");
     // A single-member thread gets no member-details footer.
     assert!(!contents.contains("## Session Details"), "{contents}");
+}
+
+/// Design doc AC3 / P6 success criterion `session_governance_is_keys_not_tags`:
+/// a session note carries `scope:`/`redacted:` frontmatter KEYS, never the
+/// old `scope-work`/`scope-personal`/`redacted-source` TAGS, and neither
+/// governance key pollutes the `tags:` list.
+#[tokio::test]
+async fn session_governance_is_keys_not_tags() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+
+    let mut member = session_record(
+        "governance-keys",
+        "2026-07-02T04:51:21+00:00",
+        "2026-07-02T06:08:39+00:00",
+        7,
+    );
+    member.scope = "personal".to_string();
+    member.redaction_count = 1;
+
+    let result = process_session_inner(
+        "human: hi\nassistant: hello\n",
+        &[member],
+        "governance-keys",
+        false,
+        vec![],
+        IngestMethod::Harvest,
+        false,
+        ResolveIntent::NewNote,
+        None,
+        &config,
+        "harvest-test-governance-keys",
+    )
+    .await
+    .expect("process_session_inner should succeed");
+
+    let note_path = result.note_path.expect("note_path");
+    let contents = std::fs::read_to_string(&note_path).expect("read note");
+    let (yaml, _body) = vault::frontmatter::split_raw(&contents).expect("frontmatter block");
+    let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("parse frontmatter");
+
+    assert_eq!(
+        map.get("scope").and_then(|v| v.as_str()),
+        Some("personal"),
+        "{contents}"
+    );
+    assert_eq!(map.get("redacted").and_then(|v| v.as_bool()), Some(true), "{contents}");
+    let tags: Vec<String> = map
+        .get("tags")
+        .and_then(|v| v.as_sequence())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !tags.iter().any(|t| t.starts_with("scope-") || t == "redacted-source"),
+        "governance keys must never leak into tags: {tags:?}"
+    );
 }
 
 // ---- harvest-content-slug-naming: filename stem resolution ----

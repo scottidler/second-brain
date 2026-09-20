@@ -827,7 +827,7 @@ async fn process_url_inner(
             .await
         };
         // Gate-2 runs against the concise Distilled summary, which is what
-        // we now display to users; it is also what `fabric::generate_tags`
+        // we now display to users; it is also what the tag classifier
         // consumes below.
         crate::stages::raw::run_gate_2(config, trace_id, Some(&url_match.url), &distilled.summary)?;
         // Thread/social title override (design doc
@@ -861,28 +861,29 @@ async fn process_url_inner(
         });
     }
 
-    let mut all_tags: Vec<String> = tags.iter().map(|t| hygiene::sanitize_tag(t)).collect();
-    // Extractor-produced tags also flow into the tag pipeline so canonical
-    // filtering applies to them uniformly. Gate: distill.propose-tags — when
-    // off, the distiller-proposed tags are not merged (other sources stand).
-    merge_proposed_tags(&mut all_tags, &distilled.tags, config.distill.propose_tags);
-
-    // Extract hashtags from YouTube description and merge yt-dlp tags
+    // Candidates are built HERE, before anything merges them, because after
+    // the merge the provenance is gone and the classifier needs it.
+    let mut sources = tags::TagSources::new(&title, &distilled.summary);
+    // Caller-supplied tags: operator-provided, so author-side.
+    sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
+    // Publisher hashtags and yt-dlp tags: the creator's own words.
     if let Some(ref desc) = raw_description {
         let hashtags = description::extract_hashtags(desc);
-        all_tags.extend(hashtags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+        sources
+            .author
+            .extend(hashtags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
     }
-    all_tags.extend(yt_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+    sources
+        .author
+        .extend(yt_tags.into_iter().map(|t| hygiene::sanitize_tag(&t)));
+    // Distiller output: model-side, ignored by the scoring classifiers.
+    // Gate: distill.propose-tags.
+    merge_proposed_tags(&mut sources.model, &distilled.tags, config.distill.propose_tags);
 
-    // Generate tags via Fabric (graceful failure). Now driven by the
-    // concise Distilled summary rather than a long prose body.
-    if use_fabric {
-        match fabric::generate_tags(&distilled.summary, &config.fabric).await {
-            Ok(fabric_tags) => all_tags.extend(fabric_tags.into_iter().map(|t| hygiene::sanitize_tag(&t))),
-            Err(e) => log::warn!("fabric generate_tags failed, continuing without fabric tags: {e}"),
-        }
-    }
-    finalize_tags(&mut all_tags, config).await;
+    let outcome = finalize_tags(sources, config).await;
+    let all_tags = outcome.tags;
+    let author_tags = outcome.author_tags;
+    let tags_degraded = outcome.degraded;
 
     let filtered_description = raw_description.as_deref().and_then(description::filter_description);
 
@@ -979,7 +980,7 @@ async fn process_url_inner(
             let mut additions = rendered_distilled.frontmatter_additions;
             let expires = retention::trace_expires_for(now.date_naive(), config.staging.retention_days);
             additions.insert("trace-expires".to_string(), serde_yaml::Value::String(expires));
-            additions
+            tags::insert_author_tags(additions, &author_tags)
         },
         // URL kinds keep the pre-existing `origin: assisted` / no `status:`
         // behavior; only harvest's Session handler sets these.
@@ -1127,10 +1128,11 @@ async fn process_url_inner(
         trace_id: None,
         obsidian_url,
         failure_stage: None,
-        // Degraded when the L2 distiller fell back OR an enumeration fell short
-        // of its declared count (Phase 4, Resolved Decision 2026-07-07). Single
-        // source of truth: `ValidationMeta::is_degraded`.
-        degraded: distilled.meta.validation.is_degraded(),
+        // Degraded when the L2 distiller fell back, an enumeration fell short
+        // of its declared count (Phase 4, Resolved Decision 2026-07-07), OR
+        // the tag classifier errored and the receipt needs to say so (P6:
+        // "the receipt is degraded=true, and the note is still published").
+        degraded: distilled.meta.validation.is_degraded() || tags_degraded,
     })
 }
 
