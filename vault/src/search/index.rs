@@ -85,7 +85,43 @@ impl super::SearchIndex {
     /// flow through here. Existing rows are UPDATEd in place (vault-derived
     /// columns only; signal columns stay untouched); new rows are INSERTed
     /// with signal columns zeroed.
+    ///
+    /// Wraps the row write and its `note_tags` maintenance in one SAVEPOINT so
+    /// a note is never half-indexed: a failed tag insert rolls the `notes` row
+    /// back with it. `index_changed` has no enclosing transaction, so without
+    /// this the two tables could disagree for any note whose tag write failed.
     pub fn index_one(&self, note: &Note, mtime: i64) -> Result<IndexAction> {
+        self.conn.execute_batch("SAVEPOINT index_one")?;
+        match self.index_one_inner(note, mtime) {
+            Ok(action) => {
+                self.conn.execute_batch("RELEASE index_one")?;
+                Ok(action)
+            }
+            Err(e) => {
+                // Roll the note row back, then release the (now empty)
+                // savepoint so it does not linger on the connection.
+                let _ = self.conn.execute_batch("ROLLBACK TO index_one; RELEASE index_one");
+                Err(e)
+            }
+        }
+    }
+
+    /// Replace this note's `note_tags` rows. Delete-then-insert rather than a
+    /// diff: a note carries at most `max-per-note` tags, so the churn is
+    /// bounded and the code has one path instead of three.
+    fn sync_note_tags(&self, path: &str, tags: &[String]) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM note_tags WHERE path = ?1", params![path])?;
+        for tag in tags {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO note_tags (path, tag) VALUES (?1, ?2)",
+                params![path, tag],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn index_one_inner(&self, note: &Note, mtime: i64) -> Result<IndexAction> {
         let fm = &note.frontmatter;
         let path_str = note.path.to_string_lossy();
         log::debug!(
@@ -116,11 +152,11 @@ impl super::SearchIndex {
         // rides the same UPDATE/INSERT path as the rest.
         let superseded_by = extract_cortex_string(&fm.extra, "superseded-by");
 
-        let tags_json = fm
-            .tags
-            .as_ref()
-            .map(|t| serde_json::to_string(t).unwrap_or_default())
-            .unwrap_or_default();
+        // A note with no `tags` key indexes as `[]`, not `''`. The empty string
+        // is not valid JSON, so `json_each` errors on it and every tag query
+        // has to special-case it; 303 such rows existed before this change.
+        let tag_list: Vec<String> = fm.tags.clone().unwrap_or_default();
+        let tags_json = serde_json::to_string(&tag_list).unwrap_or_else(|_| "[]".to_string());
 
         let domain = normalize_enum::<Domain>(fm.domain.as_deref(), "domain", &path_str);
         let note_type = normalize_enum::<NoteType>(fm.note_type.as_deref(), "note_type", &path_str);
@@ -250,6 +286,7 @@ impl super::SearchIndex {
                     superseded_by,
                 ],
             )?;
+            self.sync_note_tags(&path_str, &tag_list)?;
             Ok(IndexAction::Updated)
         } else {
             self.conn.execute(
@@ -319,6 +356,7 @@ impl super::SearchIndex {
                     superseded_by,
                 ],
             )?;
+            self.sync_note_tags(&path_str, &tag_list)?;
             Ok(IndexAction::Inserted)
         }
     }
@@ -344,6 +382,9 @@ impl super::SearchIndex {
                     .conn
                     .execute("DELETE FROM notes WHERE path = ?1", params![path_str.as_ref()])?
                     as u64;
+                // The facet rows go with the note; nothing else owns them.
+                self.conn
+                    .execute("DELETE FROM note_tags WHERE path = ?1", params![path_str.as_ref()])?;
                 continue;
             }
 
@@ -398,6 +439,9 @@ impl super::SearchIndex {
         for path in &db_paths {
             if !current.contains(path.as_str()) {
                 self.conn.execute("DELETE FROM notes WHERE path = ?1", params![path])?;
+                // The facet rows go with the note; nothing else owns them.
+                self.conn
+                    .execute("DELETE FROM note_tags WHERE path = ?1", params![path])?;
                 removed += 1;
             }
         }

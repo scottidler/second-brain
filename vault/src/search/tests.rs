@@ -276,3 +276,166 @@ fn repos_touched_round_trips_through_index_to_graph_note_row_three_state() {
         "Some(xs) -> the touched set threads verbatim to GraphNoteRow"
     );
 }
+
+// ---- Phase 5: the tags facet ----
+
+fn tagged_note(path: &str, tags: &[&str]) -> Note {
+    use crate::frontmatter::Frontmatter;
+    use std::path::PathBuf;
+    Note {
+        path: PathBuf::from(path),
+        frontmatter: Frontmatter {
+            title: Some(path.to_string()),
+            note_type: Some("note".to_string()),
+            origin: Some("authored".to_string()),
+            tags: Some(tags.iter().map(|t| t.to_string()).collect()),
+            ..Frontmatter::default()
+        },
+        body: "body".to_string(),
+        raw: "---\n---\nbody".to_string(),
+    }
+}
+
+#[test]
+fn note_tags_rows_track_the_frontmatter_list() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&tagged_note("notes/a.md", &["rust", "ai"]), 1)
+        .expect("index");
+
+    let mut tags: Vec<String> = index
+        .conn
+        .prepare("SELECT tag FROM note_tags WHERE path = ?1")
+        .expect("prepare")
+        .query_map(["notes/a.md"], |r| r.get(0))
+        .expect("query")
+        .filter_map(Result::ok)
+        .collect();
+    tags.sort();
+    assert_eq!(tags, vec!["ai".to_string(), "rust".to_string()]);
+
+    // Re-indexing with a different list REPLACES the rows: a tag removed from
+    // frontmatter must not linger in the facet.
+    index
+        .index_one(&tagged_note("notes/a.md", &["rust"]), 2)
+        .expect("reindex");
+    let after: Vec<String> = index
+        .conn
+        .prepare("SELECT tag FROM note_tags WHERE path = ?1")
+        .expect("prepare")
+        .query_map(["notes/a.md"], |r| r.get(0))
+        .expect("query")
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(after, vec!["rust".to_string()]);
+}
+
+#[test]
+fn note_with_no_tags_indexes_as_empty_json_not_empty_string() {
+    // 303 rows in the live index held `tags = ''`, which is not valid JSON, so
+    // `json_each` errored on them and every tag query had to special-case it.
+    use crate::frontmatter::Frontmatter;
+    use std::path::PathBuf;
+    let index = SearchIndex::open_memory().expect("open");
+    let note = Note {
+        path: PathBuf::from("notes/untagged.md"),
+        frontmatter: Frontmatter {
+            title: Some("untagged".to_string()),
+            ..Frontmatter::default()
+        },
+        body: "body".to_string(),
+        raw: "---\n---\nbody".to_string(),
+    };
+    index.index_one(&note, 1).expect("index");
+
+    let stored: String = index
+        .conn
+        .query_row("SELECT tags FROM notes WHERE path = ?1", ["notes/untagged.md"], |r| {
+            r.get(0)
+        })
+        .expect("row");
+    assert_eq!(stored, "[]");
+
+    let valid: i64 = index
+        .conn
+        .query_row(
+            "SELECT json_valid(tags) FROM notes WHERE path = ?1",
+            ["notes/untagged.md"],
+            |r| r.get(0),
+        )
+        .expect("json_valid");
+    assert_eq!(valid, 1, "every indexed row must be valid JSON");
+}
+
+#[test]
+fn note_tags_and_notes_tags_agree() {
+    // AC4's standing invariant, in miniature: the facet row count equals the
+    // json_each count over the same rows.
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&tagged_note("notes/a.md", &["rust", "ai"]), 1)
+        .expect("a");
+    index.index_one(&tagged_note("notes/b.md", &["rust"]), 1).expect("b");
+    index.index_one(&tagged_note("notes/c.md", &[]), 1).expect("c");
+
+    let facet: i64 = index
+        .conn
+        .query_row("SELECT count(*) FROM note_tags", [], |r| r.get(0))
+        .expect("facet count");
+    let json: i64 = index
+        .conn
+        .query_row(
+            "SELECT count(*) FROM notes, json_each(notes.tags) WHERE json_valid(notes.tags)",
+            [],
+            |r| r.get(0),
+        )
+        .expect("json count");
+    assert_eq!(facet, json, "facet and JSON column disagree");
+    assert_eq!(facet, 3);
+}
+
+#[test]
+fn removing_a_note_removes_its_facet_rows() {
+    let index = SearchIndex::open_memory().expect("open");
+    index.index_one(&tagged_note("notes/a.md", &["rust"]), 1).expect("a");
+    index.index_one(&tagged_note("notes/b.md", &["ai"]), 1).expect("b");
+
+    // `a` is no longer in the vault.
+    let removed = index
+        .remove_stale_notes(&["notes/b.md".to_string()])
+        .expect("remove stale");
+    assert_eq!(removed, 1);
+
+    let orphans: i64 = index
+        .conn
+        .query_row(
+            "SELECT count(*) FROM note_tags WHERE path NOT IN (SELECT path FROM notes)",
+            [],
+            |r| r.get(0),
+        )
+        .expect("orphan count");
+    assert_eq!(orphans, 0, "facet rows outlived their note");
+}
+
+#[test]
+fn index_is_atomic_per_note() {
+    // A failed facet write must roll the `notes` row back with it, so the two
+    // tables can never disagree. Forced by dropping `note_tags` so the insert
+    // errors while the `notes` upsert would otherwise have succeeded.
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .conn
+        .execute_batch("DROP TABLE note_tags")
+        .expect("drop the facet table");
+
+    let err = index.index_one(&tagged_note("notes/doomed.md", &["rust"]), 1);
+    assert!(err.is_err(), "a failed facet write must fail the index call");
+
+    let rows: i64 = index
+        .conn
+        .query_row("SELECT count(*) FROM notes WHERE path = ?1", ["notes/doomed.md"], |r| {
+            r.get(0)
+        })
+        .expect("count");
+    assert_eq!(rows, 0, "the notes row survived a failed facet write");
+}

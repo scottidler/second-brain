@@ -46,6 +46,23 @@ impl super::SearchIndex {
                 superseded_by TEXT DEFAULT ''
             );
 
+            -- The tags facet. `notes.tags` keeps its JSON array for FTS and
+            -- for `NoteRow`; this table is what makes a tag filter an index
+            -- lookup instead of a full scan plus JSON parse, which is what
+            -- `idx_notes_domain` gave the column it replaces.
+            --
+            -- No foreign key: SQLite enforces them only under
+            -- `PRAGMA foreign_keys=ON`, which this connection does not set, so
+            -- declaring one would be decoration. Rows are maintained
+            -- explicitly in `index_one` inside the per-note SAVEPOINT and
+            -- deleted alongside the note in `remove_stale_notes`.
+            CREATE TABLE IF NOT EXISTS note_tags (
+                path TEXT NOT NULL,
+                tag  TEXT NOT NULL,
+                PRIMARY KEY (path, tag)
+            );
+            CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag);
+
             CREATE INDEX IF NOT EXISTS idx_notes_domain ON notes(domain);
             CREATE INDEX IF NOT EXISTS idx_notes_note_type ON notes(note_type);
             CREATE INDEX IF NOT EXISTS idx_notes_status ON notes(status);
