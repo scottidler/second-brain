@@ -147,8 +147,15 @@ pub struct MigrateOpts {
     /// Apply migrations (default: report only)
     pub apply: bool,
 
-    /// Path to migration plan YAML
+    /// Path to migration plan YAML. Reads migrations from this file instead
+    /// of `cortex.yml`, which is where an inverse migration lives so a routine
+    /// `--apply` can never run it.
     pub plan: Option<PathBuf>,
+
+    /// Run only the named migration. Without it every configured migration
+    /// runs, which is unsafe once the config holds a migration meant for a
+    /// later phase.
+    pub only: Option<String>,
 }
 
 #[derive(Debug, Clone)]

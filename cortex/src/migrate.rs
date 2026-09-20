@@ -14,14 +14,52 @@ use crate::vault::{Note, scan_vault};
 pub fn run(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Result<Report> {
     log::info!("starting migrate command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
+
+    // `--plan <file>` reads its migrations from a standalone YAML file instead
+    // of `cortex.yml`. The inverse of a migration lives in such a file rather
+    // than in the config, so `migrate --apply` can never run it by accident;
+    // it was parsed but ignored before this phase.
+    let from_plan;
+    let migrations: &[MigrationConfig] = match &opts.plan {
+        Some(path) => {
+            from_plan = load_plan(path)?;
+            &from_plan
+        }
+        None => &config.migrations,
+    };
+
+    // `--only <name>` narrows to one migration. `apply_migrate` runs every
+    // configured migration otherwise, which is exactly what makes a two-step
+    // rollout (v5 now, v6 seven phases later) unsafe without it.
+    let selected: Vec<&MigrationConfig> = match &opts.only {
+        Some(name) => {
+            let hit: Vec<&MigrationConfig> = migrations.iter().filter(|m| m.name == *name).collect();
+            if hit.is_empty() {
+                let known: Vec<&str> = migrations.iter().map(|m| m.name.as_str()).collect();
+                return Err(eyre::eyre!(
+                    "no migration named {name:?}; available migrations are {known:?}"
+                ));
+            }
+            hit
+        }
+        None => migrations.iter().collect(),
+    };
+
+    // The dry-run flags notes a tag transform would push over `max-per-note`.
+    // Best-effort: a missing or unreadable vocabulary file means no cap column,
+    // not a failed dry-run.
+    let cap = vault::canonical::CanonicalTagsFile::load(&config.sweep.canonical_path)
+        .map(|f| f.max_per_note)
+        .ok();
+
     if opts.apply {
-        let count = apply_migrate(vault_root, &notes, &config.migrations)?;
+        let count = apply_migrate_selected(vault_root, &notes, &selected)?;
         Ok(Report {
             applied: count,
             ..Default::default()
         })
     } else {
-        Ok(lint_migrate(&notes, &config.migrations))
+        Ok(lint_migrate_selected(&notes, &selected, cap))
     }
 }
 
@@ -33,8 +71,28 @@ struct PlannedMove {
     set_frontmatter: Vec<(String, serde_yaml::Value)>,
 }
 
+/// Read migrations from a standalone plan file (`migrate --plan <file>`).
+/// The file is a YAML sequence of the same shape `cortex.yml`'s `migrations:`
+/// holds. An inverse migration lives here, never in the config, so a routine
+/// `migrate --apply` cannot run it.
+pub fn load_plan(path: &Path) -> Result<Vec<MigrationConfig>> {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("failed to read migration plan {}", path.display()))?;
+    serde_yaml::from_str(&raw).with_context(|| format!("failed to parse migration plan {}", path.display()))
+}
+
 /// Run migration dry-run: report what would be moved and what fields would change.
 pub fn lint_migrate(notes: &[Note], migrations: &[MigrationConfig]) -> Report {
+    lint_migrate_selected(notes, &migrations.iter().collect::<Vec<_>>(), None)
+}
+
+/// Apply migrations: field transforms first, then file moves.
+pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationConfig]) -> Result<usize> {
+    apply_migrate_selected(vault_root, notes, &migrations.iter().collect::<Vec<_>>())
+}
+
+/// `lint_migrate` over an already-narrowed selection (`--only`).
+pub fn lint_migrate_selected(notes: &[Note], migrations: &[&MigrationConfig], cap: Option<usize>) -> Report {
     let mut report = Report::default();
 
     for migration in migrations {
@@ -58,15 +116,26 @@ pub fn lint_migrate(notes: &[Note], migrations: &[MigrationConfig]) -> Report {
 
         // Report value transforms
         lint_value_transforms(notes, migration, &mut report);
+
+        // Report field-to-tags and tags-remove
+        lint_tag_transforms(notes, migration, cap, &mut report);
     }
 
     log::info!("migrate lint complete: {} violation(s)", report.violations.len());
     report
 }
 
-/// Apply migrations: field transforms first, then file moves.
-pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationConfig]) -> Result<usize> {
+/// `apply_migrate` over an already-narrowed selection (`--only`).
+pub fn apply_migrate_selected(vault_root: &Path, notes: &[Note], migrations: &[&MigrationConfig]) -> Result<usize> {
     let mut total_count = 0;
+
+    // Phase 0: tag transforms. They run FIRST so a later field-drop in the
+    // same run cannot remove the source field before its value is copied.
+    for migration in migrations {
+        if !migration.field_to_tags.is_empty() || !migration.tags_remove.is_empty() {
+            total_count += apply_tag_transforms(vault_root, notes, migration)?;
+        }
+    }
 
     // Phase 1: Apply field transforms (renames and drops)
     for migration in migrations {
@@ -451,6 +520,137 @@ fn apply_value_transforms(vault_root: &Path, notes: &[Note], migration: &Migrati
             } else {
                 Ok(0)
             }
+        })
+        .try_reduce(|| 0usize, |a, b| Ok(a + b))
+}
+
+/// Read a note's current tag list out of its parsed frontmatter.
+fn note_tags(note: &Note) -> Vec<String> {
+    note.frontmatter.tags.clone().unwrap_or_default()
+}
+
+/// The canonical tag a source field's value becomes, or `None` when the value
+/// is excluded, empty, or the note does not carry the field.
+///
+/// Values are quote-stripped (350 vault notes quote `domain:`) and normalized
+/// through `hygiene::normalize_domain`, which is what maps the legacy
+/// `knowledge` value onto `life`.
+fn field_to_tag_value(note: &Note, field: &str, cfg: &crate::config::FieldToTags) -> Option<String> {
+    let raw = match field {
+        "domain" => note.frontmatter.domain.as_deref(),
+        "type" => note.frontmatter.note_type.as_deref(),
+        "origin" => note.frontmatter.origin.as_deref(),
+        "status" => note.frontmatter.status.as_deref(),
+        _ => note.frontmatter.extra.get(field).and_then(|v| v.as_str()),
+    }?;
+    let value = raw.trim().trim_matches(['"', '\'']).trim();
+    if value.is_empty() {
+        return None;
+    }
+    // `normalize_domain` handles emoji folder paths and case. It does NOT know
+    // the `knowledge -> life` backwards-compat alias, which lives in
+    // `Domain::from_str` (`vault/src/schema.rs:117`), so the schema parse runs
+    // first and the hygiene pass is the fallback. The design doc credits
+    // `normalize_domain` with this mapping; it does not have it.
+    let hygienic = vault::hygiene::normalize_domain(value);
+    let normalized = match hygienic.parse::<vault::schema::Domain>() {
+        Ok(domain) => domain.as_str().to_string(),
+        Err(_) => hygienic,
+    };
+    if cfg.exclude.iter().any(|e| e == &normalized || e == value) {
+        return None;
+    }
+    Some(normalized)
+}
+
+/// Dry-run for `field-to-tags` and `tags-remove`.
+fn lint_tag_transforms(notes: &[Note], migration: &MigrationConfig, cap: Option<usize>, report: &mut Report) {
+    for note in notes {
+        let current = note_tags(note);
+        let mut would: Vec<String> = Vec::new();
+
+        for (field, cfg) in &migration.field_to_tags {
+            if let Some(tag) = field_to_tag_value(note, field, cfg)
+                && !current.contains(&tag)
+            {
+                would.push(tag);
+            }
+        }
+        for tag in &migration.tags_remove {
+            if current.contains(tag) {
+                would.push(format!("-{tag}"));
+            }
+        }
+        if would.is_empty() {
+            continue;
+        }
+
+        // Surface the two conditions the design doc asks the dry-run to list:
+        // a note that would exceed the cap, and a note already carrying two or
+        // more of the migrated names before the run.
+        let mut message = format!("would set tags {would:?}");
+        let added = would.iter().filter(|t| !t.starts_with('-')).count();
+        if let Some(cap) = cap
+            && current.len() + added > cap
+        {
+            message.push_str(&format!(
+                " (WOULD EXCEED max-per-note: {} tags against a cap of {cap})",
+                current.len() + added
+            ));
+        }
+        report.add(Violation {
+            path: note.path.clone(),
+            rule: format!("migrate.{}", migration.name),
+            severity: Severity::Info,
+            message,
+            fix: None,
+        });
+    }
+}
+
+/// Apply `field-to-tags` and `tags-remove`.
+///
+/// Idempotent: a value already present as a tag is not appended twice, so a
+/// second `--apply` writes zero files. Every visited note's tag block is
+/// rewritten in canonical block form, which is also how a pre-P4 inline list
+/// gets normalized.
+fn apply_tag_transforms(vault_root: &Path, notes: &[Note], migration: &MigrationConfig) -> Result<usize> {
+    notes
+        .par_iter()
+        .map(|note| -> Result<usize> {
+            let current = note_tags(note);
+            let mut next = current.clone();
+
+            for (field, cfg) in &migration.field_to_tags {
+                if let Some(tag) = field_to_tag_value(note, field, cfg)
+                    && !next.contains(&tag)
+                {
+                    next.push(tag);
+                }
+            }
+            if !migration.tags_remove.is_empty() {
+                next.retain(|t| !migration.tags_remove.contains(t));
+            }
+            if next == current {
+                return Ok(0);
+            }
+
+            let abs_path = vault_root.join(&note.path);
+            let content =
+                std::fs::read_to_string(&abs_path).context(format!("failed to read {}", abs_path.display()))?;
+            let Some(updated) = crate::tags::replace_tags_in_frontmatter(&content, &next) else {
+                log::warn!("tag transform skipped (no frontmatter): {}", note.path.display());
+                return Ok(0);
+            };
+            vault::note::write_atomic(&abs_path, updated.as_bytes())?;
+            log::info!(
+                "applied tag transform: {} ({}) {:?} -> {:?}",
+                note.path.display(),
+                migration.name,
+                current,
+                next
+            );
+            Ok(1)
         })
         .try_reduce(|| 0usize, |a, b| Ok(a + b))
 }

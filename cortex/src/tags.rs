@@ -184,8 +184,23 @@ fn normalize_tag(tag: &str) -> String {
         .join("-")
 }
 
-/// Replace the `tags` entry in frontmatter YAML with an inline list of
-/// `new_tags`, rewriting it to `tags: [a, b, ...]`.
+/// Replace the `tags` entry in frontmatter YAML with a BLOCK list of
+/// `new_tags`:
+///
+/// ```yaml
+/// tags:
+///   - a
+///   - b
+/// ```
+///
+/// Block form, not the inline `[a, b]` this used to write, is the single
+/// on-disk form the tags-only design doc pins (P4). Two of the three writers
+/// already wrote block (`borg::markdown::render_note`,
+/// `vault::frontmatter::to_yaml`) and Obsidian's property editor writes block,
+/// so an inline writer here meant the vault carried both spellings forever.
+/// Readers accept either; only the writer changed. This switch lands BEFORE
+/// the domain-as-tag migration so the migration's own writes are already in
+/// the final form.
 ///
 /// Delegates to [`crate::scope::insert_frontmatter_fields`], whose
 /// continuation-aware `remove_entry` handles BOTH indented (`  - tag`) and
@@ -197,8 +212,8 @@ fn normalize_tag(tag: &str) -> String {
 /// as defaults, silently dropping the note from subsequent scans. The daemon
 /// auto-applies sweep, so this corrupted notes unattended.
 pub fn replace_tags_in_frontmatter(content: &str, new_tags: &[String]) -> Option<String> {
-    let inline = format!("[{}]", new_tags.join(", "));
-    crate::scope::insert_frontmatter_fields(content, &[("tags".to_string(), serde_yaml::Value::String(inline))])
+    let seq = serde_yaml::Value::Sequence(new_tags.iter().map(|t| serde_yaml::Value::String(t.clone())).collect());
+    crate::scope::insert_frontmatter_fields(content, &[("tags".to_string(), seq)])
 }
 
 #[cfg(test)]

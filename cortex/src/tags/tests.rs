@@ -83,8 +83,25 @@ fn test_replace_tags_in_frontmatter() {
     let result = replace_tags_in_frontmatter(content, &new_tags);
     assert!(result.is_some());
     let result = result.expect("should have result");
-    assert!(result.contains("tags: [new-tag, good]"));
+    // P4: block form is now the single on-disk spelling.
+    assert!(result.contains("tags:\n  - new-tag\n  - good"), "got:\n{result}");
+    assert!(!result.contains("tags: ["), "inline form survived:\n{result}");
     assert!(result.contains("title: Test"));
+}
+
+/// Every `- ` bullet in a frontmatter block must sit under a key that opened a
+/// list. Shared by the two orphan-bullet regressions below, which can no
+/// longer simply assert "no bullets": block form means the rewritten `tags:`
+/// legitimately has its own.
+fn assert_no_orphan_bullets(fm_block: &str) {
+    let mut under_list = false;
+    for line in fm_block.lines() {
+        if line.trim_start().starts_with("- ") {
+            assert!(under_list, "orphan bullet survived: {line:?}\nfull fm:\n{fm_block}");
+            continue;
+        }
+        under_list = line.ends_with(':');
+    }
 }
 
 #[test]
@@ -95,13 +112,10 @@ fn replace_tags_on_column0_block_list_does_not_orphan_bullets() {
     let new_tags = vec!["new-tag".to_string(), "good".to_string()];
     let result = replace_tags_in_frontmatter(content, &new_tags).expect("rewrite");
     let fm_block = result.split("\n---\n").next().expect("frontmatter");
-    for line in fm_block.lines() {
-        assert!(
-            !line.starts_with("- "),
-            "orphan column-0 bullet survived: {line:?}\nfull fm:\n{fm_block}"
-        );
-    }
-    assert!(result.contains("tags: [new-tag, good]"));
+    assert_no_orphan_bullets(fm_block);
+    assert!(!result.contains("old-tag"), "stale value survived:\n{result}");
+    assert!(!result.contains("- bad"), "stale value survived:\n{result}");
+    assert!(result.contains("tags:\n  - new-tag\n  - good"), "got:\n{result}");
     assert!(result.contains("title: Test"));
     assert!(result.contains("date: 2026-01-01"));
 }
@@ -112,13 +126,11 @@ fn replace_tags_on_indented_block_list_does_not_orphan_bullets() {
     let new_tags = vec!["new-tag".to_string()];
     let result = replace_tags_in_frontmatter(content, &new_tags).expect("rewrite");
     let fm_block = result.split("\n---\n").next().expect("frontmatter");
-    for line in fm_block.lines() {
-        assert!(
-            !line.trim_start().starts_with("- "),
-            "orphan indented bullet survived: {line:?}\nfull fm:\n{fm_block}"
-        );
-    }
-    assert!(result.contains("tags: [new-tag]"));
+    assert_no_orphan_bullets(fm_block);
+    assert!(!result.contains("old-tag"), "stale value survived:\n{result}");
+    assert!(!result.contains("- bad"), "stale value survived:\n{result}");
+    assert_eq!(fm_block.matches("  - ").count(), 1, "expected one bullet:\n{result}");
+    assert!(result.contains("tags:\n  - new-tag"), "got:\n{result}");
     assert!(result.contains("date: 2026-01-01"));
 }
 

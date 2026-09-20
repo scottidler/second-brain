@@ -374,3 +374,157 @@ fn test_extract_frontmatter_block() {
     assert_eq!(before, "");
     assert!(after.contains("Body here."));
 }
+
+// ---- Phase 4: field-to-tags / tags-remove ----
+
+fn domain_as_tag() -> MigrationConfig {
+    let mut field_to_tags = std::collections::HashMap::new();
+    field_to_tags.insert(
+        "domain".to_string(),
+        crate::config::FieldToTags {
+            exclude: vec!["resources".to_string(), "system".to_string()],
+        },
+    );
+    MigrationConfig {
+        name: "v5-domain-as-tag".to_string(),
+        field_to_tags,
+        ..Default::default()
+    }
+}
+
+fn tags_of(v: &TestVault, path: &str) -> Vec<String> {
+    let content = v.read(path);
+    let fm = content.split("\n---\n").next().expect("frontmatter");
+    let mut out = Vec::new();
+    let mut under_tags = false;
+    for line in fm.lines() {
+        if let Some(after_key) = line.strip_prefix("tags:") {
+            under_tags = true;
+            if let Some(body) = after_key.trim().strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+                out.extend(body.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()));
+                under_tags = false;
+            }
+            continue;
+        }
+        if under_tags {
+            match line.trim().strip_prefix("- ") {
+                Some(tag) => out.push(tag.trim().to_string()),
+                None => under_tags = false,
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn field_to_tags_writes_the_domain_value_as_a_tag() {
+    let v = TestVault::new();
+    let notes = v.scan();
+    let count = apply_migrate(v.root(), &notes, std::slice::from_ref(&domain_as_tag())).expect("apply");
+    assert!(count > 0, "expected the migration to write at least one note");
+
+    // `rust-guide.md` is `domain: tech` with tags [rust, programming].
+    let tags = tags_of(&v, "rust-guide.md");
+    assert!(tags.contains(&"tech".to_string()), "domain value not added: {tags:?}");
+    assert!(tags.contains(&"rust".to_string()), "existing tag lost: {tags:?}");
+    assert!(tags.contains(&"programming".to_string()), "existing tag lost: {tags:?}");
+}
+
+#[test]
+fn field_to_tags_is_idempotent() {
+    let v = TestVault::new();
+    let migration = domain_as_tag();
+
+    let first = apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&migration)).expect("first apply");
+    assert!(first > 0);
+    // A second apply must write ZERO files: the value is already a tag.
+    let second = apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&migration)).expect("second apply");
+    assert_eq!(second, 0, "migration is not idempotent");
+}
+
+#[test]
+fn field_to_tags_writes_block_form() {
+    let v = TestVault::new();
+    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("apply");
+    let content = v.read("rust-guide.md");
+    assert!(content.contains("tags:\n  - "), "expected block form:\n{content}");
+    assert!(!content.contains("tags: ["), "inline form survived:\n{content}");
+}
+
+#[test]
+fn field_to_tags_skips_excluded_values() {
+    let v = TestVault::new();
+    std::fs::write(
+        v.root().join("junk.md"),
+        "---\ntitle: Junk\ndate: 2026-03-20\ntype: note\ndomain: resources\norigin: authored\ntags:\n  - rust\n---\nBody.\n",
+    ).expect("write");
+    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("apply");
+    let tags = tags_of(&v, "junk.md");
+    assert!(
+        !tags.contains(&"resources".to_string()),
+        "excluded value propagated: {tags:?}"
+    );
+    assert_eq!(tags, vec!["rust".to_string()], "unrelated tags disturbed: {tags:?}");
+}
+
+#[test]
+fn field_to_tags_strips_quotes_and_normalizes() {
+    let v = TestVault::new();
+    // 350 vault notes quote the value; `knowledge` is the legacy spelling of
+    // `life` that `hygiene::normalize_domain` maps.
+    std::fs::write(
+        v.root().join("quoted.md"),
+        "---\ntitle: Q\ndate: 2026-03-20\ntype: note\ndomain: \"knowledge\"\norigin: authored\ntags: []\n---\nBody.\n",
+    )
+    .expect("write");
+    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("apply");
+    let tags = tags_of(&v, "quoted.md");
+    assert_eq!(tags, vec!["life".to_string()], "got {tags:?}");
+}
+
+#[test]
+fn tags_remove_strips_the_named_tags() {
+    let v = TestVault::new();
+    let migration = MigrationConfig {
+        name: "v5-domain-as-tag-undo".to_string(),
+        tags_remove: vec!["rust".to_string()],
+        ..Default::default()
+    };
+    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&migration)).expect("apply");
+    let tags = tags_of(&v, "rust-guide.md");
+    assert!(!tags.contains(&"rust".to_string()), "tag not removed: {tags:?}");
+    assert!(tags.contains(&"programming".to_string()), "sibling tag lost: {tags:?}");
+}
+
+#[test]
+fn lint_tag_transforms_flags_a_note_that_would_exceed_the_cap() {
+    let v = TestVault::new();
+    std::fs::write(
+        v.root().join("full.md"),
+        "---\ntitle: Full\ndate: 2026-03-20\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - a\n  - b\n---\nBody.\n",
+    ).expect("write");
+    let notes = v.scan();
+    let migration = domain_as_tag();
+    let report = lint_migrate_selected(&notes, &[&migration], Some(2));
+    let hit = report
+        .violations
+        .iter()
+        .find(|vi| vi.path.to_string_lossy() == "full.md")
+        .expect("expected a violation for full.md");
+    assert!(
+        hit.message.contains("WOULD EXCEED max-per-note"),
+        "cap not flagged: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn load_plan_reads_the_shipped_undo_file() {
+    // The inverse must stay parseable and must NOT be a cortex.yml migration.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../config/migrations/v5-domain-as-tag-undo.yml");
+    let plan = load_plan(&path).expect("plan parses");
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].name, "v5-domain-as-tag-undo");
+    assert_eq!(plan[0].tags_remove.len(), 10, "expected the ten migrated names");
+    assert!(plan[0].field_to_tags.is_empty(), "the inverse must not re-add tags");
+}

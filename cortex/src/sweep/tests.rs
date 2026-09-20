@@ -505,5 +505,8 @@ fn rewrite_note_tags_returns_true_and_writes_when_frontmatter_present() {
     assert!(wrote);
 
     let content = std::fs::read_to_string(&path).expect("read note");
-    assert!(content.contains("tags: [new]"), "expected rewritten tags: {content}");
+    // P4: the writer emits block form, so an inline note is normalized on the
+    // way through rather than leaving the vault with two spellings.
+    assert!(content.contains("tags:\n  - new"), "expected rewritten tags: {content}");
+    assert!(!content.contains("tags: ["), "inline form survived: {content}");
 }

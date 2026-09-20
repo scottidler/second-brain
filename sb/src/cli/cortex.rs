@@ -293,14 +293,20 @@ impl From<DaemonArgs> for opts::DaemonOpts {
 pub struct MigrateArgs {
     #[arg(long)]
     pub apply: bool,
+    /// Read migrations from this plan file instead of cortex.yml. An inverse
+    /// migration lives in a plan file so a routine --apply cannot run it.
     #[arg(long)]
     pub plan: Option<PathBuf>,
+    /// Run only the named migration instead of every configured one.
+    #[arg(long)]
+    pub only: Option<String>,
 }
 impl From<MigrateArgs> for opts::MigrateOpts {
     fn from(a: MigrateArgs) -> Self {
         Self {
             apply: a.apply,
             plan: a.plan,
+            only: a.only,
         }
     }
 }

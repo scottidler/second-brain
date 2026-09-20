@@ -124,3 +124,50 @@ Turning the Bash sandbox off for the session (`/sandbox`) restores the cache.
 ### Deferred operator steps (not run by this phase)
 
 - None in this phase, but the ordering matters: P3 must be deployed (`otto deploy`) before P4's migration runs, or a URL reingest in the window between them drops a freshly migrated tag. The design doc's Rollout step 2 says the same.
+
+## Phase 4: Domain-as-tag migration
+
+### Design decisions
+
+- **Block-list emission moved into `scope::insert_frontmatter_fields`, not into `replace_tags_in_frontmatter`** (`cortex/src/scope.rs`). A `Value::Sequence` of scalars now emits `key:` plus indented `  - item` lines; serde_yaml would have emitted its bullets at column 0, a *third* spelling of the same list. Fixing it at the one place that serializes sequences means any other caller passing a list also gets the vault's form, and `replace_tags_in_frontmatter` becomes a two-line call that passes a sequence.
+- **`field-to-tags` normalizes through `Domain::from_str` first, then `hygiene::normalize_domain`** (`cortex/src/migrate.rs::field_to_tag_value`). See the deviation below: the doc's stated normalizer does not carry the `knowledge -> life` alias.
+- **Tag transforms run BEFORE field transforms in `apply_migrate_selected`.** A single migration could legally carry both `field-to-tags: {domain: ...}` and `field-drops: [domain]`; if the drop ran first the value would be gone before it was copied. The phase ordering makes that combination safe even though this doc splits it across P4 and P11.
+- **The transform rewrites every visited note's tag block in canonical block form**, which is how a pre-P4 inline list gets normalized on the way through. Idempotent: a value already present is not appended twice, so a second `--apply` writes zero files (`field_to_tags_is_idempotent`).
+- **`--only` errors when the name matches nothing**, listing the available names, rather than silently running zero migrations. A typo in the operator runbook should fail loudly, not look like a clean no-op.
+- **`load_plan` is public and tested against the shipped undo file** (`load_plan_reads_the_shipped_undo_file`), which also asserts the inverse carries no `field-to-tags`. That is the guard against someone "fixing" the inverse into a round-trip it cannot be.
+- **The cap for the dry-run's over-cap warning is read from `config.sweep.canonical_path`, best-effort.** An unreadable vocabulary file means no cap column, not a failed dry-run.
+
+### Deviations
+
+- **The design doc is wrong about which function maps `knowledge` to `life`.** It says `field-to-tags` "normalizes through `hygiene::normalize_domain` (`knowledge` -> `life`)". `normalize_domain` handles emoji folder paths and case only; the `knowledge -> life` backwards-compat alias lives in `Domain::from_str` (`vault/src/schema.rs:117`). Caught by `field_to_tags_strips_quotes_and_normalizes`, which failed with `["knowledge"]`. The implementation runs the hygiene pass, then a schema parse, and falls back to the hygiene result for anything the schema rejects.
+- **The dry-run does not list "notes that already carried two or more domain-name tags before the run."** The doc asks for it, but a per-note lint has no access to the set of *all* domain values the migration could produce, only to this note's own. A first attempt at approximating it was meaningless and was removed rather than shipped as a misleading count. The over-cap warning, which is the part that changes an operator decision, IS implemented.
+- **`lint_migrate` / `apply_migrate` keep their `&[MigrationConfig]` signatures** and delegate to new `*_selected` variants taking `&[&MigrationConfig]`. Existing tests and callers are untouched; `--only` narrows by reference rather than cloning configs.
+
+### Tradeoffs
+
+- **Four existing tests changed their assertions**, because the inline-to-block writer switch is exactly what this phase does: `test_replace_tags_in_frontmatter`, the two `..._does_not_orphan_bullets` regressions, and `rewrite_note_tags_returns_true_and_writes_when_frontmatter_present`. The two orphan-bullet tests could no longer assert "no `- ` lines exist" (block form has its own), so they now assert via a shared `assert_no_orphan_bullets` helper that every bullet sits under a key that opened a list. That keeps the original regression pinned instead of weakening it to nothing.
+- **`tags-remove` is a blunt instrument, documented as such in the plan file itself.** It cannot distinguish a migrated `football` from one of the 125 that predate the migration. The obsidian commit is the authoritative undo and the file says so at the top.
+
+### Open questions
+
+- None.
+
+### Deferred operator steps (not run by this phase)
+
+The apply writes the live vault and is NOT run here. In order:
+
+1. dotfiles `~/.config/sb/cortex.yml`: add the `v5-domain-as-tag` migration entry:
+   ```yaml
+   migrations:
+     - name: v5-domain-as-tag
+       field-to-tags:
+         domain:
+           exclude: [resources, system]
+   ```
+2. `otto deploy` (also picks up P1's config files and P3's preserve behavior, both of which must be live before the migration runs).
+3. `systemctl --user stop borg cortex`. Cortex's per-tick sweep and lint write the same files; borg snapshots preserved fields minutes before it applies them, so an in-flight reingest straddling the migration would write back a pre-migration snapshot.
+4. `sb cortex migrate --only v5-domain-as-tag` (dry-run first; expect ~2,545 files and a list of any note that would exceed `max-per-note: 8`).
+5. `sb cortex migrate --only v5-domain-as-tag --apply`.
+6. `find . -name '*.sync-conflict*' | wc -l` == 0 in the vault.
+7. `systemctl --user start borg cortex`, then one daemon tick, then confirm the ten domain tags survived it.
+8. Commit the obsidian repo. **This commit is the authoritative undo for the whole migration**; the inverse plan file is not exact.

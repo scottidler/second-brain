@@ -1,0 +1,31 @@
+# Inverse of the `v5-domain-as-tag` migration.
+#
+# NOT a `cortex.yml` entry, deliberately. `sb cortex migrate --apply` runs every
+# migration configured in `cortex.yml`; an inverse living there would undo the
+# forward migration on the next routine run. It lives here and runs only when
+# named:
+#
+#   sb cortex migrate --plan config/migrations/v5-domain-as-tag-undo.yml --apply
+#
+# THIS IS NOT AN EXACT UNDO, and the obsidian commit taken right after the
+# forward apply is the authoritative one. `tags-remove` cannot tell a tag the
+# migration added from one that was already there: 125 notes carried `football`
+# before the migration, 5 carried `writing` without `domain: writing`, and 2
+# carried `music` without `domain: music`. Running this strips those too. It
+# also cannot reconstruct `resources` or `system`, which the forward migration
+# never propagated.
+#
+# Stop the borg and cortex daemons around the apply, the same as the forward
+# direction: cortex's per-tick sweep and lint write the same files.
+- name: v5-domain-as-tag-undo
+  tags-remove:
+    - ai
+    - tech
+    - football
+    - work
+    - writing
+    - music
+    - spanish
+    - life
+    - homelab
+    - diy

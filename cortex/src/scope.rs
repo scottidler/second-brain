@@ -173,6 +173,14 @@ pub(crate) fn remove_entry(lines: &mut Vec<String>, key: &str) {
 }
 
 /// Insert key-value pairs into frontmatter before the closing ---.
+/// A YAML value this module can emit as a single block-list bullet.
+fn scalar_yaml_value(value: &serde_yaml::Value) -> bool {
+    matches!(
+        value,
+        serde_yaml::Value::String(_) | serde_yaml::Value::Bool(_) | serde_yaml::Value::Number(_)
+    )
+}
+
 pub fn insert_frontmatter_fields(content: &str, fields: &[(String, serde_yaml::Value)]) -> Option<String> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
@@ -205,6 +213,23 @@ pub fn insert_frontmatter_fields(content: &str, fields: &[(String, serde_yaml::V
             serde_yaml::Value::String(s) => new_lines.push(format!("{key}: {s}")),
             serde_yaml::Value::Bool(b) => new_lines.push(format!("{key}: {b}")),
             serde_yaml::Value::Number(n) => new_lines.push(format!("{key}: {n}")),
+            // A sequence of scalars is emitted as an INDENTED block list
+            // (`key:` then `  - item`), the form `markdown::render_note` and
+            // `Frontmatter::to_yaml` already write and Obsidian's property
+            // editor produces. serde_yaml would emit its bullets at column 0,
+            // which is valid YAML but a third spelling of the same list, and
+            // the tags-only design doc pins one on-disk form.
+            serde_yaml::Value::Sequence(items) if items.iter().all(scalar_yaml_value) => {
+                new_lines.push(format!("{key}:"));
+                for item in items {
+                    match item {
+                        serde_yaml::Value::String(s) => new_lines.push(format!("  - {s}")),
+                        serde_yaml::Value::Bool(b) => new_lines.push(format!("  - {b}")),
+                        serde_yaml::Value::Number(n) => new_lines.push(format!("  - {n}")),
+                        _ => unreachable!("guarded by scalar_yaml_value"),
+                    }
+                }
+            }
             other => {
                 let mut map = serde_yaml::Mapping::new();
                 map.insert(serde_yaml::Value::String(key.clone()), other.clone());

@@ -979,6 +979,24 @@ pub struct MigrationConfig {
     pub field_drops: Vec<String>,
     #[serde(rename = "value-renames", default)]
     pub value_renames: HashMap<String, HashMap<String, String>>,
+    /// Copy a scalar field's value onto the note's `tags` list, keyed by the
+    /// source field. Forward half of the domain-as-tag migration.
+    #[serde(rename = "field-to-tags", default)]
+    pub field_to_tags: HashMap<String, FieldToTags>,
+    /// Remove the named tags wherever they appear. Inverse half, and the
+    /// reason it lives only in a `--plan` file: run against the vault by
+    /// accident it would strip pre-existing same-name tags too, which is why
+    /// the obsidian commit, not this, is the authoritative undo.
+    #[serde(rename = "tags-remove", default)]
+    pub tags_remove: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct FieldToTags {
+    /// Source values that are NOT propagated (`resources` is the junk drawer
+    /// the design doc retires; `system` is a path fact, not an interest).
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
