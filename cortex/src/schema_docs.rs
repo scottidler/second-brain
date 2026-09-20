@@ -1,11 +1,19 @@
 //! Render `system/schemas/{domain,type,origin,status}-values.md` from
-//! `vault::schema`.
+//! `vault::schema`, plus `tag-values.md` from `canonical-tags.yml` (P9).
 //!
-//! The four value docs were hand-written and drifted from the enums they
-//! describe (the vault's `type-values.md` listed 15 of `NoteType`'s 25
+//! The four enum-backed docs were hand-written and drifted from the enums
+//! they describe (the vault's `type-values.md` listed 15 of `NoteType`'s 25
 //! variants). Making them generated closes that gap by construction: the
 //! values table is the enum, each row's prose is `description()`, and the
 //! surrounding prose is a `const` per file.
+//!
+//! `tag-values.md` is the fifth generated doc and the odd one out: its rows
+//! come from data (`canonical-tags.yml`, loaded by the caller and passed in),
+//! not a compiled `vault::schema` enum, so it cannot share `DocSpec`'s
+//! zero-argument `rows: fn() -> Vec<Row>` and gets its own render function
+//! (`render_tag_values_doc`) alongside the `SPECS`-driven ones.
+//! `domain-values.md` keeps rendering until P11 deletes the `Domain` enum;
+//! nothing here removes it.
 //!
 //! `frontmatter.md` stays hand-written on purpose - its field tables exist
 //! only in that doc and generating them would invent a second schema with no
@@ -213,19 +221,29 @@ impl RenderReport {
     }
 }
 
-/// Render the four value docs and compare them to `<vault_root>/system/schemas/`.
+/// Render the five value docs and compare them to `<vault_root>/system/schemas/`.
 ///
 /// With `apply` false nothing is written and every difference reports
 /// `Drifted`. With `apply` true each drifted file is rewritten atomically and
 /// reports `Written`; files that already match are left alone, which is what
 /// keeps `generated-at` from churning on every run.
-pub fn render_all(vault_root: &Path, apply: bool) -> Result<RenderReport> {
+///
+/// `tags` is the caller's already-loaded canonical vocabulary (sorted), used
+/// only for `tag-values.md` - this function stays filesystem-free for the
+/// vocabulary the same way `schema_info_payload` (oracle, P8) does, so it
+/// stays unit-testable with no config or `canonical-tags.yml` on disk.
+pub fn render_all(vault_root: &Path, apply: bool, tags: &[String]) -> Result<RenderReport> {
     let now = chrono::Utc::now();
-    render_all_at(vault_root, apply, now)
+    render_all_at(vault_root, apply, now, tags)
 }
 
 /// `render_all` with an explicit `now`, so tests get reproducible bytes.
-pub fn render_all_at(vault_root: &Path, apply: bool, now: chrono::DateTime<chrono::Utc>) -> Result<RenderReport> {
+pub fn render_all_at(
+    vault_root: &Path,
+    apply: bool,
+    now: chrono::DateTime<chrono::Utc>,
+    tags: &[String],
+) -> Result<RenderReport> {
     let dir = vault_root.join(SCHEMAS_DIR);
     let mut report = RenderReport::default();
 
@@ -249,6 +267,27 @@ pub fn render_all_at(vault_root: &Path, apply: bool, now: chrono::DateTime<chron
         log::debug!("render_all_at: {rel} -> {outcome:?}");
         report.files.push(FileStatus { path: rel, outcome });
     }
+
+    let tag_path = dir.join(TAG_VALUES_FILENAME);
+    let tag_rel = format!("{SCHEMAS_DIR}/{TAG_VALUES_FILENAME}");
+    let tag_disk = std::fs::read_to_string(&tag_path).ok();
+    let tag_matches = tag_disk.as_deref().is_some_and(|d| matches_tag_render(tags, d));
+
+    let tag_outcome = if tag_matches {
+        Outcome::Unchanged
+    } else if apply {
+        let bytes = render_tag_values_doc(tags, &stamp(now));
+        vault::note::write_atomic(&tag_path, bytes.as_bytes())
+            .wrap_err_with(|| format!("failed to write {}", tag_path.display()))?;
+        Outcome::Written
+    } else {
+        Outcome::Drifted
+    };
+    log::debug!("render_all_at: {tag_rel} -> {tag_outcome:?}");
+    report.files.push(FileStatus {
+        path: tag_rel,
+        outcome: tag_outcome,
+    });
 
     Ok(report)
 }
@@ -324,10 +363,76 @@ fn render_doc(spec: &DocSpec, generated_at: &str) -> String {
     out
 }
 
-/// The four vault-relative paths this module owns. Used by `sb doctor` for its
+/// Vault-relative filename for the fifth generated doc.
+const TAG_VALUES_FILENAME: &str = "tag-values.md";
+
+const TAG_RULES: &str = "\
+- Every value here comes from `config/canonical-tags.yml`; nothing else adds or removes a canonical tag.
+- A note's tags must be a subset of this list, capped at `max-per-note` (`tags.non-canonical`, `tags.cap`).
+- Tag assignment goes through the shared classifier (`distillers::tags`), not free text.
+- New tags are added to `config/canonical-tags.yml`; this file follows from there via `sb cortex schema --render`.
+";
+
+/// Render `tag-values.md`. Unlike the `SPECS`-driven docs, `tags` is data the
+/// caller loaded from `canonical-tags.yml` (`sb cortex schema` and `sb
+/// doctor` both resolve it through `config.sweep.canonical_path`), not a
+/// compiled enum, so this function takes it as a parameter rather than
+/// reading a `rows: fn() -> Vec<Row>`.
+fn render_tag_values_doc(tags: &[String], generated_at: &str) -> String {
+    let date = generated_at.split('T').next().unwrap_or(generated_at);
+
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str("title: Tag Values\n");
+    out.push_str(&format!("date: {date}\n"));
+    out.push_str("type: system\n");
+    out.push_str("domain: system\n");
+    out.push_str("origin: generated\n");
+    out.push_str(&format!("generated-at: {generated_at}\n"));
+    out.push_str("generator: sb cortex schema\n");
+    out.push_str("pinned: true\n");
+    out.push_str("tags: [obsidian]\n");
+    out.push_str("---\n\n");
+
+    out.push_str("# Tag Values\n\n");
+    out.push_str(
+        "Canonical list of allowed values for the `tags` frontmatter field. Every note's tags are \
+         drawn from this list, capped at `max-per-note`, and stored as a block list.\n\n",
+    );
+    out.push_str(&format!("{DO_NOT_EDIT}\n\n"));
+    out.push_str(
+        "See also: [[frontmatter]], [[domain-values]], [[type-values]], [[origin-values]], [[status-values]]\n\n",
+    );
+
+    out.push_str(&format!("## Values ({})\n\n", tags.len()));
+    out.push_str("| Tag |\n");
+    out.push_str("|-----|\n");
+    for tag in tags {
+        out.push_str(&format!("| {tag} |\n"));
+    }
+    out.push('\n');
+
+    out.push_str("## Rules\n\n");
+    out.push_str(TAG_RULES);
+
+    out
+}
+
+/// Same neutralise-the-timestamp comparison as `matches_render`, for the
+/// data-driven tag doc.
+fn matches_tag_render(tags: &[String], disk: &str) -> bool {
+    match disk_generated_at(disk) {
+        Some(stamp) => render_tag_values_doc(tags, &stamp) == disk,
+        None => false,
+    }
+}
+
+/// The five vault-relative paths this module owns. Used by `sb doctor` for its
 /// message and by tests.
 pub fn doc_paths() -> Vec<PathBuf> {
-    SPECS.iter().map(|s| Path::new(SCHEMAS_DIR).join(s.filename)).collect()
+    let mut paths: Vec<PathBuf> = SPECS.iter().map(|s| Path::new(SCHEMAS_DIR).join(s.filename)).collect();
+    paths.push(Path::new(SCHEMAS_DIR).join(TAG_VALUES_FILENAME));
+    paths
 }
 
 #[cfg(test)]

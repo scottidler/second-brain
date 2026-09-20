@@ -272,6 +272,10 @@ pub struct SummarizeOpts {
     /// Only re-distill notes whose `domain:` frontmatter matches <name>.
     pub domain: Option<String>,
 
+    /// Only re-distill notes whose `tags:` frontmatter includes <name>.
+    /// Beside `--domain`, not instead of it (P9); domain removal is P11.
+    pub tag: Option<String>,
+
     /// Force re-distill against a specific extractor id (e.g.
     /// `distill-article-v2`), bypassing the `distilled: true` skip-guard.
     /// Use this to regenerate notes against a newer pattern version.

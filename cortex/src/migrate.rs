@@ -525,8 +525,10 @@ fn apply_value_transforms(vault_root: &Path, notes: &[Note], migration: &Migrati
 }
 
 /// True when the note's frontmatter carries a NON-EMPTY inline `tags: [a, b]`
-/// list, the form P4 normalizes away.
-fn has_inline_tag_list(content: &str) -> bool {
+/// list, the form P4 normalizes away. `pub(crate)` so `tags::lint_tags` /
+/// `tags::apply_tags` (P9) share the same on-disk-form detector rather than
+/// growing a second copy of this parse.
+pub(crate) fn has_inline_tag_list(content: &str) -> bool {
     let Some((fm, _body)) = vault::frontmatter::split_raw(content) else {
         return false;
     };

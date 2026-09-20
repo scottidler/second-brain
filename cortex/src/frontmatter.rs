@@ -68,7 +68,11 @@ fn validate_note(note: &Note, config: &FrontmatterConfig, schema: &SchemaConfig,
             "domain" => fm.domain.is_some(),
             "origin" => fm.origin.is_some(),
             "status" => fm.status.is_some(),
-            "tags" => fm.tags.is_some(),
+            // `tags: []` and a bare `tags:` (no items) both parse to
+            // `Some(vec![])`; an empty list means "not yet classified", not
+            // "present" - the tags-only schema's required rule (Data Model,
+            // P9) treats both the same as a missing key.
+            "tags" => fm.tags.as_ref().is_some_and(|t| !t.is_empty()),
             "source" => fm.source.is_some(),
             "creator" => fm.creator.is_some(),
             _ => fm.extra.contains_key(field),

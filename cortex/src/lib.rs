@@ -183,7 +183,11 @@ pub fn lint_with_notes(
     }
 
     if rules.contains(&"tags") {
-        report.merge(tags::lint_tags(&lintable_notes, &config.actions.tags));
+        // The shared `canonical-tags.yml` vocabulary, not the legacy
+        // `actions.tags.canonical` list: `tags.non-canonical` and the new
+        // `tags.cap` rule are schema properties of that file (P9).
+        let canon = ::vault::canonical::CanonicalTagsFile::load(&config.sweep.canonical_path)?.canonical_set();
+        report.merge(tags::lint_tags(&lintable_notes, &config.actions.tags, &canon));
         if opts.apply {
             written_paths.extend(tags::apply_tags(vault_root, &lintable_notes, &config.actions.tags)?);
         }

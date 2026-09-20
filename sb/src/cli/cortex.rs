@@ -461,6 +461,8 @@ pub struct SummarizeArgs {
     #[arg(long)]
     pub domain: Option<String>,
     #[arg(long)]
+    pub tag: Option<String>,
+    #[arg(long)]
     pub extractor: Option<String>,
     #[arg(long)]
     pub dry_run: bool,
@@ -480,6 +482,7 @@ impl From<SummarizeArgs> for opts::SummarizeOpts {
             backfill: a.backfill,
             since: a.since,
             domain: a.domain,
+            tag: a.tag,
             extractor: a.extractor,
             dry_run: a.dry_run,
             resume: a.resume,
@@ -580,7 +583,8 @@ impl CortexCli {
                 // --check is the default: the verb is a drift gate first and a
                 // writer second, so a bare `sb cortex schema` never touches the
                 // vault.
-                let report = cortex::schema_docs::render_all(&vault_root, a.render)?;
+                let tags = load_canonical_tags(&config)?;
+                let report = cortex::schema_docs::render_all(&vault_root, a.render, &tags)?;
                 print_schema_report(&report);
                 if report.drifted() {
                     return Err(crate::error::SilentFailure.into());
@@ -923,6 +927,20 @@ fn print_unlink_stats(s: &cortex::unlink::UnlinkStats) {
             s.occurrences, s.files_changed
         );
     }
+}
+
+/// Load and sort the canonical tag vocabulary for `sb cortex schema`'s
+/// `tag-values.md` renderer. Shared with `sb doctor`'s schema-drift check
+/// (`checks.rs`) so the two can never compare against a different
+/// vocabulary. Propagates the load error (fail loud): a schema command that
+/// silently rendered an empty or stale vocabulary would be worse than one
+/// that refuses.
+pub(crate) fn load_canonical_tags(config: &cortex::config::Config) -> Result<Vec<String>> {
+    let file = vault::canonical::CanonicalTagsFile::load(&config.sweep.canonical_path)
+        .context("failed to load canonical tags for schema docs")?;
+    let mut tags: Vec<String> = file.all_tags().into_iter().collect();
+    tags.sort();
+    Ok(tags)
 }
 
 fn print_schema_report(r: &cortex::schema_docs::RenderReport) {

@@ -150,10 +150,12 @@ fn render_all_drifts_then_writes_then_settles() {
     for spec in SPECS {
         std::fs::write(dir.join(spec.filename), "---\ntitle: hand written\n---\n\nold\n").expect("seed");
     }
+    std::fs::write(dir.join(TAG_VALUES_FILENAME), "---\ntitle: hand written\n---\n\nold\n").expect("seed");
+    let tags = vec!["rust".to_string(), "tech".to_string()];
 
-    let check = render_all_at(tmp.path(), false, fixed_now()).expect("check");
+    let check = render_all_at(tmp.path(), false, fixed_now(), &tags).expect("check");
     assert!(check.drifted(), "hand-written files drift");
-    assert_eq!(check.drifted_paths().len(), SPECS.len());
+    assert_eq!(check.drifted_paths().len(), SPECS.len() + 1);
     assert!(
         check.files.iter().all(|f| f.outcome == Outcome::Drifted),
         "check writes nothing"
@@ -164,18 +166,18 @@ fn render_all_drifts_then_writes_then_settles() {
         "--check must not touch the file"
     );
 
-    let rendered = render_all_at(tmp.path(), true, fixed_now()).expect("render");
+    let rendered = render_all_at(tmp.path(), true, fixed_now(), &tags).expect("render");
     assert!(rendered.files.iter().all(|f| f.outcome == Outcome::Written));
     assert!(!rendered.drifted());
 
-    let after = render_all_at(tmp.path(), false, fixed_now()).expect("recheck");
+    let after = render_all_at(tmp.path(), false, fixed_now(), &tags).expect("recheck");
     assert!(!after.drifted(), "rendered files no longer drift");
     assert!(after.files.iter().all(|f| f.outcome == Outcome::Unchanged));
 
     // A later run with a different clock must not rewrite an unchanged file.
     let before_bytes = std::fs::read_to_string(dir.join("domain-values.md")).expect("read");
     let later = chrono::DateTime::<chrono::Utc>::from_timestamp(1_800_000_000, 0).expect("later");
-    let again = render_all_at(tmp.path(), true, later).expect("render again");
+    let again = render_all_at(tmp.path(), true, later, &tags).expect("render again");
     assert!(again.files.iter().all(|f| f.outcome == Outcome::Unchanged));
     assert_eq!(
         std::fs::read_to_string(dir.join("domain-values.md")).expect("read"),
@@ -190,11 +192,12 @@ fn render_all_drifts_then_writes_then_settles() {
 fn render_all_creates_missing_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(tmp.path().join(SCHEMAS_DIR)).expect("create schemas dir");
+    let tags = vec!["rust".to_string()];
 
-    let check = render_all_at(tmp.path(), false, fixed_now()).expect("check");
+    let check = render_all_at(tmp.path(), false, fixed_now(), &tags).expect("check");
     assert!(check.drifted(), "absent files count as drift");
 
-    let rendered = render_all_at(tmp.path(), true, fixed_now()).expect("render");
+    let rendered = render_all_at(tmp.path(), true, fixed_now(), &tags).expect("render");
     assert!(rendered.files.iter().all(|f| f.outcome == Outcome::Written));
     for spec in SPECS {
         assert!(
@@ -203,6 +206,61 @@ fn render_all_creates_missing_files() {
             spec.filename
         );
     }
+    assert!(
+        tmp.path().join(SCHEMAS_DIR).join(TAG_VALUES_FILENAME).is_file(),
+        "tag-values.md written"
+    );
+}
+
+/// P9 success criterion: `system/schemas/tag-values.md` exists after
+/// `--render` and lists every canonical tag; a vocabulary change is drift.
+#[test]
+fn tag_values_doc_lists_every_canonical_tag() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join(SCHEMAS_DIR)).expect("create schemas dir");
+    let tags = vec!["ai".to_string(), "rust".to_string(), "tech".to_string()];
+
+    let rendered = render_all_at(tmp.path(), true, fixed_now(), &tags).expect("render");
+    assert!(
+        rendered
+            .files
+            .iter()
+            .any(|f| f.path == format!("{SCHEMAS_DIR}/{TAG_VALUES_FILENAME}") && f.outcome == Outcome::Written)
+    );
+
+    let content = std::fs::read_to_string(tmp.path().join(SCHEMAS_DIR).join(TAG_VALUES_FILENAME)).expect("read");
+    for tag in &tags {
+        assert!(
+            content.contains(&format!("| {tag} |")),
+            "missing tag row: {tag}\n{content}"
+        );
+    }
+    assert!(content.contains("## Values (3)"), "{content}");
+    assert!(content.contains(DO_NOT_EDIT));
+
+    // Unchanged on a second render against the same vocabulary.
+    let again = render_all_at(tmp.path(), true, fixed_now(), &tags).expect("render again");
+    assert!(
+        again
+            .files
+            .iter()
+            .any(|f| f.path == format!("{SCHEMAS_DIR}/{TAG_VALUES_FILENAME}") && f.outcome == Outcome::Unchanged)
+    );
+
+    // A vocabulary change is drift.
+    let grown = vec![
+        "ai".to_string(),
+        "rust".to_string(),
+        "tech".to_string(),
+        "security".to_string(),
+    ];
+    let check = render_all_at(tmp.path(), false, fixed_now(), &grown).expect("check");
+    assert!(
+        check
+            .files
+            .iter()
+            .any(|f| f.path == format!("{SCHEMAS_DIR}/{TAG_VALUES_FILENAME}") && f.outcome == Outcome::Drifted)
+    );
 }
 
 /// A one-byte body edit to a generated file is caught even though its
@@ -211,7 +269,7 @@ fn render_all_creates_missing_files() {
 fn a_body_edit_to_a_generated_file_is_drift() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(tmp.path().join(SCHEMAS_DIR)).expect("create schemas dir");
-    render_all_at(tmp.path(), true, fixed_now()).expect("render");
+    render_all_at(tmp.path(), true, fixed_now(), &[]).expect("render");
 
     let path = tmp.path().join(SCHEMAS_DIR).join("status-values.md");
     let edited = std::fs::read_to_string(&path)
@@ -219,7 +277,7 @@ fn a_body_edit_to_a_generated_file_is_drift() {
         .replace("High value, reference often", "High value, reference oftenn");
     std::fs::write(&path, edited).expect("write edit");
 
-    let check = render_all_at(tmp.path(), false, fixed_now()).expect("check");
+    let check = render_all_at(tmp.path(), false, fixed_now(), &[]).expect("check");
     assert_eq!(check.drifted_paths(), vec!["system/schemas/status-values.md"]);
 }
 
@@ -238,7 +296,7 @@ fn disk_generated_at_only_reads_the_frontmatter_block() {
 }
 
 #[test]
-fn doc_paths_names_the_four_generated_files() {
+fn doc_paths_names_the_five_generated_files() {
     let names: Vec<String> = doc_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect();
     assert_eq!(
         names,
@@ -247,6 +305,7 @@ fn doc_paths_names_the_four_generated_files() {
             "system/schemas/type-values.md",
             "system/schemas/origin-values.md",
             "system/schemas/status-values.md",
+            "system/schemas/tag-values.md",
         ]
     );
     assert!(

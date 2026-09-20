@@ -1,12 +1,20 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use ::vault::canonical::CanonicalSet;
+
 use crate::config::TagsConfig;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::vault::Note;
 
 /// Run tag normalization lint on all notes.
-pub fn lint_tags(notes: &[Note], config: &TagsConfig) -> Report {
+///
+/// `canon` is the loaded `canonical-tags.yml` vocabulary (P9): membership
+/// (`tags.non-canonical`) and the per-note cap (`tags.cap`) are schema
+/// properties of that shared file, not of the legacy `actions.tags.canonical`
+/// list `config` still carries (alias resolution and character-format checks
+/// stay config-driven; those are lint POLICY, not vocabulary).
+pub fn lint_tags(notes: &[Note], config: &TagsConfig, canon: &CanonicalSet) -> Report {
     let mut report = Report::default();
     let mut tag_usage: HashMap<String, usize> = HashMap::new();
 
@@ -46,16 +54,56 @@ pub fn lint_tags(notes: &[Note], config: &TagsConfig) -> Report {
                     continue;
                 }
 
-                // Check if tag is in canonical list (if list is non-empty)
-                if !config.canonical.is_empty() && !config.canonical.contains(tag) {
+                // Check if tag is in the canonical vocabulary (if loaded)
+                if !canon.all.is_empty() && !canon.all.contains(tag) {
                     report.add(Violation {
                         path: note.path.clone(),
                         rule: "tags.non-canonical".to_string(),
                         severity: Severity::Info,
-                        message: format!("tag '{tag}' is not in canonical list"),
+                        message: format!("tag '{tag}' is not in canonical-tags.yml"),
                         fix: None,
                     });
                 }
+            }
+
+            // Cap: the upper bound only. The lower bound (0 tags) is
+            // `frontmatter.required.tags`'s job - that rule already treats
+            // `[]`/bare `tags:` as missing, honoring the path exemptions
+            // (entities/inbox/system/notes-ai/daily) that `tags.cap` has no
+            // way to see. A cap rule with no fix: exceeding the cap is a
+            // human/classifier call (which tag to drop), not mechanical.
+            if tags.len() > canon.max_per_note {
+                report.add(Violation {
+                    path: note.path.clone(),
+                    rule: "tags.cap".to_string(),
+                    severity: Severity::Warning,
+                    message: format!(
+                        "{} tags exceeds max-per-note {} (canonical-tags.yml)",
+                        tags.len(),
+                        canon.max_per_note
+                    ),
+                    fix: None,
+                });
+            }
+
+            // Form: the on-disk form must be a block list. `tags.format`
+            // already flags per-tag character format above; this extends the
+            // SAME rule to the list's own on-disk spelling. Readers already
+            // accept both forms (`vault::frontmatter` parses either), so this
+            // is a lint-only, apply-fixable concern, not a read concern.
+            if !tags.is_empty() && crate::migrate::has_inline_tag_list(&note.raw) {
+                report.add(Violation {
+                    path: note.path.clone(),
+                    rule: "tags.format".to_string(),
+                    severity: Severity::Warning,
+                    message: "tags stored as an inline list; canonical form is a block list".to_string(),
+                    fix: Some(Fix::SetFrontmatter {
+                        key: "tags".to_string(),
+                        value: serde_yaml::Value::Sequence(
+                            tags.iter().map(|t| serde_yaml::Value::String(t.clone())).collect(),
+                        ),
+                    }),
+                });
             }
         }
     }
@@ -121,6 +169,14 @@ pub fn apply_tags(vault_root: &Path, notes: &[Note], config: &TagsConfig) -> eyr
         let mut seen = std::collections::HashSet::new();
         new_tags.retain(|t| seen.insert(t.clone()));
         if new_tags.len() != before_dedup {
+            changed = true;
+        }
+
+        // Form: an inline `tags: [a, b]` list rewrites to block even when the
+        // values themselves need no fix - `replace_tags_in_frontmatter`
+        // always writes block, so forcing `changed` here is what actually
+        // fixes the `tags.format` (form) violation `lint_tags` reports above.
+        if !changed && !tags.is_empty() && crate::migrate::has_inline_tag_list(&note.raw) {
             changed = true;
         }
 

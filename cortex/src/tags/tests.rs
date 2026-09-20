@@ -1,13 +1,41 @@
+use std::collections::HashSet;
+
 use super::*;
-use crate::testutil::TestVault;
+use crate::testutil::{NoteBuilder, TestVault};
+
+/// The vocabulary `TestVault`'s fixtures were written against (P9: lint reads
+/// `canonical-tags.yml`, not `actions.tags.canonical`, so tests build the
+/// `CanonicalSet` shape directly rather than a `TagsConfig.canonical` list).
+/// `max_per_note` 7 is well above every fixture's tag count (max 2), so it
+/// never trips `tags.cap` by accident.
+fn test_canon() -> CanonicalSet {
+    CanonicalSet {
+        all: [
+            "rust",
+            "python",
+            "programming",
+            "ai-llm",
+            "kubernetes",
+            "sre",
+            "obsidian",
+            "writing",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+        no_segment: HashSet::new(),
+        max_per_note: 7,
+    }
+}
 
 #[test]
 fn test_alias_resolution_on_vault() {
     let v = TestVault::new();
     let notes = v.scan();
     let config = v.config().actions.tags;
+    let canon = test_canon();
 
-    let report = lint_tags(&notes, &config);
+    let report = lint_tags(&notes, &config, &canon);
     // ai-research.md has tags: [ai, k8s] which are aliases
     assert!(
         report
@@ -32,15 +60,55 @@ fn test_non_canonical_tag_on_vault() {
     let v = TestVault::new();
     let notes = v.scan();
     let config = v.config().actions.tags;
+    let canon = test_canon();
 
-    let report = lint_tags(&notes, &config);
-    // hobby-project.md has tag "obscure-hobby" not in canonical list
+    let report = lint_tags(&notes, &config, &canon);
+    // hobby-project.md has tag "obscure-hobby", not in canonical-tags.yml
     assert!(
         report
             .violations
             .iter()
             .any(|vi| vi.path.to_string_lossy() == "hobby-project.md" && vi.rule == "tags.non-canonical")
     );
+}
+
+/// P9 success criterion: on a three-note fixture, `sb cortex lint` reports
+/// exactly one `tags.non-canonical`, one `tags.cap`, one `tags.format`
+/// (the form variant - inline on disk). Each note is built to trip exactly
+/// one of the three rules and none of the others.
+#[test]
+fn tags_schema_rules_fire_once_each() {
+    let canon = CanonicalSet {
+        all: ["rust", "cli", "ai", "llm"].into_iter().map(String::from).collect(),
+        no_segment: HashSet::new(),
+        max_per_note: 3,
+    };
+    let config = TagsConfig::default();
+
+    let non_canonical = NoteBuilder::new("non-canonical.md")
+        .tags(&["rust", "not-a-real-tag"])
+        .raw("---\ntitle: Non-canonical\ntags:\n  - rust\n  - not-a-real-tag\n---\nBody\n")
+        .build();
+    let over_cap = NoteBuilder::new("over-cap.md")
+        .tags(&["rust", "cli", "ai", "llm"])
+        .raw("---\ntitle: Over cap\ntags:\n  - rust\n  - cli\n  - ai\n  - llm\n---\nBody\n")
+        .build();
+    let inline_form = NoteBuilder::new("inline-form.md")
+        .tags(&["rust"])
+        .raw("---\ntitle: Inline form\ntags: [rust]\n---\nBody\n")
+        .build();
+    let notes = [non_canonical, over_cap, inline_form];
+
+    let report = lint_tags(&notes, &config, &canon);
+
+    for rule in ["tags.non-canonical", "tags.cap", "tags.format"] {
+        let count = report.violations.iter().filter(|v| v.rule == rule).count();
+        assert_eq!(
+            count, 1,
+            "expected exactly one {rule}, got {count}: {:#?}",
+            report.violations
+        );
+    }
 }
 
 #[test]

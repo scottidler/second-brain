@@ -480,3 +480,155 @@ Note: "auto" here means the DETERMINISTIC path re-derived them from the tags the
 - `cargo test -p sb --lib`: 69 passed, 0 failed.
 - `otto ci`: green (build, full test suite, clippy, fmt).
 - `bash bin/agents-map`: passes.
+
+## Phase 9: Cortex lint, schema docs, summarize
+
+### Design decisions
+
+- **`tags.cap` enforces the upper bound only, not the full `1 <= n <=
+  max-per-note` the Data Model row states.** The lower bound (0 tags) is
+  already `frontmatter.required.tags`'s job, and that rule alone honors the
+  path/type exemptions (`entities/**`, `inbox/**`, `daily`, ...) that a
+  cardinality rule has no way to see. Making `tags.cap` also flag `n == 0`
+  would double-report the same note under a rule with no exemption list,
+  flagging all 915 `entities/**` notes (deliberately `tags: []` by design)
+  a second time under a different name. `tags.cap` fires on `tags.len() >
+  canon.max_per_note`; `frontmatter.required.tags` owns the floor.
+- **`tags.non-canonical` and `tags.cap` read a `vault::canonical::CanonicalSet`
+  passed into `lint_tags`/`tags::lint_tags`, loaded once in
+  `lib::lint_with_notes` from `config.sweep.canonical_path`** (the same
+  vocabulary `sweep`/`migrate`/`classify` already load), not from
+  `TagsConfig.canonical` (the legacy 11-entry `actions.tags.canonical` list).
+  `TagsConfig.canonical` itself is left in place (deletion is P10's job per
+  its own doc bullet: "delete legacy `actions.tags.canonical` ... if empty").
+  `cargo check` confirms it stays live (derived `Debug` reads it), so no
+  `dead_code` deny fires.
+- **The on-disk "form" violation reuses the existing `tags.format` rule name**
+  rather than minting a new one - the Data Model row says "`tags.format`
+  extended", and the character-format check and the inline-vs-block check are
+  both about the tags list's spelling, not its content. Detection reuses
+  `cortex::migrate::has_inline_tag_list` (made `pub(crate)`) instead of a
+  second copy of that raw-content parse.
+- **`apply_tags` forces `changed = true` when the on-disk form is inline**,
+  even when no tag value itself needs a fix, so `--apply` actually rewrites a
+  fully-canonical-but-inline note to block form. `replace_tags_in_frontmatter`
+  already always writes block (P4); this phase's addition is only the
+  "notice inline and force the rewrite" trigger.
+- **`tag-values.md` is data-driven and does NOT fit `DocSpec`'s zero-argument
+  `rows: fn() -> Vec<Row>` shape** (`schema_docs.rs`): its rows come from
+  `canonical-tags.yml`, loaded by the caller (`sb cortex schema`, `sb
+  doctor`), not a compiled `vault::schema` enum. It gets its own
+  `render_tag_values_doc(tags, generated_at)` and its own drift-check branch
+  in `render_all_at`, run alongside (not inside) the `SPECS` loop.
+  `render_all`/`render_all_at` gained a `tags: &[String]` parameter as a
+  result - a signature change to every call site (2 in `sb`, 8 in
+  `schema_docs/tests.rs`).
+- **`load_canonical_tags(&Config) -> Result<Vec<String>>` lives in
+  `sb/src/cli/cortex.rs`** (`pub(crate)`), shared by `sb cortex schema` (fail
+  loud via `?`) and `sb doctor`'s `schema_docs_findings` (soft-fails to a
+  `Finding::warn`, consistent with that function's existing style for every
+  other load failure it already handles).
+- **`summarize --tag`** filters on `note.frontmatter.tags` containment,
+  exactly beside `--domain`'s equality filter (same `filter_notes` function,
+  new `tag: Option<&str>` local beside `domain`). `SummarizeOpts.tag` sits
+  next to `SummarizeOpts.domain` in both the struct and the `sb` CLI's
+  `SummarizeArgs`.
+- **Cold report's domain grouping was left untouched**, per the phase's own
+  instruction; verified live (`sb cortex sweep --cold`) that
+  `system/views/cold-notes.md` still renders and still groups by domain.
+
+### Deviations
+
+- None from the phase's literal bullet list. The `tags.cap` lower-bound
+  scoping above is an interpretation of an underspecified row, not a
+  contradiction of it - recorded as a design decision, not a deviation,
+  because implementing the literal `1 <= n` reading would have been the
+  wrong seam (see above), not merely a different valid seam.
+
+### Tradeoffs
+
+- **`render_all_at`'s tag doc branch is written out longhand, parallel to the
+  `SPECS` loop, rather than folding `tag-values.md` into a generalized
+  `DocSpec` that accepts a data parameter.** Generalizing `DocSpec` would
+  have touched all four existing snapshot-tested renderers for one new
+  consumer; the duplication is roughly 20 lines and stays inside one
+  function.
+- **`load_canonical_tags` was not added to `cortex` itself** (e.g. beside
+  `schema_docs::render_all`), even though `checks.rs` and `cortex.rs` both
+  live in the `sb` crate and could have shared a `cortex`-crate helper
+  instead. Kept in `sb` because loading is a CLI-composition-root concern
+  (deciding fail-loud vs. fail-soft per caller) and `schema_docs.rs` itself
+  stays filesystem-free for the vocabulary, matching oracle's P8
+  `schema_info_payload`/`load_canonical_tags` split.
+
+### Open questions
+
+- None.
+
+### Live verification (2026-09-20, `otto deploy`d binary, run from
+`~/repos/scottidler/obsidian` with both daemons stopped for the render/lint
+pass, per the standing "there is no my-side" instruction)
+
+- Live lint counts, before and after this phase's rule changes (the "before"
+  values are the ones recorded in the design doc's own Background section
+  and Phase 9 handoff, not re-measured against the old binary):
+  - `tags.non-canonical`: **9,020** (legacy 11-entry list) -> **0**
+    (`canonical-tags.yml`, 117 tags). The near-zero result is real, not a
+    bug: `config/tag-mapping.yml` and the daemon's `sweep` have kept the
+    vault's ~115 distinct tags inside the canonical vocabulary for months: a
+    manual cross-check (parsing `notes/**` and `work/**` frontmatter
+    independently of cortex) found 0 tags outside the 117-tag vocabulary.
+  - `tags.cap`: previously no rule existed; now **0**. The highest tag count
+    on any single note in `notes/`/`work/` is exactly 8 (`max-per-note`
+    itself), never above it.
+  - `tags.format`: previously conflated with `frontmatter.tag-format`
+    (character format only); the new form-violation count is **0**. P4's
+    migration and the daemon's continuous `apply_tags` already normalized
+    every lintable note to block form.
+  - `frontmatter.required.tags`: **300** (old "empty counts as present"
+    behavior) -> **1,057** (empty/`[]`/bare `tags:` now counts as missing).
+    Breakdown: 915 `entities/**` (all `tags: []` by design), 88 `journal/`,
+    50 `notes/`, 2 `test_folder/`, 1 `system/` (an included file), 1
+    `home.md`. The 915-note jump is EXPECTED and not this phase's to fix:
+    `entities/**` is exempt from `domain`/`origin` in `cortex.yml`'s
+    `path-exempt` today but NOT from `tags` - carrying that exemption over
+    (":entities/**": add `tags`" etc.) is explicitly P10's bullet ("exemptions
+    carried 1:1 to `tags`"), not P9's. Recording the number here is the
+    phase's own instruction; wiring the exemption is next phase.
+- `sb cortex schema --check` before render: exit 1, all 5 files (including
+  the 4 pre-existing ones) reported `drifted` - the 4 enum-backed docs had
+  independently drifted since 2026-09-06 (stale `generated-at`, and an
+  inline-vs-block `tags:` mismatch unrelated to this phase's code, since
+  `render_doc`'s literal `tags: [obsidian]` was never touched here).
+  `sb cortex schema --render`: all 5 written, including the new
+  `system/schemas/tag-values.md` (117 rows). `sb cortex schema --check`
+  after: **exit 0**, all 5 `unchanged`.
+- `system/views/cold-notes.md`: renders (`sb cortex sweep --cold`,
+  scanned=3746 surfaced=471), still grouped by domain headings as this
+  phase requires.
+- `sb cortex summarize --backfill --tag rust --dry-run`: 106 notes listed,
+  0 distilled (dry run), confirming `--tag` reaches `filter_notes` live
+  beside `--domain`.
+- `find . -name '*.sync-conflict*' | wc -l`: **0**, before and after.
+- `otto deploy`: binary installed cleanly this run (`cp`-then-`mv` was not
+  needed; the `~/.cargo/bin` write-set covered it, unlike the P4 failure).
+  Verified live via `sb cortex summarize --help` showing the new `--tag`
+  flag (`sb --version` still reports the last tag, `a29f933`, and cannot
+  distinguish this phase's build - same caveat P7 recorded).
+- `cargo test -p cortex --features vault/vec --lib`: **541** passed (P7
+  baseline 537 + 4 new: `tags_schema_rules_fire_once_each`,
+  `required_tags_treats_empty_list_as_missing`,
+  `backfill_filters_by_tag_frontmatter`,
+  `tag_values_doc_lists_every_canonical_tag`), 0 failed.
+- `otto ci`: green (build, full workspace test suite, clippy, fmt).
+
+### Success criteria
+
+| criterion | result |
+|---|---|
+| `sb cortex schema --check` exit 0 and `system/schemas/tag-values.md` exists | PASS |
+| three-note fixture: exactly one `tags.non-canonical`, one `tags.cap`, one `tags.format` | PASS - `tags_schema_rules_fire_once_each` |
+| live vault: `tags.non-canonical`, `tags.cap`, `tags.format`, `frontmatter.required.tags` recorded | PASS - 0, 0, 0, 1057 (see above) |
+| `system/views/cold-notes.md` renders | PASS |
+| `cargo test -p cortex` green (baseline 537) | PASS - 541 |
+| `otto ci` green | PASS |

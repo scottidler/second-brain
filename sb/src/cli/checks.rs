@@ -848,7 +848,16 @@ fn schema_docs_findings() -> Vec<Finding> {
             )];
         }
     };
-    match cortex::schema_docs::render_all(&vault_root, false) {
+    let tags = match crate::cli::cortex::load_canonical_tags(&cortex_config) {
+        Ok(t) => t,
+        Err(e) => {
+            return vec![Finding::warn(
+                format!("could not load canonical tags for the schema-doc check: {e}"),
+                "sb bootstrap".to_string(),
+            )];
+        }
+    };
+    match cortex::schema_docs::render_all(&vault_root, false, &tags) {
         Ok(report) if report.drifted() => vec![Finding::warn(
             format!(
                 "system/schemas/*-values.md drifted from binary ({})",

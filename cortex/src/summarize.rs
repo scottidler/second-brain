@@ -42,10 +42,11 @@ pub async fn run(vault_root: &Path, config: &Config, opts: &SummarizeOpts) -> Re
 /// tests can inject a fake.
 pub async fn backfill(vault_root: &Path, config: &Config, opts: &SummarizeOpts) -> Result<BackfillSummary> {
     log::debug!(
-        "summarize::backfill: vault_root={} since={:?} domain={:?} extractor={:?} dry_run={} resume={}",
+        "summarize::backfill: vault_root={} since={:?} domain={:?} tag={:?} extractor={:?} dry_run={} resume={}",
         vault_root.display(),
         opts.since,
         opts.domain,
+        opts.tag,
         opts.extractor,
         opts.dry_run,
         opts.resume,
@@ -95,10 +96,11 @@ pub async fn backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 's
 
     let candidates: Vec<Note> = filter_notes(&notes, opts, &completed);
     log::info!(
-        "summarize::backfill: {} note(s) qualify after filters (since={:?} domain={:?} extractor={:?})",
+        "summarize::backfill: {} note(s) qualify after filters (since={:?} domain={:?} tag={:?} extractor={:?})",
         candidates.len(),
         opts.since,
         opts.domain,
+        opts.tag,
         opts.extractor,
     );
 
@@ -404,12 +406,13 @@ fn kind_from_url(url: &str) -> Option<DistillKind> {
     Some(DistillKind::Article)
 }
 
-/// Apply `--since` and `--domain` to the scanned notes; drop notes that
-/// fall before the resume-checkpoint path. The result is a freshly-owned
+/// Apply `--since`, `--domain`, and `--tag` to the scanned notes; drop notes
+/// that fall before the resume-checkpoint path. The result is a freshly-owned
 /// vector so the spawned tasks can move each note independently.
 pub fn filter_notes(notes: &[Note], opts: &SummarizeOpts, completed: &HashSet<PathBuf>) -> Vec<Note> {
     let cutoff = opts.since.as_deref().and_then(parse_since);
     let domain = opts.domain.as_deref();
+    let tag = opts.tag.as_deref();
     let mut out = Vec::new();
     for note in notes {
         // Resume: exclude notes already distilled in a prior run (set
@@ -436,6 +439,15 @@ pub fn filter_notes(notes: &[Note], opts: &SummarizeOpts, completed: &HashSet<Pa
         }
         if let Some(want) = domain
             && note.frontmatter.domain.as_deref() != Some(want)
+        {
+            continue;
+        }
+        if let Some(want) = tag
+            && !note
+                .frontmatter
+                .tags
+                .as_ref()
+                .is_some_and(|tags| tags.iter().any(|t| t == want))
         {
             continue;
         }

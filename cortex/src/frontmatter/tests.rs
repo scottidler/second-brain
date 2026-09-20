@@ -94,6 +94,36 @@ fn test_missing_required_fields() {
     assert_eq!(partial_violations.len(), 3);
 }
 
+/// P9 Data Model: `frontmatter.required.tags` treats `[]` and a bare `tags:`
+/// (no items) as missing, the same as an absent key - both parse to
+/// `Some(vec![])`/`None` respectively, and neither means "classified".
+#[test]
+fn required_tags_treats_empty_list_as_missing() {
+    let v = TestVault::new();
+    let notes = v.scan();
+    let config = v.config().actions.frontmatter;
+    let schema = test_schema();
+
+    let report = lint_frontmatter(&notes, &config, &schema);
+    // daily/2026-03-18.md and inbox/untriaged-link.md both carry `tags: []`.
+    for name in ["2026-03-18", "untriaged-link"] {
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.path.to_string_lossy().contains(name) && v.rule == "frontmatter.required.tags"),
+            "{name} (tags: []) should be flagged as missing required tags"
+        );
+    }
+    // rust-guide.md carries real tags and must not be flagged.
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|v| v.path.to_string_lossy() == "rust-guide.md" && v.rule == "frontmatter.required.tags")
+    );
+}
+
 #[test]
 fn test_type_specific_fields() {
     let v = TestVault::new();
