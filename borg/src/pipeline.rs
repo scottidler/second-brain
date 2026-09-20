@@ -20,7 +20,7 @@ use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
-use vault::canonical::{self, CanonicalTagsFile, TagMapping};
+use vault::canonical::{self, CanonicalSet, CanonicalTagsFile, TagMapping};
 use vault::paths::expand_tilde;
 use vault::receipts::FailureStage;
 use vault::schema::CORTEX_PRESERVE_KEYS;
@@ -42,11 +42,13 @@ pub(crate) use session::*;
 pub(crate) use tags::*;
 pub(crate) use text::*;
 
-/// Cached canonical tag state loaded once at first use.
+/// Cached canonical tag state loaded once at first use. `canon` is the shared
+/// vocabulary snapshot (`vault::canonical::CanonicalSet`); `mapping` and
+/// `reject_concatenated` are borg-local additions the shared shape has no
+/// room for.
 pub(crate) struct CanonicalState {
-    canonical_set: std::collections::HashSet<String>,
+    canon: CanonicalSet,
     mapping: TagMapping,
-    max_per_note: usize,
     reject_concatenated: bool,
 }
 

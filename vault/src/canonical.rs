@@ -10,7 +10,28 @@ pub struct CanonicalTagsFile {
     pub max_per_note: usize,
     #[serde(default = "default_max_canonical")]
     pub max_canonical: usize,
+    /// Tags tier-2 segment matching may never mint on its own (e.g. `work` and
+    /// `life` out of raw `work-life-balance`). Absent in files written before
+    /// this field existed, hence the default.
+    #[serde(default)]
+    pub no_segment_match: Vec<String>,
+    /// Tags a `--retag` (replace semantics) must never remove: the classifier
+    /// recovers 0 of 17 of them from note text (design doc P0b). Read here so
+    /// the vocabulary file round-trips; consumed by `distillers::tags` in P2.
+    #[serde(default)]
+    pub no_classifier_tags: Vec<String>,
     pub tags: HashMap<String, Vec<String>>,
+}
+
+/// The loaded canonical-tag vocabulary shared by borg, cortex, and (from
+/// Phase 2) distillers: the flattened tag set, the segment-guard list, and
+/// the per-note cap. Absorbs borg's former private `CanonicalState`
+/// (`borg/src/pipeline.rs`) so every caller loads one vocabulary shape.
+#[derive(Debug, Clone)]
+pub struct CanonicalSet {
+    pub all: HashSet<String>,
+    pub no_segment: HashSet<String>,
+    pub max_per_note: usize,
 }
 
 fn default_max_per_note() -> usize {
@@ -32,6 +53,15 @@ impl CanonicalTagsFile {
 
     pub fn all_tags(&self) -> HashSet<String> {
         self.tags.values().flatten().cloned().collect()
+    }
+
+    /// Build the shared `CanonicalSet` snapshot every matcher takes.
+    pub fn canonical_set(&self) -> CanonicalSet {
+        CanonicalSet {
+            all: self.all_tags(),
+            no_segment: self.no_segment_match.iter().cloned().collect(),
+            max_per_note: self.max_per_note,
+        }
     }
 }
 
@@ -83,7 +113,7 @@ pub fn is_concatenated_word(tag: &str, canonical_set: &HashSet<String>) -> bool 
 ///
 /// Returns zero, one, or multiple canonical tags.
 /// Priority: mapping file -> exact canonical match -> segment fuzzy match.
-pub fn match_to_canonical(raw_tag: &str, canonical_set: &HashSet<String>, mapping: &TagMapping) -> Vec<String> {
+pub fn match_to_canonical(raw_tag: &str, canon: &CanonicalSet, mapping: &TagMapping) -> Vec<String> {
     // 1. Mapping file lookup
     if let Some(mapped) = mapping.get(raw_tag) {
         return match mapped {
@@ -93,20 +123,23 @@ pub fn match_to_canonical(raw_tag: &str, canonical_set: &HashSet<String>, mappin
     }
 
     // 2. Exact canonical match
-    if canonical_set.contains(raw_tag) {
+    if canon.all.contains(raw_tag) {
         return vec![raw_tag.to_string()];
     }
 
-    // 3. Segment fuzzy match (single-word canonical tags only)
+    // 3. Segment fuzzy match (single-word canonical tags only), skipping any
+    // segment on the no-segment-match guard list.
     let segments: Vec<&str> = raw_tag.split('-').collect();
     let matches: Vec<String> = segments
         .iter()
         .filter(|seg| !seg.is_empty())
-        .filter_map(
-            |seg| {
-                if canonical_set.contains(*seg) { Some(seg.to_string()) } else { None }
-            },
-        )
+        .filter_map(|seg| {
+            if canon.all.contains(*seg) && !canon.no_segment.contains(*seg) {
+                Some(seg.to_string())
+            } else {
+                None
+            }
+        })
         .collect();
 
     if !matches.is_empty() {
@@ -121,12 +154,7 @@ pub fn match_to_canonical(raw_tag: &str, canonical_set: &HashSet<String>, mappin
 ///
 /// Returns deduplicated canonical tags, capped at max_per_note.
 /// Tags from mapping hits come first, then exact matches, then segment matches.
-pub fn filter_and_cap(
-    raw_tags: &[String],
-    canonical_set: &HashSet<String>,
-    mapping: &TagMapping,
-    max_per_note: usize,
-) -> Vec<String> {
+pub fn filter_and_cap(raw_tags: &[String], canon: &CanonicalSet, mapping: &TagMapping) -> Vec<String> {
     let mut mapping_hits = Vec::new();
     let mut exact_hits = Vec::new();
     let mut segment_hits = Vec::new();
@@ -141,15 +169,17 @@ pub fn filter_and_cap(
         }
 
         // Exact canonical match
-        if canonical_set.contains(raw.as_str()) {
+        if canon.all.contains(raw.as_str()) {
             exact_hits.push(raw.clone());
             continue;
         }
 
-        // Segment fuzzy match
+        // Segment fuzzy match, skipping any segment on the no-segment-match
+        // guard list (this is the duplicate of `match_to_canonical`'s tier-2
+        // loop that borg and sweep call through this function).
         let segments: Vec<&str> = raw.split('-').collect();
         for seg in segments {
-            if !seg.is_empty() && canonical_set.contains(seg) {
+            if !seg.is_empty() && canon.all.contains(seg) && !canon.no_segment.contains(seg) {
                 segment_hits.push(seg.to_string());
             }
         }
@@ -175,7 +205,7 @@ pub fn filter_and_cap(
 
     // (tier, tag): tiers stay ordered, within-tier is alphabetical (deterministic).
     tiered.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    tiered.truncate(max_per_note);
+    tiered.truncate(canon.max_per_note);
     tiered.into_iter().map(|(_, tag)| tag).collect()
 }
 

@@ -125,6 +125,7 @@ agentswarms: multi-agent
 aggies: college-football
 agililty-training: drills
 agriculture: null
+ai: ai
 ai-adoption: ai
 ai-agent: agents
 ai-agent-framework: agents
@@ -1284,7 +1285,7 @@ disambiguation: null
 disney: null
 display: null
 distro: linux
-diy: null
+diy: diy
 dl: null
 dl-skills: null
 dns: networking
@@ -1882,7 +1883,7 @@ home-automation-beginners: home-automation
 home-automation-ideas: home-automation
 home-lab: home-automation
 home-theater: null
-homelab: null
+homelab: homelab
 hooks: null
 hooks-in-skills: null
 hopecore: null
@@ -2231,6 +2232,7 @@ lets-get-rusty: rust
 leverage-calibration: null
 libraries: programming
 librewolf: null
+life: life
 life-hacking: productivity
 life-management: productivity
 life-mastery: productivity
@@ -4046,7 +4048,7 @@ team-organization: null
 team-workflows: workflow
 teams: null
 teamwork: null
-tech: null
+tech: tech
 tech-career: career
 tech-commentary: null
 tech-jobs: career
@@ -4445,6 +4447,7 @@ wood: null
 woodworking: null
 wordplay: null
 wordpress: web-development
+work: work
 work-automation: automation
 work-hard: null
 work-motivation: null

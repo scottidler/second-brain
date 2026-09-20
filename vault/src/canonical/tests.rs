@@ -1,6 +1,6 @@
 use super::*;
 
-fn test_canonical_set() -> HashSet<String> {
+fn test_canonical_hashset() -> HashSet<String> {
     [
         "ai",
         "agents",
@@ -23,6 +23,14 @@ fn test_canonical_set() -> HashSet<String> {
     .collect()
 }
 
+fn test_canonical_set() -> CanonicalSet {
+    CanonicalSet {
+        all: test_canonical_hashset(),
+        no_segment: HashSet::new(),
+        max_per_note: 7,
+    }
+}
+
 fn test_mapping() -> TagMapping {
     let mut m = HashMap::new();
     m.insert("ai-agents".to_string(), Some("agents".to_string()));
@@ -37,7 +45,7 @@ fn test_mapping() -> TagMapping {
 
 #[test]
 fn test_concatenated_word_detected() {
-    let canonical = test_canonical_set();
+    let canonical = test_canonical_hashset();
     assert!(is_concatenated_word("claudecodeai", &canonical)); // claude + ai
     assert!(is_concatenated_word("aiagents", &canonical)); // ai + agents
     assert!(is_concatenated_word("rustpython", &canonical)); // rust + python
@@ -45,21 +53,21 @@ fn test_concatenated_word_detected() {
 
 #[test]
 fn test_hyphenated_tag_not_concatenated() {
-    let canonical = test_canonical_set();
+    let canonical = test_canonical_hashset();
     assert!(!is_concatenated_word("claude-code", &canonical));
     assert!(!is_concatenated_word("ai-agents", &canonical));
 }
 
 #[test]
 fn test_single_word_not_concatenated() {
-    let canonical = test_canonical_set();
+    let canonical = test_canonical_hashset();
     assert!(!is_concatenated_word("infrastructure", &canonical));
     assert!(!is_concatenated_word("worldbuilding", &canonical));
 }
 
 #[test]
 fn test_short_tag_not_concatenated() {
-    let canonical = test_canonical_set();
+    let canonical = test_canonical_hashset();
     assert!(!is_concatenated_word("rust", &canonical));
     assert!(!is_concatenated_word("ai", &canonical));
 }
@@ -126,7 +134,7 @@ fn test_filter_basic() {
     let canonical = test_canonical_set();
     let mapping = test_mapping();
     let raw = vec!["ai-agents".to_string(), "rust".to_string(), "unknown-junk".to_string()];
-    let result = filter_and_cap(&raw, &canonical, &mapping, 7);
+    let result = filter_and_cap(&raw, &canonical, &mapping);
     assert!(result.contains(&"agents".to_string()));
     assert!(result.contains(&"rust".to_string()));
     assert!(!result.iter().any(|t| t.contains("unknown")));
@@ -138,7 +146,7 @@ fn test_filter_dedup() {
     let mapping = test_mapping();
     // Both map to "agents" via mapping
     let raw = vec!["ai-agents".to_string(), "ai-coding-agents".to_string()];
-    let result = filter_and_cap(&raw, &canonical, &mapping, 7);
+    let result = filter_and_cap(&raw, &canonical, &mapping);
     assert_eq!(result.iter().filter(|t| *t == "agents").count(), 1);
 }
 
@@ -158,7 +166,7 @@ fn test_filter_cap() {
         "security".to_string(),
         "gaming".to_string(),
     ];
-    let result = filter_and_cap(&raw, &canonical, &mapping, 7);
+    let result = filter_and_cap(&raw, &canonical, &mapping);
     assert_eq!(result.len(), 7);
 }
 
@@ -167,8 +175,37 @@ fn test_filter_rejected_tags_excluded() {
     let canonical = test_canonical_set();
     let mapping = test_mapping();
     let raw = vec!["claudecodeai".to_string(), "rust".to_string()];
-    let result = filter_and_cap(&raw, &canonical, &mapping, 7);
+    let result = filter_and_cap(&raw, &canonical, &mapping);
     assert_eq!(result, vec!["rust"]);
+}
+
+// ---- no-segment-match guard (Phase 1) ----
+
+#[test]
+fn segment_match_skips_no_segment_tags_in_both_matchers() {
+    let canonical = CanonicalSet {
+        all: ["work", "life", "rust", "cli"].iter().map(|s| s.to_string()).collect(),
+        no_segment: ["work", "life"].iter().map(|s| s.to_string()).collect(),
+        max_per_note: 7,
+    };
+    let mapping = TagMapping::new();
+
+    // Guarded segments never mint, in either matcher.
+    assert_eq!(
+        match_to_canonical("work-life-balance", &canonical, &mapping),
+        Vec::<String>::new()
+    );
+    let raw = vec!["work-life-balance".to_string()];
+    assert_eq!(filter_and_cap(&raw, &canonical, &mapping), Vec::<String>::new());
+
+    // Unguarded segments still mint as today.
+    let mut result = match_to_canonical("rust-cli-tooling", &canonical, &mapping);
+    result.sort();
+    assert_eq!(result, vec!["cli".to_string(), "rust".to_string()]);
+    let raw = vec!["rust-cli-tooling".to_string()];
+    let mut result = filter_and_cap(&raw, &canonical, &mapping);
+    result.sort();
+    assert_eq!(result, vec!["cli".to_string(), "rust".to_string()]);
 }
 
 // ---- CanonicalTagsFile ----

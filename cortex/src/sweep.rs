@@ -141,8 +141,7 @@ pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run:
     crate::startup::validate_canonical_assets()?;
     let canonical_file = CanonicalTagsFile::load(&config.canonical_path).wrap_err("failed to load canonical tags")?;
     let mapping = canonical::load_tag_mapping(&config.mapping_path).wrap_err("failed to load tag mapping")?;
-    let canonical_set = canonical_file.all_tags();
-    let max_per_note = canonical_file.max_per_note;
+    let canonical_set = canonical_file.canonical_set();
 
     // Real changed-path list (would-rewrite in dry-run, actually-rewritten
     // otherwise) so the daemon's oscillation fingerprint compares consecutive
@@ -156,7 +155,7 @@ pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run:
             continue;
         }
 
-        let new_tags = canonical::filter_and_cap(&tags, &canonical_set, &mapping, max_per_note);
+        let new_tags = canonical::filter_and_cap(&tags, &canonical_set, &mapping);
 
         if new_tags != tags {
             if dry_run {
@@ -197,7 +196,7 @@ pub fn scan_proposals(notes: &[Note], config: &SweepConfig) -> Result<Vec<Propos
     crate::startup::validate_canonical_assets()?;
     let canonical_file = CanonicalTagsFile::load(&config.canonical_path).wrap_err("failed to load canonical tags")?;
     let mapping = canonical::load_tag_mapping(&config.mapping_path).wrap_err("failed to load tag mapping")?;
-    let canonical_set = canonical_file.all_tags();
+    let canonical_set = canonical_file.canonical_set();
 
     // Count non-canonical tags across all notes
     let mut non_canonical: HashMap<String, Vec<String>> = HashMap::new();

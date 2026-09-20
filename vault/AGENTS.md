@@ -16,6 +16,7 @@ The single source of truth for the Obsidian-vault domain schema (Domain / NoteTy
 - `vault::embedding::{EmbeddingModel, load_active_model, embed_query}` (Candle / fastembed, feature-gated).
 - `vault::distilled::Distilled { summary, tldr, slug, enumeration, key_ideas, claims, tags, links, kind_specific, meta, transcript }`.
 - `vault::watcher::VaultWatcher::start(vault_root, config, applying_flag)` — debounced change stream.
+- `vault::canonical::CanonicalSet { all, no_segment, max_per_note }`: the one loaded vocabulary snapshot, built by `CanonicalTagsFile::canonical_set()` and taken by `match_to_canonical` / `filter_and_cap`. Absorbed borg's private `CanonicalState` shape.
 
 ## Contracts & Invariants
 
@@ -24,6 +25,8 @@ The single source of truth for the Obsidian-vault domain schema (Domain / NoteTy
 - **Tilde expansion at the boundary.** Any user-supplied path MUST pass through `expand_tilde` / `deserialize_tilde_pathbuf` before a filesystem call. For `PathBuf` config fields use `#[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]`.
 - **Vault-root precedence:** CLI override > config (`vault.root-path`) > marker-gated CWD (a `.obsidian/` dir must exist). No silent CWD fallback.
 - **`embedding_config` pins `active_model` + `active_dim`** (384 for bge-small-en-v1.5); both cortex and oracle read these on dispatch so they never drift.
+- **The segment guard is honored in both matchers.** `no-segment-match` in `canonical-tags.yml` lists tags that tier-2 segment splitting may never mint (`work-life-balance` must not produce `work` and `life`). `match_to_canonical` and `filter_and_cap` each carry their own tier-2 loop; a new guard goes in both or it does not hold.
+- **Removing a tag from the vocabulary means deleting its self-map.** `match_to_canonical` checks `tag-mapping.yml` *before* canonical membership, so a leftover `x: x` self-map keeps minting a tag the vocabulary no longer contains.
 - **`scan_vault` is deterministic** (par_iter + sort by path). **Pinned** is strict `Some(true)` — typos/nulls parse as not-pinned, never a parse error.
 
 ## Patterns

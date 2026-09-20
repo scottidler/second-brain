@@ -35,8 +35,7 @@ pub(crate) async fn get_or_init_canonical(config: &Config) -> Option<std::sync::
     };
 
     let state = Arc::new(CanonicalState {
-        canonical_set: canonical_file.all_tags(),
-        max_per_note: canonical_file.max_per_note,
+        canon: canonical_file.canonical_set(),
         mapping,
         reject_concatenated: config.tags.reject_concatenated,
     });
@@ -53,11 +52,11 @@ pub(crate) async fn finalize_tags(tags: &mut Vec<String>, config: &Config) {
     if let Some(state) = get_or_init_canonical(config).await {
         // Reject concatenated words
         if state.reject_concatenated {
-            tags.retain(|t| !canonical::is_concatenated_word(t, &state.canonical_set));
+            tags.retain(|t| !canonical::is_concatenated_word(t, &state.canon.all));
         }
 
         // Filter and cap through canonical vocabulary
-        *tags = canonical::filter_and_cap(tags, &state.canonical_set, &state.mapping, state.max_per_note);
+        *tags = canonical::filter_and_cap(tags, &state.canon, &state.mapping);
     }
 }
 

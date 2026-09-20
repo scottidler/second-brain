@@ -125,6 +125,7 @@ agentswarms
 aggies
 agililty-training
 agriculture
+ai
 ai-adoption
 ai-agent
 ai-agent-framework
@@ -2231,6 +2232,7 @@ lets-get-rusty
 leverage-calibration
 libraries
 librewolf
+life
 life-hacking
 life-management
 life-mastery
@@ -4445,6 +4447,7 @@ wood
 woodworking
 wordplay
 wordpress
+work
 work-automation
 work-hard
 work-motivation

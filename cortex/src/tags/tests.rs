@@ -121,3 +121,51 @@ fn replace_tags_on_indented_block_list_does_not_orphan_bullets() {
     assert!(result.contains("tags: [new-tag]"));
     assert!(result.contains("date: 2026-01-01"));
 }
+
+#[test]
+fn alias_free_ai_survives_apply_tags() {
+    // P1 retires the `ai`/`ML`/`ml` -> `ai-llm` aliases in `cortex.yml` so the
+    // P4 migration can write `ai` as a tag and the next daemon tick leaves it
+    // alone. With the aliases gone, `apply_tags` must not rewrite `ai`.
+    let v = TestVault::new();
+    let notes = v.scan();
+    let mut config = v.config().actions.tags;
+    config.aliases.remove("ai");
+    config.aliases.remove("ML");
+    config.aliases.remove("ml");
+
+    apply_tags(v.root(), &notes, &config).expect("apply");
+
+    let content = v.read("ai-research.md");
+    assert!(
+        !content.contains("ai-llm"),
+        "retired alias still rewrote `ai`:\n{content}"
+    );
+    // Form-agnostic on purpose: cortex still writes the inline list here and
+    // only switches to block form in P4, so this must read both.
+    assert!(
+        frontmatter_tags(&content).contains(&"ai".to_string()),
+        "`ai` did not survive apply_tags:\n{content}"
+    );
+}
+
+/// Read a note's `tags` values out of its frontmatter in either on-disk form
+/// (inline `tags: [a, b]` or a block list of `- a` lines).
+fn frontmatter_tags(content: &str) -> Vec<String> {
+    let fm = content.split("\n---\n").next().unwrap_or_default();
+    let mut lines = fm.lines().skip_while(|l| !l.trim_start().starts_with("tags:"));
+    let Some(head) = lines.next() else {
+        return Vec::new();
+    };
+    let rest = head.trim_start().trim_start_matches("tags:").trim();
+    if let Some(inner) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return inner
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+    }
+    lines
+        .map_while(|l| l.trim().strip_prefix("- ").map(|t| t.trim().to_string()))
+        .collect()
+}

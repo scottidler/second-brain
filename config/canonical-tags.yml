@@ -1,5 +1,17 @@
-max-per-note: 7
+max-per-note: 8
 max-canonical: 300
+no-segment-match:
+  - tech
+  - work
+  - life
+  - homelab
+  - diy
+no-classifier-tags:
+  - work
+  - life
+  - homelab
+  - diy
+  - writing
 tags:
   ai:
     - ai
@@ -21,6 +33,7 @@ tags:
     - vibe-coding
     - cursor
   tech:
+    - tech
     - rust
     - python
     - typescript
@@ -72,6 +85,7 @@ tags:
     - quarterback
     - drills
   work:
+    - work
     - productivity
     - automation
     - workflow
@@ -86,6 +100,7 @@ tags:
     - reading
     - research
   life:
+    - life
     - obsidian
     - note-taking
     - markdown
@@ -104,9 +119,13 @@ tags:
     - exercise
     - nutrition
     - health
+    - entertainment
+    - politics
   homelab:
+    - homelab
     - home-automation
-  diy: []
+  diy:
+    - diy
   system: []
   music:
     - music
