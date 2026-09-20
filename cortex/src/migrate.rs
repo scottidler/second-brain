@@ -524,6 +524,37 @@ fn apply_value_transforms(vault_root: &Path, notes: &[Note], migration: &Migrati
         .try_reduce(|| 0usize, |a, b| Ok(a + b))
 }
 
+/// True when the note's frontmatter carries a NON-EMPTY inline `tags: [a, b]`
+/// list, the form P4 normalizes away.
+fn has_inline_tag_list(content: &str) -> bool {
+    let Some((fm, _body)) = vault::frontmatter::split_raw(content) else {
+        return false;
+    };
+    fm.lines().filter_map(|line| line.strip_prefix("tags:")).any(|rest| {
+        let rest = rest.trim();
+        rest.starts_with('[') && rest != "[]"
+    })
+}
+
+/// A migration source field's raw value, quote-stripped, or `None` when the
+/// note does not carry the field or carries it empty. Exclusion is NOT applied
+/// here: callers that care about the value apply it, callers that only ask
+/// "is this note in scope" do not.
+fn source_field_value(note: &Note, field: &str) -> Option<String> {
+    let raw = match field {
+        "domain" => note.frontmatter.domain.as_deref(),
+        "type" => note.frontmatter.note_type.as_deref(),
+        "origin" => note.frontmatter.origin.as_deref(),
+        "status" => note.frontmatter.status.as_deref(),
+        _ => note.frontmatter.extra.get(field).and_then(|v| v.as_str()),
+    }?;
+    let value = raw.trim().trim_matches(['"', '\'']).trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_string())
+}
+
 /// Read a note's current tag list out of its parsed frontmatter.
 fn note_tags(note: &Note) -> Vec<String> {
     note.frontmatter.tags.clone().unwrap_or_default()
@@ -536,17 +567,8 @@ fn note_tags(note: &Note) -> Vec<String> {
 /// through `hygiene::normalize_domain`, which is what maps the legacy
 /// `knowledge` value onto `life`.
 fn field_to_tag_value(note: &Note, field: &str, cfg: &crate::config::FieldToTags) -> Option<String> {
-    let raw = match field {
-        "domain" => note.frontmatter.domain.as_deref(),
-        "type" => note.frontmatter.note_type.as_deref(),
-        "origin" => note.frontmatter.origin.as_deref(),
-        "status" => note.frontmatter.status.as_deref(),
-        _ => note.frontmatter.extra.get(field).and_then(|v| v.as_str()),
-    }?;
-    let value = raw.trim().trim_matches(['"', '\'']).trim();
-    if value.is_empty() {
-        return None;
-    }
+    let value = source_field_value(note, field)?;
+    let value = value.as_str();
     // `normalize_domain` handles emoji folder paths and case. It does NOT know
     // the `knowledge -> life` backwards-compat alias, which lives in
     // `Domain::from_str` (`vault/src/schema.rs:117`), so the schema parse runs
@@ -631,13 +653,37 @@ fn apply_tag_transforms(vault_root: &Path, notes: &[Note], migration: &Migration
             if !migration.tags_remove.is_empty() {
                 next.retain(|t| !migration.tags_remove.contains(t));
             }
-            if next == current {
+            // A note whose tag SET is unchanged may still be in the wrong
+            // on-disk FORM. `field-to-tags` is the pass that establishes one
+            // form for the field it migrates (G4), so an in-scope note with a
+            // non-empty inline list is normalized to block even when nothing
+            // is added. Without this the vault keeps two spellings forever:
+            // the notes that already carried their own domain value as a tag
+            // are exactly the ones the set-comparison skips.
+            // Carrying the source FIELD is what puts a note in scope for form
+            // normalization, independent of whether its VALUE is excluded.
+            // `exclude` says "do not propagate this value as a tag"; it does
+            // not say "leave this note in the old spelling". The 38 `resources`
+            // and 14 `system` notes are the ones that difference decides.
+            let in_scope = migration
+                .field_to_tags
+                .keys()
+                .any(|field| source_field_value(note, field).is_some());
+            let form_only = next == current && in_scope && !current.is_empty();
+            if next == current && !form_only {
                 return Ok(0);
             }
 
             let abs_path = vault_root.join(&note.path);
             let content =
                 std::fs::read_to_string(&abs_path).context(format!("failed to read {}", abs_path.display()))?;
+
+            // Empty lists are left alone: rewriting `tags: []` to a bare
+            // `tags:` swaps one spelling of "no tags" for another and churns
+            // 915 `entities/` files for nothing.
+            if form_only && !has_inline_tag_list(&content) {
+                return Ok(0);
+            }
             let Some(updated) = crate::tags::replace_tags_in_frontmatter(&content, &next) else {
                 log::warn!("tag transform skipped (no frontmatter): {}", note.path.display());
                 return Ok(0);

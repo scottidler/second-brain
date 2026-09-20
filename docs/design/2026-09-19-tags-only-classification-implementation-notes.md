@@ -171,3 +171,77 @@ The apply writes the live vault and is NOT run here. In order:
 6. `find . -name '*.sync-conflict*' | wc -l` == 0 in the vault.
 7. `systemctl --user start borg cortex`, then one daemon tick, then confirm the ten domain tags survived it.
 8. Commit the obsidian repo. **This commit is the authoritative undo for the whole migration**; the inverse plan file is not exact.
+
+### Executed 2026-09-20 (the operator steps above were run, not deferred)
+
+Scott's instruction mid-phase: "there is no my-side". The whole sequence ran.
+
+- dotfiles `cortex.yml`: the three `ai-llm` aliases removed and the
+  `v5-domain-as-tag` entry added, committed as `ed944a0`.
+- `otto deploy`: the release build succeeded but **the install step failed**,
+  `Read-only file system` on `~/.cargo/bin/sb`, which is outside the Bash
+  sandbox's write set. This mattered later (see the daemon-tick finding).
+- Vault snapshot committed FIRST as `17604101` with both daemons stopped, and
+  verified clean of any `tags:` / bullet / `domain:` change before committing,
+  so it is a true pre-migration undo point.
+- P1's deferred criteria, now measured on the deployed config: `max-per-note:
+  8`, `no-classifier-tags` present, `tech|diy|homelab: null` 3 -> 0,
+  `resources|system: null` 2, `ai-llm` aliases 3 -> 0, all ten domain names
+  canonical. `sb cortex sweep --migrate --dry-run`: 1 note would be rewritten
+  with `drop: []`, so **0 notes lose a domain-name tag**.
+- P4 dry-run: **2,536** notes (doc predicted 2,545, due-diligence re-derived
+  2,541; the vault has moved since those measurements). **0** would exceed the
+  cap, which is what raising `max-per-note` to 8 bought.
+- Apply: 2,536 files. Second dry-run: 0. Sync conflicts: 0.
+- `ai` went **1 -> 1,149**, the number the doc predicted. That single tag was
+  the alias chain's fingerprint and it is gone.
+
+### Two implementation gaps the live run exposed
+
+Both were found by running the phase's own criterion, not by review:
+
+1. **Form normalization was missing.** The transform only wrote notes whose tag
+   SET changed, so the ~158 notes that already carried their own domain value
+   kept their inline lists and the vault still had two spellings (G4 forbids
+   that). Fixed: a note in scope for the migration is rewritten to block form
+   even when nothing is added, guarded so `tags: []` is left alone. Idempotence
+   holds, and `field_to_tags_normalizes_form_when_the_set_is_unchanged` pins it.
+2. **`exclude` was over-applied.** The first fix gated form normalization on
+   `field_to_tag_value(...).is_some()`, which is `None` for excluded values, so
+   the 38 `resources` and 14 `system` notes kept inline lists. `exclude` means
+   "do not propagate this VALUE as a tag", not "leave this note's FORM alone".
+   Split into `source_field_value` (no exclusion, answers "is this note in
+   scope") and `field_to_tag_value` (exclusion applied, answers "what tag").
+
+### The daemon tick, and why it looked like data loss
+
+After restarting the daemons, the ten tag counts appeared to collapse: `ai`
+1,149 -> 139, `tech` 840 -> 627, `homelab` 48 -> 8. **Nothing was lost.**
+Counting both on-disk forms showed the totals unchanged (football 223 block +
+78 inline = 301, exactly the pre-tick 301). The daemons had restarted on the
+**old binary**, because `otto deploy`'s install step had failed, and the old
+`replace_tags_in_frontmatter` writes inline. The tick reverted the form, not
+the content.
+
+Fixed by installing the new binary over the busy inode (six `sb oracle serve`
+MCP processes held it, so a plain `cp` gives `Text file busy`; copy-then-`mv`
+replaces by rename and leaves them on the old inode), then re-running the
+migration to restore block form: 1,440 files, all ten counts back to their
+pre-tick values.
+
+**Carry this forward:** every remaining phase's runtime verification is void if
+`~/.cargo/bin/sb` is stale. `otto deploy` cannot install it from inside the
+Bash sandbox.
+
+### Criterion amended (doc defect, evidence recorded in the design doc)
+
+P4's `grep -lE '^tags: \[' $(grep -rl '^domain:' notes work system) | wc -l`
+== 0 cannot be satisfied by P4:
+
+- `system/**` is excluded from the vault scan (`cortex.yml:14`), so `migrate`
+  never visits it, and P10 owns those 10 templates. 17 files, all under
+  `system/`.
+- `tags: []` is already "no tags" by the doc's own Data Model. 4 files, all
+  `domain: resources`.
+
+Amended to `'^tags: \[[^]]'` over `notes work`. Observed: **0**.

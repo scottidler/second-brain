@@ -528,3 +528,45 @@ fn load_plan_reads_the_shipped_undo_file() {
     assert_eq!(plan[0].tags_remove.len(), 10, "expected the ten migrated names");
     assert!(plan[0].field_to_tags.is_empty(), "the inverse must not re-add tags");
 }
+
+#[test]
+fn field_to_tags_normalizes_form_when_the_set_is_unchanged() {
+    // The note already carries its own domain value, so the tag SET does not
+    // change, but its inline list is the wrong on-disk form. Without this the
+    // vault keeps two spellings and P4's own success criterion fails.
+    let v = TestVault::new();
+    std::fs::write(
+        v.root().join("already.md"),
+        "---\ntitle: A\ndate: 2026-03-20\ntype: note\ndomain: tech\norigin: authored\ntags: [tech, rust]\n---\nBody.\n",
+    )
+    .expect("write");
+
+    let count = apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("apply");
+    assert!(count > 0);
+
+    let content = v.read("already.md");
+    assert!(
+        content.contains("tags:\n  - tech\n  - rust"),
+        "not normalized:\n{content}"
+    );
+    assert!(!content.contains("tags: ["), "inline form survived:\n{content}");
+
+    // Still idempotent: the form is right now, so a second pass writes nothing.
+    let again = apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("second apply");
+    assert_eq!(again, 0, "form normalization broke idempotence");
+}
+
+#[test]
+fn field_to_tags_leaves_empty_inline_lists_alone() {
+    // `tags: []` is already "no tags"; rewriting it to a bare `tags:` swaps one
+    // spelling of empty for another and churns every entities/ file.
+    let v = TestVault::new();
+    std::fs::write(
+        v.root().join("empty.md"),
+        "---\ntitle: E\ndate: 2026-03-20\ntype: note\norigin: authored\ntags: []\n---\nBody.\n",
+    )
+    .expect("write");
+
+    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("apply");
+    assert!(v.read("empty.md").contains("tags: []"), "empty list was churned");
+}
