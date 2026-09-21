@@ -396,7 +396,7 @@ Run against current `main` before ready-to-build; observed output recorded under
 - **2026-09-20, author:** on-disk form is the block list (Obsidian-native; two of three writers already).
 - **2026-09-20, author:** ledger `Domain` column deleted with a row rewrite and backup, not made multi-valued (3,234 of 3,302 rows are `-`).
 - **2026-09-20, author:** `resources` and `system` are not propagated as tags; `system/**` joins the tags exemptions.
-- **2026-09-20, author:** default classifier `classifier-dev` with `deterministic` fallback at ingest and a visible `degraded` receipt; threshold 0.9 from the calibration back-test and the Phase 0 spike.
+- **2026-09-20, author:** the shipped default classifier is `deterministic` (`TagsClassifierConfig::default`, `distillers/src/tags.rs`); the deployed hosts opt in to `classifier-dev` per host in `borg.yml` / `cortex.yml`, with `deterministic` fallback at ingest and a visible `degraded` receipt; threshold 0.9 from the calibration back-test and the Phase 0 spike.
 - **2026-09-20, panel r2 M1 -> author:** the `ai`/`ML`/`ml` -> `ai-llm` aliases are retired in P1, before any phase writes `ai` as a tag. Verified live: 1 note carries `ai` today.
 - **2026-09-20, panel r2 M2 -> author:** reingest preservation (P3) lands before the migration (P4). Both seats converged; `apply_cortex_fields` skips non-preserve keys silently.
 - **2026-09-20, panel r2 M4 -> author:** segment guard is a top-level `no-segment-match` list threaded into both `match_to_canonical` and `filter_and_cap`, with `CanonicalSet` replacing the bare `HashSet` (API change acknowledged). The per-group flag was rejected: `tags: HashMap<String, Vec<String>>` cannot carry it.
