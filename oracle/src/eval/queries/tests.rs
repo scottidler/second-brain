@@ -9,12 +9,12 @@ fn write_tmp(yaml: &str) -> tempfile::NamedTempFile {
 
 #[test]
 fn loads_valid_query_set() {
-    let f = write_tmp("queries:\n  - id: a\n    query: hello world\n    domain: ai\n  - id: b\n    query: another\n");
+    let f = write_tmp("queries:\n  - id: a\n    query: hello world\n    tags: [ai]\n  - id: b\n    query: another\n");
     let q = Queries::load(f.path()).expect("load");
     assert_eq!(q.queries.len(), 2);
     assert_eq!(q.queries[0].id, "a");
-    assert_eq!(q.queries[0].domain.as_deref(), Some("ai"));
-    assert!(q.queries[1].domain.is_none());
+    assert_eq!(q.queries[0].tags.as_deref(), Some(&["ai".to_string()][..]));
+    assert!(q.queries[1].tags.is_none());
 }
 
 #[test]

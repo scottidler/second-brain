@@ -16,8 +16,8 @@
 //! - **shared-tag** — rarity-weighted (`Σ 1/ln(1+df_t)`) so blanket tags
 //!   contribute ~nothing; built via a tag→notes inverted index with a fan-out
 //!   cap on blanket buckets.
-//! - **shared-creator / shared-source / shared-domain** — low fixed weight,
-//!   read straight from frontmatter columns.
+//! - **shared-creator / shared-source** (low fixed weight, read straight
+//!   from frontmatter columns).
 //!
 //! Every edge insert obeys the universal resolve-`dst`-or-skip rule (enforced
 //! in `vault::search::SearchIndex::insert_edges`): an edge whose `dst` is
@@ -42,7 +42,6 @@ const KIND_WIKILINK: &str = "wikilink";
 const KIND_SHARED_TAG: &str = "shared-tag";
 const KIND_SHARED_CREATOR: &str = "shared-creator";
 const KIND_SHARED_SOURCE: &str = "shared-source";
-const KIND_SHARED_DOMAIN: &str = "shared-domain";
 /// Note -> repo hub membership (harvest-clyde-sessions design, Phase 10).
 const KIND_REPO_MEMBER: &str = "repo-member";
 /// Note -> creator hub membership (entity-hub-two-vector-synthesis, Phase 1).
@@ -200,7 +199,6 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
     let tag_buckets = invert(&rows, |r| r.tags.clone());
     let creator_buckets = invert(&rows, |r| single(&r.creator));
     let source_buckets = invert(&rows, |r| single(&source_bucket_key(&r.source)));
-    let domain_buckets = invert(&rows, |r| single(&r.domain));
 
     // Determine which notes' edges to rebuild. Per-note staleness (mirroring
     // `stale_embedding_targets`) so an incremental pass touches only notes that
@@ -237,7 +235,6 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
             &tag_buckets,
             &creator_buckets,
             &source_buckets,
-            &domain_buckets,
         )?;
         let (_inserted, skipped) = index.insert_edges(&edges)?;
         tally(&mut stats, &edges);
@@ -264,7 +261,6 @@ fn build_edges_for(
     tag_buckets: &HashMap<String, Vec<String>>,
     creator_buckets: &HashMap<String, Vec<String>>,
     source_buckets: &HashMap<String, Vec<String>>,
-    domain_buckets: &HashMap<String, Vec<String>>,
 ) -> Result<Vec<Edge>> {
     let mut edges: Vec<Edge> = Vec::new();
     let src = &row.path;
@@ -349,15 +345,6 @@ fn build_edges_for(
         source_buckets,
         KIND_SHARED_SOURCE,
         cfg.source_weight,
-        cfg.fanout_cap,
-    );
-    metadata_edges(
-        &mut edges,
-        src,
-        &row.domain,
-        domain_buckets,
-        KIND_SHARED_DOMAIN,
-        cfg.domain_weight,
         cfg.fanout_cap,
     );
 
@@ -531,7 +518,7 @@ fn tally(stats: &mut GraphStats, edges: &[Edge]) {
             KIND_SEMANTIC => stats.semantic += 1,
             KIND_WIKILINK => stats.wikilink += 1,
             KIND_SHARED_TAG => stats.shared_tag += 1,
-            KIND_SHARED_CREATOR | KIND_SHARED_SOURCE | KIND_SHARED_DOMAIN => stats.metadata += 1,
+            KIND_SHARED_CREATOR | KIND_SHARED_SOURCE => stats.metadata += 1,
             // Explicit arms, not the catch-all: the `_ => {}` below hid
             // `repo-member` from every run report since Phase 10 shipped.
             KIND_REPO_MEMBER => stats.repo_member += 1,

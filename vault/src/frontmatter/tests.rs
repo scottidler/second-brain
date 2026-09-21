@@ -30,7 +30,6 @@ fn test_frontmatter_roundtrip() {
         title: Some("Test".to_string()),
         date: Some("2026-01-01".to_string()),
         note_type: Some("note".to_string()),
-        domain: Some("tech".to_string()),
         origin: Some("authored".to_string()),
         tags: Some(vec!["rust".to_string()]),
         ..Default::default()
@@ -38,7 +37,7 @@ fn test_frontmatter_roundtrip() {
 
     let yaml = fm.to_yaml().expect("to_yaml");
     assert!(yaml.contains("title: Test"));
-    assert!(yaml.contains("domain: tech"));
+    assert!(yaml.contains("tags:"));
 }
 
 #[test]

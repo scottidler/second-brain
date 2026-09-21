@@ -85,7 +85,6 @@ pub struct GraphNoteRow {
     pub tags: Vec<String>,
     pub source: String,
     pub creator: String,
-    pub domain: String,
     pub body: String,
     pub modified_at: i64,
     /// Canonical `<org>/<repo>` anchor (harvest-clyde-sessions Phase 9), empty
@@ -379,25 +378,23 @@ impl SearchIndex {
     pub fn graph_note_rows(&self) -> Result<Vec<GraphNoteRow>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path, tags, source, creator, domain, body, modified_at, repo, repos_touched FROM notes")?;
+            .prepare("SELECT path, tags, source, creator, body, modified_at, repo, repos_touched FROM notes")?;
         let rows = stmt.query_map([], |row| {
             let path: String = row.get(0)?;
             let tags_json: String = row.get::<_, Option<String>>(1)?.unwrap_or_default();
             let source: String = row.get::<_, Option<String>>(2)?.unwrap_or_default();
             let creator: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
-            let domain: String = row.get::<_, Option<String>>(4)?.unwrap_or_default();
-            let body: String = row.get::<_, Option<String>>(5)?.unwrap_or_default();
-            let modified_at: i64 = row.get::<_, Option<i64>>(6)?.unwrap_or(0);
-            let repo: String = row.get::<_, Option<String>>(7)?.unwrap_or_default();
+            let body: String = row.get::<_, Option<String>>(4)?.unwrap_or_default();
+            let modified_at: i64 = row.get::<_, Option<i64>>(5)?.unwrap_or(0);
+            let repo: String = row.get::<_, Option<String>>(6)?.unwrap_or_default();
             // NULL (`None`) and `'[]'` (`Some(vec![])`) both arrive as an empty
             // touched set here; only the populated case drives an extra edge.
-            let repos_touched_json: Option<String> = row.get::<_, Option<String>>(8)?;
+            let repos_touched_json: Option<String> = row.get::<_, Option<String>>(7)?;
             Ok((
                 path,
                 tags_json,
                 source,
                 creator,
-                domain,
                 body,
                 modified_at,
                 repo,
@@ -406,7 +403,7 @@ impl SearchIndex {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (path, tags_json, source, creator, domain, body, modified_at, repo, repos_touched_json) = r?;
+            let (path, tags_json, source, creator, body, modified_at, repo, repos_touched_json) = r?;
             let tags: Vec<String> = match serde_json::from_str(&tags_json) {
                 Ok(t) => t,
                 Err(e) => {
@@ -431,7 +428,6 @@ impl SearchIndex {
                 tags,
                 source,
                 creator,
-                domain,
                 body,
                 modified_at,
                 repo,
@@ -485,16 +481,15 @@ impl SearchIndex {
         tags: &[&str],
         source: &str,
         creator: &str,
-        domain: &str,
         body: &str,
         modified_at: i64,
     ) -> Result<()> {
         let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
         self.conn.execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
-                path, "T", domain, "article", "assisted", "", "2026-06-05",
+                path, "T", "article", "assisted", "", "2026-06-05",
                 tags_json, source, creator, body, body, modified_at,
             ],
         )?;

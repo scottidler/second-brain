@@ -11,7 +11,7 @@ fn outcome_is_failure_protocol_error() {
 }
 
 #[test]
-fn outcome_is_failure_domain_not_found() {
+fn outcome_is_failure_application_not_found() {
     let result = CallToolResult::success(vec![
         Content::json(json!({
             "found": false,

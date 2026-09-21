@@ -330,12 +330,12 @@ async fn scan_vault_inside_block_in_place_does_not_panic() {
     let root = tmp.path();
     fs::write(
         root.join("a.md"),
-        "---\ndomain: tools\ntype: knowledge\norigin: authored\nstatus: draft\nmethod: cli\n---\n# A\n",
+        "---\ntype: knowledge\norigin: authored\nstatus: draft\nmethod: cli\n---\n# A\n",
     )
     .expect("write a");
     fs::write(
         root.join("b.md"),
-        "---\ndomain: tools\ntype: knowledge\norigin: authored\nstatus: draft\nmethod: cli\n---\n# B\n",
+        "---\ntype: knowledge\norigin: authored\nstatus: draft\nmethod: cli\n---\n# B\n",
     )
     .expect("write b");
 
@@ -620,12 +620,12 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
             },
             ..crate::config::ActionsConfig::default()
         },
-        // Point fabric at a binary that does not exist so the DOMAIN Tier-2 LLM
-        // path (`domain_by_llm` -> `fabric::is_available`) is deterministically
-        // OFF on every machine. Without this, a dev host that happens to have a
-        // populated oracle index AND a real `fabric` binary would reach the
-        // network mid-test. Tag classification is `deterministic` by config
-        // default, so nothing else here calls out.
+        // Point fabric at a binary that does not exist so any fabric-backed
+        // action in this test (e.g. intel) is deterministically OFF on every
+        // machine. Without this, a dev host with a real `fabric` binary would
+        // reach the network mid-test. Tag classification is `deterministic`
+        // by config default and never calls fabric, so this only matters for
+        // the other actions enabled below.
         fabric: crate::config::FabricConfig {
             binary: "cortex-test-no-fabric-binary".to_string(),
             ..crate::config::FabricConfig::default()
@@ -675,29 +675,31 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     )
     .expect("write no-signal inbox note");
 
-    // -- classify (catch-up path, Phase 8 audit finding #2): a domainless note
-    // already in notes/ with a Tier-1-classifiable tag (`rust` -> tech). Cycle 1
-    // enriches it in place (writes `domain: tech` + classified markers); once it
-    // has a domain it leaves the unclassified target set, so cycle 2 leaves it
+    // -- classify (catch-up path, Phase 8 audit finding #2): a tag-less note
+    // already in notes/ (orphaned by a reingest that dropped its tags), but
+    // its `author-tags` (the publisher's own hashtag) survived so the
+    // deterministic classifier has a candidate to confirm. Cycle 1 enriches
+    // it in place (writes the recovered tag + classified markers); once it
+    // has tags it leaves the unclassified target set, so cycle 2 leaves it
     // alone. `origin: authored` keeps every other action off it. Its catch-up
     // write was previously invisible to the fingerprint (finding #2). --
     std::fs::write(
         vault_root.join("orphan.md"),
-        "---\ntitle: Orphan Note\ndate: 2020-01-01\ntype: note\norigin: authored\ntags:\n  - rust\n---\nAn orphaned note that lost its domain during a reingest.\n",
+        "---\ntitle: Orphan Note\ndate: 2020-01-01\ntype: note\norigin: authored\ntags: []\nauthor-tags:\n  - rust\n---\nAn orphaned note that lost its tags during a reingest.\n",
     )
-    .expect("write domainless catch-up note");
+    .expect("write tag-less catch-up note");
 
     // -- link: a glossary-concept hub note (self-link-excluded by its own
     // stem) plus a note whose prose mentions the concept and gets a wikilink
     // inserted at first mention. --
     std::fs::write(
         vault_root.join("langchain.md"),
-        "---\ntitle: LangChain\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - programming\n---\nThe LangChain hub note.\n",
+        "---\ntitle: LangChain\ndate: 2020-01-01\ntype: note\norigin: authored\ntags:\n  - programming\n---\nThe LangChain hub note.\n",
     )
     .expect("write langchain hub note");
     std::fs::write(
         vault_root.join("mentions-langchain.md"),
-        "---\ntitle: Mentions LangChain\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - programming\n---\nWe use LangChain daily in production for retrieval workflows.\n",
+        "---\ntitle: Mentions LangChain\ndate: 2020-01-01\ntype: note\norigin: authored\ntags:\n  - programming\n---\nWe use LangChain daily in production for retrieval workflows.\n",
     )
     .expect("write mentions-langchain note");
 
@@ -716,19 +718,19 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     let dup_body = "This exact body text appears twice on purpose for duplicate detection testing, see [[langchain]] for reference.\n";
     std::fs::write(
         vault_root.join("dup-a.md"),
-        format!("---\ntitle: Duplicate A\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - programming\n---\n{dup_body}"),
+        format!("---\ntitle: Duplicate A\ndate: 2020-01-01\ntype: note\norigin: assisted\ntags:\n  - programming\n---\n{dup_body}"),
     )
     .expect("write dup-a note");
     std::fs::write(
         vault_root.join("dup-b.md"),
-        format!("---\ntitle: Duplicate B\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - programming\n---\n{dup_body}"),
+        format!("---\ntitle: Duplicate B\ndate: 2020-01-01\ntype: note\norigin: assisted\ntags:\n  - programming\n---\n{dup_body}"),
     )
     .expect("write dup-b note");
 
     // -- quality/link: assisted origin, body mentions a glossary concept. --
     std::fs::write(
         vault_root.join("k8s-notes.md"),
-        "---\ntitle: K8s Notes\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - programming\n---\nNotes about kubernetes clusters and pods for the on-call rotation, see [[langchain]] too.\n",
+        "---\ntitle: K8s Notes\ndate: 2020-01-01\ntype: note\norigin: assisted\ntags:\n  - programming\n---\nNotes about kubernetes clusters and pods for the on-call rotation, see [[langchain]] too.\n",
     )
     .expect("write k8s-notes");
 
@@ -741,14 +743,14 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     // nothing left to alias-fix) - both orders converge by cycle 2. --
     std::fs::write(
         vault_root.join("alias-note.md"),
-        "---\ntitle: Alias Note\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: assisted\ntags:\n  - k8s\n---\nNotes about container orchestration and clusters at scale, see [[langchain]] too.\n",
+        "---\ntitle: Alias Note\ndate: 2020-01-01\ntype: note\norigin: assisted\ntags:\n  - k8s\n---\nNotes about container orchestration and clusters at scale, see [[langchain]] too.\n",
     )
     .expect("write alias-note");
 
     // -- naming: a badly-named file lint renames to lowercase-hyphenated. --
     std::fs::write(
         vault_root.join("My Badly Named Note.md"),
-        "---\ntitle: My Badly Named Note\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - programming\n---\nThis filename violates the naming convention on purpose.\n",
+        "---\ntitle: My Badly Named Note\ndate: 2020-01-01\ntype: note\norigin: authored\ntags:\n  - programming\n---\nThis filename violates the naming convention on purpose.\n",
     )
     .expect("write badly-named note");
 
@@ -757,7 +759,7 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     // because the design doc names broken-links among the default set). --
     std::fs::write(
         vault_root.join("no-title-note.md"),
-        "---\ndate: 2020-01-01\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - programming\n---\nSee [[nonexistent-target]] for background reading on this topic.\n",
+        "---\ndate: 2020-01-01\ntype: note\norigin: authored\ntags:\n  - programming\n---\nSee [[nonexistent-target]] for background reading on this topic.\n",
     )
     .expect("write no-title-note");
 

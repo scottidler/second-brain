@@ -482,7 +482,6 @@ fn classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonConfi
         path: None,
         force: false,
         review_only: false,
-        reclassify_domain: None,
         retag: Vec::new(),
     };
     match crate::classify::run(vault_root, config, &opts) {
@@ -598,7 +597,6 @@ where
                     path: None,
                     force: false,
                     review_only: false,
-                    reclassify_domain: None,
                     retag: Vec::new(),
                 };
                 match crate::classify::run_with_notes(&notes, vault_root, config, &opts) {
@@ -608,7 +606,7 @@ where
                         // substring sniff of violation messages. That old sniff
                         // ignored the two other write paths (`mark_needs_review`
                         // for no-signal/low-confidence inbox notes and catch-up
-                        // enrichment for domainless notes/), so those writes
+                        // enrichment for tag-less notes/), so those writes
                         // fired the daemon watcher while being invisible to the
                         // fingerprint - reopening the oscillation defect through
                         // the classify arm.

@@ -11,7 +11,6 @@ use std::str::FromStr;
 /// verbatim. Without it a refetch would strip tags cortex or a migration
 /// added, which is the failure the tags-only design doc's P3 exists to close.
 pub const CORTEX_PRESERVE_KEYS: &[&str] = &[
-    "domain",
     "tags",
     "status",
     "cortex-classified",
@@ -20,109 +19,6 @@ pub const CORTEX_PRESERVE_KEYS: &[&str] = &[
     "cortex-quality",
     "cortex-quality-issues",
 ];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum Domain {
-    Ai,
-    Tech,
-    Football,
-    Work,
-    Writing,
-    Music,
-    Spanish,
-    Life,
-    Homelab,
-    Diy,
-    Resources,
-    System,
-}
-
-impl Domain {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Ai => "ai",
-            Self::Tech => "tech",
-            Self::Football => "football",
-            Self::Work => "work",
-            Self::Writing => "writing",
-            Self::Music => "music",
-            Self::Spanish => "spanish",
-            Self::Life => "life",
-            Self::Homelab => "homelab",
-            Self::Diy => "diy",
-            Self::Resources => "resources",
-            Self::System => "system",
-        }
-    }
-
-    /// Human-readable gloss for this domain, rendered into
-    /// `system/schemas/domain-values.md` by `sb cortex schema` and returned by
-    /// oracle's `schema_info`. Exhaustive on purpose: a new variant cannot ship
-    /// undescribed.
-    pub fn description(&self) -> &'static str {
-        match self {
-            Self::Ai => "AI, LLMs, agents, prompting, AI tools",
-            Self::Tech => "Programming, CLI tools, DevOps, SRE, Docker, Kubernetes, infrastructure",
-            Self::Football => "Coaching, schemes, plays, drills, film notes",
-            Self::Work => "Platform engineering, career, leadership, team management",
-            Self::Writing => "Fiction projects, craft essays, poetry",
-            Self::Music => "Electronic music production, instruments",
-            Self::Spanish => "Language learning, vocabulary, grammar",
-            Self::Life => "Health, fitness, motivation, psychology, habits, personal development, culture",
-            Self::Homelab => "Self-hosting, home networking, Plex, NAS, Unifi, pfSense, home automation",
-            Self::Diy => "Building, woodworking, construction, knots, furniture, crafts",
-            Self::Resources => "Books, general reference material (not a catch-all)",
-            Self::System => "Vault operations, templates, schemas, dashboards",
-        }
-    }
-
-    pub fn all() -> &'static [Self] {
-        &[
-            Self::Ai,
-            Self::Tech,
-            Self::Football,
-            Self::Work,
-            Self::Writing,
-            Self::Music,
-            Self::Spanish,
-            Self::Life,
-            Self::Homelab,
-            Self::Diy,
-            Self::Resources,
-            Self::System,
-        ]
-    }
-}
-
-impl fmt::Display for Domain {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl FromStr for Domain {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "ai" => Ok(Self::Ai),
-            "tech" => Ok(Self::Tech),
-            "football" => Ok(Self::Football),
-            "work" => Ok(Self::Work),
-            "writing" => Ok(Self::Writing),
-            "music" => Ok(Self::Music),
-            "spanish" => Ok(Self::Spanish),
-            "life" => Ok(Self::Life),
-            "knowledge" => Ok(Self::Life), // backwards-compat alias
-            "homelab" => Ok(Self::Homelab),
-            "diy" => Ok(Self::Diy),
-            "resources" => Ok(Self::Resources),
-            "system" => Ok(Self::System),
-            _ => Err(format!("unknown domain: {s}")),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -222,7 +118,7 @@ impl NoteType {
             Self::System => "Vault operational note",
             Self::Entity => {
                 "Entity hub (concept, creator, or source) stubbed by `sb cortex hub`; \
-                 carries no `domain`, `origin`, or `status`"
+                 carries no `origin` or `status`"
             }
             Self::Digest => "Periodic intel digest produced by `sb cortex intel`",
             Self::Review => "Vault review note produced by `sb cortex intel`",
@@ -503,8 +399,8 @@ impl Method {
     }
 
     /// Human-readable gloss for this ingest method. No `*-values.md` file is
-    /// rendered for `Method` (the four generated schema docs cover domain,
-    /// type, origin, status); this feeds oracle's `schema_info`. Exhaustive on
+    /// rendered for `Method` (the four generated schema docs cover type,
+    /// origin, status, tags); this feeds oracle's `schema_info`. Exhaustive on
     /// purpose: a new variant cannot ship undescribed.
     pub fn description(&self) -> &'static str {
         match self {

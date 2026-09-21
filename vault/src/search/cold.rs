@@ -21,7 +21,7 @@ impl super::SearchIndex {
         // untyped note inside journal/ is still excluded by path).
         let daily = crate::schema::NoteType::Daily.as_str();
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT path, title, domain, date
+            "SELECT path, title, date
              FROM notes
              WHERE search_hit_count = 0
                AND last_accessed_at IS NULL
@@ -40,8 +40,7 @@ impl super::SearchIndex {
                 Ok(ColdNote {
                     path: row.get(0)?,
                     title: row.get::<_, String>(1).unwrap_or_default(),
-                    domain: row.get::<_, String>(2).unwrap_or_default(),
-                    date: row.get::<_, String>(3).unwrap_or_default(),
+                    date: row.get::<_, String>(2).unwrap_or_default(),
                 })
             })?
             .filter_map(warn_row)

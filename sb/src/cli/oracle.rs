@@ -155,11 +155,6 @@ fn print_vault_stats(config: &oracle::Config, stats: &vault::search::VaultStats)
         }
     }
 
-    println!("\nBy domain:");
-    for (domain, count) in &stats.by_domain {
-        println!("  {domain:<15} {count}");
-    }
-
     println!("\nBy tag (top 20):");
     for (tag, count) in &stats.by_tag {
         println!("  {tag:<15} {count}");
@@ -236,8 +231,8 @@ fn print_tool_list(tools: &[rmcp::model::Tool]) {
 ///
 /// Two failure shapes are recognized:
 /// - `is_error == Some(true)`: MCP-level protocol error (invalid args, panic).
-/// - Top-level JSON `"found": false`: domain-level "not found" — the tool ran
-///   successfully but the requested item doesn't exist.
+/// - Top-level JSON `"found": false`: application-level "not found" - the
+///   tool ran successfully but the requested item doesn't exist.
 fn outcome_is_failure(result: &rmcp::model::CallToolResult) -> bool {
     if result.is_error == Some(true) {
         return true;

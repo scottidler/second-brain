@@ -51,7 +51,7 @@ fn daily_digest_second_run_on_unchanged_inputs_makes_zero_llm_calls_and_zero_wri
     v.add_note(
         "yesterday-note.md",
         &format!(
-            "---\ntitle: Yesterday Note\ndate: {yesterday_str}\ntype: note\ndomain: tech\norigin: authored\ntags: [rust]\n---\nSome content from yesterday.\n"
+            "---\ntitle: Yesterday Note\ndate: {yesterday_str}\ntype: note\norigin: authored\ntags: [rust]\n---\nSome content from yesterday.\n"
         ),
     );
     let notes = v.scan();
@@ -115,7 +115,7 @@ fn daily_digest_regenerates_when_inputs_change() {
     v.add_note(
         "yesterday-note.md",
         &format!(
-            "---\ntitle: Yesterday Note\ndate: {yesterday_str}\ntype: note\ndomain: tech\norigin: authored\ntags: [rust]\n---\nSome content from yesterday.\n"
+            "---\ntitle: Yesterday Note\ndate: {yesterday_str}\ntype: note\norigin: authored\ntags: [rust]\n---\nSome content from yesterday.\n"
         ),
     );
     let config = v.config().actions.intel;
@@ -136,7 +136,7 @@ fn daily_digest_regenerates_when_inputs_change() {
     v.add_note(
         "another-yesterday-note.md",
         &format!(
-            "---\ntitle: Another Note\ndate: {yesterday_str}\ntype: note\ndomain: tech\norigin: authored\ntags: [python]\n---\nDifferent content.\n"
+            "---\ntitle: Another Note\ndate: {yesterday_str}\ntype: note\norigin: authored\ntags: [python]\n---\nDifferent content.\n"
         ),
     );
     let notes2 = v.scan();
@@ -282,7 +282,7 @@ fn test_daily_digest_fallback_on_llm_failure() {
     v.add_note(
             "yesterday-note.md",
             &format!(
-                "---\ntitle: Yesterday Note\ndate: {yesterday_str}\ntype: note\ndomain: tech\norigin: authored\ntags: [rust]\n---\nSome content from yesterday.\n"
+                "---\ntitle: Yesterday Note\ndate: {yesterday_str}\ntype: note\norigin: authored\ntags: [rust]\n---\nSome content from yesterday.\n"
             ),
         );
     let notes = v.scan();

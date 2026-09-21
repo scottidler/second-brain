@@ -230,8 +230,8 @@ fn migration_no_ops_on_fresh_schema() {
     index
         .conn
         .execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES ('notes/z.md', 'T', 'tech', 'article', 'assisted', '', '2026-07-05', '[]', '', '', 'b', 's', 100)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('notes/z.md', 'T', 'article', 'assisted', '', '2026-07-05', '[]', '', '', 'b', 's', 100)",
             [],
         )
         .expect("insert note for FK");

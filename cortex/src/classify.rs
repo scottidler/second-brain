@@ -6,30 +6,22 @@
 //! for the next tick. When the configured implementation errors the configured
 //! `fallback` runs over the note's existing tags and `author-tags` - today's
 //! Tier 1 - so a classifier outage only holds notes that carry no tags at all.
-//!
-//! `domain` is still derived and still written (tag-to-domain map, then the
-//! source-URL map, then the Fabric LLM tier) until the phase that deletes the
-//! field; nothing here reads it to decide whether a note promotes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use eyre::{Result, WrapErr};
-use serde::Deserialize;
 
-use crate::config::{Config, FabricConfig, FrontmatterConfig};
+use crate::config::{Config, FrontmatterConfig};
 use crate::opts::ClassifyOpts;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::scope::insert_frontmatter_fields;
 use crate::vault::{Note, scan_vault};
 use ::vault::canonical::{self, CanonicalSet, CanonicalTagsFile};
-use ::vault::schema::Domain;
-use ::vault::search::SearchIndex;
 use distillers::tags::{CandidateSource, Confidence, TagCandidate, TagClassifier, TagInput, TagOutput};
 
-/// Top-level orchestrator for `sb cortex classify`. Scans the vault, opens the
-/// oracle search index (best-effort, Tier-2 LLM context), and dispatches to
-/// `apply_classify` or `lint_classify` based on `opts.apply`.
+/// Top-level orchestrator for `sb cortex classify`. Scans the vault and
+/// dispatches to `apply_classify` or `lint_classify` based on `opts.apply`.
 ///
 /// Returns `(Report, written_paths)`. `written_paths` is the concrete list of
 /// vault-relative paths this call ACTUALLY wrote (promotions + catch-up
@@ -61,37 +53,16 @@ pub fn run_with_notes(
         notes.len(),
         opts.apply
     );
-    // Open the oracle index READ-ONLY for Tier-2 similar-note context. We do
-    // NOT call `index_vault` here: cortex must never write oracle's `notes`
-    // table (one-way data flow; oracle's VaultWatcher owns index refresh).
-    // Writing it made cortex+oracle concurrent cross-process writers.
-    let db_path = config.oracle_db_path();
-    // `.ok()` by design - Tier-2 context is optional and classify still runs
-    // without it - but the degradation must be visible, not silent (the
-    // fail-closed legacy-oracle-DB guard lands here as an Err).
-    let search_index = SearchIndex::open(&db_path)
-        .inspect_err(|e| {
-            log::warn!(
-                "classify::run_with_notes: oracle index unavailable at {}, continuing without Tier-2 similar-note context: {e}",
-                db_path.display(),
-            );
-        })
-        .ok();
-    let search_ref = search_index.as_ref();
-
     // Built once per run, never per note: `ClassifierDev` reloads nothing, but
     // the vocabulary behind it is two YAML files and a full vault pass would
     // read them thousands of times.
     let classifiers = Classifiers::load(config)?;
 
     if opts.apply {
-        apply_classify(vault_root, notes, config, opts, &classifiers, search_ref)
+        apply_classify(vault_root, notes, config, opts, &classifiers)
     } else {
         // Dry-run writes nothing, so the written-paths list is always empty.
-        Ok((
-            lint_classify(notes, vault_root, config, opts, &classifiers, search_ref),
-            Vec::new(),
-        ))
+        Ok((lint_classify(notes, vault_root, config, opts, &classifiers), Vec::new()))
     }
 }
 
@@ -132,8 +103,7 @@ impl Classifiers {
             canonical_file.no_classifier_tags.len(),
         );
         Ok(Self {
-            // No `FabricRunner` is wired here: cortex's Fabric surface is the
-            // domain tier below, and `fabric-closed` degrades to
+            // No `FabricRunner` is wired here: `fabric-closed` degrades to
             // `deterministic` without one (`distillers::tags::build_kind`).
             primary: distillers::tags::build(cfg, &canon, &mapping, None),
             fallback: distillers::tags::build_fallback(cfg, &canon, &mapping, None),
@@ -182,177 +152,13 @@ impl Classifiers {
     }
 }
 
-/// Classification configuration from cortex.yml
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
-pub struct ClassifyConfig {
-    pub confidence_threshold: f64,
-    pub fabric_pattern: String,
-    pub fabric_timeout_secs: u64,
-    pub max_input_tokens: usize,
-    pub similar_notes_limit: usize,
-    pub tag_domain_map: HashMap<String, Vec<String>>,
-    pub source_domain_map: HashMap<String, Vec<String>>,
-}
-
-impl Default for ClassifyConfig {
-    fn default() -> Self {
-        Self {
-            confidence_threshold: 0.7,
-            // The installed pattern file is `obsidian-classify.md`
-            // (`resolve_pattern` appends `.md`). The old `cortex_classify`
-            // default matched no file, so Tier-2 LLM classification was
-            // silently dead on the live system.
-            fabric_pattern: "obsidian-classify".to_string(),
-            fabric_timeout_secs: 30,
-            max_input_tokens: 8000,
-            similar_notes_limit: 5,
-            tag_domain_map: default_tag_domain_map(),
-            source_domain_map: HashMap::new(),
-        }
-    }
-}
-
-fn default_tag_domain_map() -> HashMap<String, Vec<String>> {
-    let mut m = HashMap::new();
-    m.insert(
-        "ai".into(),
-        vec![
-            "ai",
-            "claude",
-            "llm",
-            "gpt",
-            "anthropic",
-            "openai",
-            "agents",
-            "prompting",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-    );
-    m.insert(
-        "tech".into(),
-        vec![
-            "rust",
-            "python",
-            "nix",
-            "cli",
-            "devops",
-            "obsidian",
-            "neovim",
-            "linux",
-            "programming",
-            "gemini",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-    );
-    m.insert(
-        "football".into(),
-        vec!["football", "offense", "defense", "coaching", "drills", "plays"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-    );
-    m.insert(
-        "work".into(),
-        vec!["tatari", "sre", "infrastructure", "kubernetes", "platform"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-    );
-    m.insert(
-        "writing".into(),
-        vec!["writing", "fiction", "plot", "worldbuilding", "publishing"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-    );
-    m.insert(
-        "music".into(),
-        vec!["music", "synth", "production", "ableton", "electronic"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-    );
-    m.insert(
-        "spanish".into(),
-        vec!["spanish", "espanol", "vocab", "grammar", "conjugation"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-    );
-    m.insert(
-        "life".into(),
-        vec![
-            "health",
-            "exercise",
-            "learning",
-            "vocabulary",
-            "productivity",
-            "motivation",
-            "fitness",
-            "psychology",
-            "mindset",
-            "habits",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-    );
-    m.insert(
-        "homelab".into(),
-        vec![
-            "homelab",
-            "selfhosted",
-            "plex",
-            "unifi",
-            "pfsense",
-            "proxmox",
-            "nas",
-            "pihole",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-    );
-    m.insert(
-        "diy".into(),
-        vec![
-            "diy",
-            "woodworking",
-            "building",
-            "knots",
-            "construction",
-            "makeover",
-            "furniture",
-            "timber",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-    );
-    m.insert(
-        "resources".into(),
-        vec!["book", "reference", "tools"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-    );
-    m
-}
-
 /// What classifying one note produced.
 ///
 /// `tags` is the answer that matters: its `confidence` decides promotion and
-/// its `method` is written to `cortex-classified-by`. `domain` rides along,
-/// still derived and still written, until the phase that deletes the field.
+/// its `method` is written to `cortex-classified-by`.
 #[derive(Debug)]
 pub struct ClassifyResult {
     pub tags: TagOutput,
-    pub domain: Option<Domain>,
     pub reason: String,
 }
 
@@ -363,11 +169,6 @@ impl ClassifyResult {
 
     pub fn method(&self) -> &'static str {
         self.tags.method.as_str()
-    }
-
-    /// `domain` for a log or report line; `-` when no tier produced one.
-    fn domain_str(&self) -> &'static str {
-        self.domain.map_or("-", |d| d.as_str())
     }
 }
 
@@ -447,9 +248,6 @@ fn select_targets<'a>(notes: &'a [Note], vault_root: &Path, config: &Config, opt
     if !opts.retag.is_empty() {
         return filter_retag_notes(notes, &opts.retag, vault_root);
     }
-    if let Some(domain) = opts.reclassify_domain.as_deref() {
-        return filter_domain_notes(notes, domain);
-    }
     let inbox = filter_inbox_notes(notes, opts.force, opts.review_only);
     let unclassified = filter_unclassified_notes(notes, &config.actions.frontmatter);
     inbox.into_iter().chain(unclassified).collect()
@@ -462,15 +260,13 @@ pub fn lint_classify(
     config: &Config,
     opts: &ClassifyOpts,
     classifiers: &Classifiers,
-    search_index: Option<&SearchIndex>,
 ) -> Report {
     let mut report = Report::default();
     let targets = select_targets(notes, vault_root, config, opts);
-    let classify_config = &config.actions.classify;
 
     for note in &targets {
         let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
-        let result = classify_note(note, classifiers, classify_config, &config.fabric, search_index);
+        let result = classify_note(note, classifiers);
 
         if !opts.retag.is_empty() {
             if result.confidence() == Confidence::Low {
@@ -521,9 +317,8 @@ pub fn lint_classify(
                 rule: "classify".to_string(),
                 severity: Severity::Info,
                 message: format!(
-                    "would catch-up classify tags=[{}], domain={}, method={}",
+                    "would catch-up classify tags=[{}], method={}",
                     result.tags.tags.join(", "),
-                    result.domain_str(),
                     result.method(),
                 ),
                 fix: None,
@@ -534,9 +329,8 @@ pub fn lint_classify(
                 rule: "classify".to_string(),
                 severity: Severity::Info,
                 message: format!(
-                    "would classify as tags=[{}], domain={}, confidence={}, method={}: {}",
+                    "would classify as tags=[{}], confidence={}, method={}: {}",
                     result.tags.tags.join(", "),
-                    result.domain_str(),
                     result.confidence().as_str(),
                     result.method(),
                     result.reason,
@@ -555,15 +349,14 @@ pub fn lint_classify(
 
 /// Apply: classify and move notes from inbox/ to notes/.
 ///
-/// Three write shapes, selected by `opts`: `--retag` REPLACES a named note's
-/// tags (protect list honored, never writes empty), `--reclassify-domain`
-/// rewrites in place without moving, and the default run promotes inbox notes
-/// and catch-up-enriches domainless ones in `notes/`.
+/// Two write shapes, selected by `opts`: `--retag` REPLACES a named note's
+/// tags (protect list honored, never writes empty), and the default run
+/// promotes inbox notes and catch-up-enriches tag-less ones in `notes/`.
 ///
 /// Returns `(Report, written_paths)`. `written_paths` is the union of the real,
 /// vault-relative paths this call actually WROTE - promotions, catch-up
-/// enrichment, reclassify rewrites, retags, and needs-review marks - never the
-/// paths of notes merely inspected. It is the classify equivalent of
+/// enrichment, retags, and needs-review marks - never the paths of notes
+/// merely inspected. It is the classify equivalent of
 /// `LintApplyReport.written_paths` and is the ONLY thing the daemon's
 /// oscillation fingerprint may draw from for the classify action.
 pub fn apply_classify(
@@ -572,12 +365,9 @@ pub fn apply_classify(
     config: &Config,
     opts: &ClassifyOpts,
     classifiers: &Classifiers,
-    search_index: Option<&SearchIndex>,
 ) -> Result<(Report, Vec<String>)> {
     let target_notes = select_targets(notes, vault_root, config, opts);
-    let classify_config = &config.actions.classify;
     let is_retag = !opts.retag.is_empty();
-    let is_reclassify = opts.reclassify_domain.is_some();
     let mut report = Report::default();
     let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
     // Real, byte-changed paths this call wrote - the daemon fingerprints this,
@@ -588,7 +378,7 @@ pub fn apply_classify(
 
     for note in &target_notes {
         let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
-        let result = classify_note(note, classifiers, classify_config, &config.fabric, search_index);
+        let result = classify_note(note, classifiers);
 
         // `--retag`: replace, not union. The fresh classification wins outright;
         // the previous tags survive only through the protect list or when the
@@ -635,7 +425,7 @@ pub fn apply_classify(
         }
 
         if result.confidence() == Confidence::Low {
-            if !is_reclassify && !already_in_notes && mark_needs_review(vault_root, note)? {
+            if !already_in_notes && mark_needs_review(vault_root, note)? {
                 written.push(note.path.to_string_lossy().to_string());
             }
             log::info!(
@@ -645,8 +435,8 @@ pub fn apply_classify(
             continue;
         }
 
-        // Catch-up: enrich domainless notes in notes/ in place
-        if already_in_notes && !is_reclassify {
+        // Catch-up: enrich tag-less notes already in notes/ in place
+        if already_in_notes {
             let fields = build_enrichment_fields(&result, note, classifiers.canon.max_per_note);
             if let Some(path) = write_fields(vault_root, note, &fields, "catch-up classify")? {
                 written.push(path);
@@ -655,47 +445,17 @@ pub fn apply_classify(
                     rule: "classify".to_string(),
                     severity: Severity::Info,
                     message: format!(
-                        "catch-up classified tags=[{}], domain={} (method={})",
+                        "catch-up classified tags=[{}] (method={})",
                         result.tags.tags.join(", "),
-                        result.domain_str(),
                         result.method(),
                     ),
                     fix: None,
                 });
 
                 log::info!(
-                    "catch-up classified {} (tags=[{}], domain={}, method={})",
+                    "catch-up classified {} (tags=[{}], method={})",
                     note.path.display(),
                     result.tags.tags.join(", "),
-                    result.domain_str(),
-                    result.method(),
-                );
-            }
-            continue;
-        }
-
-        // For reclassify: update in place, no file move
-        if is_reclassify {
-            let fields = build_enrichment_fields(&result, note, classifiers.canon.max_per_note);
-            if let Some(path) = write_fields(vault_root, note, &fields, "reclassify")? {
-                written.push(path);
-                report.add(Violation {
-                    path: note.path.clone(),
-                    rule: "classify".to_string(),
-                    severity: Severity::Info,
-                    message: format!(
-                        "reclassified domain={} (method={})",
-                        result.domain_str(),
-                        result.method(),
-                    ),
-                    fix: None,
-                });
-
-                log::info!(
-                    "reclassified {} (domain={}, confidence={}, method={})",
-                    note.path.display(),
-                    result.domain_str(),
-                    result.confidence().as_str(),
                     result.method(),
                 );
             }
@@ -770,21 +530,19 @@ pub fn apply_classify(
             rule: "classify".to_string(),
             severity: Severity::Info,
             message: format!(
-                "promoted to {} (tags=[{}], domain={}, method={})",
+                "promoted to {} (tags=[{}], method={})",
                 dest_relative.display(),
                 result.tags.tags.join(", "),
-                result.domain_str(),
                 result.method(),
             ),
             fix: None,
         });
 
         log::info!(
-            "promoted {} -> {} (tags=[{}], domain={}, confidence={}, method={})",
+            "promoted {} -> {} (tags=[{}], confidence={}, method={})",
             note.path.display(),
             dest_relative.display(),
             result.tags.tags.join(", "),
-            result.domain_str(),
             result.confidence().as_str(),
             result.method(),
         );
@@ -843,20 +601,8 @@ fn write_fields(
     }
 }
 
-/// Classify a single note: tags from the shared classifier, then a domain
-/// derived from those tags (and, failing that, from the source map or the
-/// Fabric tier) for as long as the field exists.
-///
-/// The domain tiers only run for a note that is going to be written: deriving
-/// one for a note the classifier held would spend a Fabric call on a note that
-/// stays in `inbox/`.
-fn classify_note(
-    note: &Note,
-    classifiers: &Classifiers,
-    config: &ClassifyConfig,
-    fabric: &FabricConfig,
-    search_index: Option<&SearchIndex>,
-) -> ClassifyResult {
+/// Classify a single note: tags from the shared classifier, nothing else.
+fn classify_note(note: &Note, classifiers: &Classifiers) -> ClassifyResult {
     let candidates = note_candidates(note);
     let text = classifier_text(note);
     let title = note.frontmatter.title.as_deref().unwrap_or("Untitled");
@@ -869,224 +615,14 @@ fn classify_note(
     if tags.confidence == Confidence::Low {
         return ClassifyResult {
             tags,
-            domain: None,
             reason: "no tag cleared the classifier".to_string(),
         };
     }
 
-    let (domain, reason) = derive_domain(note, &tags.tags, config, fabric, search_index);
-    ClassifyResult { tags, domain, reason }
-}
-
-/// Derive `domain` for a classified note. Tier 1a is the tag-to-domain map,
-/// now read over the FRESH tag set rather than whatever the note carried;
-/// Tier 1b is the source-URL map; Tier 2 is the Fabric pattern.
-fn derive_domain(
-    note: &Note,
-    tags: &[String],
-    config: &ClassifyConfig,
-    fabric: &FabricConfig,
-    search_index: Option<&SearchIndex>,
-) -> (Option<Domain>, String) {
-    if let Some((domain, reason)) = domain_by_tags(tags, config) {
-        return (Some(domain), reason);
+    ClassifyResult {
+        tags,
+        reason: "tags classifier".to_string(),
     }
-    if let Some((domain, reason)) = domain_by_source(note, config) {
-        return (Some(domain), reason);
-    }
-    if let Some(index) = search_index
-        && let Some((domain, reason)) = domain_by_llm(note, config, fabric, index)
-    {
-        return (Some(domain), reason);
-    }
-    (None, "tags only, no domain tier matched".to_string())
-}
-
-/// Tier 2: LLM domain classification using Fabric with vault context from SearchIndex
-fn domain_by_llm(
-    note: &Note,
-    config: &ClassifyConfig,
-    fabric: &FabricConfig,
-    index: &SearchIndex,
-) -> Option<(Domain, String)> {
-    if !crate::fabric::is_available(&fabric.binary) {
-        log::debug!("fabric not available, skipping LLM domain classification");
-        return None;
-    }
-
-    // Build vault context
-    let context = build_llm_context(note, config, index);
-    let input = crate::fabric::truncate_input(&context, config.max_input_tokens);
-
-    // Call Fabric pattern
-    match crate::fabric::run_pattern(fabric, &config.fabric_pattern, input, config.fabric_timeout_secs) {
-        Ok(output) => parse_llm_result(&output, config.confidence_threshold),
-        Err(e) => {
-            log::warn!("LLM domain classification failed: {e}");
-            None
-        }
-    }
-}
-
-/// Build the LLM context string with vault search results
-fn build_llm_context(note: &Note, config: &ClassifyConfig, index: &SearchIndex) -> String {
-    let title = note.frontmatter.title.as_deref().unwrap_or("Untitled");
-    let tags = note.frontmatter.tags.as_ref().map(|t| t.join(", ")).unwrap_or_default();
-
-    // Find similar notes via FTS5. `_lossy` because a classification is still
-    // worth attempting without similarity context - but it logs at ERROR, so a
-    // broken query can never masquerade as "nothing similar in the vault" the
-    // way the unquoted-hyphen MATCH bug did.
-    let similar_text = match index.find_similar_lossy(&note.body, config.similar_notes_limit) {
-        results if !results.is_empty() => {
-            let lines: Vec<String> = results
-                .iter()
-                .map(|r| format!("- \"{}\" (domain: {})", r.title, r.domain))
-                .collect();
-            lines.join("\n")
-        }
-        _ => "No similar notes found.".to_string(),
-    };
-
-    // Get tag-domain correlations for this note's tags
-    let tag_correlations = match (index.tag_domain_map(), &note.frontmatter.tags) {
-        (Ok(tdm), Some(note_tags)) => {
-            let lines: Vec<String> = note_tags
-                .iter()
-                .filter_map(|tag| {
-                    tdm.get(tag).map(|domains| {
-                        let domain_list: Vec<String> = domains.iter().map(|(d, c)| format!("{d}:{c}")).collect();
-                        format!("- tag \"{tag}\" appears in: {}", domain_list.join(", "))
-                    })
-                })
-                .collect();
-            if lines.is_empty() {
-                "No tag-domain correlations found.".to_string()
-            } else {
-                lines.join("\n")
-            }
-        }
-        _ => "No tag-domain correlations available.".to_string(),
-    };
-
-    // Truncate body for LLM input
-    let body_chars: String = note.body.chars().take(4000).collect();
-
-    format!(
-        "Title: {title}\n\n\
-         Tags: {tags}\n\n\
-         Similar notes in vault:\n{similar_text}\n\n\
-         Tag-domain correlations:\n{tag_correlations}\n\n\
-         Content:\n{body_chars}"
-    )
-}
-
-/// Parse the Fabric domain pattern's JSON output. `None` when it is malformed,
-/// names a domain the enum does not have, or scores below the threshold.
-fn parse_llm_result(output: &str, confidence_threshold: f64) -> Option<(Domain, String)> {
-    let json_str = ::vault::fabric::extract_json(output);
-
-    #[derive(Deserialize)]
-    struct LlmOutput {
-        domain: String,
-        confidence: f64,
-        #[serde(default)]
-        reasoning: String,
-        #[serde(default)]
-        suggested_tags: Vec<String>,
-    }
-
-    let parsed: LlmOutput = match serde_json::from_str(&json_str) {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!("Failed to parse LLM classification JSON: {e}");
-            return None;
-        }
-    };
-
-    let domain = match parsed.domain.parse::<Domain>() {
-        Ok(d) => d,
-        Err(_) => {
-            log::warn!("LLM returned invalid domain: {}", parsed.domain);
-            return None;
-        }
-    };
-
-    if parsed.confidence < confidence_threshold {
-        log::debug!(
-            "LLM domain {} scored {} below the {confidence_threshold} threshold, no domain",
-            domain.as_str(),
-            parsed.confidence,
-        );
-        return None;
-    }
-
-    // Tags no longer come from this pattern; the classifier owns them.
-    let _ = parsed.suggested_tags;
-
-    Some((domain, parsed.reasoning))
-}
-
-/// Tier 1a: Tag-to-domain mapping, read over the tags the classifier just
-/// produced. A tie between two domains yields no domain (the next tier tries).
-fn domain_by_tags(tags: &[String], config: &ClassifyConfig) -> Option<(Domain, String)> {
-    if tags.is_empty() {
-        return None;
-    }
-
-    // Count matches per domain
-    let mut domain_scores: HashMap<&str, usize> = HashMap::new();
-    let mut matched_tags: HashMap<&str, Vec<&str>> = HashMap::new();
-
-    for (domain, trigger_tags) in &config.tag_domain_map {
-        for note_tag in tags {
-            let lower_tag = note_tag.to_lowercase();
-            if trigger_tags.iter().any(|t| {
-                let t_lower = t.to_lowercase();
-                lower_tag == t_lower || lower_tag.split('-').any(|segment| segment == t_lower)
-            }) {
-                *domain_scores.entry(domain.as_str()).or_insert(0) += 1;
-                matched_tags.entry(domain.as_str()).or_default().push(note_tag.as_str());
-            }
-        }
-    }
-
-    if domain_scores.is_empty() {
-        return None;
-    }
-
-    // Find domain with most matching tags
-    let mut sorted: Vec<_> = domain_scores.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(a.1));
-
-    let (top_domain, top_score) = sorted[0];
-
-    // If there's a tie, this is ambiguous - fall through to the next tier
-    if sorted.len() > 1 && sorted[1].1 == top_score {
-        return None;
-    }
-
-    let domain = Domain::from_str(top_domain).ok()?;
-    let matched = matched_tags.get(top_domain).map(|t| t.join(", ")).unwrap_or_default();
-
-    Some((domain, format!("tag match: {matched}")))
-}
-
-/// Tier 1b: Source URL pattern matching
-fn domain_by_source(note: &Note, config: &ClassifyConfig) -> Option<(Domain, String)> {
-    let source = note.frontmatter.source.as_ref()?;
-    let lower_source = source.to_lowercase();
-
-    for (domain, patterns) in &config.source_domain_map {
-        for pattern in patterns {
-            if lower_source.contains(&pattern.to_lowercase()) {
-                let domain = Domain::from_str(domain).ok()?;
-                return Some((domain, format!("source URL match: {pattern}")));
-            }
-        }
-    }
-
-    None
 }
 
 /// Filter notes to the `--retag` set. Each argument is a vault-relative path
@@ -1131,14 +667,6 @@ fn filter_retag_notes<'a>(notes: &'a [Note], patterns: &[String], vault_root: &P
     selected
 }
 
-/// Filter notes to those matching a specific domain value (for reclassification)
-fn filter_domain_notes<'a>(notes: &'a [Note], domain: &str) -> Vec<&'a Note> {
-    notes
-        .iter()
-        .filter(|n| n.frontmatter.domain.as_deref() == Some(domain))
-        .collect()
-}
-
 /// Filter notes to inbox-only, respecting force and review-only flags
 fn filter_inbox_notes(notes: &[Note], force: bool, review_only: bool) -> Vec<&Note> {
     notes
@@ -1168,12 +696,12 @@ fn filter_inbox_notes(notes: &[Note], force: bool, review_only: bool) -> Vec<&No
         .collect()
 }
 
-/// Filter notes in notes/ that are missing a domain field (orphaned by reingest
-/// or other means), EXCLUDING paths that `frontmatter.path-exempt` excuses from
-/// carrying a domain at all.
+/// Filter notes in notes/ that carry no tags (orphaned by reingest or other
+/// means), EXCLUDING paths that `frontmatter.path-exempt` excuses from
+/// carrying tags at all.
 ///
 /// Without the exemption check this selected every `notes/ai/**` digest on every
-/// cycle - they are exempt from `domain` by config, so they can never become
+/// cycle - they are exempt from `tags` by config, so they can never become
 /// "classified" - burning one LLM call per digest per cycle and logging
 /// `held for review (low confidence)` in perpetuity.
 fn filter_unclassified_notes<'a>(notes: &'a [Note], frontmatter: &FrontmatterConfig) -> Vec<&'a Note> {
@@ -1183,13 +711,12 @@ fn filter_unclassified_notes<'a>(notes: &'a [Note], frontmatter: &FrontmatterCon
             let path_str = n.path.to_string_lossy();
             path_str.starts_with("notes/") || path_str.starts_with("notes\\")
         })
-        .filter(|n| n.frontmatter.domain.is_none())
-        .filter(|n| !crate::frontmatter::path_exempts_field("domain", &n.path, frontmatter))
+        .filter(|n| n.frontmatter.tags.as_ref().is_none_or(|t| t.is_empty()))
+        .filter(|n| !crate::frontmatter::path_exempts_field("tags", &n.path, frontmatter))
         .collect()
 }
 
-/// Build the frontmatter fields an enrichment (promotion, catch-up, or
-/// reclassify) writes.
+/// Build the frontmatter fields an enrichment (promotion or catch-up) writes.
 ///
 /// `tags` is the P3 union - the note's existing tags first, then the fresh
 /// ones, capped - so a classification never removes a tag a reingest would
@@ -1207,13 +734,6 @@ fn build_enrichment_fields(
         fields.push(("tags".to_string(), tags_value(&merged)));
     }
 
-    if let Some(domain) = result.domain {
-        fields.push((
-            "domain".to_string(),
-            serde_yaml::Value::String(domain.as_str().to_string()),
-        ));
-    }
-
     fields.push((
         "status".to_string(),
         serde_yaml::Value::String(vault::schema::Status::Unread.as_str().to_string()),
@@ -1223,8 +743,7 @@ fn build_enrichment_fields(
 }
 
 /// The three provenance keys every classification writes, whatever the write
-/// shape. `cortex-classified-by` carries the TAG method - the classifier is
-/// what decided the note - not whichever tier produced its domain.
+/// shape.
 fn push_classification_fields(fields: &mut Vec<(String, serde_yaml::Value)>, result: &ClassifyResult) {
     fields.push(("cortex-classified".to_string(), serde_yaml::Value::Bool(true)));
     fields.push((
@@ -1349,18 +868,6 @@ fn existing_note_has_source(path: &Path, source_url: &str) -> bool {
     // without quotes (`source: https://...`) were previously never recognized
     // as reingest replacements, so they got a spurious `-2` suffix.
     header.contains(&format!("source: \"{source_url}\"")) || header.contains(&format!("source: {source_url}"))
-}
-
-/// Update wikilinks across vault after file moves
-/// Trait needed for Domain::from_str since vault uses custom FromStr
-trait FromStrExt: Sized {
-    fn from_str(s: &str) -> Result<Self, String>;
-}
-
-impl FromStrExt for Domain {
-    fn from_str(s: &str) -> Result<Self, String> {
-        s.parse::<Domain>().map_err(|e| e.to_string())
-    }
 }
 
 #[cfg(test)]

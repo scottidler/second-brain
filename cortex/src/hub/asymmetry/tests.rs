@@ -25,7 +25,7 @@ fn seed_member(vault: &Path, rel: &str, note_type: &str) {
 
 fn index_note(index: &SearchIndex, path: &str) {
     index
-        .insert_test_note_graph(path, &[], "", "", "tech", "b", 100)
+        .insert_test_note_graph(path, &[], "", "", "b", 100)
         .expect("index note");
 }
 

@@ -6,14 +6,14 @@ mod legacy_oracle_guard;
 mod trace;
 
 /// Helper: insert a test note directly into the DB
-fn insert_test_note(index: &SearchIndex, path: &str, title: &str, domain: &str, tags: &[&str], body: &str) {
+fn insert_test_note(index: &SearchIndex, path: &str, title: &str, tags: &[&str], body: &str) {
     let tags_json = serde_json::to_string(&tags).expect("tags json");
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![path, title, domain, "article", "assisted", "", "2026-03-21", tags_json, "", "", body, "", 0],
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![path, title, "article", "assisted", "", "2026-03-21", tags_json, "", "", body, "", 0],
             )
             .expect("insert test note");
 }
@@ -458,7 +458,7 @@ fn list_notes_filters_by_tag_or_and_and() {
     // OR (the default): either tag.
     let rust_or_cooking = vec!["rust".to_string(), "cooking".to_string()];
     let rows = index
-        .list_notes(None, Some(&rust_or_cooking), false, None, None, None, None, None)
+        .list_notes(Some(&rust_or_cooking), false, None, None, None, None, None)
         .expect("or");
     assert_eq!(
         paths(rows),
@@ -472,60 +472,19 @@ fn list_notes_filters_by_tag_or_and_and() {
     // AND: every tag.
     let rust_and_ai = vec!["rust".to_string(), "ai".to_string()];
     let rows = index
-        .list_notes(None, Some(&rust_and_ai), true, None, None, None, None, None)
+        .list_notes(Some(&rust_and_ai), true, None, None, None, None, None)
         .expect("and");
     assert_eq!(paths(rows), vec!["notes/a.md".to_string()]);
 
     // An empty list is NOT a filter that matches nothing.
     let rows = index
-        .list_notes(None, Some(&[]), false, None, None, None, None, None)
+        .list_notes(Some(&[]), false, None, None, None, None, None)
         .expect("empty");
     assert_eq!(rows.len(), 3, "an empty tag list must not filter everything out");
 
     // No filter at all.
     let rows = index
-        .list_notes(None, None, false, None, None, None, None, None)
+        .list_notes(None, false, None, None, None, None, None)
         .expect("none");
     assert_eq!(rows.len(), 3);
-}
-
-#[test]
-fn domain_members_are_tag_members() {
-    // The migration's invariant, in miniature: every note carrying `domain: x`
-    // also carries `x` as a tag. Subset, not equality, because a tag legitimately
-    // exists outside its domain (measured on the live index: 5 notes carry
-    // `writing` without `domain: writing`).
-    use crate::frontmatter::Frontmatter;
-    use std::path::PathBuf;
-    let index = SearchIndex::open_memory().expect("open");
-    let migrated = |path: &str, domain: &str, tags: &[&str]| Note {
-        path: PathBuf::from(path),
-        frontmatter: Frontmatter {
-            title: Some(path.to_string()),
-            domain: Some(domain.to_string()),
-            tags: Some(tags.iter().map(|t| t.to_string()).collect()),
-            ..Frontmatter::default()
-        },
-        body: "body".to_string(),
-        raw: "---\n---\nbody".to_string(),
-    };
-    index
-        .index_one(&migrated("notes/a.md", "tech", &["tech", "rust"]), 1)
-        .expect("a");
-    index
-        .index_one(&migrated("notes/b.md", "tech", &["tech"]), 1)
-        .expect("b");
-    // A tag outside its domain: allowed, which is why this is a subset check.
-    index.index_one(&tagged_note("notes/c.md", &["tech"]), 1).expect("c");
-
-    let orphans: i64 = index
-        .conn
-        .query_row(
-            "SELECT count(*) FROM notes WHERE domain = 'tech' \
-             AND path NOT IN (SELECT path FROM note_tags WHERE tag = 'tech')",
-            [],
-            |r| r.get(0),
-        )
-        .expect("count");
-    assert_eq!(orphans, 0, "a domain member is missing its tag");
 }

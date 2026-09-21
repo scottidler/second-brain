@@ -4,23 +4,6 @@ use crate::testutil::TestVault;
 
 fn test_schema() -> SchemaConfig {
     SchemaConfig {
-        domains: vec![
-            "ai",
-            "tech",
-            "football",
-            "work",
-            "writing",
-            "music",
-            "spanish",
-            "life",
-            "homelab",
-            "diy",
-            "resources",
-            "system",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
         types: vec![
             "youtube", "article", "github", "social", "book", "video", "research", "daily", "meeting", "note", "vocab",
             "moc", "link", "poem", "system",
@@ -164,23 +147,6 @@ fn test_apply_inserts_frontmatter() {
 }
 
 #[test]
-fn test_enum_validation_invalid_domain() {
-    let v = TestVault::new();
-    let notes = v.scan();
-    let config = v.config().actions.frontmatter;
-    let schema = test_schema();
-
-    let report = lint_frontmatter(&notes, &config, &schema);
-    // bad-enums.md has domain: tech-stuff which is invalid
-    assert!(
-        report
-            .violations
-            .iter()
-            .any(|v| v.path.to_string_lossy() == "bad-enums.md" && v.rule == "frontmatter.enum.domain")
-    );
-}
-
-#[test]
 fn test_enum_validation_invalid_type() {
     let v = TestVault::new();
     let notes = v.scan();
@@ -222,7 +188,6 @@ fn test_enum_validation_skipped_when_schema_empty() {
     // SchemaConfig::default() is now enum-derived (non-empty); construct a
     // genuinely empty schema to exercise the skip-when-empty code path.
     let empty_schema = SchemaConfig {
-        domains: vec![],
         types: vec![],
         origins: vec![],
         statuses: vec![],
@@ -235,7 +200,7 @@ fn test_enum_validation_skipped_when_schema_empty() {
 }
 
 #[test]
-fn test_daily_note_exempt_from_domain() {
+fn test_daily_note_exempt_from_tags() {
     let v = TestVault::new();
     let notes = v.scan();
     let mut config = v.config().actions.frontmatter;
@@ -243,25 +208,24 @@ fn test_daily_note_exempt_from_domain() {
         "title".to_string(),
         "date".to_string(),
         "type".to_string(),
-        "domain".to_string(),
         "origin".to_string(),
         "tags".to_string(),
     ];
-    config.exempt.insert("daily".to_string(), vec!["domain".to_string()]);
+    config.exempt.insert("daily".to_string(), vec!["tags".to_string()]);
     let schema = test_schema();
 
     let report = lint_frontmatter(&notes, &config, &schema);
-    // daily/2026-03-18.md is type: daily, has no domain, should NOT be flagged
+    // daily/2026-03-18.md is type: daily, has empty tags, should NOT be flagged
     assert!(
         !report
             .violations
             .iter()
-            .any(|v| v.path.to_string_lossy().contains("2026-03-18") && v.rule == "frontmatter.required.domain")
+            .any(|v| v.path.to_string_lossy().contains("2026-03-18") && v.rule == "frontmatter.required.tags")
     );
 }
 
 #[test]
-fn test_inbox_note_exempt_from_domain() {
+fn test_inbox_note_exempt_from_tags() {
     let v = TestVault::new();
     let notes = v.scan();
     let mut config = v.config().actions.frontmatter;
@@ -269,22 +233,21 @@ fn test_inbox_note_exempt_from_domain() {
         "title".to_string(),
         "date".to_string(),
         "type".to_string(),
-        "domain".to_string(),
         "origin".to_string(),
         "tags".to_string(),
     ];
     config
         .path_exempt
-        .insert("inbox/**".to_string(), vec!["domain".to_string()]);
+        .insert("inbox/**".to_string(), vec!["tags".to_string()]);
     let schema = test_schema();
 
     let report = lint_frontmatter(&notes, &config, &schema);
-    // inbox/untriaged-link.md has no domain, should NOT be flagged
+    // inbox/untriaged-link.md has empty tags, should NOT be flagged
     assert!(
         !report
             .violations
             .iter()
-            .any(|v| v.path.to_string_lossy().contains("untriaged-link") && v.rule == "frontmatter.required.domain")
+            .any(|v| v.path.to_string_lossy().contains("untriaged-link") && v.rule == "frontmatter.required.tags")
     );
 }
 
@@ -296,15 +259,17 @@ fn test_deprecated_field_detection() {
     let schema = SchemaConfig::default();
 
     let report = lint_frontmatter(&notes, &config, &schema);
-    // legacy-note.md has url, author, duration_min, folder
+    // legacy-note.md has url, author, duration_min (the legacy folder-rename
+    // target was retired in P11; a bare `folder:` key is no longer a
+    // recognized deprecated-rename target).
     let legacy_deprecated: Vec<_> = report
         .violations
         .iter()
         .filter(|v| v.path.to_string_lossy() == "legacy-note.md" && v.rule.starts_with("frontmatter.deprecated"))
         .collect();
     assert!(
-        legacy_deprecated.len() >= 4,
-        "expected at least 4 deprecated field violations, got {}",
+        legacy_deprecated.len() >= 3,
+        "expected at least 3 deprecated field violations, got {}",
         legacy_deprecated.len()
     );
 }

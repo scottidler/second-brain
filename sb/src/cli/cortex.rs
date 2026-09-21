@@ -55,7 +55,7 @@ pub struct CortexCli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Classify inbox notes by domain and promote to notes/
+    /// Classify inbox notes by tags and promote to notes/
     Classify(ClassifyArgs),
     /// Validate vault against rules
     Lint(LintArgs),
@@ -138,8 +138,6 @@ pub struct ClassifyArgs {
     pub force: bool,
     #[arg(long)]
     pub review_only: bool,
-    #[arg(long)]
-    pub reclassify_domain: Option<String>,
     /// Re-run the tag classifier over these notes, replacing their tags.
     /// Space-separated vault-relative paths or globs.
     #[arg(long, num_args = 1.., value_delimiter = None)]
@@ -152,7 +150,6 @@ impl From<ClassifyArgs> for opts::ClassifyOpts {
             path: a.path,
             force: a.force,
             review_only: a.review_only,
-            reclassify_domain: a.reclassify_domain,
             retag: a.retag,
         }
     }
@@ -459,8 +456,6 @@ pub struct SummarizeArgs {
     #[arg(long)]
     pub since: Option<String>,
     #[arg(long)]
-    pub domain: Option<String>,
-    #[arg(long)]
     pub tag: Option<String>,
     #[arg(long)]
     pub extractor: Option<String>,
@@ -481,7 +476,6 @@ impl From<SummarizeArgs> for opts::SummarizeOpts {
         Self {
             backfill: a.backfill,
             since: a.since,
-            domain: a.domain,
             tag: a.tag,
             extractor: a.extractor,
             dry_run: a.dry_run,

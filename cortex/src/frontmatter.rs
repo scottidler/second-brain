@@ -19,7 +19,6 @@ const DEPRECATED_RENAMES: &[(&str, &str)] = &[
     ("channel", "creator"),
     ("duration_min", "duration"),
     ("trace_id", "trace"),
-    ("folder", "domain"),
 ];
 
 /// Deprecated fields that should be dropped entirely.
@@ -65,7 +64,6 @@ fn validate_note(note: &Note, config: &FrontmatterConfig, schema: &SchemaConfig,
             "title" => fm.title.is_some(),
             "date" => fm.date.is_some(),
             "type" => fm.note_type.is_some(),
-            "domain" => fm.domain.is_some(),
             "origin" => fm.origin.is_some(),
             "status" => fm.status.is_some(),
             // `tags: []` and a bare `tags:` (no items) both parse to
@@ -129,7 +127,6 @@ fn validate_note(note: &Note, config: &FrontmatterConfig, schema: &SchemaConfig,
 
     // Validate enum fields against schema
     validate_enum("type", fm.note_type.as_deref(), &schema.types, note, report);
-    validate_enum("domain", fm.domain.as_deref(), &schema.domains, note, report);
     validate_enum("origin", fm.origin.as_deref(), &schema.origins, note, report);
     validate_enum("status", fm.status.as_deref(), &schema.statuses, note, report);
     // method lives in extra
@@ -145,7 +142,6 @@ fn validate_note(note: &Note, config: &FrontmatterConfig, schema: &SchemaConfig,
             let present = match field.as_str() {
                 "source" => fm.source.is_some(),
                 "creator" => fm.creator.is_some(),
-                "domain" => fm.domain.is_some(),
                 "origin" => fm.origin.is_some(),
                 "status" => fm.status.is_some(),
                 _ => fm.extra.contains_key(field),
@@ -209,7 +205,7 @@ fn is_field_required(field: &str, note: &Note, config: &FrontmatterConfig) -> bo
 /// Does `frontmatter.path-exempt` excuse `path` from carrying `field`?
 ///
 /// Public because classify needs the SAME answer: `notes/ai/**` is exempt from
-/// `domain`, so a domain-less digest is correct, not "unclassified". Reading the
+/// `tags`, so a tag-less digest is correct, not "unclassified". Reading the
 /// globs in a second place would drift, and the drift cost real money - classify
 /// re-ran an LLM pass over every exempt digest on every daemon cycle and logged
 /// `held for review (low confidence)` forever.

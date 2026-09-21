@@ -51,26 +51,6 @@ fn sanitize_tag_is_ascii_folded_too() {
 }
 
 #[test]
-fn test_normalize_domain_valid_passthrough() {
-    assert_eq!(normalize_domain("ai"), "ai");
-    assert_eq!(normalize_domain("tech"), "tech");
-    assert_eq!(normalize_domain("football"), "football");
-    assert_eq!(normalize_domain("resources"), "resources");
-}
-
-#[test]
-fn test_normalize_domain_case_insensitive() {
-    assert_eq!(normalize_domain("AI"), "ai");
-    assert_eq!(normalize_domain("Tech"), "tech");
-    assert_eq!(normalize_domain("FOOTBALL"), "football");
-}
-
-#[test]
-fn test_normalize_domain_trimming() {
-    assert_eq!(normalize_domain("  ai  "), "ai");
-}
-
-#[test]
 fn test_sanitize_tag_basic() {
     assert_eq!(sanitize_tag("AI/ML"), "ai-ml");
 }

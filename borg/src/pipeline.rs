@@ -1106,7 +1106,6 @@ async fn process_url_inner(
             method,
             filename: extract_filename(&note_path),
             source: canonical.clone(),
-            domain: None,
             trace_id: Some(trace_id.to_string()),
         },
     )?;

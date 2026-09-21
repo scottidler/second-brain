@@ -15,7 +15,6 @@ pub struct LedgerEntry {
     pub method: Method,
     pub filename: Option<String>,
     pub source: String,
-    pub domain: Option<String>,
     pub trace_id: Option<String>,
 }
 
@@ -23,7 +22,6 @@ const LEDGER_FRONTMATTER: &str = r#"---
 title: Borg Ledger
 date: {date}
 type: system
-domain: system
 origin: authored
 tags:
   - obsidian-borg
@@ -36,16 +34,18 @@ All URLs ingested by obsidian-borg. This file is machine-maintained - do not edi
 
 See also: [[borg-ledger]]
 
-| Date | Time | Method | Status | Note | Source | Domain | Trace |
-|------|------|--------|--------|------|--------|--------|-------|
+| Date | Time | Method | Status | Note | Source | Trace |
+|------|------|--------|--------|------|--------|-------|
 "#;
 
 /// The canonical table header and separator - single source of truth for column
 /// names and order. Any code that reads or writes ledger rows must match this.
 /// `Note` holds a single `[[slug]]` wikilink whose target is the filename stem;
-/// it replaces the older two-column Title + Filename layout.
-const LEDGER_HEADER: &str = "| Date | Time | Method | Status | Note | Source | Domain | Trace |";
-const LEDGER_SEPARATOR: &str = "|------|------|--------|--------|------|--------|--------|-------|";
+/// it replaces the older two-column Title + Filename layout. A one-time
+/// vault-wide row rewrite dropped a since-retired classification column;
+/// this header is the post-rewrite shape.
+const LEDGER_HEADER: &str = "| Date | Time | Method | Status | Note | Source | Trace |";
+const LEDGER_SEPARATOR: &str = "|------|------|--------|--------|------|--------|-------|";
 
 /// Resolve the Borg Ledger path. The ledger is a machine-maintained dedup
 /// datastore (not a human note), so it lives alongside `receipts.db` in the
@@ -111,32 +111,34 @@ pub fn ensure_ledger_exists(ledger_path: &Path) -> Result<()> {
 
 /// Indices into a `split('|')` of one ledger row, for either layout.
 ///
-/// Current layout (8 fields, `cols.len() == 10`):
-///   `Date | Time | Method | Status | Note | Source | Domain | Trace`
-/// Legacy layout (9 fields, `cols.len() == 11`):
-///   `Date | Time | Method | Status | Title | Filename | Source | Domain | Trace`
+/// Current layout (7 fields, `cols.len() == 9`):
+///   `Date | Time | Method | Status | Note | Source | Trace`
+/// Legacy layout (8 fields, `cols.len() == 10`):
+///   `Date | Time | Method | Status | Title | Filename | Source | Trace`
+///
+/// Both layouts dropped their retired classification column in the one-time
+/// ledger rewrite (`docs/design/2026-09-19-tags-only-classification.md`); a
+/// row written before that rewrite is out of scope here (the rewrite is
+/// vault-wide and one-time, not an ongoing read-time shim).
 struct ColIdx {
     note: usize,
     filename: Option<usize>,
     source: usize,
-    domain: usize,
 }
 
 fn col_idx(col_count: usize) -> Option<ColIdx> {
     match col_count {
-        // New 8-field format: collapsed Note column.
-        10 => Some(ColIdx {
+        // Current 7-field format: collapsed Note column.
+        9 => Some(ColIdx {
             note: 5,
             filename: None,
             source: 6,
-            domain: 7,
         }),
-        // Legacy 9-field format: separate Title + Filename columns.
-        n if n >= 11 => Some(ColIdx {
+        // Legacy 8-field format: separate Title + Filename columns.
+        n if n >= 10 => Some(ColIdx {
             note: 5,
             filename: Some(6),
             source: 7,
-            domain: 8,
         }),
         _ => None,
     }
@@ -261,7 +263,6 @@ pub fn find_completed(ledger_path: &Path, content_key: &str) -> Result<Option<Co
 #[derive(Debug, Default)]
 pub struct EntryFilter {
     pub source: Option<String>,
-    pub domain: Option<String>,
     pub before: Option<String>,
     pub after: Option<String>,
 }
@@ -274,7 +275,6 @@ pub struct QueriedEntry {
     pub slug: String,
     pub filename: String,
     pub source: String,
-    pub domain: String,
     pub line_number: usize,
 }
 
@@ -320,15 +320,9 @@ pub fn query_entries(ledger_path: &Path, filter: &EntryFilter) -> Result<Vec<Que
             None => format!("{slug}.md"),
         };
         let source = cols[idx.source].trim().to_string();
-        let domain = cols[idx.domain].trim().to_string();
 
         if let Some(ref f_source) = filter.source
             && source != *f_source
-        {
-            continue;
-        }
-        if let Some(ref f_domain) = filter.domain
-            && domain != *f_domain
         {
             continue;
         }
@@ -349,7 +343,6 @@ pub fn query_entries(ledger_path: &Path, filter: &EntryFilter) -> Result<Vec<Que
             slug,
             filename,
             source,
-            domain,
             line_number,
         });
     }
@@ -440,11 +433,10 @@ pub fn append_entry(ledger_path: &Path, entry: &LedgerEntry) -> Result<()> {
         .map(|name| name.strip_suffix(".md").unwrap_or(name))
         .map(|stem| format!("[[{stem}]]"))
         .unwrap_or_else(|| "-".to_string());
-    let domain_display = entry.domain.as_deref().unwrap_or("-");
     let trace_display = entry.trace_id.as_deref().unwrap_or("-");
 
     // Build the row via `table::format_row`, which escapes `|` and collapses
-    // newlines per cell — a `|` in a source URL no longer shatters the row.
+    // newlines per cell - a `|` in a source URL no longer shatters the row.
     let method = entry.method.to_string();
     let row = crate::table::format_row(&[
         ("Date", &entry.date),
@@ -453,7 +445,6 @@ pub fn append_entry(ledger_path: &Path, entry: &LedgerEntry) -> Result<()> {
         ("Status", SUCCESS_GLYPH),
         ("Note", &note_display),
         ("Source", &entry.source),
-        ("Domain", domain_display),
         ("Trace", trace_display),
     ]);
 

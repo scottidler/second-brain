@@ -35,20 +35,6 @@ fn test_open_memory_index() {
 }
 
 #[test]
-fn test_domain_stats_empty() {
-    let index = SearchIndex::open_memory().expect("Failed to open in-memory index");
-    let stats = index.domain_stats().expect("Failed to get domain stats");
-    assert!(stats.is_empty());
-}
-
-#[test]
-fn test_tag_domain_map_empty() {
-    let index = SearchIndex::open_memory().expect("Failed to open in-memory index");
-    let map = index.tag_domain_map().expect("Failed to get tag domain map");
-    assert!(map.is_empty());
-}
-
-#[test]
 fn test_find_similar_empty_content() {
     let index = SearchIndex::open_memory().expect("Failed to open in-memory index");
     let results = index.find_similar("", 5).expect("Failed find_similar");
@@ -58,14 +44,14 @@ fn test_find_similar_empty_content() {
 #[test]
 fn test_tag_search_exact() {
     let index = SearchIndex::open_memory().expect("open");
-    insert_test_note(&index, "notes/a.md", "Rust CLI", "tech", &["rust", "cli"], "body");
-    insert_test_note(&index, "notes/b.md", "Rust Web", "tech", &["rust", "web"], "body");
-    insert_test_note(&index, "notes/c.md", "Python ML", "ai", &["python", "ml"], "body");
+    insert_test_note(&index, "notes/a.md", "Rust CLI", &["rust", "cli"], "body");
+    insert_test_note(&index, "notes/b.md", "Rust Web", &["rust", "web"], "body");
+    insert_test_note(&index, "notes/c.md", "Python ML", &["python", "ml"], "body");
 
-    let results = index.tag_search("rust", None, None, false, None).expect("tag_search");
+    let results = index.tag_search("rust", None, false, None).expect("tag_search");
     assert_eq!(results.len(), 2);
 
-    let results = index.tag_search("python", None, None, false, None).expect("tag_search");
+    let results = index.tag_search("python", None, false, None).expect("tag_search");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].path, "notes/c.md");
 }
@@ -73,25 +59,10 @@ fn test_tag_search_exact() {
 #[test]
 fn test_tag_search_prefix() {
     let index = SearchIndex::open_memory().expect("open");
-    insert_test_note(&index, "notes/a.md", "Rust CLI", "tech", &["rust", "rust-cli"], "body");
-    insert_test_note(&index, "notes/b.md", "Ruby", "tech", &["ruby"], "body");
+    insert_test_note(&index, "notes/a.md", "Rust CLI", &["rust", "rust-cli"], "body");
+    insert_test_note(&index, "notes/b.md", "Ruby", &["ruby"], "body");
 
-    let results = index
-        .tag_search("rust*", None, None, false, None)
-        .expect("tag_search prefix");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].path, "notes/a.md");
-}
-
-#[test]
-fn test_tag_search_with_domain_filter() {
-    let index = SearchIndex::open_memory().expect("open");
-    insert_test_note(&index, "notes/a.md", "AI Rust", "ai", &["rust"], "body");
-    insert_test_note(&index, "notes/b.md", "Tech Rust", "tech", &["rust"], "body");
-
-    let results = index
-        .tag_search("rust", Some("ai"), None, false, None)
-        .expect("tag_search domain");
+    let results = index.tag_search("rust*", None, false, None).expect("tag_search prefix");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].path, "notes/a.md");
 }
@@ -99,15 +70,13 @@ fn test_tag_search_with_domain_filter() {
 #[test]
 fn test_tag_stats() {
     let index = SearchIndex::open_memory().expect("open");
-    insert_test_note(&index, "notes/a.md", "A", "tech", &["rust", "cli"], "body");
-    insert_test_note(&index, "notes/b.md", "B", "tech", &["rust", "web"], "body");
-    insert_test_note(&index, "notes/c.md", "C", "ai", &["rust", "ml"], "body");
+    insert_test_note(&index, "notes/a.md", "A", &["rust", "cli"], "body");
+    insert_test_note(&index, "notes/b.md", "B", &["rust", "web"], "body");
+    insert_test_note(&index, "notes/c.md", "C", &["rust", "ml"], "body");
 
     let stats = index.tag_stats().expect("tag_stats");
     let rust_stat = stats.iter().find(|s| s.tag == "rust").expect("rust tag");
     assert_eq!(rust_stat.count, 3);
-    assert!(rust_stat.domains.contains(&"tech".to_string()));
-    assert!(rust_stat.domains.contains(&"ai".to_string()));
 
     let cli_stat = stats.iter().find(|s| s.tag == "cli").expect("cli tag");
     assert_eq!(cli_stat.count, 1);
@@ -116,9 +85,9 @@ fn test_tag_stats() {
 #[test]
 fn test_tag_cooccurrence() {
     let index = SearchIndex::open_memory().expect("open");
-    insert_test_note(&index, "notes/a.md", "A", "tech", &["rust", "cli", "linux"], "body");
-    insert_test_note(&index, "notes/b.md", "B", "tech", &["rust", "web"], "body");
-    insert_test_note(&index, "notes/c.md", "C", "ai", &["python", "ml"], "body");
+    insert_test_note(&index, "notes/a.md", "A", &["rust", "cli", "linux"], "body");
+    insert_test_note(&index, "notes/b.md", "B", &["rust", "web"], "body");
+    insert_test_note(&index, "notes/c.md", "C", &["python", "ml"], "body");
 
     let cooccur = index.tag_cooccurrence("rust").expect("cooccurrence");
     // cli, linux, web all co-occur with rust
@@ -174,18 +143,18 @@ fn test_extract_host() {
 fn test_creator_stats() {
     let index = SearchIndex::open_memory().expect("open");
     index.conn.execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES ('a.md', 'A', 'tech', 'youtube', 'assisted', '', '2026-03-21', '[]', '', 'Alice', '', '', 0)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('a.md', 'A', 'youtube', 'assisted', '', '2026-03-21', '[]', '', 'Alice', '', '', 0)",
             [],
         ).expect("insert");
     index.conn.execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES ('b.md', 'B', 'ai', 'youtube', 'assisted', '', '2026-03-21', '[]', '', 'Alice', '', '', 0)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('b.md', 'B', 'youtube', 'assisted', '', '2026-03-21', '[]', '', 'Alice', '', '', 0)",
             [],
         ).expect("insert");
     index.conn.execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES ('c.md', 'C', 'tech', 'article', 'assisted', '', '2026-03-21', '[]', '', 'Bob', '', '', 0)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('c.md', 'C', 'article', 'assisted', '', '2026-03-21', '[]', '', 'Bob', '', '', 0)",
             [],
         ).expect("insert");
 
@@ -198,18 +167,18 @@ fn test_creator_stats() {
 fn test_source_domain_stats() {
     let index = SearchIndex::open_memory().expect("open");
     index.conn.execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES ('a.md', 'A', 'tech', 'youtube', 'assisted', '', '2026-03-21', '[]', 'https://www.youtube.com/watch?v=abc', '', '', '', 0)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('a.md', 'A', 'youtube', 'assisted', '', '2026-03-21', '[]', 'https://www.youtube.com/watch?v=abc', '', '', '', 0)",
             [],
         ).expect("insert");
     index.conn.execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES ('b.md', 'B', 'tech', 'youtube', 'assisted', '', '2026-03-21', '[]', 'https://youtube.com/watch?v=def', '', '', '', 0)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('b.md', 'B', 'youtube', 'assisted', '', '2026-03-21', '[]', 'https://youtube.com/watch?v=def', '', '', '', 0)",
             [],
         ).expect("insert");
     index.conn.execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES ('c.md', 'C', 'tech', 'article', 'assisted', '', '2026-03-21', '[]', 'https://github.com/user/repo', '', '', '', 0)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('c.md', 'C', 'article', 'assisted', '', '2026-03-21', '[]', 'https://github.com/user/repo', '', '', '', 0)",
             [],
         ).expect("insert");
 
@@ -221,8 +190,8 @@ fn test_source_domain_stats() {
 #[test]
 fn test_find_outbound_links() {
     let index = SearchIndex::open_memory().expect("open");
-    insert_test_note(&index, "notes/a.md", "A", "tech", &[], "See [[b]] and [[c|see C]].");
-    insert_test_note(&index, "notes/b.md", "B", "tech", &[], "Just body.");
+    insert_test_note(&index, "notes/a.md", "A", &[], "See [[b]] and [[c|see C]].");
+    insert_test_note(&index, "notes/b.md", "B", &[], "Just body.");
 
     let links = index.find_outbound_links("notes/a.md").expect("outbound");
     assert_eq!(links.len(), 2);
@@ -233,9 +202,9 @@ fn test_find_outbound_links() {
 #[test]
 fn test_find_inbound_links() {
     let index = SearchIndex::open_memory().expect("open");
-    insert_test_note(&index, "notes/a.md", "A", "tech", &[], "Links to [[b]].");
-    insert_test_note(&index, "notes/b.md", "B", "tech", &[], "No links.");
-    insert_test_note(&index, "notes/c.md", "C", "tech", &[], "Also links to [[b]].");
+    insert_test_note(&index, "notes/a.md", "A", &[], "Links to [[b]].");
+    insert_test_note(&index, "notes/b.md", "B", &[], "No links.");
+    insert_test_note(&index, "notes/c.md", "C", &[], "Also links to [[b]].");
 
     let inbound = index.find_inbound_links("notes/b.md").expect("inbound");
     assert_eq!(inbound.len(), 2);
@@ -251,8 +220,8 @@ fn test_governance_columns_exist() {
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality, classified, classified_by, confidence, needs_review, duplicate_group)
-                 VALUES ('test.md', 'Test', 'tech', 'article', 'assisted', '', '2026-03-21', '[]', '', '', '', '', 0, 'high', 1, 'deterministic', 'high', 0, '')",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality, classified, classified_by, confidence, needs_review, duplicate_group)
+                 VALUES ('test.md', 'Test', 'article', 'assisted', '', '2026-03-21', '[]', '', '', '', '', 0, 'high', 1, 'deterministic', 'high', 0, '')",
                 [],
             )
             .expect("insert with governance columns");
@@ -275,9 +244,9 @@ fn test_governance_columns_exist() {
 #[test]
 fn test_inbox_notes() {
     let index = SearchIndex::open_memory().expect("open");
-    insert_test_note(&index, "inbox/a.md", "Inbox A", "tech", &[], "body");
-    insert_test_note(&index, "inbox/b.md", "Inbox B", "", &[], "body");
-    insert_test_note(&index, "notes/c.md", "Not inbox", "tech", &[], "body");
+    insert_test_note(&index, "inbox/a.md", "Inbox A", &[], "body");
+    insert_test_note(&index, "inbox/b.md", "Inbox B", &[], "body");
+    insert_test_note(&index, "notes/c.md", "Not inbox", &[], "body");
 
     let inbox = index.inbox_notes(None).expect("inbox");
     assert_eq!(inbox.len(), 2);
@@ -290,24 +259,24 @@ fn test_inbox_oldest() {
     index
         .conn
         .execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES ('inbox/.claude/loop.md', 'Loop', '', 'article', 'assisted', '', '2026-01-01', '[]', '', '', '', '', 100)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('inbox/.claude/loop.md', 'Loop', 'article', 'assisted', '', '2026-01-01', '[]', '', '', '', '', 100)",
             [],
         )
         .expect("insert dotfile note");
     index
         .conn
         .execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES ('inbox/newer.md', 'Newer', '', 'article', 'assisted', '', '2026-03-21', '[]', '', '', '', '', 300)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('inbox/newer.md', 'Newer', 'article', 'assisted', '', '2026-03-21', '[]', '', '', '', '', 300)",
             [],
         )
         .expect("insert newer note");
     index
         .conn
         .execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES ('inbox/oldest.md', 'Oldest', '', 'article', 'assisted', '', '2026-01-15', '[]', '', '', '', '', 200)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES ('inbox/oldest.md', 'Oldest', 'article', 'assisted', '', '2026-01-15', '[]', '', '', '', '', 200)",
             [],
         )
         .expect("insert oldest note");
@@ -330,24 +299,24 @@ fn test_quality_distribution() {
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality)
-                 VALUES ('a.md', 'A', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'high')",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality)
+                 VALUES ('a.md', 'A', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'high')",
                 [],
             )
             .expect("insert");
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality)
-                 VALUES ('b.md', 'B', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'low')",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality)
+                 VALUES ('b.md', 'B', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'low')",
                 [],
             )
             .expect("insert");
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality)
-                 VALUES ('c.md', 'C', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'high')",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality)
+                 VALUES ('c.md', 'C', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'high')",
                 [],
             )
             .expect("insert");
@@ -364,8 +333,8 @@ fn test_note_quality() {
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality)
-                 VALUES ('a.md', 'A', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'low')",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, quality)
+                 VALUES ('a.md', 'A', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'low')",
                 [],
             )
             .expect("insert");
@@ -384,38 +353,42 @@ fn test_classify_stats() {
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, classified, classified_by, confidence, needs_review)
-                 VALUES ('notes/a.md', 'A', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 1, 'deterministic', 'high', 0)",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, classified, classified_by, confidence, needs_review)
+                 VALUES ('notes/a.md', 'A', 'article', '', '', '2026-03-21', '[\"rust\"]', '', '', '', '', 0, 1, 'deterministic', 'high', 0)",
                 [],
             )
             .expect("insert");
     index
+        .conn
+        .execute("INSERT INTO note_tags (path, tag) VALUES ('notes/a.md', 'rust')", [])
+        .expect("insert note_tags");
+    index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, classified, classified_by, confidence, needs_review)
-                 VALUES ('inbox/b.md', 'B', '', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 0, '', '', 1)",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, classified, classified_by, confidence, needs_review)
+                 VALUES ('inbox/b.md', 'B', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 0, '', '', 1)",
                 [],
             )
             .expect("insert");
 
-    let stats = index.classify_stats(None, None, false).expect("classify_stats");
+    let stats = index.classify_stats(None, false).expect("classify_stats");
     assert_eq!(stats.total_classified, 1);
     assert_eq!(stats.pending_review, 1);
     assert_eq!(stats.inbox_count, 1);
-    assert_eq!(stats.unclassified, 1);
+    assert_eq!(stats.unclassified, 1, "inbox/b.md carries no tags");
 
-    // Domain filter is parameterized: a value with SQL-special characters must
-    // be treated as data (matching nothing here), never interpolated as SQL.
+    // The `tags` filter is parameterized: a value with SQL-special characters
+    // must be treated as data (matching nothing here), never interpolated as SQL.
     let filtered = index
-        .classify_stats(Some("tech' OR '1'='1"), None, false)
-        .expect("classify_stats with injection-shaped domain must not error");
+        .classify_stats(Some(&["rust' OR '1'='1".to_string()]), false)
+        .expect("classify_stats with injection-shaped tag must not error");
     assert_eq!(filtered.total_classified, 0);
 
-    // And a legitimate domain filter still narrows correctly.
-    let tech = index
-        .classify_stats(Some("tech"), None, false)
-        .expect("classify_stats tech");
-    assert_eq!(tech.total_classified, 1);
+    // And a legitimate tags filter still narrows correctly.
+    let rust = index
+        .classify_stats(Some(&["rust".to_string()]), false)
+        .expect("classify_stats rust");
+    assert_eq!(rust.total_classified, 1);
 }
 
 #[test]
@@ -424,24 +397,24 @@ fn test_duplicate_groups() {
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, duplicate_group)
-                 VALUES ('a.md', 'Article A', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'group-1')",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, duplicate_group)
+                 VALUES ('a.md', 'Article A', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'group-1')",
                 [],
             )
             .expect("insert");
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, duplicate_group)
-                 VALUES ('b.md', 'Article A Copy', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'group-1')",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, duplicate_group)
+                 VALUES ('b.md', 'Article A Copy', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'group-1')",
                 [],
             )
             .expect("insert");
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, duplicate_group)
-                 VALUES ('c.md', 'Solo', 'tech', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'group-solo')",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at, duplicate_group)
+                 VALUES ('c.md', 'Solo', 'article', '', '', '2026-03-21', '[]', '', '', '', '', 0, 'group-solo')",
                 [],
             )
             .expect("insert");
@@ -635,9 +608,7 @@ fn hub_members_deliberate_keeps_only_deliberate_note_to_hub_edges() {
         "notes/semantic.md",
         "notes/shared-tag.md",
     ] {
-        index
-            .insert_test_note_graph(path, &[], "", "", "tech", "b", 100)
-            .expect("note");
+        index.insert_test_note_graph(path, &[], "", "", "b", 100).expect("note");
     }
     let edges = vec![
         Edge::deterministic("notes/wikilinked.md", hub, "wikilink", 1.0),
@@ -680,9 +651,7 @@ fn hub_members_deliberate_is_empty_for_inferred_only_membership() {
     let mut index = SearchIndex::open_memory().expect("open");
     let hub = "entities/every.md";
     for path in [hub, "notes/a.md", "notes/b.md"] {
-        index
-            .insert_test_note_graph(path, &[], "", "", "tech", "b", 100)
-            .expect("note");
+        index.insert_test_note_graph(path, &[], "", "", "b", 100).expect("note");
     }
     index
         .insert_edges(&[
@@ -714,14 +683,7 @@ fn find_similar_survives_hyphenated_and_uuid_terms() {
 
     let body = "captured from xda-developers about cli-plugin-marketplace-sync-incident-and-fix-options \
                 during session dfb3bc2f-6dc0-4151-bf48-4789bad13782 on tatari-tv infrastructure";
-    insert_test_note(
-        &index,
-        "notes/hyphenated.md",
-        "Hyphenated Title",
-        "tech",
-        &["tech"],
-        body,
-    );
+    insert_test_note(&index, "notes/hyphenated.md", "Hyphenated Title", &["tech"], body);
 
     let hits = index
         .find_similar(body, 5)
@@ -740,7 +702,7 @@ fn find_similar_survives_operator_keywords_and_colons() {
     // `and`/`or`/`near` are FTS5 operators; `07:51` and `scott:idler` are the
     // colon shape that reads as a column filter.
     let body = "meeting at 07:51 near the office about scott:idler and marquee or clyde tooling";
-    insert_test_note(&index, "notes/operators.md", "Operators", "tech", &["tech"], body);
+    insert_test_note(&index, "notes/operators.md", "Operators", &["tech"], body);
 
     let hits = index
         .find_similar(body, 5)
@@ -751,19 +713,12 @@ fn find_similar_survives_operator_keywords_and_colons() {
 #[test]
 fn search_propagates_a_malformed_match_instead_of_returning_empty() {
     let index = SearchIndex::open_memory().expect("open");
-    insert_test_note(
-        &index,
-        "notes/present.md",
-        "Present",
-        "tech",
-        &["tech"],
-        "some body text",
-    );
+    insert_test_note(&index, "notes/present.md", "Present", &["tech"], "some body text");
 
     // A raw unquoted hyphenated bareword: sqlite rejects it mid-step. The old
     // code swallowed that per row and returned Ok(vec![]) - a fail-open search.
     let err = index
-        .search("xda-developers", None, None, false, None, None, Some(5))
+        .search("xda-developers", None, false, None, None, Some(5))
         .expect_err("a malformed MATCH must be an error, not an empty result set");
     assert!(
         format!("{err:#}").contains("fts5 search failed"),

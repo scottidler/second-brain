@@ -188,7 +188,7 @@ impl SearchIndex {
     /// a note whose summary answered the query. Not implemented until the
     /// eval demands it - see the Phase 9 measurement step.
     ///
-    /// The note-side filters (`domain`, `tags`, `note_type`, `status`) are
+    /// The note-side filters (`tags`, `note_type`, `status`) are
     /// pushed into SQL so the scan only visits rows that pass them;
     /// the dot-product loop then ranks the survivors. `tags` is an
     /// `EXISTS`/count subquery against the `note_tags` facet via the shared
@@ -203,7 +203,6 @@ impl SearchIndex {
         &self,
         query_vec: &[f32],
         limit: u32,
-        domain: Option<&str>,
         tags: Option<&[String]>,
         tags_all: bool,
         note_type: Option<&str>,
@@ -227,11 +226,6 @@ impl SearchIndex {
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(active_model)];
         let mut param_idx = 2;
-        if let Some(d) = domain {
-            sql.push_str(&format!(" AND n.domain = ?{param_idx}"));
-            param_values.push(Box::new(d.to_string()));
-            param_idx += 1;
-        }
         super::query::push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "n", tags, tags_all);
         if let Some(t) = note_type {
             sql.push_str(&format!(" AND n.note_type = ?{param_idx}"));
@@ -865,10 +859,10 @@ impl SearchIndex {
         modified_at: i64,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
-                path, "T", "tech", note_type, "assisted", "", "2026-05-16",
+                path, "T", note_type, "assisted", "", "2026-05-16",
                 "[]", "", "", body, summary, modified_at,
             ],
         )?;

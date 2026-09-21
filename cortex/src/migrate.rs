@@ -417,7 +417,6 @@ fn lint_value_transforms(notes: &[Note], migration: &MigrationConfig, report: &m
             let mut out = Vec::new();
             for (field_name, value_map) in &migration.value_renames {
                 let current_value = match field_name.as_str() {
-                    "domain" => note.frontmatter.domain.as_deref(),
                     "type" => note.frontmatter.note_type.as_deref(),
                     "origin" => note.frontmatter.origin.as_deref(),
                     "status" => note.frontmatter.status.as_deref(),
@@ -461,7 +460,6 @@ fn apply_value_transforms(vault_root: &Path, notes: &[Note], migration: &Migrati
             let mut has_target = false;
             for (field_name, value_map) in &migration.value_renames {
                 let current_value = match field_name.as_str() {
-                    "domain" => note.frontmatter.domain.as_deref(),
                     "type" => note.frontmatter.note_type.as_deref(),
                     "origin" => note.frontmatter.origin.as_deref(),
                     "status" => note.frontmatter.status.as_deref(),
@@ -544,7 +542,6 @@ pub(crate) fn has_inline_tag_list(content: &str) -> bool {
 /// "is this note in scope" do not.
 fn source_field_value(note: &Note, field: &str) -> Option<String> {
     let raw = match field {
-        "domain" => note.frontmatter.domain.as_deref(),
         "type" => note.frontmatter.note_type.as_deref(),
         "origin" => note.frontmatter.origin.as_deref(),
         "status" => note.frontmatter.status.as_deref(),
@@ -565,23 +562,13 @@ fn note_tags(note: &Note) -> Vec<String> {
 /// The canonical tag a source field's value becomes, or `None` when the value
 /// is excluded, empty, or the note does not carry the field.
 ///
-/// Values are quote-stripped (350 vault notes quote `domain:`) and normalized
-/// through `hygiene::normalize_domain`, which is what maps the legacy
-/// `knowledge` value onto `life`.
+/// Values are quote-stripped and lowercased; a migration whose source field
+/// needs richer normalization (emoji folder paths, legacy aliases) applies
+/// its own before configuring `field-to-tags`.
 fn field_to_tag_value(note: &Note, field: &str, cfg: &crate::config::FieldToTags) -> Option<String> {
     let value = source_field_value(note, field)?;
-    let value = value.as_str();
-    // `normalize_domain` handles emoji folder paths and case. It does NOT know
-    // the `knowledge -> life` backwards-compat alias, which lives in
-    // `Domain::from_str` (`vault/src/schema.rs:117`), so the schema parse runs
-    // first and the hygiene pass is the fallback. The design doc credits
-    // `normalize_domain` with this mapping; it does not have it.
-    let hygienic = vault::hygiene::normalize_domain(value);
-    let normalized = match hygienic.parse::<vault::schema::Domain>() {
-        Ok(domain) => domain.as_str().to_string(),
-        Err(_) => hygienic,
-    };
-    if cfg.exclude.iter().any(|e| e == &normalized || e == value) {
+    let normalized = value.to_lowercase();
+    if cfg.exclude.iter().any(|e| e == &normalized || e == &value) {
         return None;
     }
     Some(normalized)
@@ -660,8 +647,8 @@ fn apply_tag_transforms(vault_root: &Path, notes: &[Note], migration: &Migration
             // form for the field it migrates (G4), so an in-scope note with a
             // non-empty inline list is normalized to block even when nothing
             // is added. Without this the vault keeps two spellings forever:
-            // the notes that already carried their own domain value as a tag
-            // are exactly the ones the set-comparison skips.
+            // the notes that already carried their own source-field value as
+            // a tag are exactly the ones the set-comparison skips.
             // Carrying the source FIELD is what puts a note in scope for form
             // normalization, independent of whether its VALUE is excluded.
             // `exclude` says "do not propagate this value as a tag"; it does

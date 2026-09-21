@@ -55,7 +55,6 @@ pub(crate) fn publish_note(
             method,
             filename: extract_filename(note_path),
             source,
-            domain: None,
             trace_id: Some(trace_id.to_string()),
         },
     )?;

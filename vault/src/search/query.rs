@@ -44,20 +44,17 @@ impl super::SearchIndex {
     pub fn search(
         &self,
         query: &str,
-        domain: Option<&str>,
         tags: Option<&[String]>,
         tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
-        log::debug!(
-            "search::search: query={query} domain={domain:?} note_type={note_type:?} status={status:?} limit={limit:?}"
-        );
+        log::debug!("search::search: query={query} note_type={note_type:?} status={status:?} limit={limit:?}");
         let limit = limit.unwrap_or(20);
 
         let mut sql = String::from(
-            "SELECT n.path, n.title, n.domain, n.note_type, n.origin, n.status, n.date, n.tags, n.source, n.creator, n.body, n.summary, n.trace, n.ingested, n.trace_expires
+            "SELECT n.path, n.title, n.note_type, n.origin, n.status, n.date, n.tags, n.source, n.creator, n.body, n.summary, n.trace, n.ingested, n.trace_expires
              FROM notes n
              JOIN notes_fts f ON n.rowid = f.rowid
              WHERE notes_fts MATCH ?1",
@@ -65,11 +62,6 @@ impl super::SearchIndex {
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(query.to_string())];
         let mut param_idx = 2;
 
-        if let Some(d) = domain {
-            sql.push_str(&format!(" AND n.domain = ?{param_idx}"));
-            param_values.push(Box::new(d.to_string()));
-            param_idx += 1;
-        }
         push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "n", tags, tags_all);
         if let Some(t) = note_type {
             sql.push_str(&format!(" AND n.note_type = ?{param_idx}"));
@@ -113,7 +105,7 @@ impl super::SearchIndex {
         // names are the norm, and an unquoted one takes the whole MATCH down.
         let fts_query = terms.iter().map(|t| fts_quote(t)).collect::<Vec<_>>().join(" OR ");
 
-        self.search(&fts_query, None, None, false, None, None, Some(limit as u32))
+        self.search(&fts_query, None, false, None, None, Some(limit as u32))
     }
 
     /// `find_similar` for callers that treat "no similar notes" and "the query
@@ -133,7 +125,6 @@ impl super::SearchIndex {
     /// List notes with optional filters (no full-text search)
     pub fn list_notes(
         &self,
-        domain: Option<&str>,
         tags: Option<&[String]>,
         tags_all: bool,
         note_type: Option<&str>,
@@ -143,21 +134,16 @@ impl super::SearchIndex {
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
         log::debug!(
-            "search::list_notes: domain={domain:?} note_type={note_type:?} status={status:?} after={after:?} before={before:?} limit={limit:?}"
+            "search::list_notes: note_type={note_type:?} status={status:?} after={after:?} before={before:?} limit={limit:?}"
         );
         let limit = limit.unwrap_or(50);
         let mut sql = String::from(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
+            "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
              FROM notes WHERE 1=1",
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
         let mut param_idx = 1;
 
-        if let Some(d) = domain {
-            sql.push_str(&format!(" AND domain = ?{param_idx}"));
-            param_values.push(Box::new(d.to_string()));
-            param_idx += 1;
-        }
         push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
         if let Some(t) = note_type {
             sql.push_str(&format!(" AND note_type = ?{param_idx}"));
@@ -196,7 +182,7 @@ impl super::SearchIndex {
     /// Get a single note by path
     pub fn get_note(&self, path: &str) -> Result<Option<NoteRow>> {
         optional_row(self.conn.query_row(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
+            "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
                  FROM notes WHERE path = ?1",
             params![path],
             NoteRow::from_row,
@@ -223,11 +209,10 @@ impl super::SearchIndex {
         ))
     }
 
-    /// Get recent notes across the vault, optionally filtered by domain and/or note type
+    /// Get recent notes across the vault, optionally filtered by tags and/or note type
     pub fn recent_notes(
         &self,
         days: Option<u32>,
-        domain: Option<&str>,
         tags: Option<&[String]>,
         tags_all: bool,
         note_type: Option<&str>,
@@ -242,16 +227,7 @@ impl super::SearchIndex {
             .map(|d| d.format("%Y-%m-%d").to_string())
             .unwrap_or_default();
 
-        self.list_notes(
-            domain,
-            tags,
-            tags_all,
-            note_type,
-            None,
-            Some(&cutoff),
-            None,
-            Some(limit),
-        )
+        self.list_notes(tags, tags_all, note_type, None, Some(&cutoff), None, Some(limit))
     }
 
     /// Find outbound wikilinks from a note's body
@@ -284,7 +260,7 @@ impl super::SearchIndex {
         let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or(path);
 
         let mut stmt = self.conn.prepare(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
+            "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
              FROM notes WHERE body LIKE ?1",
         )?;
 
@@ -308,7 +284,7 @@ impl super::SearchIndex {
 
         // Get all notes
         let mut stmt = self.conn.prepare(
-            "SELECT path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
+            "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
              FROM notes ORDER BY date DESC",
         )?;
         let all_notes: Vec<NoteRow> = stmt.query_map([], NoteRow::from_row)?.filter_map(warn_row).collect();

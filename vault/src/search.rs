@@ -1,13 +1,13 @@
 //! SQLite-backed full-text search index for vault notes
 //!
-//! Provides FTS5-powered search, incremental indexing by mtime, and
-//! domain/tag analytics. Shared by oracle (MCP server) and cortex (daemon).
+//! Provides FTS5-powered search, incremental indexing by mtime, and tag
+//! analytics. Shared by oracle (MCP server) and cortex (daemon).
 
 use crate::config::ScanConfig;
 use crate::detail;
 use crate::distilled::{Claim, ClaimKind};
 use crate::note::{Note, scan_vault};
-use crate::schema::{Domain, NoteType, Origin, Status};
+use crate::schema::{NoteType, Origin, Status};
 use chrono;
 use eyre::{Result, WrapErr};
 use regex::Regex;
@@ -511,7 +511,6 @@ pub fn extract_host(url: &str) -> Option<String> {
 pub struct NoteRow {
     pub path: String,
     pub title: String,
-    pub domain: String,
     pub note_type: String,
     pub origin: String,
     pub status: String,
@@ -534,19 +533,18 @@ impl NoteRow {
         Ok(Self {
             path: row.get(0)?,
             title: row.get(1)?,
-            domain: row.get(2)?,
-            note_type: row.get(3)?,
-            origin: row.get(4)?,
-            status: row.get(5)?,
-            date: row.get(6)?,
-            tags: row.get(7)?,
-            source: row.get(8)?,
-            creator: row.get(9)?,
-            body: row.get(10)?,
-            summary: row.get(11)?,
-            trace: row.get(12)?,
-            ingested: row.get(13)?,
-            trace_expires: row.get(14)?,
+            note_type: row.get(2)?,
+            origin: row.get(3)?,
+            status: row.get(4)?,
+            date: row.get(5)?,
+            tags: row.get(6)?,
+            source: row.get(7)?,
+            creator: row.get(8)?,
+            body: row.get(9)?,
+            summary: row.get(10)?,
+            trace: row.get(11)?,
+            ingested: row.get(12)?,
+            trace_expires: row.get(13)?,
         })
     }
 }
@@ -572,28 +570,14 @@ impl EmbeddingCoverage {
 #[derive(Debug, Serialize)]
 pub struct VaultStats {
     pub total_notes: u64,
-    pub by_domain: Vec<(String, u64)>,
-    /// Top 20 tags by note count, over the `note_tags` facet (P8, beside
-    /// `by_domain`; `by_domain` is deleted in P11, `by_tag` stays).
+    /// Top 20 tags by note count, over the `note_tags` facet.
     pub by_tag: Vec<(String, u64)>,
     pub by_type: Vec<(String, u64)>,
     pub by_status: Vec<(String, u64)>,
     pub schema_gaps: Vec<(String, u64)>,
 }
 
-/// Statistics and recent notes for a single domain
-#[derive(Debug, Serialize)]
-pub struct DomainBrief {
-    pub domain: String,
-    pub total_notes: u64,
-    pub unread: u64,
-    pub starred: u64,
-    pub by_type: Vec<(String, u64)>,
-    pub recent: Vec<NoteRow>,
-}
-
-/// Statistics and recent notes for a single tag - the `tags` counterpart to
-/// `DomainBrief` (P8, beside `domain_brief`; `DomainBrief` is deleted in P11).
+/// Statistics and recent notes for a single tag.
 #[derive(Debug, Serialize)]
 pub struct TagBrief {
     pub tag: String,
@@ -614,12 +598,11 @@ pub struct IndexStats {
     pub removed: u64,
 }
 
-/// Tag with count and domain distribution
+/// Tag with note count
 #[derive(Debug, Serialize)]
 pub struct TagStat {
     pub tag: String,
     pub count: u64,
-    pub domains: Vec<String>,
 }
 
 /// An outbound wikilink from a note
@@ -651,7 +634,6 @@ pub struct ClassifyStats {
     pub total_classified: u64,
     pub by_method: Vec<(String, u64)>,
     pub by_confidence: Vec<(String, u64)>,
-    pub by_domain: Vec<(String, u64)>,
     pub pending_review: u64,
     pub inbox_count: u64,
     pub unclassified: u64,
@@ -675,7 +657,6 @@ pub struct ColdQuery {
 pub struct ColdNote {
     pub path: String,
     pub title: String,
-    pub domain: String,
     pub date: String,
 }
 

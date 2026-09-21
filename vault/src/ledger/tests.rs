@@ -54,7 +54,6 @@ fn test_append_and_check_duplicate() {
         time: "14:30".to_string(),
         method: Method::Cli,
         source: "https://example.com/article".to_string(),
-        domain: Some("ai".to_string()),
         filename: Some("test-article.md".to_string()),
         trace_id: None,
     };
@@ -80,7 +79,6 @@ fn test_find_completed_returns_path() {
         method: Method::Cli,
         filename: Some("test-note.md".to_string()),
         source: "https://example.com/article".to_string(),
-        domain: Some("ai".to_string()),
         trace_id: None,
     };
     append_entry(&path, &entry).expect("append");
@@ -103,11 +101,11 @@ fn test_separator_detection_with_spaces() {
 
     // Write a ledger with Obsidian-style spaced separators
     let content = format!(
-        "---\ntitle: Borg Ledger\ndate: 2026-03-23\ntype: system\ndomain: system\norigin: authored\ntags: []\n---\n\n\
+        "---\ntitle: Borg Ledger\ndate: 2026-03-23\ntype: system\norigin: authored\ntags: []\n---\n\n\
              # Borg Ledger\n\n\
-             | Date | Time | Method | Status | Title | Filename | Source | Domain | Trace |\n\
-             | ---------- | ----- | --------- | ------ | ----- | -------- | ------ | ------ | ----- |\n\
-             | 2026-03-20 | 10:00 | http | {} | [[Old Note]] | old.md | https://example.com/old | ai | tr-000001 |\n",
+             | Date | Time | Method | Status | Title | Filename | Source | Trace |\n\
+             | ---------- | ----- | --------- | ------ | ----- | -------- | ------ | ----- |\n\
+             | 2026-03-20 | 10:00 | http | {} | [[Old Note]] | old.md | https://example.com/old | tr-000001 |\n",
         "\u{2705}"
     );
     fs::write(&path, content).expect("write");
@@ -118,7 +116,6 @@ fn test_separator_detection_with_spaces() {
         method: Method::Http,
         filename: Some("new-note.md".to_string()),
         source: "https://example.com/new".to_string(),
-        domain: Some("ai".to_string()),
         trace_id: Some("tr-000002".to_string()),
     };
     append_entry(&path, &entry).expect("append");
@@ -153,10 +150,10 @@ fn test_header_drift_repair() {
 
     // Write a ledger with a broken header (missing Filename column)
     let content = "\
-            ---\ntitle: Borg Ledger\ndate: 2026-03-23\ntype: system\ndomain: system\norigin: authored\ntags: []\n---\n\n\
+            ---\ntitle: Borg Ledger\ndate: 2026-03-23\ntype: system\norigin: authored\ntags: []\n---\n\n\
             # Borg Ledger\n\n\
-            | Date | Time | Method | Status | Title | Source | Domain |   |   |\n\
-            |------|------|--------|--------|-------|--------|--------|---|---|\n";
+            | Date | Time | Method | Status | Title | Source |   |   |\n\
+            |------|------|--------|--------|-------|--------|---|---|\n";
     fs::write(&path, content).expect("write");
 
     // Appending should trigger header repair
@@ -166,7 +163,6 @@ fn test_header_drift_repair() {
         method: Method::Http,
         filename: Some("test.md".to_string()),
         source: "https://example.com".to_string(),
-        domain: Some("ai".to_string()),
         trace_id: None,
     };
     append_entry(&path, &entry).expect("append");
@@ -174,12 +170,9 @@ fn test_header_drift_repair() {
     let result = fs::read_to_string(&path).expect("read");
     assert!(
         result.contains("| Note |"),
-        "header should be repaired to canonical 8-column layout with Note column"
+        "header should be repaired to canonical 7-column layout with Note column"
     );
-    assert!(
-        !result.contains("| Source | Domain |   |"),
-        "broken header should be gone"
-    );
+    assert!(!result.contains("| Source |   |   |"), "broken header should be gone");
 
     cleanup(&path);
 }
@@ -198,7 +191,6 @@ fn test_filename_stripping_in_append() {
         method: Method::Http,
         filename: Some("inbox/should-strip-this.md".to_string()),
         source: "https://example.com/strip".to_string(),
-        domain: Some("ai".to_string()),
         trace_id: None,
     };
     append_entry(&path, &entry).expect("append");
@@ -248,7 +240,6 @@ fn test_append_newest_first_multiple_entries() {
                 method: Method::Http,
                 filename: Some(format!("{}.md", title.to_lowercase())),
                 source: format!("https://example.com/{}", title.to_lowercase()),
-                domain: Some("ai".to_string()),
                 trace_id: None,
             },
         )

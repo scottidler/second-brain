@@ -9,7 +9,6 @@ fn opts_default() -> SummarizeOpts {
     SummarizeOpts {
         backfill: true,
         since: None,
-        domain: None,
         tag: None,
         extractor: None,
         dry_run: false,
@@ -380,41 +379,8 @@ async fn backfill_extractor_override_forces_redistill() {
     assert!(raw.contains("Refreshed."), "{raw}");
 }
 
-#[tokio::test]
-async fn backfill_filters_by_domain_frontmatter() {
-    let v = MiniVault::new();
-    v.add(
-        "rust.md",
-        &note(
-            "title: r\ntype: article\nsource: https://example.com/r\ndomain: technical\n",
-            "rust prose.\n",
-        ),
-    );
-    v.add(
-        "news.md",
-        &note(
-            "title: n\ntype: article\nsource: https://example.com/n\ndomain: leisure\n",
-            "news prose.\n",
-        ),
-    );
-
-    let dispatcher = dispatcher_for(fake_with_response(
-        "distill-article",
-        "summary: \"S\"\nclaims: []\ntags: []\nlinks: []\n",
-    ));
-    let cfg = v.config();
-    let mut opts = opts_default();
-    opts.domain = Some("technical".to_string());
-
-    let summary = backfill_with_dispatcher(v.root(), &cfg, &opts, dispatcher)
-        .await
-        .expect("run");
-    assert_eq!(summary.distilled, 1);
-    assert!(v.read("news.md").contains("news prose"));
-}
-
-/// `--tag` beside `--domain` (P9), not instead of it: same filter shape, a
-/// different frontmatter field.
+/// The tags-only filter over the scanned notes: `--tag` narrows to notes
+/// whose `tags:` frontmatter includes the named value.
 #[tokio::test]
 async fn backfill_filters_by_tag_frontmatter() {
     let v = MiniVault::new();

@@ -147,7 +147,7 @@ fn relink(body: &str, from: &str, to: &str) -> String {
     let holder = "link-holder.md";
     v.add_note(
         holder,
-        &format!("---\ntitle: Holder\ndate: 2026-08-19\ntype: note\ndomain: tech\norigin: authored\ntags: []\n---\n\n{body}\n"),
+        &format!("---\ntitle: Holder\ndate: 2026-08-19\ntype: note\norigin: authored\ntags: []\n---\n\n{body}\n"),
     );
     let notes = v.scan();
     let renames = vec![(

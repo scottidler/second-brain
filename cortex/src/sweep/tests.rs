@@ -28,11 +28,10 @@ fn make_config(dir: &Path) -> SweepConfig {
     }
 }
 
-fn make_cold_note(path: &str, title: &str, domain: &str, date: &str) -> ColdNote {
+fn make_cold_note(path: &str, title: &str, date: &str) -> ColdNote {
     ColdNote {
         path: path.to_string(),
         title: title.to_string(),
-        domain: domain.to_string(),
         date: date.to_string(),
     }
 }
@@ -43,9 +42,9 @@ fn make_cold_note(path: &str, title: &str, domain: &str, date: &str) -> ColdNote
 /// path see identical input.
 fn snapshot_fixture_input() -> (Vec<ColdNote>, ColdStats, u32, chrono::DateTime<chrono::Utc>) {
     let rows = vec![
-        make_cold_note("notes/ai/old-paper.md", "Old Paper", "ai", "2025-08-12"),
-        make_cold_note("notes/ai/forgotten.md", "Forgotten Thread", "ai", "2025-08-12"),
-        make_cold_note("notes/diy/unused-jig.md", "Unused Jig", "diy", "2025-08-12"),
+        make_cold_note("notes/ai/old-paper.md", "Old Paper", "2025-08-12"),
+        make_cold_note("notes/ai/forgotten.md", "Forgotten Thread", "2025-08-12"),
+        make_cold_note("notes/diy/unused-jig.md", "Unused Jig", "2025-08-12"),
     ];
     let stats = ColdStats {
         scanned: 1_345,
@@ -91,11 +90,11 @@ fn regenerate_cold_report_snapshot() {
 }
 
 #[test]
-fn render_cold_report_groups_by_domain_and_includes_metadata() {
+fn render_cold_report_flat_list_includes_metadata() {
     let rows = vec![
-        make_cold_note("notes/ai/a.md", "A Paper", "ai", "2025-08-12"),
-        make_cold_note("notes/ai/b.md", "B Thing", "ai", "2025-08-12"),
-        make_cold_note("notes/diy/c.md", "C Hack", "diy", "2025-08-12"),
+        make_cold_note("notes/ai/a.md", "A Paper", "2025-08-12"),
+        make_cold_note("notes/ai/b.md", "B Thing", "2025-08-12"),
+        make_cold_note("notes/diy/c.md", "C Hack", "2025-08-12"),
     ];
     let stats = ColdStats {
         scanned: 100,
@@ -109,9 +108,11 @@ fn render_cold_report_groups_by_domain_and_includes_metadata() {
     assert!(out.contains("total-surfaced: 3"));
     assert!(out.contains("pinned-excluded: 7"));
     assert!(out.contains("pinned: true"), "report file marks itself pinned");
-    assert!(out.contains("## ai (2)"));
-    assert!(out.contains("## diy (1)"));
+    // No grouping headers: every row is a flat checklist item.
+    assert!(!out.contains("##"), "no group headers in the flat list");
     assert!(out.contains("- [ ] `notes/ai/a.md`"));
+    assert!(out.contains("- [ ] `notes/ai/b.md`"));
+    assert!(out.contains("- [ ] `notes/diy/c.md`"));
     assert!(out.contains("\"A Paper\""));
     assert!(out.contains("dated 2025-08-12"));
 }
@@ -128,15 +129,16 @@ fn render_cold_report_empty_writes_placeholder() {
 }
 
 #[test]
-fn render_cold_report_groups_empty_domain_as_no_domain() {
-    let rows = vec![make_cold_note("notes/loose.md", "Loose", "", "2025-08-12")];
+fn render_cold_report_lists_a_single_row_with_no_group_header() {
+    let rows = vec![make_cold_note("notes/loose.md", "Loose", "2025-08-12")];
     let stats = ColdStats {
         scanned: 1,
         surfaced: 1,
         pinned_excluded: 0,
     };
     let out = render_cold_report(&rows, &stats, 180);
-    assert!(out.contains("## (no domain) (1)"));
+    assert!(out.contains("- [ ] `notes/loose.md`"));
+    assert!(!out.contains("##"), "no group header for a single row");
 }
 
 /// `test_daemon_cold_tick_fires` per the design doc. Goes through
@@ -196,7 +198,6 @@ fn test_daemon_cold_tick_fires() {
             date: Some("2020-01-01".to_string()),
             note_type: Some("article".to_string()),
             origin: Some("assisted".to_string()),
-            domain: Some("ai".to_string()),
             ..Frontmatter::default()
         };
         let note = Note {
@@ -245,7 +246,6 @@ fn cold_with_index_counts_pinned_excluded() {
         date: Some("2020-01-01".to_string()),
         note_type: Some("article".to_string()),
         origin: Some("assisted".to_string()),
-        domain: Some("ai".to_string()),
         pinned: Some(true),
         ..Frontmatter::default()
     };
@@ -263,7 +263,6 @@ fn cold_with_index_counts_pinned_excluded() {
         date: Some("2020-01-01".to_string()),
         note_type: Some("article".to_string()),
         origin: Some("assisted".to_string()),
-        domain: Some("ai".to_string()),
         ..Frontmatter::default()
     };
     let cold_note = Note {
@@ -311,7 +310,6 @@ fn cold_with_index_writes_report_atomically() {
         date: Some("2020-01-01".to_string()),
         note_type: Some("article".to_string()),
         origin: Some("assisted".to_string()),
-        domain: Some("ai".to_string()),
         ..Frontmatter::default()
     };
     let cold_note = Note {
@@ -340,7 +338,6 @@ fn cold_with_index_writes_report_atomically() {
         report_path.display()
     );
     let body = std::fs::read_to_string(&report_path).expect("read report");
-    assert!(body.contains("## ai (1)"));
     assert!(body.contains("`notes/ai/old.md`"));
     assert!(body.contains("\"Old Paper\""));
     // Atomic write: temp file should not survive the rename.
@@ -350,7 +347,7 @@ fn cold_with_index_writes_report_atomically() {
 
 #[test]
 fn render_cold_report_handles_missing_title() {
-    let rows = vec![make_cold_note("notes/a.md", "", "ai", "2025-08-12")];
+    let rows = vec![make_cold_note("notes/a.md", "", "2025-08-12")];
     let stats = ColdStats {
         scanned: 1,
         surfaced: 1,

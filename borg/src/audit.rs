@@ -345,7 +345,10 @@ pub fn scan(config: &Config) -> Result<AuditReport> {
                 continue;
             }
             let status = cols[4].trim();
-            let source = if cols.len() >= 11 { cols[7].trim() } else { cols[6].trim() };
+            // Legacy 8-field layout (Title+Filename separate, len >= 10) has source at
+            // cols[7]; the current 7-field layout (collapsed Note, no classification column
+            // since the tags-only migration) has it at cols[6].
+            let source = if cols.len() >= 10 { cols[7].trim() } else { cols[6].trim() };
 
             if status == "✅" {
                 completed_sources.insert(source.to_string());
@@ -759,7 +762,8 @@ fn drop_ledger_row(ledger_path: &Path, source: &str, status_glyph: &str, date_fi
             continue;
         }
         let status = cols[4].trim();
-        let row_source = if cols.len() >= 11 { cols[7].trim() } else { cols[6].trim() };
+        // Same legacy-vs-current column shift as the orphan-scan above.
+        let row_source = if cols.len() >= 10 { cols[7].trim() } else { cols[6].trim() };
         let row_date = cols[1].trim();
         let date_ok = match date_filter {
             Some(d) => row_date == d,

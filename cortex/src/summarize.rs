@@ -42,10 +42,9 @@ pub async fn run(vault_root: &Path, config: &Config, opts: &SummarizeOpts) -> Re
 /// tests can inject a fake.
 pub async fn backfill(vault_root: &Path, config: &Config, opts: &SummarizeOpts) -> Result<BackfillSummary> {
     log::debug!(
-        "summarize::backfill: vault_root={} since={:?} domain={:?} tag={:?} extractor={:?} dry_run={} resume={}",
+        "summarize::backfill: vault_root={} since={:?} tag={:?} extractor={:?} dry_run={} resume={}",
         vault_root.display(),
         opts.since,
-        opts.domain,
         opts.tag,
         opts.extractor,
         opts.dry_run,
@@ -96,10 +95,9 @@ pub async fn backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 's
 
     let candidates: Vec<Note> = filter_notes(&notes, opts, &completed);
     log::info!(
-        "summarize::backfill: {} note(s) qualify after filters (since={:?} domain={:?} tag={:?} extractor={:?})",
+        "summarize::backfill: {} note(s) qualify after filters (since={:?} tag={:?} extractor={:?})",
         candidates.len(),
         opts.since,
-        opts.domain,
         opts.tag,
         opts.extractor,
     );
@@ -317,7 +315,6 @@ fn clone_frontmatter(fm: &Frontmatter) -> Frontmatter {
         title: fm.title.clone(),
         date: fm.date.clone(),
         note_type: fm.note_type.clone(),
-        domain: fm.domain.clone(),
         origin: fm.origin.clone(),
         status: fm.status.clone(),
         tags: fm.tags.clone(),
@@ -406,12 +403,11 @@ fn kind_from_url(url: &str) -> Option<DistillKind> {
     Some(DistillKind::Article)
 }
 
-/// Apply `--since`, `--domain`, and `--tag` to the scanned notes; drop notes
-/// that fall before the resume-checkpoint path. The result is a freshly-owned
-/// vector so the spawned tasks can move each note independently.
+/// Apply `--since` and `--tag` to the scanned notes; drop notes that fall
+/// before the resume-checkpoint path. The result is a freshly-owned vector
+/// so the spawned tasks can move each note independently.
 pub fn filter_notes(notes: &[Note], opts: &SummarizeOpts, completed: &HashSet<PathBuf>) -> Vec<Note> {
     let cutoff = opts.since.as_deref().and_then(parse_since);
-    let domain = opts.domain.as_deref();
     let tag = opts.tag.as_deref();
     let mut out = Vec::new();
     for note in notes {
@@ -434,11 +430,6 @@ pub fn filter_notes(notes: &[Note], opts: &SummarizeOpts, completed: &HashSet<Pa
         }
         if let Some(cutoff) = cutoff
             && !note_date_at_or_after(note, cutoff)
-        {
-            continue;
-        }
-        if let Some(want) = domain
-            && note.frontmatter.domain.as_deref() != Some(want)
         {
             continue;
         }

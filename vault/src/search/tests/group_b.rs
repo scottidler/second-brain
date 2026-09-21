@@ -462,8 +462,8 @@ fn fts5_schema_migrates_from_old_schema() {
                 INSERT INTO notes_fts(rowid, title, body, tags, summary)
                 VALUES (new.rowid, new.title, new.body, new.tags, new.summary);
             END;
-            INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-            VALUES ('notes/legacy.md', 'Legacy', 'tech', 'article', 'assisted', '', '2026-03-21', '[]', '', '', 'legacy body', 'legacy summary', 0);",
+            INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+            VALUES ('notes/legacy.md', 'Legacy', 'article', 'assisted', '', '2026-03-21', '[]', '', '', 'legacy body', 'legacy summary', 0);",
         )
         .expect("seed old schema");
 
@@ -500,9 +500,7 @@ fn fts5_schema_migrates_from_old_schema() {
     assert_eq!(title, "Legacy");
 
     // FTS5 was rebuilt: the legacy body should still be searchable.
-    let hits = index
-        .search("legacy", None, None, false, None, None, None)
-        .expect("search");
+    let hits = index.search("legacy", None, false, None, None, None).expect("search");
     assert!(
         hits.iter().any(|n| n.path == "notes/legacy.md"),
         "post-migration FTS5 must still surface legacy rows: got {hits:?}"
@@ -520,7 +518,7 @@ fn fts5_search_hits_claims_column() {
 
     // FTS5 query for the claim-only term should find this note.
     let hits = index
-        .search("xenomorphism", None, None, false, None, None, None)
+        .search("xenomorphism", None, false, None, None, None)
         .expect("search");
     assert!(
         hits.iter().any(|n| n.path == "notes/distinctclaim.md"),
@@ -638,8 +636,8 @@ fn vec_schema_migrates_old_db_without_note_embeddings() {
                 summary TEXT,
                 modified_at INTEGER
             );
-            INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-            VALUES ('notes/old.md', 'Old', 'tech', 'article', 'assisted', '', '2026-03-21', '[]', '', '', 'old body', 'old summary', 0);",
+            INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+            VALUES ('notes/old.md', 'Old', 'article', 'assisted', '', '2026-03-21', '[]', '', '', 'old body', 'old summary', 0);",
         )
         .expect("seed old schema");
 
@@ -677,11 +675,11 @@ fn vec_schema_fk_cascade_deletes_embeddings_with_note() {
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     "notes/cascade.md",
-                    "T", "tech", "article", "assisted", "", "2026-03-21",
+                    "T", "article", "assisted", "", "2026-03-21",
                     "[]", "", "", "body", "summary", 0_i64,
                 ],
             )
@@ -749,11 +747,11 @@ fn vec_schema_fk_pragma_must_be_on_for_cascade() {
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     "notes/orphan.md",
-                    "T", "tech", "article", "assisted", "", "2026-03-21",
+                    "T", "article", "assisted", "", "2026-03-21",
                     "[]", "", "", "body", "summary", 0_i64,
                 ],
             )
@@ -838,11 +836,11 @@ fn vec_schema_kind_check_constraint_rejects_unknown_kind() {
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     "notes/x.md",
-                    "T", "tech", "article", "assisted", "", "2026-03-21",
+                    "T", "article", "assisted", "", "2026-03-21",
                     "[]", "", "", "body", "summary", 0_i64,
                 ],
             )
@@ -879,11 +877,11 @@ fn vec_schema_unique_constraint_replaces_on_upsert_intent() {
     index
             .conn
             .execute(
-                "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     "notes/up.md",
-                    "T", "tech", "article", "assisted", "", "2026-03-21",
+                    "T", "article", "assisted", "", "2026-03-21",
                     "[]", "", "", "body", "summary", 0_i64,
                 ],
             )
@@ -1154,13 +1152,13 @@ fn cortex_upsert_after_stale_flag_replaces_old_row_atomically() {
     );
 }
 
-// --- Phase 8: tags siblings beside domain in stats.rs -----------------------
+// --- Phase 8: tags siblings in stats.rs -------------------------------------
 
 /// Build a fully-populated `Note` for the P8 tags-sibling tests below:
-/// domain, creator, source, tags, and (when `classified`) the `cortex-*`
-/// extra keys `index_one` reads into the `classified`/`classified_by`
-/// columns (`index.rs:167-170`).
-fn siblings_note(path: &str, domain: &str, creator: &str, source: &str, tags: &[&str], classified: bool) -> Note {
+/// creator, source, tags, and (when `classified`) the `cortex-*` extra keys
+/// `index_one` reads into the `classified`/`classified_by` columns
+/// (`index.rs:167-170`).
+fn siblings_note(path: &str, creator: &str, source: &str, tags: &[&str], classified: bool) -> Note {
     use crate::frontmatter::Frontmatter;
     use std::path::PathBuf;
     let mut extra = std::collections::HashMap::new();
@@ -1177,7 +1175,6 @@ fn siblings_note(path: &str, domain: &str, creator: &str, source: &str, tags: &[
             title: Some(path.to_string()),
             note_type: Some("article".to_string()),
             origin: Some("assisted".to_string()),
-            domain: Some(domain.to_string()),
             creator: Some(creator.to_string()),
             source: Some(source.to_string()),
             tags: Some(tags.iter().map(|t| t.to_string()).collect()),
@@ -1190,24 +1187,24 @@ fn siblings_note(path: &str, domain: &str, creator: &str, source: &str, tags: &[
 }
 
 #[test]
-fn tag_search_narrows_by_tags_sibling_beside_domain() {
+fn tag_search_narrows_by_tags_sibling() {
     let index = SearchIndex::open_memory().expect("open");
     index
-        .index_one(&siblings_note("notes/a.md", "tech", "", "", &["rust", "ai"], false), 1)
+        .index_one(&siblings_note("notes/a.md", "", "", &["rust", "ai"], false), 1)
         .expect("a");
     index
-        .index_one(&siblings_note("notes/b.md", "tech", "", "", &["rust"], false), 1)
+        .index_one(&siblings_note("notes/b.md", "", "", &["rust"], false), 1)
         .expect("b");
 
     // Primary `tag` matches both; the `tags` sibling narrows to the one that
     // also carries `ai`.
     let narrowed = index
-        .tag_search("rust", None, Some(&["ai".to_string()]), false, None)
+        .tag_search("rust", Some(&["ai".to_string()]), false, None)
         .expect("narrowed");
     assert_eq!(narrowed.len(), 1);
     assert_eq!(narrowed[0].path, "notes/a.md");
 
-    let unfiltered = index.tag_search("rust", None, None, false, None).expect("unfiltered");
+    let unfiltered = index.tag_search("rust", None, false, None).expect("unfiltered");
     assert_eq!(unfiltered.len(), 2);
 }
 
@@ -1216,33 +1213,24 @@ fn notes_by_creator_narrows_by_tags_sibling() {
     let index = SearchIndex::open_memory().expect("open");
     index
         .index_one(
-            &siblings_note("notes/a.md", "tech", "acme", "https://example.com/a", &["rust"], false),
+            &siblings_note("notes/a.md", "acme", "https://example.com/a", &["rust"], false),
             1,
         )
         .expect("a");
     index
         .index_one(
-            &siblings_note(
-                "notes/b.md",
-                "tech",
-                "acme",
-                "https://example.com/b",
-                &["cooking"],
-                false,
-            ),
+            &siblings_note("notes/b.md", "acme", "https://example.com/b", &["cooking"], false),
             1,
         )
         .expect("b");
 
     let rows = index
-        .notes_by_creator("acme", None, Some(&["rust".to_string()]), false, None)
+        .notes_by_creator("acme", Some(&["rust".to_string()]), false, None)
         .expect("filtered");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].path, "notes/a.md");
 
-    let all = index
-        .notes_by_creator("acme", None, None, false, None)
-        .expect("unfiltered");
+    let all = index.notes_by_creator("acme", None, false, None).expect("unfiltered");
     assert_eq!(all.len(), 2);
 }
 
@@ -1251,26 +1239,19 @@ fn notes_by_source_domain_narrows_by_tags_sibling() {
     let index = SearchIndex::open_memory().expect("open");
     index
         .index_one(
-            &siblings_note("notes/a.md", "tech", "acme", "https://example.com/a", &["rust"], false),
+            &siblings_note("notes/a.md", "acme", "https://example.com/a", &["rust"], false),
             1,
         )
         .expect("a");
     index
         .index_one(
-            &siblings_note(
-                "notes/b.md",
-                "tech",
-                "acme",
-                "https://example.com/b",
-                &["cooking"],
-                false,
-            ),
+            &siblings_note("notes/b.md", "acme", "https://example.com/b", &["cooking"], false),
             1,
         )
         .expect("b");
 
     let rows = index
-        .notes_by_source_domain("example.com", None, Some(&["cooking".to_string()]), false, None)
+        .notes_by_source_domain("example.com", Some(&["cooking".to_string()]), false, None)
         .expect("filtered");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].path, "notes/b.md");
@@ -1280,35 +1261,30 @@ fn notes_by_source_domain_narrows_by_tags_sibling() {
 fn classify_stats_narrows_by_tags_sibling() {
     let index = SearchIndex::open_memory().expect("open");
     index
-        .index_one(&siblings_note("notes/a.md", "tech", "", "", &["rust"], true), 1)
+        .index_one(&siblings_note("notes/a.md", "", "", &["rust"], true), 1)
         .expect("a");
     index
-        .index_one(&siblings_note("notes/b.md", "tech", "", "", &["cooking"], true), 1)
+        .index_one(&siblings_note("notes/b.md", "", "", &["cooking"], true), 1)
         .expect("b");
 
-    let rust_only = index
-        .classify_stats(None, Some(&["rust".to_string()]), false)
-        .expect("rust");
+    let rust_only = index.classify_stats(Some(&["rust".to_string()]), false).expect("rust");
     assert_eq!(rust_only.total_classified, 1);
 
-    let both = index.classify_stats(None, None, false).expect("unfiltered");
+    let both = index.classify_stats(None, false).expect("unfiltered");
     assert_eq!(both.total_classified, 2);
 }
 
 #[test]
-fn tag_brief_mirrors_domain_brief_shape() {
+fn tag_brief_reports_tag_stats_shape() {
     let index = SearchIndex::open_memory().expect("open");
     index
-        .index_one(
-            &siblings_note("notes/a.md", "tech", "", "", &["privacy", "ai"], false),
-            1,
-        )
+        .index_one(&siblings_note("notes/a.md", "", "", &["privacy", "ai"], false), 1)
         .expect("a");
     index
-        .index_one(&siblings_note("notes/b.md", "tech", "", "", &["privacy"], false), 1)
+        .index_one(&siblings_note("notes/b.md", "", "", &["privacy"], false), 1)
         .expect("b");
     index
-        .index_one(&siblings_note("notes/c.md", "tech", "", "", &["ai"], false), 1)
+        .index_one(&siblings_note("notes/c.md", "", "", &["ai"], false), 1)
         .expect("c");
 
     let brief = index.tag_brief("privacy", None).expect("tag_brief");
@@ -1323,10 +1299,10 @@ fn tag_brief_mirrors_domain_brief_shape() {
 fn stats_by_tag_reports_top_20() {
     let index = SearchIndex::open_memory().expect("open");
     index
-        .index_one(&siblings_note("notes/a.md", "tech", "", "", &["rust", "ai"], false), 1)
+        .index_one(&siblings_note("notes/a.md", "", "", &["rust", "ai"], false), 1)
         .expect("a");
     index
-        .index_one(&siblings_note("notes/b.md", "tech", "", "", &["rust"], false), 1)
+        .index_one(&siblings_note("notes/b.md", "", "", &["rust"], false), 1)
         .expect("b");
 
     let stats = index.stats().expect("stats");
@@ -1339,10 +1315,10 @@ fn stats_by_tag_reports_top_20() {
 fn schema_gaps_reports_a_tags_gap_via_the_note_tags_facet() {
     let index = SearchIndex::open_memory().expect("open");
     index
-        .index_one(&siblings_note("notes/a.md", "tech", "", "", &["rust"], false), 1)
+        .index_one(&siblings_note("notes/a.md", "", "", &["rust"], false), 1)
         .expect("a");
     index
-        .index_one(&siblings_note("notes/b.md", "tech", "", "", &[], false), 1)
+        .index_one(&siblings_note("notes/b.md", "", "", &[], false), 1)
         .expect("b");
 
     let stats = index.stats().expect("stats");

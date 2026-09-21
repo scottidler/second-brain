@@ -139,10 +139,6 @@ fn migrate_one_note(path: &Path, vault_root: &Path, apply: bool, config: &Config
             method: IngestMethod::Cli,
             filename: rel_note_path.and_then(|p| p.rsplit('/').next().map(|s| s.to_string())),
             source: source.to_string(),
-            domain: path
-                .parent()
-                .and_then(|p| p.strip_prefix(vault_root).ok())
-                .map(|p| p.display().to_string()),
             trace_id: None,
         })
     } else {

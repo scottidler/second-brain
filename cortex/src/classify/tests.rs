@@ -2,10 +2,6 @@ use super::*;
 use crate::testutil::NoteBuilder;
 use distillers::tags::{Deterministic, TagMethod};
 
-fn test_config() -> ClassifyConfig {
-    ClassifyConfig::default()
-}
-
 /// The vocabulary the classify tests classify against. Small on purpose: every
 /// tag here is one a fixture below actually carries.
 fn test_canon() -> CanonicalSet {
@@ -90,55 +86,8 @@ fn apply_opts() -> ClassifyOpts {
         path: None,
         force: false,
         review_only: false,
-        reclassify_domain: None,
         retag: Vec::new(),
     }
-}
-
-#[test]
-fn test_domain_by_tags_single_domain() {
-    let config = test_config();
-    let (domain, reason) = domain_by_tags(&["rust".to_string(), "cli".to_string()], &config).expect("a domain");
-    assert_eq!(domain, Domain::Tech);
-    assert!(reason.contains("tag match"), "reason was {reason}");
-}
-
-#[test]
-fn test_domain_by_tags_no_match() {
-    let config = test_config();
-    assert!(domain_by_tags(&["random-tag".to_string(), "unrelated".to_string()], &config).is_none());
-}
-
-#[test]
-fn test_domain_by_tags_ambiguous_tie() {
-    // rust -> tech, claude -> ai: one each, so no tier-1a answer.
-    let config = test_config();
-    assert!(domain_by_tags(&["rust".to_string(), "claude".to_string()], &config).is_none());
-}
-
-#[test]
-fn test_domain_by_source() {
-    let note = NoteBuilder::new("inbox/test-note.md")
-        .title("Test Note")
-        .source("https://docs.rs/some-crate")
-        .build();
-
-    let mut config = test_config();
-    config.source_domain_map.insert("tech".into(), vec!["docs.rs".into()]);
-
-    let (domain, _) = domain_by_source(&note, &config).expect("a domain");
-    assert_eq!(domain, Domain::Tech);
-}
-
-#[test]
-fn test_domain_by_source_no_match() {
-    let note = NoteBuilder::new("inbox/test-note.md")
-        .title("Test Note")
-        .source("https://random-site.example.com")
-        .build();
-
-    let config = test_config();
-    assert!(domain_by_source(&note, &config).is_none());
 }
 
 #[test]
@@ -237,8 +186,8 @@ fn test_resolve_collision_mints_next_free_slot_when_no_candidate_matches_source(
     assert_eq!(resolved, dir.path().join("note-3.md"));
 }
 
-/// Enrichment writes the P3 union (preserved first, then fresh), the domain
-/// when a tier produced one, and the three provenance keys.
+/// Enrichment writes the P3 union (preserved first, then fresh) and the three
+/// provenance keys.
 #[test]
 fn test_build_enrichment_fields_unions_tags() {
     let note = NoteBuilder::new("inbox/test.md").title("Test").tags(&["rust"]).build();
@@ -249,7 +198,6 @@ fn test_build_enrichment_fields_unions_tags() {
             confidence: Confidence::High,
             method: TagMethod::ClassifierDev,
         },
-        domain: Some(Domain::Ai),
         reason: "test".to_string(),
     };
 
@@ -262,11 +210,6 @@ fn test_build_enrichment_fields_unions_tags() {
     assert_eq!(
         tags,
         tags_value(&["rust".to_string(), "ai".to_string(), "llm".to_string()])
-    );
-    assert!(
-        fields
-            .iter()
-            .any(|(k, v)| k == "domain" && v == &serde_yaml::Value::String("ai".to_string()))
     );
     assert!(
         fields
@@ -300,7 +243,6 @@ fn test_build_enrichment_fields_cap_keeps_preserved() {
             confidence: Confidence::High,
             method: TagMethod::ClassifierDev,
         },
-        domain: None,
         reason: "test".to_string(),
     };
 
@@ -311,79 +253,14 @@ fn test_build_enrichment_fields_cap_keeps_preserved() {
         Some(tags_value(&["rust".to_string(), "cli".to_string()])),
         "the fresh tag must lose to the cap, not the preserved ones"
     );
-    assert!(
-        !fields.iter().any(|(k, _)| k == "domain"),
-        "no domain tier matched, so no domain key is written"
-    );
 }
 
 #[test]
-fn test_domain_by_tags_compound_segment_match() {
-    // Compound tags like "ai-agents" should match via segment "agents"
-    let config = test_config();
-    let (domain, _) = domain_by_tags(&["ai-agents".to_string(), "ai-strategy".to_string()], &config).expect("a domain");
-    assert_eq!(domain, Domain::Ai);
-}
-
-#[test]
-fn test_domain_by_tags_compound_claude_code() {
-    // "claude-code" should match via segment "claude" -> ai domain
-    let config = test_config();
-    let (domain, _) =
-        domain_by_tags(&["claude-code".to_string(), "claudecode".to_string()], &config).expect("a domain");
-    assert_eq!(domain, Domain::Ai);
-}
-
-#[test]
-fn test_domain_by_tags_compound_no_false_positive() {
-    // Tags with no segment matching any trigger should still return None
-    let config = test_config();
-    assert!(domain_by_tags(&["career-advice".to_string(), "hiring-trends".to_string()], &config).is_none());
-}
-
-#[test]
-fn test_domain_by_tags_single_word_still_works() {
-    // Exact single-word matches should still work
-    let config = test_config();
-    let (domain, _) = domain_by_tags(&["rust".to_string()], &config).expect("a domain");
-    assert_eq!(domain, Domain::Tech);
-}
-
-#[test]
-fn test_domain_by_tags_multi_segment_tag() {
-    // "ai-coding-agents" has segments ["ai", "coding", "agents"]
-    // Both "ai" and "agents" are triggers for ai domain - should give ai +1 (not +2)
-    let config = test_config();
-    let (domain, _) = domain_by_tags(&["ai-coding-agents".to_string()], &config).expect("a domain");
-    assert_eq!(domain, Domain::Ai);
-}
-
-#[test]
-fn test_derive_domain_tags_win_over_source() {
-    let note = NoteBuilder::new("inbox/test-note.md")
-        .title("AI Article on GitHub")
-        .source("https://github.com/anthropics/claude")
-        .build();
-
-    let mut config = test_config();
-    config
-        .source_domain_map
-        .insert("tech".into(), vec!["github.com".into()]);
-
-    // The classified tags say ai (3 matches), the source says tech - tier 1a
-    // runs first, so the tags win.
-    let fabric = FabricConfig::default();
-    let tags = ["claude".to_string(), "llm".to_string(), "anthropic".to_string()];
-    let (domain, _) = derive_domain(&note, &tags, &config, &fabric, None);
-    assert_eq!(domain, Some(Domain::Ai));
-}
-
-#[test]
-fn test_filter_unclassified_notes_selects_domainless_in_notes() {
-    let domainless = NoteBuilder::new("notes/orphaned.md").title("Orphaned").build();
-    let classified = NoteBuilder::new("notes/good.md").title("Good").domain("tech").build();
+fn test_filter_unclassified_notes_selects_tagless_in_notes() {
+    let tagless = NoteBuilder::new("notes/orphaned.md").title("Orphaned").build();
+    let classified = NoteBuilder::new("notes/good.md").title("Good").tags(&["tech"]).build();
     let inbox = NoteBuilder::new("inbox/new.md").title("New").build();
-    let notes = vec![domainless, classified, inbox];
+    let notes = vec![tagless, classified, inbox];
 
     let filtered = filter_unclassified_notes(&notes, &FrontmatterConfig::default());
     assert_eq!(filtered.len(), 1);
@@ -392,8 +269,8 @@ fn test_filter_unclassified_notes_selects_domainless_in_notes() {
 
 #[test]
 fn test_filter_unclassified_notes_ignores_inbox() {
-    let inbox_no_domain = NoteBuilder::new("inbox/test.md").title("Test").build();
-    let notes = vec![inbox_no_domain];
+    let inbox_no_tags = NoteBuilder::new("inbox/test.md").title("Test").build();
+    let notes = vec![inbox_no_tags];
 
     let filtered = filter_unclassified_notes(&notes, &FrontmatterConfig::default());
     assert_eq!(filtered.len(), 0);
@@ -404,10 +281,10 @@ fn test_catchup_classify_enriches_in_place() {
     use crate::testutil::TestVault;
 
     let vault = TestVault::new();
-    // Add a domainless note in notes/ with classifiable tags
+    // Add a tag-less note in notes/ (orphaned by reingest) for catch-up to enrich
     vault.add_note(
             "notes/reingest-orphan.md",
-            "---\ntitle: Reingest Orphan\ndate: 2026-03-20\ntype: link\ntags:\n  - rust\n  - cli\nsource: \"https://example.com/rust-guide\"\n---\nA reingested note that lost its domain.\n",
+            "---\ntitle: Reingest Orphan\ndate: 2026-03-20\ntype: link\ntags: []\nsource: \"https://example.com/rust-guide\"\n---\nA reingested note that lost its tags.\n",
         );
 
     let notes = vault.scan();
@@ -418,7 +295,6 @@ fn test_catchup_classify_enriches_in_place() {
         &config,
         &apply_opts(),
         &stub_classifiers(&["rust", "cli"], Confidence::High),
-        None,
     )
     .unwrap();
 
@@ -430,7 +306,7 @@ fn test_catchup_classify_enriches_in_place() {
 
     // The orphan should have been catch-up classified
     let content = vault.read("notes/reingest-orphan.md");
-    assert!(content.contains("domain: tech"), "should have domain assigned");
+    assert!(content.contains("- rust"), "should have fresh tags assigned");
     assert!(
         content.contains("cortex-classified: true"),
         "should be marked classified"
@@ -452,10 +328,7 @@ fn test_catchup_classify_enriches_in_place() {
 #[test]
 fn test_lint_classify_includes_unclassified_notes() {
     let inbox_note = NoteBuilder::new("inbox/test.md").title("Test").tags(&["rust"]).build();
-    let orphan = NoteBuilder::new("notes/orphan.md")
-        .title("Orphan")
-        .tags(&["rust"])
-        .build();
+    let orphan = NoteBuilder::new("notes/orphan.md").title("Orphan").build();
     let notes = vec![inbox_note, orphan];
 
     let config = Config::default();
@@ -469,7 +342,6 @@ fn test_lint_classify_includes_unclassified_notes() {
         &config,
         &opts,
         &stub_classifiers(&["rust"], Confidence::High),
-        None,
     );
     // Both should produce violations
     let paths: Vec<String> = report
@@ -484,7 +356,7 @@ fn test_lint_classify_includes_unclassified_notes() {
 // ---- catch-up scope: path-exempt notes are not "unclassified" ----
 
 #[test]
-fn unclassified_filter_skips_domain_exempt_paths() {
+fn unclassified_filter_skips_tags_exempt_paths() {
     use std::collections::HashMap;
 
     let vault = crate::testutil::TestVault::new();
@@ -508,12 +380,12 @@ fn unclassified_filter_skips_domain_exempt_paths() {
         picked.iter().map(|n| &n.path).collect::<Vec<_>>()
     );
 
-    // With the live config's `notes/ai/** -> [domain]` exemption, the digest is
-    // correctly domain-less and must NOT be re-classified every cycle.
+    // With the live config's `notes/ai/** -> [tags]` exemption, the digest is
+    // correctly tag-less and must NOT be re-classified every cycle.
     let mut path_exempt = HashMap::new();
     path_exempt.insert(
         "notes/ai/**".to_string(),
-        vec!["domain".to_string(), "origin".to_string()],
+        vec!["tags".to_string(), "origin".to_string()],
     );
     let exempting = FrontmatterConfig {
         path_exempt,
@@ -537,8 +409,7 @@ fn promote_once(classifiers: &Classifiers, tags: &str) -> (bool, bool, String) {
     );
     let notes = vault.scan();
     let config = vault.config();
-    let (_report, _written) =
-        apply_classify(vault.root(), &notes, &config, &apply_opts(), classifiers, None).expect("apply");
+    let (_report, _written) = apply_classify(vault.root(), &notes, &config, &apply_opts(), classifiers).expect("apply");
 
     let promoted = vault.root().join("notes/candidate.md").exists();
     let inbox_path = vault.root().join("inbox/candidate.md");
@@ -555,7 +426,6 @@ fn promote_once(classifiers: &Classifiers, tags: &str) -> (bool, bool, String) {
 }
 
 /// The confidence table drives promotion: High and Medium promote, Low holds.
-/// This is the rule the phase moved off `domain` and onto the tag classifier.
 #[test]
 fn promotion_gates_on_confidence() {
     let (promoted, held, content) = promote_once(&stub_classifiers(&["rust", "cli"], Confidence::High), "");
@@ -607,7 +477,7 @@ fn retag_replaces_and_never_writes_empty() {
     let vault = crate::testutil::TestVault::new();
     vault.add_note(
         "notes/keeper.md",
-        "---\ntitle: Keeper\ndate: 2026-09-20\ntype: note\ndomain: tech\ntags:\n  - rust\n  - work\n---\n\nbody\n",
+        "---\ntitle: Keeper\ndate: 2026-09-20\ntype: note\ntags:\n  - rust\n  - work\n---\n\nbody\n",
     );
     let opts = ClassifyOpts {
         retag: vec!["notes/keeper.md".to_string()],
@@ -622,8 +492,7 @@ fn retag_replaces_and_never_writes_empty() {
         test_canon(),
         protected.clone(),
     );
-    let (_report, written) =
-        apply_classify(vault.root(), &vault.scan(), &config, &opts, &classifiers, None).expect("retag");
+    let (_report, written) = apply_classify(vault.root(), &vault.scan(), &config, &opts, &classifiers).expect("retag");
     assert_eq!(written, vec!["notes/keeper.md".to_string()]);
 
     let content = vault.read("notes/keeper.md");
@@ -642,7 +511,7 @@ fn retag_replaces_and_never_writes_empty() {
         test_canon(),
         protected,
     );
-    let (_report, written) = apply_classify(vault.root(), &vault.scan(), &config, &opts, &empty, None).expect("retag");
+    let (_report, written) = apply_classify(vault.root(), &vault.scan(), &config, &opts, &empty).expect("retag");
     assert!(written.is_empty(), "an empty result writes nothing: {written:?}");
     let after = vault.read("notes/keeper.md");
     assert!(

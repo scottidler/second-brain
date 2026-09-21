@@ -42,10 +42,10 @@ fn full_rebuild_builds_semantic_edges() {
     let mut index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(16, "mock-graph-v1");
     index
-        .insert_test_note_graph("notes/a.md", &[], "", "", "tech", "alpha", 100)
+        .insert_test_note_graph("notes/a.md", &[], "", "", "alpha", 100)
         .expect("a");
     index
-        .insert_test_note_graph("notes/b.md", &[], "", "", "tech", "beta", 100)
+        .insert_test_note_graph("notes/b.md", &[], "", "", "beta", 100)
         .expect("b");
     set_active_mock(&mut index, &m);
     embed(&index, &m, "notes/a.md", "shared topic", 100);
@@ -73,10 +73,10 @@ fn semantic_edge_not_stranded_when_embedding_lands_after_skip() {
     let m = MockEmbedder::new(16, "mock-graph-v1");
     // Two notes; only `b` is embedded at first. `a` has NO embedding.
     index
-        .insert_test_note_graph("notes/a.md", &[], "", "", "tech", "alpha topic", 100)
+        .insert_test_note_graph("notes/a.md", &[], "", "", "alpha topic", 100)
         .expect("a");
     index
-        .insert_test_note_graph("notes/b.md", &[], "", "", "tech", "alpha topic", 100)
+        .insert_test_note_graph("notes/b.md", &[], "", "", "alpha topic", 100)
         .expect("b");
     set_active_mock(&mut index, &m);
     embed(&index, &m, "notes/b.md", "alpha topic", 100);
@@ -120,10 +120,10 @@ fn dangling_wikilink_is_skipped_not_inserted() {
     let mut index = SearchIndex::open_memory().expect("open");
     // `a` links to a real note and a dangling one.
     index
-        .insert_test_note_graph("notes/a.md", &[], "", "", "tech", "see [[b]] and [[ghost]]", 100)
+        .insert_test_note_graph("notes/a.md", &[], "", "", "see [[b]] and [[ghost]]", 100)
         .expect("a");
     index
-        .insert_test_note_graph("notes/b.md", &[], "", "", "tech", "body", 100)
+        .insert_test_note_graph("notes/b.md", &[], "", "", "body", 100)
         .expect("b");
 
     let stats = build(&mut index, &cfg(), true).expect("build");
@@ -142,14 +142,14 @@ fn shared_tag_rarity_downweights_blanket_tags() {
     // `rare` shared by a,b only (df=2). `common` shared by a,b (df=2 here) —
     // keep small so both fire, then assert the rare contributes more weight.
     index
-        .insert_test_note_graph("notes/a.md", &["rare", "common"], "", "", "tech", "x", 100)
+        .insert_test_note_graph("notes/a.md", &["rare", "common"], "", "", "x", 100)
         .expect("a");
     index
-        .insert_test_note_graph("notes/b.md", &["rare", "common"], "", "", "tech", "y", 100)
+        .insert_test_note_graph("notes/b.md", &["rare", "common"], "", "", "y", 100)
         .expect("b");
     // Pad `common` to df=3 (still under cap) so its rarity weight is lower.
     index
-        .insert_test_note_graph("notes/c.md", &["common"], "", "", "tech", "z", 100)
+        .insert_test_note_graph("notes/c.md", &["common"], "", "", "z", 100)
         .expect("c");
 
     build(&mut index, &cfg(), true).expect("build");
@@ -176,7 +176,7 @@ fn shared_tag_skips_buckets_over_fanout_cap() {
     // 5 notes all sharing tag `blanket`; cap is 3 -> bucket skipped entirely.
     for i in 0..5 {
         index
-            .insert_test_note_graph(&format!("notes/{i}.md"), &["blanket"], "", "", "tech", "x", 100)
+            .insert_test_note_graph(&format!("notes/{i}.md"), &["blanket"], "", "", "x", 100)
             .expect("note");
     }
     build(&mut index, &cfg(), true).expect("build");
@@ -191,10 +191,10 @@ fn shared_tag_skips_buckets_over_fanout_cap() {
 fn shared_creator_edges_built_with_fixed_weight() {
     let mut index = SearchIndex::open_memory().expect("open");
     index
-        .insert_test_note_graph("notes/a.md", &[], "", "alice", "tech", "x", 100)
+        .insert_test_note_graph("notes/a.md", &[], "", "alice", "x", 100)
         .expect("a");
     index
-        .insert_test_note_graph("notes/b.md", &[], "", "alice", "tech", "y", 100)
+        .insert_test_note_graph("notes/b.md", &[], "", "alice", "y", 100)
         .expect("b");
     build(&mut index, &cfg(), true).expect("build");
     let neighbors = index
@@ -213,18 +213,10 @@ fn shared_creator_edges_built_with_fixed_weight() {
 fn shared_source_uses_host_not_full_url() {
     let mut index = SearchIndex::open_memory().expect("open");
     index
-        .insert_test_note_graph(
-            "notes/a.md",
-            &[],
-            "https://www.youtube.com/watch?v=1",
-            "",
-            "tech",
-            "x",
-            100,
-        )
+        .insert_test_note_graph("notes/a.md", &[], "https://www.youtube.com/watch?v=1", "", "x", 100)
         .expect("a");
     index
-        .insert_test_note_graph("notes/b.md", &[], "https://youtube.com/watch?v=2", "", "tech", "y", 100)
+        .insert_test_note_graph("notes/b.md", &[], "https://youtube.com/watch?v=2", "", "y", 100)
         .expect("b");
     build(&mut index, &cfg(), true).expect("build");
     // Both normalize to host youtube.com -> a shared-source edge forms.
@@ -246,17 +238,17 @@ fn shared_source_uses_host_not_full_url() {
 fn incremental_only_rebuilds_changed_notes() {
     let mut index = SearchIndex::open_memory().expect("open");
     index
-        .insert_test_note_graph("notes/a.md", &["t"], "", "", "tech", "x", 100)
+        .insert_test_note_graph("notes/a.md", &["t"], "", "", "x", 100)
         .expect("a");
     index
-        .insert_test_note_graph("notes/b.md", &["t"], "", "", "tech", "y", 100)
+        .insert_test_note_graph("notes/b.md", &["t"], "", "", "y", 100)
         .expect("b");
     build(&mut index, &cfg(), true).expect("full");
     let before = index.count_edges(None).expect("count");
 
     // Add a new note c (modified_at higher than the content watermark).
     index
-        .insert_test_note_graph("notes/c.md", &["t"], "", "", "tech", "z", 500)
+        .insert_test_note_graph("notes/c.md", &["t"], "", "", "z", 500)
         .expect("c");
     let stats = build(&mut index, &cfg(), false).expect("incr");
     assert!(!stats.full_rebuild);
@@ -297,12 +289,10 @@ fn multi_repo_member_edges_join_every_touched_repo_hub_deduped() {
     let repos = ["scottidler/loopr", "tatari-tv/marquee", "scottidler/second-brain"];
     // Stub the three repo hubs at their real nested paths so `insert_edges`
     // resolves the `dst` (an absent hub note would silently drop the edge).
-    // Empty domain so the hubs do not form shared-domain edges among themselves
-    // (which would pollute `hub_members`, a kind-agnostic incoming-edge query).
     for repo in repos {
         let hub = crate::hub::repo_hub_path(repo);
         index
-            .insert_test_note_graph(&hub, &[], "", "", "", "hub", 100)
+            .insert_test_note_graph(&hub, &[], "", "", "hub", 100)
             .expect("hub note");
     }
     // repo: loopr, repos-touched [loopr, marquee, second-brain] -> loopr is
@@ -340,7 +330,7 @@ fn no_extra_repo_member_edges_when_repos_touched_absent_or_empty() {
     let mut index = SearchIndex::open_memory().expect("open");
     let hub = crate::hub::repo_hub_path("scottidler/loopr");
     index
-        .insert_test_note_graph(&hub, &[], "", "", "tech", "hub", 100)
+        .insert_test_note_graph(&hub, &[], "", "", "hub", 100)
         .expect("hub note");
     index_repo_session(&index, "inbox/none.md", Some("scottidler/loopr"), None);
     index_repo_session(&index, "inbox/empty.md", Some("scottidler/loopr"), Some(vec![]));
@@ -371,7 +361,7 @@ fn repo_member_edges_are_monotonic_across_incremental_builds() {
     let marquee_hub = crate::hub::repo_hub_path("tatari-tv/marquee");
     for hub in [&loopr_hub, &marquee_hub] {
         index
-            .insert_test_note_graph(hub, &[], "", "", "", "hub", 100)
+            .insert_test_note_graph(hub, &[], "", "", "hub", 100)
             .expect("hub note");
     }
 
@@ -428,12 +418,11 @@ fn cfg_stoplisted() -> GraphConfig {
 }
 
 /// Stub a flat hub note (`entities/<slug>.md`) so `insert_edges` can resolve a
-/// membership edge's `dst`. Empty domain: hubs must not form shared-domain
-/// edges among themselves and pollute the kind-agnostic `hub_members` probe.
+/// membership edge's `dst`.
 fn stub_hub(index: &SearchIndex, slug: &str) -> String {
     let path = format!("{}/{slug}.md", crate::hub::HUB_DIR);
     index
-        .insert_test_note_graph(&path, &[], "", "", "", "hub", 100)
+        .insert_test_note_graph(&path, &[], "", "", "hub", 100)
         .expect("hub note");
     path
 }
@@ -450,7 +439,7 @@ fn stoplisted_wikilink_mints_no_edge_while_creator_member_does() {
     // Body carries the auto-linker's `[[Every]]` (capitalized: the match must be
     // case-insensitive) AND the note's creator is the every.to publication.
     index
-        .insert_test_note_graph("notes/a.md", &[], "", "Every", "tech", "read on [[Every]] today", 100)
+        .insert_test_note_graph("notes/a.md", &[], "", "Every", "read on [[Every]] today", 100)
         .expect("a");
 
     let stats = build(&mut index, &cfg_stoplisted(), true).expect("build");
@@ -477,7 +466,7 @@ fn unstoplisted_wikilink_still_mints_an_edge() {
     let mut index = SearchIndex::open_memory().expect("open");
     stub_hub(&index, "every");
     index
-        .insert_test_note_graph("notes/a.md", &[], "", "", "tech", "read on [[Every]] today", 100)
+        .insert_test_note_graph("notes/a.md", &[], "", "", "read on [[Every]] today", 100)
         .expect("a");
     assert!(
         cfg().wikilink_stopwords.is_empty(),
@@ -498,7 +487,7 @@ fn stoplisted_wikilink_leaves_the_note_body_byte_identical() {
     stub_hub(&index, "every");
     let body = "read on [[Every]] today";
     index
-        .insert_test_note_graph("notes/a.md", &[], "", "", "tech", body, 100)
+        .insert_test_note_graph("notes/a.md", &[], "", "", body, 100)
         .expect("a");
     let before: Vec<String> = index
         .graph_note_rows()
@@ -538,7 +527,6 @@ fn source_member_ignores_the_fanout_cap_that_zeroes_the_largest_host() {
                 &[],
                 &format!("https://www.youtube.com/watch?v={i}"),
                 "",
-                "",
                 "x",
                 100,
             )
@@ -571,10 +559,10 @@ fn source_member_normalizes_www_and_query_to_one_hub() {
     let mut index = SearchIndex::open_memory().expect("open");
     let hub = stub_hub(&index, "youtube-com");
     index
-        .insert_test_note_graph("notes/a.md", &[], "https://www.youtube.com/watch?v=1", "", "", "x", 100)
+        .insert_test_note_graph("notes/a.md", &[], "https://www.youtube.com/watch?v=1", "", "x", 100)
         .expect("a");
     index
-        .insert_test_note_graph("notes/b.md", &[], "https://youtube.com/watch?v=2", "", "", "y", 100)
+        .insert_test_note_graph("notes/b.md", &[], "https://youtube.com/watch?v=2", "", "y", 100)
         .expect("b");
 
     build(&mut index, &cfg(), true).expect("build");
@@ -597,7 +585,6 @@ fn schemeless_source_emits_no_source_member_edge_and_no_dangling_target() {
             &[],
             "clyde://0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8",
             "",
-            "",
             "session body",
             100,
         )
@@ -619,7 +606,7 @@ fn schemeless_source_emits_no_source_member_edge_and_no_dangling_target() {
 fn creator_that_slugifies_empty_emits_no_creator_member_edge() {
     let mut index = SearchIndex::open_memory().expect("open");
     index
-        .insert_test_note_graph("notes/a.md", &[], "", "!!!", "", "x", 100)
+        .insert_test_note_graph("notes/a.md", &[], "", "!!!", "x", 100)
         .expect("a");
 
     let stats = build(&mut index, &cfg(), true).expect("build");
@@ -638,7 +625,7 @@ fn creator_member_dst_matches_the_minted_creator_hub_path() {
     let creator = "Dan Shipper & Co.";
     let hub = stub_hub(&index, &crate::hub::slugify(creator));
     index
-        .insert_test_note_graph("notes/a.md", &[], "", creator, "", "x", 100)
+        .insert_test_note_graph("notes/a.md", &[], "", creator, "x", 100)
         .expect("a");
 
     build(&mut index, &cfg(), true).expect("build");
@@ -658,7 +645,7 @@ fn run_report_counts_all_three_membership_kinds() {
     let mut index = SearchIndex::open_memory().expect("open");
     let repo_hub = crate::hub::repo_hub_path("scottidler/loopr");
     index
-        .insert_test_note_graph(&repo_hub, &[], "", "", "", "hub", 100)
+        .insert_test_note_graph(&repo_hub, &[], "", "", "hub", 100)
         .expect("repo hub");
     stub_hub(&index, "every");
     stub_hub(&index, "youtube-com");
@@ -669,7 +656,6 @@ fn run_report_counts_all_three_membership_kinds() {
             &[],
             "https://www.youtube.com/watch?v=1",
             "Every",
-            "",
             "x",
             100,
         )
@@ -702,10 +688,10 @@ fn run_report_counts_all_three_membership_kinds() {
 fn schemeless_sources_still_share_a_shared_source_bucket() {
     let mut index = SearchIndex::open_memory().expect("open");
     index
-        .insert_test_note_graph("notes/a.md", &[], "Pais-Migration", "", "", "x", 100)
+        .insert_test_note_graph("notes/a.md", &[], "Pais-Migration", "", "x", 100)
         .expect("a");
     index
-        .insert_test_note_graph("notes/b.md", &[], "pais-migration", "", "", "y", 100)
+        .insert_test_note_graph("notes/b.md", &[], "pais-migration", "", "y", 100)
         .expect("b");
 
     build(&mut index, &cfg(), true).expect("build");

@@ -255,7 +255,7 @@ fn test_apply_quality_clears_stale_fields() {
     let v = TestVault::new();
     v.add_note(
             "was-bad.md",
-            "---\ntitle: Was Bad\ndate: 2026-03-18\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - rust\ncortex-quality: low\ncortex-quality-issues: \"[empty-body]\"\n---\nNow this note has a real body with plenty of words to pass the quality checks. It has enough content to not be a stub. It also has outbound links like [[rust-guide]] and a summary section.\n\n## Summary\n\nThis note is now high quality.\n",
+            "---\ntitle: Was Bad\ndate: 2026-03-18\ntype: note\norigin: authored\ntags:\n  - rust\ncortex-quality: low\ncortex-quality-issues: \"[empty-body]\"\n---\nNow this note has a real body with plenty of words to pass the quality checks. It has enough content to not be a stub. It also has outbound links like [[rust-guide]] and a summary section.\n\n## Summary\n\nThis note is now high quality.\n",
         );
 
     let notes = v.scan();

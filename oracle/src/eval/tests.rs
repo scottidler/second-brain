@@ -34,14 +34,12 @@ fn fixture() -> (Queries, Vec<QueryRun>) {
             EvalQuery {
                 id: "q1".into(),
                 query: "alpha".into(),
-                domain: None,
                 tags: None,
                 calibration: None,
             },
             EvalQuery {
                 id: "q2".into(),
                 query: "beta".into(),
-                domain: None,
                 tags: None,
                 calibration: Some(BTreeMap::from([("notes/a.md".to_string(), 3u8)])),
             },

@@ -3,13 +3,13 @@ use crate::embedding::{EmbeddingModel, MockEmbedder};
 use crate::search::SearchIndex;
 use rusqlite::params;
 
-fn insert_note(index: &SearchIndex, path: &str, domain: &str, note_type: &str, modified_at: i64) {
+fn insert_note(index: &SearchIndex, path: &str, note_type: &str, modified_at: i64) {
     index
         .conn
         .execute(
-            "INSERT INTO notes (path, title, domain, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![path, "T", domain, note_type, "assisted", "", "2026-05-16", "[]", "", "", "body", "summary", modified_at],
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![path, "T", note_type, "assisted", "", "2026-05-16", "[]", "", "", "body", "summary", modified_at],
         )
         .expect("insert note");
 }
@@ -94,18 +94,16 @@ fn search_vector_returns_closest_summary_first() {
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(16, "mock-test-v1");
 
-    insert_note(&index, "notes/a.md", "tech", "article", 100);
-    insert_note(&index, "notes/b.md", "tech", "article", 100);
-    insert_note(&index, "notes/c.md", "tech", "article", 100);
+    insert_note(&index, "notes/a.md", "article", 100);
+    insert_note(&index, "notes/b.md", "article", 100);
+    insert_note(&index, "notes/c.md", "article", 100);
 
     upsert_summary(&index, &m, "notes/a.md", "temporal restate dbos durable execution", 100);
     upsert_summary(&index, &m, "notes/b.md", "react hooks effect tutorial", 100);
     upsert_summary(&index, &m, "notes/c.md", "kubernetes operator pattern", 100);
 
     let q = m.embed_one("durable execution temporal").expect("query");
-    let hits = index
-        .search_vector(&q, 3, None, None, false, None, None)
-        .expect("search");
+    let hits = index.search_vector(&q, 3, None, false, None, None).expect("search");
     assert_eq!(hits.len(), 3);
     // The exact match seed is the deterministic mock hash; we just need to
     // verify that the same string (notes/a.md's summary text starts with
@@ -139,14 +137,12 @@ fn search_vector_ties_break_by_path_deterministically() {
         let index = SearchIndex::open_memory().expect("open");
         // inserted c, a, b — deliberately not sorted
         for p in ["notes/c.md", "notes/a.md", "notes/b.md"] {
-            insert_note(&index, p, "tech", "article", 100);
+            insert_note(&index, p, "article", 100);
             upsert_summary(&index, &m, p, same, 100);
         }
         let q = m.embed_one("anything").expect("q");
 
-        let all = index
-            .search_vector(&q, 3, None, None, false, None, None)
-            .expect("search");
+        let all = index.search_vector(&q, 3, None, false, None, None).expect("search");
         let paths: Vec<&str> = all.iter().map(|h| h.note_path.as_str()).collect();
         assert_eq!(
             paths,
@@ -154,9 +150,7 @@ fn search_vector_ties_break_by_path_deterministically() {
             "tied distances must order by path asc"
         );
 
-        let top2 = index
-            .search_vector(&q, 2, None, None, false, None, None)
-            .expect("search");
+        let top2 = index.search_vector(&q, 2, None, false, None, None).expect("search");
         let p2: Vec<&str> = top2.iter().map(|h| h.note_path.as_str()).collect();
         assert_eq!(
             p2,
@@ -172,37 +166,12 @@ fn search_vector_respects_limit() {
     let m = MockEmbedder::new(8, "mock-test-v1");
     for i in 0..5 {
         let path = format!("notes/{i}.md");
-        insert_note(&index, &path, "tech", "article", 100);
+        insert_note(&index, &path, "article", 100);
         upsert_summary(&index, &m, &path, &format!("text {i}"), 100);
     }
     let q = m.embed_one("query").expect("q");
-    let hits = index
-        .search_vector(&q, 2, None, None, false, None, None)
-        .expect("search");
+    let hits = index.search_vector(&q, 2, None, false, None, None).expect("search");
     assert_eq!(hits.len(), 2);
-}
-
-#[test]
-fn search_vector_filters_by_domain() {
-    let index = SearchIndex::open_memory().expect("open");
-    let m = MockEmbedder::new(8, "mock-test-v1");
-    insert_note(&index, "notes/tech.md", "tech", "article", 100);
-    insert_note(&index, "notes/life.md", "life", "article", 100);
-    upsert_summary(&index, &m, "notes/tech.md", "temporal", 100);
-    upsert_summary(&index, &m, "notes/life.md", "temporal", 100);
-    let q = m.embed_one("temporal").expect("q");
-
-    let tech_hits = index
-        .search_vector(&q, 10, Some("tech"), None, false, None, None)
-        .expect("tech");
-    assert_eq!(tech_hits.len(), 1);
-    assert_eq!(tech_hits[0].note_path, "notes/tech.md");
-
-    let life_hits = index
-        .search_vector(&q, 10, Some("life"), None, false, None, None)
-        .expect("life");
-    assert_eq!(life_hits.len(), 1);
-    assert_eq!(life_hits[0].note_path, "notes/life.md");
 }
 
 #[test]
@@ -212,8 +181,8 @@ fn search_vector_filters_by_tags() {
     // `push_tags_filter` reads have to be inserted here too.
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
-    insert_note(&index, "notes/privacy.md", "tech", "article", 100);
-    insert_note(&index, "notes/other.md", "tech", "article", 100);
+    insert_note(&index, "notes/privacy.md", "article", 100);
+    insert_note(&index, "notes/other.md", "article", 100);
     index
         .conn
         .execute(
@@ -227,7 +196,7 @@ fn search_vector_filters_by_tags() {
 
     let tags = vec!["privacy".to_string()];
     let hits = index
-        .search_vector(&q, 10, None, Some(&tags), false, None, None)
+        .search_vector(&q, 10, Some(&tags), false, None, None)
         .expect("privacy");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].note_path, "notes/privacy.md");
@@ -240,7 +209,7 @@ fn search_vector_rejects_dim_mismatch_against_active_model() {
     // error (not a panic).
     let q = vec![0.0_f32; 16];
     let err = index
-        .search_vector(&q, 5, None, None, false, None, None)
+        .search_vector(&q, 5, None, false, None, None)
         .expect_err("dim mismatch");
     assert!(format!("{err}").contains("does not match"));
 }
@@ -249,7 +218,7 @@ fn search_vector_rejects_dim_mismatch_against_active_model() {
 fn upsert_embedding_replaces_on_conflict() {
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
-    insert_note(&index, "notes/x.md", "tech", "article", 100);
+    insert_note(&index, "notes/x.md", "article", 100);
 
     let v1 = m.embed_one("first").expect("v1");
     index
@@ -294,7 +263,7 @@ fn upsert_embedding_replaces_on_conflict() {
 fn delete_embeddings_for_note_removes_all_rows() {
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
-    insert_note(&index, "notes/d.md", "tech", "article", 100);
+    insert_note(&index, "notes/d.md", "article", 100);
     let v = m.embed_one("t").expect("v");
     index
         .upsert_embedding("notes/d.md", EmbeddingKind::Summary, 0, "t", &v, m.model_version(), 100)
@@ -326,8 +295,8 @@ fn delete_embeddings_for_note_removes_all_rows() {
 fn stale_embedding_targets_returns_unembedded_notes_for_summary() {
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
-    insert_note(&index, "notes/a.md", "tech", "article", 100);
-    insert_note(&index, "notes/b.md", "tech", "article", 200);
+    insert_note(&index, "notes/a.md", "article", 100);
+    insert_note(&index, "notes/b.md", "article", 200);
     // b is embedded, a is not
     let v = m.embed_one("b").expect("v");
     index
@@ -352,8 +321,8 @@ fn stale_embedding_targets_excludes_merge_tombstones() {
     // skip is by-tombstone, not by-empty-note.
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
-    insert_note(&index, "notes/live.md", "tech", "session", 100);
-    insert_note(&index, "notes/tomb.md", "tech", "session", 100);
+    insert_note(&index, "notes/live.md", "session", 100);
+    insert_note(&index, "notes/tomb.md", "session", 100);
     index
         .conn
         .execute(
@@ -379,7 +348,7 @@ fn stale_embedding_targets_carry_note_title() {
     // embedding, so the target rows must surface `notes.title`.
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
-    insert_note(&index, "notes/a.md", "tech", "article", 100);
+    insert_note(&index, "notes/a.md", "article", 100);
     let targets = index
         .stale_embedding_targets(EmbeddingKind::Summary, m.model_version(), 100)
         .expect("targets");
@@ -391,7 +360,7 @@ fn stale_embedding_targets_carry_note_title() {
 fn stale_embedding_targets_returns_modified_notes_for_summary() {
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
-    insert_note(&index, "notes/x.md", "tech", "article", 100);
+    insert_note(&index, "notes/x.md", "article", 100);
     let v = m.embed_one("x").expect("v");
     index
         .upsert_embedding("notes/x.md", EmbeddingKind::Summary, 0, "x", &v, m.model_version(), 100)
@@ -427,9 +396,9 @@ fn stale_embedding_targets_transcript_kind_filters_by_note_type() {
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
     for i in 0..100 {
-        insert_note(&index, &format!("notes/a{i}.md"), "tech", "github", 100);
+        insert_note(&index, &format!("notes/a{i}.md"), "github", 100);
     }
-    insert_note(&index, "notes/v.md", "tech", "audio", 100);
+    insert_note(&index, "notes/v.md", "audio", 100);
 
     let targets = index
         .stale_embedding_targets(EmbeddingKind::TranscriptChunk, m.model_version(), 1000)
@@ -451,12 +420,12 @@ fn stale_embedding_targets_transcript_kind_covers_all_transcript_eligible_kinds(
     let m = MockEmbedder::new(8, "mock-test-v1");
     let eligible = NoteType::transcript_eligible();
     for (i, t) in eligible.iter().enumerate() {
-        insert_note(&index, &format!("notes/n{i}.md"), "tech", t.as_str(), 100);
+        insert_note(&index, &format!("notes/n{i}.md"), t.as_str(), 100);
     }
     // A non-eligible kind that must NOT surface. `github`/repo stays
     // transcript-free (Phase 7 keeps repos transcript-free deliberately), so
     // it is the sentinel here now that `article`/`youtube` ARE eligible.
-    insert_note(&index, "notes/repo.md", "tech", "github", 100);
+    insert_note(&index, "notes/repo.md", "github", 100);
 
     let targets = index
         .stale_embedding_targets(EmbeddingKind::TranscriptChunk, m.model_version(), 1000)
@@ -485,8 +454,8 @@ fn stale_transcript_targets_exclude_examined_until_modified_at_bumps() {
     // ~127-note transcript re-scan every daemon tick.
     let mut index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
-    insert_note(&index, "notes/skip.md", "tech", "article", 100);
-    insert_note(&index, "notes/live.md", "tech", "article", 100);
+    insert_note(&index, "notes/skip.md", "article", 100);
+    insert_note(&index, "notes/live.md", "article", 100);
 
     // Before any sentinel: both notes are stale (neither embedded).
     let before = index
@@ -547,7 +516,7 @@ fn search_vector_returns_no_row_for_examined_sentinel_note() {
     index.set_active_embedding(m.model_version(), m.dim()).expect("set");
 
     // sentinel.md: examined (side-table row) but NO note_embeddings row.
-    insert_note(&index, "notes/sentinel.md", "tech", "article", 100);
+    insert_note(&index, "notes/sentinel.md", "article", 100);
     index
         .mark_embedding_examined_batch(
             EmbeddingKind::TranscriptChunk,
@@ -557,13 +526,11 @@ fn search_vector_returns_no_row_for_examined_sentinel_note() {
         .expect("mark examined");
 
     // real.md: a genuine summary embedding so search has something to return.
-    insert_note(&index, "notes/real.md", "tech", "article", 100);
+    insert_note(&index, "notes/real.md", "article", 100);
     upsert_summary(&index, &m, "notes/real.md", "durable execution temporal", 100);
 
     let q = m.embed_one("durable execution").expect("q");
-    let hits = index
-        .search_vector(&q, 10, None, None, false, None, None)
-        .expect("search");
+    let hits = index.search_vector(&q, 10, None, false, None, None).expect("search");
     let paths: Vec<&str> = hits.iter().map(|h| h.note_path.as_str()).collect();
     assert!(paths.contains(&"notes/real.md"), "the embedded note must be found");
     assert!(
@@ -578,7 +545,7 @@ fn mark_embedding_examined_batch_upsert_advances_watermark() {
     // latest examined_at rather than erroring on the PK conflict.
     let mut index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
-    insert_note(&index, "notes/a.md", "tech", "article", 100);
+    insert_note(&index, "notes/a.md", "article", 100);
 
     index
         .mark_embedding_examined_batch(
@@ -719,7 +686,7 @@ fn search_vector_returns_one_row_per_note_when_chunks_exist() {
     let m = MockEmbedder::new(16, "mock-maxpool");
     index.set_active_embedding(m.model_version(), m.dim()).expect("set");
 
-    insert_note(&index, "notes/v.md", "tech", "audio", 100);
+    insert_note(&index, "notes/v.md", "audio", 100);
 
     // Seed a summary + 3 transcript chunks for the same note.
     upsert_summary(&index, &m, "notes/v.md", "summary text", 100);
@@ -732,9 +699,7 @@ fn search_vector_returns_one_row_per_note_when_chunks_exist() {
         .expect("swap");
 
     let q = m.embed_one("query").expect("q");
-    let hits = index
-        .search_vector(&q, 10, None, None, false, None, None)
-        .expect("search");
+    let hits = index.search_vector(&q, 10, None, false, None, None).expect("search");
     // Even though 4 rows back this note (1 summary + 3 chunks), the
     // result must contain exactly one entry for it.
     let v_hits: Vec<&VectorHit> = hits.iter().filter(|h| h.note_path == "notes/v.md").collect();
@@ -752,7 +717,7 @@ fn search_vector_max_pool_picks_best_representation_min_distance() {
     let m = MockEmbedder::new(16, "mock-maxpool");
     index.set_active_embedding(m.model_version(), m.dim()).expect("set");
 
-    insert_note(&index, "notes/note.md", "tech", "audio", 100);
+    insert_note(&index, "notes/note.md", "audio", 100);
 
     // Summary text deliberately orthogonal; transcript chunk matches
     // the query verbatim.
@@ -772,7 +737,7 @@ fn search_vector_max_pool_picks_best_representation_min_distance() {
         .expect("swap");
 
     let hits = index
-        .search_vector(&q_vec, 10, None, None, false, None, None)
+        .search_vector(&q_vec, 10, None, false, None, None)
         .expect("search");
     let h = hits
         .iter()
@@ -794,10 +759,10 @@ fn search_vector_max_pool_picks_best_representation_min_distance() {
 fn semantic_neighbors_ranks_by_cosine_and_honors_k_and_threshold() {
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(16, "mock-knn-v1");
-    insert_note(&index, "notes/seed.md", "tech", "article", 100);
-    insert_note(&index, "notes/near.md", "tech", "article", 100);
-    insert_note(&index, "notes/far.md", "tech", "article", 100);
-    insert_note(&index, "notes/mid.md", "tech", "article", 100);
+    insert_note(&index, "notes/seed.md", "article", 100);
+    insert_note(&index, "notes/near.md", "article", 100);
+    insert_note(&index, "notes/far.md", "article", 100);
+    insert_note(&index, "notes/mid.md", "article", 100);
 
     // seed and near share text (cosine 1.0 under the deterministic mock);
     // far/mid get unrelated text.
@@ -826,7 +791,7 @@ fn semantic_neighbors_ranks_by_cosine_and_honors_k_and_threshold() {
 #[test]
 fn semantic_neighbors_empty_when_note_has_no_embedding() {
     let index = SearchIndex::open_memory().expect("open");
-    insert_note(&index, "notes/bare.md", "tech", "article", 100);
+    insert_note(&index, "notes/bare.md", "article", 100);
     let hits = index.semantic_neighbors("notes/bare.md", 10, 0.0).expect("knn");
     assert!(hits.is_empty(), "note with no summary embedding yields no neighbors");
 }
@@ -1003,9 +968,9 @@ fn semantic_neighbors_ignores_claim_rows() {
         .set_active_embedding(m.model_version(), m.dim())
         .expect("set model");
 
-    insert_note(&index, "notes/a.md", "tech", "article", 100);
-    insert_note(&index, "notes/b.md", "tech", "article", 100);
-    insert_note(&index, "notes/claimonly.md", "tech", "article", 100);
+    insert_note(&index, "notes/a.md", "article", 100);
+    insert_note(&index, "notes/b.md", "article", 100);
+    insert_note(&index, "notes/claimonly.md", "article", 100);
 
     let va = m.embed_one("shared topic").expect("embed");
     index
@@ -1059,8 +1024,8 @@ fn cosine_between_returns_some_for_two_embedded_notes() {
 
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(16, "mock-pairwise-v1");
-    insert_note(&index, "notes/a.md", "tech", "session", 100);
-    insert_note(&index, "notes/b.md", "tech", "session", 100);
+    insert_note(&index, "notes/a.md", "session", 100);
+    insert_note(&index, "notes/b.md", "session", 100);
 
     // Identical text -> deterministic mock embeds identically -> cosine ~1.0.
     upsert_summary(&index, &m, "notes/a.md", "durable execution temporal", 100);
@@ -1086,10 +1051,10 @@ fn cosine_between_ignores_unrelated_notes_unlike_global_topk() {
     // pairwise read is unaffected by how many unrelated notes exist.
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(16, "mock-pairwise-v2");
-    insert_note(&index, "notes/a.md", "tech", "session", 100);
-    insert_note(&index, "notes/b.md", "tech", "session", 100);
-    insert_note(&index, "notes/noise1.md", "tech", "article", 100);
-    insert_note(&index, "notes/noise2.md", "tech", "article", 100);
+    insert_note(&index, "notes/a.md", "session", 100);
+    insert_note(&index, "notes/b.md", "session", 100);
+    insert_note(&index, "notes/noise1.md", "article", 100);
+    insert_note(&index, "notes/noise2.md", "article", 100);
 
     upsert_summary(&index, &m, "notes/a.md", "durable execution temporal", 100);
     upsert_summary(&index, &m, "notes/b.md", "durable execution temporal", 100);
@@ -1112,8 +1077,8 @@ fn cosine_between_returns_none_when_either_note_unembedded() {
 
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(16, "mock-pairwise-v3");
-    insert_note(&index, "notes/embedded.md", "tech", "session", 100);
-    insert_note(&index, "notes/bare.md", "tech", "session", 100);
+    insert_note(&index, "notes/embedded.md", "session", 100);
+    insert_note(&index, "notes/bare.md", "session", 100);
     upsert_summary(&index, &m, "notes/embedded.md", "durable execution temporal", 100);
 
     let one_side = index

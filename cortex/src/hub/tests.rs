@@ -135,12 +135,12 @@ fn graph_skips_edges_to_out_of_band_deleted_hub() {
     // 3 notes share blanket tag "llm" (df=3); cap=2 -> over cap -> hub-routed.
     for i in 0..3 {
         index
-            .insert_test_note_graph(&format!("notes/{i}.md"), &["llm"], "", "", "tech", "x", 100)
+            .insert_test_note_graph(&format!("notes/{i}.md"), &["llm"], "", "", "x", 100)
             .expect("note");
     }
     // Stub the tag hub note so the graph pass can route to it.
     index
-        .insert_test_note_graph("entities/llm.md", &[], "", "", "tech", "hub", 100)
+        .insert_test_note_graph("entities/llm.md", &[], "", "", "hub", 100)
         .expect("hub");
 
     let cfg = GraphConfig {
@@ -621,7 +621,7 @@ fn seed_member(vault: &Path, rel: &str, note_type: &str, date: &str, claims: &[&
 /// accepts edges touching it.
 fn index_note(index: &SearchIndex, path: &str) {
     index
-        .insert_test_note_graph(path, &[], "", "", "tech", "b", 100)
+        .insert_test_note_graph(path, &[], "", "", "b", 100)
         .expect("index note");
 }
 

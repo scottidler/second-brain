@@ -15,9 +15,6 @@ pub struct ClassifyOpts {
     /// Only process notes with cortex-needs-review: true
     pub review_only: bool,
 
-    /// Reclassify all notes with this domain (e.g., --reclassify-domain resources)
-    pub reclassify_domain: Option<String>,
-
     /// Re-run the tag classifier over these notes with REPLACE semantics:
     /// the fresh tag set wins outright, except for `no-classifier-tags` and
     /// except when the fresh result is empty or Low. Vault-relative paths or
@@ -66,8 +63,8 @@ impl ScanScope {
     /// `contains("concepts")` / `contains("all")`).
     ///
     /// `Metadata` is accepted for symmetry but produces no wikilink fixes:
-    /// creator/source/domain relationships are materialized as graph `edges`
-    /// by `sb cortex graph`, never written into note frontmatter (the design's
+    /// creator/source relationships are materialized as graph `edges` by
+    /// `sb cortex graph`, never written into note frontmatter (the design's
     /// "no metadata linking into frontmatter" rule). The linker has no
     /// `metadata` branch, so this scope is a deliberate no-op for `cortex link`.
     pub fn as_config_scan_for(self) -> Vec<String> {
@@ -269,11 +266,7 @@ pub struct SummarizeOpts {
     /// `3mo`). Omit to scan the entire vault.
     pub since: Option<String>,
 
-    /// Only re-distill notes whose `domain:` frontmatter matches <name>.
-    pub domain: Option<String>,
-
     /// Only re-distill notes whose `tags:` frontmatter includes <name>.
-    /// Beside `--domain`, not instead of it (P9); domain removal is P11.
     pub tag: Option<String>,
 
     /// Force re-distill against a specific extractor id (e.g.

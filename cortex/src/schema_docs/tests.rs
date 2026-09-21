@@ -72,10 +72,6 @@ fn every_enum_variant_appears_in_its_table() {
             .1
     };
 
-    for d in vault::schema::Domain::all() {
-        let row = format!("| {} | {} |", d.as_str(), d.description());
-        assert!(find("domain-values.md").contains(&row), "missing domain row: {row}");
-    }
     for t in vault::schema::NoteType::all() {
         let row = format!("| {} | {} |", t.as_str(), t.description());
         assert!(find("type-values.md").contains(&row), "missing type row: {row}");
@@ -98,7 +94,6 @@ fn generated_frontmatter_carries_the_required_keys() {
     assert!(out.starts_with("---\n"), "frontmatter present");
     for key in [
         "type: system",
-        "domain: system",
         "origin: generated",
         "generated-at: 2026-09-05T00:00:00Z",
         "generator: sb cortex schema",
@@ -108,18 +103,6 @@ fn generated_frontmatter_carries_the_required_keys() {
         assert!(out.contains(key), "missing frontmatter key: {key}");
     }
     assert!(out.contains(DO_NOT_EDIT), "do-not-edit line present");
-}
-
-/// The dropped `domain-values.md` cruft stays dropped: the "Replaces folder"
-/// column duplicated folder history nobody uses, and the Tag -> Domain table
-/// duplicated `cortex::classify::default_tag_domain_map`, which is
-/// config-driven and had already drifted.
-#[test]
-fn domain_doc_drops_the_replaces_folder_column_and_tag_map() {
-    let out = render_doc(&SPECS[0], "2026-09-05T00:00:00Z");
-    assert!(!out.contains("Replaces folder"), "Replaces folder column dropped");
-    assert!(!out.contains("Mapping from Tags to Domain"), "tag map dropped");
-    assert!(!out.contains("Inferred domain"), "tag map dropped");
 }
 
 /// The stale naming rule ("no hyphens") is gone; several canonical keys
@@ -161,7 +144,7 @@ fn render_all_drifts_then_writes_then_settles() {
         "check writes nothing"
     );
     assert_eq!(
-        std::fs::read_to_string(dir.join("domain-values.md")).expect("read"),
+        std::fs::read_to_string(dir.join("type-values.md")).expect("read"),
         "---\ntitle: hand written\n---\n\nold\n",
         "--check must not touch the file"
     );
@@ -175,12 +158,12 @@ fn render_all_drifts_then_writes_then_settles() {
     assert!(after.files.iter().all(|f| f.outcome == Outcome::Unchanged));
 
     // A later run with a different clock must not rewrite an unchanged file.
-    let before_bytes = std::fs::read_to_string(dir.join("domain-values.md")).expect("read");
+    let before_bytes = std::fs::read_to_string(dir.join("type-values.md")).expect("read");
     let later = chrono::DateTime::<chrono::Utc>::from_timestamp(1_800_000_000, 0).expect("later");
     let again = render_all_at(tmp.path(), true, later, &tags).expect("render again");
     assert!(again.files.iter().all(|f| f.outcome == Outcome::Unchanged));
     assert_eq!(
-        std::fs::read_to_string(dir.join("domain-values.md")).expect("read"),
+        std::fs::read_to_string(dir.join("type-values.md")).expect("read"),
         before_bytes,
         "generated-at must not churn on an unchanged render"
     );
@@ -296,12 +279,11 @@ fn disk_generated_at_only_reads_the_frontmatter_block() {
 }
 
 #[test]
-fn doc_paths_names_the_five_generated_files() {
+fn doc_paths_names_the_four_generated_files() {
     let names: Vec<String> = doc_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect();
     assert_eq!(
         names,
         vec![
-            "system/schemas/domain-values.md",
             "system/schemas/type-values.md",
             "system/schemas/origin-values.md",
             "system/schemas/status-values.md",

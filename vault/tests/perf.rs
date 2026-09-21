@@ -24,7 +24,7 @@ fn perf_scan_vault_thousand_notes() {
     for i in 0..NOTE_COUNT {
         let path = root.join(format!("note-{i:04}.md"));
         let body = format!(
-            "---\ntitle: Note {i}\ntype: knowledge\ndomain: tools\norigin: authored\nstatus: draft\nmethod: cli\ntags:\n  - rust\n  - perf\n---\n# Note {i}\n\n{filler}\n"
+            "---\ntitle: Note {i}\ntype: knowledge\norigin: authored\nstatus: draft\nmethod: cli\ntags:\n  - rust\n  - perf\n---\n# Note {i}\n\n{filler}\n"
         );
         fs::write(&path, body).expect("write note");
     }

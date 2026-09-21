@@ -11,7 +11,7 @@ use std::collections::HashMap;
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum DetailLevel {
-    /// Just frontmatter fields: title, domain, type, status, date, source, tags
+    /// Just frontmatter fields: title, type, status, date, source, tags
     #[default]
     Metadata,
     /// Title + first sentence of summary

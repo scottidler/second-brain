@@ -7,7 +7,7 @@ use rmcp::schemars;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use vault::detail::DetailLevel;
-use vault::schema::{Domain, NoteType, Status};
+use vault::schema::{NoteType, Status};
 
 /// Retrieval mode for `knowledge_search`.
 ///
@@ -44,10 +44,6 @@ pub struct KnowledgeSearchRequest {
     /// The search query (full-text search across titles, bodies, tags, and summaries)
     #[schemars(description = "Search query - searches across note titles, bodies, tags, and summaries")]
     pub query: String,
-
-    /// Filter by domain
-    #[schemars(description = "Filter by domain")]
-    pub domain: Option<Domain>,
 
     /// Filter to notes carrying any of these tags (OR across the list)
     #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
@@ -108,33 +104,13 @@ pub struct NoteReadRequest {
     pub detail: Option<DetailLevel>,
 }
 
-/// Get an overview of the vault - total notes, distribution by domain, type, and status, plus schema gaps.
+/// Get an overview of the vault - total notes, distribution by type and status, plus schema gaps.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct VaultOverviewRequest {}
-
-/// Get a briefing on a specific knowledge domain - stats, recent ingests, unread count.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct DomainBriefRequest {
-    /// The domain to get a briefing on
-    #[schemars(description = "Domain to brief on")]
-    pub domain: Domain,
-
-    /// How much content to return per note in the recent list
-    #[schemars(description = "Detail level for recent notes. Default: tldr")]
-    pub detail: Option<DetailLevel>,
-
-    /// Number of recent notes to include
-    #[schemars(description = "Number of recent notes to include (default: 10)")]
-    pub limit: Option<u32>,
-}
 
 /// List notes with optional filters, without requiring a search query.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListNotesRequest {
-    /// Filter by domain
-    #[schemars(description = "Filter by domain")]
-    pub domain: Option<Domain>,
-
     /// Filter to notes carrying any of these tags (OR across the list)
     #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
     pub tags: Option<Vec<String>>,
@@ -170,10 +146,6 @@ pub struct IngestHistoryRequest {
     /// Filter by source URL substring
     #[schemars(description = "Filter by source URL (substring match)")]
     pub source: Option<String>,
-
-    /// Filter by domain
-    #[schemars(description = "Filter by domain")]
-    pub domain: Option<Domain>,
 
     /// Only entries after this date (YYYY-MM-DD)
     #[schemars(description = "Only entries after this date (YYYY-MM-DD)")]
@@ -227,13 +199,8 @@ pub struct TagSearchRequest {
     )]
     pub tag: Option<String>,
 
-    /// Filter to tags within a domain
-    #[schemars(description = "Filter to a specific domain")]
-    pub domain: Option<Domain>,
-
     /// Additionally require the note to carry any of these tags (OR across
-    /// the list) - a sibling filter beside `domain`, distinct from the
-    /// primary `tag` match above.
+    /// the list), distinct from the primary `tag` match above.
     #[schemars(description = "Additionally filter to notes carrying any of these tags (OR across the list)")]
     pub tags: Option<Vec<String>>,
 
@@ -247,8 +214,6 @@ pub struct TagSearchRequest {
 }
 
 /// Get a briefing on a specific tag - stats, recent notes, unread count.
-/// The `tags` counterpart to `domain_brief` (P8; `domain_brief` is deleted
-/// in P11).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TagBriefRequest {
     /// The tag to get a briefing on
@@ -277,10 +242,6 @@ pub struct FindSimilarRequest {
     )]
     pub path: Option<String>,
 
-    /// Filter by domain
-    #[schemars(description = "Restrict results to a specific domain")]
-    pub domain: Option<Domain>,
-
     /// Filter to notes carrying any of these tags (OR across the list)
     #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
     pub tags: Option<Vec<String>>,
@@ -294,16 +255,12 @@ pub struct FindSimilarRequest {
     pub limit: Option<u32>,
 }
 
-/// Cross-domain timeline of recent vault activity.
+/// Timeline of recent vault activity.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RecentActivityRequest {
     /// How many days back to look
     #[schemars(description = "Number of days back to search (default: 7)")]
     pub days: Option<u32>,
-
-    /// Filter by domain
-    #[schemars(description = "Filter to a specific domain")]
-    pub domain: Option<Domain>,
 
     /// Filter to notes carrying any of these tags (OR across the list)
     #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
@@ -356,10 +313,6 @@ pub struct CreatorBrowseRequest {
     #[schemars(description = "Creator name to filter (substring match). Omit to list all creators with counts.")]
     pub creator: Option<String>,
 
-    /// Filter by domain
-    #[schemars(description = "Filter to a specific domain")]
-    pub domain: Option<Domain>,
-
     /// Filter to notes carrying any of these tags (OR across the list)
     #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
     pub tags: Option<Vec<String>>,
@@ -373,18 +326,14 @@ pub struct CreatorBrowseRequest {
     pub limit: Option<u32>,
 }
 
-/// Browse notes by source URL domain.
+/// Browse notes by source URL host.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SourceBrowseRequest {
-    /// Source domain to filter (e.g., "youtube.com"). Omit to list all source domains with counts.
+    /// Source host to filter (e.g., "youtube.com"). Omit to list all source hosts with counts.
     #[schemars(
-        description = "Source domain to filter (e.g., 'youtube.com'). Omit to list all source domains with counts."
+        description = "Source host to filter (e.g., 'youtube.com'). Omit to list all source hosts with counts."
     )]
     pub host: Option<String>,
-
-    /// Filter by vault domain
-    #[schemars(description = "Filter to a specific vault domain")]
-    pub domain: Option<Domain>,
 
     /// Filter to notes carrying any of these tags (OR across the list)
     #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
@@ -463,16 +412,12 @@ pub struct DuplicateGroupsRequest {
 /// Classification pipeline health and metadata.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ClassifyStatusRequest {
-    /// Filter to a specific domain
-    #[schemars(description = "Filter statistics to a specific domain")]
-    pub domain: Option<Domain>,
-
     /// Filter statistics to notes carrying any of these tags (OR across the list)
     #[schemars(description = "Filter statistics to notes carrying any of these tags (OR across the list)")]
     pub tags: Option<Vec<String>>,
 }
 
-/// List all valid schema values (domains, note types, origins, statuses, methods).
+/// List all valid schema values (tags, note types, origins, statuses, methods).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SchemaInfoRequest {}
 

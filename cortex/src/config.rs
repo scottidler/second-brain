@@ -146,7 +146,7 @@ pub struct GraphConfig {
     pub semantic_k: usize,
     /// Minimum cosine similarity for a semantic edge.
     pub min_cosine: f32,
-    /// Tags/creators/sources/domains held by more than this many notes are
+    /// Tags/creators/sources held by more than this many notes are
     /// skipped for pairwise edge emission (routed through hub notes in
     /// Phase 3 instead) so blanket buckets do not explode the table.
     pub fanout_cap: usize,
@@ -154,8 +154,6 @@ pub struct GraphConfig {
     pub creator_weight: f32,
     /// Fixed weight for shared-source-host edges.
     pub source_weight: f32,
-    /// Fixed weight for shared-domain edges.
-    pub domain_weight: f32,
     // --- Phase 5 (MemGraphRAG) ---
     /// Fabric pattern that extracts subject-predicate-object triples.
     pub fact_pattern: String,
@@ -210,7 +208,6 @@ impl Default for GraphConfig {
             fanout_cap: 100,
             creator_weight: 0.2,
             source_weight: 0.15,
-            domain_weight: 0.1,
             fact_pattern: "extract-triples".to_string(),
             fact_weight: 0.5,
             fact_max_per_run: 50,
@@ -406,7 +403,6 @@ impl Default for FabricConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct SchemaConfig {
-    pub domains: Vec<String>,
     pub types: Vec<String>,
     pub origins: Vec<String>,
     pub statuses: Vec<String>,
@@ -415,15 +411,14 @@ pub struct SchemaConfig {
 
 impl Default for SchemaConfig {
     /// Built from the `vault::schema` enums (the single source of truth) so
-    /// the validation vocabulary can never drift from the real Domain /
-    /// NoteType / Origin / Status / Method variants. The previous derived
-    /// `Default` produced EMPTY vecs (validated nothing), and the historically
+    /// the validation vocabulary can never drift from the real NoteType /
+    /// Origin / Status / Method variants. The previous derived `Default`
+    /// produced EMPTY vecs (validated nothing), and the historically
     /// hand-typed defaults had already drifted (missing reddit/image/pdf/...).
     /// Config still overrides these.
     fn default() -> Self {
-        use vault::schema::{Domain, Method, NoteType, Origin, Status};
+        use vault::schema::{Method, NoteType, Origin, Status};
         Self {
-            domains: Domain::all().iter().map(|d| d.as_str().to_string()).collect(),
             types: NoteType::all().iter().map(|t| t.as_str().to_string()).collect(),
             origins: Origin::all().iter().map(|o| o.as_str().to_string()).collect(),
             statuses: Status::all().iter().map(|s| s.as_str().to_string()).collect(),
@@ -462,7 +457,6 @@ impl Default for VaultConfig {
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 pub struct ActionsConfig {
-    pub classify: crate::classify::ClassifyConfig,
     pub naming: NamingConfig,
     pub frontmatter: FrontmatterConfig,
     pub tags: TagsConfig,
@@ -959,7 +953,7 @@ pub struct MigrationConfig {
     #[serde(rename = "value-renames", default)]
     pub value_renames: HashMap<String, HashMap<String, String>>,
     /// Copy a scalar field's value onto the note's `tags` list, keyed by the
-    /// source field. Forward half of the domain-as-tag migration.
+    /// source field. Forward half of a field-to-tags migration.
     #[serde(rename = "field-to-tags", default)]
     pub field_to_tags: HashMap<String, FieldToTags>,
     /// Remove the named tags wherever they appear. Inverse half, and the

@@ -265,7 +265,7 @@ fn make_vault() -> (tempfile::TempDir, PathBuf) {
 
 fn write_ledger(root: &Path, body: &str) -> PathBuf {
     let path = root.join("system").join("views").join("borg-ledger.md");
-    let header = "| Date | Time | Method | Status | Note | Source | Domain | Trace |\n|------|------|--------|--------|------|--------|--------|-------|\n";
+    let header = "| Date | Time | Method | Status | Note | Source | Trace |\n|------|------|--------|--------|------|--------|-------|\n";
     std::fs::write(
         &path,
         format!("---\ntitle: Borg Ledger\n---\n\n# Borg Ledger\n\n{header}{body}\n"),
@@ -347,8 +347,8 @@ fn apply_fix_orphan_replace_drops_row() {
     let (_tmp, root) = make_vault();
     let src = "https://example.com/abandoned";
     let body = format!(
-        "| 2026-03-29 | 10:00 | http | \u{1F504} | [[old]] | {src} | ai | tr-1 |\n\
-             | 2026-03-28 | 09:00 | http | \u{2705} | [[other]] | https://example.com/other | ai | tr-0 |\n"
+        "| 2026-03-29 | 10:00 | http | \u{1F504} | [[old]] | {src} | tr-1 |\n\
+             | 2026-03-28 | 09:00 | http | \u{2705} | [[other]] | https://example.com/other | tr-0 |\n"
     );
     let ledger_path = write_ledger(&root, &body);
 
@@ -381,8 +381,8 @@ fn apply_fix_blocked_removes_note_and_drops_row() {
     let src = "https://blocked.example.com/post";
     let note_path = write_note(&root, "inbox/blocked-note.md", src, "Just a moment...");
     let body = format!(
-        "| 2026-03-20 | 10:00 | http | \u{2705} | [[blocked-note]] | {src} | ai | tr-1 |\n\
-             | 2026-03-19 | 09:00 | http | \u{2705} | [[other]] | https://example.com/other | ai | tr-0 |\n"
+        "| 2026-03-20 | 10:00 | http | \u{2705} | [[blocked-note]] | {src} | tr-1 |\n\
+             | 2026-03-19 | 09:00 | http | \u{2705} | [[other]] | https://example.com/other | tr-0 |\n"
     );
     let ledger_path = write_ledger(&root, &body);
 
@@ -413,7 +413,7 @@ fn apply_fix_raw_title_removes_note_and_drops_row() {
     let (_tmp, root) = make_vault();
     let src = "https://example.com/no-title";
     let note_path = write_note(&root, "inbox/no-title.md", src, src);
-    let body = format!("| 2026-03-20 | 10:00 | http | \u{2705} | [[no-title]] | {src} | x | tr-1 |\n");
+    let body = format!("| 2026-03-20 | 10:00 | http | \u{2705} | [[no-title]] | {src} | tr-1 |\n");
     let ledger_path = write_ledger(&root, &body);
 
     let report = AuditReport {
@@ -659,8 +659,8 @@ fn apply_fixes_filters_by_kind() {
     let src_orphan = "https://example.com/orphan";
     let src_other = "https://example.com/other";
     let body = format!(
-        "| 2026-03-29 | 10:00 | http | \u{1F504} | [[old]] | {src_orphan} | ai | tr-1 |\n\
-             | 2026-03-28 | 09:00 | http | \u{2705} | [[other]] | {src_other} | ai | tr-0 |\n"
+        "| 2026-03-29 | 10:00 | http | \u{1F504} | [[old]] | {src_orphan} | tr-1 |\n\
+             | 2026-03-28 | 09:00 | http | \u{2705} | [[other]] | {src_other} | tr-0 |\n"
     );
     let ledger_path = write_ledger(&root, &body);
 
@@ -702,7 +702,7 @@ fn apply_fixes_filters_by_kind() {
 fn apply_fixes_empty_kinds_means_all() {
     let (_tmp, root) = make_vault();
     let src = "https://example.com/orphan";
-    let body = format!("| 2026-03-29 | 10:00 | http | \u{1F504} | [[old]] | {src} | ai | tr-1 |\n");
+    let body = format!("| 2026-03-29 | 10:00 | http | \u{1F504} | [[old]] | {src} | tr-1 |\n");
     let ledger_path = write_ledger(&root, &body);
 
     let report = AuditReport {

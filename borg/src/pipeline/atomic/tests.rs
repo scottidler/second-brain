@@ -68,7 +68,7 @@ fn test_compose_then_write_atomic_is_complete_in_one_write() {
     let rendered = "---\ntitle: Example\ndate: 2026-05-08\n---\nBody text.\n";
     let composed = apply_original_date(rendered, "2026-04-19");
     let cortex_fields = vec![
-        ("domain".to_string(), FieldValue::Scalar("ai".to_string())),
+        ("status".to_string(), FieldValue::Scalar("read".to_string())),
         ("cortex-quality".to_string(), FieldValue::Scalar("ok".to_string())),
     ];
     let composed = apply_cortex_fields(&composed, &cortex_fields, 8);
@@ -80,8 +80,8 @@ fn test_compose_then_write_atomic_is_complete_in_one_write() {
         "date should be restored, got: {contents}"
     );
     assert!(
-        contents.contains("domain: ai"),
-        "domain should be present, got: {contents}"
+        contents.contains("status: read"),
+        "status should be present, got: {contents}"
     );
     assert!(
         contents.contains("cortex-quality: ok"),
@@ -125,9 +125,9 @@ fn test_apply_ingested_date_replaces_existing() {
 
 #[test]
 fn test_apply_ingested_date_preserves_other_fields() {
-    let input = "---\ntitle: X\ndate: 2026-04-16\ndomain: ai\ncortex-quality: ok\n---\nbody\n";
+    let input = "---\ntitle: X\ndate: 2026-04-16\ncustom-field: ai\ncortex-quality: ok\n---\nbody\n";
     let out = apply_ingested_date(input, "2026-05-12");
-    assert!(out.contains("domain: ai"));
+    assert!(out.contains("custom-field: ai"));
     assert!(out.contains("cortex-quality: ok"));
     assert!(out.contains("body"));
 }
@@ -161,11 +161,11 @@ fn test_apply_original_date_noop_when_no_date_line() {
 fn test_apply_cortex_fields_inserts_fields() {
     let input = "---\ntitle: Test\nsource: \"https://x\"\n---\nBody.\n";
     let fields = vec![
-        ("domain".to_string(), FieldValue::Scalar("ai".to_string())),
+        ("status".to_string(), FieldValue::Scalar("read".to_string())),
         ("cortex-quality".to_string(), FieldValue::Scalar("ok".to_string())),
     ];
     let out = apply_cortex_fields(input, &fields, 8);
-    assert!(out.contains("domain: ai"));
+    assert!(out.contains("status: read"));
     assert!(out.contains("cortex-quality: ok"));
     assert!(out.contains("title: Test"));
     assert!(out.contains("source: \"https://x\""));
@@ -174,17 +174,17 @@ fn test_apply_cortex_fields_inserts_fields() {
 
 #[test]
 fn test_apply_cortex_fields_replaces_existing() {
-    let input = "---\ntitle: T\ndomain: tech\n---\nBody.\n";
-    let fields = vec![("domain".to_string(), FieldValue::Scalar("ai".to_string()))];
+    let input = "---\ntitle: T\nstatus: unread\n---\nBody.\n";
+    let fields = vec![("status".to_string(), FieldValue::Scalar("read".to_string()))];
     let out = apply_cortex_fields(input, &fields, 8);
-    assert!(out.contains("domain: ai"));
-    assert!(!out.contains("domain: tech"));
+    assert!(out.contains("status: read"));
+    assert!(!out.contains("status: unread"));
 }
 
 #[test]
 fn test_apply_cortex_fields_no_frontmatter_is_noop() {
     let input = "no frontmatter here";
-    let fields = vec![("domain".to_string(), FieldValue::Scalar("ai".to_string()))];
+    let fields = vec![("status".to_string(), FieldValue::Scalar("read".to_string()))];
     let out = apply_cortex_fields(input, &fields, 8);
     assert_eq!(out, input);
 }
@@ -281,14 +281,14 @@ fn test_apply_cortex_fields_filters_unknown_keys() {
 fn test_reingest_failure_before_publish_preserves_old_note() {
     let dir = tempfile::tempdir().expect("tempdir");
     let old_path = dir.path().join("old-note.md");
-    let original_bytes = b"---\ntitle: Old\ndate: 2026-04-01\ndomain: ai\n---\nOriginal body.\n";
+    let original_bytes = b"---\ntitle: Old\ndate: 2026-04-01\ncustom-field: ai\n---\nOriginal body.\n";
     std::fs::write(&old_path, original_bytes).unwrap();
 
     // Simulate the captured metadata path - the publish step never runs
     // because the pipeline returned Err before reaching write_atomic.
     let _captured_date = "2026-04-01".to_string();
     let _captured_cortex: Vec<(String, FieldValue)> =
-        vec![("domain".to_string(), FieldValue::Scalar("ai".to_string()))];
+        vec![("status".to_string(), FieldValue::Scalar("read".to_string()))];
     let pipeline_result: Result<()> = Err(eyre::eyre!("simulated mid-pipeline failure"));
     assert!(pipeline_result.is_err(), "pipeline failed before publish");
 

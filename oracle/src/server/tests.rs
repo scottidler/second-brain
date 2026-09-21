@@ -11,7 +11,6 @@ fn seed_one_article(db: &SearchIndex, path: &str, title: &str, body: &str) {
         title: Some(title.to_string()),
         note_type: Some("article".to_string()),
         origin: Some("assisted".to_string()),
-        domain: Some("ai".to_string()),
         ..Frontmatter::default()
     };
     let note = Note {
@@ -149,35 +148,10 @@ async fn source_browse_no_arg_returns_results_key() {
     assert!(v.get("sources").is_none(), "legacy `sources` key must be gone: {v}");
 }
 
-#[tokio::test]
-async fn domain_brief_returns_results_key() {
-    let db = SearchIndex::open_memory().expect("open db");
-    seed_one_article(&db, "notes/ai/transformer.md", "Transformer", "body");
-    let server = OracleMcpServer::new(Config::default(), db);
-
-    let result = server
-        .dispatch("domain_brief", json!({"domain": "ai"}))
-        .await
-        .expect("dispatch");
-    assert_ne!(result.is_error, Some(true));
-    let v = first_content_as_json(&result);
-    assert!(v.get("results").is_some(), "domain_brief must expose `results`: {v}");
-    assert!(v.get("recent").is_none(), "legacy `recent` key must be gone: {v}");
-    assert!(
-        v.get("recent_notes").is_none(),
-        "legacy `recent_notes` key (per design doc) must be gone: {v}"
-    );
-    // unread is u64, not Option<u64>, so it must serialize as a number, never null.
-    assert!(
-        v.get("unread").is_some_and(|u| u.is_number()),
-        "domain_brief.unread must be a number, never null: {v}"
-    );
-}
-
 /// D2: missing-note paths should return a structured `{found: false, ...}`
 /// payload, not a free-text string. The CallToolResult must NOT set
 /// `is_error: true` (MCP `isError` is reserved for protocol-level
-/// failures, not domain-level "no row matched").
+/// failures, not application-level "no row matched").
 #[tokio::test]
 async fn note_read_missing_path_returns_found_false() {
     let db = SearchIndex::open_memory().expect("open db");
@@ -190,7 +164,7 @@ async fn note_read_missing_path_returns_found_false() {
     assert_ne!(
         result.is_error,
         Some(true),
-        "domain not-found must not set is_error: true",
+        "application not-found must not set is_error: true",
     );
     let v = first_content_as_json(&result);
     assert_eq!(v.get("found").and_then(|f| f.as_bool()), Some(false), "{v}");
@@ -399,7 +373,6 @@ fn seed_with_quality(db: &SearchIndex, path: &str, title: &str, body: &str, qual
         title: Some(title.to_string()),
         note_type: Some("article".to_string()),
         origin: Some("assisted".to_string()),
-        domain: Some("ai".to_string()),
         extra,
         ..Frontmatter::default()
     };
@@ -624,7 +597,6 @@ fn note_returning_tools_advertise_trace_block() {
         "knowledge_search",
         "note_read",
         "list_notes",
-        "domain_brief",
         "tag_brief",
         "tag_search",
         "find_similar",
@@ -691,7 +663,6 @@ fn trace_note_row(trace: &str, ingested: &str, trace_expires: &str) -> NoteRow {
     NoteRow {
         path: "notes/x.md".to_string(),
         title: "X".to_string(),
-        domain: "ai".to_string(),
         note_type: "article".to_string(),
         origin: "assisted".to_string(),
         status: String::new(),
@@ -810,12 +781,12 @@ fn format_note_carries_trace_block_at_every_level() {
 }
 
 /// `schema_info` must emit `{value, description}` pairs, not bare strings: a
-/// caller learns what a value MEANS. All five enums are covered, and every
+/// caller learns what a value MEANS. All four enums are covered, and every
 /// description is non-empty.
 #[test]
 fn schema_info_payload_emits_value_description_pairs() {
     let payload = schema_info_payload(&[]);
-    for key in ["domains", "note_types", "origins", "statuses", "methods"] {
+    for key in ["note_types", "origins", "statuses", "methods"] {
         let rows = payload[key]
             .as_array()
             .unwrap_or_else(|| panic!("{key} is not an array"));
@@ -850,7 +821,6 @@ fn seed_tagged_article(db: &SearchIndex, path: &str, title: &str, body: &str, ta
         title: Some(title.to_string()),
         note_type: Some("article".to_string()),
         origin: Some("assisted".to_string()),
-        domain: Some("ai".to_string()),
         tags: Some(tags.iter().map(|t| t.to_string()).collect()),
         ..Frontmatter::default()
     };
@@ -951,49 +921,4 @@ fn schema_info_includes_tags_from_the_vocabulary() {
     let tags = vec!["privacy".to_string(), "rust".to_string()];
     let payload = schema_info_payload(&tags);
     assert_eq!(payload["tags"], json!(["privacy", "rust"]));
-}
-
-/// P8 success criterion: every MCP request struct with a `domain` filter also
-/// has a `tags` filter beside it (G6). Checked over the schemars-derived tool
-/// input schemas, not a hand-maintained list, so a future request struct with
-/// `domain` and no `tags` fails this test automatically.
-///
-/// Two tools are exempt, both per the design doc's own API Design section
-/// (`docs/design/2026-09-19-tags-only-classification.md`):
-/// - `ingest_history`: the ledger never carried a tags column; `domain` is
-///   dropped in P11 with no sibling.
-/// - `domain_brief`: `tags` gets its own tool, `tag_brief`, not a field on
-///   this one.
-#[test]
-fn every_domain_param_has_a_tags_sibling() {
-    const EXEMPT: &[&str] = &["ingest_history", "domain_brief"];
-    let tools = OracleMcpServer::list_tools();
-    assert!(!tools.is_empty(), "router advertised no tools");
-    let mut checked = 0;
-    for tool in &tools {
-        let Some(props) = tool.input_schema.get("properties").and_then(|p| p.as_object()) else {
-            continue;
-        };
-        if !props.contains_key("domain") {
-            continue;
-        }
-        checked += 1;
-        if EXEMPT.contains(&tool.name.as_ref()) {
-            assert!(
-                !props.contains_key("tags"),
-                "tool {:?} is on the exempt list but now HAS a tags field - remove it from EXEMPT",
-                tool.name
-            );
-            continue;
-        }
-        assert!(
-            props.contains_key("tags"),
-            "tool {:?} has a domain filter with no tags sibling",
-            tool.name
-        );
-    }
-    assert!(
-        checked > 0,
-        "no tool with a domain filter was found - test is not exercising anything"
-    );
 }

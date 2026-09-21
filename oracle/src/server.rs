@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use tracing::{debug, info, warn};
 use vault::detail::{self, DetailLevel};
 use vault::ledger;
-use vault::schema::{Domain, Method, NoteType, Origin, Status};
+use vault::schema::{Method, NoteType, Origin, Status};
 use vault::search::{NoteRow, SearchIndex};
 
 mod pipeline;
@@ -22,7 +22,7 @@ const MAX_EXPAND_HOPS: u8 = 2;
 /// Per-hop decay applied to expansion scores so distant neighbors rank lower.
 /// 0.5 ≈ one effective hop. Feeds the graph rank list (an ordering into RRF).
 const GRAPH_HOP_DECAY: f32 = 0.5;
-/// `find_similar` over-fetch multiplier: when a post-filter (domain / self
+/// `find_similar` over-fetch multiplier: when a post-filter (tags / self
 /// exclusion) is active, fetch this many times `limit` candidates so filtering
 /// can't shrink the result below `limit` (or to zero when matches exist).
 const FIND_SIMILAR_OVERFETCH: usize = 5;
@@ -83,10 +83,6 @@ impl OracleMcpServer {
             "vault_overview" => {
                 let req: VaultOverviewRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
                 self.vault_overview(Parameters(req)).await
-            }
-            "domain_brief" => {
-                let req: DomainBriefRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
-                self.domain_brief(Parameters(req)).await
             }
             "tag_brief" => {
                 let req: TagBriefRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
@@ -280,7 +276,6 @@ impl OracleMcpServer {
         let metadata = json!({
             "path": note.path,
             "title": note.title,
-            "domain": note.domain,
             "type": note.note_type,
             "origin": note.origin,
             "status": note.status,
@@ -332,7 +327,7 @@ impl OracleMcpServer {
 impl OracleMcpServer {
     /// Search the vault's ingested knowledge.
     #[tool(
-        description = "Search the vault's ingested knowledge. Omit mode (the common case) to run the operator-configured pipeline (vector-first by default, eval-best). Mode overrides force a single path: bm25 (FTS5 keyword search), vector (semantic, brute-force cosine over embeddings), or hybrid (BM25 + vector fused via RRF). Filter by domain, note type, or status. Control content verbosity with the detail parameter: metadata, tldr, summary, full. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "Search the vault's ingested knowledge. Omit mode (the common case) to run the operator-configured pipeline (vector-first by default, eval-best). Mode overrides force a single path: bm25 (FTS5 keyword search), vector (semantic, brute-force cosine over embeddings), or hybrid (BM25 + vector fused via RRF). Filter by tags, note type, or status. Control content verbosity with the detail parameter: metadata, tldr, summary, full. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn knowledge_search(&self, params: Parameters<KnowledgeSearchRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -342,7 +337,6 @@ impl OracleMcpServer {
         let detail_level = req.detail.unwrap_or(DetailLevel::Summary);
         let limit = req.limit.unwrap_or(10);
 
-        let domain = req.domain.as_ref().map(|d| d.as_str());
         let tags = req.tags.as_deref();
         let note_type = req.note_type.as_ref().map(|t| t.as_str());
         let status = req.status.as_ref().map(|s| s.as_str());
@@ -372,7 +366,6 @@ impl OracleMcpServer {
                     &db,
                     mode,
                     &req.query,
-                    domain,
                     tags,
                     note_type,
                     status,
@@ -386,7 +379,6 @@ impl OracleMcpServer {
                     &self.config.retrieval,
                     &req.query,
                     pre_queries.as_deref().unwrap_or_default(),
-                    domain,
                     tags,
                     note_type,
                     status,
@@ -437,7 +429,7 @@ impl OracleMcpServer {
 
     /// List notes with optional filters
     #[tool(
-        description = "List notes with optional filters by domain, note type, status, or date range. Unlike knowledge_search, this does not require a search query - use it to browse by category. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "List notes with optional filters by tags, note type, status, or date range. Unlike knowledge_search, this does not require a search query - use it to browse by category. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn list_notes(&self, params: Parameters<ListNotesRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -447,7 +439,6 @@ impl OracleMcpServer {
         let db = self.db.lock().map_err(Self::err)?;
         let notes = db
             .list_notes(
-                req.domain.as_ref().map(|d| d.as_str()),
                 req.tags.as_deref(),
                 false,
                 req.note_type.as_ref().map(|t| t.as_str()),
@@ -468,7 +459,7 @@ impl OracleMcpServer {
 
     /// Get an overview of the vault
     #[tool(
-        description = "Get an overview of the entire vault - total note count, distribution by domain, note type, and status, plus schema gaps showing notes with missing fields."
+        description = "Get an overview of the entire vault - total note count, distribution by tag, note type, and status, plus schema gaps showing notes with missing fields."
     )]
     async fn vault_overview(&self, _params: Parameters<VaultOverviewRequest>) -> Result<CallToolResult, McpError> {
         let db = self.db.lock().map_err(Self::err)?;
@@ -476,35 +467,7 @@ impl OracleMcpServer {
         Ok(CallToolResult::success(vec![Content::json(&stats)?]))
     }
 
-    /// Get a briefing on a specific knowledge domain
-    #[tool(
-        description = "Get a briefing on a specific knowledge domain - total notes, unread count, starred count, type breakdown, and recent notes. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
-    )]
-    async fn domain_brief(&self, params: Parameters<DomainBriefRequest>) -> Result<CallToolResult, McpError> {
-        let req = params.0;
-        let detail_level = req.detail.unwrap_or(DetailLevel::Tldr);
-
-        let db = self.db.lock().map_err(Self::err)?;
-        let brief = db.domain_brief(req.domain.as_str(), req.limit).map_err(Self::err)?;
-
-        let results: Vec<serde_json::Value> = brief
-            .recent
-            .iter()
-            .map(|n| Self::format_note(n, &detail_level))
-            .collect();
-
-        Ok(CallToolResult::success(vec![Content::json(json!({
-            "domain": brief.domain,
-            "total_notes": brief.total_notes,
-            "unread": brief.unread,
-            "starred": brief.starred,
-            "by_type": brief.by_type,
-            "results": results,
-        }))?]))
-    }
-
-    /// Get a briefing on a specific tag - the `tags` counterpart to
-    /// `domain_brief` (P8, beside it; `domain_brief` is deleted in P11).
+    /// Get a briefing on a specific tag
     #[tool(
         description = "Get a briefing on a specific tag - total notes, unread count, starred count, type breakdown, and recent notes. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
@@ -532,16 +495,13 @@ impl OracleMcpServer {
     }
 
     /// Query the borg ingest ledger
-    #[tool(
-        description = "Query the borg ingest ledger for ingestion history. Filter by source URL, domain, or date range."
-    )]
+    #[tool(description = "Query the borg ingest ledger for ingestion history. Filter by source URL or date range.")]
     async fn ingest_history(&self, params: Parameters<IngestHistoryRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
         let ledger_path = ledger::ledger_path().map_err(Self::err)?;
 
         let filter = vault::ledger::EntryFilter {
             source: req.source,
-            domain: req.domain.map(|d| d.as_str().to_string()),
             before: req.before,
             after: req.after,
         };
@@ -564,7 +524,6 @@ impl OracleMcpServer {
                     "slug": e.slug,
                     "filename": e.filename,
                     "source": e.source,
-                    "domain": e.domain,
                 })
             })
             .collect();
@@ -667,7 +626,7 @@ impl OracleMcpServer {
 
     /// List all valid schema values
     #[tool(
-        description = "List all valid schema values - domains, tags, note types, origins, statuses, and ingest methods. Use this to understand what filter values are available."
+        description = "List all valid schema values - tags, note types, origins, statuses, and ingest methods. Use this to understand what filter values are available."
     )]
     async fn schema_info(&self, _params: Parameters<SchemaInfoRequest>) -> Result<CallToolResult, McpError> {
         let tags = load_canonical_tags();
@@ -689,7 +648,7 @@ impl OracleMcpServer {
 
     /// Search notes by tag or list all tags
     #[tool(
-        description = "Search notes by tag, or list all tags with counts when no tag is specified. Supports exact match and prefix match (append * to tag). Filter by domain. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "Search notes by tag, or list all tags with counts when no tag is specified. Supports exact match and prefix match (append * to tag). Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn tag_search(&self, params: Parameters<TagSearchRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -699,13 +658,7 @@ impl OracleMcpServer {
             Some(tag) => {
                 let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
                 let notes = db
-                    .tag_search(
-                        &tag,
-                        req.domain.as_ref().map(|d| d.as_str()),
-                        req.tags.as_deref(),
-                        false,
-                        req.limit,
-                    )
+                    .tag_search(&tag, req.tags.as_deref(), false, req.limit)
                     .map_err(Self::err)?;
 
                 let results: Vec<serde_json::Value> =
@@ -727,7 +680,6 @@ impl OracleMcpServer {
                         json!({
                             "tag": s.tag,
                             "count": s.count,
-                            "domains": s.domains,
                         })
                     })
                     .collect();
@@ -772,11 +724,11 @@ impl OracleMcpServer {
         };
 
         // Over-fetch a candidate pool BEFORE the post-filters so a selective
-        // domain/tags filter or the self-note exclusion cannot shrink the
+        // tags filter or the self-note exclusion cannot shrink the
         // result below `limit` (the previous fetch-exactly-`limit` could
         // return 0 with matches present). With no post-filter active the
         // pool is exactly `limit`.
-        let filtering = req.domain.is_some() || req.tags.is_some() || req.path.is_some();
+        let filtering = req.tags.is_some() || req.path.is_some();
         let fetch = if filtering {
             (limit as usize)
                 .saturating_mul(FIND_SIMILAR_OVERFETCH)
@@ -786,17 +738,10 @@ impl OracleMcpServer {
         };
         let mut notes = db.find_similar(&content, fetch).map_err(Self::err)?;
 
-        // Filter by domain if requested
-        if let Some(ref domain) = req.domain {
-            let d = domain.as_str();
-            notes.retain(|n| n.domain == d);
-        }
-
         // Filter by tags if requested (OR across the list, same default as
         // every other `tags` filter). `find_similar` has no vault-layer tags
         // param (FTS5 term extraction, not a schema-filtered query), so this
-        // is a post-filter over the resolved rows, matching the domain filter
-        // just above.
+        // is a post-filter over the resolved rows.
         if let Some(wanted) = &req.tags
             && !wanted.is_empty()
         {
@@ -822,9 +767,9 @@ impl OracleMcpServer {
         }))?]))
     }
 
-    /// Get recent vault activity across domains
+    /// Get recent vault activity
     #[tool(
-        description = "Cross-domain timeline of recent vault activity. Shows notes added or modified in the last N days. Filter by domain or note type. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "Timeline of recent vault activity. Shows notes added or modified in the last N days. Filter by tags or note type. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn recent_activity(&self, params: Parameters<RecentActivityRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -834,7 +779,6 @@ impl OracleMcpServer {
         let notes = db
             .recent_notes(
                 req.days,
-                req.domain.as_ref().map(|d| d.as_str()),
                 req.tags.as_deref(),
                 false,
                 req.note_type.as_ref().map(|t| t.as_str()),
@@ -918,13 +862,7 @@ impl OracleMcpServer {
             Some(creator) => {
                 let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
                 let notes = db
-                    .notes_by_creator(
-                        &creator,
-                        req.domain.as_ref().map(|d| d.as_str()),
-                        req.tags.as_deref(),
-                        false,
-                        req.limit,
-                    )
+                    .notes_by_creator(&creator, req.tags.as_deref(), false, req.limit)
                     .map_err(Self::err)?;
                 let results: Vec<serde_json::Value> =
                     notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
@@ -957,9 +895,9 @@ impl OracleMcpServer {
         }
     }
 
-    /// Browse notes by source URL domain
+    /// Browse notes by source URL host
     #[tool(
-        description = "Browse notes by source URL domain. When host is provided, returns matching notes. When omitted, lists all source domains with counts. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "Browse notes by source URL host. When host is provided, returns matching notes. When omitted, lists all source hosts with counts. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn source_browse(&self, params: Parameters<SourceBrowseRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -969,13 +907,7 @@ impl OracleMcpServer {
             Some(host) => {
                 let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
                 let notes = db
-                    .notes_by_source_domain(
-                        &host,
-                        req.domain.as_ref().map(|d| d.as_str()),
-                        req.tags.as_deref(),
-                        false,
-                        req.limit,
-                    )
+                    .notes_by_source_domain(&host, req.tags.as_deref(), false, req.limit)
                     .map_err(Self::err)?;
                 let results: Vec<serde_json::Value> =
                     notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
@@ -1024,9 +956,8 @@ impl OracleMcpServer {
         let review_results: Vec<serde_json::Value> =
             review.iter().map(|n| Self::format_note(n, &detail_level)).collect();
 
-        // P8: classified is a tags heuristic now, not a domain one - tags are
-        // the classification axis borg/cortex write to (`domain` stops being
-        // the signal here; it is dropped from the notes payload in P11).
+        // Classified is a tags heuristic: tags are the classification axis
+        // borg/cortex write to.
         let classified: u64 = inbox
             .iter()
             .filter(|n| {
@@ -1115,14 +1046,12 @@ impl OracleMcpServer {
 
     /// Classification pipeline health and metadata
     #[tool(
-        description = "View classification pipeline statistics - total classified, method breakdown, confidence distribution, domain assignments, inbox count, and pending reviews."
+        description = "View classification pipeline statistics - total classified, method breakdown, confidence distribution, inbox count, and pending reviews."
     )]
     async fn classify_status(&self, params: Parameters<ClassifyStatusRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
         let db = self.db.lock().map_err(Self::err)?;
-        let stats = db
-            .classify_stats(req.domain.as_ref().map(|d| d.as_str()), req.tags.as_deref(), false)
-            .map_err(Self::err)?;
+        let stats = db.classify_stats(req.tags.as_deref(), false).map_err(Self::err)?;
 
         Ok(CallToolResult::success(vec![Content::json(&stats)?]))
     }
@@ -1135,13 +1064,13 @@ impl ServerHandler for OracleMcpServer {
         let mut info = ServerInfo::default();
         info.instructions = Some(
             "Oracle - knowledge retrieval MCP for a second-brain Obsidian vault. \
-             Search ingested knowledge by domain, type, or full-text query. knowledge_search \
+             Search ingested knowledge by tag, type, or full-text query. knowledge_search \
              with no mode runs the operator-configured pipeline (vector-first by default, \
              eval-best); pass mode=bm25 for pure keyword search, mode=vector for pure semantic \
              similarity, or mode=hybrid to force BM25 + vector fused via RRF. \
              Control content verbosity with the 'detail' parameter: \
              metadata (fields only), tldr (one-liner), summary (summary section), full (complete body). \
-             Use vault_overview for the big picture, domain_brief for domain-specific intelligence, \
+             Use vault_overview for the big picture, tag_brief for tag-specific intelligence, \
              and knowledge_search for targeted queries. \
              Returned notes include a `trace` block: when `trace.available` is true, `trace.ref` is a \
              borg staged-source handle for the verbatim captured source (e.g. a full transcript), and \
@@ -1158,13 +1087,12 @@ impl ServerHandler for OracleMcpServer {
 /// The `schema_info` payload: every schema enum rendered as `{value,
 /// description}` pairs so a caller learns what a value MEANS, not just that it
 /// exists. Split out of the tool method so the shape is unit-testable without
-/// standing up an MCP server or opening the search index. `tags` (P8, beside
-/// `domains`; `domains` is deleted in P11) is data-driven, not a Rust enum -
-/// the caller loads it from the canonical vocabulary and passes it in, so this
-/// function stays pure and testable with no filesystem access.
+/// standing up an MCP server or opening the search index. `tags` is
+/// data-driven, not a Rust enum - the caller loads it from the canonical
+/// vocabulary and passes it in, so this function stays pure and testable
+/// with no filesystem access.
 pub fn schema_info_payload(tags: &[String]) -> serde_json::Value {
     json!({
-        "domains": schema_values(Domain::all(), Domain::as_str, Domain::description),
         "tags": tags,
         "note_types": schema_values(NoteType::all(), NoteType::as_str, NoteType::description),
         "origins": schema_values(Origin::all(), Origin::as_str, Origin::description),

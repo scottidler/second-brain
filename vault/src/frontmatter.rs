@@ -59,7 +59,6 @@ pub struct Frontmatter {
     pub title: Option<String>,
     pub date: Option<String>,
     pub note_type: Option<String>,
-    pub domain: Option<String>,
     pub origin: Option<String>,
     pub status: Option<String>,
     pub tags: Option<Vec<String>>,
@@ -110,7 +109,6 @@ impl Frontmatter {
         let mut title = None;
         let mut date = None;
         let mut note_type = None;
-        let mut domain = None;
         let mut origin = None;
         let mut status = None;
         let mut tags = None;
@@ -152,9 +150,6 @@ impl Frontmatter {
                 }
                 "type" => {
                     note_type = scalar_to_string(val);
-                }
-                "domain" => {
-                    domain = scalar_to_string(val);
                 }
                 "origin" => {
                     origin = scalar_to_string(val);
@@ -230,7 +225,6 @@ impl Frontmatter {
             title,
             date,
             note_type,
-            domain,
             origin,
             status,
             tags,
@@ -247,7 +241,7 @@ impl Frontmatter {
     }
 
     /// Serialize back to YAML string, preserving extra fields.
-    /// Fields emitted in canonical order: title, date, type, domain, origin, tags,
+    /// Fields emitted in canonical order: title, date, type, origin, tags,
     /// status, source, creator, then extra fields alphabetically.
     pub fn to_yaml(&self) -> Result<String> {
         let mut mapping = serde_yaml::Mapping::new();
@@ -268,12 +262,6 @@ impl Frontmatter {
             mapping.insert(
                 serde_yaml::Value::String("type".to_string()),
                 serde_yaml::Value::String(note_type.clone()),
-            );
-        }
-        if let Some(ref domain) = self.domain {
-            mapping.insert(
-                serde_yaml::Value::String("domain".to_string()),
-                serde_yaml::Value::String(domain.clone()),
             );
         }
         if let Some(ref origin) = self.origin {
@@ -371,7 +359,6 @@ impl Frontmatter {
         self.title.is_none()
             && self.date.is_none()
             && self.note_type.is_none()
-            && self.domain.is_none()
             && self.origin.is_none()
             && self.status.is_none()
             && self.tags.is_none()

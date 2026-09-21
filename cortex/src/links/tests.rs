@@ -59,11 +59,11 @@ fn test_title_case_wikilink_resolves_via_slug() {
     let v = TestVault::new();
     v.add_note(
             "zone-blocking-families.md",
-            "---\ntitle: Zone Blocking Families\ndate: 2026-03-18\ntype: note\ndomain: football\norigin: authored\ntags:\n  - football\n---\nZone blocking content.\n",
+            "---\ntitle: Zone Blocking Families\ndate: 2026-03-18\ntype: note\norigin: authored\ntags:\n  - football\n---\nZone blocking content.\n",
         );
     v.add_note(
             "views/borg-ledger.md",
-            "---\ntitle: Borg Ledger\ndate: 2026-03-18\ntype: system\ndomain: system\norigin: generated\ntags: []\n---\nSee [[Zone Blocking Families]] for details.\n",
+            "---\ntitle: Borg Ledger\ndate: 2026-03-18\ntype: system\norigin: generated\ntags: []\n---\nSee [[Zone Blocking Families]] for details.\n",
         );
     let notes = v.scan();
     let config = v.config().actions.broken_links;
@@ -85,11 +85,11 @@ fn test_title_match_wikilink_resolves() {
     // Note where title differs from filename
     v.add_note(
             "my-custom-slug.md",
-            "---\ntitle: A Totally Different Title\ndate: 2026-03-18\ntype: note\ndomain: tech\norigin: authored\ntags: []\n---\nContent.\n",
+            "---\ntitle: A Totally Different Title\ndate: 2026-03-18\ntype: note\norigin: authored\ntags: []\n---\nContent.\n",
         );
     v.add_note(
             "referrer.md",
-            "---\ntitle: Referrer\ndate: 2026-03-18\ntype: note\ndomain: tech\norigin: authored\ntags: []\n---\nSee [[A Totally Different Title]] here.\n",
+            "---\ntitle: Referrer\ndate: 2026-03-18\ntype: note\norigin: authored\ntags: []\n---\nSee [[A Totally Different Title]] here.\n",
         );
     let notes = v.scan();
     let config = v.config().actions.broken_links;

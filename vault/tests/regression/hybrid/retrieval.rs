@@ -279,11 +279,11 @@ fn hybrid_recovers_union_top3_with_transcript_chunks() {
     let total = transcript_queries().len();
     for q in transcript_queries() {
         let bm25 = index
-            .search(q, None, None, false, None, None, Some(K_RRF_INPUT))
+            .search(q, None, false, None, None, Some(K_RRF_INPUT))
             .expect("bm25");
         let q_vec = m.embed_one(q).expect("q vec");
         let vec_hits = index
-            .search_vector(&q_vec, K_RRF_INPUT, None, None, false, None, None)
+            .search_vector(&q_vec, K_RRF_INPUT, None, false, None, None)
             .expect("vec");
 
         let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
@@ -320,11 +320,11 @@ fn hybrid_recovers_union_top3() {
     let total = queries().len();
     for q in queries() {
         let bm25 = index
-            .search(q, None, None, false, None, None, Some(K_RRF_INPUT))
+            .search(q, None, false, None, None, Some(K_RRF_INPUT))
             .expect("bm25");
         let q_vec = m.embed_one(q).expect("q");
         let vec_hits = index
-            .search_vector(&q_vec, K_RRF_INPUT, None, None, false, None, None)
+            .search_vector(&q_vec, K_RRF_INPUT, None, false, None, None)
             .expect("vec");
 
         let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();

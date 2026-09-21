@@ -1,6 +1,6 @@
 use eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use vault::canonical::{self, CanonicalTagsFile};
 use vault::search::{ColdNote, ColdQuery, SearchIndex};
@@ -285,8 +285,8 @@ pub fn daemon_cold_tick(vault_root: &Path, config: &Config) -> Result<ColdStats>
 
 /// Generate the cold-note review report.
 ///
-/// Opens the oracle search DB, runs the cold query, groups by domain,
-/// renders a markdown checklist, writes it atomically to
+/// Opens the oracle search DB, runs the cold query, renders a flat markdown
+/// checklist, writes it atomically to
 /// `<vault_root>/system/views/cold-notes.md`. Cortex writes nothing to
 /// the `notes` table; the inbound counts it reads are whatever oracle's
 /// periodic recompute most recently materialized.
@@ -417,29 +417,18 @@ pub fn render_cold_report_at(
     if rows.is_empty() {
         out.push_str("No cold notes at the current threshold.\n\n");
     } else {
-        // Group rows by domain, preserving stable order for snapshot tests.
-        let mut groups: BTreeMap<String, Vec<&ColdNote>> = BTreeMap::new();
+        // Flat list, ordered exactly as `cold_notes` returned it (oldest
+        // `date` first). No grouping: the old single-valued grouping key is
+        // gone, and `tags` is multi-valued so it cannot replace it 1:1.
         for row in rows {
-            let key = if row.domain.is_empty() {
-                "(no domain)".to_string()
-            } else {
-                row.domain.clone()
-            };
-            groups.entry(key).or_default().push(row);
+            let title = if row.title.is_empty() { "(untitled)".to_string() } else { row.title.clone() };
+            out.push_str(&format!(
+                "- [ ] `{path}` - \"{title}\" - dated {date}\n",
+                path = row.path,
+                date = row.date,
+            ));
         }
-
-        for (domain, domain_rows) in &groups {
-            out.push_str(&format!("## {domain} ({count})\n\n", count = domain_rows.len()));
-            for row in domain_rows {
-                let title = if row.title.is_empty() { "(untitled)".to_string() } else { row.title.clone() };
-                out.push_str(&format!(
-                    "- [ ] `{path}` - \"{title}\" - dated {date}\n",
-                    path = row.path,
-                    date = row.date,
-                ));
-            }
-            out.push('\n');
-        }
+        out.push('\n');
     }
 
     // Footer cross-references the live ingest-activity view so a reviewer can

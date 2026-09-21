@@ -79,8 +79,6 @@ pub enum Command {
         #[arg(long, value_name = "TYPE")]
         r#type: Option<String>,
         #[arg(long)]
-        domain: Option<String>,
-        #[arg(long)]
         source: Option<String>,
         #[arg(long)]
         before: Option<String>,
@@ -485,53 +483,50 @@ impl BorgCli {
             Some(Command::Reingest {
                 all,
                 r#type,
-                domain,
                 source,
                 before,
                 after,
                 dry_run,
             }) => {
-                let _report =
-                    borg::reingest(
-                        config,
-                        all,
-                        r#type,
-                        domain,
-                        source,
-                        before,
-                        after,
-                        dry_run,
-                        |event| match event {
-                            borg::ReingestEvent::NoMatches => println!("No matching entries found."),
-                            borg::ReingestEvent::Matched { count, dry_run } => println!(
-                                "{} {} entries{}",
-                                if *dry_run { "Would reingest" } else { "Reingesting" },
-                                count,
-                                if *dry_run { " (dry run)" } else { "" }
-                            ),
-                            borg::ReingestEvent::ItemStart {
-                                index,
-                                total,
-                                date,
-                                slug,
-                                source,
-                            } => println!("  [{}/{}] {} - {} ({})", index + 1, total, date, slug, source),
-                            borg::ReingestEvent::ItemReplaced { title } => {
-                                println!("    -> Replaced: \"{title}\"")
+                let _report = borg::reingest(
+                    config,
+                    all,
+                    r#type,
+                    source,
+                    before,
+                    after,
+                    dry_run,
+                    |event| match event {
+                        borg::ReingestEvent::NoMatches => println!("No matching entries found."),
+                        borg::ReingestEvent::Matched { count, dry_run } => println!(
+                            "{} {} entries{}",
+                            if *dry_run { "Would reingest" } else { "Reingesting" },
+                            count,
+                            if *dry_run { " (dry run)" } else { "" }
+                        ),
+                        borg::ReingestEvent::ItemStart {
+                            index,
+                            total,
+                            date,
+                            slug,
+                            source,
+                        } => println!("  [{}/{}] {} - {} ({})", index + 1, total, date, slug, source),
+                        borg::ReingestEvent::ItemReplaced { title } => {
+                            println!("    -> Replaced: \"{title}\"")
+                        }
+                        borg::ReingestEvent::ItemFailed { reason } => {
+                            eprintln!("    -> Failed: {reason}")
+                        }
+                        borg::ReingestEvent::ItemOther(s) => println!("    -> {s}"),
+                        borg::ReingestEvent::ItemError(e) => eprintln!("    -> Error: {e}"),
+                        borg::ReingestEvent::Complete { dry_run } => {
+                            if !*dry_run {
+                                println!("Reingest complete.");
                             }
-                            borg::ReingestEvent::ItemFailed { reason } => {
-                                eprintln!("    -> Failed: {reason}")
-                            }
-                            borg::ReingestEvent::ItemOther(s) => println!("    -> {s}"),
-                            borg::ReingestEvent::ItemError(e) => eprintln!("    -> Error: {e}"),
-                            borg::ReingestEvent::Complete { dry_run } => {
-                                if !*dry_run {
-                                    println!("Reingest complete.");
-                                }
-                            }
-                        },
-                    )
-                    .await?;
+                        }
+                    },
+                )
+                .await?;
                 Ok(())
             }
             Some(Command::Replay(args)) => {

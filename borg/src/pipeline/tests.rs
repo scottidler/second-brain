@@ -611,11 +611,11 @@ fn test_reingest_preserves_notes_directory() {
     // Create a ledger with the existing entry
     let ledger_file = vault.join("system").join("views").join("borg-ledger.md");
     let ledger_content = format!(
-        "---\ntitle: Borg Ledger\ndate: 2026-03-23\ntype: system\ndomain: system\norigin: authored\ntags: []\n---\n\n\
+        "---\ntitle: Borg Ledger\ndate: 2026-03-23\ntype: system\norigin: authored\ntags: []\n---\n\n\
              # Borg Ledger\n\n\
-             | Date | Time | Method | Status | Title | Filename | Source | Domain | Trace |\n\
-             |------|------|--------|--------|-------|----------|--------|--------|-------|\n\
-             | 2026-03-20 | 10:00 | http | {} | [[Original]] | reingest-test.md | {source_url} | ai | tr-000001 |\n",
+             | Date | Time | Method | Status | Title | Filename | Source | Trace |\n\
+             |------|------|--------|--------|-------|----------|--------|-------|\n\
+             | 2026-03-20 | 10:00 | http | {} | [[Original]] | reingest-test.md | {source_url} | tr-000001 |\n",
         "\u{2705}"
     );
     std::fs::write(&ledger_file, ledger_content).expect("write ledger");
@@ -678,11 +678,11 @@ fn test_reingest_finds_note_via_ledger_filename_fallback() {
     // Ledger references the new canonical URL but has the filename
     let ledger_file = vault.join("system").join("views").join("borg-ledger.md");
     let ledger_content = format!(
-        "---\ntitle: Borg Ledger\ndate: 2026-03-23\ntype: system\ndomain: system\norigin: authored\ntags: []\n---\n\n\
+        "---\ntitle: Borg Ledger\ndate: 2026-03-23\ntype: system\norigin: authored\ntags: []\n---\n\n\
              # Borg Ledger\n\n\
-             | Date | Time | Method | Status | Title | Filename | Source | Domain | Trace |\n\
-             |------|------|--------|--------|-------|----------|--------|--------|-------|\n\
-             | 2026-03-20 | 10:00 | http | {} | [[Fallback]] | fallback-note.md | https://new-url.com/page | ai | tr-000001 |\n",
+             | Date | Time | Method | Status | Title | Filename | Source | Trace |\n\
+             |------|------|--------|--------|-------|----------|--------|-------|\n\
+             | 2026-03-20 | 10:00 | http | {} | [[Fallback]] | fallback-note.md | https://new-url.com/page | tr-000001 |\n",
         "\u{2705}"
     );
     std::fs::write(&ledger_file, ledger_content).expect("write ledger");
@@ -716,13 +716,12 @@ fn test_read_cortex_fields_all_present() {
     let note = dir.path().join("test.md");
     std::fs::write(
             &note,
-            "---\ntitle: Test\ndate: 2026-03-20\ndomain: tech\nstatus: read\ncortex-classified: true\ncortex-classified-by: deterministic\ncortex-confidence: high\ncortex-quality: medium\ncortex-quality-issues: [no-outbound-links]\n---\nBody text.\n",
+            "---\ntitle: Test\ndate: 2026-03-20\nstatus: read\ncortex-classified: true\ncortex-classified-by: deterministic\ncortex-confidence: high\ncortex-quality: medium\ncortex-quality-issues: [no-outbound-links]\n---\nBody text.\n",
         )
         .unwrap();
 
     let fields = read_cortex_fields(&note).expect("read");
-    assert_eq!(fields.len(), 7);
-    assert!(fields.iter().any(|(k, v)| k == "domain" && *v == scalar("tech")));
+    assert_eq!(fields.len(), 6);
     assert!(fields.iter().any(|(k, v)| k == "status" && *v == scalar("read")));
     assert!(
         fields
@@ -764,11 +763,15 @@ fn list(items: &[&str]) -> FieldValue {
 fn test_read_cortex_fields_partial() {
     let dir = tempfile::tempdir().unwrap();
     let note = dir.path().join("test.md");
-    std::fs::write(&note, "---\ntitle: Test\ndate: 2026-03-20\ndomain: ai\n---\nBody.\n").unwrap();
+    std::fs::write(
+        &note,
+        "---\ntitle: Test\ndate: 2026-03-20\nstatus: unread\n---\nBody.\n",
+    )
+    .unwrap();
 
     let fields = read_cortex_fields(&note).expect("read");
     assert_eq!(fields.len(), 1);
-    assert_eq!(fields[0], ("domain".to_string(), scalar("ai")));
+    assert_eq!(fields[0], ("status".to_string(), scalar("unread")));
 }
 
 #[test]
@@ -810,10 +813,10 @@ fn read_cortex_fields_round_trips_block_inline_and_quoted_lists() {
     let dir = tempfile::tempdir().unwrap();
 
     let block = dir.path().join("block.md");
-    std::fs::write(&block, "---\ntags:\n  - rust\n  - ai\ndomain: tech\n---\nBody.\n").unwrap();
+    std::fs::write(&block, "---\ntags:\n  - rust\n  - ai\nstatus: read\n---\nBody.\n").unwrap();
     let fields = read_cortex_fields(&block).expect("read");
     assert!(fields.contains(&("tags".to_string(), list(&["rust", "ai"]))));
-    assert!(fields.contains(&("domain".to_string(), scalar("tech"))));
+    assert!(fields.contains(&("status".to_string(), scalar("read"))));
 
     let inline = dir.path().join("inline.md");
     std::fs::write(&inline, "---\ntags: [rust, ai]\n---\nBody.\n").unwrap();
@@ -823,12 +826,12 @@ fn read_cortex_fields_round_trips_block_inline_and_quoted_lists() {
     let quoted = dir.path().join("quoted.md");
     std::fs::write(
         &quoted,
-        "---\ntags:\n  - \"rust\"\n  - 'ai'\ndomain: \"tech\"\n---\nBody.\n",
+        "---\ntags:\n  - \"rust\"\n  - 'ai'\nstatus: \"read\"\n---\nBody.\n",
     )
     .unwrap();
     let fields = read_cortex_fields(&quoted).expect("read");
     assert!(fields.contains(&("tags".to_string(), list(&["rust", "ai"]))));
-    assert!(fields.contains(&("domain".to_string(), scalar("tech"))));
+    assert!(fields.contains(&("status".to_string(), scalar("read"))));
 
     let empty_inline = dir.path().join("empty.md");
     std::fs::write(&empty_inline, "---\ntags: []\n---\nBody.\n").unwrap();

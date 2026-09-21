@@ -121,8 +121,8 @@ const FOLLOWS_KEY: &str = "follows";
 /// The complete borg-owned frontmatter key set: everything
 /// [`markdown::render_note`] emits from its own fields, plus this handler's
 /// session additions, plus the session distiller's additions. On a replace
-/// these are rewritten from the fresh publish; EVERY other key (`domain`,
-/// `cortex-classified*`, `cortex-quality*`, `superseded-by`, user keys) is
+/// these are rewritten from the fresh publish; EVERY other key
+/// (`cortex-classified*`, `cortex-quality*`, `superseded-by`, user keys) is
 /// carried forward verbatim.
 ///
 /// Derived from the writer rather than hand-listed, per the design doc's
@@ -145,8 +145,8 @@ struct PriorFrontmatter {
     /// The prior `tags:` list. Nominally borg-owned (it is in
     /// `RENDER_NOTE_KEYS`), but on a REPLACE it merges rather than being
     /// rewritten, the same exception `status:` already carries: a replay must
-    /// not strip a tag cortex or the domain-as-tag migration added. The union
-    /// happens at the call site, where the fresh list exists.
+    /// not strip a tag cortex or a prior migration added. The union happens
+    /// at the call site, where the fresh list exists.
     tags: Option<Vec<String>>,
     /// The prior `status:` value, RAW (not parsed through
     /// `vault::schema::Status`) so an off-schema operator value survives
@@ -631,9 +631,9 @@ pub(crate) async fn process_session_inner(
         }
         if let Some(prior_tags) = prior.tags {
             // Union, preserved first, matching the URL reingest path. A
-            // replace must not strip a tag cortex or the domain-as-tag
-            // migration added, and this is the only key in `RENDER_NOTE_KEYS`
-            // that merges instead of being rewritten.
+            // replace must not strip a tag cortex or a prior migration
+            // added, and this is the only key in `RENDER_NOTE_KEYS` that
+            // merges instead of being rewritten.
             let fresh = std::mem::take(&mut all_tags);
             for tag in prior_tags.into_iter().chain(fresh) {
                 if !all_tags.contains(&tag) {

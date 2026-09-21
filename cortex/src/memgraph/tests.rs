@@ -47,10 +47,10 @@ fn extract_facts_writes_typed_edge_with_provenance() {
     let mut index = SearchIndex::open_memory().expect("open");
     // Both entity hubs must exist for the fact edge endpoints to resolve.
     index
-        .insert_test_note_graph("entities/langchain.md", &[], "", "", "tech", "hub", 100)
+        .insert_test_note_graph("entities/langchain.md", &[], "", "", "hub", 100)
         .unwrap();
     index
-        .insert_test_note_graph("entities/neo4j.md", &[], "", "", "tech", "hub", 100)
+        .insert_test_note_graph("entities/neo4j.md", &[], "", "", "hub", 100)
         .unwrap();
 
     let extractor = MockTriples(vec![Triple {
@@ -76,7 +76,7 @@ fn extract_facts_skips_when_a_hub_is_missing() {
     let mut index = SearchIndex::open_memory().expect("open");
     // Only the subject hub exists; object hub absent -> edge skipped, no abort.
     index
-        .insert_test_note_graph("entities/langchain.md", &[], "", "", "tech", "hub", 100)
+        .insert_test_note_graph("entities/langchain.md", &[], "", "", "hub", 100)
         .unwrap();
 
     let extractor = MockTriples(vec![Triple {
@@ -106,9 +106,7 @@ fn detect_contradictions_flags_functional_predicate_with_two_objects() {
         "entities/u.md",
         "entities/v.md",
     ] {
-        index
-            .insert_test_note_graph(h, &[], "", "", "tech", "hub", 100)
-            .unwrap();
+        index.insert_test_note_graph(h, &[], "", "", "hub", 100).unwrap();
     }
     // Functional predicate `released-on` with two distinct objects -> conflict.
     add_fact(&mut index, "entities/x.md", "entities/y.md", "released-on");
@@ -131,9 +129,7 @@ fn detect_contradictions_flags_functional_predicate_with_two_objects() {
 fn remove_noise_drops_only_noise_predicates() {
     let mut index = SearchIndex::open_memory().expect("open");
     for h in ["entities/x.md", "entities/y.md", "entities/z.md"] {
-        index
-            .insert_test_note_graph(h, &[], "", "", "tech", "hub", 100)
-            .unwrap();
+        index.insert_test_note_graph(h, &[], "", "", "hub", 100).unwrap();
     }
     add_fact(&mut index, "entities/x.md", "entities/y.md", "is"); // noise
     add_fact(&mut index, "entities/x.md", "entities/z.md", "built-on"); // keep
@@ -153,9 +149,7 @@ fn bridge_clusters_connects_an_isolated_note_to_its_nearest_neighbor() {
     index.set_active_embedding(m.model_version(), m.dim()).unwrap();
     // Two isolated notes with identical embeddings (cosine 1.0), no edges.
     for p in ["notes/iso1.md", "notes/iso2.md"] {
-        index
-            .insert_test_note_graph(p, &[], "", "", "tech", "island", 100)
-            .unwrap();
+        index.insert_test_note_graph(p, &[], "", "", "island", 100).unwrap();
         let v = m.embed_one("shared island topic").expect("embed");
         index
             .upsert_embedding(
@@ -184,9 +178,7 @@ fn consolidate_runs_all_three_agents() {
     let m = MockEmbedder::new(16, "mock-consolidate-v1");
     index.set_active_embedding(m.model_version(), m.dim()).unwrap();
     for h in ["entities/x.md", "entities/y.md", "entities/z.md"] {
-        index
-            .insert_test_note_graph(h, &[], "", "", "tech", "hub", 100)
-            .unwrap();
+        index.insert_test_note_graph(h, &[], "", "", "hub", 100).unwrap();
     }
     // A noise fact + two functional-conflict facts.
     add_fact(&mut index, "entities/x.md", "entities/y.md", "is");

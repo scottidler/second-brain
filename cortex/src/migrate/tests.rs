@@ -258,17 +258,17 @@ fn test_value_rename_applies() {
     let v = TestVault::new();
     v.add_note(
         "knowledge-note.md",
-        "---\ntitle: Health Tips\ndate: 2026-01-01\ntype: note\ndomain: knowledge\ntags: []\n---\nBody.\n",
+        "---\ntitle: Health Tips\ndate: 2026-01-01\ntype: note\ncategory: knowledge\ntags: []\n---\nBody.\n",
     );
     let notes = v.scan();
 
     let mut value_map = HashMap::new();
     value_map.insert("knowledge".to_string(), "life".to_string());
     let mut value_renames = HashMap::new();
-    value_renames.insert("domain".to_string(), value_map);
+    value_renames.insert("category".to_string(), value_map);
 
     let migration = MigrationConfig {
-        name: "v3-domain-expansion".to_string(),
+        name: "v3-category-rename-test".to_string(),
         value_renames,
         ..Default::default()
     };
@@ -277,9 +277,12 @@ fn test_value_rename_applies() {
     assert!(count > 0, "expected at least one value transform");
 
     let content = v.read("knowledge-note.md");
-    assert!(content.contains("domain: life"), "expected domain: life after rename");
     assert!(
-        !content.contains("domain: knowledge"),
+        content.contains("category: life"),
+        "expected category: life after rename"
+    );
+    assert!(
+        !content.contains("category: knowledge"),
         "expected knowledge to be renamed"
     );
 }
@@ -288,15 +291,15 @@ fn test_value_rename_applies() {
 fn test_value_rename_quoted() {
     let v = TestVault::new();
     v.add_note(
-        "quoted-domain.md",
-        "---\ntitle: Quoted\ndate: 2026-01-01\ntype: note\ndomain: \"knowledge\"\ntags: []\n---\nBody.\n",
+        "quoted-category.md",
+        "---\ntitle: Quoted\ndate: 2026-01-01\ntype: note\ncategory: \"knowledge\"\ntags: []\n---\nBody.\n",
     );
     let notes = v.scan();
 
     let mut value_map = HashMap::new();
     value_map.insert("knowledge".to_string(), "life".to_string());
     let mut value_renames = HashMap::new();
-    value_renames.insert("domain".to_string(), value_map);
+    value_renames.insert("category".to_string(), value_map);
 
     let migration = MigrationConfig {
         name: "v3-test".to_string(),
@@ -307,9 +310,9 @@ fn test_value_rename_quoted() {
     let count = apply_value_transforms(v.root(), &notes, &migration).expect("apply");
     assert!(count > 0);
 
-    let content = v.read("quoted-domain.md");
+    let content = v.read("quoted-category.md");
     assert!(
-        content.contains("domain: \"life\""),
+        content.contains("category: \"life\""),
         "expected quoted value to be renamed"
     );
 }
@@ -319,14 +322,14 @@ fn test_value_rename_no_match() {
     let v = TestVault::new();
     v.add_note(
         "ai-note.md",
-        "---\ntitle: AI Note\ndate: 2026-01-01\ntype: note\ndomain: ai\ntags: []\n---\nBody.\n",
+        "---\ntitle: AI Note\ndate: 2026-01-01\ntype: note\ncategory: ai\ntags: []\n---\nBody.\n",
     );
     let notes = v.scan();
 
     let mut value_map = HashMap::new();
     value_map.insert("knowledge".to_string(), "life".to_string());
     let mut value_renames = HashMap::new();
-    value_renames.insert("domain".to_string(), value_map);
+    value_renames.insert("category".to_string(), value_map);
 
     let migration = MigrationConfig {
         name: "v3-test".to_string(),
@@ -335,7 +338,7 @@ fn test_value_rename_no_match() {
     };
 
     let count = apply_value_transforms(v.root(), &notes, &migration).expect("apply");
-    assert_eq!(count, 0, "ai domain should not be renamed");
+    assert_eq!(count, 0, "ai category should not be renamed");
 }
 
 #[test]
@@ -343,14 +346,14 @@ fn test_lint_value_transforms_reports() {
     let v = TestVault::new();
     v.add_note(
         "knowledge-note.md",
-        "---\ntitle: Health Tips\ndate: 2026-01-01\ntype: note\ndomain: knowledge\ntags: []\n---\nBody.\n",
+        "---\ntitle: Health Tips\ndate: 2026-01-01\ntype: note\ncategory: knowledge\ntags: []\n---\nBody.\n",
     );
     let notes = v.scan();
 
     let mut value_map = HashMap::new();
     value_map.insert("knowledge".to_string(), "life".to_string());
     let mut value_renames = HashMap::new();
-    value_renames.insert("domain".to_string(), value_map);
+    value_renames.insert("category".to_string(), value_map);
 
     let migrations = vec![MigrationConfig {
         name: "v3-test".to_string(),
@@ -377,16 +380,16 @@ fn test_extract_frontmatter_block() {
 
 // ---- Phase 4: field-to-tags / tags-remove ----
 
-fn domain_as_tag() -> MigrationConfig {
+fn category_as_tag() -> MigrationConfig {
     let mut field_to_tags = std::collections::HashMap::new();
     field_to_tags.insert(
-        "domain".to_string(),
+        "category".to_string(),
         crate::config::FieldToTags {
             exclude: vec!["resources".to_string(), "system".to_string()],
         },
     );
     MigrationConfig {
-        name: "v5-domain-as-tag".to_string(),
+        name: "v5-category-as-tag".to_string(),
         field_to_tags,
         ..Default::default()
     }
@@ -417,15 +420,20 @@ fn tags_of(v: &TestVault, path: &str) -> Vec<String> {
 }
 
 #[test]
-fn field_to_tags_writes_the_domain_value_as_a_tag() {
+fn field_to_tags_writes_the_category_value_as_a_tag() {
     let v = TestVault::new();
+    std::fs::write(
+        v.root().join("categorized.md"),
+        "---\ntitle: Categorized\ndate: 2026-03-20\ntype: note\ncategory: tech\ntags:\n  - rust\n  - programming\n---\nBody.\n",
+    )
+    .expect("write");
     let notes = v.scan();
-    let count = apply_migrate(v.root(), &notes, std::slice::from_ref(&domain_as_tag())).expect("apply");
+    let count = apply_migrate(v.root(), &notes, std::slice::from_ref(&category_as_tag())).expect("apply");
     assert!(count > 0, "expected the migration to write at least one note");
 
-    // `rust-guide.md` is `domain: tech` with tags [rust, programming].
-    let tags = tags_of(&v, "rust-guide.md");
-    assert!(tags.contains(&"tech".to_string()), "domain value not added: {tags:?}");
+    // `categorized.md` is `category: tech` with tags [rust, programming].
+    let tags = tags_of(&v, "categorized.md");
+    assert!(tags.contains(&"tech".to_string()), "category value not added: {tags:?}");
     assert!(tags.contains(&"rust".to_string()), "existing tag lost: {tags:?}");
     assert!(tags.contains(&"programming".to_string()), "existing tag lost: {tags:?}");
 }
@@ -433,7 +441,12 @@ fn field_to_tags_writes_the_domain_value_as_a_tag() {
 #[test]
 fn field_to_tags_is_idempotent() {
     let v = TestVault::new();
-    let migration = domain_as_tag();
+    std::fs::write(
+        v.root().join("categorized.md"),
+        "---\ntitle: Categorized\ndate: 2026-03-20\ntype: note\ncategory: tech\ntags:\n  - rust\n---\nBody.\n",
+    )
+    .expect("write");
+    let migration = category_as_tag();
 
     let first = apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&migration)).expect("first apply");
     assert!(first > 0);
@@ -445,7 +458,7 @@ fn field_to_tags_is_idempotent() {
 #[test]
 fn field_to_tags_writes_block_form() {
     let v = TestVault::new();
-    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("apply");
+    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&category_as_tag())).expect("apply");
     let content = v.read("rust-guide.md");
     assert!(content.contains("tags:\n  - "), "expected block form:\n{content}");
     assert!(!content.contains("tags: ["), "inline form survived:\n{content}");
@@ -456,9 +469,9 @@ fn field_to_tags_skips_excluded_values() {
     let v = TestVault::new();
     std::fs::write(
         v.root().join("junk.md"),
-        "---\ntitle: Junk\ndate: 2026-03-20\ntype: note\ndomain: resources\norigin: authored\ntags:\n  - rust\n---\nBody.\n",
+        "---\ntitle: Junk\ndate: 2026-03-20\ntype: note\ncategory: resources\norigin: authored\ntags:\n  - rust\n---\nBody.\n",
     ).expect("write");
-    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("apply");
+    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&category_as_tag())).expect("apply");
     let tags = tags_of(&v, "junk.md");
     assert!(
         !tags.contains(&"resources".to_string()),
@@ -470,23 +483,23 @@ fn field_to_tags_skips_excluded_values() {
 #[test]
 fn field_to_tags_strips_quotes_and_normalizes() {
     let v = TestVault::new();
-    // 350 vault notes quote the value; `knowledge` is the legacy spelling of
-    // `life` that `hygiene::normalize_domain` maps.
+    // 350 vault notes quote the value; the writer must strip the quotes and
+    // lowercase before writing the tag.
     std::fs::write(
         v.root().join("quoted.md"),
-        "---\ntitle: Q\ndate: 2026-03-20\ntype: note\ndomain: \"knowledge\"\norigin: authored\ntags: []\n---\nBody.\n",
+        "---\ntitle: Q\ndate: 2026-03-20\ntype: note\ncategory: \"Knowledge\"\norigin: authored\ntags: []\n---\nBody.\n",
     )
     .expect("write");
-    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("apply");
+    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&category_as_tag())).expect("apply");
     let tags = tags_of(&v, "quoted.md");
-    assert_eq!(tags, vec!["life".to_string()], "got {tags:?}");
+    assert_eq!(tags, vec!["knowledge".to_string()], "got {tags:?}");
 }
 
 #[test]
 fn tags_remove_strips_the_named_tags() {
     let v = TestVault::new();
     let migration = MigrationConfig {
-        name: "v5-domain-as-tag-undo".to_string(),
+        name: "v5-category-as-tag-undo".to_string(),
         tags_remove: vec!["rust".to_string()],
         ..Default::default()
     };
@@ -501,10 +514,10 @@ fn lint_tag_transforms_flags_a_note_that_would_exceed_the_cap() {
     let v = TestVault::new();
     std::fs::write(
         v.root().join("full.md"),
-        "---\ntitle: Full\ndate: 2026-03-20\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - a\n  - b\n---\nBody.\n",
+        "---\ntitle: Full\ndate: 2026-03-20\ntype: note\ncategory: tech\norigin: authored\ntags:\n  - a\n  - b\n---\nBody.\n",
     ).expect("write");
     let notes = v.scan();
-    let migration = domain_as_tag();
+    let migration = category_as_tag();
     let report = lint_migrate_selected(&notes, &[&migration], Some(2));
     let hit = report
         .violations
@@ -521,6 +534,10 @@ fn lint_tag_transforms_flags_a_note_that_would_exceed_the_cap() {
 #[test]
 fn load_plan_reads_the_shipped_undo_file() {
     // The inverse must stay parseable and must NOT be a cortex.yml migration.
+    // This is the real shipped historical-undo artifact for the P4 migration
+    // that already ran against the live vault (its name and content are
+    // fixed history, not a demo field name, so this test does not rename it
+    // alongside the synthetic `category_as_tag` fixtures above).
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../config/migrations/v5-domain-as-tag-undo.yml");
     let plan = load_plan(&path).expect("plan parses");
     assert_eq!(plan.len(), 1);
@@ -531,17 +548,17 @@ fn load_plan_reads_the_shipped_undo_file() {
 
 #[test]
 fn field_to_tags_normalizes_form_when_the_set_is_unchanged() {
-    // The note already carries its own domain value, so the tag SET does not
+    // The note already carries its own category value, so the tag SET does not
     // change, but its inline list is the wrong on-disk form. Without this the
     // vault keeps two spellings and P4's own success criterion fails.
     let v = TestVault::new();
     std::fs::write(
         v.root().join("already.md"),
-        "---\ntitle: A\ndate: 2026-03-20\ntype: note\ndomain: tech\norigin: authored\ntags: [tech, rust]\n---\nBody.\n",
+        "---\ntitle: A\ndate: 2026-03-20\ntype: note\ncategory: tech\norigin: authored\ntags: [tech, rust]\n---\nBody.\n",
     )
     .expect("write");
 
-    let count = apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("apply");
+    let count = apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&category_as_tag())).expect("apply");
     assert!(count > 0);
 
     let content = v.read("already.md");
@@ -552,7 +569,7 @@ fn field_to_tags_normalizes_form_when_the_set_is_unchanged() {
     assert!(!content.contains("tags: ["), "inline form survived:\n{content}");
 
     // Still idempotent: the form is right now, so a second pass writes nothing.
-    let again = apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("second apply");
+    let again = apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&category_as_tag())).expect("second apply");
     assert_eq!(again, 0, "form normalization broke idempotence");
 }
 
@@ -567,6 +584,6 @@ fn field_to_tags_leaves_empty_inline_lists_alone() {
     )
     .expect("write");
 
-    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&domain_as_tag())).expect("apply");
+    apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&category_as_tag())).expect("apply");
     assert!(v.read("empty.md").contains("tags: []"), "empty list was churned");
 }

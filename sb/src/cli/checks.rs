@@ -470,24 +470,6 @@ fn pattern_findings() -> Vec<Finding> {
         findings.push(Finding::ok(format!("{total} patterns match binary")));
     }
 
-    // The cortex classify Tier-2 pattern is referenced BY NAME in cortex.yml
-    // (`actions.classify.fabric-pattern`) and resolved at runtime. A name that
-    // doesn't resolve to a file silently disables Tier-2 LLM classification
-    // (this exact bug shipped: the old default `cortex_classify` matched no
-    // file). Verify the configured name resolves to an installed pattern.
-    if let Ok(cfg) = cortex::config::Config::load(None) {
-        let name = &cfg.actions.classify.fabric_pattern;
-        let resolved = installed_dir.join(name);
-        let resolved_md = installed_dir.join(format!("{name}.md"));
-        if resolved.exists() || resolved_md.exists() {
-            findings.push(Finding::ok(format!("classify pattern '{name}' resolves")));
-        } else {
-            findings.push(Finding::error(
-                format!("classify pattern '{name}' resolves to no file in {}", installed_dir.display()),
-                "set actions.classify.fabric-pattern in cortex.yml to an installed pattern (e.g. obsidian-classify), or sb bootstrap",
-            ));
-        }
-    }
     findings
 }
 
@@ -776,9 +758,9 @@ fn vault_findings() -> Vec<Finding> {
     match db.stats() {
         Ok(stats) => {
             findings.push(Finding::ok(format!(
-                "{} note(s) indexed across {} domain(s)",
+                "{} note(s) indexed across {} tag(s)",
                 stats.total_notes,
-                stats.by_domain.len()
+                stats.by_tag.len()
             )));
         }
         Err(e) => findings.push(Finding::warn(
@@ -910,11 +892,10 @@ fn frontmatter_policy_findings() -> Vec<Finding> {
 
     let mut findings = Vec::new();
     let required = report.count_by_rule_prefix("frontmatter.required.");
-    let domain = required.get("domain").copied().unwrap_or(0);
     let origin = required.get("origin").copied().unwrap_or(0);
     let tags = required.get("tags").copied().unwrap_or(0);
     findings.push(Finding::info(format!(
-        "frontmatter gaps (cortex lint policy): domain={domain}, origin={origin}, tags={tags}"
+        "frontmatter gaps (cortex lint policy): origin={origin}, tags={tags}"
     )));
 
     let enum_violations: u64 = report.count_by_rule_prefix("frontmatter.enum.").values().sum();
@@ -942,7 +923,7 @@ fn inbox_stale_finding(db: &vault::search::SearchIndex) -> Finding {
             if age_secs > INBOX_STALE_SECS {
                 Finding::warn(
                     format!("oldest inbox note {path} is {}h old", age_secs / 3600),
-                    "sb cortex classify, or assign a domain by hand".to_string(),
+                    "sb cortex classify, or assign tags by hand".to_string(),
                 )
             } else {
                 Finding::ok(format!("oldest inbox note {path} is {}h old", age_secs / 3600))

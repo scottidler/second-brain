@@ -649,7 +649,7 @@ async fn replace_preserves_cortex_fields_and_a_user_set_status() {
     inject_frontmatter(
         &landed,
         "cortex-classified: true\ncortex-quality-score: 87\ncortex-quality-issues: [no-outbound-links]\n\
-         domain: engineering\n",
+         custom-field: engineering\n",
     );
     // The operator marks it read in Obsidian (replacing borg's `unread`).
     let text = std::fs::read_to_string(&landed)
@@ -667,7 +667,7 @@ async fn replace_preserves_cortex_fields_and_a_user_set_status() {
     assert_eq!(fm.get("cortex-classified").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(fm.get("cortex-quality-score").and_then(|v| v.as_u64()), Some(87));
     assert!(fm.contains_key("cortex-quality-issues"), "{fm:?}");
-    assert_eq!(fm.get("domain").and_then(|v| v.as_str()), Some("engineering"));
+    assert_eq!(fm.get("custom-field").and_then(|v| v.as_str()), Some("engineering"));
     assert_eq!(
         fm.get("status").and_then(|v| v.as_str()),
         Some("read"),
@@ -1159,9 +1159,9 @@ fn borg_owned_key_policy_matches_the_declaration() {
     assert!(owned.contains(STATUS_KEY));
     // `tags` is the second such key, added by the tags-only design doc's P3:
     // owned and rewritten by `render_note`, but MERGED rather than replaced on
-    // a session replace, so a replay cannot strip a tag cortex or the
-    // domain-as-tag migration added. Same shape as `status`: in the owned set,
-    // handled explicitly in `read_prior_frontmatter`.
+    // a session replace, so a replay cannot strip a tag cortex or a prior
+    // migration added. Same shape as `status`: in the owned set, handled
+    // explicitly in `read_prior_frontmatter`.
     assert!(owned.contains(TAGS_KEY));
     assert!(
         vault::schema::CORTEX_PRESERVE_KEYS.contains(&TAGS_KEY),
@@ -1177,7 +1177,7 @@ fn session_replace_merges_tags() {
     let note = dir.path().join("session.md");
     std::fs::write(
         &note,
-        "---\ntitle: S\ntype: session\ntags:\n  - ai\n  - rust\nstatus: read\ndomain: tech\n---\nBody.\n",
+        "---\ntitle: S\ntype: session\ntags:\n  - ai\n  - rust\nstatus: read\ncustom-field: tech\n---\nBody.\n",
     )
     .expect("write");
 

@@ -728,7 +728,6 @@ pub async fn reingest(
     config: Config,
     all: bool,
     content_type: Option<String>,
-    domain: Option<String>,
     source: Option<String>,
     before: Option<String>,
     after: Option<String>,
@@ -737,15 +736,14 @@ pub async fn reingest(
 ) -> Result<ReingestReport> {
     use ledger::{EntryFilter, QueriedEntry};
 
-    if !all && source.is_none() && content_type.is_none() && domain.is_none() {
-        eyre::bail!("Specify --all, --source <URL>, --type <TYPE>, or --domain <DOMAIN> to select entries");
+    if !all && source.is_none() && content_type.is_none() {
+        eyre::bail!("Specify --all, --source <URL>, or --type <TYPE> to select entries");
     }
 
     let ledger_file = ledger::ledger_path()?;
 
     let filter = EntryFilter {
         source: source.clone(),
-        domain: domain.clone(),
         before,
         after,
     };

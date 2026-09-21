@@ -299,7 +299,7 @@ fn apply_group_writes_the_tombstone_contract_shape() {
     let loser = write_note(
         root,
         "notes/loser.md",
-        "trace: hv-aaaaaa\nsource: \"clyde://s1\"\ndistilled: true\nslug: loser\ndomain: tech\n",
+        "trace: hv-aaaaaa\nsource: \"clyde://s1\"\ndistilled: true\nslug: loser\ncustom-field: tech\n",
         "## Summary\n\nreal but a fork\n",
     );
     let group = DedupeGroup {
@@ -313,10 +313,9 @@ fn apply_group_writes_the_tombstone_contract_shape() {
     let (fm, body) = vault::frontmatter::parse_frontmatter(&rewritten).unwrap();
     assert!(!fm.extra.contains_key("slug"), "slug must be stripped from a tombstone");
     assert_eq!(fm.extra.get("superseded-by").and_then(|v| v.as_str()), Some("survivor"));
-    // A field this design does not own (domain:) survives untouched. It is a
-    // PROMOTED Frontmatter field (not `extra`), so `to_yaml()`'s explicit
-    // `domain:` emission is what is under test here.
-    assert_eq!(fm.domain.as_deref(), Some("tech"));
+    // A field this design does not own (custom-field:) survives untouched: an
+    // unrecognized key rides `extra` unchanged through the tombstone rewrite.
+    assert_eq!(fm.extra.get("custom-field").and_then(|v| v.as_str()), Some("tech"));
     assert_eq!(body.trim(), "Merged into [[survivor]].");
 }
 

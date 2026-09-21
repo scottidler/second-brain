@@ -255,7 +255,7 @@ fn normalize_tag(tag: &str) -> String {
 /// `vault::frontmatter::to_yaml`) and Obsidian's property editor writes block,
 /// so an inline writer here meant the vault carried both spellings forever.
 /// Readers accept either; only the writer changed. This switch lands BEFORE
-/// the domain-as-tag migration so the migration's own writes are already in
+/// any field-to-tags migration so the migration's own writes are already in
 /// the final form.
 ///
 /// Delegates to [`crate::scope::insert_frontmatter_fields`], whose

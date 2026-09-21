@@ -206,8 +206,8 @@ impl Report {
 
     /// Count violations whose `rule` starts with `prefix`, keyed by the
     /// remainder of the rule string after the prefix (e.g. `prefix =
-    /// "frontmatter.required."` on a rule `"frontmatter.required.domain"`
-    /// keys the count under `"domain"`). Lets a caller (doctor) report
+    /// "frontmatter.required."` on a rule `"frontmatter.required.tags"`
+    /// keys the count under `"tags"`). Lets a caller (doctor) report
     /// per-field/per-enum tallies from cortex's own policy engine without a
     /// second copy of the rule-name convention.
     pub fn count_by_rule_prefix(&self, prefix: &str) -> BTreeMap<String, u64> {
@@ -239,8 +239,8 @@ mod tests {
     fn count_by_rule_prefix_groups_by_suffix_and_ignores_other_prefixes() {
         let report = Report {
             violations: vec![
-                violation("frontmatter.required.domain"),
-                violation("frontmatter.required.domain"),
+                violation("frontmatter.required.tags"),
+                violation("frontmatter.required.tags"),
                 violation("frontmatter.required.origin"),
                 violation("tags.non-canonical"),
             ],
@@ -249,7 +249,7 @@ mod tests {
         };
 
         let required = report.count_by_rule_prefix("frontmatter.required.");
-        let expected: BTreeMap<String, u64> = [("domain".to_string(), 2), ("origin".to_string(), 1)]
+        let expected: BTreeMap<String, u64> = [("tags".to_string(), 2), ("origin".to_string(), 1)]
             .into_iter()
             .collect();
         assert_eq!(required, expected);

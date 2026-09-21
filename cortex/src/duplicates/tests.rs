@@ -132,7 +132,7 @@ fn test_apply_duplicates_clears_stale_fields() {
     // Add a note with stale cortex-duplicate fields (not actually a duplicate)
     v.add_note(
             "formerly-duplicate.md",
-            "---\ntitle: Formerly Duplicate\ndate: 2026-03-18\ntype: note\ndomain: tech\norigin: authored\ntags: []\ncortex-duplicate: true\ncortex-duplicate-group: dup-old\n---\nThis note is unique now.\n",
+            "---\ntitle: Formerly Duplicate\ndate: 2026-03-18\ntype: note\norigin: authored\ntags: []\ncortex-duplicate: true\ncortex-duplicate-group: dup-old\n---\nThis note is unique now.\n",
         );
 
     let notes = v.scan();

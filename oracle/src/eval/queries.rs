@@ -22,11 +22,7 @@ pub struct EvalQuery {
     pub id: String,
     /// The search string.
     pub query: String,
-    /// Optional schema filter passed to search.
-    #[serde(default)]
-    pub domain: Option<String>,
-    /// Optional tags filter passed to search (P8, beside `domain`; OR across
-    /// the list).
+    /// Optional tags filter passed to search (OR across the list).
     #[serde(default)]
     pub tags: Option<Vec<String>>,
     /// Calibration marker. `None` = not a calibration query. `Some(map)` = a
