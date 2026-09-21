@@ -53,9 +53,11 @@ pub(crate) async fn get_or_init_canonical(config: &Config) -> Option<std::sync::
 /// provenance is gone, which is why candidates are built before it.
 pub(crate) struct TagSources<'a> {
     pub title: &'a str,
-    /// The note summary when one exists, else a body excerpt. Never the
-    /// transcript.
-    pub text: &'a str,
+    /// What the classifier scores, and - under `classifier-dev` - what leaves
+    /// the machine. The note summary when one exists, else a
+    /// `CLASSIFIER_TEXT_CHARS` body excerpt. Never a whole transcript, which
+    /// is why the two constructors are the only way to set it.
+    pub text: String,
     /// Publisher hashtags, yt-dlp tags, the note's own `author-tags`.
     pub author: Vec<String>,
     /// Distiller / LLM output from this ingest.
@@ -63,7 +65,20 @@ pub(crate) struct TagSources<'a> {
 }
 
 impl<'a> TagSources<'a> {
-    pub fn new(title: &'a str, text: &'a str) -> Self {
+    /// A note that already has a distilled summary: scored verbatim, the same
+    /// text `cortex::classify::classifier_text` picks for the same note.
+    pub fn from_summary(title: &'a str, summary: &str) -> Self {
+        Self::build(title, summary.to_string())
+    }
+
+    /// A note with no summary: only the head of the body is scored. Audio is
+    /// the case that matters - without this clip the whole transcript was
+    /// POSTed to classifier.dev verbatim (implementation audit r1, M3).
+    pub fn from_body(title: &'a str, body: &str) -> Self {
+        Self::build(title, distillers::tags::body_excerpt(body))
+    }
+
+    fn build(title: &'a str, text: String) -> Self {
         Self {
             title,
             text,
@@ -86,6 +101,25 @@ pub(crate) struct TagOutcome {
     pub degraded: bool,
 }
 
+/// What `finalize_tags` returns when the canonical vocabulary cannot be
+/// loaded.
+///
+/// This used to return the raw `author` + `model` candidates un-canonicalized,
+/// uncapped and `degraded: false` - exactly the "unfiltered tag pipeline" the
+/// comment on `get_or_init_canonical` says it refuses to soft-fail into, and
+/// the receipt read clean. Borg's startup precondition guarantees the
+/// vocabulary loads, so reaching here is an I/O or parse regression: publish
+/// untagged and mark the receipt, the same shape as a classifier fallback
+/// that also failed (implementation audit r1, M5).
+fn vocabulary_unavailable() -> TagOutcome {
+    log::error!("canonical vocabulary unavailable after startup validation, publishing untagged and degraded");
+    TagOutcome {
+        tags: Vec::new(),
+        author_tags: Vec::new(),
+        degraded: true,
+    }
+}
+
 /// Assign a note's tags through the shared closed-vocabulary classifier.
 ///
 /// Replaces the old `finalize_tags(&mut Vec<String>)`, which sorted, deduped
@@ -94,16 +128,7 @@ pub(crate) struct TagOutcome {
 /// so it runs on the blocking pool here.
 pub(crate) async fn finalize_tags(sources: TagSources<'_>, config: &Config) -> TagOutcome {
     let Some(state) = get_or_init_canonical(config).await else {
-        // No vocabulary loaded: fall back to the old behavior rather than
-        // dropping every tag on the floor.
-        let mut tags: Vec<String> = sources.author.iter().chain(sources.model.iter()).cloned().collect();
-        tags.sort();
-        tags.dedup();
-        return TagOutcome {
-            tags,
-            author_tags: Vec::new(),
-            degraded: false,
-        };
+        return vocabulary_unavailable();
     };
 
     // Reject raw candidates that are two-or-more canonical words mashed
@@ -133,7 +158,7 @@ pub(crate) async fn finalize_tags(sources: TagSources<'_>, config: &Config) -> T
     let canon = state.canon.clone();
     let mapping = state.mapping.clone();
     let title = sources.title.to_string();
-    let text = sources.text.to_string();
+    let text = sources.text;
 
     // `spawn_blocking`: the trait is sync by design, and `ClassifierDev` makes
     // a blocking HTTP call. Running it on the async worker would stall the

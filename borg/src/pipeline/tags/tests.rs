@@ -46,7 +46,7 @@ async fn distiller_proposed_tags_survive_canonical_filter() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = config_with_fixture_canonical(dir.path());
 
-    let mut sources = TagSources::new("title", "text");
+    let mut sources = TagSources::from_summary("title", "text");
     sources
         .author
         .extend(["llm".to_string()].iter().map(|t| hygiene::sanitize_tag(t)));
@@ -98,7 +98,7 @@ async fn empty_distiller_tags_yield_no_canonical_tags_from_that_source() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = config_with_fixture_canonical(dir.path());
 
-    let sources = TagSources::new("title", "text");
+    let sources = TagSources::from_summary("title", "text");
     let outcome = finalize_tags(sources, &config).await;
 
     assert!(
@@ -143,7 +143,7 @@ async fn ingest_tags_are_repeatable_under_deterministic() {
     let config = config_with_fixture_canonical(dir.path());
 
     let build_sources = || {
-        let mut sources = TagSources::new(
+        let mut sources = TagSources::from_summary(
             "Async Rust for humans",
             "A practical guide to async Rust and LLM tooling.",
         );
@@ -186,7 +186,7 @@ async fn ingest_tags_are_stable_under_distiller_drift() {
     let config = config_with_fixture_canonical(dir.path());
 
     // Ingest 1: distiller proposes `rust`.
-    let mut sources_1 = TagSources::new("Async Rust for humans", "A guide to async Rust.");
+    let mut sources_1 = TagSources::from_summary("Async Rust for humans", "A guide to async Rust.");
     sources_1.model.push(hygiene::sanitize_tag("rust"));
     let ingest_1 = finalize_tags(sources_1, &config).await;
     assert_eq!(ingest_1.tags, vec!["rust".to_string()]);
@@ -194,7 +194,7 @@ async fn ingest_tags_are_stable_under_distiller_drift() {
     // Ingest 2 (a reingest of the same URL): the distiller's own output
     // DRIFTED to `llm` instead of `rust` - the exact instability this test
     // exists to survive. This is the FRESH render about to be published.
-    let mut sources_2 = TagSources::new("Async Rust for humans", "A guide to async Rust.");
+    let mut sources_2 = TagSources::from_summary("Async Rust for humans", "A guide to async Rust.");
     sources_2.model.push(hygiene::sanitize_tag("llm"));
     let ingest_2 = finalize_tags(sources_2, &config).await;
     assert_eq!(ingest_2.tags, vec!["llm".to_string()]);
@@ -249,7 +249,7 @@ async fn classifier_failure_degrades_visibly() {
         timeout_secs: 1,
     };
 
-    let mut sources = TagSources::new("title", "text");
+    let mut sources = TagSources::from_summary("title", "text");
     sources.model.push(hygiene::sanitize_tag("rust"));
 
     let outcome = finalize_tags(sources, &config).await;
@@ -283,7 +283,7 @@ async fn author_tags_are_recorded() {
 
     // A YouTube fixture: the creator's own `#rust` hashtag is author-side;
     // the classifier never sees it as a scored candidate.
-    let mut sources = TagSources::new("A talk about async Rust", "...");
+    let mut sources = TagSources::from_summary("A talk about async Rust", "...");
     sources.author.push(hygiene::sanitize_tag("rust"));
     let outcome = finalize_tags(sources, &config).await;
     assert_eq!(outcome.author_tags, vec!["rust".to_string()]);
@@ -312,4 +312,40 @@ async fn author_tags_are_recorded() {
         !empty_rendered.contains("author-tags"),
         "author-tags must be omitted, not emitted empty:\n{empty_rendered}"
     );
+}
+
+/// Implementation audit r1, M3: `text` is what leaves the machine under
+/// `classifier-dev`. A summary-less audio note used to hand the classifier
+/// its whole transcript; `from_body` is the one seam that clips it.
+#[test]
+fn from_body_clips_a_transcript_to_the_documented_excerpt() {
+    let transcript = "word ".repeat(4_000);
+    let sources = TagSources::from_body("A voice note", &transcript);
+    assert_eq!(
+        sources.text.chars().count(),
+        distillers::tags::CLASSIFIER_TEXT_CHARS,
+        "the transcript was not clipped"
+    );
+    assert!(transcript.starts_with(&sources.text), "the excerpt is the head");
+}
+
+/// The other constructor is deliberately verbatim: a distilled summary is
+/// already short, and cortex's `classifier_text` does not clip one either, so
+/// both call paths score identical text for the same note.
+#[test]
+fn from_summary_is_verbatim() {
+    let summary = "A distilled summary.";
+    assert_eq!(TagSources::from_summary("T", summary).text, summary);
+}
+
+/// Implementation audit r1, M5: a vocabulary load failure used to return the
+/// raw author+model candidates un-canonicalized, uncapped and
+/// `degraded: false`, so the receipt read clean while an unfiltered tag set
+/// reached the note. The documented contract is the opposite.
+#[test]
+fn a_vocabulary_failure_publishes_untagged_and_degraded() {
+    let outcome = vocabulary_unavailable();
+    assert!(outcome.tags.is_empty(), "unfiltered tags escaped: {:?}", outcome.tags);
+    assert!(outcome.author_tags.is_empty());
+    assert!(outcome.degraded, "the receipt would have read clean");
 }

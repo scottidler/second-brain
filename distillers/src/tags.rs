@@ -60,12 +60,28 @@ impl TagCandidate {
 }
 
 /// What a classifier scores. `text` is the note summary when one exists, else
-/// the first 900 characters of the body. Never the transcript.
+/// a `CLASSIFIER_TEXT_CHARS` body excerpt. Never a whole transcript.
 #[derive(Debug, Clone, Copy)]
 pub struct TagInput<'a> {
     pub title: &'a str,
     pub text: &'a str,
     pub candidates: &'a [TagCandidate],
+}
+
+/// How much body text the scoring classifiers read when a note has no
+/// summary (design doc, API Design).
+///
+/// This is a data-boundary number, not a tuning knob: `text` is shipped
+/// verbatim to classifier.dev, so an untruncated body means a whole
+/// transcript of captured audio leaves the machine. Both callers clip
+/// through `body_excerpt` (borg: `TagSources::from_body`; cortex:
+/// `classify::classifier_text`).
+pub const CLASSIFIER_TEXT_CHARS: usize = 900;
+
+/// The head of a note body, clipped to `CLASSIFIER_TEXT_CHARS`. Counts
+/// characters rather than bytes so a multi-byte boundary cannot panic.
+pub fn body_excerpt(body: &str) -> String {
+    body.chars().take(CLASSIFIER_TEXT_CHARS).collect()
 }
 
 /// Drives inbox promotion and `cortex-confidence`. Promotion happens on `High`

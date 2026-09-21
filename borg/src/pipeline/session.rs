@@ -484,7 +484,7 @@ pub(crate) async fn process_session_inner(
     // Candidates built before anything merges them (provenance is lost after
     // that point). Operator-supplied tags are author-side; the distiller
     // output is model-side, scored against the summary.
-    let mut sources = TagSources::new(&title, &distilled.summary);
+    let mut sources = TagSources::from_summary(&title, &distilled.summary);
     sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
     sources
         .model

@@ -746,7 +746,7 @@ pub(crate) async fn process_image_inner(
     // author-side, same as the URL path's caller-supplied tags; vision's
     // suggestions are a model guess derived from the image content, same
     // bucket as the distiller output.
-    let mut sources = TagSources::new(&title, &distilled.summary);
+    let mut sources = TagSources::from_summary(&title, &distilled.summary);
     sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
     sources.model.push("image".to_string());
     sources
@@ -967,14 +967,15 @@ pub(crate) async fn process_audio_inner(
 
     // Candidates built before anything merges them (provenance is lost after
     // that point). Operator-supplied tags are author-side; the transcript
-    // (used as classifier `text` when there is no summary yet) and the
-    // distiller output are model-side.
-    let text_for_classifier = if !distilled.summary.is_empty() {
-        distilled.summary.clone()
+    // (excerpted as classifier `text` when there is no summary yet) and the
+    // distiller output are model-side. `from_body` is load-bearing on the
+    // no-summary leg: the transcript is verbatim captured audio, and under
+    // `classifier-dev` the whole of it used to be POSTed to a third-party API.
+    let mut sources = if distilled.summary.is_empty() {
+        TagSources::from_body(&title, &transcript_text)
     } else {
-        transcript_text.clone()
+        TagSources::from_summary(&title, &distilled.summary)
     };
-    let mut sources = TagSources::new(&title, &text_for_classifier);
     sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
     sources.model.push("audio".to_string());
     sources
@@ -1199,14 +1200,14 @@ pub(crate) async fn process_document_file_inner(
     // Candidates built before anything merges them (provenance is lost after
     // that point). Operator-supplied tags are author-side; the file-kind
     // marker has no separable provenance, so `model` is the safe default.
-    let text_for_classifier = if !summary.is_empty() {
-        summary.clone()
+    let mut sources = if !summary.is_empty() {
+        TagSources::from_summary(&title, &summary)
     } else if !extracted_text.is_empty() {
-        extracted_text.clone()
+        // Extracted document text is a body, not a summary: excerpt it.
+        TagSources::from_body(&title, &extracted_text)
     } else {
-        format!("{} file: {filename}", kind.label())
+        TagSources::from_summary(&title, &format!("{} file: {filename}", kind.label()))
     };
-    let mut sources = TagSources::new(&title, &text_for_classifier);
     sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
     sources.model.push(kind.default_tag().to_string());
     let outcome = finalize_tags(sources, config).await;

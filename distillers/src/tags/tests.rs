@@ -422,3 +422,25 @@ fn retag_never_writes_over_the_cap() {
     assert_eq!(got[0], "work", "the protected tag claims its slot first");
     assert!(!got.contains(&"rust".to_string()), "unprotected tag survived: {got:?}");
 }
+
+// -------------------------------------------------------- classifier text
+
+/// Implementation audit r1, M3: the 900-character ceiling the design doc
+/// promises had no implementation in borg, so an audio note with no summary
+/// POSTed its whole transcript to classifier.dev.
+#[test]
+fn body_excerpt_clips_at_the_documented_ceiling() {
+    let long = "x".repeat(5_000);
+    assert_eq!(body_excerpt(&long).chars().count(), CLASSIFIER_TEXT_CHARS);
+    assert!(long.starts_with(&body_excerpt(&long)), "the excerpt is the head");
+}
+
+#[test]
+fn body_excerpt_leaves_short_text_and_multibyte_alone() {
+    let short = "A short body.";
+    assert_eq!(body_excerpt(short), short);
+
+    // Char-wise, not byte-wise: a 3-byte char at the boundary must not panic.
+    let multibyte = "\u{4e16}".repeat(CLASSIFIER_TEXT_CHARS + 10);
+    assert_eq!(body_excerpt(&multibyte).chars().count(), CLASSIFIER_TEXT_CHARS);
+}

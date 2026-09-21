@@ -863,7 +863,7 @@ async fn process_url_inner(
 
     // Candidates are built HERE, before anything merges them, because after
     // the merge the provenance is gone and the classifier needs it.
-    let mut sources = tags::TagSources::new(&title, &distilled.summary);
+    let mut sources = tags::TagSources::from_summary(&title, &distilled.summary);
     // Caller-supplied tags: operator-provided, so author-side.
     sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
     // Publisher hashtags and yt-dlp tags: the creator's own words.

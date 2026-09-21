@@ -164,15 +164,12 @@ impl ClassifyResult {
     }
 }
 
-/// How many characters of body text the scoring classifiers read when a note
-/// has no `## Summary` section. Never the transcript (design doc, API Design).
-const CLASSIFIER_TEXT_CHARS: usize = 900;
-
 /// The note text a classifier scores: its `## Summary` when it has one, else
-/// the head of the body.
+/// the head of the body, clipped through the shared
+/// `distillers::tags::body_excerpt` so borg and cortex send the same amount
+/// of a summary-less note to classifier.dev.
 fn classifier_text(note: &Note) -> String {
-    ::vault::search::parse_body_summary(&note.body)
-        .unwrap_or_else(|| note.body.chars().take(CLASSIFIER_TEXT_CHARS).collect())
+    ::vault::search::parse_body_summary(&note.body).unwrap_or_else(|| distillers::tags::body_excerpt(&note.body))
 }
 
 /// Publisher hashtags borg recorded at ingest. Read back as `Author`

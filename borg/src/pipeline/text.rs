@@ -126,7 +126,7 @@ pub(crate) async fn process_text_inner(
     // Candidates built before anything merges them (provenance is lost after
     // that point). Operator-supplied tags are author-side; the distiller
     // output is model-side, scored against the summary.
-    let mut sources = TagSources::new(&title, &distilled.summary);
+    let mut sources = TagSources::from_summary(&title, &distilled.summary);
     sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
     sources
         .model
@@ -290,7 +290,7 @@ pub(crate) async fn process_vocab(
         }
         _ => "vocab".to_string(),
     };
-    let mut sources = TagSources::new(&title, &distilled.summary);
+    let mut sources = TagSources::from_summary(&title, &distilled.summary);
     sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
     sources
         .model
@@ -669,7 +669,7 @@ pub(crate) async fn process_code_snippet(
     // `code-snippet`/language markers have no separable provenance, so
     // `model` is the safe default (they are non-canonical anyway, and the
     // classifier drops them the same way `filter_and_cap` used to).
-    let mut sources = TagSources::new(&title, text);
+    let mut sources = TagSources::from_body(&title, text);
     sources.author.extend(tags.iter().map(|t| hygiene::sanitize_tag(t)));
     sources.model.push("code-snippet".to_string());
     if !language.is_empty() {
