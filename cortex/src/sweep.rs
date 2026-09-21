@@ -73,11 +73,15 @@ pub fn run(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<Sweep
 
     let proposals_data = if opts.proposals || !opts.migrate {
         let proposals = scan_proposals(&notes, &config.sweep)?;
-        let path = if !proposals.is_empty() && !opts.dry_run {
+        // Write UNCONDITIONALLY when not a dry run. Under overwrite semantics a
+        // non-empty gate would make "rendered view of one scan window" a lie: a
+        // scan that dropped to zero would leave the last non-empty file in place
+        // forever.
+        let path = if opts.dry_run {
+            None
+        } else {
             write_proposals(&config.sweep, proposals.clone())?;
             Some(config.sweep.proposals_path.display().to_string())
-        } else {
-            None
         };
         Some((proposals, path))
     } else {
@@ -113,17 +117,31 @@ pub struct ColdStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Proposal {
     pub tag: String,
+    /// Distinct sources carrying this candidate.
     pub frequency: usize,
-    pub suggested_canonical: Option<String>,
-    pub action: String,
-    pub notes: Vec<String>,
+    /// Sample provenance, capped to match `cortex::entities::MAX_SAMPLE_NOTES`.
+    /// Named `sources` rather than `notes` because a source key is not always
+    /// a note path.
+    pub sources: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A rendered view of ONE scan window, not an accumulator. `write_proposals`
+/// overwrites, so a candidate that fell below threshold disappears instead of
+/// persisting at a stale frequency (the merge-on-write this replaces is what
+/// grew `entity-proposals.yml` to 212 KB).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ProposalsFile {
+    /// UTC timestamp of the scan that produced this file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned_at: Option<String>,
+    /// Oldest and newest `meta.produced-at` in the staged corpus this scan
+    /// read, so a reader can tell what window the frequencies cover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_window: Option<String>,
     pub proposals: Vec<Proposal>,
 }
 
@@ -227,11 +245,9 @@ pub fn scan_proposals(notes: &[Note], config: &SweepConfig) -> Result<Vec<Propos
     let proposals: Vec<Proposal> = non_canonical
         .into_iter()
         .filter(|(_, notes)| notes.len() >= threshold)
-        .map(|(tag, notes)| Proposal {
-            frequency: notes.len(),
-            suggested_canonical: None,
-            action: "review".to_string(),
-            notes,
+        .map(|(tag, sources)| Proposal {
+            frequency: sources.len(),
+            sources,
             tag,
         })
         .collect();
@@ -239,31 +255,38 @@ pub fn scan_proposals(notes: &[Note], config: &SweepConfig) -> Result<Vec<Propos
     Ok(proposals)
 }
 
-/// Write proposals to the proposals file, merging with existing.
-pub fn write_proposals(config: &SweepConfig, new_proposals: Vec<Proposal>) -> Result<()> {
+/// Overwrite the proposals file with this scan's result.
+///
+/// Overwrite, not merge: the file is a rendered view of one scan window, so a
+/// candidate that fell below threshold must disappear rather than persist at a
+/// stale frequency. An existing file is still PARSED first, and a parse failure
+/// is propagated: a corrupt queue is a hand edit that went wrong, and the
+/// `unwrap_or(empty)` this replaces discarded it without a word.
+pub fn write_proposals(config: &SweepConfig, proposals: Vec<Proposal>) -> Result<()> {
     // proposals_path is a PathBuf already tilde-expanded at config-load time
     // (deserialize_tilde_pathbuf), so no shellexpand here.
     let path = &config.proposals_path;
-    let mut existing = load_proposals(path).unwrap_or(ProposalsFile { proposals: Vec::new() });
-
-    // Merge: update frequency for existing tags, add new ones
-    for proposal in new_proposals {
-        if let Some(existing_proposal) = existing.proposals.iter_mut().find(|p| p.tag == proposal.tag) {
-            existing_proposal.frequency = proposal.frequency;
-            existing_proposal.notes = proposal.notes;
-        } else {
-            existing.proposals.push(proposal);
-        }
+    if path.exists() {
+        load_proposals(path)?;
     }
 
-    let yaml = serde_yaml::to_string(&existing).wrap_err("failed to serialize proposals")?;
-    std::fs::write(path, yaml).wrap_err("failed to write proposals file")?;
+    let file = ProposalsFile {
+        scanned_at: Some(chrono::Utc::now().to_rfc3339()),
+        staged_window: None,
+        proposals,
+    };
+
+    let yaml = serde_yaml::to_string(&file).wrap_err("failed to serialize proposals")?;
+    vault::note::write_atomic(path, yaml.as_bytes())
+        .wrap_err_with(|| format!("failed to write proposals file {}", path.display()))?;
     Ok(())
 }
 
 fn load_proposals(path: &Path) -> Result<ProposalsFile> {
-    let content = std::fs::read_to_string(path).wrap_err("failed to read proposals file")?;
-    let file: ProposalsFile = serde_yaml::from_str(&content).wrap_err("failed to parse proposals YAML")?;
+    let content =
+        std::fs::read_to_string(path).wrap_err_with(|| format!("failed to read proposals file {}", path.display()))?;
+    let file: ProposalsFile = serde_yaml::from_str(&content)
+        .wrap_err_with(|| format!("failed to parse proposals file {}", path.display()))?;
     Ok(file)
 }
 
