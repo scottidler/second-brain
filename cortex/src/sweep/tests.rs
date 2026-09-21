@@ -838,10 +838,17 @@ fn test_unreadable_staging_root_errors_and_preserves_the_queue() {
     std::fs::create_dir_all(&staging).expect("mkdir");
     std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
 
+    // Root bypasses permission bits and CI runs as root, so probe whether the
+    // chmod actually denies anything before asserting that it does.
+    let denial_is_real = std::fs::read_dir(&staging).is_err();
     let result = scan_proposals(dir.path(), &[], &config, &staging);
     // Restore before asserting so the tempdir can always be cleaned up.
     std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).expect("restore");
 
+    if !denial_is_real {
+        eprintln!("skipping: this environment (probably root) ignores the chmod, so EACCES cannot be produced");
+        return;
+    }
     let err = result.expect_err("an unreadable staging root must not read as an empty scan");
     assert!(format!("{err:?}").contains("staging root"), "{err:?}");
 

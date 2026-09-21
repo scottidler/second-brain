@@ -655,9 +655,18 @@ fn an_unreadable_parent_is_an_error_not_a_skip() {
     std::fs::write(staging.join("hv-1").join("distilled.yml"), "tags:\n  - ci-cd\n").expect("write");
 
     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    // ROOT BYPASSES PERMISSION BITS, and CI runs as root, so chmod 000 denies
+    // nothing there. Probe whether the denial is real before asserting on it:
+    // a test that silently passes because it could not create its own
+    // precondition is worse than one that says it was skipped.
+    let denial_is_real = std::fs::read_dir(&staging).is_err();
     let result = read_staged_candidates(&staging);
     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).expect("restore");
 
+    if !denial_is_real {
+        eprintln!("skipping: this environment (probably root) ignores the chmod, so EACCES cannot be produced");
+        return;
+    }
     let err = result.expect_err("EACCES on a parent must not read as 'no staging root'");
     assert!(format!("{err:?}").contains("staging root"), "{err:?}");
 }
