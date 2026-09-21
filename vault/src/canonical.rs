@@ -171,6 +171,19 @@ pub fn is_rejected(raw_tag: &str, mapping: &TagMapping) -> bool {
     matches!(mapping.get(raw_tag), Some(None))
 }
 
+/// True when `raw_tag` matches `^[a-z0-9]+(-[a-z0-9]+)*$`, the shape every
+/// tag in the shipped vocabulary holds.
+///
+/// NOT `sanitize_tag(t) == t`: `sanitize_tag("")` is `""`, so the empty tag
+/// passes that gate, and `sanitize_slug` keeps non-ASCII alphanumerics the
+/// shipped-file test rejects. A promotion path needs the strict predicate.
+pub fn is_kebab_tag(raw_tag: &str) -> bool {
+    !raw_tag.is_empty()
+        && raw_tag
+            .split('-')
+            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+}
+
 /// Filter raw tags through canonical vocabulary and cap the result.
 ///
 /// Returns deduplicated canonical tags, capped at max_per_note.

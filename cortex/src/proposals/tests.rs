@@ -401,3 +401,232 @@ fn the_frozen_fixture_reproduces_the_shipped_counting_rule() {
     assert!(!tags.contains(&"rust"), "an exact canonical member is not a candidate");
     assert_eq!(out[0].frequency, 3);
 }
+
+// ---------------------------------------------------------------------------
+// promote_tags: a targeted textual insert, tested against a copy of the
+// SHIPPED canonical-tags.yml so layout regressions surface here.
+// ---------------------------------------------------------------------------
+
+const SHIPPED_CANONICAL: &str = include_str!("../../../config/canonical-tags.yml");
+
+fn promote_fixture(dir: &Path, queue_tags: &[&str]) -> (PathBuf, PathBuf) {
+    let canonical = dir.join("canonical-tags.yml");
+    std::fs::write(&canonical, SHIPPED_CANONICAL).expect("copy shipped vocabulary");
+
+    let proposals: Vec<crate::sweep::Proposal> = queue_tags
+        .iter()
+        .map(|t| crate::sweep::Proposal {
+            tag: t.to_string(),
+            frequency: 9,
+            sources: vec!["notes/a.md".to_string()],
+            source: ProposalSource::Staged,
+        })
+        .collect();
+    let queue = dir.join("tag-proposals.yml");
+    std::fs::write(
+        &queue,
+        serde_yaml::to_string(&crate::sweep::ProposalsFile {
+            scanned_at: Some("2026-09-21T00:00:00Z".to_string()),
+            staged_window: Some("2026-08-05 .. 2026-09-21".to_string()),
+            proposals,
+        })
+        .expect("serialize queue"),
+    )
+    .expect("write queue");
+    (queue, canonical)
+}
+
+#[test]
+fn a_dry_run_leaves_both_files_byte_identical() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
+    let before_c = std::fs::read(&canonical).expect("read");
+    let before_q = std::fs::read(&queue).expect("read");
+
+    let report = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", false).expect("dry run");
+    assert!(!report.applied);
+    assert!(report.diff.contains("ci-cd"));
+
+    assert_eq!(
+        before_c,
+        std::fs::read(&canonical).expect("read"),
+        "vocabulary untouched"
+    );
+    assert_eq!(before_q, std::fs::read(&queue).expect("read"), "queue untouched");
+}
+
+/// Every line outside the touched group must be byte-identical, including
+/// `max-per-note`, `max-canonical`, both guard lists, and all 12 group keys in
+/// their original order.
+#[test]
+fn apply_changes_exactly_one_line_and_nothing_else() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
+    let before = std::fs::read_to_string(&canonical).expect("read");
+
+    promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true).expect("apply");
+    let after = std::fs::read_to_string(&canonical).expect("read");
+
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+    assert_eq!(after_lines.len(), before_lines.len() + 1, "exactly one line added");
+
+    let added: Vec<&&str> = after_lines
+        .iter()
+        .filter(|l| {
+            !before_lines.contains(l)
+                || before_lines.iter().filter(|b| b == l).count() < after_lines.iter().filter(|a| a == l).count()
+        })
+        .collect();
+    assert!(added.iter().any(|l| **l == "    - ci-cd"), "added {added:?}");
+
+    // Everything outside the insert is positionally identical.
+    let insert_at = after_lines
+        .iter()
+        .position(|l| *l == "    - ci-cd")
+        .expect("inserted line");
+    let mut rebuilt = after_lines.clone();
+    rebuilt.remove(insert_at);
+    assert_eq!(rebuilt, before_lines, "no other line moved or changed");
+
+    let reparsed: vault::canonical::CanonicalTagsFile = serde_yaml::from_str(&after).expect("must still parse");
+    assert!(reparsed.all_tags().contains("ci-cd"));
+    assert_eq!(reparsed.max_per_note, 8);
+    assert_eq!(reparsed.max_canonical, 300);
+    assert_eq!(reparsed.no_segment_match.len(), 5);
+    assert_eq!(reparsed.no_classifier_tags.len(), 5);
+}
+
+/// `  system: []` has no `    - ` line to anchor on: the insert rewrites that
+/// one line to block form.
+#[test]
+fn promoting_into_the_empty_flow_group_produces_valid_block_form() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["jsonl"]);
+
+    promote_tags(&queue, &canonical, &["jsonl".to_string()], "system", true).expect("apply");
+    let after = std::fs::read_to_string(&canonical).expect("read");
+
+    assert!(!after.contains("  system: []"), "the flow form is gone");
+    assert!(after.contains("  system:\n    - jsonl"), "block form written:\n{after}");
+    let reparsed: vault::canonical::CanonicalTagsFile = serde_yaml::from_str(&after).expect("must parse");
+    assert_eq!(
+        reparsed.tags.get("system").map(Vec::as_slice),
+        Some(&["jsonl".to_string()][..])
+    );
+}
+
+/// A repeat `--apply` is an idempotent no-op reporting already-present, not a
+/// failure. This is the bail reorder: the first apply removed the proposal the
+/// old ordering would then demand.
+#[test]
+fn a_repeat_apply_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
+
+    promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true).expect("first apply");
+    let after_first = std::fs::read(&canonical).expect("read");
+
+    let second = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true)
+        .expect("a second apply must succeed, not bail on the proposal it consumed");
+    assert_eq!(second.already_present, vec!["ci-cd".to_string()]);
+    assert!(second.tags.is_empty(), "nothing left to add");
+    assert_eq!(
+        after_first,
+        std::fs::read(&canonical).expect("read"),
+        "no second insert"
+    );
+}
+
+#[test]
+fn apply_drops_the_promoted_entry_from_the_queue() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd", "jsonl"]);
+
+    promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true).expect("apply");
+    let file: crate::sweep::ProposalsFile =
+        serde_yaml::from_str(&std::fs::read_to_string(&queue).expect("read")).expect("parse");
+    let tags: Vec<&str> = file.proposals.iter().map(|p| p.tag.as_str()).collect();
+    assert_eq!(tags, vec!["jsonl"], "the promoted entry is gone, the other stays");
+    assert!(file.scanned_at.is_some(), "the scan header survives");
+    assert!(file.staged_window.is_some());
+}
+
+#[test]
+fn a_tag_that_is_not_a_pending_proposal_bails() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
+    let err = promote_tags(&queue, &canonical, &["never-proposed".to_string()], "tech", false)
+        .expect_err("promotion must trace to a proposal");
+    assert!(format!("{err}").contains("never-proposed"), "{err}");
+}
+
+#[test]
+fn an_unknown_group_bails_naming_the_valid_ones() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
+    let err = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "nope", false).expect_err("bad group");
+    let rendered = format!("{err}");
+    assert!(rendered.contains("nope"), "{rendered}");
+    assert!(rendered.contains("tech"), "must name the valid groups: {rendered}");
+}
+
+/// `sanitize_tag("")` is `""`, so an empty tag passes a `sanitize == self`
+/// gate. The strict kebab predicate is what rejects it.
+#[test]
+fn an_empty_or_non_kebab_tag_bails() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
+    for bad in ["", "Not-Kebab", "trailing-", "double--dash", "under_score"] {
+        let err = promote_tags(&queue, &canonical, &[bad.to_string()], "tech", false)
+            .expect_err(&format!("{bad:?} must be rejected"));
+        assert!(
+            format!("{err}").contains("a-z0-9"),
+            "{bad:?} must fail the kebab predicate, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn promotion_at_the_cap_bails_naming_the_count() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let canonical = dir.path().join("canonical-tags.yml");
+    std::fs::write(
+        &canonical,
+        "max-per-note: 8\nmax-canonical: 2\ntags:\n  tech:\n    - rust\n    - cli\n",
+    )
+    .expect("write");
+    let queue = dir.path().join("tag-proposals.yml");
+    std::fs::write(
+        &queue,
+        "proposals:\n  - tag: jsonl\n    frequency: 9\n    sources: []\n    source: staged\n",
+    )
+    .expect("write");
+
+    let err = promote_tags(&queue, &canonical, &["jsonl".to_string()], "tech", false).expect_err("at the cap");
+    let rendered = format!("{err}");
+    assert!(rendered.contains("max-canonical"), "{rendered}");
+    assert!(rendered.contains('2'), "must name the count: {rendered}");
+}
+
+#[test]
+fn several_tags_promote_in_one_call() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd", "jsonl", "helm"]);
+
+    promote_tags(
+        &queue,
+        &canonical,
+        &["ci-cd".to_string(), "jsonl".to_string(), "helm".to_string()],
+        "tech",
+        true,
+    )
+    .expect("batch apply");
+
+    let reparsed: vault::canonical::CanonicalTagsFile =
+        serde_yaml::from_str(&std::fs::read_to_string(&canonical).expect("read")).expect("parse");
+    let tech = reparsed.tags.get("tech").expect("tech group");
+    assert!(tech.contains(&"ci-cd".to_string()));
+    assert!(tech.contains(&"jsonl".to_string()));
+    assert!(tech.contains(&"helm".to_string()));
+}
