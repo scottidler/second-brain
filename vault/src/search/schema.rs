@@ -51,11 +51,16 @@ impl super::SearchIndex {
             -- lookup instead of a full scan plus JSON parse, which is what
             -- `idx_notes_domain` gave the column it replaces.
             --
-            -- No foreign key: SQLite enforces them only under
-            -- `PRAGMA foreign_keys=ON`, which this connection does not set, so
-            -- declaring one would be decoration. Rows are maintained
-            -- explicitly in `index_one` inside the per-note SAVEPOINT and
-            -- deleted alongside the note in `remove_stale_notes`.
+            -- No foreign key, by choice: the connection does run with
+            -- `PRAGMA foreign_keys=ON` (`SearchIndex::open` / `open_memory`),
+            -- and `note_embeddings` relies on it for its CASCADE (see
+            -- `vec_schema_fk_pragma_must_be_on_for_cascade`). This table is
+            -- instead maintained explicitly: `index_one` rewrites a note's
+            -- rows inside the per-note SAVEPOINT, and `remove_note` deletes
+            -- them with the note in both stale-removal paths. Keeping the
+            -- maintenance in code means the facet is rebuilt from the same
+            -- deduped list as `notes.tags`, which a CASCADE alone would not
+            -- guarantee.
             CREATE TABLE IF NOT EXISTS note_tags (
                 path TEXT NOT NULL,
                 tag  TEXT NOT NULL,
