@@ -171,24 +171,53 @@ pub struct FileStatus {
     pub outcome: Outcome,
 }
 
+/// What `render_all` did (or would do) to a `*-values.md` under
+/// `system/schemas/` that no spec owns: a doc a retired schema field left
+/// behind, which nothing regenerates and nothing else would ever delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrangerOutcome {
+    /// Present on disk, owned by no spec. `--check` exits 1 on this.
+    Obsolete,
+    /// Was obsolete, and `--render` deleted it.
+    Removed,
+}
+
+#[derive(Debug, Clone)]
+pub struct StrangerStatus {
+    /// Vault-relative path, e.g. `system/schemas/<retired>-values.md`.
+    pub path: String,
+    pub outcome: StrangerOutcome,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RenderReport {
     pub files: Vec<FileStatus>,
+    /// Unowned `*-values.md` files found beside the generated docs.
+    pub strangers: Vec<StrangerStatus>,
 }
 
 impl RenderReport {
-    /// True when any file still differs from the binary. `sb cortex schema
-    /// --check` exits 1 on this; `sb doctor` warns on it.
+    /// True when any file still differs from the binary, or an obsolete doc
+    /// is still on disk. `sb cortex schema --check` exits 1 on this; `sb
+    /// doctor` warns on it.
     pub fn drifted(&self) -> bool {
         self.files.iter().any(|f| f.outcome == Outcome::Drifted)
+            || self.strangers.iter().any(|s| s.outcome == StrangerOutcome::Obsolete)
     }
 
-    /// Vault-relative paths that drifted, for the operator-facing message.
+    /// Vault-relative paths that drifted or are obsolete, for the
+    /// operator-facing message.
     pub fn drifted_paths(&self) -> Vec<&str> {
         self.files
             .iter()
             .filter(|f| f.outcome == Outcome::Drifted)
             .map(|f| f.path.as_str())
+            .chain(
+                self.strangers
+                    .iter()
+                    .filter(|s| s.outcome == StrangerOutcome::Obsolete)
+                    .map(|s| s.path.as_str()),
+            )
             .collect()
     }
 }
@@ -261,7 +290,46 @@ pub fn render_all_at(
         outcome: tag_outcome,
     });
 
+    report.strangers = sweep_strangers(&dir, apply)?;
+
     Ok(report)
+}
+
+/// Every `*-values.md` under the schemas dir that `doc_paths` does not own.
+/// Detected by shape, not by name, so a doc for a retired field is found
+/// without this module ever naming the field. `--check` reports them;
+/// `--render` deletes them (plain `remove_file`: cortex has no recoverable
+/// removal helper, and the file is regenerable from git history anyway).
+fn sweep_strangers(dir: &Path, apply: bool) -> Result<Vec<StrangerStatus>> {
+    log::debug!("schema_docs::sweep_strangers: dir={} apply={apply}", dir.display());
+    let owned: Vec<PathBuf> = doc_paths();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).wrap_err_with(|| format!("failed to list {}", dir.display())),
+    };
+    let mut strangers = Vec::new();
+    for entry in entries {
+        let entry = entry.wrap_err_with(|| format!("failed to list {}", dir.display()))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !name.ends_with("-values.md") || owned.iter().any(|p| p == &Path::new(SCHEMAS_DIR).join(&name)) {
+            continue;
+        }
+        let rel = format!("{SCHEMAS_DIR}/{name}");
+        let outcome = if apply {
+            std::fs::remove_file(entry.path()).wrap_err_with(|| format!("failed to remove {rel}"))?;
+            log::info!("schema_docs: removed obsolete schema doc {rel}");
+            StrangerOutcome::Removed
+        } else {
+            log::warn!("schema_docs: obsolete schema doc {rel} is owned by no spec; --render removes it");
+            StrangerOutcome::Obsolete
+        };
+        strangers.push(StrangerStatus { path: rel, outcome });
+    }
+    strangers.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(strangers)
 }
 
 /// Byte-exact comparison with the volatile field neutralised: re-render using

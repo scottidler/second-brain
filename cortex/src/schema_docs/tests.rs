@@ -319,3 +319,49 @@ fn generated_frontmatter_writes_tags_in_block_form() {
         );
     }
 }
+
+/// B5: a `*-values.md` no spec owns is reported obsolete by `--check` (and
+/// counts as drift, so the exit code is non-zero) and deleted by `--render`.
+/// The owned docs are not touched by the sweep.
+#[test]
+fn unowned_values_doc_is_obsolete_in_check_and_removed_in_render() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join(SCHEMAS_DIR);
+    std::fs::create_dir_all(&dir).expect("create schemas dir");
+    let tags = vec!["rust".to_string()];
+    render_all_at(tmp.path(), true, fixed_now(), &tags).expect("seed owned docs");
+    let owned_before: Vec<String> = doc_paths()
+        .iter()
+        .map(|p| std::fs::read_to_string(tmp.path().join(p)).expect("owned doc"))
+        .collect();
+
+    let stranger = dir.join("legacy-values.md");
+    std::fs::write(&stranger, "---\ntitle: Legacy\n---\n\nleft behind\n").expect("write stranger");
+    // A non-values file beside them is none of this module's business.
+    std::fs::write(dir.join("frontmatter.md"), "hand written\n").expect("write frontmatter doc");
+
+    let check = render_all_at(tmp.path(), false, fixed_now(), &tags).expect("check");
+    assert!(check.drifted(), "an obsolete doc must fail --check");
+    assert_eq!(
+        check.drifted_paths(),
+        vec![format!("{SCHEMAS_DIR}/legacy-values.md")],
+        "only the stranger is reported"
+    );
+    assert_eq!(check.strangers.len(), 1);
+    assert_eq!(check.strangers[0].outcome, StrangerOutcome::Obsolete);
+    assert!(stranger.is_file(), "--check must not delete");
+
+    let render = render_all_at(tmp.path(), true, fixed_now(), &tags).expect("render");
+    assert!(!render.drifted());
+    assert_eq!(render.strangers[0].outcome, StrangerOutcome::Removed);
+    assert!(!stranger.exists(), "--render removes the stranger");
+    assert!(dir.join("frontmatter.md").is_file(), "non-values docs are left alone");
+    let owned_after: Vec<String> = doc_paths()
+        .iter()
+        .map(|p| std::fs::read_to_string(tmp.path().join(p)).expect("owned doc"))
+        .collect();
+    assert_eq!(owned_before, owned_after, "owned docs untouched by the sweep");
+
+    let settled = render_all_at(tmp.path(), false, fixed_now(), &tags).expect("recheck");
+    assert!(settled.strangers.is_empty());
+}
