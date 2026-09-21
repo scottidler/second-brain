@@ -1,5 +1,17 @@
 use super::*;
 
+/// A vocabulary snapshot for the union tests: `max` is `max-per-note`,
+/// `protected` stands in for `no-classifier-tags`. The tag sets the union
+/// path never reads (`all`, `no_segment`) stay empty.
+fn canon(max: usize, protected: &[&str]) -> vault::canonical::CanonicalSet {
+    vault::canonical::CanonicalSet {
+        all: std::collections::HashSet::new(),
+        no_segment: std::collections::HashSet::new(),
+        no_classifier: protected.iter().map(|t| (*t).to_string()).collect(),
+        max_per_note: max,
+    }
+}
+
 /// Builds a `Config` whose canonical-tag vocabulary and mapping live in a
 /// throwaway tempdir, so the test does not depend on (or mutate) the real
 /// `~/.config/sb/` catalogue.
@@ -204,7 +216,7 @@ async fn ingest_tags_are_stable_under_distiller_drift() {
     // The P3 reingest union: preserved (ingest 1's landed tags, read back off
     // the old note on disk) merged into the fresh render (ingest 2's tags).
     let preserved = vec![("tags".to_string(), FieldValue::List(ingest_1.tags.clone()))];
-    let merged = apply_cortex_fields(&fresh_note, &preserved, 7);
+    let merged = apply_cortex_fields(&fresh_note, &preserved, Some(&canon(7, &[])));
     let (yaml, _body) = vault::frontmatter::split_raw(&merged).expect("frontmatter block");
     let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("parse merged frontmatter");
     let final_tags: Vec<String> = map

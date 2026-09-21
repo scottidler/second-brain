@@ -1,5 +1,17 @@
 use super::*;
 
+/// A vocabulary snapshot for the union tests: `max` is `max-per-note`,
+/// `protected` stands in for `no-classifier-tags`. The tag sets the union
+/// path never reads (`all`, `no_segment`) stay empty.
+fn canon(max: usize, protected: &[&str]) -> vault::canonical::CanonicalSet {
+    vault::canonical::CanonicalSet {
+        all: std::collections::HashSet::new(),
+        no_segment: std::collections::HashSet::new(),
+        no_classifier: protected.iter().map(|t| (*t).to_string()).collect(),
+        max_per_note: max,
+    }
+}
+
 #[test]
 fn resolve_publish_path_uniquifies_and_respects_force() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -71,7 +83,7 @@ fn test_compose_then_write_atomic_is_complete_in_one_write() {
         ("status".to_string(), FieldValue::Scalar("read".to_string())),
         ("cortex-quality".to_string(), FieldValue::Scalar("ok".to_string())),
     ];
-    let composed = apply_cortex_fields(&composed, &cortex_fields, 8);
+    let composed = apply_cortex_fields(&composed, &cortex_fields, Some(&canon(8, &[])));
     write_atomic(&dest, composed.as_bytes()).expect("write");
 
     let contents = std::fs::read_to_string(&dest).unwrap();
@@ -164,7 +176,7 @@ fn test_apply_cortex_fields_inserts_fields() {
         ("status".to_string(), FieldValue::Scalar("read".to_string())),
         ("cortex-quality".to_string(), FieldValue::Scalar("ok".to_string())),
     ];
-    let out = apply_cortex_fields(input, &fields, 8);
+    let out = apply_cortex_fields(input, &fields, Some(&canon(8, &[])));
     assert!(out.contains("status: read"));
     assert!(out.contains("cortex-quality: ok"));
     assert!(out.contains("title: Test"));
@@ -176,7 +188,7 @@ fn test_apply_cortex_fields_inserts_fields() {
 fn test_apply_cortex_fields_replaces_existing() {
     let input = "---\ntitle: T\nstatus: unread\n---\nBody.\n";
     let fields = vec![("status".to_string(), FieldValue::Scalar("read".to_string()))];
-    let out = apply_cortex_fields(input, &fields, 8);
+    let out = apply_cortex_fields(input, &fields, Some(&canon(8, &[])));
     assert!(out.contains("status: read"));
     assert!(!out.contains("status: unread"));
 }
@@ -185,7 +197,7 @@ fn test_apply_cortex_fields_replaces_existing() {
 fn test_apply_cortex_fields_no_frontmatter_is_noop() {
     let input = "no frontmatter here";
     let fields = vec![("status".to_string(), FieldValue::Scalar("read".to_string()))];
-    let out = apply_cortex_fields(input, &fields, 8);
+    let out = apply_cortex_fields(input, &fields, Some(&canon(8, &[])));
     assert_eq!(out, input);
 }
 
@@ -199,7 +211,7 @@ fn reingest_keeps_cortex_added_tag() {
         "tags".to_string(),
         FieldValue::List(vec!["rust".to_string(), "ai".to_string()]),
     )];
-    let out = apply_cortex_fields(rendered, &preserved, 8);
+    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(8, &[])));
     assert!(out.contains("  - ai"), "cortex-added tag was dropped:\n{out}");
     assert!(out.contains("  - rust"), "fresh tag was dropped:\n{out}");
     assert_eq!(out.matches("tags:").count(), 1, "duplicated the tags key:\n{out}");
@@ -212,7 +224,7 @@ fn reingest_merges_an_inline_fresh_list_into_block_form() {
     // P4 is inline. Either way the merged result is one block list.
     let rendered = "---\ntitle: T\ntags: [rust]\n---\nBody.\n";
     let preserved = vec![("tags".to_string(), FieldValue::List(vec!["ai".to_string()]))];
-    let out = apply_cortex_fields(rendered, &preserved, 8);
+    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(8, &[])));
     assert!(out.contains("tags:\n  - ai\n  - rust"), "expected block form:\n{out}");
     assert!(!out.contains("tags: ["), "inline form survived:\n{out}");
 }
@@ -226,11 +238,97 @@ fn union_at_cap_keeps_preserved_and_logs() {
         "tags".to_string(),
         FieldValue::List(vec!["kept-a".to_string(), "kept-b".to_string()]),
     )];
-    let out = apply_cortex_fields(rendered, &preserved, 2);
+    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(2, &[])));
     assert!(out.contains("  - kept-a"), "preserved tag lost at the cap:\n{out}");
     assert!(out.contains("  - kept-b"), "preserved tag lost at the cap:\n{out}");
     assert!(!out.contains("fresh-one"), "cap was exceeded:\n{out}");
     assert!(!out.contains("fresh-two"), "cap was exceeded:\n{out}");
+}
+
+#[test]
+fn protected_tag_in_the_fresh_set_survives_a_full_cap() {
+    // The protect list (`no-classifier-tags`) outranks the cap at EVERY
+    // capping path, including borg's reingest union. Before this, the union
+    // ended in `truncate`, so a protected tag that the fresh render carried
+    // was dropped whenever the preserved list already filled the cap.
+    let rendered = "---\ntitle: T\ntags:\n  - protected-one\n  - fresh-two\n---\nBody.\n";
+    let preserved = vec![(
+        "tags".to_string(),
+        FieldValue::List(vec!["kept-a".to_string(), "kept-b".to_string()]),
+    )];
+    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(2, &["protected-one"])));
+    assert!(
+        out.contains("  - protected-one"),
+        "protected tag dropped by the cap:\n{out}"
+    );
+    assert!(
+        out.contains("  - kept-a"),
+        "the first preserved tag should claim the other slot:\n{out}"
+    );
+    assert!(!out.contains("kept-b"), "the cap is still hard:\n{out}");
+    assert!(
+        !out.contains("fresh-two"),
+        "an unprotected fresh tag has no claim:\n{out}"
+    );
+}
+
+#[test]
+fn protected_tag_in_the_preserved_set_survives_an_oversize_preserved_list() {
+    // Same rule when the overflow is entirely inside the PRESERVED list: the
+    // protected tag claims a slot first even though it sits last in priority
+    // order, so the note keeps it across the reingest.
+    let rendered = "---\ntitle: T\ntags:\n  - fresh-one\n---\nBody.\n";
+    let preserved = vec![(
+        "tags".to_string(),
+        FieldValue::List(vec![
+            "kept-a".to_string(),
+            "kept-b".to_string(),
+            "protected-one".to_string(),
+        ]),
+    )];
+    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(2, &["protected-one"])));
+    assert!(
+        out.contains("  - protected-one"),
+        "protected tag dropped by the cap:\n{out}"
+    );
+    assert!(
+        out.contains("  - kept-a"),
+        "priority order should fill the remaining slot:\n{out}"
+    );
+    assert!(!out.contains("kept-b"), "the cap is still hard:\n{out}");
+    assert!(
+        !out.contains("fresh-one"),
+        "the fresh set loses the overflow first:\n{out}"
+    );
+}
+
+#[test]
+fn the_cap_applies_to_tags_only_and_not_to_the_other_preserved_lists() {
+    // `max-per-note` is a TAGS policy. Applying it to every
+    // `CORTEX_PRESERVE_KEYS` list truncated `cortex-quality-issues` at the
+    // tags cap, silently discarding findings cortex had written.
+    let rendered = "---\ntitle: T\ntags:\n  - fresh\n---\nBody.\n";
+    let issues: Vec<String> = (1..=11).map(|i| format!("issue-{i}")).collect();
+    let preserved = vec![
+        ("cortex-quality-issues".to_string(), FieldValue::List(issues.clone())),
+        ("tags".to_string(), FieldValue::List(vec!["kept".to_string()])),
+    ];
+    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(2, &[])));
+    for issue in &issues {
+        assert!(
+            out.contains(&format!("  - {issue}")),
+            "{issue} lost to the tags cap:\n{out}"
+        );
+    }
+    // The tags list is still capped, so the two policies are not merely both off.
+    let fm = out.split("\n---").next().expect("frontmatter");
+    let tags_bullets = fm
+        .lines()
+        .skip_while(|l| !l.starts_with("tags:"))
+        .skip(1)
+        .take_while(|l| l.trim_start().starts_with("- "))
+        .count();
+    assert_eq!(tags_bullets, 2, "tags must still honor the cap:\n{out}");
 }
 
 #[test]
@@ -239,7 +337,7 @@ fn block_list_bullets_are_not_orphaned_on_replace() {
     // `- item` bullets dangling under whatever key came next.
     let rendered = "---\ntitle: T\ntags:\n  - fresh\nstatus: unread\n---\nBody.\n";
     let preserved = vec![("tags".to_string(), FieldValue::List(vec!["kept".to_string()]))];
-    let out = apply_cortex_fields(rendered, &preserved, 8);
+    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(8, &[])));
 
     // Both values belong in the union. What must not happen is a bullet left
     // dangling under some OTHER key once `tags:` moves to the end.
@@ -266,7 +364,7 @@ fn test_apply_cortex_fields_filters_unknown_keys() {
     // `not-a-cortex-key` is not in CORTEX_PRESERVE_KEYS and must be
     // ignored.
     let fields = vec![("not-a-cortex-key".to_string(), FieldValue::Scalar("value".to_string()))];
-    let out = apply_cortex_fields(input, &fields, 8);
+    let out = apply_cortex_fields(input, &fields, Some(&canon(8, &[])));
     assert!(!out.contains("not-a-cortex-key"));
 }
 

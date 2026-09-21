@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+/// The `tags:` frontmatter key. Named once here because it is the one
+/// `CORTEX_PRESERVE_KEYS` entry with its own merge and capping policy, so
+/// every writer that special-cases it spells it the same way.
+pub const TAGS_KEY: &str = "tags";
+
 /// Frontmatter keys owned by cortex. Borg preserves these across reingest so a
 /// fetch of an already-classified URL does not strip the classification work.
 /// Single source of truth; do not duplicate this list.
@@ -11,7 +16,7 @@ use std::str::FromStr;
 /// verbatim. Without it a refetch would strip tags cortex or a migration
 /// added, which is the failure the tags-only design doc's P3 exists to close.
 pub const CORTEX_PRESERVE_KEYS: &[&str] = &[
-    "tags",
+    TAGS_KEY,
     "status",
     "cortex-classified",
     "cortex-classified-by",

@@ -1012,14 +1012,12 @@ async fn process_url_inner(
         log::info!("[{trace_id}] Restored original date: {orig_date}");
     }
     if !cortex_fields.is_empty() {
-        // The cap bounds the tags union. `usize::MAX` when no vocabulary is
-        // loaded: we cannot know the cap, and inventing one would silently
-        // drop a preserved tag.
-        let max_per_note = match tags::get_or_init_canonical(config).await {
-            Some(state) => state.canon.max_per_note,
-            None => usize::MAX,
-        };
-        final_str = apply_cortex_fields(&final_str, &cortex_fields, max_per_note);
+        // The vocabulary snapshot carries both the tags cap and the protect
+        // list `cap_protecting` honors. `None` when no vocabulary is loaded:
+        // nothing is capped, because we cannot know the cap and inventing one
+        // would silently drop a preserved tag.
+        let canonical_state = tags::get_or_init_canonical(config).await;
+        final_str = apply_cortex_fields(&final_str, &cortex_fields, canonical_state.as_deref().map(|s| &s.canon));
         log::info!(
             "[{trace_id}] Restored cortex fields: {:?}",
             cortex_fields.iter().map(|(k, _)| k).collect::<Vec<_>>()

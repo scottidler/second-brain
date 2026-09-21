@@ -556,10 +556,106 @@ fn inject_frontmatter(path: &std::path::Path, extra: &str) {
     std::fs::write(path, format!("---\n{fm}\n{extra}{}", &body[1..])).unwrap();
 }
 
+/// The `tags:` list as it landed on disk, in note order.
+fn tags_of(path: &std::path::Path) -> Vec<String> {
+    frontmatter_of(path)
+        .get("tags")
+        .and_then(|v| v.as_sequence())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
+
 fn frontmatter_of(path: &std::path::Path) -> serde_yaml::Mapping {
     let text = std::fs::read_to_string(path).unwrap();
     let (yaml, _body) = vault::frontmatter::split_raw(&text).expect("note has frontmatter");
     serde_yaml::from_str(yaml).expect("frontmatter parses")
+}
+
+/// Rewrite a note's `tags:` block on disk, standing in for cortex's classify
+/// write landing between a publish and a replay.
+fn set_tags_on_disk(path: &std::path::Path, tags: &[&str]) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let (yaml, body) = vault::frontmatter::split_raw(&text).expect("note has frontmatter");
+    let mut kept: Vec<String> = Vec::new();
+    let mut under_tags = false;
+    for line in yaml.lines() {
+        if line.starts_with("tags:") {
+            under_tags = true;
+            continue;
+        }
+        if under_tags && line.trim_start().starts_with("- ") {
+            continue;
+        }
+        under_tags = false;
+        kept.push(line.to_string());
+    }
+    let mut fm = kept.join("\n");
+    fm.push_str("\ntags:\n");
+    for tag in tags {
+        fm.push_str(&format!("  - {tag}\n"));
+    }
+    std::fs::write(path, format!("---\n{fm}---\n{body}")).unwrap();
+}
+
+/// Design doc P3, session half: a replace UNIONS the prior `tags:` list with
+/// the fresh one instead of overwriting it, so a replay never strips a tag
+/// cortex or a migration added.
+///
+/// This drives the production merge loop in `process_session_inner` and reads
+/// the result back OFF DISK - the previous test rebuilt the union in a local
+/// and asserted on that, so the production loop was never exercised.
+/// Break-the-code evidence: delete the loop and this fails on the empty list.
+///
+/// The fresh set is empty here because the harness config points at an absent
+/// vocabulary, so `finalize_tags` no-ops (see `test_config`). The other union
+/// direction - a fresh tag joining the preserved list, deduped - is pinned by
+/// `pipeline::atomic::tests` and `ingest_tags_are_stable_under_distiller_drift`.
+#[tokio::test]
+async fn session_replace_merges_prior_tags_into_the_published_note() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+    let trace = "hv-tagsmerge";
+
+    let first = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        trace,
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .unwrap();
+    let landed = std::path::PathBuf::from(first.note_path.expect("first publish lands a note"));
+
+    // Cortex classifies the landed note.
+    set_tags_on_disk(&landed, &["ai", "rust"]);
+    assert_eq!(tags_of(&landed), vec!["ai".to_string(), "rust".to_string()]);
+
+    let replay = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        trace,
+        ResolveIntent::Replay,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::path::PathBuf::from(replay.note_path.expect("replay lands a note")),
+        landed,
+        "the replay must rewrite the note the trace already produced"
+    );
+    assert_eq!(
+        tags_of(&landed),
+        vec!["ai".to_string(), "rust".to_string()],
+        "a replace must not strip the tags cortex added"
+    );
 }
 
 /// Acceptance: "Replay the same trace three times -> exactly one note, same
@@ -1170,9 +1266,11 @@ fn borg_owned_key_policy_matches_the_declaration() {
 }
 
 #[test]
-fn session_replace_merges_tags() {
+fn session_replace_captures_prior_tags_instead_of_carrying_them() {
     // `read_prior_frontmatter` captures the prior list instead of carrying it
     // as an opaque key, so the call site can union it with the fresh one.
+    // The union itself is asserted on disk by
+    // `session_replace_merges_prior_tags_into_the_published_note`.
     let dir = tempfile::tempdir().expect("tempdir");
     let note = dir.path().join("session.md");
     std::fs::write(
@@ -1190,20 +1288,6 @@ fn session_replace_merges_tags() {
     assert!(
         !prior.carried.contains_key(TAGS_KEY),
         "tags must not also be carried verbatim, or the union would be bypassed"
-    );
-    // The union itself, as the call site performs it: preserved first, fresh
-    // appended, deduped.
-    let fresh = vec!["rust".to_string(), "claude".to_string()];
-    let mut merged: Vec<String> = Vec::new();
-    for tag in prior.tags.clone().unwrap_or_default().into_iter().chain(fresh) {
-        if !merged.contains(&tag) {
-            merged.push(tag);
-        }
-    }
-    assert_eq!(
-        merged,
-        vec!["ai".to_string(), "rust".to_string(), "claude".to_string()],
-        "a replace must not strip `ai`"
     );
 }
 

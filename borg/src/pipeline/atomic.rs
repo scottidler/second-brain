@@ -16,7 +16,8 @@
 use crate::pipeline::publish::FieldValue;
 use eyre::Result;
 use std::path::{Path, PathBuf};
-use vault::schema::CORTEX_PRESERVE_KEYS;
+use vault::canonical::{self, CanonicalSet};
+use vault::schema::{CORTEX_PRESERVE_KEYS, TAGS_KEY};
 
 /// Resolve a non-URL publish destination, honoring `force`. When `force` is
 /// true (or the path is free) the destination is returned unchanged
@@ -236,22 +237,40 @@ fn remove_key(lines: &mut Vec<String>, key: &str) -> Vec<String> {
     items
 }
 
-/// Union two lists, `preserved` first, deduped, capped.
-fn union_capped(preserved: &[String], fresh: &[String], max_per_note: usize) -> Vec<String> {
+/// Union two lists, `preserved` first, deduped. No cap: `max-per-note` is a
+/// TAGS policy, so every other preserved list merges whole. Capping them too
+/// truncated `cortex-quality-issues` at 8 for no stated reason.
+fn union(preserved: &[String], fresh: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for item in preserved.iter().chain(fresh.iter()) {
         if !out.contains(item) {
             out.push(item.clone());
         }
     }
-    if out.len() > max_per_note {
-        log::info!(
-            "union_capped: truncating {} merged values to the {max_per_note} cap; the fresh set loses the overflow",
-            out.len()
-        );
-        out.truncate(max_per_note);
-    }
     out
+}
+
+/// The tags union: [`union`] capped through `canonical::cap_protecting`, so a
+/// `no-classifier-tags` entry survives even when the note's own tags already
+/// fill the cap. The cortex twin is `cortex::classify::union_capped`; the
+/// policy is stated once in the design doc and enforced at both writers.
+///
+/// `canon` is `None` when no vocabulary is loaded. That means no cap at all:
+/// we cannot know `max-per-note`, and inventing one would silently drop a
+/// preserved tag.
+fn union_capped(preserved: &[String], fresh: &[String], canon: Option<&CanonicalSet>) -> Vec<String> {
+    let out = union(preserved, fresh);
+    let Some(canon) = canon else {
+        return out;
+    };
+    if out.len() > canon.max_per_note {
+        log::info!(
+            "union_capped: capping {} merged tags to {}; the fresh set loses the overflow first, protected tags never",
+            out.len(),
+            canon.max_per_note
+        );
+    }
+    canonical::cap_protecting(out, canon.max_per_note, &canon.no_classifier)
 }
 
 /// Apply (insert or replace) the given cortex-managed frontmatter fields
@@ -259,7 +278,10 @@ fn union_capped(preserved: &[String], fresh: &[String], max_per_note: usize) -> 
 /// is present. Pure-string form of the previous `patch_cortex_fields`
 /// helper. Only keys present in `CORTEX_PRESERVE_KEYS` are accepted; the
 /// caller is expected to filter before calling.
-pub fn apply_cortex_fields(rendered: &str, fields: &[(String, FieldValue)], max_per_note: usize) -> String {
+///
+/// `canon` supplies the tags cap and its protect list; `None` means no
+/// vocabulary is loaded and nothing is capped.
+pub fn apply_cortex_fields(rendered: &str, fields: &[(String, FieldValue)], canon: Option<&CanonicalSet>) -> String {
     let trimmed = rendered.trim_start();
     if !trimmed.starts_with("---") {
         return rendered.to_string();
@@ -288,10 +310,13 @@ pub fn apply_cortex_fields(rendered: &str, fields: &[(String, FieldValue)], max_
                 // what this publish just rendered, so it is read back out of
                 // `lines` before the key is removed.
                 let fresh = remove_key(&mut lines, key);
-                let merged = union_capped(preserved, &fresh, max_per_note);
+                let merged = match key.as_str() {
+                    TAGS_KEY => union_capped(preserved, &fresh, canon),
+                    _ => union(preserved, &fresh),
+                };
                 if merged != fresh {
                     log::info!(
-                        "apply_cortex_fields: {key} merged {} preserved + {} fresh -> {} (cap {max_per_note})",
+                        "apply_cortex_fields: {key} merged {} preserved + {} fresh -> {}",
                         preserved.len(),
                         fresh.len(),
                         merged.len()

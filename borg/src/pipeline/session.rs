@@ -15,6 +15,7 @@ use crate::harvest::watermark;
 use chrono::{DateTime, FixedOffset};
 use distillers::{SessionConfig, SessionMetadata};
 use std::collections::{BTreeMap, HashSet};
+use vault::schema::TAGS_KEY;
 
 /// Length of the primary-session-id prefix used to disambiguate a harvest
 /// filename collision (harvest-content-slug-naming Phase 3). Clyde ids are
@@ -139,8 +140,6 @@ pub(crate) fn borg_owned_keys() -> HashSet<&'static str> {
 
 /// What a replace carries off the note it is about to overwrite: every
 /// non-borg-owned frontmatter key, verbatim, plus the prior `status:` value.
-const TAGS_KEY: &str = "tags";
-
 struct PriorFrontmatter {
     /// The prior `tags:` list. Nominally borg-owned (it is in
     /// `RENDER_NOTE_KEYS`), but on a REPLACE it merges rather than being
@@ -641,7 +640,15 @@ pub(crate) async fn process_session_inner(
                 }
             }
             if let Some(state) = crate::pipeline::tags::get_or_init_canonical(config).await {
-                all_tags.truncate(state.canon.max_per_note);
+                // Cap through `cap_protecting`, not `truncate`: a
+                // `no-classifier-tags` entry must survive even when the
+                // merged list is over `max-per-note`. Same policy as the URL
+                // reingest path (`atomic::union_capped`) and cortex.
+                all_tags = vault::canonical::cap_protecting(
+                    std::mem::take(&mut all_tags),
+                    state.canon.max_per_note,
+                    &state.canon.no_classifier,
+                );
             }
             log::debug!("[{trace_id}] session replace merged tags -> {all_tags:?}");
         }
