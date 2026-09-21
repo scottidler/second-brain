@@ -238,6 +238,9 @@ pub struct ProposalScan {
     /// or no staging root on this host.
     pub staged_scanned: bool,
     pub staged_traces: usize,
+    /// Trace directories carrying no `distilled.yml`. The ordinary case, but
+    /// reported: it is the denominator that makes `staged_traces` legible.
+    pub staged_without_distilled: usize,
     pub staged_unreadable: usize,
     pub staged_window: Option<String>,
 }
@@ -300,6 +303,7 @@ pub fn scan_proposals(
         proposals,
         staged_scanned: staged.scanned,
         staged_traces: staged.candidates.len(),
+        staged_without_distilled: staged.without_distilled,
         staged_unreadable: staged.unreadable,
         staged_window: staged.window_label(),
     })

@@ -740,7 +740,14 @@ impl CortexCli {
                 // `otto deploy`, so applying there writes a promotion the next
                 // deploy deletes. Dry-run against it is allowed and useful:
                 // that is the file the daemon reads.
-                if a.apply && canonical == deployed {
+                //
+                // Compare RESOLVED paths, not the raw PathBufs: `==` is
+                // lexical, so `$XDG/sb/../sb/canonical-tags.yml` names the
+                // deployed file and slips past a raw comparison. Fall back to
+                // the given path when canonicalize fails (the file may not
+                // exist yet), which only ever makes the guard stricter.
+                let resolve = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                if a.apply && resolve(&canonical) == resolve(&deployed) {
                     eyre::bail!(
                         "refusing to --apply to the deployed {}: `otto deploy` regenerates it from the repo and \
                          would revert this promotion. Pass --canonical config/canonical-tags.yml, then commit and \
@@ -749,7 +756,7 @@ impl CortexCli {
                     );
                 }
                 let report = cortex::proposals::promote_tags(
-                    &vault::paths::tag_proposals(),
+                    &config.sweep.proposals_path,
                     &canonical,
                     &a.tags,
                     &a.group,
@@ -1067,8 +1074,8 @@ fn print_sweep_report(r: &cortex::sweep::SweepReport) {
         if scan.staged_scanned {
             let window = scan.staged_window.as_deref().unwrap_or("unknown");
             println!(
-                "Staged arm: {} trace(s), {} unreadable, window {window}",
-                scan.staged_traces, scan.staged_unreadable
+                "Staged arm: {} trace(s) with a distilled.yml, {} without, {} unreadable, window {window}",
+                scan.staged_traces, scan.staged_without_distilled, scan.staged_unreadable
             );
         } else {
             println!("Staged arm: not scanned (no staging root, or staged-proposals is false); note-derived arm only");

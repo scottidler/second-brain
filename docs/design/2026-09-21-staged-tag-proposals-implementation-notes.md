@@ -161,3 +161,29 @@
 | **AC3** no proposal carries a `null`-mapped tag | **PASS.** The literal command prints `0 []` against a POPULATED queue; all 13 named rejects confirmed absent from the live output. |
 | **AC4** `tag-promote` exists, dry-run by default, leaves both YAMLs byte-identical | **PASS.** `--help` exits 0; md5 of `config/canonical-tags.yml` and `~/.config/sb/tag-proposals.yml` unchanged across a dry run. All four bails exit 1. |
 | **AC5** nothing outside `docs/design/` claims the tags are canonical-filtered; neither file carries "max 7" | **PASS.** Both commands return `0`. The unrelated fourth hit (`borg/patterns/obsidian-note.md:44`) is untouched, as the doc requires. |
+
+## Implementation audit, panel round 1 (Mode 2), 2026-09-21
+
+Synthesis: `/tmp/review-panel/bOi06SF9/synthesis.md`. Staff-engineer seat (Codex) returned 8 findings with executed probes; architect seat (Gemini) returned "Complete / None x5" with zero probes, which the panel agent itself flagged as a rubber stamp rather than agreement. Counts: 3 must-fix, 6 cheap-win, 3 defer. Every must-fix was reproduced here before being fixed.
+
+### Must-fix, all three fixed in this commit
+
+1. **An unreadable staging root wiped the queue** (`cortex/src/proposals.rs`). `Path::exists()` maps EVERY stat error to false, including `EACCES` on a PARENT component, so the scan reported "not scanned", exited 0, and Phase 2's unconditional write replaced a 112-entry queue with `proposals: []`. This falsified the doc's own risk-row mitigation. Reproduced locally (`os.path.exists` false, `listdir` errno 13 on a chmod-000 parent) before fixing. Now an explicit `fs::metadata` match: only `NotFound` is a skip, every other error is an `Err`. Regression: `an_unreadable_parent_is_an_error_not_a_skip`, plus `a_genuinely_absent_root_is_still_a_skip` so the fix does not break the client-only host. **My Phase 6 test missed this** because it chmod-000s the staging dir ITSELF, and `stat` on that path only needs execute on its parent, so `exists()` was true there and `read_dir` produced the Err. The parent case is a different path through the same function.
+2. **`tag-promote ci-cd ci-cd --apply` wrote two identical entries.** `to_add` was never deduped, so a repeated argument broke the cross-group uniqueness invariant Phase 7 itself introduced into the shipped-file test, i.e. it broke Phase 7's own M3 criterion. Deduped, preserving first-seen order. Regression: `a_repeated_tag_in_one_call_is_inserted_once`, which asserts both the single written line and the uniqueness invariant.
+3. **The deployed-copy `--apply` refusal was bypassable.** It compared raw `PathBuf`s, so `$XDG/sb/../sb/canonical-tags.yml` named the deployed file and slipped past. Now compares `fs::canonicalize`d paths, falling back to the given path when canonicalize fails (which only makes the guard stricter). Verified against the built binary: the traversal path now exits 1 and the deployed file's md5 is unchanged.
+
+### Cheap wins folded
+
+- `without_distilled` reaches the report (`ProposalScan.staged_without_distilled`) and the printed line, which was dropped between `StagedScan` and `ProposalScan`. It is the denominator that makes the trace count legible: "659 trace(s) with a distilled.yml, 45637 without, 0 unreadable".
+- `tag-promote` now reads `config.sweep.proposals_path` instead of hardcoding `vault::paths::tag_proposals()`, so an operator who moved the queue is not silently promoting against the default.
+- Root `CLAUDE.md:21` and `:54` still described `tag-proposals.yml` as shared config with "source of truth in `config/`", which Phase 3 undid. Both corrected to name it (and `glossary.yml`) as generated state that bootstrap seeds only when absent.
+
+### Findings NOT fixed, and why
+
+- **Tier 3 cannot match two ingest classes.** The panel verified on live traces that URL hygiene strips query fragments (`&t=22s`), so a receipt's `raw_input` and the note's `source` differ, and that every clyde/session ingest carries a text preview in `raw_input` versus `clyde://<uuid>` in the note. So tier 3 structurally cannot resolve those, and the affected traces fall to tier 4 and key on themselves, which can over-count a tag whose notes were ingested that way. Staff's reconstruction named four proposals as one too high (`logging` 15->14, `release-process` 9->8, `branch-protection` 6->5, `audit-remediation` 4->3); the panel agent verified the MECHANISM but explicitly not those four deltas. **Not fixed here because loosening tier 3's cross-check is a design change, not an audit repair**: the cross-check exists precisely because "exactly one basename match" alone resolved to the wrong note, and relaxing it needs Scott's call on what replaces it. The effect is bounded: a tag can only be counted too HIGH, never too low, and promotion is human-gated, so the failure mode is a candidate surfacing at 15 instead of 14.
+- **Tier 1 only resolves traces that have a receipts row**, contradicting the plan's "Tier 1 reads only `notes`". Latent: 0 of 659 staged traces lack a row today. Recorded rather than restructured.
+- **Break-the-code evidence appears only in the Phase 1 commit**, though Testing Strategy asks for it in Phases 1, 2, 3 and 7. The three later phases were verified by other means (Phase 2's four tests, Phase 3's live `--force` md5 comparison, Phase 7's ten tests plus the four bails exercised against the binary), but the literal ritual was not performed per phase. Noted rather than rewritten into history.
+
+### Live re-verification after the fixes
+- `sb cortex sweep --proposals --dry-run`: still **112** proposals; staged arm 659 with a distilled.yml, 45637 without, 0 unreadable; window unchanged.
+- `otto ci`: green (all five tasks).

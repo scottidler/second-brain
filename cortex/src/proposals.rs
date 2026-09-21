@@ -96,12 +96,25 @@ pub fn read_staged_candidates(staging_root: &Path) -> Result<StagedScan> {
         staging_root.display()
     );
 
-    if !staging_root.exists() {
-        log::info!(
-            "proposals::read_staged_candidates: no staging root at {}, skipping the staged arm",
-            staging_root.display()
-        );
-        return Ok(StagedScan::default());
+    // NOT `Path::exists()`: it maps EVERY error to false, including EACCES on
+    // a parent component. That turns "cannot look" into "not scanned", and
+    // because the write is unconditional it replaces a populated queue with
+    // `proposals: []` and exits 0. Only NotFound is a skip.
+    match std::fs::metadata(staging_root) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            log::info!(
+                "proposals::read_staged_candidates: no staging root at {}, skipping the staged arm",
+                staging_root.display()
+            );
+            return Ok(StagedScan::default());
+        }
+        Err(e) => {
+            return Err(eyre::eyre!(
+                "failed to stat staging root {}: {e}",
+                staging_root.display()
+            ));
+        }
     }
 
     let entries: Vec<std::path::PathBuf> = std::fs::read_dir(staging_root)
@@ -484,7 +497,12 @@ pub fn promote_tags(
                 proposals_path.display()
             );
         }
-        to_add.push(tag.clone());
+        // Dedupe: `tag-promote ci ci --apply` would otherwise write two
+        // identical `    - ci` lines and break the uniqueness invariant Phase
+        // 7 itself introduced into the shipped-file test.
+        if !to_add.contains(tag) {
+            to_add.push(tag.clone());
+        }
     }
 
     let projected = existing.len() + to_add.len();

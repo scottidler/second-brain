@@ -630,3 +630,72 @@ fn several_tags_promote_in_one_call() {
     assert!(tech.contains(&"jsonl".to_string()));
     assert!(tech.contains(&"helm".to_string()));
 }
+
+// ---------------------------------------------------------------------------
+// Implementation-audit regressions (panel round 1, Mode 2, 2026-09-21).
+// ---------------------------------------------------------------------------
+
+/// **The queue-wipe path.** `Path::exists()` maps EVERY stat error to false,
+/// including EACCES on a PARENT component. That reported "no staging root",
+/// exited 0, and let Phase 2's unconditional write replace a 112-entry queue
+/// with `proposals: []`. Only NotFound may be a skip.
+///
+/// Distinct from the Phase 6 test that chmod-000s the staging dir ITSELF:
+/// `stat` on that path only needs execute on its parent, so `exists()` is
+/// true there and `read_dir` produces the Err. This is the case that slipped.
+#[test]
+#[cfg(unix)]
+fn an_unreadable_parent_is_an_error_not_a_skip() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let parent = dir.path().join("parent");
+    let staging = parent.join("stages");
+    std::fs::create_dir_all(staging.join("hv-1")).expect("tree");
+    std::fs::write(staging.join("hv-1").join("distilled.yml"), "tags:\n  - ci-cd\n").expect("write");
+
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    let result = read_staged_candidates(&staging);
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).expect("restore");
+
+    let err = result.expect_err("EACCES on a parent must not read as 'no staging root'");
+    assert!(format!("{err:?}").contains("staging root"), "{err:?}");
+}
+
+/// A genuinely absent root is still a skip, not an error: a client-only host
+/// POSTs to the daemon and owns no staging tree.
+#[test]
+fn a_genuinely_absent_root_is_still_a_skip() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let scan = read_staged_candidates(&dir.path().join("nope")).expect("NotFound is a skip");
+    assert!(!scan.scanned);
+}
+
+/// `tag-promote ci ci --apply` wrote two identical `    - ci` lines, breaking
+/// the cross-group uniqueness invariant Phase 7 itself added to the
+/// shipped-file test.
+#[test]
+fn a_repeated_tag_in_one_call_is_inserted_once() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
+
+    let report = promote_tags(
+        &queue,
+        &canonical,
+        &["ci-cd".to_string(), "ci-cd".to_string()],
+        "tech",
+        true,
+    )
+    .expect("apply");
+    assert_eq!(report.tags, vec!["ci-cd".to_string()], "deduped before the insert");
+
+    let after = std::fs::read_to_string(&canonical).expect("read");
+    assert_eq!(after.matches("\n    - ci-cd").count(), 1, "exactly one line written");
+
+    let reparsed: vault::canonical::CanonicalTagsFile = serde_yaml::from_str(&after).expect("parse");
+    let mut flat: Vec<&String> = reparsed.tags.values().flatten().collect();
+    let before_dedup = flat.len();
+    flat.sort();
+    flat.dedup();
+    assert_eq!(flat.len(), before_dedup, "the uniqueness invariant still holds");
+}
