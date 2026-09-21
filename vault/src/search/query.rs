@@ -62,7 +62,9 @@ impl super::SearchIndex {
         status: Option<&str>,
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
-        log::debug!("search::search: query={query} note_type={note_type:?} status={status:?} limit={limit:?}");
+        log::debug!(
+            "search::search: query={query} tags={tags:?} tags_all={tags_all} note_type={note_type:?} status={status:?} limit={limit:?}"
+        );
         let limit = limit.unwrap_or(20);
 
         let mut sql = String::from(
@@ -146,7 +148,7 @@ impl super::SearchIndex {
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
         log::debug!(
-            "search::list_notes: note_type={note_type:?} status={status:?} after={after:?} before={before:?} limit={limit:?}"
+            "search::list_notes: tags={tags:?} tags_all={tags_all} note_type={note_type:?} status={status:?} after={after:?} before={before:?} limit={limit:?}"
         );
         let limit = limit.unwrap_or(50);
         let mut sql = String::from(
@@ -230,6 +232,9 @@ impl super::SearchIndex {
         note_type: Option<&str>,
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
+        log::debug!(
+            "search::recent_notes: days={days:?} tags={tags:?} tags_all={tags_all} note_type={note_type:?} limit={limit:?}"
+        );
         let days = days.unwrap_or(7);
         let limit = limit.unwrap_or(20);
 
