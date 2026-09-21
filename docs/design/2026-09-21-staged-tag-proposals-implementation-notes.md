@@ -90,3 +90,26 @@
 
 ### Open questions
 - None.
+
+## Phase 6: Wire the staged arm into sweep and the daemon
+
+### Design decisions
+- `scan_proposals` returns a `ProposalScan`, not a bare `Vec<Proposal>` (`cortex/src/sweep.rs:233`), and `SweepReport.proposals` carries it. Coverage has to be reported rather than inferred: "0 proposals" means something different on a host that read 659 staged traces than on one with no staging tree, and the printer can only say which if the scan tells it.
+- **Identity reconciliation is skipped entirely when the staged arm did not run** (`cortex/src/sweep.rs:274`). The doc's host rule makes an unreadable receipts DB an `Err` *while the staged arm is running*; a note-only scan has nothing to reconcile, so making it depend on a receipts DB would break the laptop case the rule exists to protect.
+- `print_sweep_report` leads with the staged arm's coverage line, then the proposals with frequency, source (`note`/`staged`/`both`) and the sampled provenance. "Proposals written to ..." moved outside the non-empty branch, since Phase 2 made the write unconditional.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- The two Phase 6 tests that exercise the staged arm create an EMPTY receipts DB in the hermetic config home (`empty_receipts_db`, `cortex/src/sweep/tests.rs`). The alternative was to soften the unreadable-DB `Err`, which is the behavior the doc specifically argues for. The tier logic is covered against real rows in `cortex::proposals::tests`; these two are about the wiring.
+- `resolve_trace_notes` reads every receipts row (52,007 live), not just the 659 with a staged artifact. Simpler and measured at 116 ms inside a 394 ms scan; narrowing it to the staged trace set is an optimization with no current motive.
+
+### Observed, live rollout smoke check (daemon host, not asserted in any test)
+- `sb cortex sweep --proposals --dry-run`: `vault parsed: 3804 notes`, staged arm `traces=46296 with_distilled=659 without=45637 unreadable=0`, `resolve_trace_notes: receipts=52007 resolved=1889 (tier1=1723 tier2=24 tier3=142)`, **112 proposals**. That is exactly the count the design doc predicts for the shipped counting rule (126 naive, less the 13 Phase 1 suppresses, less `system-prompt`).
+- The dry run left `~/.config/sb/tag-proposals.yml` byte-identical: md5 `9b478217738ebff61bfb50ef856c284f` and mtime `2026-09-20 23:27:32` before and after.
+- **M1 canary: `system-prompt` is absent from the live output.** So are all 13 prior rejects (`session-management`, `documentation`, `yaml`, `json`, `macos`, `hooks`, `search`, `plugins`, `backup`, `harness-engineering`, `nodejs`, `skills`, `customization`).
+- The real write then produced AC2 = `112` with every `sources` list within 1..=5, AC3 = `0 []`, and a header carrying both `scanned-at` and `staged-window`.
+
+### Open questions
+- None.

@@ -1014,17 +1014,39 @@ fn print_sweep_report(r: &cortex::sweep::SweepReport) {
         }
         SweepMode::Proposals => {}
     }
-    if let Some(proposals) = &r.proposals {
-        if proposals.is_empty() {
+    if let Some(scan) = &r.proposals {
+        // Coverage first: "0 proposals" means something different on a host
+        // that read 659 staged traces than on one with no staging tree.
+        if scan.staged_scanned {
+            let window = scan.staged_window.as_deref().unwrap_or("unknown");
+            println!(
+                "Staged arm: {} trace(s), {} unreadable, window {window}",
+                scan.staged_traces, scan.staged_unreadable
+            );
+        } else {
+            println!("Staged arm: not scanned (no staging root, or staged-proposals is false); note-derived arm only");
+        }
+
+        if scan.proposals.is_empty() {
             println!("No new tag proposals.");
         } else {
-            println!("Found {} tag(s) needing review:", proposals.len());
-            for proposal in proposals {
-                println!("  {} (on {} notes)", proposal.tag, proposal.frequency);
+            println!("Found {} tag(s) needing review:", scan.proposals.len());
+            for proposal in &scan.proposals {
+                let source = match proposal.source {
+                    cortex::sweep::ProposalSource::Note => "note",
+                    cortex::sweep::ProposalSource::Staged => "staged",
+                    cortex::sweep::ProposalSource::Both => "both",
+                };
+                println!(
+                    "  {} (on {} source(s), from {source}): {}",
+                    proposal.tag,
+                    proposal.frequency,
+                    proposal.sources.join(", ")
+                );
             }
-            if let Some(path) = &r.proposals_path {
-                println!("Proposals written to {path}");
-            }
+        }
+        if let Some(path) = &r.proposals_path {
+            println!("Proposals written to {path}");
         }
     }
 }

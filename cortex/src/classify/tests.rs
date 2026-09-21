@@ -640,6 +640,7 @@ fn retag_then_sweep_keeps_the_protected_tag() {
         proposals_path,
         sweep_interval: "1h".to_string(),
         proposal_threshold: 2,
+        staged_proposals: false,
         cold: crate::config::ColdConfig::default(),
     };
     crate::sweep::migrate(vault.root(), &vault.scan(), &sweep_config, false).expect("sweep --migrate");

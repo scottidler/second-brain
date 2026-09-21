@@ -24,6 +24,7 @@ fn make_config(dir: &Path) -> SweepConfig {
         proposals_path,
         sweep_interval: "1h".to_string(),
         proposal_threshold: 2,
+        staged_proposals: false,
         cold: crate::config::ColdConfig::default(),
     }
 }
@@ -377,7 +378,9 @@ fn test_scan_proposals_finds_non_canonical() {
         NoteBuilder::new("notes/c.md").tags(&["other-tag", "python"]).build(),
     ];
 
-    let proposals = scan_proposals(&notes, &config).expect("scan");
+    let proposals = scan_proposals(dir.path(), &notes, &config, &dir.path().join("no-staging"))
+        .expect("scan")
+        .proposals;
     // "unknown-tag" appears on 2 notes, meets threshold of 2
     assert!(proposals.iter().any(|p| p.tag == "unknown-tag"));
     // "other-tag" appears on 1 note, below threshold
@@ -399,7 +402,9 @@ fn test_scan_proposals_mapped_tags_not_proposed() {
         NoteBuilder::new("notes/b.md").tags(&["ai-agents", "python"]).build(),
     ];
 
-    let proposals = scan_proposals(&notes, &config).expect("scan");
+    let proposals = scan_proposals(dir.path(), &notes, &config, &dir.path().join("no-staging"))
+        .expect("scan")
+        .proposals;
     // ai-agents maps to "ai" in the mapping file, so it should NOT be proposed
     assert!(proposals.is_empty());
 }
@@ -427,7 +432,9 @@ fn test_scan_proposals_rejected_tags_not_proposed() {
         NoteBuilder::new("notes/b.md").tags(&["claudecodeai", "python"]).build(),
     ];
 
-    let proposals = scan_proposals(&notes, &config).expect("scan");
+    let proposals = scan_proposals(dir.path(), &notes, &config, &dir.path().join("no-staging"))
+        .expect("scan")
+        .proposals;
     assert!(proposals.is_empty());
 }
 
@@ -605,6 +612,7 @@ fn test_write_proposals_propagates_corrupt_file() {
             sources: vec!["notes/a.md".to_string()],
             source: ProposalSource::Note,
         }],
+        None,
     )
     .expect_err("corrupt queue must not be silently replaced");
 
@@ -627,7 +635,7 @@ fn test_write_proposals_rejects_unknown_key() {
     )
     .expect("write legacy");
 
-    let err = write_proposals(&config, vec![]).expect_err("legacy `action` key must be rejected");
+    let err = write_proposals(&config, vec![], None).expect_err("legacy `action` key must be rejected");
     assert!(format!("{err:?}").contains("tag-proposals.yml"));
 }
 
@@ -647,13 +655,14 @@ fn test_write_proposals_overwrites_including_empty_scan() {
             sources: vec!["notes/a.md".to_string()],
             source: ProposalSource::Note,
         }],
+        None,
     )
     .expect("first write");
     let after_first = std::fs::read_to_string(&config.proposals_path).expect("read");
     assert!(after_first.contains("stale-tag"), "first write must land");
     assert!(after_first.contains("scanned-at"), "header must be kebab-case");
 
-    write_proposals(&config, vec![]).expect("second write, empty scan");
+    write_proposals(&config, vec![], None).expect("second write, empty scan");
     let after_second = std::fs::read_to_string(&config.proposals_path).expect("read");
     assert!(
         !after_second.contains("stale-tag"),
@@ -674,4 +683,181 @@ fn test_shipped_empty_proposals_still_parses() {
     assert!(parsed.proposals.is_empty());
     assert!(parsed.scanned_at.is_none());
     assert!(parsed.staged_window.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Design doc `2026-09-21-staged-tag-proposals.md`, Phase 6: the staged arm is
+// wired into `scan_proposals` and reaches both call sites with no new flag.
+// Counted assertions live on a FIXTURE tree; the live corpus is mutable and
+// keeps only a `>=` smoke check at rollout.
+// ---------------------------------------------------------------------------
+
+/// An EMPTY receipts DB at the path `scan_proposals` resolves. The staged arm
+/// treats an unreadable DB as an `Err` by design, so a test that exercises the
+/// arm has to provide one; these tests are about the arm, not about identity
+/// resolution, which `cortex::proposals::tests` covers against its own rows.
+fn empty_receipts_db() {
+    let path = vault::receipts::receipts_db_path().expect("receipts path");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("receipts dir");
+    }
+    let conn = rusqlite::Connection::open(&path).expect("create receipts db");
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS receipts (
+           trace_id TEXT NOT NULL PRIMARY KEY,
+           note_path TEXT,
+           raw_input TEXT NOT NULL
+         );",
+    )
+    .expect("receipts schema");
+}
+
+fn write_staged(root: &Path, trace: &str, body: &str) {
+    let dir = root.join(trace);
+    std::fs::create_dir_all(&dir).expect("trace dir");
+    std::fs::write(dir.join("distilled.yml"), body).expect("write distilled");
+}
+
+/// The whole point of the design: the note-derived arm alone finds nothing,
+/// and the staged arm finds the candidate.
+#[test]
+fn test_scan_proposals_staged_arm_finds_what_the_note_arm_cannot() {
+    let _lock = crate::testutil::lock_env();
+    let _cfg = crate::testutil::hermetic_config_home();
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let mut config = make_config(dir.path());
+    config.staged_proposals = true;
+
+    empty_receipts_db();
+    let staging = dir.path().join("stages");
+    write_staged(&staging, "hv-1", "tags:\n  - ci-cd\n");
+    write_staged(&staging, "hv-2", "tags:\n  - ci-cd\n");
+
+    // No note carries a non-canonical tag: this is the tags-only steady state.
+    let notes = vec![NoteBuilder::new("notes/a.md").tags(&["rust"]).build()];
+
+    let off = {
+        let mut c = make_config(dir.path());
+        c.staged_proposals = false;
+        scan_proposals(dir.path(), &notes, &c, &staging).expect("note-only scan")
+    };
+    assert!(off.proposals.is_empty(), "note-derived arm alone is empty: {off:?}");
+    assert!(!off.staged_scanned, "staged-proposals: false must not scan");
+
+    let on = scan_proposals(dir.path(), &notes, &config, &staging).expect("staged scan");
+    assert!(on.staged_scanned);
+    assert_eq!(on.staged_traces, 2);
+    assert!(
+        on.proposals.iter().any(|p| p.tag == "ci-cd"),
+        "the staged arm must surface ci-cd: {:?}",
+        on.proposals
+    );
+}
+
+/// A host with no staging tree (the laptop: it POSTs to the daemon and owns no
+/// staging root) runs the note-only scan and exits 0, reporting the gap rather
+/// than silently looking like a clean scan.
+#[test]
+fn test_scan_proposals_without_a_staging_root_is_note_only_not_an_error() {
+    let _lock = crate::testutil::lock_env();
+    let _cfg = crate::testutil::hermetic_config_home();
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let mut config = make_config(dir.path());
+    config.staged_proposals = true;
+
+    let scan = scan_proposals(dir.path(), &[], &config, &dir.path().join("no-such-root")).expect("must not fail");
+    assert!(!scan.staged_scanned, "coverage is reported, not inferred");
+    assert!(scan.proposals.is_empty());
+}
+
+/// The scan window reaches the written file, so a reader can tell what period
+/// the frequencies cover.
+#[test]
+fn test_staged_window_is_written_to_the_queue() {
+    let _lock = crate::testutil::lock_env();
+    let _cfg = crate::testutil::hermetic_config_home();
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let mut config = make_config(dir.path());
+    config.staged_proposals = true;
+
+    empty_receipts_db();
+    let staging = dir.path().join("stages");
+    write_staged(
+        &staging,
+        "hv-1",
+        "tags:\n  - ci-cd\n  - jsonl\nmeta:\n  produced-at: 2026-08-05T00:00:00Z\n",
+    );
+    write_staged(
+        &staging,
+        "hv-2",
+        "tags:\n  - ci-cd\n  - jsonl\nmeta:\n  produced-at: 2026-09-21T00:00:00Z\n",
+    );
+
+    let scan = scan_proposals(dir.path(), &[], &config, &staging).expect("scan");
+    write_proposals(&config, scan.proposals.clone(), scan.staged_window.clone()).expect("write");
+
+    let text = std::fs::read_to_string(&config.proposals_path).expect("read");
+    let parsed: ProposalsFile = serde_yaml::from_str(&text).expect("must parse back through ProposalsFile");
+    assert_eq!(
+        parsed.staged_window.as_deref(),
+        Some("2026-08-05T00:00:00Z .. 2026-09-21T00:00:00Z")
+    );
+    assert!(parsed.scanned_at.is_some());
+    assert!(!parsed.proposals.is_empty());
+}
+
+/// A staging root that EXISTS but cannot be enumerated is an Err, and the
+/// prior queue is left byte-identical. Phase 2 made the write unconditional,
+/// so a reader that could not distinguish "could not look" from "nothing
+/// found" would be a queue-wipe path.
+#[test]
+#[cfg(unix)]
+fn test_unreadable_staging_root_errors_and_preserves_the_queue() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::testutil::lock_env();
+    let _cfg = crate::testutil::hermetic_config_home();
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let mut config = make_config(dir.path());
+    config.staged_proposals = true;
+
+    write_proposals(
+        &config,
+        vec![Proposal {
+            tag: "keep-me".to_string(),
+            frequency: 4,
+            sources: vec!["notes/a.md".to_string()],
+            source: ProposalSource::Note,
+        }],
+        None,
+    )
+    .expect("seed the queue");
+    let before = std::fs::read(&config.proposals_path).expect("read before");
+
+    let staging = dir.path().join("locked");
+    std::fs::create_dir_all(&staging).expect("mkdir");
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+
+    let result = scan_proposals(dir.path(), &[], &config, &staging);
+    // Restore before asserting so the tempdir can always be cleaned up.
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).expect("restore");
+
+    let err = result.expect_err("an unreadable staging root must not read as an empty scan");
+    assert!(format!("{err:?}").contains("staging root"), "{err:?}");
+
+    let after = std::fs::read(&config.proposals_path).expect("read after");
+    assert_eq!(before, after, "the prior queue must be untouched on Err");
+}
+
+/// The template's `staged-proposals` key is asserted on its PARSED VALUE, not
+/// merely that the file parses: `SweepConfig` has no `deny_unknown_fields`, so
+/// "it parses" would pass for a misspelled key and prove nothing.
+#[test]
+fn test_staged_proposals_key_parses_to_its_value() {
+    let on: crate::config::Config = serde_yaml::from_str("sweep:\n  staged-proposals: true\n").expect("parse");
+    assert!(on.sweep.staged_proposals);
+    let off: crate::config::Config = serde_yaml::from_str("sweep:\n  staged-proposals: false\n").expect("parse");
+    assert!(!off.sweep.staged_proposals, "the key must be honored, not defaulted");
+    let absent: crate::config::Config = serde_yaml::from_str("log-level: info\n").expect("parse");
+    assert!(absent.sweep.staged_proposals, "default is on");
 }

@@ -576,6 +576,13 @@ pub struct SweepConfig {
     pub proposals_path: PathBuf,
     pub sweep_interval: String,
     pub proposal_threshold: usize,
+    /// Read open-vocabulary tag candidates from borg's staged `distilled.yml`
+    /// files in addition to note frontmatter. The note-derived arm alone is
+    /// structurally empty under tags-only: every published tag is canonical by
+    /// construction, so this is where vocabulary growth comes from. A host
+    /// with no staging tree skips the arm without error; set this false to
+    /// skip it on a host that HAS one.
+    pub staged_proposals: bool,
     pub cold: ColdConfig,
 }
 
@@ -587,6 +594,7 @@ impl Default for SweepConfig {
             proposals_path: vault::paths::tag_proposals(),
             sweep_interval: "1h".to_string(),
             proposal_threshold: 3,
+            staged_proposals: true,
             cold: ColdConfig::default(),
         }
     }
