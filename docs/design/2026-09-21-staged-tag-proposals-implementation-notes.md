@@ -51,3 +51,19 @@
 
 ### Consequence (stated per the design doc)
 - Existing installs stop receiving repo updates to `glossary.yml`. That is the point: a `concept-promote` must survive a deploy. The operator path for a genuine upstream glossary change is to delete the local file and re-run `sb bootstrap`.
+
+## Phase 4: One staging root for cortex
+
+### Design decisions
+- The hoisted field carries `#[serde(rename = "staging-root")]` exactly as the doc requires (`cortex/src/config.rs:24`), and the doc comment states WHY, so nobody "cleans it up" later: top-level `Config` renames per field rather than via `rename_all`, so dropping the rename would silently make the key `staging_root` and ignore `staging-root:`.
+- `cortex/src/testutil.rs:442` builds `Config` as a struct literal rather than from `Default`, so the hoist required adding the field there too. It uses `::vault::paths::borg_stages_dir()` with a leading `::` because `crate::vault` shadows the `vault` crate in that file (`cortex/src/testutil.rs:135`).
+- The `staging-root` test parses literal YAML text and asserts three things separately: the key is honored (not silently defaulted), the value is tilde-expanded, and the path is the one given. The doc asks for the first; the second is the invariant the root CLAUDE.md calls out as a repeat bug source.
+
+### Deviations
+- The doc puts the `sweep.staged-proposals` template key in this phase, but `config/templates/cortex.yml.example` had no `sweep:` section at all, so the doc's premise ("that file documents every tunable") was not accurate. Added the section with the key commented out, as the doc directs; the field itself and the assertion on its parsed value stay in Phase 6.
+
+### Tradeoffs
+- Fixed a **pre-existing test race** rather than routing around it. `cortex/src/tests.rs`'s three `lint_apply_*` tests resolve `canonical-tags.yml` through `vault::paths` off `XDG_CONFIG_HOME` without taking `crate::testutil::lock_env()`, so they race every test holding a `hermetic_config_home()` tempdir, which is deleted on drop. Two of them failed in this phase's first CI run with "No such file or directory" on a `.tmpXXXX/sb/canonical-tags.yml` path. Proven a race, not a Phase 4 regression: the same two pass when run in isolation (`cargo test -p cortex --lib lint_apply`, 3 passed) and fail only under the full parallel suite. Nothing in Phase 4 touches lint, canonical loading, or env. The fix is `lock_env()` on all three (the third has the same defect and merely got lucky), which is the pattern `cortex/src/sweep/tests.rs` already uses. Chose the lock over `hermetic_config_home()` because the latter substitutes a small fixture vocabulary and would change which tags these tests see as non-canonical.
+
+### Open questions
+- None.

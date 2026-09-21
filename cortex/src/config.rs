@@ -23,6 +23,26 @@ pub struct Config {
     pub graph: GraphConfig,
     pub entities: EntitiesConfig,
     pub tags: TagsSection,
+    /// Root of borg's per-trace staging directories. cortex reads
+    /// `<staging-root>/<trace>/distilled.yml` READ-ONLY from two places: the
+    /// embed loop's transcript source for Video/Article notes
+    /// (2026-07-07-distillation-output-restore Phase 5) and the sweep's
+    /// open-vocabulary tag candidates (2026-09-21-staged-tag-proposals).
+    /// It is one directory, so it is one key: it was `embed.staging-root`
+    /// until the second reader arrived. Defaults to borg's own
+    /// `vault::paths::borg_stages_dir()`; an operator who overrode borg's
+    /// `staging.root` must point this at the same directory. borg remains the
+    /// sole staging writer.
+    ///
+    /// The explicit `rename` is load-bearing: `EmbedConfig` carries
+    /// `rename_all = "kebab-case"` but top-level `Config` does NOT - it renames
+    /// per field, as `log-level` does. Without it the YAML key would silently
+    /// be `staging_root` and a `staging-root:` line would be ignored.
+    #[serde(
+        rename = "staging-root",
+        deserialize_with = "vault::paths::deserialize_tilde_pathbuf"
+    )]
+    pub staging_root: PathBuf,
 }
 
 impl Default for Config {
@@ -43,6 +63,7 @@ impl Default for Config {
             graph: GraphConfig::default(),
             entities: EntitiesConfig::default(),
             tags: TagsSection::default(),
+            staging_root: vault::paths::borg_stages_dir(),
         }
     }
 }
@@ -251,7 +272,7 @@ impl Default for GraphConfig {
 /// rayon fan-out that allocates tens of GB. See
 /// docs/design/2026-05-19-cortex-embed-memory-bounding.md.
 #[derive(Debug, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct EmbedConfig {
     /// Size of the DEDICATED inference thread pool (`embed::inference_pool`).
     ///
@@ -282,17 +303,6 @@ pub struct EmbedConfig {
     /// Which embedding kinds the default (no-`--kind`) `cortex embed`/`--backfill`
     /// pass and the daemon embed tick generate. See [`EmbedKindsConfig`].
     pub kinds: EmbedKindsConfig,
-    /// Root of borg's per-trace staging directories. cortex reads the staged
-    /// `distilled.yml` (read-only) at `<staging-root>/<trace>/distilled.yml` as
-    /// the transcript-embedding source for Video/Article notes
-    /// (2026-07-07-distillation-output-restore Phase 5): those notes no longer
-    /// carry a `## Transcript` body section, so the verbatim text is read from
-    /// staging via the `notes.trace` join. Defaults to borg's own staging
-    /// default (`vault::paths::borg_stages_dir()`); an operator who overrode
-    /// borg's `staging.root` must point this at the same directory. borg remains
-    /// the sole staging writer; cortex only reads. Tilde-expanded at load.
-    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
-    pub staging_root: PathBuf,
 }
 
 impl Default for EmbedConfig {
@@ -303,7 +313,6 @@ impl Default for EmbedConfig {
             max_chunks_per_tick: crate::embed::DEFAULT_MAX_CHUNKS_PER_TICK,
             cadence_secs: crate::embed::DEFAULT_CADENCE_SECS,
             kinds: EmbedKindsConfig::default(),
-            staging_root: vault::paths::borg_stages_dir(),
         }
     }
 }

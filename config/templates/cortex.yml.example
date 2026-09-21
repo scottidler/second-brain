@@ -47,13 +47,27 @@ embed:
     # to keep the claim-free baseline; flip to true only for the guard-first
     # claim experiment.
     claim: false
-  # Root of borg's per-trace staging directories. cortex reads the staged
-  # distilled.yml (read-only) as the transcript-embedding source for
-  # Video/Article notes, which no longer carry a `## Transcript` body section
-  # (2026-07-07-distillation-output-restore). Defaults to borg's own staging
-  # default (~/.local/share/sb/borg/stages); only set this if you overrode
-  # borg's `staging.root` in borg.yml -- it must point at the SAME directory.
-  # staging-root: ~/.local/share/sb/borg/stages
+
+# Root of borg's per-trace staging directories. TOP-LEVEL, not under `embed:`:
+# cortex has two read-only readers of this one directory -- the embed loop's
+# transcript source for Video/Article notes, which no longer carry a
+# `## Transcript` body section (2026-07-07-distillation-output-restore), and
+# the sweep's open-vocabulary tag candidates
+# (2026-09-21-staged-tag-proposals). Two keys naming one directory can drift,
+# so there is one. Defaults to borg's own staging default
+# (~/.local/share/sb/borg/stages); only set this if you overrode borg's
+# `staging.root` in borg.yml -- it must point at the SAME directory. borg
+# remains the sole staging writer.
+# staging-root: ~/.local/share/sb/borg/stages
+
+# Tag sweep / proposal scan.
+sweep:
+  # Read open-vocabulary tag candidates from borg's staged distilled.yml files
+  # in addition to note frontmatter. The note-derived arm alone is structurally
+  # empty under tags-only -- every published tag is canonical by construction --
+  # so this is where vocabulary growth comes from. Set false on a host whose
+  # staged corpus you do not want scanned. Default true.
+  # staged-proposals: true
 
 # Graph-augmented-memory edge layer (oracle reads; cortex writes). All fields
 # optional; defaults live in cortex/src/config.rs GraphConfig.

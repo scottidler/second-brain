@@ -137,6 +137,12 @@ fn link_scan_concepts_is_strict_subset_of_all() {
 #[test]
 fn lint_apply_report_excludes_fix_none_violations() {
     use crate::testutil::TestVault;
+    // `lint` resolves `canonical-tags.yml` through `vault::paths` off
+    // XDG_CONFIG_HOME, so it races every test holding a
+    // `hermetic_config_home()` tempdir: that dir is deleted on drop, and this
+    // test then reads a path that no longer exists. Take the suite-wide env
+    // lock so the real config home is what resolves here.
+    let _lock = crate::testutil::lock_env();
 
     let v = TestVault::new();
     let config = v.config();
@@ -173,6 +179,12 @@ fn lint_apply_report_excludes_fix_none_violations() {
 #[test]
 fn lint_apply_zero_writable_fixes_yields_empty_fingerprint() {
     use crate::testutil::TestVault;
+    // `lint` resolves `canonical-tags.yml` through `vault::paths` off
+    // XDG_CONFIG_HOME, so it races every test holding a
+    // `hermetic_config_home()` tempdir: that dir is deleted on drop, and this
+    // test then reads a path that no longer exists. Take the suite-wide env
+    // lock so the real config home is what resolves here.
+    let _lock = crate::testutil::lock_env();
 
     let v = TestVault::new();
     let config = v.config();
@@ -197,6 +209,12 @@ fn lint_apply_zero_writable_fixes_yields_empty_fingerprint() {
 #[test]
 fn lint_apply_written_paths_are_subset_of_bytes_changed() {
     use crate::testutil::TestVault;
+    // `lint` resolves `canonical-tags.yml` through `vault::paths` off
+    // XDG_CONFIG_HOME, so it races every test holding a
+    // `hermetic_config_home()` tempdir: that dir is deleted on drop, and this
+    // test then reads a path that no longer exists. Take the suite-wide env
+    // lock so the real config home is what resolves here.
+    let _lock = crate::testutil::lock_env();
     use std::fs;
 
     let v = TestVault::new();
