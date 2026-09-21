@@ -21,6 +21,10 @@ pub(crate) fn push_tags_filter(
     let Some(tags) = tags.filter(|t| !t.is_empty()) else {
         return;
     };
+    // Dedup before both the placeholder list and the AND-mode `= N` count:
+    // `note_tags` holds one row per (path, tag), so `["rust", "rust"]` with
+    // `tags_all` would demand two distinct matches and never return a row.
+    let tags = dedup_tags(tags);
     let placeholders: Vec<String> = (0..tags.len()).map(|i| format!("?{}", *param_idx + i)).collect();
     let list = placeholders.join(", ");
     if tags_all {
@@ -33,10 +37,18 @@ pub(crate) fn push_tags_filter(
             " AND EXISTS (SELECT 1 FROM note_tags t WHERE t.path = {alias}.path AND t.tag IN ({list}))"
         ));
     }
-    for tag in tags {
-        param_values.push(Box::new(tag.clone()));
+    for tag in &tags {
+        param_values.push(Box::new((*tag).clone()));
     }
     *param_idx += tags.len();
+}
+
+/// First-occurrence dedup of a tag list, order preserved. Shared by the
+/// filter builder and `index_one` so the facet rows, the JSON column, and
+/// the AND-mode count all agree on what "N tags" means.
+pub(crate) fn dedup_tags(tags: &[String]) -> Vec<&String> {
+    let mut seen = std::collections::HashSet::with_capacity(tags.len());
+    tags.iter().filter(|t| seen.insert(t.as_str())).collect()
 }
 
 impl super::SearchIndex {

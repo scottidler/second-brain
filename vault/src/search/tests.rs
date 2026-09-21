@@ -3,6 +3,7 @@ use super::*;
 mod group_a;
 mod group_b;
 mod legacy_oracle_guard;
+mod tags_facet;
 mod trace;
 
 /// Helper: insert a test note directly into the DB

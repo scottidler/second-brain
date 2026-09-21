@@ -155,7 +155,15 @@ impl super::SearchIndex {
         // A note with no `tags` key indexes as `[]`, not `''`. The empty string
         // is not valid JSON, so `json_each` errors on it and every tag query
         // has to special-case it; 303 such rows existed before this change.
-        let tag_list: Vec<String> = fm.tags.clone().unwrap_or_default();
+        //
+        // Deduped once here so the JSON column and the `note_tags` facet are
+        // written from the same list: the facet's `PRIMARY KEY (path, tag)`
+        // would collapse a duplicate on its own and leave `json_each` one row
+        // ahead of it.
+        let tag_list: Vec<String> = super::query::dedup_tags(fm.tags.as_deref().unwrap_or_default())
+            .into_iter()
+            .cloned()
+            .collect();
         let tags_json = serde_json::to_string(&tag_list).unwrap_or_else(|_| "[]".to_string());
 
         let note_type = normalize_enum::<NoteType>(fm.note_type.as_deref(), "note_type", &path_str);
@@ -361,8 +369,9 @@ impl super::SearchIndex {
     /// Incrementally reindex only the given (absolute) paths - the watcher's
     /// change set - instead of walking the whole vault. Each existing file is
     /// parsed and `index_one`'d (mtime-gated, same as the full walk); a path
-    /// whose file no longer exists has its `notes` row deleted (mirroring
-    /// `remove_stale_notes`, which only touches the `notes` table). A parse
+    /// whose file no longer exists has its `notes` row and `note_tags` rows
+    /// deleted together through `remove_note` (shared with
+    /// `remove_stale_notes`). A parse
     /// failure on one path is logged and skipped so it can't abort the batch.
     pub fn index_changed(&self, vault_root: &Path, changed_paths: &[PathBuf]) -> Result<IndexStats> {
         let mut inserted = 0u64;
@@ -375,13 +384,7 @@ impl super::SearchIndex {
             if !abs_path.exists() {
                 let relative = abs_path.strip_prefix(vault_root).unwrap_or(abs_path);
                 let path_str = relative.to_string_lossy();
-                removed += self
-                    .conn
-                    .execute("DELETE FROM notes WHERE path = ?1", params![path_str.as_ref()])?
-                    as u64;
-                // The facet rows go with the note; nothing else owns them.
-                self.conn
-                    .execute("DELETE FROM note_tags WHERE path = ?1", params![path_str.as_ref()])?;
+                removed += self.remove_note(&path_str)?;
                 continue;
             }
 
@@ -425,6 +428,33 @@ impl super::SearchIndex {
         })
     }
 
+    /// Delete one note's `notes` row and its `note_tags` facet rows as a unit.
+    /// The pair runs inside a SAVEPOINT (the same shape as `index_one`) so a
+    /// failure between the two statements cannot leave orphan facet rows that
+    /// `top_tags` and the AC4 count would then see. Returns the number of
+    /// `notes` rows removed (0 or 1).
+    fn remove_note(&self, path: &str) -> Result<u64> {
+        log::debug!("search::remove_note: path={path}");
+        self.conn.execute_batch("SAVEPOINT remove_note")?;
+        let result = (|| -> Result<u64> {
+            let removed = self.conn.execute("DELETE FROM notes WHERE path = ?1", params![path])? as u64;
+            // The facet rows go with the note; nothing else owns them.
+            self.conn
+                .execute("DELETE FROM note_tags WHERE path = ?1", params![path])?;
+            Ok(removed)
+        })();
+        match result {
+            Ok(removed) => {
+                self.conn.execute_batch("RELEASE remove_note")?;
+                Ok(removed)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK TO remove_note; RELEASE remove_note");
+                Err(e)
+            }
+        }
+    }
+
     pub(crate) fn remove_stale_notes(&self, current_paths: &[String]) -> Result<u64> {
         let mut stmt = self.conn.prepare("SELECT path FROM notes")?;
         let db_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?.filter_map(warn_row).collect();
@@ -435,11 +465,7 @@ impl super::SearchIndex {
         let mut removed = 0u64;
         for path in &db_paths {
             if !current.contains(path.as_str()) {
-                self.conn.execute("DELETE FROM notes WHERE path = ?1", params![path])?;
-                // The facet rows go with the note; nothing else owns them.
-                self.conn
-                    .execute("DELETE FROM note_tags WHERE path = ?1", params![path])?;
-                removed += 1;
+                removed += self.remove_note(path)?;
             }
         }
         Ok(removed)

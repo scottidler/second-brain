@@ -572,6 +572,8 @@ pub struct VaultStats {
     pub total_notes: u64,
     /// Top 20 tags by note count, over the `note_tags` facet.
     pub by_tag: Vec<(String, u64)>,
+    /// Distinct tags across the facet. Not `by_tag.len()`, which is the cap.
+    pub distinct_tags: u64,
     pub by_type: Vec<(String, u64)>,
     pub by_status: Vec<(String, u64)>,
     pub schema_gaps: Vec<(String, u64)>,
