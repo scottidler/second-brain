@@ -174,6 +174,22 @@ pub(crate) fn remove_entry(lines: &mut Vec<String>, key: &str) {
 
 /// Insert key-value pairs into frontmatter before the closing ---.
 /// A YAML value this module can emit as a single block-list bullet.
+/// One scalar as it goes on a `  - ` line: serde_yaml's own spelling, so a
+/// string that plain YAML would misread (`a: b`, `#lead`, `true`, `[x]`)
+/// comes out quoted and reads back as the same string. The scalar arm of
+/// `insert_frontmatter_fields` stays raw on purpose (see its comment); list
+/// items have no reader that depends on an unquoted form.
+fn yaml_scalar_text(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::String(s) => serde_yaml::to_string(value)
+            .map(|y| y.trim_end_matches('\n').to_string())
+            .unwrap_or_else(|_| s.clone()),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        _ => unreachable!("guarded by scalar_yaml_value"),
+    }
+}
+
 fn scalar_yaml_value(value: &serde_yaml::Value) -> bool {
     matches!(
         value,
@@ -222,12 +238,7 @@ pub fn insert_frontmatter_fields(content: &str, fields: &[(String, serde_yaml::V
             serde_yaml::Value::Sequence(items) if items.iter().all(scalar_yaml_value) => {
                 new_lines.push(format!("{key}:"));
                 for item in items {
-                    match item {
-                        serde_yaml::Value::String(s) => new_lines.push(format!("  - {s}")),
-                        serde_yaml::Value::Bool(b) => new_lines.push(format!("  - {b}")),
-                        serde_yaml::Value::Number(n) => new_lines.push(format!("  - {n}")),
-                        _ => unreachable!("guarded by scalar_yaml_value"),
-                    }
+                    new_lines.push(format!("  - {}", yaml_scalar_text(item)));
                 }
             }
             other => {

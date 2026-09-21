@@ -171,3 +171,33 @@ fn remove_field_removes_multi_line_list_value_cleanly() {
     assert!(out.contains("title: T"));
     assert!(out.contains("distilled: true"));
 }
+
+/// B8: a sequence item that plain YAML would misread is quoted on its
+/// `  - ` line, so the written frontmatter parses back to the same list.
+#[test]
+fn sequence_items_needing_quotes_round_trip() {
+    let content = "---\ntitle: Test\n---\nBody\n";
+    let items = vec!["plain", "needs: quoting", "#leading-hash", "true", "[bracketed]"];
+    let seq = serde_yaml::Value::Sequence(
+        items
+            .iter()
+            .map(|s| serde_yaml::Value::String((*s).to_string()))
+            .collect(),
+    );
+    let written = insert_frontmatter_fields(content, &[("aliases".to_string(), seq)]).expect("frontmatter");
+
+    let block = written
+        .strip_prefix("---\n")
+        .and_then(|b| b.split_once("\n---"))
+        .map(|(fm, _)| fm)
+        .expect("frontmatter block");
+    let parsed: serde_yaml::Mapping = serde_yaml::from_str(block).expect("written frontmatter must parse");
+    let back: Vec<String> = parsed["aliases"]
+        .as_sequence()
+        .expect("aliases is a sequence")
+        .iter()
+        .map(|v| v.as_str().expect("every item reads back as a string").to_string())
+        .collect();
+    assert_eq!(back, items, "round-trip lost or changed an item:\n{block}");
+    assert!(written.contains("  - plain\n"), "a plain item stays unquoted:\n{block}");
+}
