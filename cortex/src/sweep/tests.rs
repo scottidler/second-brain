@@ -581,3 +581,95 @@ fn migrate_does_not_drop_a_protected_tag_when_capping() {
         "the cap must still be hard - an unprotected tag goes instead:\n{content}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Design doc `2026-09-21-staged-tag-proposals.md`, Phase 2: the proposals file
+// is a rendered view of ONE scan window, written atomically, and a corrupt
+// queue fails loudly instead of being silently replaced.
+// ---------------------------------------------------------------------------
+
+/// A corrupt `tag-proposals.yml` is a hand edit that went wrong. The
+/// `load_proposals(path).unwrap_or(empty)` this replaces discarded it without
+/// a word; the error must now reach the caller and name the file.
+#[test]
+fn test_write_proposals_propagates_corrupt_file() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let config = make_config(dir.path());
+    std::fs::write(&config.proposals_path, "proposals: [this is not: a list of maps\n").expect("write corrupt");
+
+    let err = write_proposals(
+        &config,
+        vec![Proposal {
+            tag: "novel-tag".to_string(),
+            frequency: 3,
+            sources: vec!["notes/a.md".to_string()],
+        }],
+    )
+    .expect_err("corrupt queue must not be silently replaced");
+
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("tag-proposals.yml"),
+        "error must name the file, got: {rendered}"
+    );
+}
+
+/// An unknown key is a schema violation, not something to ignore: `Proposal`
+/// and `ProposalsFile` both carry `deny_unknown_fields`.
+#[test]
+fn test_write_proposals_rejects_unknown_key() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let config = make_config(dir.path());
+    std::fs::write(
+        &config.proposals_path,
+        "proposals:\n  - tag: old\n    frequency: 3\n    sources: []\n    action: review\n",
+    )
+    .expect("write legacy");
+
+    let err = write_proposals(&config, vec![]).expect_err("legacy `action` key must be rejected");
+    assert!(format!("{err:?}").contains("tag-proposals.yml"));
+}
+
+/// Overwrite, not merge. A proposal present in the file but absent from the
+/// new scan is gone after a write - including when the new scan is empty,
+/// which is the case the old non-empty write gate could never express.
+#[test]
+fn test_write_proposals_overwrites_including_empty_scan() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let config = make_config(dir.path());
+
+    write_proposals(
+        &config,
+        vec![Proposal {
+            tag: "stale-tag".to_string(),
+            frequency: 7,
+            sources: vec!["notes/a.md".to_string()],
+        }],
+    )
+    .expect("first write");
+    let after_first = std::fs::read_to_string(&config.proposals_path).expect("read");
+    assert!(after_first.contains("stale-tag"), "first write must land");
+    assert!(after_first.contains("scanned-at"), "header must be kebab-case");
+
+    write_proposals(&config, vec![]).expect("second write, empty scan");
+    let after_second = std::fs::read_to_string(&config.proposals_path).expect("read");
+    assert!(
+        !after_second.contains("stale-tag"),
+        "a candidate absent from the new scan must be gone, got: {after_second}"
+    );
+
+    let parsed: ProposalsFile = serde_yaml::from_str(&after_second).expect("empty scan must parse back");
+    assert!(parsed.proposals.is_empty());
+    assert!(parsed.scanned_at.is_some(), "scan header must survive the round trip");
+    assert!(parsed.staged_window.is_none(), "no staged arm until Phase 6");
+}
+
+/// The shipped `proposals: []` seed must still parse under the new attributes:
+/// both header fields default, so the deployed file is untouched by this phase.
+#[test]
+fn test_shipped_empty_proposals_still_parses() {
+    let parsed: ProposalsFile = serde_yaml::from_str("proposals: []\n").expect("shipped seed must parse");
+    assert!(parsed.proposals.is_empty());
+    assert!(parsed.scanned_at.is_none());
+    assert!(parsed.staged_window.is_none());
+}

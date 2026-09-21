@@ -817,13 +817,16 @@ where
                 // mutate `notes` in place - only the on-disk bytes), not a
                 // freshly rescanned one.
                 match crate::sweep::scan_proposals(&notes, &config.sweep) {
-                    Ok(proposals) if !proposals.is_empty() => {
+                    // Write UNCONDITIONALLY. The file is a rendered view of one
+                    // scan window, so an empty scan must clear it; the
+                    // `!proposals.is_empty()` gate this replaces would have left
+                    // the last non-empty result in place forever.
+                    Ok(proposals) => {
                         log::info!("sweep: {} tag(s) needing review", proposals.len());
                         if let Err(e) = crate::sweep::write_proposals(&config.sweep, proposals) {
                             log::error!("sweep: failed to write proposals: {e}");
                         }
                     }
-                    Ok(_) => {}
                     Err(e) => log::error!("sweep proposals scan failed: {e}"),
                 }
             }
