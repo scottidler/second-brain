@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler (via agent)
 **Date:** 2026-09-19
-**Status:** Implemented (2026-09-20: five passes, **four** panel rounds folded, every acceptance criterion run on `main` a1415bc with output recorded, Open Questions closed. Round 4 was ordered by Scott after an independent due-diligence pass produced new measurements; it corrected four numbers in that pass and closed OQ5 on option A. 2026-09-20, during execution: the `CLASSIFY_API_KEY` secret was re-encrypted and verified live on the Pro tier, closing the two classifier-access risk rows. All 11 phases implemented; Phase 11 closed the design with AC1/AC2/AC4 all passing on the fully-migrated tree, see implementation notes)
+**Status:** Implemented (2026-09-20: five passes, **four** panel rounds folded, every acceptance criterion run on `main` a1415bc with output recorded, Open Questions closed. Round 4 was ordered by Scott after an independent due-diligence pass produced new measurements; it corrected four numbers in that pass and closed OQ5 on option A. 2026-09-20, during execution: the `CLASSIFY_API_KEY` secret was re-encrypted and verified live on the Pro tier, closing the two classifier-access risk rows. All 11 phases implemented; Phase 11 closed the design with AC1/AC2/AC4 all passing on the fully-migrated tree, see implementation notes. 2026-09-21: independent ten-reviewer verification pass, fold merged in part, shipped as v0.15.0; what did not ship is Addendum C)
 **Review Passes Completed:** 5/5 + an independent due-diligence pass on 2026-09-20 (Addendum B: every load-bearing vault number re-derived, the classifier exercised on real notes, three new risks and one schema correction folded in; P0b added as a gate on P1)
 **Original pass line:** 5/5 + panel r2 and r3 folded (r1 ran both seats against a 162-line pre-draft and was stopped before synthesis; superseded. r2: 11 must-fix, 9 corrections. r3: 6 must-fix, 3 corrections; the staff seat timed out both rounds and its findings were mined from its trace and re-verified. Every finding verified on `main` a1415bc before folding; run dir `/tmp/review-panel/MLUDM7sw/`. Round cap of 3 reached; a further round needs `PANEL_ROUNDS_ORDERED_BY_SCOTT`). Pass 2: phase numbers re-aligned; every acceptance criterion run on `main` a1415bc and the live vault with output recorded; FK clause dropped; HTTP client pinned to `ureq`. Pass 3: candidate provenance (`Author` vs `Model`); classifier-error behavior split between ingest and cortex; `--retag` never writes empty. Pass 4: block-form writer switch moved into the migration phase; daemon stopped around both `migrate --apply` steps; segment-match guard; sync-conflict check. Pass 5: voice lint clean.
 
@@ -656,3 +656,62 @@ The concern was that `fallback: deterministic` cannot help the notes that most n
 3. Once P4 lands, every note in scope carries at least one tag, so `Deterministic` can reproduce a compliant tag list for every existing note with no network at all. The classifier is load-bearing only for **new** ingests that arrive with no distiller tags and no author hashtags, and that path already fails visibly through the `degraded=true` receipt and `sb doctor`'s `degraded_24h` warning.
 
 The residual exposure is therefore bounded to new ingest, which is what the existing mitigation was written for. No change to `TagClassifier`, no change to the confidence table, no new holding state.
+
+## Addendum C: independent verification pass and partial fold (2026-09-21)
+
+After the panel's implementation audit r1 was folded (fbd33e8), Scott asked for one more pass before the merge. Ten read-only reviewers each took one slice of the branch at fbd33e8: acceptance criteria against code, the `vault`, `cortex`, `borg`+`distillers`, and `oracle`+`sb`+`config` diffs, a fresh `otto ci` plus a test-quality audit, panel-finding closure, the deployed vault and config and daemons, git history and residue, and the provenance of every "open item" the previous agent had declared non-blocking. Their reports lived in the session scratchpad (tmpfs); everything load-bearing is recorded here or in the implementation notes.
+
+### C1. What the pass found
+
+`otto ci` was green at fbd33e8 (0 failures, 4 pre-existing ignored tests). Every acceptance criterion re-run held. All four audit must-fixes were closed in code and tests. The branch was a clean 22-commit fast-forward of `main`. The pass still found four defects introduced by the branch, none data-corrupting:
+
+1. The protect list was bypassed at three capping sites that call `truncate()` instead of `cap_protecting`: `cortex/src/classify.rs:225`, `borg/src/pipeline/atomic.rs:250`, `borg/src/pipeline/session.rs:644`. Root CLAUDE.md promises "never dropped by any capping path".
+2. `sb doctor` and `sb status` printed `by_tag.len()`, the top-20 cap, as the tag count (`sb/src/cli/checks.rs:761`). Live output said 20; the index held 115.
+3. `max-per-note` was applied to every preserved list, not only `tags` (`borg/src/pipeline/atomic.rs:277-292`), so `cortex-quality-issues` could be truncated at 8.
+4. `session_replace_merges_tags` rebuilt the union inside the test and never exercised the production loop at `session.rs:638` (`borg/src/pipeline/session/tests.rs:1194-1207`). AC3 counted it as a protection it did not deliver.
+
+Smaller: the `degraded` operator text still named only the distill fallback; a preserve-read failure was recorded as `fetch-failed` rather than `publish-failed` (`borg/src/pipeline.rs:641`); AND-mode tag filtering miscounted a duplicated request (`vault/src/search/query.rs:26`, unreachable, every caller passes OR).
+
+Gaps against this document: `fabric-closed` was unreachable and downgraded to `deterministic` with only a `debug!` line; `classify_batch` had no 1,000-input chunking, nothing read a rate-limit header, and nothing called it; no test drove the classifier.dev HTTP error surface; `domain-values.md` deletion was manual; the MCP schema guard (`every_domain_param_has_a_tags_sibling`, not the never-committed `no_tool_has_a_domain_param`) was deleted with no replacement and AC1 is a manual grep, not in `.otto.yml`; the shipped `canonical-tags.yml` was no longer parse-tested; the audit's nine cheap-wins and defers existed only in tmpfs; Resolved Decisions said the default classifier was `classifier-dev` while the code and the Data Model said `deterministic`.
+
+Two earlier claims were wrong and are corrected in the implementation notes: the `sb/build.rs` "stale GIT_DESCRIBE" mechanism (missing `rerun-if-changed` paths make the script rerun every build; the stale strings came from deploying before committing), and "`v6-drop-domain` exists nowhere" (it is in dotfiles `cortex.yml`).
+
+Drift was concentrated in the per-crate `AGENTS.md` files, `README.md`, `docs/onboarding.md`, the vault's own `CLAUDE.md` and `system/schemas/frontmatter.md`, and this document.
+
+### C2. What shipped in the fold
+
+The uncommitted `expand-tilde` `ssh://` to `https://` change was not a stray edit: GitHub Actions cannot fetch an ssh git dependency, and `main` CI had been red since 2026-09-08. It shipped as its own commit (f3ff234).
+
+Shipped, cortex (b2d425d..15ad91f): protect-aware cap in `union_capped` (defect 1, cortex site); `--retag` reports retained-protected and model-selected counts; `ShellFabricRunner` wired for `fabric-closed` on the cortex side; `field-to-tags` drops a non-vocabulary value with an `info!` line and the dry-run lists notes already carrying two or more migrated names; generated schema docs write block-form tags; `sb cortex schema --check` reports and `--render` removes an unowned `*-values.md` by shape; a config-driven `actions.frontmatter.deprecated-drops` list lets the deployed `cortex.yml` name the retired key without the literal in code; frontmatter sequence items are quoted when YAML would misread them; the orphaned `cortex/patterns/cortex-classify.md` is gone; both starter templates carry the `tags.classifier` block; `cortex/AGENTS.md` describes HEAD.
+
+Shipped, vault and sb (5ce1731..5386d3c): `VaultStats.distinct_tags` and the doctor/status/stats lines print it (defect 2); `push_tags_filter` dedups (AND miscount); `index_one` dedups before both writes (AC4 by construction); note removal runs both deletes inside a savepoint; debug logs carry `tags`/`tags_all`; `default_max_per_note` is 8 and `CanonicalTagsFile` rejects unknown keys; the shipped `canonical-tags.yml` is parse-tested (117 tags, cap 8, five and five guard entries); the vector tags test asserts both directions and AND mode; the FK comment states the true reason.
+
+Shipped, prose (4c1a9ff..5165e9a): the sixteen drift and correction items D1 to D16 named in the implementation notes, including the recorded audit table, the corrected open questions, and the vault-side `CLAUDE.md` and `frontmatter.md` (obsidian a5fbc231).
+
+### C3. What did not ship
+
+Scott called the fold at "merge what is done and ship it" while two workers were mid-CI. Their edits are preserved, unverified and never CI'd, on two local branches: `fold-borg-wip` (bbde837, 14 files) and `fold-vault-wip` (0fb86b2). Nothing on either branch has been reviewed. The items, each with where it points:
+
+Open defects from C1:
+- Defect 1, borg sites: `borg/src/pipeline/atomic.rs:250` and `borg/src/pipeline/session.rs:644` still `truncate()`. The CLAUDE.md invariant holds at the cortex site and at `filter_and_cap` and `apply_retag`, and does not hold at these two.
+- Defect 3: `borg/src/pipeline/atomic.rs:277-292` still caps every preserved list.
+- Defect 4: `borg/src/pipeline/session/tests.rs:1194-1207` still re-implements the union.
+
+Open borg and distillers items: the `vocabulary_unavailable` LazyLock constraint is written only in the notes, not in the test; the preserve-read failure stage is `fetch-failed`; an empty union writes a bare `tags:` where `render_note` writes `tags: []` (`atomic.rs:300`); `borg/src/audit.rs:351,766` picks the source column by field count and misreads an un-rewritten ledger on another host; `ClassifierDev::finish` truncates before it retains (`distillers/src/tags.rs:646-650`), so an echoed unknown label can evict a valid tag; `fabric-closed` on the borg side still passes `None` and `build_kind` still downgrades at `debug!`; `classify_batch` sends the whole slice with no 1,000 chunk; no HTTP negative-path test exists for 401, 429, malformed JSON, count mismatch, or an empty-scores 200; `FabricClosedVocab` and the fake cap alphabetically, so an author tag can lose to a model tag.
+
+Open oracle and sb items: no test walks the MCP tool schemas (the panel's C2; a fixture-backed test exists only on `fold-vault-wip`); tool request structs accept unknown keys, so a stale client sending the removed facet is silently unfiltered; `tag_brief` of a non-canonical tag returns zero with no not-found signal; the aggregate branches of `tag_search`, `creator_browse`, and `source_browse` ignore `tags` (a faithful port of the old behaviour); the `degraded` wording at `sb/src/cli/checks.rs:620` and `sb/src/cli/borg.rs:305` still names only the distill fallback; `sb doctor` has no classifier check; `checks.rs:367` still requires fabric's `create_tags` pattern that nothing calls; `--apply` and `--tag` have no help text; `schema_info` reads the vocabulary from the default path while cortex and borg honour a configured one; AC1 is not in `.otto.yml`; `vault/AGENTS.md`, `vault/src/search/AGENTS.md`, `oracle/AGENTS.md`, and `sb/AGENTS.md` still carry the drift the pass listed.
+
+Doc-only items left open: AC1's whole-file exclusions are broader than needed; the `--retag` protected-count guardrail is now implemented but not enumerated under OQ5; the P4 detector misses a quoted `"tags":` key (moot on this vault).
+
+### C4. Operator steps after this deploy
+
+- `sb cortex schema --render` in the vault, so the four generated schema docs pick up block-form tags.
+- Add `deprecated-drops: [domain]` under `actions.frontmatter` in `~/.config/sb/cortex.yml` (dotfiles), so lint flags a leftover key on any host.
+- Push the obsidian repo (ahead of origin by 3) and dotfiles (ahead by 7). Before either laptop or mini runs an `sb cortex daemon`, confirm it carries this release: a pre-P11 daemon writes the retired key back into synced notes.
+- `CLASSIFY_API_KEY` still returns 401; every classify runs the deterministic fallback, every tick, with no backoff.
+- Recycle the stale `sb oracle serve` processes running the deleted binary image, and fix the harvest env file (826 KB; systemd refuses it, and the nightly run has failed since 2026-09-20).
+- Open `system/views/untriaged.base` and `tags.base` once in Obsidian.
+
+### C5. Version
+
+0.15.0. `vault` removes `Domain`, `normalize_domain`, four search functions and several struct fields, and re-signatures nine public functions; that is a minor bump under 0.x, not a patch.
