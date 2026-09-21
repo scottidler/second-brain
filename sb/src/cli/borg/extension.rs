@@ -33,6 +33,7 @@ pub enum ExtensionCommand {
     /// Remove the policies.json entry (and, with --purge, the signed artifacts).
     /// Does NOT uninstall from a running Firefox - restart Firefox to clear.
     Uninstall {
+        /// Also delete the signed .xpi artifacts, not just the policies.json entry
         #[arg(long)]
         purge: bool,
     },

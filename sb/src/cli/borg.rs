@@ -36,20 +36,29 @@ pub enum Command {
     /// Send a URL to the running daemon for ingestion
     Ingest {
         url: Option<String>,
+        /// Read the URL from the clipboard instead of taking it as an argument
         #[arg(long)]
         clipboard: bool,
+        /// Ingest this local file instead of a URL
         #[arg(long)]
         file: Option<PathBuf>,
+        /// Operator tags to seed the note with (space-separated). They enter
+        /// the classifier as author-side candidates, not as final tags
         #[arg(short, long, num_args = 0..)]
         tags: Option<Vec<String>>,
+        /// Ingest even when the URL is already in the ledger (a reingest,
+        /// which preserves the existing note's location and cortex fields)
         #[arg(long)]
         force: bool,
     },
     /// Quick text capture - create a note from text
     Note {
         text: Option<String>,
+        /// Read the note text from the clipboard instead of an argument
         #[arg(long)]
         clipboard: bool,
+        /// Operator tags to seed the note with (space-separated). They enter
+        /// the classifier as author-side candidates, not as final tags
         #[arg(short, long, num_args = 0..)]
         tags: Option<Vec<String>>,
     },
@@ -60,6 +69,7 @@ pub enum Command {
     /// Migrate vault frontmatter to current schema. Without `--apply` this is a
     /// dry run (reports what would change); `--apply` is the gate that writes.
     Migrate {
+        /// Write the changes. Without it this is a dry run
         #[arg(long)]
         apply: bool,
     },
@@ -74,16 +84,22 @@ pub enum Command {
     Log(LogCliArgs),
     /// Reingest existing entries through the current pipeline
     Reingest {
+        /// Reingest every ledger entry rather than a filtered subset
         #[arg(long)]
         all: bool,
+        /// Only entries of this note type (youtube, article, github, ...)
         #[arg(long, value_name = "TYPE")]
         r#type: Option<String>,
+        /// Only entries whose source URL contains this substring
         #[arg(long)]
         source: Option<String>,
+        /// Only entries ingested on or before this date (YYYY-MM-DD)
         #[arg(long)]
         before: Option<String>,
+        /// Only entries ingested on or after this date (YYYY-MM-DD)
         #[arg(long)]
         after: Option<String>,
+        /// List what would be reingested and exit without writing
         #[arg(long)]
         dry_run: bool,
     },
@@ -93,6 +109,7 @@ pub enum Command {
     Retention(RetentionCliArgs),
     /// Re-ingest every vault note whose body matches the failed-fetch signature
     ReingestFailed {
+        /// List the notes that would be reingested and exit without writing
         #[arg(long)]
         dry_run: bool,
     },
@@ -102,6 +119,7 @@ pub enum Command {
     /// assisted notes (homogenizes ingested; stamps the retention expiry on
     /// every note that carries a `trace:`).
     BackfillIngested {
+        /// List the notes that would be stamped and exit without writing
         #[arg(long)]
         dry_run: bool,
     },
@@ -331,16 +349,25 @@ pub enum BlocklistAction {
 #[derive(Args)]
 pub struct ReplayCliArgs {
     pub trace_id: Option<String>,
+    /// Resume the pipeline at this stage instead of the beginning. Session
+    /// traces only; any other kind rejects a non-zero value
     #[arg(long, default_value_t = 0)]
     pub from_stage: u8,
+    /// Replay every trace received within this window (a relative span like
+    /// 7d or 24h, ISO-8601, or a bare date)
     #[arg(long)]
     pub since: Option<String>,
+    /// Replay only the traces that were rejected at the door
     #[arg(long)]
     pub rejected: bool,
+    /// Re-fetch a pre-staging note by reading its frontmatter, for notes that
+    /// predate the staging store. Requires --note
     #[arg(long)]
     pub bootstrap_from_vault: bool,
+    /// The vault note to bootstrap from (used with --bootstrap-from-vault)
     #[arg(long)]
     pub note: Option<PathBuf>,
+    /// List what would be replayed and exit without writing
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -354,6 +381,7 @@ pub struct RetentionCliArgs {
 pub enum RetentionAction {
     /// Sweep aged-off trace directories and raw-input sidecars
     Sweep {
+        /// List what would be swept and exit without deleting
         #[arg(long)]
         dry_run: bool,
         /// Sweep ONLY the vault's raw-input sidecars, leaving staging alone.

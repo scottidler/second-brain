@@ -130,12 +130,17 @@ pub struct BridgeApplyArgs {
 
 #[derive(Args)]
 pub struct ClassifyArgs {
+    /// Write the changes (assign tags, promote out of inbox/). Without it
+    /// this is a dry run that reports what would change
     #[arg(long)]
     pub apply: bool,
+    /// Restrict the run to this vault-relative path
     #[arg(long)]
     pub path: Option<String>,
+    /// Reclassify notes that already carry `cortex-classified: true`
     #[arg(long)]
     pub force: bool,
+    /// Process only notes flagged `cortex-needs-review: true`
     #[arg(long)]
     pub review_only: bool,
     /// Re-run the tag classifier over these notes, replacing their tags.
@@ -157,12 +162,17 @@ impl From<ClassifyArgs> for opts::ClassifyOpts {
 
 #[derive(Args)]
 pub struct LintArgs {
+    /// Fix the violations the rules can write. Without it this reports only
     #[arg(long)]
     pub apply: bool,
+    /// Output format: human (default) or json
     #[arg(long, value_enum, ignore_case = true, default_value_t = opts::LintFormat::Human)]
     pub format: opts::LintFormat,
+    /// Run only these rules (repeatable): naming, frontmatter, tags, scope,
+    /// broken-links. Default: every configured rule
     #[arg(long)]
     pub rule: Vec<String>,
+    /// Restrict the run to this vault-relative path
     #[arg(long)]
     pub path: Option<String>,
 }
@@ -179,8 +189,10 @@ impl From<LintArgs> for opts::LintOpts {
 
 #[derive(Args)]
 pub struct LinkArgs {
+    /// Write the wikilinks into note bodies. Without it this reports only
     #[arg(long)]
     pub apply: bool,
+    /// Which notes to scan for link candidates. Default: all
     #[arg(long, value_enum, ignore_case = true, default_value_t = opts::ScanScope::All)]
     pub scan: opts::ScanScope,
 }
@@ -199,6 +211,7 @@ impl From<LinkArgs> for opts::LinkOpts {
 /// was gated. Reports by default; `--apply` edits note bodies.
 #[derive(Args)]
 pub struct UnlinkArgs {
+    /// Edit note bodies to retract the links. Without it this reports only
     #[arg(long)]
     pub apply: bool,
     /// Also retract inside `origin: authored` notes. Off by default: the
@@ -219,10 +232,13 @@ impl From<UnlinkArgs> for opts::UnlinkOpts {
 
 #[derive(Args)]
 pub struct IntelArgs {
+    /// Generate the daily digest. The default when neither flag is given
     #[arg(long)]
     pub daily: bool,
+    /// Generate the weekly review instead of the daily digest
     #[arg(long)]
     pub weekly: bool,
+    /// Write the generated note here instead of its default vault location
     #[arg(long)]
     pub output: Option<PathBuf>,
     /// Treat this date (YYYY-MM-DD) as "today" instead of the system clock,
@@ -247,8 +263,10 @@ impl From<IntelArgs> for opts::IntelOpts {
 
 #[derive(Args)]
 pub struct StateArgs {
+    /// Save a new manifest of the vault's current file fingerprints
     #[arg(long)]
     pub refresh: bool,
+    /// Report what changed since the saved manifest
     #[arg(long)]
     pub diff: bool,
 }
@@ -293,6 +311,7 @@ impl From<DaemonArgs> for opts::DaemonOpts {
 
 #[derive(Args)]
 pub struct MigrateArgs {
+    /// Write the migrated frontmatter. Without it this is a dry run
     #[arg(long)]
     pub apply: bool,
     /// Read migrations from this plan file instead of cortex.yml. An inverse
@@ -326,12 +345,18 @@ pub struct SchemaArgs {
 
 #[derive(Args)]
 pub struct SweepArgs {
+    /// Rewrite non-canonical tags to their canonical names via tag-mapping.yml
     #[arg(long)]
     pub migrate: bool,
+    /// Report what would change and write nothing
     #[arg(long)]
     pub dry_run: bool,
+    /// Scan for new tag proposals and write tag-proposals.yml. Runs by
+    /// default when --migrate is absent
     #[arg(long)]
     pub proposals: bool,
+    /// Render the cold-notes checklist to system/views/cold-notes.md instead
+    /// of sweeping tags. Cannot be combined with --migrate or --proposals
     #[arg(long)]
     pub cold: bool,
 }
@@ -348,18 +373,25 @@ impl From<SweepArgs> for opts::SweepOpts {
 
 #[derive(Args)]
 pub struct EmbedArgs {
+    /// Embed every eligible note, not just the ones changed since the last run
     #[arg(long)]
     pub backfill: bool,
+    /// Embed only this kind (summary | transcript-chunk | claim). Default:
+    /// the config-enabled kinds
     #[arg(long)]
     pub kind: Option<String>,
     /// Rollback verb: delete every embedding row of this kind
     /// (summary | transcript-chunk | claim) and exit.
     #[arg(long)]
     pub drop_kind: Option<String>,
+    /// Embedding model override. Default: the model pinned in embedding_config
     #[arg(long)]
     pub model: Option<String>,
+    /// How many texts to embed per inference batch
     #[arg(long, default_value_t = cortex::embed::DEFAULT_BATCH_SIZE)]
     pub batch_size: usize,
+    /// Download the embedding model into the local cache and exit. Run once
+    /// on a fresh machine so the first real embed needs no network
     #[arg(long)]
     pub prefetch_model: bool,
     #[arg(long, hide = true)]
@@ -451,16 +483,24 @@ impl From<EntitiesArgs> for opts::EntitiesOpts {
 
 #[derive(Args)]
 pub struct SummarizeArgs {
+    /// Distill legacy notes that predate the structured L2 contract
     #[arg(long)]
     pub backfill: bool,
+    /// Only notes dated on or after this point (a relative span like 30d,
+    /// ISO-8601, or a bare date)
     #[arg(long)]
     pub since: Option<String>,
+    /// Only notes carrying this tag
     #[arg(long)]
     pub tag: Option<String>,
+    /// Distiller override. Default: the per-kind distiller for each note
     #[arg(long)]
     pub extractor: Option<String>,
+    /// Report which notes would be distilled and write nothing
     #[arg(long)]
     pub dry_run: bool,
+    /// Skip notes the checkpoint file records as already distilled
+    /// (`--resume=false` starts fresh). Default: true
     #[arg(
         long,
         default_value_t = true,

@@ -727,6 +727,61 @@ Break-the-code evidence, each regression applied and reverted:
 
 Everything else listed in C3 stays open.
 
+### C7. Shakedown findings, closed (0.15.2)
+
+A `cli-shakedown` pass over the installed `sb v0.15.1` confirmed the excision
+(six independent probes, recorded in `docs/shakedown-v0.15.1.md`) and turned up
+eight items. All eight are closed here.
+
+Operator and config, the two C4 steps plus one new:
+
+- The four `system/schemas/*-values.md` docs were drifted (inline `tags: [...]`
+  where the binary now writes block form). `sb cortex schema --render` run on
+  the vault; `--check` exits 0. Note the list is four files, not five:
+  `domain-values.md` is gone, which is itself excision evidence.
+- `deprecated-drops` was absent from the deployed `cortex.yml`, so lint fired
+  `frontmatter.deprecated.{author,day,time,url}` and no `.domain`. Added as
+  `deprecated-drops: [domain]`. Proven on a throwaway vault: a note carrying
+  `domain: tech` now reports `frontmatter.deprecated.domain` with a
+  `DropField` fix.
+- New: the same file still named `domain` in four `exempt` / `path-exempt`
+  lists, exempting a key that no longer exists. Removed. Lint output is
+  unchanged (`frontmatter.required.tags` stays at 4), which is the point:
+  they were dead config.
+
+Oracle, three defects and one ergonomic gap:
+
+- **Unknown request keys were dropped, not rejected.** `{"domain": "tech"}`
+  returned an unfiltered list, and a plausible `{"tags_all": [...]}` returned
+  a wrong one (notes carrying neither tag). Every one of the 19 request
+  structs now carries `#[serde(deny_unknown_fields)]`, which also emits
+  `additionalProperties: false` into the published schema. This is the C3 item
+  of the same name.
+- **AND-mode tag filtering was unreachable.** `vault::search` has taken a
+  `tags_all` boolean all along; oracle hardcoded `false` at all nine call
+  sites, so no client could ask for it. A `TagsMode { Any, All }` schema enum
+  (`any` the default) is now a `tags_mode` sibling on all eight tags-bearing
+  requests, threaded through the retrieval pipeline and honored by
+  `find_similar`'s Rust-side post-filter too. Under a tags-only regime the tag
+  filter carries every query `domain` used to narrow, so OR-only was a ceiling.
+- **`tag_brief` had no not-found signal.** A typo and a canonical-but-unused
+  tag both returned zeros. The brief now carries `known`, plus a `message`
+  when false. The vocabulary is read only on the zero path.
+- **`tag_search`'s aggregate branch paged at 50 with `count: 50`**, so a
+  client could not tell 115 tags had been truncated. It now returns
+  `total_tags` and `truncated` beside `count`, and the schema documents both
+  defaults (20 notes with `tag`, 50 tags without).
+
+Two new machine checks replace manual greps: `no_mcp_tool_schema_carries_a_domain_parameter`
+walks every published tool schema (this is the C3 "MCP schema fixture test",
+delivered as a router walk rather than a fixture), and
+`every_tags_parameter_has_a_tags_mode_sibling` keeps the AND/OR choice from
+differing per tool.
+
+CLI: 57 clap flags across `sb borg` and `sb cortex` carried no help text,
+including the `--apply` / `--dry-run` gates. All 57 documented; the scan that
+found them now returns only the one intentionally `hide = true` flag.
+
 ### C5. Version
 
-0.15.0 for the fold; 0.15.1 for the C6 conformance fixes (behavior-only, no public `vault` surface change beyond the added `TAGS_KEY` constant). `vault` removes `Domain`, `normalize_domain`, four search functions and several struct fields, and re-signatures nine public functions; that is a minor bump under 0.x, not a patch.
+0.15.0 for the fold; 0.15.1 for the C6 conformance fixes (behavior-only, no public `vault` surface change beyond the added `TAGS_KEY` constant); 0.15.2 for the C7 shakedown fixes. C7 adds a request parameter and two response fields and starts rejecting unknown keys, which is a behavior change for any client that was sending them, but the MCP surface is 0.x and the rejected calls were silently wrong. `vault` removes `Domain`, `normalize_domain`, four search functions and several struct fields, and re-signatures nine public functions; that is a minor bump under 0.x, not a patch.

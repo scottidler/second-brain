@@ -32,6 +32,29 @@ pub enum SearchMode {
     GraphHybrid,
 }
 
+/// How a multi-tag `tags` filter combines.
+///
+/// A schema enum for the same reason `SearchMode` and `LinkDirection` are:
+/// a typo fails deserialization with the valid options listed, instead of
+/// silently falling back to the other mode and returning a wrong result set.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TagsMode {
+    /// Keep a note carrying at least one of the tags. The default, and the
+    /// only behavior that existed before this parameter.
+    #[default]
+    Any,
+    /// Keep only notes carrying every one of the tags.
+    All,
+}
+
+impl TagsMode {
+    /// The `tags_all` boolean every `vault::search` query takes.
+    pub fn is_all(self) -> bool {
+        matches!(self, TagsMode::All)
+    }
+}
+
 /// Search the vault's ingested knowledge.
 ///
 /// `mode` is an explicit single-path override. Omitting it (the common case)
@@ -40,14 +63,23 @@ pub enum SearchMode {
 /// (nDCG@10 0.876 vs 0.799 for equal-weight hybrid). Pass `mode` only to force
 /// one legacy path.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct KnowledgeSearchRequest {
     /// The search query (full-text search across titles, bodies, tags, and summaries)
     #[schemars(description = "Search query - searches across note titles, bodies, tags, and summaries")]
     pub query: String,
 
-    /// Filter to notes carrying any of these tags (OR across the list)
-    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    /// Filter to notes by tag, combined per `tags_mode` (default: any)
+    #[schemars(
+        description = "Filter to notes by tag. Combined per `tags_mode`: any (carry at least one, the default) or all (carry every one)."
+    )]
     pub tags: Option<Vec<String>>,
+
+    /// How a multi-tag filter combines: any (default) or all
+    #[schemars(
+        description = "How the tags filter combines: any (carry at least one, the default) or all (carry every one)"
+    )]
+    pub tags_mode: Option<TagsMode>,
 
     /// Filter by note type
     #[schemars(description = "Filter by note type")]
@@ -94,6 +126,7 @@ pub struct KnowledgeSearchRequest {
 
 /// Read a specific note by its vault-relative path.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NoteReadRequest {
     /// The vault-relative path to the note (e.g., 'ai/some-article.md')
     #[schemars(description = "Vault-relative path to the note (e.g., 'ai/some-article.md')")]
@@ -106,14 +139,24 @@ pub struct NoteReadRequest {
 
 /// Get an overview of the vault - total notes, distribution by type and status, plus schema gaps.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VaultOverviewRequest {}
 
 /// List notes with optional filters, without requiring a search query.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListNotesRequest {
-    /// Filter to notes carrying any of these tags (OR across the list)
-    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    /// Filter to notes by tag, combined per `tags_mode` (default: any)
+    #[schemars(
+        description = "Filter to notes by tag. Combined per `tags_mode`: any (carry at least one, the default) or all (carry every one)."
+    )]
     pub tags: Option<Vec<String>>,
+
+    /// How a multi-tag filter combines: any (default) or all
+    #[schemars(
+        description = "How the tags filter combines: any (carry at least one, the default) or all (carry every one)"
+    )]
+    pub tags_mode: Option<TagsMode>,
 
     /// Filter by note type
     #[schemars(description = "Filter by note type")]
@@ -142,6 +185,7 @@ pub struct ListNotesRequest {
 
 /// Query the borg ingest ledger for ingestion history.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IngestHistoryRequest {
     /// Filter by source URL substring
     #[schemars(description = "Filter by source URL (substring match)")]
@@ -166,6 +210,7 @@ pub struct IngestHistoryRequest {
 /// subset (from `borg-ledger.md`), `failure_history` returns failures from
 /// the receipts SQLite DB at `~/.local/share/sb/borg/receipts.db`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FailureHistoryRequest {
     /// Optional `failure_stage` filter. One of `intake-rejected`,
     /// `classify-failed`, `fetch-failed`, `quality-blocked`,
@@ -192,6 +237,7 @@ pub struct FailureHistoryRequest {
 
 /// Search notes by tag, or list all tags with counts when no tag is specified.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TagSearchRequest {
     /// Specific tag to search for. Exact match by default; append * for prefix match (e.g. "rust*"). Omit to list all tags with counts.
     #[schemars(
@@ -199,22 +245,33 @@ pub struct TagSearchRequest {
     )]
     pub tag: Option<String>,
 
-    /// Additionally require the note to carry any of these tags (OR across
-    /// the list), distinct from the primary `tag` match above.
-    #[schemars(description = "Additionally filter to notes carrying any of these tags (OR across the list)")]
+    /// Additionally require the note to carry these tags, combined per
+    /// `tags_mode`, distinct from the primary `tag` match above.
+    #[schemars(description = "Additionally filter to notes by tag, combined per `tags_mode` (default: any)")]
     pub tags: Option<Vec<String>>,
+
+    /// How a multi-tag filter combines: any (default) or all
+    #[schemars(
+        description = "How the tags filter combines: any (carry at least one, the default) or all (carry every one)"
+    )]
+    pub tags_mode: Option<TagsMode>,
 
     /// How much content to return per note
     #[schemars(description = "Detail level for returned notes. Default: metadata")]
     pub detail: Option<DetailLevel>,
 
-    /// Maximum number of results
-    #[schemars(description = "Maximum number of results (default: 20)")]
+    /// Maximum number of results. Two defaults, because the two branches
+    /// return different things: 20 notes when `tag` is given, 50 tags when
+    /// it is omitted.
+    #[schemars(
+        description = "Maximum number of results (default: 20 notes when tag is given, 50 tags when it is omitted)"
+    )]
     pub limit: Option<u32>,
 }
 
 /// Get a briefing on a specific tag - stats, recent notes, unread count.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TagBriefRequest {
     /// The tag to get a briefing on
     #[schemars(description = "Tag to brief on")]
@@ -231,6 +288,7 @@ pub struct TagBriefRequest {
 
 /// Find notes similar to given content or another note.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FindSimilarRequest {
     /// Text to find similar notes for
     #[schemars(description = "Text content to find similar notes for. Provide either this or path, not both.")]
@@ -242,9 +300,17 @@ pub struct FindSimilarRequest {
     )]
     pub path: Option<String>,
 
-    /// Filter to notes carrying any of these tags (OR across the list)
-    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    /// Filter to notes by tag, combined per `tags_mode` (default: any)
+    #[schemars(
+        description = "Filter to notes by tag. Combined per `tags_mode`: any (carry at least one, the default) or all (carry every one)."
+    )]
     pub tags: Option<Vec<String>>,
+
+    /// How a multi-tag filter combines: any (default) or all
+    #[schemars(
+        description = "How the tags filter combines: any (carry at least one, the default) or all (carry every one)"
+    )]
+    pub tags_mode: Option<TagsMode>,
 
     /// How much content to return per note
     #[schemars(description = "Detail level for returned notes. Default: tldr")]
@@ -257,14 +323,23 @@ pub struct FindSimilarRequest {
 
 /// Timeline of recent vault activity.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RecentActivityRequest {
     /// How many days back to look
     #[schemars(description = "Number of days back to search (default: 7)")]
     pub days: Option<u32>,
 
-    /// Filter to notes carrying any of these tags (OR across the list)
-    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    /// Filter to notes by tag, combined per `tags_mode` (default: any)
+    #[schemars(
+        description = "Filter to notes by tag. Combined per `tags_mode`: any (carry at least one, the default) or all (carry every one)."
+    )]
     pub tags: Option<Vec<String>>,
+
+    /// How a multi-tag filter combines: any (default) or all
+    #[schemars(
+        description = "How the tags filter combines: any (carry at least one, the default) or all (carry every one)"
+    )]
+    pub tags_mode: Option<TagsMode>,
 
     /// Filter by note type
     #[schemars(description = "Filter to a specific note type")]
@@ -292,6 +367,7 @@ pub enum LinkDirection {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FindLinksRequest {
     /// Note path to inspect
     #[schemars(description = "Vault-relative path to the note to inspect links for")]
@@ -308,14 +384,23 @@ pub struct FindLinksRequest {
 
 /// Browse notes by creator/channel.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreatorBrowseRequest {
     /// Filter to specific creator (substring match). Omit to list all creators with counts.
     #[schemars(description = "Creator name to filter (substring match). Omit to list all creators with counts.")]
     pub creator: Option<String>,
 
-    /// Filter to notes carrying any of these tags (OR across the list)
-    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    /// Filter to notes by tag, combined per `tags_mode` (default: any)
+    #[schemars(
+        description = "Filter to notes by tag. Combined per `tags_mode`: any (carry at least one, the default) or all (carry every one)."
+    )]
     pub tags: Option<Vec<String>>,
+
+    /// How a multi-tag filter combines: any (default) or all
+    #[schemars(
+        description = "How the tags filter combines: any (carry at least one, the default) or all (carry every one)"
+    )]
+    pub tags_mode: Option<TagsMode>,
 
     /// How much content to return per note
     #[schemars(description = "Detail level for returned notes. Default: metadata")]
@@ -328,6 +413,7 @@ pub struct CreatorBrowseRequest {
 
 /// Browse notes by source URL host.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SourceBrowseRequest {
     /// Source host to filter (e.g., "youtube.com"). Omit to list all source hosts with counts.
     #[schemars(
@@ -335,9 +421,17 @@ pub struct SourceBrowseRequest {
     )]
     pub host: Option<String>,
 
-    /// Filter to notes carrying any of these tags (OR across the list)
-    #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
+    /// Filter to notes by tag, combined per `tags_mode` (default: any)
+    #[schemars(
+        description = "Filter to notes by tag. Combined per `tags_mode`: any (carry at least one, the default) or all (carry every one)."
+    )]
     pub tags: Option<Vec<String>>,
+
+    /// How a multi-tag filter combines: any (default) or all
+    #[schemars(
+        description = "How the tags filter combines: any (carry at least one, the default) or all (carry every one)"
+    )]
+    pub tags_mode: Option<TagsMode>,
 
     /// How much content to return per note
     #[schemars(description = "Detail level for returned notes. Default: metadata")]
@@ -350,6 +444,7 @@ pub struct SourceBrowseRequest {
 
 /// View inbox contents and classification pipeline health.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InboxStatusRequest {
     /// How much content to return per note
     #[schemars(description = "Detail level for returned notes. Default: tldr")]
@@ -383,6 +478,7 @@ impl QualityLevel {
 
 /// Notes by quality score and common issues.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QualityReportRequest {
     /// Filter by quality level: "low", "medium", "high"
     #[schemars(description = "Filter by quality level: low, medium, high. Omit for distribution overview.")]
@@ -399,6 +495,7 @@ pub struct QualityReportRequest {
 
 /// Browse duplicate note clusters.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DuplicateGroupsRequest {
     /// Specific group to inspect
     #[schemars(description = "Specific duplicate group ID to inspect. Omit to list all groups.")]
@@ -411,16 +508,25 @@ pub struct DuplicateGroupsRequest {
 
 /// Classification pipeline health and metadata.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClassifyStatusRequest {
-    /// Filter statistics to notes carrying any of these tags (OR across the list)
-    #[schemars(description = "Filter statistics to notes carrying any of these tags (OR across the list)")]
+    /// Filter statistics to notes by tag, combined per `tags_mode` (default: any)
+    #[schemars(description = "Filter statistics to notes by tag, combined per `tags_mode` (default: any)")]
     pub tags: Option<Vec<String>>,
+
+    /// How a multi-tag filter combines: any (default) or all
+    #[schemars(
+        description = "How the tags filter combines: any (carry at least one, the default) or all (carry every one)"
+    )]
+    pub tags_mode: Option<TagsMode>,
 }
 
 /// List all valid schema values (tags, note types, origins, statuses, methods).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SchemaInfoRequest {}
 
 /// Trigger a reindex of the vault into the SQLite database.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReindexRequest {}

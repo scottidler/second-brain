@@ -16,7 +16,7 @@
 
 - `borg.rs` (+`cli/borg/`) — Daemon, Ingest, Note, Hotkey, Extension, Migrate, Audit, Log, Reingest, … → borg lib.
 - `cortex.rs` — Classify, Lint, Link, Intel, State, Daemon, Migrate, Sweep, Summarize, Embed, … → cortex lib (after-help checks `fabric` availability).
-- `oracle.rs`: Serve, Index, Stats (prints "By tag (top 20)" beside "By domain", tags-only design Phase 8), Call (`--list`, `--json`); width-aware tool-list formatting; exit codes via `outcome_is_failure`.
+- `oracle.rs`: Serve, Index, Stats (prints "By tag (top 20)" plus the true "Distinct tags" count; the old "By domain" block is gone with the facet), Call (`--list`, `--json`); width-aware tool-list formatting; exit codes via `outcome_is_failure`.
 - `bootstrap.rs`, `status.rs`, `doctor.rs`, `checks.rs` — setup + health.
 
 ## Contracts & Invariants

@@ -185,6 +185,7 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) ->
                     *m,
                     &q.query,
                     tags,
+                    false,
                     None,
                     None,
                     opts.k,
@@ -204,6 +205,7 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) ->
                 SearchMode::GraphHybrid,
                 &q.query,
                 tags,
+                false,
                 None,
                 None,
                 opts.k,
@@ -218,7 +220,7 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) ->
         // The live operator-configured pipeline (the shipped default and any
         // rerank/transform the operator has turned on).
         let configured = server
-            .run_configured_pipeline(&guard, &q.query, tags, None, None, opts.k)
+            .run_configured_pipeline(&guard, &q.query, tags, false, None, None, opts.k)
             .map_err(|e| eyre!("run_configured_pipeline: {e}"))?;
         run.ranked.insert(
             CONFIGURED_LABEL.to_string(),

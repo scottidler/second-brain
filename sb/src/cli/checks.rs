@@ -92,6 +92,10 @@ pub fn all_sections() -> Vec<Section> {
             findings: external_binaries_findings(),
         },
         Section {
+            name: "classifier",
+            findings: classifier_findings(),
+        },
+        Section {
             name: "embedding cache",
             findings: embedding_findings(),
         },
@@ -417,6 +421,68 @@ fn fabric_live_probe_findings() -> Vec<Finding> {
             format!("fabric live probe failed: {e}"),
             "check DEFAULT_MODEL in ~/.config/fabric/.env against a live `fabric --listmodels` probe (the static list can name retired models), the API key, and provider egress"
                 .to_string(),
+        )],
+    }
+}
+
+/// Live probe of the configured tag classifier.
+///
+/// The exact counterpart to `fabric_live_probe_findings`, for the other
+/// inference dependency. `tags.classifier` selecting `classifier-dev` and the
+/// key env var being SET both look healthy statically, and neither says the
+/// key is accepted: on a rejected key every ingest silently falls back to
+/// `deterministic` and lands `cortex-classified-by: deterministic`, every
+/// tick, forever. That is exactly the state this vault sat in unnoticed
+/// (design doc Addendum C4), which is why a static check is not enough.
+///
+/// Warn, not error: a transient outage should not turn doctor red, and the
+/// fallback means ingest keeps working. The probe sends a three-label
+/// vocabulary rather than the real one so it is a single cheap request, not a
+/// sharded pass over 117 tags.
+fn classifier_findings() -> Vec<Finding> {
+    let Ok(config) = borg::config::load_config::<borg::config::Config>(None) else {
+        return vec![Finding::info("borg config unavailable; classifier not probed")];
+    };
+    let cfg = &config.tags.classifier;
+    if cfg.classifier == distillers::tags::ClassifierKind::Deterministic {
+        return vec![Finding::info(
+            "tags.classifier is `deterministic` (local, no network); nothing to probe",
+        )];
+    }
+    if std::env::var(&cfg.api_key_env).is_err() {
+        return vec![Finding::warn(
+            format!("{} is not set; every classify will fall back", cfg.api_key_env),
+            format!(
+                "export {} (see the secrets manifest), then restart the daemons",
+                cfg.api_key_env
+            ),
+        )];
+    }
+
+    let canon = vault::canonical::CanonicalSet {
+        all: ["rust", "cooking", "llm"].iter().map(|t| (*t).to_string()).collect(),
+        no_segment: std::collections::HashSet::new(),
+        no_classifier: std::collections::HashSet::new(),
+        max_per_note: 3,
+    };
+    let mapping = vault::canonical::TagMapping::default();
+    let classifier = distillers::tags::build(cfg, &canon, &mapping, None);
+    let input = distillers::tags::TagInput {
+        title: "Async Rust for humans",
+        text: "A guide to async Rust and tokio.",
+        candidates: &[],
+    };
+    match classifier.classify(&input) {
+        Ok(_) => vec![Finding::ok(format!(
+            "classifier live probe succeeded ({:?}, key from {})",
+            cfg.classifier, cfg.api_key_env
+        ))],
+        Err(e) => vec![Finding::warn(
+            format!("classifier live probe failed: {e:#}"),
+            format!(
+                "every ingest is silently falling back to {:?}. Check the value of {} (a classifier.dev workspace key from /app/keys, not a personal token) and provider egress; drill in with `sb borg log --degraded --since 24h`",
+                cfg.fallback, cfg.api_key_env
+            ),
         )],
     }
 }

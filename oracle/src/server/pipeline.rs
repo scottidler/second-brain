@@ -31,12 +31,13 @@ impl OracleMcpServer {
         db: &SearchIndex,
         query: &str,
         tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
         k: u32,
     ) -> Result<Vec<String>, McpError> {
         let rows = db
-            .search(query, tags, false, note_type, status, Some(k))
+            .search(query, tags, tags_all, note_type, status, Some(k))
             .map_err(Self::err)?;
         Ok(rows.iter().map(|n| n.path.clone()).collect())
     }
@@ -52,6 +53,7 @@ impl OracleMcpServer {
         db: &SearchIndex,
         query: &str,
         tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
         k: u32,
@@ -59,7 +61,7 @@ impl OracleMcpServer {
         let active_model = db.active_embedding_model().map_err(Self::err)?;
         let q_vec = vault::embedding::embed_query(query, &active_model).map_err(Self::err)?;
         let hits = db
-            .search_vector(&q_vec, k, tags, false, note_type, status)
+            .search_vector(&q_vec, k, tags, tags_all, note_type, status)
             .map_err(Self::err)?;
         self.warn_if_no_embeddings(db, &hits)?;
         Ok(hits.iter().map(|h| h.note_path.clone()).collect())
@@ -77,6 +79,7 @@ impl OracleMcpServer {
         db: &SearchIndex,
         seed_paths: &[String],
         tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
         hops: u8,
@@ -109,7 +112,7 @@ impl OracleMcpServer {
         });
         let mut graph_paths: Vec<String> = Vec::new();
         for (path, _) in scored {
-            if Self::note_matches_filters(db, &path, tags, note_type, status)? {
+            if Self::note_matches_filters(db, &path, tags, tags_all, note_type, status)? {
                 graph_paths.push(path);
             }
         }
@@ -129,6 +132,7 @@ impl OracleMcpServer {
         mode: SearchMode,
         query: &str,
         tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
         limit: u32,
@@ -138,15 +142,17 @@ impl OracleMcpServer {
     ) -> Result<Vec<NoteRow>, McpError> {
         match mode {
             SearchMode::Bm25 => db
-                .search(query, tags, false, note_type, status, Some(limit))
+                .search(query, tags, tags_all, note_type, status, Some(limit))
                 .map_err(Self::err),
             SearchMode::Vector => {
-                let paths = self.vector_paths(db, query, tags, note_type, status, limit)?;
+                let paths = self.vector_paths(db, query, tags, tags_all, note_type, status, limit)?;
                 Self::resolve_note_paths(db, paths.iter().map(|p| p.as_str()))
             }
             SearchMode::Hybrid => {
-                let bm25_paths = self.bm25_paths(db, query, tags, note_type, status, vault::search::K_RRF_INPUT)?;
-                let vec_paths = self.vector_paths(db, query, tags, note_type, status, vault::search::K_RRF_INPUT)?;
+                let bm25_paths =
+                    self.bm25_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
+                let vec_paths =
+                    self.vector_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
                 let fused = vault::search::reciprocal_rank_fusion(
                     &[&bm25_paths, &vec_paths],
                     vault::search::RRF_K,
@@ -158,6 +164,7 @@ impl OracleMcpServer {
                 db,
                 query,
                 tags,
+                tags_all,
                 note_type,
                 status,
                 limit,
@@ -188,6 +195,7 @@ impl OracleMcpServer {
         db: &SearchIndex,
         query: &str,
         tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
         limit: u32,
@@ -196,8 +204,8 @@ impl OracleMcpServer {
         min_weight: f32,
         include_base_lists: bool,
     ) -> Result<Vec<NoteRow>, McpError> {
-        let bm25_paths = self.bm25_paths(db, query, tags, note_type, status, vault::search::K_RRF_INPUT)?;
-        let vec_paths = self.vector_paths(db, query, tags, note_type, status, vault::search::K_RRF_INPUT)?;
+        let bm25_paths = self.bm25_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
+        let vec_paths = self.vector_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
 
         // Seed list = the hybrid-fused order; seed rank feeds w_seed.
         let seed_fused = vault::search::reciprocal_rank_fusion(
@@ -213,6 +221,7 @@ impl OracleMcpServer {
             db,
             &seed_paths,
             tags,
+            tags_all,
             note_type,
             status,
             hops,
@@ -243,6 +252,7 @@ impl OracleMcpServer {
         db: &SearchIndex,
         query: &str,
         tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
         limit: u32,
@@ -254,6 +264,7 @@ impl OracleMcpServer {
             query,
             &queries,
             tags,
+            tags_all,
             note_type,
             status,
             limit,
@@ -294,6 +305,7 @@ impl OracleMcpServer {
         query: &str,
         queries: &[String],
         tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
         limit: u32,
@@ -323,21 +335,21 @@ impl OracleMcpServer {
         if cfg.methods.vector.enabled {
             let per_variant = queries
                 .iter()
-                .map(|q| self.vector_paths(db, q, tags, note_type, status, cfg.methods.vector.top_k))
+                .map(|q| self.vector_paths(db, q, tags, tags_all, note_type, status, cfg.methods.vector.top_k))
                 .collect::<Result<Vec<_>, _>>()?;
             lists.push((crate::transform::union_lists(per_variant), 1.0));
         }
         if cfg.methods.bm25.enabled {
             let per_variant = queries
                 .iter()
-                .map(|q| self.bm25_paths(db, q, tags, note_type, status, cfg.methods.bm25.top_k))
+                .map(|q| self.bm25_paths(db, q, tags, tags_all, note_type, status, cfg.methods.bm25.top_k))
                 .collect::<Result<Vec<_>, _>>()?;
             lists.push((crate::transform::union_lists(per_variant), cfg.methods.bm25.weight));
         }
         if cfg.methods.graph.enabled {
             let per_variant = queries
                 .iter()
-                .map(|q| self.pipeline_graph_paths(db, cfg, q, tags, note_type, status))
+                .map(|q| self.pipeline_graph_paths(db, cfg, q, tags, tags_all, note_type, status))
                 .collect::<Result<Vec<_>, _>>()?;
             lists.push((crate::transform::union_lists(per_variant), cfg.methods.graph.weight));
         }
@@ -431,11 +443,12 @@ impl OracleMcpServer {
         cfg: &RetrievalConfig,
         query: &str,
         tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<Vec<String>, McpError> {
-        let bm25 = self.bm25_paths(db, query, tags, note_type, status, vault::search::K_RRF_INPUT)?;
-        let vec = self.vector_paths(db, query, tags, note_type, status, vault::search::K_RRF_INPUT)?;
+        let bm25 = self.bm25_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
+        let vec = self.vector_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
         let seed =
             vault::search::reciprocal_rank_fusion(&[&bm25, &vec], cfg.fusion.k, vault::search::K_RRF_INPUT as usize);
         let seed_paths: Vec<String> = seed.iter().map(|h| h.note_path.clone()).collect();
@@ -443,6 +456,7 @@ impl OracleMcpServer {
             db,
             &seed_paths,
             tags,
+            tags_all,
             note_type,
             status,
             // Honor the same hard cap as the per-call graph modes: a misconfigured
@@ -569,13 +583,14 @@ impl OracleMcpServer {
     /// True when the note at `path` matches the (optional) schema filters.
     /// A missing note fails the check (it cannot be a valid result). `tags`
     /// is OR semantics (any one tag matches), matching the `push_tags_filter`
-    /// default used everywhere else the `tags` filter appears - checked
+    /// mode the caller asked for (`tags_all`) - checked
     /// against the resolved `NoteRow`'s JSON `tags` column rather than the
     /// `note_tags` facet, since the row is already loaded here.
     fn note_matches_filters(
         db: &SearchIndex,
         path: &str,
         tags: Option<&[String]>,
+        tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<bool, McpError> {
@@ -586,7 +601,10 @@ impl OracleMcpServer {
             None | Some([]) => true,
             Some(wanted) => {
                 let note_tags: Vec<String> = serde_json::from_str(&note.tags).unwrap_or_default();
-                wanted.iter().any(|t| note_tags.contains(t))
+                match tags_all {
+                    true => wanted.iter().all(|t| note_tags.contains(t)),
+                    false => wanted.iter().any(|t| note_tags.contains(t)),
+                }
             }
         };
         let ok = tags_ok && note_type.is_none_or(|t| note.note_type == t) && status.is_none_or(|s| note.status == s);

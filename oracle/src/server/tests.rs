@@ -922,3 +922,176 @@ fn schema_info_includes_tags_from_the_vocabulary() {
     let payload = schema_info_payload(&tags);
     assert_eq!(payload["tags"], json!(["privacy", "rust"]));
 }
+
+// --- 0.15.2: unknown-key rejection, AND-mode tags, tag_brief not-found -----
+
+/// A retired or misspelled parameter must FAIL the call, not be dropped.
+///
+/// Before `deny_unknown_fields` a stale client sending the removed `domain`
+/// facet got a silently unfiltered list back, and a plausible-looking
+/// `tags_all` got a wrong one. Both are now loud.
+#[tokio::test]
+async fn an_unknown_request_key_is_rejected_not_ignored() {
+    let db = SearchIndex::open_memory().expect("open db");
+    seed_tagged_article(&db, "notes/a.md", "A", "body", &["rust"]);
+    let server = OracleMcpServer::new(Config::default(), db);
+
+    for (tool, args) in [
+        ("list_notes", json!({"domain": "tech", "limit": 3})),
+        ("list_notes", json!({"tags_all": ["rust", "llm"]})),
+        ("knowledge_search", json!({"query": "a", "domain": "tech"})),
+        ("tag_search", json!({"tag": "rust", "domain": "tech"})),
+    ] {
+        let err = server
+            .dispatch(tool, args.clone())
+            .await
+            .expect_err(&format!("{tool} must reject {args}"));
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("unknown field"),
+            "{tool} rejected {args} but not for the unknown key: {text}"
+        );
+    }
+}
+
+/// `tags_mode: all` requires every tag; the default (`any`) keeps requiring
+/// only one. Asserted in both directions so a regression to the hardcoded
+/// `false` fails here.
+#[tokio::test]
+async fn tags_mode_all_requires_every_tag() {
+    let db = SearchIndex::open_memory().expect("open db");
+    seed_tagged_article(&db, "notes/both.md", "Both", "body", &["rust", "llm"]);
+    seed_tagged_article(&db, "notes/one.md", "One", "body", &["rust"]);
+    let server = OracleMcpServer::new(Config::default(), db);
+
+    let any = server
+        .dispatch("list_notes", json!({"tags": ["rust", "llm"]}))
+        .await
+        .expect("list_notes any");
+    assert_eq!(
+        first_content_as_json(&any)["count"],
+        json!(2),
+        "the default mode is any: both notes carry at least one tag"
+    );
+
+    let all = server
+        .dispatch("list_notes", json!({"tags": ["rust", "llm"], "tags_mode": "all"}))
+        .await
+        .expect("list_notes all");
+    let parsed = first_content_as_json(&all);
+    assert_eq!(parsed["count"], json!(1), "all mode must drop the single-tag note");
+    assert_eq!(parsed["results"][0]["path"], json!("notes/both.md"));
+}
+
+/// Same rule on the search path, which threads `tags_all` through the whole
+/// retrieval pipeline rather than a single SQL call.
+#[tokio::test]
+async fn knowledge_search_honors_tags_mode_all() {
+    let db = SearchIndex::open_memory().expect("open db");
+    seed_tagged_article(&db, "notes/both.md", "Both", "ollama runs locally", &["rust", "llm"]);
+    seed_tagged_article(&db, "notes/one.md", "One", "ollama runs locally", &["rust"]);
+    let server = OracleMcpServer::new(Config::default(), db);
+
+    let result = server
+        .dispatch(
+            "knowledge_search",
+            json!({"query": "ollama", "mode": "bm25", "tags": ["rust", "llm"], "tags_mode": "all"}),
+        )
+        .await
+        .expect("knowledge_search dispatch");
+    let parsed = first_content_as_json(&result);
+    let paths: Vec<&str> = parsed["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|r| r["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(paths, vec!["notes/both.md"], "all mode must drop notes/one.md");
+}
+
+/// A typo and a real-but-unused tag both return zeros, so the brief carries
+/// `known` to tell them apart.
+#[tokio::test]
+async fn tag_brief_flags_an_unknown_tag() {
+    let db = SearchIndex::open_memory().expect("open db");
+    seed_tagged_article(&db, "notes/a.md", "A", "body", &["privacy"]);
+    let server = OracleMcpServer::new(Config::default(), db);
+
+    let known = server
+        .dispatch("tag_brief", json!({"tag": "privacy"}))
+        .await
+        .expect("tag_brief dispatch");
+    assert_eq!(first_content_as_json(&known)["known"], json!(true));
+
+    let unknown = server
+        .dispatch("tag_brief", json!({"tag": "definitely-not-a-tag"}))
+        .await
+        .expect("tag_brief dispatch");
+    let parsed = first_content_as_json(&unknown);
+    assert_eq!(parsed["known"], json!(false));
+    assert_eq!(parsed["total_notes"], json!(0));
+    assert!(
+        parsed["message"].as_str().is_some_and(|m| m.contains("no such tag")),
+        "an unknown tag must say so: {parsed}"
+    );
+}
+
+/// The aggregate `tag_search` branch pages at 50 by default, so `count`
+/// alone cannot say whether the vocabulary was truncated. `total_tags` and
+/// `truncated` do.
+#[tokio::test]
+async fn tag_search_reports_the_total_beside_the_page() {
+    let db = SearchIndex::open_memory().expect("open db");
+    for i in 0..4 {
+        seed_tagged_article(&db, &format!("notes/{i}.md"), "T", "body", &[&format!("tag-{i}")]);
+    }
+    let server = OracleMcpServer::new(Config::default(), db);
+
+    let full = server.dispatch("tag_search", json!({})).await.expect("tag_search");
+    let parsed = first_content_as_json(&full);
+    assert_eq!(parsed["total_tags"], json!(4));
+    assert_eq!(parsed["truncated"], json!(false));
+
+    let paged = server
+        .dispatch("tag_search", json!({"limit": 2}))
+        .await
+        .expect("tag_search paged");
+    let parsed = first_content_as_json(&paged);
+    assert_eq!(parsed["count"], json!(2));
+    assert_eq!(parsed["total_tags"], json!(4), "the total must survive the page cap");
+    assert_eq!(parsed["truncated"], json!(true));
+}
+
+/// No MCP tool may take a `domain` parameter. The facet was retired by the
+/// tags-only design doc; this is the machine-checked half of that promise,
+/// replacing the manual grep the fold left behind (Addendum C3).
+#[test]
+fn no_mcp_tool_schema_carries_a_domain_parameter() {
+    let tools = OracleMcpServer::list_tools();
+    assert!(!tools.is_empty(), "the tool router must expose tools");
+    for tool in &tools {
+        let schema = serde_json::to_string(&tool.input_schema).expect("schema serializes");
+        assert!(
+            !schema.to_lowercase().contains("domain"),
+            "tool {} still carries a domain parameter: {schema}",
+            tool.name
+        );
+    }
+}
+
+/// Every tool that filters by `tags` must also expose `tags_mode`, or the
+/// AND/OR choice silently differs per tool.
+#[test]
+fn every_tags_parameter_has_a_tags_mode_sibling() {
+    for tool in &OracleMcpServer::list_tools() {
+        let schema = serde_json::to_value(&tool.input_schema).expect("schema serializes");
+        let props = &schema["properties"];
+        if props.get("tags").is_some() {
+            assert!(
+                props.get("tags_mode").is_some(),
+                "tool {} takes tags but not tags_mode",
+                tool.name
+            );
+        }
+    }
+}

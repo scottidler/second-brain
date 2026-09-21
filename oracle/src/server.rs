@@ -327,7 +327,7 @@ impl OracleMcpServer {
 impl OracleMcpServer {
     /// Search the vault's ingested knowledge.
     #[tool(
-        description = "Search the vault's ingested knowledge. Omit mode (the common case) to run the operator-configured pipeline (vector-first by default, eval-best). Mode overrides force a single path: bm25 (FTS5 keyword search), vector (semantic, brute-force cosine over embeddings), or hybrid (BM25 + vector fused via RRF). Filter by tags, note type, or status. Control content verbosity with the detail parameter: metadata, tldr, summary, full. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "Search the vault's ingested knowledge. Omit mode (the common case) to run the operator-configured pipeline (vector-first by default, eval-best). Mode overrides force a single path: bm25 (FTS5 keyword search), vector (semantic, brute-force cosine over embeddings), or hybrid (BM25 + vector fused via RRF). Filter by tags (tags_mode: any or all), note type, or status. Control content verbosity with the detail parameter: metadata, tldr, summary, full. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn knowledge_search(&self, params: Parameters<KnowledgeSearchRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -338,6 +338,7 @@ impl OracleMcpServer {
         let limit = req.limit.unwrap_or(10);
 
         let tags = req.tags.as_deref();
+        let tags_all = req.tags_mode.unwrap_or_default().is_all();
         let note_type = req.note_type.as_ref().map(|t| t.as_str());
         let status = req.status.as_ref().map(|s| s.as_str());
 
@@ -367,6 +368,7 @@ impl OracleMcpServer {
                     mode,
                     &req.query,
                     tags,
+                    tags_all,
                     note_type,
                     status,
                     limit,
@@ -380,6 +382,7 @@ impl OracleMcpServer {
                     &req.query,
                     pre_queries.as_deref().unwrap_or_default(),
                     tags,
+                    tags_all,
                     note_type,
                     status,
                     limit,
@@ -429,7 +432,7 @@ impl OracleMcpServer {
 
     /// List notes with optional filters
     #[tool(
-        description = "List notes with optional filters by tags, note type, status, or date range. Unlike knowledge_search, this does not require a search query - use it to browse by category. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "List notes with optional filters by tags (tags_mode: any or all), note type, status, or date range. Unlike knowledge_search, this does not require a search query - use it to browse by category. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn list_notes(&self, params: Parameters<ListNotesRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -440,7 +443,7 @@ impl OracleMcpServer {
         let notes = db
             .list_notes(
                 req.tags.as_deref(),
-                false,
+                req.tags_mode.unwrap_or_default().is_all(),
                 req.note_type.as_ref().map(|t| t.as_str()),
                 req.status.as_ref().map(|s| s.as_str()),
                 req.after.as_deref(),
@@ -484,14 +487,28 @@ impl OracleMcpServer {
             .map(|n| Self::format_note(n, &detail_level))
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::json(json!({
+        // A zero-note brief is ambiguous on its own: a canonical tag nobody
+        // has used yet and an outright typo both return zeros, and the caller
+        // cannot tell which it got. `known` separates them. The vocabulary is
+        // read only on the zero path, so the common case stays one DB query.
+        let known = brief.total_notes > 0 || load_canonical_tags().contains(&req.tag);
+        let mut payload = json!({
             "tag": brief.tag,
+            "known": known,
             "total_notes": brief.total_notes,
             "unread": brief.unread,
             "starred": brief.starred,
             "by_type": brief.by_type,
             "results": results,
-        }))?]))
+        });
+        if !known {
+            payload["message"] = json!(format!(
+                "no such tag: {:?} is neither in use nor in the canonical vocabulary (call tag_search with no tag, or schema_info, for the valid values)",
+                req.tag
+            ));
+        }
+
+        Ok(CallToolResult::success(vec![Content::json(payload)?]))
     }
 
     /// Query the borg ingest ledger
@@ -658,7 +675,12 @@ impl OracleMcpServer {
             Some(tag) => {
                 let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
                 let notes = db
-                    .tag_search(&tag, req.tags.as_deref(), false, req.limit)
+                    .tag_search(
+                        &tag,
+                        req.tags.as_deref(),
+                        req.tags_mode.unwrap_or_default().is_all(),
+                        req.limit,
+                    )
                     .map_err(Self::err)?;
 
                 let results: Vec<serde_json::Value> =
@@ -673,6 +695,11 @@ impl OracleMcpServer {
             None => {
                 let stats = db.tag_stats().map_err(Self::err)?;
                 let limit = req.limit.unwrap_or(50) as usize;
+                // `count` is the page length. Without `total_tags` beside it a
+                // caller cannot tell a truncated page from the whole
+                // vocabulary, which is how the default 50 read as "115 tags
+                // became 50".
+                let total_tags = stats.len();
                 let stats: Vec<&vault::search::TagStat> = stats.iter().take(limit).collect();
                 let tags: Vec<serde_json::Value> = stats
                     .iter()
@@ -686,6 +713,8 @@ impl OracleMcpServer {
 
                 Ok(CallToolResult::success(vec![Content::json(json!({
                     "count": tags.len(),
+                    "total_tags": total_tags,
+                    "truncated": tags.len() < total_tags,
                     "results": tags,
                 }))?]))
             }
@@ -738,16 +767,20 @@ impl OracleMcpServer {
         };
         let mut notes = db.find_similar(&content, fetch).map_err(Self::err)?;
 
-        // Filter by tags if requested (OR across the list, same default as
-        // every other `tags` filter). `find_similar` has no vault-layer tags
+        // Filter by tags if requested, combined per `tags_mode` like every
+        // other `tags` filter. `find_similar` has no vault-layer tags
         // param (FTS5 term extraction, not a schema-filtered query), so this
         // is a post-filter over the resolved rows.
         if let Some(wanted) = &req.tags
             && !wanted.is_empty()
         {
+            let tags_all = req.tags_mode.unwrap_or_default().is_all();
             notes.retain(|n| {
                 let note_tags: Vec<String> = serde_json::from_str(&n.tags).unwrap_or_default();
-                wanted.iter().any(|t| note_tags.contains(t))
+                match tags_all {
+                    true => wanted.iter().all(|t| note_tags.contains(t)),
+                    false => wanted.iter().any(|t| note_tags.contains(t)),
+                }
             });
         }
 
@@ -780,7 +813,7 @@ impl OracleMcpServer {
             .recent_notes(
                 req.days,
                 req.tags.as_deref(),
-                false,
+                req.tags_mode.unwrap_or_default().is_all(),
                 req.note_type.as_ref().map(|t| t.as_str()),
                 req.limit,
             )
@@ -862,7 +895,12 @@ impl OracleMcpServer {
             Some(creator) => {
                 let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
                 let notes = db
-                    .notes_by_creator(&creator, req.tags.as_deref(), false, req.limit)
+                    .notes_by_creator(
+                        &creator,
+                        req.tags.as_deref(),
+                        req.tags_mode.unwrap_or_default().is_all(),
+                        req.limit,
+                    )
                     .map_err(Self::err)?;
                 let results: Vec<serde_json::Value> =
                     notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
@@ -907,7 +945,12 @@ impl OracleMcpServer {
             Some(host) => {
                 let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
                 let notes = db
-                    .notes_by_source_domain(&host, req.tags.as_deref(), false, req.limit)
+                    .notes_by_source_domain(
+                        &host,
+                        req.tags.as_deref(),
+                        req.tags_mode.unwrap_or_default().is_all(),
+                        req.limit,
+                    )
                     .map_err(Self::err)?;
                 let results: Vec<serde_json::Value> =
                     notes.iter().map(|n| Self::format_note(n, &detail_level)).collect();
@@ -1051,7 +1094,9 @@ impl OracleMcpServer {
     async fn classify_status(&self, params: Parameters<ClassifyStatusRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
         let db = self.db.lock().map_err(Self::err)?;
-        let stats = db.classify_stats(req.tags.as_deref(), false).map_err(Self::err)?;
+        let stats = db
+            .classify_stats(req.tags.as_deref(), req.tags_mode.unwrap_or_default().is_all())
+            .map_err(Self::err)?;
 
         Ok(CallToolResult::success(vec![Content::json(&stats)?]))
     }
