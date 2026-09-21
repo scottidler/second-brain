@@ -223,8 +223,8 @@ fn alias_free_ai_survives_apply_tags() {
         !content.contains("ai-llm"),
         "retired alias still rewrote `ai`:\n{content}"
     );
-    // Form-agnostic on purpose: cortex still writes the inline list here and
-    // only switches to block form in P4, so this must read both.
+    // Form-agnostic on purpose: cortex writes block form, but the fixture
+    // this reads may still carry the inline list it was seeded with.
     assert!(
         frontmatter_tags(&content).contains(&"ai".to_string()),
         "`ai` did not survive apply_tags:\n{content}"

@@ -6,8 +6,8 @@
 //! `vault::paths::patterns_dir()`) and one set of knobs (binary, model,
 //! max_content_chars) from the cortex FabricConfig.
 //!
-//! Per-feature timeouts stay tunable (autotag 120s, classify 30s,
-//! intel 120s); binary/model/max-chars are global.
+//! Per-feature timeouts stay tunable (the bridge and memgraph extractors
+//! each pass their own); binary/model/max-chars are global.
 
 use eyre::Result;
 

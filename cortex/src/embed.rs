@@ -91,7 +91,7 @@ pub const DEFAULT_MAX_CHUNKS_PER_TICK: usize = 512;
 /// pool for the duration of the call. Candle's matmul fans out on rayon, and
 /// `ThreadPool::install` reparents that fan-out onto THIS pool instead of the
 /// global one - so inference physically cannot consume the workers that
-/// `cortex::autotag`, `cortex::quality`, `classify`, and the lint passes run
+/// `cortex::quality`, `classify`, and the lint passes run
 /// their `par_iter` on.
 ///
 /// This is the invariant the 2026-08-16 incident was missing. Inference on an

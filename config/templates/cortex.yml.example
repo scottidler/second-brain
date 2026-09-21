@@ -25,7 +25,7 @@ embedding:
 embed:
   # Size of the DEDICATED inference thread pool. Candle's matmul fans out on
   # rayon; embed installs its own pool so that fan-out can never consume the
-  # workers governance actions (classify/lint/link/quality/auto-tag) run their
+  # workers governance actions (classify/lint/link/quality) run their
   # par_iter on. 0 means "small fixed default" (2), NOT core count: "as many
   # replicas as cores" is what caused the contention this pool exists to
   # prevent. Read once per process - restart the daemon to change it.

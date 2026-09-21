@@ -956,7 +956,7 @@ fn oversized_first_note_does_not_drag_others_along() {
 #[test]
 fn inference_runs_off_the_global_rayon_pool() {
     // The invariant the incident was missing: candle's matmul fan-out must not
-    // land on the pool `classify`/`quality`/`autotag` run their par_iter on.
+    // land on the pool `classify`/`quality`/lint run their par_iter on.
     // `install` reparents the closure, so inside it the current thread must be
     // a worker of OUR pool, not of the global one.
     let name = in_inference_pool(2, || {

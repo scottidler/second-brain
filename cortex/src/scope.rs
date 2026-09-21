@@ -12,7 +12,7 @@ use crate::vault::Note;
 /// surfacing, wikilink insertion - skip authored notes so the user's space is
 /// never auto-graded or auto-edited. This is a deliberate carve-OUT for human
 /// content, distinct from the ingested-only WHITELIST (`origin == assisted`)
-/// used by classify/autotag/distill/entities, which produce enrichment that
+/// used by classify/distill/entities, which produce enrichment that
 /// only makes sense for ingested notes. The carve-out is a blacklist on
 /// purpose: generated notes (digests, entity hubs) still get governed.
 pub fn is_authored(note: &Note) -> bool {
