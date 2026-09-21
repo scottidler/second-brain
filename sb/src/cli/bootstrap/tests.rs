@@ -164,6 +164,62 @@ fn extract_force_preserves_templates() {
     assert_eq!(after, edited, "--force must NOT overwrite per-host templates");
 }
 
+// Design doc `2026-09-21-staged-tag-proposals.md`, Phase 3: `otto deploy` runs
+// `sb bootstrap --force`, so anything in the force-overwrite set is reset on
+// every deploy. `tag-proposals.yml` (written by `sb cortex sweep`) and
+// `glossary.yml` (written by `sb cortex concept-promote`) are machine-generated
+// state, and an always-write there silently reverted every promotion.
+
+#[test]
+#[serial(env_xdg)]
+fn extract_force_preserves_tag_proposals() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+
+    extract_canonical_assets(false).expect("first extract");
+    let proposals_path = tmp.path().join("sb").join("tag-proposals.yml");
+    let queue = "scanned-at: 2026-09-21T00:00:00Z\nproposals:\n  - tag: ci-cd\n    frequency: 46\n    sources: []\n";
+    std::fs::write(&proposals_path, queue).expect("populate queue");
+
+    extract_canonical_assets(true).expect("forced extract");
+
+    let after = std::fs::read_to_string(&proposals_path).expect("read");
+    assert_eq!(after, queue, "--force must NOT overwrite the generated proposal queue");
+}
+
+#[test]
+#[serial(env_xdg)]
+fn extract_force_preserves_glossary() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+
+    extract_canonical_assets(false).expect("first extract");
+    let glossary_path = tmp.path().join("sb").join("glossary.yml");
+    let promoted = "concepts:\n  reciprocal-rank-fusion:\n    aliases: [rrf]\n";
+    std::fs::write(&glossary_path, promoted).expect("promote a concept");
+
+    extract_canonical_assets(true).expect("forced extract");
+
+    let after = std::fs::read_to_string(&glossary_path).expect("read");
+    assert_eq!(after, promoted, "--force must NOT revert a concept promotion");
+}
+
+/// Both generated files are still SEEDED on a fresh machine: write-if-missing,
+/// not never-write.
+#[test]
+#[serial(env_xdg)]
+fn extract_seeds_generated_state_when_absent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+
+    extract_canonical_assets(true).expect("forced extract on a fresh machine");
+
+    let proposals = std::fs::read_to_string(tmp.path().join("sb").join("tag-proposals.yml")).expect("read proposals");
+    assert_eq!(proposals, TAG_PROPOSALS_YML, "fresh machine gets the seed queue");
+    let glossary = std::fs::read_to_string(tmp.path().join("sb").join("glossary.yml")).expect("read glossary");
+    assert_eq!(glossary, GLOSSARY_YML, "fresh machine gets the seed glossary");
+}
+
 // Template-parse guards: the shipped `.example` templates must deserialize as
 // the typed subsystem Config, not just be byte-identical to themselves. A
 // struct field rename/removal that the byte-identity checks can't see would

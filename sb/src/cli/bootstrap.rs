@@ -43,10 +43,13 @@ pub struct BootstrapArgs {
     #[arg(long)]
     pub extension: bool,
 
-    /// Refresh shared YAMLs (canonical-tags, tag-mapping, tag-proposals) and
-    /// the patterns directory from the binary's embedded copies, overwriting
-    /// any operator edits. Per-host templates (borg.yml, cortex.yml, oracle.yml)
-    /// are still write-if-missing under --force - those hold per-host config.
+    /// Refresh shipped shared YAMLs (canonical-tags, tag-mapping) and the
+    /// patterns directory from the binary's embedded copies, overwriting any
+    /// operator edits. Per-host templates (borg.yml, cortex.yml, oracle.yml)
+    /// and GENERATED state (tag-proposals.yml, glossary.yml) are still
+    /// write-if-missing under --force - the first hold per-host config, the
+    /// second are produced by `sb cortex sweep` and `sb cortex concept-promote`
+    /// and would be reverted by every `otto deploy` if --force reclaimed them.
     #[arg(long)]
     pub force: bool,
 }
@@ -248,9 +251,12 @@ fn install_extension() -> Result<()> {
     Ok(())
 }
 
-/// Extract every embedded canonical asset to `~/.config/sb/`. Templates
-/// (borg.yml, cortex.yml, oracle.yml) are always write-if-missing because
-/// they hold per-host config. Shared YAMLs and patterns honor `force`:
+/// Extract every embedded canonical asset to `~/.config/sb/`. Two sets are
+/// always write-if-missing, `force` or not: per-host templates (borg.yml,
+/// cortex.yml, oracle.yml), which hold per-host config, and GENERATED state
+/// (tag-proposals.yml, glossary.yml), which the machine produces and an
+/// always-write would silently revert on every `otto deploy`. Shipped shared
+/// YAMLs (canonical-tags, tag-mapping) and patterns honor `force`:
 /// write-if-missing by default, always-write under `--force`.
 ///
 /// Pulled out of `run` so unit tests can exercise the extraction in
@@ -265,11 +271,22 @@ pub(crate) fn extract_canonical_assets(force: bool) -> Result<()> {
         write_if_missing(name, path, template)?;
     }
 
+    // Machine-generated state. `sb cortex sweep` writes tag-proposals.yml and
+    // `sb cortex concept-promote` writes glossary.yml, so an always-write here
+    // means every `otto deploy` (which runs `sb bootstrap --force`) resets the
+    // proposal queue to `proposals: []` and reverts every concept promotion.
+    // A fresh machine still gets the seed; an existing one keeps its state.
+    let generated = [
+        ("tag-proposals", vault::paths::tag_proposals(), TAG_PROPOSALS_YML),
+        ("glossary", vault::paths::glossary(), GLOSSARY_YML),
+    ];
+    for (name, path, contents) in &generated {
+        write_if_missing(name, path, contents)?;
+    }
+
     let shared = [
         ("canonical-tags", vault::paths::canonical_tags(), CANONICAL_TAGS_YML),
         ("tag-mapping", vault::paths::tag_mapping(), TAG_MAPPING_YML),
-        ("tag-proposals", vault::paths::tag_proposals(), TAG_PROPOSALS_YML),
-        ("glossary", vault::paths::glossary(), GLOSSARY_YML),
     ];
     for (name, path, contents) in &shared {
         if force {

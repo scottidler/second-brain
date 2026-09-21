@@ -241,10 +241,13 @@ fn parse_typed<T: serde::de::DeserializeOwned>(name: &str, path: &std::path::Pat
 fn shared_config_findings() -> Vec<Finding> {
     let installed_dir = vault::paths::config_root();
     let mut findings = Vec::new();
+    // tag-proposals.yml is deliberately absent: it is machine-generated state
+    // (`sb cortex sweep` overwrites it every scan), so it is ALWAYS expected to
+    // differ from the embedded constant and a drift finding on it is permanent
+    // noise. glossary.yml is generated too and was never in this list.
     for (filename, expected) in &[
         ("canonical-tags.yml", crate::cli::bootstrap::CANONICAL_TAGS_YML),
         ("tag-mapping.yml", crate::cli::bootstrap::TAG_MAPPING_YML),
-        ("tag-proposals.yml", crate::cli::bootstrap::TAG_PROPOSALS_YML),
     ] {
         let path = installed_dir.join(filename);
         match std::fs::read_to_string(&path) {
