@@ -404,6 +404,33 @@ fn test_scan_proposals_mapped_tags_not_proposed() {
     assert!(proposals.is_empty());
 }
 
+/// Design doc `2026-09-21-staged-tag-proposals.md`, Phase 1: a `null`-mapped
+/// (human-rejected) tag must never be re-proposed. Before this guard,
+/// `match_to_canonical` returns `vec![]` for a rejection exactly like it does
+/// for "no match at all", so `scan_proposals` treated the two identically and
+/// proposed the reject once it cleared the threshold.
+#[test]
+fn test_scan_proposals_rejected_tags_not_proposed() {
+    // See the lock comment on `test_scan_proposals_finds_non_canonical`.
+    let _lock = crate::testutil::lock_env();
+    // Private XDG_CONFIG_HOME so `validate_canonical_assets` checks these
+    // files rather than the developer's real ~/.config/sb/.
+    let _cfg = crate::testutil::hermetic_config_home();
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let config = make_config(dir.path());
+
+    let notes = vec![
+        // "claudecodeai" is mapped to `null` (explicit reject) in
+        // `make_config`'s mapping fixture, and appears on 2 notes, which
+        // clears the threshold of 2.
+        NoteBuilder::new("notes/a.md").tags(&["claudecodeai", "rust"]).build(),
+        NoteBuilder::new("notes/b.md").tags(&["claudecodeai", "python"]).build(),
+    ];
+
+    let proposals = scan_proposals(&notes, &config).expect("scan");
+    assert!(proposals.is_empty());
+}
+
 /// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`, Phase 1: the
 /// sweep arm's fingerprint may only include paths `rewrite_note_tags`
 /// actually wrote, never every `new_tags != tags` diff (sweep.rs:174 in the

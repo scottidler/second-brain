@@ -163,6 +163,14 @@ pub fn match_to_canonical(raw_tag: &str, canon: &CanonicalSet, mapping: &TagMapp
     vec![]
 }
 
+/// True when `raw_tag` carries an explicit `null` entry in the mapping file,
+/// i.e. a human already rejected it. `match_to_canonical` returns an empty
+/// vec for BOTH this and "no match at all"; a proposal scanner must not
+/// conflate them or it re-proposes every rejection forever.
+pub fn is_rejected(raw_tag: &str, mapping: &TagMapping) -> bool {
+    matches!(mapping.get(raw_tag), Some(None))
+}
+
 /// Filter raw tags through canonical vocabulary and cap the result.
 ///
 /// Returns deduplicated canonical tags, capped at max_per_note.
