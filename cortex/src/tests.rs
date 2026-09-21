@@ -138,6 +138,10 @@ fn link_scan_concepts_is_strict_subset_of_all() {
 fn lint_apply_report_excludes_fix_none_violations() {
     use crate::testutil::TestVault;
 
+    let _lock = crate::testutil::lock_env();
+    // Private XDG_CONFIG_HOME so the canonical-tags load in `crate::lint`
+    // checks these files rather than the developer's real ~/.config/sb/.
+    let _cfg = crate::testutil::hermetic_config_home();
     let v = TestVault::new();
     let config = v.config();
     let opts = crate::opts::LintOpts {
@@ -174,6 +178,10 @@ fn lint_apply_report_excludes_fix_none_violations() {
 fn lint_apply_zero_writable_fixes_yields_empty_fingerprint() {
     use crate::testutil::TestVault;
 
+    let _lock = crate::testutil::lock_env();
+    // Private XDG_CONFIG_HOME so the canonical-tags load in `crate::lint`
+    // checks these files rather than the developer's real ~/.config/sb/.
+    let _cfg = crate::testutil::hermetic_config_home();
     let v = TestVault::new();
     let config = v.config();
     let opts = crate::opts::LintOpts {
@@ -199,6 +207,10 @@ fn lint_apply_written_paths_are_subset_of_bytes_changed() {
     use crate::testutil::TestVault;
     use std::fs;
 
+    let _lock = crate::testutil::lock_env();
+    // Private XDG_CONFIG_HOME so the canonical-tags load in `crate::lint`
+    // checks these files rather than the developer's real ~/.config/sb/.
+    let _cfg = crate::testutil::hermetic_config_home();
     let v = TestVault::new();
 
     // Snapshot every markdown file's bytes before the apply pass.
