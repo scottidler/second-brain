@@ -495,7 +495,7 @@ Run against current `main` before ready-to-build; observed output recorded under
 - Ingest: one or two classifier HTTP calls per note (sharded labels), 192 ms measured for 2 texts; replaces one Fabric subprocess call (`create_tags`, 5-30 s). Net faster.
 - Migration: 2,748 files, rayon, `write_atomic`; same shape as `v3-domain-expansion`.
 - Index: `note_tags` about 12,400 rows after P4; `idx_note_tags_tag` makes the tag filter an index lookup, matching what `idx_notes_domain` gave. `--force` reindex of 3,742 notes is the existing full-index cost.
-- Daemon: `--retag` and catch-up batch up to 1,000 texts per call; classifier.dev limits observed in the handoff (`3000;w=60, 20000;w=86400` free, 10x Pro) bound the daemon's tick, and the client reads `ratelimit-remaining`.
+- Daemon: `--retag` and catch-up batch up to 1,000 texts per call; classifier.dev limits observed in the handoff (`3000;w=60, 20000;w=86400` free, 10x Pro) bound the daemon's tick. The client reads no rate-limit header: every non-200 response is an error, there is no retry, and borg runs the `deterministic` fallback and marks the receipt `degraded`.
 
 ### Security
 - `CLASSIFY_API_KEY` rides the established channel: age-encrypted in `keep/.secrets`, exported by `manifest secrets env`, delivered to the daemons by `env-bootstrap` -> `EnvironmentFile`. Never logged; presence checked with `env -r`.
