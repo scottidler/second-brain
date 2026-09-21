@@ -52,6 +52,10 @@ pub enum Fix {
     RemoveCortexFields {
         keys: Vec<String>,
     },
+    /// Remove one frontmatter key outright (a deprecated field).
+    DropField {
+        key: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,6 +177,7 @@ impl Report {
                     Fix::RemoveCortexFields { keys } => {
                         format!("remove {}", keys.join(", "))
                     }
+                    Fix::DropField { key } => format!("drop {key}"),
                 };
                 let prefix = if applied { "applied:" } else { "fix:" };
                 lines.push(format!("  {} {}", prefix.dimmed(), fix_desc.dimmed()));

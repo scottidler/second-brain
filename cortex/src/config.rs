@@ -501,6 +501,12 @@ pub struct FrontmatterConfig {
     pub type_fields: HashMap<String, Vec<String>>,
     #[serde(rename = "auto-title")]
     pub auto_title: bool,
+    /// Frontmatter keys the lint reports as `frontmatter.deprecated.<key>`
+    /// with a drop fix, on top of the compiled-in list. Deployment-specific:
+    /// a key a retired schema field left behind is named here, in the
+    /// deployed cortex.yml, rather than in code. Default empty.
+    #[serde(rename = "deprecated-drops")]
+    pub deprecated_drops: Vec<String>,
 }
 
 impl Default for FrontmatterConfig {
@@ -516,6 +522,7 @@ impl Default for FrontmatterConfig {
             path_exempt: HashMap::new(),
             type_fields: HashMap::new(),
             auto_title: true,
+            deprecated_drops: Vec::new(),
         }
     }
 }

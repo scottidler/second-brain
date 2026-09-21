@@ -273,3 +273,50 @@ fn test_deprecated_field_detection() {
         legacy_deprecated.len()
     );
 }
+
+/// B7: a key named in `frontmatter.deprecated-drops` is reported as
+/// `frontmatter.deprecated.<key>` with a drop fix, and `--apply` removes it.
+/// The key lives in config, never in code, so a retired schema field can be
+/// named in the deployed cortex.yml alone.
+#[test]
+fn config_named_deprecated_key_is_reported_and_dropped() {
+    let v = TestVault::new();
+    v.add_note(
+        "notes/leftover.md",
+        "---\ntitle: Leftover\ndate: 2026-03-20\ntype: note\nfrobnicate: widgets\ntags:\n  - rust\n---\nBody.\n",
+    );
+    let mut config = v.config().actions.frontmatter;
+    let schema = SchemaConfig::default();
+
+    // Not configured: no report, nothing dropped.
+    let quiet = lint_frontmatter(&v.scan(), &config, &schema);
+    assert!(
+        !quiet
+            .violations
+            .iter()
+            .any(|vi| vi.rule == "frontmatter.deprecated.frobnicate"),
+        "unconfigured key must stay silent"
+    );
+
+    config.deprecated_drops = vec!["frobnicate".to_string()];
+    let report = lint_frontmatter(&v.scan(), &config, &schema);
+    let hit = report
+        .violations
+        .iter()
+        .find(|vi| vi.rule == "frontmatter.deprecated.frobnicate")
+        .expect("configured key reported");
+    assert!(
+        matches!(&hit.fix, Some(Fix::DropField { key }) if key == "frobnicate"),
+        "expected a drop fix, got {:?}",
+        hit.fix
+    );
+
+    let written = apply_frontmatter(v.root(), &v.scan(), &config, &schema).expect("apply");
+    assert!(
+        written.contains(&"notes/leftover.md".to_string()),
+        "written={written:?}"
+    );
+    let after = v.read("notes/leftover.md");
+    assert!(!after.contains("frobnicate"), "key not dropped:\n{after}");
+    assert!(after.contains("  - rust"), "sibling field damaged:\n{after}");
+}

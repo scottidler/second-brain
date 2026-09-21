@@ -181,6 +181,20 @@ fn validate_note(note: &Note, config: &FrontmatterConfig, schema: &SchemaConfig,
             });
         }
     }
+    // Deployment-named drops carry a fix: the operator asked for the key to
+    // go, so `--apply` removes it. The compiled-in list above stays
+    // report-only, as it always was.
+    for drop_name in &config.deprecated_drops {
+        if fm.extra.contains_key(drop_name) {
+            report.add(Violation {
+                path: note.path.clone(),
+                rule: format!("frontmatter.deprecated.{drop_name}"),
+                severity: Severity::Warning,
+                message: format!("deprecated field '{drop_name}' should be removed (frontmatter.deprecated-drops)"),
+                fix: Some(Fix::DropField { key: drop_name.clone() }),
+            });
+        }
+    }
 }
 
 /// Check whether a required field is actually required for this note,
@@ -315,6 +329,22 @@ pub fn apply_frontmatter(
             let abs_path = vault_root.join(&note.path);
             let mut content = note.raw.clone();
             let mut modified = false;
+
+            let drops: Vec<String> = report
+                .violations
+                .iter()
+                .filter_map(|v| match &v.fix {
+                    Some(Fix::DropField { key }) => Some(key.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !drops.is_empty()
+                && let Some(dropped) = crate::scope::remove_frontmatter_fields(&content, &drops)
+            {
+                log::debug!("apply_frontmatter: dropping {drops:?} from {}", note.path.display());
+                content = dropped;
+                modified = true;
+            }
 
             for violation in &report.violations {
                 if let Some(Fix::SetFrontmatter { key, value }) = &violation.fix

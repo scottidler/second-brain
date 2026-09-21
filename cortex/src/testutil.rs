@@ -341,6 +341,7 @@ impl TestVault {
                         m
                     },
                     auto_title: true,
+                    deprecated_drops: Vec::new(),
                 },
                 tags: TagsConfig {
                     style: "lowercase-hyphenated".to_string(),
