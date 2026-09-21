@@ -155,6 +155,8 @@ fn print_vault_stats(config: &oracle::Config, stats: &vault::search::VaultStats)
         }
     }
 
+    println!("Distinct tags: {}", stats.distinct_tags);
+
     println!("\nBy tag (top 20):");
     for (tag, count) in &stats.by_tag {
         println!("  {tag:<15} {count}");

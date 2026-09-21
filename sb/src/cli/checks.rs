@@ -758,9 +758,8 @@ fn vault_findings() -> Vec<Finding> {
     match db.stats() {
         Ok(stats) => {
             findings.push(Finding::ok(format!(
-                "{} note(s) indexed across {} tag(s)",
-                stats.total_notes,
-                stats.by_tag.len()
+                "{} note(s) indexed across {} distinct tag(s)",
+                stats.total_notes, stats.distinct_tags
             )));
         }
         Err(e) => findings.push(Finding::warn(

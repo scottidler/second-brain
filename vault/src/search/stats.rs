@@ -125,6 +125,7 @@ impl super::SearchIndex {
             .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
 
         let tag_counts = self.top_tags(20)?;
+        let distinct_tags = self.distinct_tag_count()?;
         let type_counts = self.count_by_column("note_type")?;
         let status_counts = self.count_by_column("status")?;
 
@@ -133,6 +134,7 @@ impl super::SearchIndex {
         Ok(VaultStats {
             total_notes: total,
             by_tag: tag_counts,
+            distinct_tags,
             by_type: type_counts,
             by_status: status_counts,
             schema_gaps,
@@ -153,6 +155,16 @@ impl super::SearchIndex {
             .filter_map(warn_row)
             .collect();
         Ok(rows)
+    }
+
+    /// Number of distinct tags across the `note_tags` facet. `by_tag` is
+    /// capped at the top 20, so anything reporting "N tags" reads this, not
+    /// `by_tag.len()`.
+    fn distinct_tag_count(&self) -> Result<u64> {
+        let count: u64 = self
+            .conn
+            .query_row("SELECT COUNT(DISTINCT tag) FROM note_tags", [], |row| row.get(0))?;
+        Ok(count)
     }
 
     /// Coverage of the `note_embeddings` table relative to `notes`. Used by
