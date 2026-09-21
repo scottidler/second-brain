@@ -26,6 +26,10 @@ ureq = { version = "3.2.0", features = ["json"] }
 unicode-normalization = { workspace = true }
 walkdir = { workspace = true }
 rayon.workspace = true
+# READ-ONLY reader of borg's receipts DB for staged-trace note identity, the
+# same way oracle reads it for `failure_history`. Free in build terms: cortex
+# already links libsqlite3-sys through vault's `search` feature.
+rusqlite = { workspace = true }
 distillers = { path = "../distillers" }
 url = { workspace = true }
 sha2 = "0.11.0"

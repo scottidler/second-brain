@@ -49,4 +49,4 @@ The single source of truth for the Obsidian-vault note schema (NoteType / Origin
 - **Embeddings/distilled:** `embedding.rs` (+`embedding/`), `distilled.rs` (+`distilled/`).
 - **Search:** `search.rs` (+`search/`) — see `src/search/AGENTS.md`.
 - **Tags/hygiene:** `canonical.rs`, `hygiene.rs`.
-- **Misc:** `watcher.rs`, `rss.rs` (+`rss/`), `logging.rs`, `config.rs`, `fabric.rs`, `text.rs` (char-accurate, panic-free string truncation), `tombstone.rs` (the shared soft-retire tombstone shape written by `cortex::association` and `borg::dedupe`).
+- **Misc:** `watcher.rs`, `rss.rs` (+`rss/`), `logging.rs`, `config.rs`, `fabric.rs`, `text.rs` (char-accurate, panic-free string truncation), `tombstone.rs` (the shared soft-retire tombstone shape written by `cortex::association` and `borg::dedupe`), `identity.rs` (+`identity/`: `NoteIndex`, the note `trace:` back-edge and the `superseded-by` convergence that resolves a staged trace to the ONE note it produced; owned here because the `trace:` map is one-way and independent copies of this drift, and because cortex must not gain a borg dependency to reach `borg::harvest::identity`).

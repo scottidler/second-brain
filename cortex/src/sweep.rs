@@ -116,6 +116,18 @@ pub struct ColdStats {
     pub pinned_excluded: u64,
 }
 
+/// Which candidate arm produced a proposal.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProposalSource {
+    /// Hand-typed in Obsidian and left in note frontmatter.
+    Note,
+    /// Proposed by a fabric distill pattern, read from borg's staged
+    /// `distilled.yml` before the canonical filter ran.
+    Staged,
+    Both,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Proposal {
@@ -126,6 +138,8 @@ pub struct Proposal {
     /// Named `sources` rather than `notes` because a source key is not always
     /// a note path.
     pub sources: Vec<String>,
+    /// Which arm(s) produced this candidate.
+    pub source: ProposalSource,
 }
 
 /// A rendered view of ONE scan window, not an accumulator. `write_proposals`
@@ -248,6 +262,7 @@ pub fn scan_proposals(notes: &[Note], config: &SweepConfig) -> Result<Vec<Propos
         .map(|(tag, sources)| Proposal {
             frequency: sources.len(),
             sources,
+            source: ProposalSource::Note,
             tag,
         })
         .collect();
