@@ -16,7 +16,10 @@ use crate::vault::{Note, scan_vault};
 #[derive(Debug)]
 pub struct SweepReport {
     pub mode: SweepMode,
-    pub proposals: Option<Vec<Proposal>>,
+    /// The full proposal scan, including the staged arm's coverage, so the
+    /// printer can say "no staging tree on this host" rather than leaving
+    /// "0 proposals" ambiguous.
+    pub proposals: Option<ProposalScan>,
     pub proposals_path: Option<String>,
 }
 
@@ -72,7 +75,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<Sweep
     };
 
     let proposals_data = if opts.proposals || !opts.migrate {
-        let proposals = scan_proposals(&notes, &config.sweep)?;
+        let scan = scan_proposals(vault_root, &notes, &config.sweep, &config.staging_root)?;
         // Write UNCONDITIONALLY when not a dry run. Under overwrite semantics a
         // non-empty gate would make "rendered view of one scan window" a lie: a
         // scan that dropped to zero would leave the last non-empty file in place
@@ -80,10 +83,10 @@ pub fn run(vault_root: &Path, config: &Config, opts: &SweepOpts) -> Result<Sweep
         let path = if opts.dry_run {
             None
         } else {
-            write_proposals(&config.sweep, proposals.clone())?;
+            write_proposals(&config.sweep, scan.proposals.clone(), scan.staged_window.clone())?;
             Some(config.sweep.proposals_path.display().to_string())
         };
-        Some((proposals, path))
+        Some((scan, path))
     } else {
         None
     };
@@ -223,51 +226,83 @@ pub fn migrate(vault_root: &Path, notes: &[Note], config: &SweepConfig, dry_run:
     Ok(modified)
 }
 
-/// Scan notes for non-canonical tags and generate proposals.
-pub fn scan_proposals(notes: &[Note], config: &SweepConfig) -> Result<Vec<Proposal>> {
+/// What one proposal scan found, beyond the proposals themselves.
+///
+/// The staged arm's coverage is reported rather than inferred: "0 proposals"
+/// means something different on a host that scanned 659 staged traces than on
+/// one that has no staging tree at all.
+#[derive(Debug, Clone, Default)]
+pub struct ProposalScan {
+    pub proposals: Vec<Proposal>,
+    /// False when the staged arm did not run: either `staged-proposals: false`
+    /// or no staging root on this host.
+    pub staged_scanned: bool,
+    pub staged_traces: usize,
+    pub staged_unreadable: usize,
+    pub staged_window: Option<String>,
+}
+
+/// Scan for non-canonical tag candidates and generate proposals.
+///
+/// Two arms, unioned on ONE key space so they cannot double-count a note:
+/// note frontmatter (a tag hand-typed in Obsidian) and borg's staged
+/// `distilled.yml` files (the fabric patterns' raw, pre-filter candidates).
+/// The note arm is structurally empty under tags-only and is kept because a
+/// hand-typed tag is still a live open-vocabulary input.
+pub fn scan_proposals(
+    vault_root: &Path,
+    notes: &[Note],
+    config: &SweepConfig,
+    staging_root: &Path,
+) -> Result<ProposalScan> {
     crate::startup::validate_canonical_assets()?;
     let canonical_file = CanonicalTagsFile::load(&config.canonical_path).wrap_err("failed to load canonical tags")?;
     let mapping = canonical::load_tag_mapping(&config.mapping_path).wrap_err("failed to load tag mapping")?;
     let canonical_set = canonical_file.canonical_set();
 
-    // Count non-canonical tags across all notes
-    let mut non_canonical: HashMap<String, Vec<String>> = HashMap::new();
-
-    for note in notes {
-        let tags = note.frontmatter.tags.clone().unwrap_or_default();
-
-        for tag in &tags {
-            // A human already rejected this tag (explicit `null` mapping).
-            // `match_to_canonical` returns `vec![]` for both a rejection and
-            // "no match at all"; checking `is_rejected` first, before that
-            // emptiness test, is what keeps a reject from being re-proposed.
-            if canonical::is_rejected(tag, &mapping) {
-                continue;
-            }
-            let matches = canonical::match_to_canonical(tag, &canonical_set, &mapping);
-            if matches.is_empty() {
-                non_canonical
-                    .entry(tag.clone())
-                    .or_default()
-                    .push(note.path.to_string_lossy().to_string());
-            }
-        }
-    }
-
-    // Filter to tags meeting proposal threshold
-    let threshold = config.proposal_threshold;
-    let proposals: Vec<Proposal> = non_canonical
-        .into_iter()
-        .filter(|(_, notes)| notes.len() >= threshold)
-        .map(|(tag, sources)| Proposal {
-            frequency: sources.len(),
-            sources,
-            source: ProposalSource::Note,
-            tag,
+    let note_candidates: Vec<(String, Vec<String>)> = notes
+        .iter()
+        .map(|note| {
+            (
+                note.path.to_string_lossy().to_string(),
+                note.frontmatter.tags.clone().unwrap_or_default(),
+            )
         })
         .collect();
 
-    Ok(proposals)
+    let staged = if config.staged_proposals {
+        crate::proposals::read_staged_candidates(staging_root)?
+    } else {
+        log::info!("sweep::scan_proposals: staged-proposals is false, note-derived arm only");
+        crate::proposals::StagedScan::default()
+    };
+
+    // Identity reconciliation only matters when there is a staged arm to
+    // reconcile. Skipping it when there is not also keeps a host with no
+    // receipts DB from failing a note-only scan.
+    let trace_to_note = if staged.scanned {
+        let receipts_db = vault::receipts::receipts_db_path()?;
+        crate::proposals::resolve_trace_notes(&receipts_db, vault_root, notes)?
+    } else {
+        HashMap::new()
+    };
+
+    let proposals = crate::proposals::aggregate(
+        &note_candidates,
+        &staged.candidates,
+        &trace_to_note,
+        &canonical_set,
+        &mapping,
+        config.proposal_threshold,
+    );
+
+    Ok(ProposalScan {
+        proposals,
+        staged_scanned: staged.scanned,
+        staged_traces: staged.candidates.len(),
+        staged_unreadable: staged.unreadable,
+        staged_window: staged.window_label(),
+    })
 }
 
 /// Overwrite the proposals file with this scan's result.
@@ -277,7 +312,7 @@ pub fn scan_proposals(notes: &[Note], config: &SweepConfig) -> Result<Vec<Propos
 /// stale frequency. An existing file is still PARSED first, and a parse failure
 /// is propagated: a corrupt queue is a hand edit that went wrong, and the
 /// `unwrap_or(empty)` this replaces discarded it without a word.
-pub fn write_proposals(config: &SweepConfig, proposals: Vec<Proposal>) -> Result<()> {
+pub fn write_proposals(config: &SweepConfig, proposals: Vec<Proposal>, staged_window: Option<String>) -> Result<()> {
     // proposals_path is a PathBuf already tilde-expanded at config-load time
     // (deserialize_tilde_pathbuf), so no shellexpand here.
     let path = &config.proposals_path;
@@ -287,7 +322,7 @@ pub fn write_proposals(config: &SweepConfig, proposals: Vec<Proposal>) -> Result
 
     let file = ProposalsFile {
         scanned_at: Some(chrono::Utc::now().to_rfc3339()),
-        staged_window: None,
+        staged_window,
         proposals,
     };
 

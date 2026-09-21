@@ -816,14 +816,20 @@ where
                 // pre-migrate note list migrate() just read (migrate() does not
                 // mutate `notes` in place - only the on-disk bytes), not a
                 // freshly rescanned one.
-                match crate::sweep::scan_proposals(&notes, &config.sweep) {
+                match crate::sweep::scan_proposals(vault_root, &notes, &config.sweep, &config.staging_root) {
                     // Write UNCONDITIONALLY. The file is a rendered view of one
                     // scan window, so an empty scan must clear it; the
                     // `!proposals.is_empty()` gate this replaces would have left
                     // the last non-empty result in place forever.
-                    Ok(proposals) => {
-                        log::info!("sweep: {} tag(s) needing review", proposals.len());
-                        if let Err(e) = crate::sweep::write_proposals(&config.sweep, proposals) {
+                    Ok(scan) => {
+                        log::info!(
+                            "sweep: {} tag(s) needing review (staged arm: scanned={} traces={})",
+                            scan.proposals.len(),
+                            scan.staged_scanned,
+                            scan.staged_traces
+                        );
+                        if let Err(e) = crate::sweep::write_proposals(&config.sweep, scan.proposals, scan.staged_window)
+                        {
                             log::error!("sweep: failed to write proposals: {e}");
                         }
                     }
