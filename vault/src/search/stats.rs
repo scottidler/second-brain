@@ -232,6 +232,7 @@ impl super::SearchIndex {
     /// Get notes for a specific tag with stats. Membership is the `note_tags`
     /// facet (an index lookup), not a JSON scan.
     pub fn tag_brief(&self, tag: &str, limit: Option<u32>) -> Result<TagBrief> {
+        log::debug!("search::tag_brief: tag={tag} limit={limit:?}");
         let limit = limit.unwrap_or(10);
         let tags_arg = [tag.to_string()];
 
@@ -294,7 +295,7 @@ impl super::SearchIndex {
         tags_all: bool,
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
-        log::debug!("search::tag_search: tag={tag} limit={limit:?}");
+        log::debug!("search::tag_search: tag={tag} tags={tags:?} tags_all={tags_all} limit={limit:?}");
         let limit = limit.unwrap_or(20);
 
         // Tags are stored as JSON arrays, use Rust-side filtering
@@ -409,6 +410,7 @@ impl super::SearchIndex {
         tags_all: bool,
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
+        log::debug!("search::notes_by_creator: creator={creator} tags={tags:?} tags_all={tags_all} limit={limit:?}");
         let limit = limit.unwrap_or(20);
         let mut sql = String::from(
             "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
@@ -458,6 +460,7 @@ impl super::SearchIndex {
         tags_all: bool,
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
+        log::debug!("search::notes_by_source_domain: host={host} tags={tags:?} tags_all={tags_all} limit={limit:?}");
         let limit = limit.unwrap_or(20);
         let mut sql = String::from(
             "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
@@ -627,6 +630,7 @@ impl super::SearchIndex {
     /// breakdowns. `unclassified` counts notes carrying no `tags` (the
     /// tags-only "not yet classified" signal), excluding daily/system notes.
     pub fn classify_stats(&self, tags: Option<&[String]>, tags_all: bool) -> Result<ClassifyStats> {
+        log::debug!("search::classify_stats: tags={tags:?} tags_all={tags_all}");
         let (sql, params) = self.classify_filtered_sql("COUNT(*)", "classified = 1", tags, tags_all, None);
         let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let total_classified: u64 = self.conn.query_row(&sql, params_refs.as_slice(), |row| row.get(0))?;
