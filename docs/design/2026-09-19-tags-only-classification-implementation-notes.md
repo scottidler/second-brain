@@ -1004,6 +1004,11 @@ Q5. Three commits: `ba5c97f` (M1), `220d426` (M3 + M5), `18b0311` (M2 + M4).
   C1 (`schema_docs` never deletes or flags an obsolete `domain-values.md`) is
   the one with a live consequence: any *other* machine that syncs the vault
   keeps the file until someone notices.
-- The `v6-drop-domain` migration P11 specifies was run as a one-off and exists
-  nowhere in the repo, while its P4 counterpart `v5-domain-as-tag-undo.yml` is
-  a shipped artifact. A second machine would need the forward one.
+- The `v6-drop-domain` migration P11 specifies is not a one-off: it is
+  configured in dotfiles `HOME/.config/sb/cortex.yml` (deployed
+  `~/.config/sb/cortex.yml:227-228`, dotfiles commit `b80fb08`), so every host
+  that receives dotfiles has the forward migration and runs it by name
+  (`sb cortex migrate --only v6-drop-domain --apply`). Its P4 counterpart
+  `v5-domain-as-tag-undo.yml` ships in this repo instead because it is an
+  inverse plan file, not a configured migration. The two live in different
+  places by kind, not by omission.
