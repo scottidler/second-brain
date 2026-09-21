@@ -200,6 +200,41 @@ fn search_vector_filters_by_tags() {
         .expect("privacy");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].note_path, "notes/privacy.md");
+
+    // The other direction: a different tag selects the other note, so the
+    // filter is reading the facet and not just dropping untagged rows.
+    index
+        .conn
+        .execute(
+            "INSERT INTO note_tags (path, tag) VALUES (?1, ?2)",
+            params!["notes/other.md", "cooking"],
+        )
+        .expect("insert note_tags");
+    let tags = vec!["cooking".to_string()];
+    let hits = index
+        .search_vector(&q, 10, Some(&tags), false, None, None)
+        .expect("cooking");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].note_path, "notes/other.md");
+
+    // AND mode: only a note carrying every listed tag survives.
+    index
+        .conn
+        .execute(
+            "INSERT INTO note_tags (path, tag) VALUES (?1, ?2)",
+            params!["notes/privacy.md", "cooking"],
+        )
+        .expect("insert note_tags");
+    let both = vec!["privacy".to_string(), "cooking".to_string()];
+    let hits = index
+        .search_vector(&q, 10, Some(&both), true, None, None)
+        .expect("tags_all");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].note_path, "notes/privacy.md");
+    let hits = index
+        .search_vector(&q, 10, Some(&both), false, None, None)
+        .expect("tags any");
+    assert_eq!(hits.len(), 2, "OR mode keeps both notes");
 }
 
 #[test]
