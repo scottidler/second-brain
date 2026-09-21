@@ -507,3 +507,50 @@ fn rewrite_note_tags_returns_true_and_writes_when_frontmatter_present() {
     assert!(content.contains("tags:\n  - new"), "expected rewritten tags: {content}");
     assert!(!content.contains("tags: ["), "inline form survived: {content}");
 }
+
+/// Implementation audit r1, M1: `migrate` caps through
+/// `canonical::filter_and_cap`, which used to truncate the within-tier
+/// alphabetical list with no knowledge of `no-classifier-tags`. The daemon
+/// runs sweep on a cadence, so an over-cap note lost its protected tag
+/// automatically. `python` sorts last of the four on purpose.
+#[test]
+fn migrate_does_not_drop_a_protected_tag_when_capping() {
+    // See the lock comment on `migrate_excludes_paths_rewrite_note_tags_could_not_write`.
+    let _lock = crate::testutil::lock_env();
+    let _cfg = crate::testutil::hermetic_config_home();
+    let dir = tempfile::tempdir().expect("assets tmpdir");
+    let config = make_config(dir.path());
+    std::fs::write(
+        &config.canonical_path,
+        "max-per-note: 3\nmax-canonical: 300\nno-classifier-tags:\n  - python\ntags:\n  ai:\n    - ai\n    - claude\n    - llm\n  tech:\n    - rust\n    - python\n",
+    )
+    .expect("rewrite canonical with a protect list");
+
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let vault_root = vault_dir.path();
+    let note_path = "over-cap.md";
+    std::fs::write(
+        vault_root.join(note_path),
+        "---\ntitle: T\ntags: [ai, claude, llm, python]\n---\nBody.\n",
+    )
+    .expect("write note");
+
+    let notes = vec![
+        NoteBuilder::new(note_path)
+            .tags(&["ai", "claude", "llm", "python"])
+            .build(),
+    ];
+
+    let modified = migrate(vault_root, &notes, &config, false).expect("migrate");
+    assert_eq!(modified, vec![note_path.to_string()]);
+
+    let content = std::fs::read_to_string(vault_root.join(note_path)).expect("read note");
+    assert!(
+        content.contains("python"),
+        "sweep capped away a protected tag:\n{content}"
+    );
+    assert!(
+        !content.contains("llm"),
+        "the cap must still be hard - an unprotected tag goes instead:\n{content}"
+    );
+}

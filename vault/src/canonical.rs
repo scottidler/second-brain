@@ -15,22 +15,29 @@ pub struct CanonicalTagsFile {
     /// this field existed, hence the default.
     #[serde(default)]
     pub no_segment_match: Vec<String>,
-    /// Tags a `--retag` (replace semantics) must never remove: the classifier
-    /// recovers 0 of 17 of them from note text (design doc P0b). Read here so
-    /// the vocabulary file round-trips; consumed by `distillers::tags` in P2.
+    /// Tags no capping path may drop: the classifier recovers 0 of 17 of them
+    /// from note text (design doc P0b). Reaches every consumer through
+    /// `CanonicalSet::no_classifier`.
     #[serde(default)]
     pub no_classifier_tags: Vec<String>,
     pub tags: HashMap<String, Vec<String>>,
 }
 
 /// The loaded canonical-tag vocabulary shared by borg, cortex, and (from
-/// Phase 2) distillers: the flattened tag set, the segment-guard list, and
-/// the per-note cap. Absorbs borg's former private `CanonicalState`
-/// (`borg/src/pipeline.rs`) so every caller loads one vocabulary shape.
+/// Phase 2) distillers: the flattened tag set, the segment-guard list, the
+/// protect list, and the per-note cap. Absorbs borg's former private
+/// `CanonicalState` (`borg/src/pipeline.rs`) so every caller loads one
+/// vocabulary shape.
 #[derive(Debug, Clone)]
 pub struct CanonicalSet {
     pub all: HashSet<String>,
     pub no_segment: HashSet<String>,
+    /// `no-classifier-tags`: tags no capping path may drop. Carried on the
+    /// snapshot rather than passed alongside it because every consumer that
+    /// caps (`filter_and_cap` here, `distillers::tags::apply_retag`) already
+    /// holds a `CanonicalSet`, and a protect list held next to the vocabulary
+    /// instead of in it is how sweep came to cap without one.
+    pub no_classifier: HashSet<String>,
     pub max_per_note: usize,
 }
 
@@ -60,6 +67,7 @@ impl CanonicalTagsFile {
         CanonicalSet {
             all: self.all_tags(),
             no_segment: self.no_segment_match.iter().cloned().collect(),
+            no_classifier: self.no_classifier_tags.iter().cloned().collect(),
             max_per_note: self.max_per_note,
         }
     }
@@ -205,8 +213,43 @@ pub fn filter_and_cap(raw_tags: &[String], canon: &CanonicalSet, mapping: &TagMa
 
     // (tier, tag): tiers stay ordered, within-tier is alphabetical (deterministic).
     tiered.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    tiered.truncate(canon.max_per_note);
-    tiered.into_iter().map(|(_, tag)| tag).collect()
+    let ordered: Vec<String> = tiered.into_iter().map(|(_, tag)| tag).collect();
+    cap_protecting(ordered, canon.max_per_note, &canon.no_classifier)
+}
+
+/// Cap a tag list at `max_per_note` without dropping a protected tag.
+///
+/// The input order is the caller's priority order and survives untouched;
+/// only *which* tags survive changes. Over the cap, protected tags
+/// (`no-classifier-tags`) claim slots first, then the rest in order. Under
+/// the cap this is the identity, so no vault-wide reordering churn.
+///
+/// The cap stays hard: protected tags beyond `max_per_note` are still
+/// dropped, because a note over the cap fails `tags.cap` lint either way.
+pub fn cap_protecting(tags: Vec<String>, max_per_note: usize, protected: &HashSet<String>) -> Vec<String> {
+    if tags.len() <= max_per_note {
+        return tags;
+    }
+    let mut keep = vec![false; tags.len()];
+    let mut slots = max_per_note;
+    for pass_protected in [true, false] {
+        for (i, tag) in tags.iter().enumerate() {
+            if slots == 0 {
+                break;
+            }
+            if keep[i] || protected.contains(tag) != pass_protected {
+                continue;
+            }
+            keep[i] = true;
+            slots -= 1;
+        }
+    }
+    let dropped: Vec<&String> = tags.iter().zip(&keep).filter(|(_, k)| !**k).map(|(t, _)| t).collect();
+    log::debug!(
+        "canonical::cap_protecting: {} -> {max_per_note} tags, dropped {dropped:?}",
+        tags.len()
+    );
+    tags.into_iter().zip(keep).filter_map(|(t, k)| k.then_some(t)).collect()
 }
 
 #[cfg(test)]

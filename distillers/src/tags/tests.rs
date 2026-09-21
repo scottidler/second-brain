@@ -32,6 +32,7 @@ fn canon() -> CanonicalSet {
     CanonicalSet {
         all,
         no_segment,
+        no_classifier: protect_list(),
         max_per_note: 8,
     }
 }
@@ -320,7 +321,7 @@ fn retag_never_removes_no_classifier_tags() {
         confidence: Confidence::High,
         method: TagMethod::ClassifierDev,
     };
-    let got = apply_retag(&previous, &fresh, &protect_list());
+    let got = apply_retag(&previous, &fresh, &canon());
     assert!(got.contains(&"work".to_string()), "protected tag was dropped: {got:?}");
     assert!(!got.contains(&"rust".to_string()), "unprotected tag survived: {got:?}");
     assert!(got.contains(&"security".to_string()));
@@ -335,7 +336,7 @@ fn retag_replaces_tags_outside_the_protect_list() {
         confidence: Confidence::High,
         method: TagMethod::ClassifierDev,
     };
-    let got = apply_retag(&previous, &fresh, &protect_list());
+    let got = apply_retag(&previous, &fresh, &canon());
     assert_eq!(got, vec!["ai".to_string(), "llm".to_string()], "replace, not union");
 }
 
@@ -349,7 +350,7 @@ fn retag_never_writes_empty() {
         confidence: Confidence::High,
         method: TagMethod::ClassifierDev,
     };
-    assert_eq!(apply_retag(&previous, &empty, &protect_list()), previous);
+    assert_eq!(apply_retag(&previous, &empty, &canon()), previous);
 
     let low = TagOutput {
         tags: vec!["ai".to_string()],
@@ -357,7 +358,7 @@ fn retag_never_writes_empty() {
         confidence: Confidence::Low,
         method: TagMethod::ClassifierDev,
     };
-    assert_eq!(apply_retag(&previous, &low, &protect_list()), previous);
+    assert_eq!(apply_retag(&previous, &low, &canon()), previous);
 }
 
 #[test]
@@ -386,4 +387,38 @@ fn a_high_result_always_carries_a_tag() {
             assert!(!out.tags.is_empty(), "High with no tags from {:?}", out.method);
         }
     }
+}
+
+/// Implementation audit r1, M1: `apply_retag` prepended the protected tags to
+/// an already-capped fresh set and never re-capped, so a note came out of
+/// `--retag` over `max-per-note` (nine tags against a cap of eight on the
+/// panel's fixture). The protected tag still survives, but the cap holds.
+#[test]
+fn retag_never_writes_over_the_cap() {
+    let c = canon();
+    let previous = vec!["work".to_string(), "rust".to_string()];
+    let fresh = TagOutput {
+        tags: [
+            "ai",
+            "llm",
+            "privacy",
+            "security",
+            "github",
+            "devops",
+            "git",
+            "programming",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect(),
+        scores: None,
+        confidence: Confidence::High,
+        method: TagMethod::ClassifierDev,
+    };
+    assert_eq!(fresh.tags.len(), c.max_per_note, "the fresh set already fills the cap");
+
+    let got = apply_retag(&previous, &fresh, &c);
+    assert_eq!(got.len(), c.max_per_note, "cap breached: {got:?}");
+    assert_eq!(got[0], "work", "the protected tag claims its slot first");
+    assert!(!got.contains(&"rust".to_string()), "unprotected tag survived: {got:?}");
 }

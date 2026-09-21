@@ -7,7 +7,6 @@
 //! `fallback` runs over the note's existing tags and `author-tags` - today's
 //! Tier 1 - so a classifier outage only holds notes that carry no tags at all.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use eyre::{Result, WrapErr};
@@ -73,14 +72,14 @@ pub fn run_with_notes(
 /// outage must not stall promotion of notes borg already tagged at ingest: the
 /// fallback (`deterministic` by default) confirms those locally from the note's
 /// own `tags` and `author-tags`, and only a `Low` result holds a note back.
+///
+/// The protect list (`no-classifier-tags`) rides on `canon`, not beside it:
+/// it has to reach every capping path, and sweep's did not when it was a
+/// separate field here (implementation audit r1, M1).
 pub struct Classifiers {
     primary: Box<dyn TagClassifier>,
     fallback: Box<dyn TagClassifier>,
     canon: CanonicalSet,
-    /// `no-classifier-tags` from the vocabulary file: `--retag` never removes
-    /// one, because the classifier recovers 0 of 17 of them from note text
-    /// (design doc Phase 0b).
-    protected: HashSet<String>,
 }
 
 impl Classifiers {
@@ -100,7 +99,7 @@ impl Classifiers {
             cfg.classifier,
             cfg.fallback,
             canon.all.len(),
-            canonical_file.no_classifier_tags.len(),
+            canon.no_classifier.len(),
         );
         Ok(Self {
             // No `FabricRunner` is wired here: `fabric-closed` degrades to
@@ -108,22 +107,15 @@ impl Classifiers {
             primary: distillers::tags::build(cfg, &canon, &mapping, None),
             fallback: distillers::tags::build_fallback(cfg, &canon, &mapping, None),
             canon,
-            protected: canonical_file.no_classifier_tags.iter().cloned().collect(),
         })
     }
 
     /// Build a pair directly, for tests and for callers that inject a double.
-    pub fn new(
-        primary: Box<dyn TagClassifier>,
-        fallback: Box<dyn TagClassifier>,
-        canon: CanonicalSet,
-        protected: HashSet<String>,
-    ) -> Self {
+    pub fn new(primary: Box<dyn TagClassifier>, fallback: Box<dyn TagClassifier>, canon: CanonicalSet) -> Self {
         Self {
             primary,
             fallback,
             canon,
-            protected,
         }
     }
 
@@ -279,7 +271,7 @@ pub fn lint_classify(
                 });
                 continue;
             }
-            let fresh = distillers::tags::apply_retag(note_tags(note), &result.tags, &classifiers.protected);
+            let fresh = distillers::tags::apply_retag(note_tags(note), &result.tags, &classifiers.canon);
             report.add(Violation {
                 path: note.path.clone(),
                 rule: "classify".to_string(),
@@ -395,7 +387,7 @@ pub fn apply_classify(
                 );
                 continue;
             }
-            let fresh = distillers::tags::apply_retag(note_tags(note), &result.tags, &classifiers.protected);
+            let fresh = distillers::tags::apply_retag(note_tags(note), &result.tags, &classifiers.canon);
             if fresh.is_empty() {
                 log::warn!(
                     "retag produced no tags and the note has none to keep: {}",

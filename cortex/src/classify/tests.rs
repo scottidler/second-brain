@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::*;
 use crate::testutil::NoteBuilder;
 use distillers::tags::{Deterministic, TagMethod};
@@ -11,7 +13,16 @@ fn test_canon() -> CanonicalSet {
             .map(String::from)
             .collect(),
         no_segment: HashSet::new(),
+        no_classifier: HashSet::new(),
         max_per_note: 7,
+    }
+}
+
+/// `test_canon()` with the named tags on its protect list.
+fn protecting_canon(protected: &[&str]) -> CanonicalSet {
+    CanonicalSet {
+        no_classifier: protected.iter().map(|t| (*t).to_string()).collect(),
+        ..test_canon()
     }
 }
 
@@ -65,7 +76,6 @@ fn stub_classifiers(tags: &[&str], confidence: Confidence) -> Classifiers {
         Stub::answering(tags, confidence),
         Stub::answering(tags, confidence),
         test_canon(),
-        HashSet::new(),
     )
 }
 
@@ -76,7 +86,6 @@ fn failing_with_deterministic_fallback() -> Classifiers {
         Stub::failing(),
         Box::new(Deterministic::new(test_canon(), Default::default())),
         test_canon(),
-        HashSet::new(),
     )
 }
 
@@ -485,12 +494,11 @@ fn retag_replaces_and_never_writes_empty() {
     };
     let config = vault.config();
 
-    let protected: HashSet<String> = ["work".to_string()].into_iter().collect();
+    let protecting = protecting_canon(&["work"]);
     let classifiers = Classifiers::new(
         Stub::answering(&["llm"], Confidence::High),
         Stub::answering(&["llm"], Confidence::High),
-        test_canon(),
-        protected.clone(),
+        protecting.clone(),
     );
     let (_report, written) = apply_classify(vault.root(), &vault.scan(), &config, &opts, &classifiers).expect("retag");
     assert_eq!(written, vec!["notes/keeper.md".to_string()]);
@@ -508,8 +516,7 @@ fn retag_replaces_and_never_writes_empty() {
     let empty = Classifiers::new(
         Stub::answering(&[], Confidence::Low),
         Stub::answering(&[], Confidence::Low),
-        test_canon(),
-        protected,
+        protecting,
     );
     let (_report, written) = apply_classify(vault.root(), &vault.scan(), &config, &opts, &empty).expect("retag");
     assert!(written.is_empty(), "an empty result writes nothing: {written:?}");
@@ -548,4 +555,93 @@ fn retag_absolute_paths_match_on_a_path_boundary() {
     // selects a note twice.
     let selected = filter_retag_notes(&notes, &["notes/*.md".to_string(), "notes/home.md".to_string()], root);
     assert_eq!(selected.len(), 2);
+}
+
+/// Implementation audit r1, M1: the reproduced sequence, end to end.
+///
+/// On the panel's fixture `sb cortex classify --retag --apply` wrote nine tags
+/// against a cap of eight, and the next `sb cortex sweep --migrate` re-capped
+/// the note without a protect list and dropped `work`. The cortex daemon runs
+/// sweep on a cadence, so no operator had to ask for that second step. Both
+/// halves are fixed here: retag respects the cap, sweep respects the protect
+/// list, and the protected tag survives both.
+#[test]
+fn retag_then_sweep_keeps_the_protected_tag() {
+    // `sweep::migrate` calls `validate_canonical_assets`, which resolves the
+    // real XDG_CONFIG_HOME - see the lock comment in `sweep/tests.rs`.
+    let _lock = crate::testutil::lock_env();
+    let _cfg = crate::testutil::hermetic_config_home();
+
+    let vault = crate::testutil::TestVault::new();
+    vault.add_note(
+        "notes/keeper.md",
+        "---\ntitle: Keeper\ndate: 2026-09-20\ntype: note\ntags:\n  - work\n  - rust\n---\n\nbody\n",
+    );
+    let opts = ClassifyOpts {
+        retag: vec!["notes/keeper.md".to_string()],
+        ..apply_opts()
+    };
+    let config = vault.config();
+
+    // Cap 3, `work` protected, and a fresh result that already fills the cap:
+    // the pre-fix code wrote four tags here.
+    let canon = CanonicalSet {
+        no_classifier: ["work".to_string()].into_iter().collect(),
+        max_per_note: 3,
+        ..test_canon()
+    };
+    let classifiers = Classifiers::new(
+        Stub::answering(&["ai", "cli", "llm"], Confidence::High),
+        Stub::answering(&["ai", "cli", "llm"], Confidence::High),
+        canon,
+    );
+    let (_report, written) = apply_classify(vault.root(), &vault.scan(), &config, &opts, &classifiers).expect("retag");
+    assert_eq!(written, vec!["notes/keeper.md".to_string()]);
+
+    let after_retag = vault.read("notes/keeper.md");
+    let tag_lines = |content: &str| -> Vec<String> {
+        content
+            .lines()
+            .skip_while(|l| !l.starts_with("tags:"))
+            .skip(1)
+            .take_while(|l| l.starts_with("  - "))
+            .map(|l| l.trim_start_matches("  - ").to_string())
+            .collect()
+    };
+    let retagged = tag_lines(&after_retag);
+    assert_eq!(retagged.len(), 3, "retag wrote over the cap:\n{after_retag}");
+    assert!(
+        retagged.contains(&"work".to_string()),
+        "the protected tag did not survive retag:\n{after_retag}"
+    );
+
+    // The daemon's next sweep, over the same vocabulary and protect list.
+    let assets = tempfile::tempdir().expect("assets tmpdir");
+    let canonical_path = assets.path().join("canonical-tags.yml");
+    let mapping_path = assets.path().join("tag-mapping.yml");
+    let proposals_path = assets.path().join("tag-proposals.yml");
+    std::fs::write(
+        &canonical_path,
+        "max-per-note: 3\nmax-canonical: 300\nno-classifier-tags:\n  - work\ntags:\n  general:\n    - rust\n    - cli\n    - ai\n    - llm\n    - work\n    - programming\n",
+    )
+    .expect("write canonical");
+    std::fs::write(&mapping_path, "{}\n").expect("write mapping");
+    std::fs::write(&proposals_path, "proposals: []\n").expect("write proposals");
+    let sweep_config = crate::config::SweepConfig {
+        canonical_path,
+        mapping_path,
+        proposals_path,
+        sweep_interval: "1h".to_string(),
+        proposal_threshold: 2,
+        cold: crate::config::ColdConfig::default(),
+    };
+    crate::sweep::migrate(vault.root(), &vault.scan(), &sweep_config, false).expect("sweep --migrate");
+
+    let after_sweep = vault.read("notes/keeper.md");
+    let swept = tag_lines(&after_sweep);
+    assert!(
+        swept.contains(&"work".to_string()),
+        "sweep dropped the protected tag the retag kept:\n{after_sweep}"
+    );
+    assert!(swept.len() <= 3, "sweep left the note over the cap:\n{after_sweep}");
 }

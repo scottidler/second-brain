@@ -27,6 +27,7 @@ fn test_canonical_set() -> CanonicalSet {
     CanonicalSet {
         all: test_canonical_hashset(),
         no_segment: HashSet::new(),
+        no_classifier: HashSet::new(),
         max_per_note: 7,
     }
 }
@@ -186,6 +187,7 @@ fn segment_match_skips_no_segment_tags_in_both_matchers() {
     let canonical = CanonicalSet {
         all: ["work", "life", "rust", "cli"].iter().map(|s| s.to_string()).collect(),
         no_segment: ["work", "life"].iter().map(|s| s.to_string()).collect(),
+        no_classifier: HashSet::new(),
         max_per_note: 7,
     };
     let mapping = TagMapping::new();
@@ -240,4 +242,59 @@ fn test_load_tag_mapping_yaml() {
     assert_eq!(mapping.get("ai-agents"), Some(&Some("agents".to_string())));
     assert_eq!(mapping.get("claudecodeai"), Some(&None));
     assert_eq!(mapping.get("rust"), Some(&Some("rust".to_string())));
+}
+
+// ---- protect-aware capping (implementation audit r1, M1) ----
+
+fn protecting_set(protected: &[&str], max_per_note: usize) -> CanonicalSet {
+    CanonicalSet {
+        all: ["ai", "claude", "llm", "rust", "work"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        no_segment: HashSet::new(),
+        no_classifier: protected.iter().map(|s| (*s).to_string()).collect(),
+        max_per_note,
+    }
+}
+
+/// `filter_and_cap` sorts within-tier alphabetically and used to truncate with
+/// no knowledge of the protect list, so a cortex sweep dropped `work` off the
+/// end of an over-cap note. `work` sorts last here on purpose.
+#[test]
+fn filter_and_cap_keeps_a_protected_tag_over_the_cap() {
+    let canonical = protecting_set(&["work"], 3);
+    let mapping = TagMapping::new();
+    let raw: Vec<String> = ["ai", "claude", "llm", "work"].iter().map(|s| s.to_string()).collect();
+
+    let result = filter_and_cap(&raw, &canonical, &mapping);
+    assert_eq!(result.len(), 3, "the cap is still hard: {result:?}");
+    assert!(
+        result.contains(&"work".to_string()),
+        "protected tag dropped: {result:?}"
+    );
+    assert_eq!(
+        result,
+        vec!["ai".to_string(), "claude".to_string(), "work".to_string()],
+        "priority order survives the protect-aware cap"
+    );
+}
+
+/// Under the cap the helper is the identity, so no note is reordered and no
+/// vault-wide rewrite churn is introduced.
+#[test]
+fn cap_protecting_is_the_identity_under_the_cap() {
+    let protected: HashSet<String> = ["work".to_string()].into_iter().collect();
+    let tags: Vec<String> = ["ai", "work", "rust"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(cap_protecting(tags.clone(), 8, &protected), tags);
+}
+
+/// Edge: more protected tags than the cap allows. The cap wins - a note over
+/// `max-per-note` fails `tags.cap` lint either way.
+#[test]
+fn cap_protecting_keeps_the_cap_hard_when_every_tag_is_protected() {
+    let protected: HashSet<String> = ["work", "life", "diy"].iter().map(|s| (*s).to_string()).collect();
+    let tags: Vec<String> = ["work", "life", "diy"].iter().map(|s| (*s).to_string()).collect();
+    let result = cap_protecting(tags, 2, &protected);
+    assert_eq!(result, vec!["work".to_string(), "life".to_string()]);
 }

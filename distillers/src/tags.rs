@@ -354,7 +354,13 @@ pub fn select_above_threshold(scores: &[(String, f32)], threshold: f32, max_per_
 ///
 /// The protect list exists because the classifier recovers 0 of 17 migrated
 /// `work`/`life`/`homelab`/`diy`/`writing` values from note text (Phase 0b).
-pub fn apply_retag(previous: &[String], fresh: &TagOutput, protected: &HashSet<String>) -> Vec<String> {
+///
+/// The result is capped through `canonical::cap_protecting`, the same helper
+/// `filter_and_cap` uses: prepending protected tags to an already-capped
+/// fresh set used to write over `max-per-note`, and the next daemon sweep
+/// then re-capped the note without a protect list and dropped the protected
+/// tag (implementation audit r1, M1).
+pub fn apply_retag(previous: &[String], fresh: &TagOutput, canon: &CanonicalSet) -> Vec<String> {
     if fresh.tags.is_empty() || fresh.confidence == Confidence::Low {
         log::debug!(
             "tags::apply_retag: keeping {} existing tags, fresh result was {:?}/{} tags",
@@ -364,13 +370,17 @@ pub fn apply_retag(previous: &[String], fresh: &TagOutput, protected: &HashSet<S
         );
         return previous.to_vec();
     }
-    let mut out: Vec<String> = previous.iter().filter(|t| protected.contains(*t)).cloned().collect();
+    let mut out: Vec<String> = previous
+        .iter()
+        .filter(|t| canon.no_classifier.contains(*t))
+        .cloned()
+        .collect();
     for tag in &fresh.tags {
         if !out.contains(tag) {
             out.push(tag.clone());
         }
     }
-    out
+    canonical::cap_protecting(out, canon.max_per_note, &canon.no_classifier)
 }
 
 // -------------------------------------------------------- deterministic

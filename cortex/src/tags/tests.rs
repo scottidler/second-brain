@@ -24,6 +24,7 @@ fn test_canon() -> CanonicalSet {
         .map(String::from)
         .collect(),
         no_segment: HashSet::new(),
+        no_classifier: HashSet::new(),
         max_per_note: 7,
     }
 }
@@ -81,6 +82,7 @@ fn tags_schema_rules_fire_once_each() {
     let canon = CanonicalSet {
         all: ["rust", "cli", "ai", "llm"].into_iter().map(String::from).collect(),
         no_segment: HashSet::new(),
+        no_classifier: HashSet::new(),
         max_per_note: 3,
     };
     let config = TagsConfig::default();
