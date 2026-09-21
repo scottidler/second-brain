@@ -1,5 +1,7 @@
 use super::*;
-use distillers::tags::{CandidateSource, TagCandidate};
+use crate::config::FabricConfig;
+use distillers::tags::{CandidateSource, ClassifierKind, FabricRunner, ShellFabricRunner, TagCandidate, TagsClassifierConfig};
+use std::sync::Arc;
 
 pub(crate) async fn get_or_init_canonical(config: &Config) -> Option<std::sync::Arc<CanonicalState>> {
     use std::sync::Arc;
@@ -111,6 +113,14 @@ pub(crate) struct TagOutcome {
 /// vocabulary loads, so reaching here is an I/O or parse regression: publish
 /// untagged and mark the receipt, the same shape as a classifier fallback
 /// that also failed (implementation audit r1, M5).
+///
+/// Called directly by `a_vocabulary_failure_publishes_untagged_and_degraded`
+/// rather than through `finalize_tags`, on purpose: `get_or_init_canonical`
+/// caches the first vocabulary it loads in a process-wide `LazyLock`, so a
+/// `finalize_tags` call with absent paths returns this only while the cache is
+/// cold. In the test binary the cache warms the moment any fixture-vocabulary
+/// test runs first, which would make a through-`finalize_tags` test
+/// order-dependent. Keep this fn the seam that test drives.
 fn vocabulary_unavailable() -> TagOutcome {
     log::error!("canonical vocabulary unavailable after startup validation, publishing untagged and degraded");
     TagOutcome {
@@ -118,6 +128,34 @@ fn vocabulary_unavailable() -> TagOutcome {
         author_tags: Vec::new(),
         degraded: true,
     }
+}
+
+/// The Fabric runner `fabric-closed` needs, built only when the primary or
+/// the fallback classifier selects it. Without one `distillers::tags::build`
+/// substitutes `deterministic` with a warning, which is how `fabric-closed`
+/// used to be configured but never run.
+///
+/// `FabricConfig.api_key` is the NAME of the credential env var (or a file
+/// path), mirrored from `llm.api-key` at load; `vault::fabric` resolves it
+/// onto the child process, so it is handed over as-is.
+pub(crate) fn fabric_runner_for(cfg: &TagsClassifierConfig, fabric: &FabricConfig) -> Option<Arc<dyn FabricRunner>> {
+    let wanted = cfg.classifier == ClassifierKind::FabricClosed || cfg.fallback == ClassifierKind::FabricClosed;
+    log::debug!(
+        "fabric_runner_for: classifier={:?} fallback={:?} wanted={wanted} binary={}",
+        cfg.classifier,
+        cfg.fallback,
+        fabric.binary
+    );
+    if !wanted {
+        return None;
+    }
+    Some(Arc::new(ShellFabricRunner {
+        binary: fabric.binary.clone(),
+        api_key: fabric.api_key.clone(),
+        model: fabric.model.clone(),
+        max_chars: fabric.max_content_chars,
+        timeout_secs: fabric.timeout_secs,
+    }))
 }
 
 /// Assign a note's tags through the shared closed-vocabulary classifier.
@@ -155,6 +193,7 @@ pub(crate) async fn finalize_tags(sources: TagSources<'_>, config: &Config) -> T
     let author_tags = canonical::filter_and_cap(&author_candidates, &state.canon, &state.mapping);
 
     let cfg = config.tags.classifier.clone();
+    let fabric_runner = fabric_runner_for(&cfg, &config.fabric);
     let canon = state.canon.clone();
     let mapping = state.mapping.clone();
     let title = sources.title.to_string();
@@ -164,7 +203,7 @@ pub(crate) async fn finalize_tags(sources: TagSources<'_>, config: &Config) -> T
     // a blocking HTTP call. Running it on the async worker would stall the
     // runtime for the length of the request.
     let result = tokio::task::spawn_blocking(move || {
-        let classifier = distillers::tags::build(&cfg, &canon, &mapping, None);
+        let classifier = distillers::tags::build(&cfg, &canon, &mapping, fabric_runner.clone());
         let input = distillers::tags::TagInput {
             title: &title,
             text: &text,
@@ -174,7 +213,7 @@ pub(crate) async fn finalize_tags(sources: TagSources<'_>, config: &Config) -> T
             Ok(out) => (out.tags, false),
             Err(e) => {
                 log::warn!("tag classifier failed, running the configured fallback: {e:#}");
-                let fallback = distillers::tags::build_fallback(&cfg, &canon, &mapping, None);
+                let fallback = distillers::tags::build_fallback(&cfg, &canon, &mapping, fabric_runner);
                 match fallback.classify(&input) {
                     Ok(out) => (out.tags, true),
                     Err(e) => {

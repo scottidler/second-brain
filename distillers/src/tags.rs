@@ -26,6 +26,10 @@ mod tests;
 /// schema 2026-09-20). The vocabulary is larger, so production always shards.
 pub const MAX_LABELS_PER_CALL: usize = 100;
 
+/// The API's hard ceiling on texts per call (same tool schema: `inputs` max
+/// 1,000). `ClassifierDev::classify_batch` chunks a larger batch at this size.
+pub const MAX_INPUTS_PER_CALL: usize = 1_000;
+
 const DEFAULT_ENDPOINT: &str = "https://classifier.dev/v1/classify";
 
 /// Where a candidate tag came from. Provenance decides which implementations
@@ -145,7 +149,8 @@ impl TagOutput {
 pub trait TagClassifier: Send + Sync {
     fn classify(&self, input: &TagInput) -> Result<TagOutput>;
 
-    /// Overridden by `ClassifierDev`, which sends up to 1,000 texts per call.
+    /// Overridden by `ClassifierDev`, which sends up to `MAX_INPUTS_PER_CALL`
+    /// texts per call and chunks anything larger.
     fn classify_batch(&self, inputs: &[TagInput]) -> Vec<Result<TagOutput>> {
         inputs.iter().map(|i| self.classify(i)).collect()
     }
@@ -206,6 +211,9 @@ pub trait FabricRunner: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct ShellFabricRunner {
     pub binary: String,
+    /// NAME of the env var (or a file path) holding the Anthropic credential,
+    /// never the credential: `vault::fabric` resolves it onto the child
+    /// process only. Borg's `FabricConfig.api_key` is already this shape.
     pub api_key: String,
     pub model: String,
     pub max_chars: usize,
@@ -263,8 +271,15 @@ fn build_kind(
         ClassifierKind::FabricClosed => match fabric {
             Some(runner) => Box::new(FabricClosedVocab::new(canon.clone(), mapping.clone(), runner)),
             // No runner means no way to call Fabric; degrade to the impl that
-            // needs nothing rather than hand back a classifier that always errors.
-            None => Box::new(Deterministic::new(canon.clone(), mapping.clone())),
+            // needs nothing rather than hand back a classifier that always
+            // errors. Loud, because the operator asked for `fabric-closed` and
+            // is getting something else.
+            None => {
+                log::warn!(
+                    "tags::build_kind: classifier `fabric-closed` selected but no Fabric runner was supplied; substituting `deterministic`"
+                );
+                Box::new(Deterministic::new(canon.clone(), mapping.clone()))
+            }
         },
         ClassifierKind::ClassifierDev => Box::new(ClassifierDev::new(canon.clone(), mapping.clone(), cfg)),
     }
@@ -308,6 +323,32 @@ fn author_tags(input: &TagInput, canon: &CanonicalSet, mapping: &TagMapping) -> 
         }
     }
     out
+}
+
+/// The unscored impls' ranking: author tags first (tier 0, publisher-provided),
+/// then whatever the model returned that maps, each tier sorted by name, then
+/// the cap. A single alphabetical sort across both used to let an author tag
+/// lose its slot to an alphabetically earlier model tag.
+fn rank_author_first<'a>(
+    input: &TagInput,
+    model_raw: impl Iterator<Item = &'a String>,
+    canon: &CanonicalSet,
+    mapping: &TagMapping,
+) -> Vec<String> {
+    let mut tags = author_tags(input, canon, mapping);
+    tags.sort();
+    let mut model: Vec<String> = Vec::new();
+    for candidate in model_raw {
+        for (tag, _) in match_with_tier(candidate, canon, mapping) {
+            if !tags.contains(&tag) && !model.contains(&tag) {
+                model.push(tag);
+            }
+        }
+    }
+    tags.extend(model);
+    tags.sort();
+    tags.truncate(canon.max_per_note);
+    tags
 }
 
 /// Sort by score descending then name, dedupe, and cap. The single place the
@@ -496,20 +537,7 @@ impl TagClassifier for FabricClosedVocab {
 
         // Post-filter: the model is asked for the vocabulary but is not bound
         // to it, so nothing it returns is trusted without matching.
-        let mut tags: Vec<String> = Vec::new();
-        for candidate in reply
-            .tags
-            .iter()
-            .chain(author_tags(input, &self.canon, &self.mapping).iter())
-        {
-            for (tag, _) in match_with_tier(candidate, &self.canon, &self.mapping) {
-                if !tags.contains(&tag) {
-                    tags.push(tag);
-                }
-            }
-        }
-        tags.sort();
-        tags.truncate(self.canon.max_per_note);
+        let tags = rank_author_first(input, reply.tags.iter(), &self.canon, &self.mapping);
 
         let confidence = if tags.is_empty() { Confidence::Low } else { Confidence::Medium };
         Ok(TagOutput {
@@ -622,6 +650,12 @@ impl ClassifierDev {
                 ));
             }
             for (slot, result) in per_input.iter_mut().zip(response.results) {
+                // The API scores the top `max_labels` labels for every input
+                // whatever their magnitude (Phase 0 recorded scores down to
+                // 0.71 with no floor), so a result carrying no score at all
+                // against a non-empty shard is a malformed reply, not a low-
+                // confidence one. `Ok(Low)` here would hold the note or
+                // publish it untagged while the receipt read clean.
                 slot.push(result.scores);
             }
         }
@@ -634,6 +668,10 @@ impl ClassifierDev {
     }
 
     fn finish(&self, input: &TagInput, shard_scores: &[HashMap<String, f32>]) -> TagOutput {
+        // Guard the subset invariant BEFORE ranking: the vocabulary is what we
+        // sent, but a service that echoes an unknown label must not reach the
+        // vault, and it must not hold a slot inside the cap either. Retaining
+        // after the cap left the note one valid tag short.
         let merged = merge_shard_scores(shard_scores);
         let mut selected = select_above_threshold(&merged, self.threshold, self.canon.max_per_note);
 
@@ -644,9 +682,6 @@ impl ClassifierDev {
             }
         }
         selected.truncate(self.canon.max_per_note);
-
-        // Guard the subset invariant: the vocabulary is what we sent, but a
-        // service that echoes an unknown label must not reach the vault.
         selected.retain(|(t, _)| self.canon.all.contains(t));
 
         let confidence = if selected.is_empty() { Confidence::Low } else { Confidence::High };
@@ -667,17 +702,18 @@ impl TagClassifier for ClassifierDev {
     }
 
     fn classify_batch(&self, inputs: &[TagInput]) -> Vec<Result<TagOutput>> {
-        match self.classify_texts(inputs) {
-            Ok(outputs) => outputs.into_iter().map(Ok).collect(),
-            Err(e) => {
-                // Whole-batch failure: one shard short means every input's
-                // ranking is missing part of the vocabulary.
-                inputs
-                    .iter()
-                    .map(|_| Err(eyre!("classifier.dev batch failed: {e}")))
-                    .collect()
+        log::debug!("ClassifierDev::classify_batch: inputs={}", inputs.len());
+        let mut out = Vec::with_capacity(inputs.len());
+        for chunk in [inputs] {
+            match self.classify_texts(chunk) {
+                Ok(outputs) => out.extend(outputs.into_iter().map(Ok)),
+                // Whole-chunk failure: one shard short means every input in
+                // the chunk is missing part of the vocabulary. Other chunks
+                // stand on their own calls and keep their results.
+                Err(e) => out.extend(chunk.iter().map(|_| Err(eyre!("classifier.dev batch failed: {e}")))),
             }
         }
+        out
     }
 
     fn method(&self) -> TagMethod {
@@ -722,20 +758,7 @@ impl TagClassifier for FakeTagClassifier {
         if self.fail {
             return Err(eyre!("FakeTagClassifier: forced failure"));
         }
-        let mut tags: Vec<String> = Vec::new();
-        for candidate in self
-            .canned
-            .iter()
-            .chain(author_tags(input, &self.canon, &self.mapping).iter())
-        {
-            for (tag, _) in match_with_tier(candidate, &self.canon, &self.mapping) {
-                if !tags.contains(&tag) {
-                    tags.push(tag);
-                }
-            }
-        }
-        tags.sort();
-        tags.truncate(self.canon.max_per_note);
+        let tags = rank_author_first(input, self.canned.iter(), &self.canon, &self.mapping);
         let confidence = if tags.is_empty() { Confidence::Low } else { Confidence::High };
         Ok(TagOutput {
             tags,

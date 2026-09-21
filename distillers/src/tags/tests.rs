@@ -444,3 +444,334 @@ fn body_excerpt_leaves_short_text_and_multibyte_alone() {
     let multibyte = "\u{4e16}".repeat(CLASSIFIER_TEXT_CHARS + 10);
     assert_eq!(body_excerpt(&multibyte).chars().count(), CLASSIFIER_TEXT_CHARS);
 }
+
+// ------------------------------------------------------- ranking at the cap
+
+/// Implementation audit fold, A8: `finish` truncated to the cap and THEN
+/// dropped unknown labels, so a service echoing a label outside the
+/// vocabulary inside its top N evicted a valid tag and the note landed one
+/// short. Eight valid labels clear the threshold here; all eight must land.
+#[test]
+fn an_echoed_unknown_label_never_evicts_a_valid_tag() {
+    let c = canon();
+    let dev = ClassifierDev::new(c.clone(), mapping(), &TagsClassifierConfig::default());
+    let valid = ["ai", "llm", "privacy", "rust", "cli", "security", "github", "devops"];
+    assert_eq!(valid.len(), c.max_per_note);
+    let mut scores: HashMap<String, f32> = valid.iter().map(|t| (t.to_string(), 0.95)).collect();
+    scores.insert("not-in-the-vocabulary".to_string(), 0.99);
+
+    let out = dev.finish(&input(&[]), &[scores]);
+    assert_eq!(out.tags.len(), c.max_per_note, "a valid tag was evicted: {:?}", out.tags);
+    for tag in &valid {
+        assert!(out.tags.contains(&tag.to_string()), "{tag} missing from {:?}", out.tags);
+    }
+    assert!(!out.tags.iter().any(|t| t == "not-in-the-vocabulary"));
+}
+
+/// Implementation audit fold, A12: the unscored impls sorted author and model
+/// tags together alphabetically before capping, so an author (tier 0) tag
+/// lost its slot to an alphabetically earlier model tag. Eight model tags
+/// that all sort before `writing` fill the cap; `writing` must still land.
+#[test]
+fn author_tags_outrank_model_tags_at_the_cap() {
+    let c = canon();
+    let m = mapping();
+    let eight_model_tags = ["ai", "cli", "devops", "git", "github", "llm", "privacy", "programming"];
+    assert_eq!(eight_model_tags.len(), c.max_per_note);
+    let author = [TagCandidate::new("writing", CandidateSource::Author)];
+
+    struct Reply(String);
+    impl FabricRunner for Reply {
+        fn run(&self, _pattern: &str, _input: &str) -> Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+    let reply = serde_json::json!({ "tags": eight_model_tags }).to_string();
+    let fabric = FabricClosedVocab::new(c.clone(), m.clone(), Arc::new(Reply(reply)));
+    let out = fabric.classify(&input(&author)).expect("classify");
+    assert_eq!(out.tags.len(), c.max_per_note, "cap breached: {:?}", out.tags);
+    assert_eq!(out.tags[0], "writing", "the author tag must rank first: {:?}", out.tags);
+
+    let canned: Vec<String> = eight_model_tags.iter().map(|s| s.to_string()).collect();
+    let fake = FakeTagClassifier::new(c.clone(), m, canned);
+    let out = fake.classify(&input(&author)).expect("classify");
+    assert_eq!(out.tags.len(), c.max_per_note, "cap breached: {:?}", out.tags);
+    assert_eq!(out.tags[0], "writing", "the author tag must rank first: {:?}", out.tags);
+}
+
+// ------------------------------------------------------------ build_kind
+
+#[test]
+fn fabric_closed_builds_the_fabric_impl_only_with_a_runner() {
+    let cfg = TagsClassifierConfig {
+        classifier: ClassifierKind::FabricClosed,
+        ..TagsClassifierConfig::default()
+    };
+    // No runner: the documented degrade to the impl that needs nothing.
+    assert_eq!(build(&cfg, &canon(), &mapping(), None).method(), TagMethod::Deterministic);
+
+    struct Never;
+    impl FabricRunner for Never {
+        fn run(&self, _pattern: &str, _input: &str) -> Result<String> {
+            Err(eyre!("never called"))
+        }
+    }
+    let runner: Arc<dyn FabricRunner> = Arc::new(Never);
+    assert_eq!(build(&cfg, &canon(), &mapping(), Some(runner)).method(), TagMethod::FabricClosed);
+}
+
+// ------------------------------------------------------ classifier.dev HTTP
+
+/// A loopback HTTP/1.1 server for the negative paths: no network, no new
+/// dependency. Each accepted connection reads one request, hands the parsed
+/// JSON body to `respond`, and writes the `(status, body)` it returns, or
+/// holds the connection open without answering when it returns `None`.
+mod http {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Once;
+    use std::time::Duration;
+
+    pub const KEY_ENV: &str = "SB_DISTILLERS_TEST_CLASSIFY_KEY";
+    static KEY: Once = Once::new();
+
+    /// Set once per process, under Rust's env lock; every HTTP test shares
+    /// the one name so no test ever unsets it under another.
+    pub fn ensure_key() {
+        KEY.call_once(|| unsafe { std::env::set_var(KEY_ENV, "test-key") });
+    }
+
+    pub fn serve<F>(respond: F) -> String
+    where
+        F: Fn(&serde_json::Value) -> Option<(u16, String)> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let body = read_request(&mut stream);
+                match respond(&body) {
+                    Some((status, body)) => {
+                        let response = format!(
+                            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    None => std::thread::sleep(Duration::from_secs(5)),
+                }
+            }
+        });
+        format!("http://127.0.0.1:{port}/v1/classify")
+    }
+
+    fn read_request(stream: &mut TcpStream) -> serde_json::Value {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let header_end = loop {
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            let n = stream.read(&mut chunk).expect("read headers");
+            assert!(n > 0, "client closed before the headers ended");
+            buf.extend_from_slice(&chunk[..n]);
+        };
+        let headers = String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
+        let content_length: usize = headers
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .map(|v| v.trim().parse().expect("content-length"))
+            .unwrap_or(0);
+        let mut body = buf[header_end..].to_vec();
+        while body.len() < content_length {
+            let n = stream.read(&mut chunk).expect("read body");
+            assert!(n > 0, "client closed before the body ended");
+            body.extend_from_slice(&chunk[..n]);
+        }
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+fn dev_against(endpoint: String, timeout_secs: u64) -> ClassifierDev {
+    dev_against_canon(endpoint, timeout_secs, canon())
+}
+
+fn dev_against_canon(endpoint: String, timeout_secs: u64, c: CanonicalSet) -> ClassifierDev {
+    http::ensure_key();
+    let cfg = TagsClassifierConfig {
+        classifier: ClassifierKind::ClassifierDev,
+        api_key_env: http::KEY_ENV.to_string(),
+        endpoint,
+        timeout_secs,
+        ..TagsClassifierConfig::default()
+    };
+    ClassifierDev::new(c, mapping(), &cfg)
+}
+
+/// One `{"scores": {...}}` per input, every input scoring `rust`.
+fn results_for(body: &serde_json::Value, score: f32) -> String {
+    let n = body["inputs"].as_array().map_or(0, Vec::len);
+    let results: Vec<serde_json::Value> = (0..n)
+        .map(|_| serde_json::json!({ "scores": { "rust": score } }))
+        .collect();
+    serde_json::json!({ "results": results }).to_string()
+}
+
+#[test]
+fn classifier_dev_401_is_an_error() {
+    let endpoint = http::serve(|_| Some((401, r#"{"error":"unauthorized"}"#.to_string())));
+    let err = dev_against(endpoint, 5).classify(&input(&[])).expect_err("401 must not classify");
+    assert!(format!("{err:#}").contains("401"), "{err:#}");
+}
+
+#[test]
+fn classifier_dev_429_is_an_error() {
+    let endpoint = http::serve(|_| Some((429, r#"{"error":"rate limited"}"#.to_string())));
+    let err = dev_against(endpoint, 5).classify(&input(&[])).expect_err("429 must not classify");
+    assert!(format!("{err:#}").contains("429"), "{err:#}");
+}
+
+#[test]
+fn classifier_dev_malformed_json_is_an_error() {
+    let endpoint = http::serve(|_| Some((200, "{not json".to_string())));
+    let err = dev_against(endpoint, 5)
+        .classify(&input(&[]))
+        .expect_err("a 200 with a body that does not parse must not classify");
+    assert!(format!("{err:#}").contains("parse"), "{err:#}");
+}
+
+#[test]
+fn classifier_dev_result_count_mismatch_is_an_error() {
+    let endpoint = http::serve(|_| Some((200, r#"{"results":[]}"#.to_string())));
+    let err = dev_against(endpoint, 5)
+        .classify(&input(&[]))
+        .expect_err("zero results for one input must not classify");
+    assert!(format!("{err:#}").contains("0 results for 1 inputs"), "{err:#}");
+}
+
+/// A 200 whose one result carries no score at all. The API scores the top
+/// `max_labels` labels for every input regardless of magnitude (Phase 0
+/// recorded scores down to 0.71 with no floor), so this is a protocol
+/// violation and an `Err`, not a `Low`: an `Ok(Low)` would hold the note or
+/// publish it untagged while the receipt read clean, and the fallback path
+/// (`degraded=true`) only runs on `Err`.
+#[test]
+fn classifier_dev_a_result_without_scores_is_an_error() {
+    let endpoint = http::serve(|_| Some((200, r#"{"results":[{}]}"#.to_string())));
+    let err = dev_against(endpoint, 5)
+        .classify(&input(&[]))
+        .expect_err("a result with no scores must not classify");
+    assert!(format!("{err:#}").contains("scores"), "{err:#}");
+
+    let endpoint = http::serve(|_| Some((200, r#"{"results":[{"scores":{}}]}"#.to_string())));
+    let err = dev_against(endpoint, 5)
+        .classify(&input(&[]))
+        .expect_err("an empty scores map must not classify");
+    assert!(format!("{err:#}").contains("no scores"), "{err:#}");
+}
+
+#[test]
+fn classifier_dev_times_out_against_a_silent_server() {
+    let endpoint = http::serve(|_| None);
+    let started = std::time::Instant::now();
+    let err = dev_against(endpoint, 1)
+        .classify(&input(&[]))
+        .expect_err("a server that never answers must not classify");
+    assert!(started.elapsed() < Duration::from_secs(4), "timeout did not bind: {:?}", started.elapsed());
+    assert!(format!("{err:#}").contains("request failed"), "{err:#}");
+}
+
+/// Design doc Testing Strategy: "one failed shard". A vocabulary over the
+/// label ceiling takes two calls; the second is answered 500, and the input
+/// must come back `Err` rather than ranked against half the vocabulary.
+#[test]
+fn classifier_dev_one_failed_shard_fails_the_input() {
+    let all: HashSet<String> = (0..120).map(|i| format!("label-{i:03}")).collect();
+    let c = CanonicalSet {
+        all,
+        no_segment: HashSet::new(),
+        no_classifier: HashSet::new(),
+        max_per_note: 8,
+    };
+    assert_eq!(shard_labels(&{
+        let mut v: Vec<String> = c.all.iter().cloned().collect();
+        v.sort();
+        v
+    })
+    .len(), 2);
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = Arc::clone(&calls);
+    let endpoint = http::serve(move |body| {
+        let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n == 0 {
+            Some((200, results_for(body, 0.95)))
+        } else {
+            Some((500, r#"{"error":"shard exploded"}"#.to_string()))
+        }
+    });
+    let err = dev_against_canon(endpoint, 5, c)
+        .classify(&input(&[]))
+        .expect_err("a failed shard must fail the input");
+    assert!(format!("{err:#}").contains("500"), "{err:#}");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2, "both shards must have been attempted");
+}
+
+/// Implementation audit fold, A10: `classify_batch` POSTed the whole slice.
+/// 1,001 inputs must go out as two calls of 1,000 and 1, and the results must
+/// come back in input order across the chunk boundary.
+#[test]
+fn classify_batch_chunks_inputs_at_the_documented_ceiling() {
+    let sizes = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+    let record = Arc::clone(&sizes);
+    let endpoint = http::serve(move |body| {
+        let inputs = body["inputs"].as_array().expect("inputs");
+        record.lock().expect("lock").push(inputs.len());
+        // Echo each input's parity back as a different tag so the caller can
+        // check order, not just count.
+        let results: Vec<serde_json::Value> = inputs
+            .iter()
+            .map(|text| {
+                let n: usize = text
+                    .as_str()
+                    .expect("text")
+                    .rsplit('n')
+                    .next()
+                    .expect("number")
+                    .trim()
+                    .parse()
+                    .expect("parse number");
+                let tag = if n % 2 == 0 { "rust" } else { "cli" };
+                serde_json::json!({ "scores": { tag: 0.95 } })
+            })
+            .collect();
+        Some((200, serde_json::json!({ "results": results }).to_string()))
+    });
+
+    let texts: Vec<String> = (0..MAX_INPUTS_PER_CALL + 1).map(|i| format!("n{i}")).collect();
+    let inputs: Vec<TagInput> = texts
+        .iter()
+        .map(|t| TagInput {
+            title: "T",
+            text: t,
+            candidates: &[],
+        })
+        .collect();
+    let outputs = dev_against(endpoint, 10).classify_batch(&inputs);
+
+    assert_eq!(outputs.len(), inputs.len());
+    for (i, out) in outputs.iter().enumerate() {
+        let out = out.as_ref().unwrap_or_else(|e| panic!("input {i} failed: {e:#}"));
+        let want = if i % 2 == 0 { "rust" } else { "cli" };
+        assert_eq!(out.tags, vec![want.to_string()], "input {i} came back out of order");
+    }
+    assert_eq!(
+        *sizes.lock().expect("lock"),
+        vec![MAX_INPUTS_PER_CALL, 1],
+        "the batch must be chunked at the ceiling"
+    );
+}

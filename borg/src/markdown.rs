@@ -218,7 +218,13 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         }
     }
 
-    fm.push_str(&format!("tags:\n{tags_yaml}\n"));
+    // `[]`, never a bare `tags:` (YAML null): the vault measured both
+    // spellings of "no tags", and the reingest merge writes `[]` too.
+    if all_tags.is_empty() {
+        fm.push_str("tags: []\n");
+    } else {
+        fm.push_str(&format!("tags:\n{tags_yaml}\n"));
+    }
 
     // `creator` is written exactly once: resolve the per-kind author via
     // `creator_for` (uploader / owner / article byline), falling back to a

@@ -139,7 +139,7 @@ pub(crate) fn borg_owned_keys() -> HashSet<&'static str> {
 
 /// What a replace carries off the note it is about to overwrite: every
 /// non-borg-owned frontmatter key, verbatim, plus the prior `status:` value.
-const TAGS_KEY: &str = "tags";
+pub(crate) const TAGS_KEY: &str = "tags";
 
 struct PriorFrontmatter {
     /// The prior `tags:` list. Nominally borg-owned (it is in
@@ -635,14 +635,8 @@ pub(crate) async fn process_session_inner(
             // added, and this is the only key in `RENDER_NOTE_KEYS` that
             // merges instead of being rewritten.
             let fresh = std::mem::take(&mut all_tags);
-            for tag in prior_tags.into_iter().chain(fresh) {
-                if !all_tags.contains(&tag) {
-                    all_tags.push(tag);
-                }
-            }
-            if let Some(state) = crate::pipeline::tags::get_or_init_canonical(config).await {
-                all_tags.truncate(state.canon.max_per_note);
-            }
+            let state = crate::pipeline::tags::get_or_init_canonical(config).await;
+            all_tags = crate::pipeline::atomic::union_tags(&prior_tags, &fresh, state.as_deref().map(|s| &s.canon));
             log::debug!("[{trace_id}] session replace merged tags -> {all_tags:?}");
         }
         for (key, value) in prior.carried {

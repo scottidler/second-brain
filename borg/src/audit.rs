@@ -345,10 +345,10 @@ pub fn scan(config: &Config) -> Result<AuditReport> {
                 continue;
             }
             let status = cols[4].trim();
-            // Legacy 8-field layout (Title+Filename separate, len >= 10) has source at
-            // cols[7]; the current 7-field layout (collapsed Note, no classification column
-            // since the tags-only migration) has it at cols[6].
-            let source = if cols.len() >= 10 { cols[7].trim() } else { cols[6].trim() };
+            let Some(source_col) = ledger_source_col(&cols) else {
+                continue;
+            };
+            let source = cols[source_col].trim();
 
             if status == "✅" {
                 completed_sources.insert(source.to_string());
@@ -762,8 +762,11 @@ fn drop_ledger_row(ledger_path: &Path, source: &str, status_glyph: &str, date_fi
             continue;
         }
         let status = cols[4].trim();
-        // Same legacy-vs-current column shift as the orphan-scan above.
-        let row_source = if cols.len() >= 10 { cols[7].trim() } else { cols[6].trim() };
+        let Some(source_col) = ledger_source_col(&cols) else {
+            out_lines.push(line);
+            continue;
+        };
+        let row_source = cols[source_col].trim();
         let row_date = cols[1].trim();
         let date_ok = match date_filter {
             Some(d) => row_date == d,
@@ -782,6 +785,41 @@ fn drop_ledger_row(ledger_path: &Path, source: &str, status_glyph: &str, date_fi
     }
     file.unlock().ok();
     Ok(dropped)
+}
+
+/// Index of the Source cell in a `split('|')` ledger row, decided by the
+/// row's own shape.
+///
+/// A header-driven lookup is not usable here: `vault::ledger` repairs the
+/// header to the current layout on every append (`ensure_header_matches`)
+/// while rows keep the shape they were written in, so on a host whose ledger
+/// never had the one-time row rewrite the header describes none of its rows.
+///
+/// Four historical shapes (`cols` includes the empty cells outside the outer
+/// pipes, so a 7-field row is 9 cells):
+///
+/// ```text
+/// 9   Date|Time|Method|Status|Note|Source|Trace                   Source 6  current
+/// 10  Date|Time|Method|Status|Note|Source|Domain|Trace            Source 6  pre-rewrite
+/// 10  Date|Time|Method|Status|Title|Filename|Source|Trace         Source 7  rewritten legacy
+/// 11  Date|Time|Method|Status|Title|Filename|Source|Domain|Trace  Source 7  oldest
+/// ```
+///
+/// The two 10-cell shapes used to be read as one (`cols[7]`), which on an
+/// un-rewritten ledger returned the Domain cell as the source. They are told
+/// apart by their cells: a Note cell is a `[[slug]]` wikilink or `-`, and a
+/// Filename cell is `<stem>.md` or `-`, while a Source is neither `-` nor a
+/// bare filename.
+fn ledger_source_col(cols: &[&str]) -> Option<usize> {
+    let is_filename_cell = |cell: &str| cell == "-" || (cell.ends_with(".md") && !cell.contains("://"));
+    match cols.len() {
+        9 => Some(6),
+        10 if cols[5].trim().starts_with("[[") => Some(6),
+        10 if is_filename_cell(cols[6].trim()) => Some(7),
+        10 => Some(6),
+        n if n >= 11 => Some(7),
+        _ => None,
+    }
 }
 
 /// Minimum normalized-body length (chars) for a note to be dedup-eligible.

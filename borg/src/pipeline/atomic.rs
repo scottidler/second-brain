@@ -16,7 +16,10 @@
 use crate::pipeline::publish::FieldValue;
 use eyre::Result;
 use std::path::{Path, PathBuf};
+use vault::canonical::{self, CanonicalSet};
 use vault::schema::CORTEX_PRESERVE_KEYS;
+
+use crate::pipeline::session::TAGS_KEY;
 
 /// Resolve a non-URL publish destination, honoring `force`. When `force` is
 /// true (or the path is free) the destination is returned unchanged
@@ -236,22 +239,34 @@ fn remove_key(lines: &mut Vec<String>, key: &str) -> Vec<String> {
     items
 }
 
-/// Union two lists, `preserved` first, deduped, capped.
-fn union_capped(preserved: &[String], fresh: &[String], max_per_note: usize) -> Vec<String> {
+/// Union two lists, `preserved` first, deduped, uncapped.
+fn union(preserved: &[String], fresh: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for item in preserved.iter().chain(fresh.iter()) {
         if !out.contains(item) {
             out.push(item.clone());
         }
     }
-    if out.len() > max_per_note {
-        log::info!(
-            "union_capped: truncating {} merged values to the {max_per_note} cap; the fresh set loses the overflow",
-            out.len()
-        );
-        out.truncate(max_per_note);
-    }
     out
+}
+
+/// The `tags` merge both reingest paths run: `union` then the cap, taken
+/// through `cap_protecting` so a tag on `no-classifier-tags` is never the one
+/// dropped (root CLAUDE.md invariant). `None` when no vocabulary is loaded:
+/// the cap is unknown, and inventing one would silently drop a preserved tag.
+pub(crate) fn union_tags(preserved: &[String], fresh: &[String], canon: Option<&CanonicalSet>) -> Vec<String> {
+    let merged = union(preserved, fresh);
+    let Some(canon) = canon else {
+        return merged;
+    };
+    if merged.len() > canon.max_per_note {
+        log::info!(
+            "union_tags: capping {} merged tags to {}; unprotected fresh tags lose the overflow",
+            merged.len(),
+            canon.max_per_note
+        );
+    }
+    canonical::cap_protecting(merged, canon.max_per_note, &canon.no_classifier)
 }
 
 /// Apply (insert or replace) the given cortex-managed frontmatter fields
@@ -259,7 +274,11 @@ fn union_capped(preserved: &[String], fresh: &[String], max_per_note: usize) -> 
 /// is present. Pure-string form of the previous `patch_cortex_fields`
 /// helper. Only keys present in `CORTEX_PRESERVE_KEYS` are accepted; the
 /// caller is expected to filter before calling.
-pub fn apply_cortex_fields(rendered: &str, fields: &[(String, FieldValue)], max_per_note: usize) -> String {
+///
+/// `tags` is the one list that is capped (`union_tags`); every other
+/// preserved list is unioned whole, because `max-per-note` is a tags cap and
+/// has no business truncating `cortex-quality-issues`.
+pub fn apply_cortex_fields(rendered: &str, fields: &[(String, FieldValue)], canon: Option<&CanonicalSet>) -> String {
     let trimmed = rendered.trim_start();
     if !trimmed.starts_with("---") {
         return rendered.to_string();
@@ -288,17 +307,27 @@ pub fn apply_cortex_fields(rendered: &str, fields: &[(String, FieldValue)], max_
                 // what this publish just rendered, so it is read back out of
                 // `lines` before the key is removed.
                 let fresh = remove_key(&mut lines, key);
-                let merged = union_capped(preserved, &fresh, max_per_note);
+                let merged = if key == TAGS_KEY {
+                    union_tags(preserved, &fresh, canon)
+                } else {
+                    union(preserved, &fresh)
+                };
                 if merged != fresh {
                     log::info!(
-                        "apply_cortex_fields: {key} merged {} preserved + {} fresh -> {} (cap {max_per_note})",
+                        "apply_cortex_fields: {key} merged {} preserved + {} fresh -> {}",
                         preserved.len(),
                         fresh.len(),
                         merged.len()
                     );
                 }
-                lines.push(format!("{key}:"));
-                lines.extend(merged.into_iter().map(|item| format!("  - {item}")));
+                // `render_note` spells an empty list `tags: []`; a bare
+                // `tags:` is YAML null, and the vault had both spellings.
+                if merged.is_empty() {
+                    lines.push(format!("{key}: []"));
+                } else {
+                    lines.push(format!("{key}:"));
+                    lines.extend(merged.into_iter().map(|item| format!("  - {item}")));
+                }
             }
         }
     }

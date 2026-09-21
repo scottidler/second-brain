@@ -204,7 +204,8 @@ async fn ingest_tags_are_stable_under_distiller_drift() {
     // The P3 reingest union: preserved (ingest 1's landed tags, read back off
     // the old note on disk) merged into the fresh render (ingest 2's tags).
     let preserved = vec![("tags".to_string(), FieldValue::List(ingest_1.tags.clone()))];
-    let merged = apply_cortex_fields(&fresh_note, &preserved, 7);
+    let state = get_or_init_canonical(&config).await.expect("fixture vocabulary loads");
+    let merged = apply_cortex_fields(&fresh_note, &preserved, Some(&state.canon));
     let (yaml, _body) = vault::frontmatter::split_raw(&merged).expect("frontmatter block");
     let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("parse merged frontmatter");
     let final_tags: Vec<String> = map
@@ -342,10 +343,57 @@ fn from_summary_is_verbatim() {
 /// raw author+model candidates un-canonicalized, uncapped and
 /// `degraded: false`, so the receipt read clean while an unfiltered tag set
 /// reached the note. The documented contract is the opposite.
+///
+/// Drives `vocabulary_unavailable` directly, not `finalize_tags` with absent
+/// paths: `get_or_init_canonical` caches the first vocabulary it loads in a
+/// process-wide `LazyLock`, and `config_with_fixture_canonical` tests in this
+/// same binary warm it. Through `finalize_tags` this test would pass or fail
+/// depending on which test ran first.
 #[test]
 fn a_vocabulary_failure_publishes_untagged_and_degraded() {
     let outcome = vocabulary_unavailable();
     assert!(outcome.tags.is_empty(), "unfiltered tags escaped: {:?}", outcome.tags);
     assert!(outcome.author_tags.is_empty());
     assert!(outcome.degraded, "the receipt would have read clean");
+}
+
+/// Implementation audit fold, A9: `fabric-closed` was accepted by config and
+/// silently ran as `deterministic`, because every production caller passed
+/// `None` for the runner. The runner is built from `config.fabric` whenever
+/// the primary or the fallback selects `fabric-closed`, and only then.
+#[test]
+fn a_fabric_runner_is_built_only_when_fabric_closed_is_selected() {
+    use distillers::tags::{ClassifierKind, TagMethod, TagsClassifierConfig};
+
+    let fabric = crate::config::FabricConfig {
+        binary: "fabric-test-binary".to_string(),
+        model: "test-model".to_string(),
+        ..crate::config::FabricConfig::default()
+    };
+    let with = |classifier: ClassifierKind, fallback: ClassifierKind| TagsClassifierConfig {
+        classifier,
+        fallback,
+        ..TagsClassifierConfig::default()
+    };
+
+    assert!(
+        fabric_runner_for(&with(ClassifierKind::Deterministic, ClassifierKind::Deterministic), &fabric).is_none(),
+        "no fabric-closed anywhere, no subprocess runner"
+    );
+    assert!(
+        fabric_runner_for(&with(ClassifierKind::ClassifierDev, ClassifierKind::Deterministic), &fabric).is_none()
+    );
+    assert!(fabric_runner_for(&with(ClassifierKind::FabricClosed, ClassifierKind::Deterministic), &fabric).is_some());
+    assert!(fabric_runner_for(&with(ClassifierKind::ClassifierDev, ClassifierKind::FabricClosed), &fabric).is_some());
+
+    // And the runner reaches the impl selection: with it, `build` yields the
+    // Fabric classifier rather than the deterministic substitute.
+    let cfg = with(ClassifierKind::FabricClosed, ClassifierKind::Deterministic);
+    let runner = fabric_runner_for(&cfg, &fabric).expect("runner");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config_with_fixture_canonical(dir.path());
+    let canonical_file = CanonicalTagsFile::load(Path::new(&config.tags.canonical_path)).expect("fixture vocabulary");
+    let canon = canonical_file.canonical_set();
+    let classifier = distillers::tags::build(&cfg, &canon, &TagMapping::new(), Some(runner));
+    assert_eq!(classifier.method(), TagMethod::FabricClosed);
 }

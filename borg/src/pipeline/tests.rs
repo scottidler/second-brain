@@ -32,6 +32,25 @@ fn terminal_failure_stage_defaults_to_fetch_failed_when_unset() {
     assert_eq!(terminal_failure_stage(&failed_result(None)), FailureStage::FetchFailed);
 }
 
+/// Design doc P3: a preserve-read failure aborts the reingest with receipt
+/// `failed`, stage `publish-failed`. The read used to bubble as a bare `?`
+/// into the `Err` arm of `process_url`, which labels every unclassified
+/// bubble `fetch-failed`, so the receipts DB blamed the network for a note
+/// borg could not read.
+#[test]
+fn a_preserve_read_failure_is_recorded_as_publish_failed() {
+    let err = eyre::eyre!("read preserved cortex fields from /vault/notes/x.md: permission denied");
+    let result = preserve_read_failed(&err, IngestMethod::Cli, "https://example.com/x", "tr-1");
+    assert!(matches!(result.status, IngestStatus::Failed { .. }));
+    assert_eq!(terminal_failure_stage(&result), FailureStage::PublishFailed);
+    assert_eq!(result.canonical_url.as_deref(), Some("https://example.com/x"));
+    assert_eq!(result.trace_id.as_deref(), Some("tr-1"));
+    match result.status {
+        IngestStatus::Failed { reason } => assert!(reason.contains("permission denied"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn test_detect_text_pattern_define() {
     assert_eq!(

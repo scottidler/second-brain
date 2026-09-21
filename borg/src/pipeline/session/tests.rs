@@ -147,8 +147,11 @@ fn test_config(vault_root: &std::path::Path, staging_root: &std::path::Path) -> 
     // `~/.config/sb/canonical-tags.yml` would, on a machine that has one,
     // permanently poison that shared cache for every other test in this
     // binary with this dev box's real tag catalogue. Point at guaranteed-
-    // absent paths instead: the load fails, `finalize_tags` no-ops for this
-    // call, and the shared cache is never touched (see
+    // absent paths instead. With the cache cold the load fails and
+    // `finalize_tags` publishes untagged and `degraded` (audit r1, M5); with
+    // it warm (a `pipeline::tags` fixture test ran first) the fixture
+    // vocabulary is used. Either way no test here asserts on the fresh tag
+    // set, and the shared cache is never pointed at real state (see
     // `pipeline::tags::get_or_init_canonical`).
     config.tags.canonical_path = staging_root.join("no-such-canonical-tags.yml").display().to_string();
     config.tags.mapping_path = staging_root.join("no-such-tag-mapping.yml").display().to_string();
@@ -1169,19 +1172,71 @@ fn borg_owned_key_policy_matches_the_declaration() {
     );
 }
 
-#[test]
-fn session_replace_merges_tags() {
-    // `read_prior_frontmatter` captures the prior list instead of carrying it
-    // as an opaque key, so the call site can union it with the fresh one.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let note = dir.path().join("session.md");
-    std::fs::write(
-        &note,
-        "---\ntitle: S\ntype: session\ntags:\n  - ai\n  - rust\nstatus: read\ncustom-field: tech\n---\nBody.\n",
-    )
-    .expect("write");
+/// Rewrite a note's `tags` block in place, whatever form the publish wrote,
+/// standing in for cortex classify or the migration adding tags to a note
+/// borg published earlier.
+fn set_tags(path: &std::path::Path, tags: &[&str]) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut out: Vec<String> = Vec::new();
+    let mut skipping = false;
+    let mut replaced = false;
+    for line in text.lines() {
+        if line.starts_with("tags:") {
+            out.push("tags:".to_string());
+            out.extend(tags.iter().map(|t| format!("  - {t}")));
+            skipping = true;
+            replaced = true;
+            continue;
+        }
+        if skipping && line.starts_with("  - ") {
+            continue;
+        }
+        skipping = false;
+        out.push(line.to_string());
+    }
+    assert!(replaced, "note had no tags key:\n{text}");
+    std::fs::write(path, format!("{}\n", out.join("\n"))).unwrap();
+}
 
-    let prior = read_prior_frontmatter(&note).expect("read prior");
+fn tags_of(path: &std::path::Path) -> Vec<String> {
+    frontmatter_of(path)
+        .get("tags")
+        .and_then(|v| v.as_sequence())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
+
+/// Design doc Testing Strategy: "session replace keep[s] a cortex-added tag".
+/// Drives the production replace, not a re-implementation of its union: the
+/// first publish lands the note, cortex (stood in by `set_tags`) adds `ai`
+/// and `rust`, and a replay of the same trace must read them back off the
+/// prior note and carry them into the rewritten one. Deleting the union at
+/// the `prior.tags` seam in `process_session_inner` fails this: the replay
+/// renders only the fresh set and both tags vanish.
+#[tokio::test]
+async fn session_replace_merges_tags() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+    let trace = "hv-7a95e001";
+
+    let first = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        trace,
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .unwrap();
+    let landed = std::path::PathBuf::from(first.note_path.expect("first publish lands a note"));
+    set_tags(&landed, &["ai", "rust"]);
+
+    let prior = read_prior_frontmatter(&landed).expect("read prior");
     assert_eq!(
         prior.tags,
         Some(vec!["ai".to_string(), "rust".to_string()]),
@@ -1191,20 +1246,15 @@ fn session_replace_merges_tags() {
         !prior.carried.contains_key(TAGS_KEY),
         "tags must not also be carried verbatim, or the union would be bypassed"
     );
-    // The union itself, as the call site performs it: preserved first, fresh
-    // appended, deduped.
-    let fresh = vec!["rust".to_string(), "claude".to_string()];
-    let mut merged: Vec<String> = Vec::new();
-    for tag in prior.tags.clone().unwrap_or_default().into_iter().chain(fresh) {
-        if !merged.contains(&tag) {
-            merged.push(tag);
-        }
-    }
-    assert_eq!(
-        merged,
-        vec!["ai".to_string(), "rust".to_string(), "claude".to_string()],
-        "a replace must not strip `ai`"
-    );
+
+    publish_session(&config, "Different Slug", "8d6b6ef3", trace, ResolveIntent::Replay, true)
+        .await
+        .unwrap();
+
+    let after = tags_of(&landed);
+    assert!(after.contains(&"ai".to_string()), "a replace stripped `ai`: {after:?}");
+    assert!(after.contains(&"rust".to_string()), "a replace stripped `rust`: {after:?}");
+    assert_eq!(all_notes(vault_dir.path()).len(), 1);
 }
 
 #[test]

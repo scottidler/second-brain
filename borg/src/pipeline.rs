@@ -526,8 +526,9 @@ pub async fn process_url(
             // Inflight guard is held inside the inner future; Drop ran when
             // the future returned Err and went out of scope. A bubbled-up
             // eyre error carries no stage, so it classifies as FetchFailed;
-            // classify / quality / publish failures are returned as typed
-            // Failed results inside process_url_inner and never reach here.
+            // classify / quality / publish failures, the preserved-field read
+            // included (`preserve_read_failed`), are returned as typed Failed
+            // results inside process_url_inner and never reach here.
             make_failure(format!("{:#}", e), FailureStage::FetchFailed, elapsed)
         }
         Err(_elapsed) => {
@@ -540,6 +541,24 @@ pub async fn process_url(
             // InflightGuard's Drop releases the entry automatically.
             make_failure("timeout".to_string(), FailureStage::PipelineTimedOut, elapsed)
         }
+    }
+}
+
+/// The typed failure for a reingest whose preserved-field read failed: receipt
+/// `failed`, stage `publish-failed`, old note untouched (design doc P3). It
+/// used to bubble as a bare `?`, and the generic `Err` arm in `process_url`
+/// labels every unclassified bubble `fetch-failed`.
+fn preserve_read_failed(err: &eyre::Report, method: IngestMethod, canonical: &str, trace_id: &str) -> IngestResult {
+    log::debug!("preserve_read_failed[{trace_id}]: canonical={canonical}");
+    IngestResult {
+        status: IngestStatus::Failed {
+            reason: format!("Failed to read preserved fields from the note being replaced: {err:#}"),
+        },
+        method: Some(method),
+        canonical_url: Some(canonical.to_string()),
+        trace_id: Some(trace_id.to_string()),
+        failure_stage: Some(FailureStage::PublishFailed),
+        ..Default::default()
     }
 }
 
@@ -638,7 +657,16 @@ async fn process_url_inner(
             // Fails the reingest CLOSED (design doc P3): publishing a note
             // that silently lost its preserved fields is worse than not
             // publishing, and the old note is left untouched either way.
-            cortex_fields = read_cortex_fields(old_path)?;
+            cortex_fields = match read_cortex_fields(old_path) {
+                Ok(fields) => fields,
+                Err(e) => {
+                    log::error!(
+                        "[{trace_id}] preserved-field read failed for {}: {e:#}",
+                        old_path.display()
+                    );
+                    return Ok(preserve_read_failed(&e, method, &canonical, trace_id));
+                }
+            };
             reingest_dest = old_path.parent().map(|p| p.to_path_buf());
             // Capture the old note's `slides:` frontmatter list BEFORE removing it
             // so reingest cleanup can find any orphaned slide attachments.
@@ -1012,14 +1040,8 @@ async fn process_url_inner(
         log::info!("[{trace_id}] Restored original date: {orig_date}");
     }
     if !cortex_fields.is_empty() {
-        // The cap bounds the tags union. `usize::MAX` when no vocabulary is
-        // loaded: we cannot know the cap, and inventing one would silently
-        // drop a preserved tag.
-        let max_per_note = match tags::get_or_init_canonical(config).await {
-            Some(state) => state.canon.max_per_note,
-            None => usize::MAX,
-        };
-        final_str = apply_cortex_fields(&final_str, &cortex_fields, max_per_note);
+        let state = tags::get_or_init_canonical(config).await;
+        final_str = apply_cortex_fields(&final_str, &cortex_fields, state.as_deref().map(|s| &s.canon));
         log::info!(
             "[{trace_id}] Restored cortex fields: {:?}",
             cortex_fields.iter().map(|(k, _)| k).collect::<Vec<_>>()

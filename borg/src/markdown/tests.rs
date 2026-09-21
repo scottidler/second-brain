@@ -797,3 +797,21 @@ fn render_note_keys_matches_the_writer() {
         "RENDER_NOTE_KEYS declares key(s) render_note never emits: {unemitted:?}"
     );
 }
+
+/// Empty has one spelling. `render_note` used to write `tags:` followed by
+/// nothing (YAML null) while the reingest merge writes `tags: []`; the vault
+/// carried 210 of the former and 166 of the latter.
+#[test]
+fn render_note_spells_an_empty_tag_list_inline() {
+    let note = NoteContent {
+        title: "Untagged".to_string(),
+        source_url: Some("https://example.com/".to_string()),
+        tags: vec![],
+        summary: "S".to_string(),
+        content_type: ContentType::Article { author: None },
+        ..NoteContent::default()
+    };
+    let rendered = render_note(&note, &test_config());
+    assert!(rendered.contains("\ntags: []\n"), "expected `tags: []`:\n{rendered}");
+    assert!(!rendered.contains("\ntags:\n"), "bare `tags:` written for an empty list:\n{rendered}");
+}

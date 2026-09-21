@@ -722,3 +722,67 @@ fn apply_fixes_empty_kinds_means_all() {
     let after = std::fs::read_to_string(&ledger_path).expect("read");
     assert!(!after.contains(src));
 }
+
+// ---- ledger source column across the historical row shapes ----
+
+fn cells(row: &str) -> Vec<&str> {
+    row.split('|').collect()
+}
+
+/// Both 8-field layouts split to ten cells. Before this the reader took
+/// `cols[7]` for either, so a pre-rewrite `Note|Source|Domain|Trace` row on
+/// another host handed back its Domain cell (`-`, or `ai`) as the source.
+#[test]
+fn ledger_source_col_tells_the_two_ten_cell_layouts_apart() {
+    let current = "| 2026-03-29 | 10:00 | http | \u{2705} | [[slug]] | https://example.com/a | tr-1 |";
+    let pre_rewrite = "| 2026-03-29 | 10:00 | http | \u{2705} | [[slug]] | https://example.com/a | ai | tr-1 |";
+    let pre_rewrite_no_note = "| 2026-03-29 | 10:00 | http | \u{2705} | - | https://example.com/a | - | tr-1 |";
+    let rewritten_legacy = "| 2026-03-29 | 10:00 | http | \u{2705} | A Title | slug.md | https://example.com/a | tr-1 |";
+    let rewritten_legacy_no_file = "| 2026-03-29 | 10:00 | http | \u{2705} | A Title | - | https://example.com/a | tr-1 |";
+    let oldest = "| 2026-03-29 | 10:00 | http | \u{2705} | A Title | slug.md | https://example.com/a | ai | tr-1 |";
+
+    for (name, row) in [
+        ("current", current),
+        ("pre-rewrite", pre_rewrite),
+        ("pre-rewrite without a note", pre_rewrite_no_note),
+        ("rewritten legacy", rewritten_legacy),
+        ("rewritten legacy without a file", rewritten_legacy_no_file),
+        ("oldest", oldest),
+    ] {
+        let cols = cells(row);
+        let col = ledger_source_col(&cols).unwrap_or_else(|| panic!("{name}: no source column"));
+        assert_eq!(cols[col].trim(), "https://example.com/a", "{name} row misread its source");
+    }
+
+    // A source URL that happens to end in `.md` is still a source, not a
+    // Filename cell.
+    let readme = "| 2026-03-29 | 10:00 | http | \u{2705} | - | https://example.com/README.md | - | tr-1 |";
+    let cols = cells(readme);
+    assert_eq!(cols[ledger_source_col(&cols).expect("col")].trim(), "https://example.com/README.md");
+
+    assert_eq!(ledger_source_col(&cells("| a | b |")), None, "a short row has no source");
+}
+
+/// The fix path reads the same column: an orphaned replacement in a
+/// pre-rewrite ledger is dropped by its source, and the rewritten-legacy row
+/// beside it is left alone.
+#[test]
+fn drop_ledger_row_matches_source_in_both_historical_shapes() {
+    let (_tmp, root) = make_vault();
+    let pre_rewrite_src = "https://example.com/pre-rewrite";
+    let legacy_src = "https://example.com/legacy";
+    let body = format!(
+        "| 2026-03-29 | 10:00 | http | \u{1F504} | [[old]] | {pre_rewrite_src} | ai | tr-1 |\n\
+         | 2026-03-28 | 09:00 | http | \u{1F504} | Old Title | old.md | {legacy_src} | tr-0 |\n"
+    );
+    let ledger_path = write_ledger(&root, &body);
+
+    assert!(drop_ledger_row(&ledger_path, pre_rewrite_src, "\u{1F504}", None).expect("drop"));
+    let after = std::fs::read_to_string(&ledger_path).expect("read");
+    assert!(!after.contains(pre_rewrite_src), "pre-rewrite row was not dropped:\n{after}");
+    assert!(after.contains(legacy_src), "legacy row was dropped:\n{after}");
+
+    assert!(drop_ledger_row(&ledger_path, legacy_src, "\u{1F504}", None).expect("drop"));
+    let after = std::fs::read_to_string(&ledger_path).expect("read");
+    assert!(!after.contains(legacy_src), "legacy row was not dropped:\n{after}");
+}
