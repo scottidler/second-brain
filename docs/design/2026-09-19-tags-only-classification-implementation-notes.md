@@ -988,16 +988,18 @@ Q5. Three commits: `ba5c97f` (M1), `220d426` (M3 + M5), `18b0311` (M2 + M4).
 
 ### Open questions
 
-- `sb/build.rs`'s `rerun-if-changed` paths do not exist from the `sb/` crate
-  directory (`.git/HEAD`, `.git/refs/`, `.git/packed-refs` resolve under
-  `sb/`), and in a worktree `../.git` is a file rather than a directory, so
-  the only remaining watch never fires either. Effect, observed: after P11
-  the deployed binary reported `v0.14.14-16-ga099ce4` while running post-P11
-  code, because cargo recompiled the crate without rerunning the build
-  script. It corrected itself on this deploy (`v0.14.14-21-g18b0311`) only
-  because an unrelated `Cargo.toml` edit invalidated the fingerprint. The
-  scaffold pattern this came from has the same paths; fixing it is a
-  cross-repo question, not a tags-only one.
+- `sb/build.rs`'s four `rerun-if-changed` paths do not exist from the `sb/`
+  crate directory (`.git/HEAD`, `.git/refs/`, `.git/packed-refs` resolve
+  under `sb/`, and in a worktree `../.git` is a file, so
+  `../.git/packed-refs` is missing too). Cargo treats a missing
+  `rerun-if-changed` path as stale, so the build script reruns on EVERY
+  build; `GIT_DESCRIBE` was never stale from caching. The "N commits behind"
+  strings (`v0.14.14-16-ga099ce4` after P11, `v0.14.14-21-g18b0311` on the
+  fold deploy) came from running `otto deploy` before the phase commit, and
+  `git describe` runs without `--dirty`, so a build from an uncommitted tree
+  reports the last commit as if it were clean. The fix (resolve the paths via
+  `git rev-parse --git-path` and add `--dirty`) belongs in scaffold, whose
+  pattern this came from; it is a cross-repo change, not a tags-only one.
 - The audit's cheap-wins C1-C5 and defers D1-D4 were left alone as instructed.
   C1 (`schema_docs` never deletes or flags an obsolete `domain-values.md`) is
   the one with a live consequence: any *other* machine that syncs the vault
