@@ -8,16 +8,20 @@
 //! Tier 1 - so a classifier outage only holds notes that carry no tags at all.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use eyre::{Result, WrapErr};
 
-use crate::config::{Config, FrontmatterConfig};
+use crate::config::{Config, FabricConfig, FrontmatterConfig};
 use crate::opts::ClassifyOpts;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::scope::insert_frontmatter_fields;
 use crate::vault::{Note, scan_vault};
-use ::vault::canonical::{self, CanonicalSet, CanonicalTagsFile};
-use distillers::tags::{CandidateSource, Confidence, TagCandidate, TagClassifier, TagInput, TagOutput};
+use ::vault::canonical::{self, CanonicalSet, CanonicalTagsFile, TagMapping};
+use distillers::tags::{
+    CandidateSource, ClassifierKind, Confidence, FabricRunner, ShellFabricRunner, TagCandidate, TagClassifier,
+    TagInput, TagOutput, TagsClassifierConfig,
+};
 
 /// Top-level orchestrator for `sb cortex classify`. Scans the vault and
 /// dispatches to `apply_classify` or `lint_classify` based on `opts.apply`.
@@ -101,13 +105,30 @@ impl Classifiers {
             canon.all.len(),
             canon.no_classifier.len(),
         );
-        Ok(Self {
-            // No `FabricRunner` is wired here: `fabric-closed` degrades to
-            // `deterministic` without one (`distillers::tags::build_kind`).
-            primary: distillers::tags::build(cfg, &canon, &mapping, None),
-            fallback: distillers::tags::build_fallback(cfg, &canon, &mapping, None),
+        let fabric = fabric_runner_for(cfg, &config.fabric);
+        Ok(Self::from_parts(cfg, canon, &mapping, fabric))
+    }
+
+    /// Build the pair from an already-loaded vocabulary and an optional Fabric
+    /// runner. `load` resolves both from config; tests hand in a fake runner
+    /// to prove the `fabric-closed` kind is selected when configured.
+    pub fn from_parts(
+        cfg: &TagsClassifierConfig,
+        canon: CanonicalSet,
+        mapping: &TagMapping,
+        fabric: Option<Arc<dyn FabricRunner>>,
+    ) -> Self {
+        log::debug!(
+            "Classifiers::from_parts: classifier={:?} fallback={:?} fabric_runner={}",
+            cfg.classifier,
+            cfg.fallback,
+            fabric.is_some()
+        );
+        Self {
+            primary: distillers::tags::build(cfg, &canon, mapping, fabric.clone()),
+            fallback: distillers::tags::build_fallback(cfg, &canon, mapping, fabric),
             canon,
-        })
+        }
     }
 
     /// Build a pair directly, for tests and for callers that inject a double.
@@ -142,6 +163,31 @@ impl Classifiers {
             }
         }
     }
+}
+
+/// The Fabric runner `fabric-closed` needs, built from cortex's `fabric:`
+/// block, or `None` when neither the classifier nor its fallback is that
+/// kind. `fabric.api_key` is the NAME of the credential var; `Config::load`
+/// copies it from `llm.api-key`, and `vault::fabric::run_pattern` resolves it
+/// on the child process (the same path `summarize --backfill` takes).
+fn fabric_runner_for(cfg: &TagsClassifierConfig, fabric: &FabricConfig) -> Option<Arc<dyn FabricRunner>> {
+    let wanted = [cfg.classifier, cfg.fallback].contains(&ClassifierKind::FabricClosed);
+    log::debug!(
+        "classify::fabric_runner_for: wanted={wanted} binary={} model={} timeout_secs={}",
+        fabric.binary,
+        fabric.model,
+        fabric.timeout_secs
+    );
+    if !wanted {
+        return None;
+    }
+    Some(Arc::new(ShellFabricRunner {
+        binary: fabric.binary.clone(),
+        api_key: fabric.api_key.clone(),
+        model: fabric.model.clone(),
+        max_chars: fabric.max_content_chars,
+        timeout_secs: fabric.timeout_secs,
+    }))
 }
 
 /// What classifying one note produced.
@@ -207,24 +253,39 @@ fn note_candidates(note: &Note) -> Vec<TagCandidate> {
 }
 
 /// Merge preserved and fresh tags the way a reingest does: preserved first,
-/// deduped, truncated to the cap. The borg twin is
-/// `borg::pipeline::atomic::union_capped`; the policy is stated once in the
-/// design doc and enforced at both writers.
-fn union_capped(preserved: &[String], fresh: &[String], max_per_note: usize) -> Vec<String> {
+/// deduped, capped through `canonical::cap_protecting` so a
+/// `no-classifier-tags` entry survives even when the note's own tags already
+/// fill the cap. The borg twin is `borg::pipeline::atomic::union_capped`; the
+/// policy is stated once in the design doc and enforced at both writers.
+fn union_capped(preserved: &[String], fresh: &[String], canon: &CanonicalSet) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for tag in preserved.iter().chain(fresh.iter()) {
         if !out.contains(tag) {
             out.push(tag.clone());
         }
     }
-    if out.len() > max_per_note {
+    if out.len() > canon.max_per_note {
         log::info!(
-            "classify::union_capped: truncating {} merged tags to the {max_per_note} cap; the fresh set loses the overflow",
-            out.len()
+            "classify::union_capped: capping {} merged tags to {}; the fresh set loses the overflow first, protected tags never",
+            out.len(),
+            canon.max_per_note
         );
-        out.truncate(max_per_note);
     }
-    out
+    canonical::cap_protecting(out, canon.max_per_note, &canon.no_classifier)
+}
+
+/// How a `--retag` result splits: tags kept from the note's previous list
+/// because they are on the protect list, and tags the classifier selected.
+/// Reported separately so a retag run shows how much of the result the
+/// model actually produced (design review r4, guardrail 3).
+fn retag_split(previous: &[String], fresh: &[String], canon: &CanonicalSet) -> (usize, usize) {
+    let retained_protected = fresh
+        .iter()
+        .filter(|t| previous.contains(t) && canon.no_classifier.contains(*t))
+        .count();
+    let model_selected = fresh.len() - retained_protected;
+    log::debug!("classify::retag_split: retained_protected={retained_protected} model_selected={model_selected}");
+    (retained_protected, model_selected)
 }
 
 fn tags_value(tags: &[String]) -> serde_yaml::Value {
@@ -269,12 +330,13 @@ pub fn lint_classify(
                 continue;
             }
             let fresh = distillers::tags::apply_retag(note_tags(note), &result.tags, &classifiers.canon);
+            let (retained_protected, model_selected) = retag_split(note_tags(note), &fresh, &classifiers.canon);
             report.add(Violation {
                 path: note.path.clone(),
                 rule: "classify".to_string(),
                 severity: Severity::Info,
                 message: format!(
-                    "would retag as [{}] (was [{}], method={})",
+                    "would retag as [{}] (was [{}], retained-protected={retained_protected}, model-selected={model_selected}, method={})",
                     fresh.join(", "),
                     note_tags(note).join(", "),
                     result.method(),
@@ -392,6 +454,7 @@ pub fn apply_classify(
                 );
                 continue;
             }
+            let (retained_protected, model_selected) = retag_split(note_tags(note), &fresh, &classifiers.canon);
             let mut fields = vec![("tags".to_string(), tags_value(&fresh))];
             push_classification_fields(&mut fields, &result);
             if let Some(path) = write_fields(vault_root, note, &fields, "retag")? {
@@ -400,11 +463,15 @@ pub fn apply_classify(
                     path: note.path.clone(),
                     rule: "classify".to_string(),
                     severity: Severity::Info,
-                    message: format!("retagged as [{}] (method={})", fresh.join(", "), result.method()),
+                    message: format!(
+                        "retagged as [{}] (retained-protected={retained_protected}, model-selected={model_selected}, method={})",
+                        fresh.join(", "),
+                        result.method()
+                    ),
                     fix: None,
                 });
                 log::info!(
-                    "retagged {} (tags=[{}], method={})",
+                    "retagged {} (tags=[{}], retained-protected={retained_protected}, model-selected={model_selected}, method={})",
                     note.path.display(),
                     fresh.join(", "),
                     result.method(),
@@ -426,7 +493,7 @@ pub fn apply_classify(
 
         // Catch-up: enrich tag-less notes already in notes/ in place
         if already_in_notes {
-            let fields = build_enrichment_fields(&result, note, classifiers.canon.max_per_note);
+            let fields = build_enrichment_fields(&result, note, &classifiers.canon);
             if let Some(path) = write_fields(vault_root, note, &fields, "catch-up classify")? {
                 written.push(path);
                 report.add(Violation {
@@ -452,7 +519,7 @@ pub fn apply_classify(
         }
 
         // Enrich frontmatter and promote (inbox -> notes/)
-        let mut enrichment_fields = build_enrichment_fields(&result, note, classifiers.canon.max_per_note);
+        let mut enrichment_fields = build_enrichment_fields(&result, note, &classifiers.canon);
         ensure_origin(&mut enrichment_fields, note);
         let enrichment_fields = enrichment_fields;
         let abs_path = vault_root.join(&note.path);
@@ -714,11 +781,11 @@ fn filter_unclassified_notes<'a>(notes: &'a [Note], frontmatter: &FrontmatterCon
 fn build_enrichment_fields(
     result: &ClassifyResult,
     note: &Note,
-    max_per_note: usize,
+    canon: &CanonicalSet,
 ) -> Vec<(String, serde_yaml::Value)> {
     let mut fields: Vec<(String, serde_yaml::Value)> = Vec::new();
 
-    let merged = union_capped(note_tags(note), &result.tags.tags, max_per_note);
+    let merged = union_capped(note_tags(note), &result.tags.tags, canon);
     if !merged.is_empty() {
         fields.push(("tags".to_string(), tags_value(&merged)));
     }

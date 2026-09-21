@@ -210,7 +210,7 @@ fn test_build_enrichment_fields_unions_tags() {
         reason: "test".to_string(),
     };
 
-    let fields = build_enrichment_fields(&result, &note, 7);
+    let fields = build_enrichment_fields(&result, &note, &test_canon());
     let tags = fields
         .iter()
         .find(|(k, _)| k == "tags")
@@ -255,7 +255,14 @@ fn test_build_enrichment_fields_cap_keeps_preserved() {
         reason: "test".to_string(),
     };
 
-    let fields = build_enrichment_fields(&result, &note, 2);
+    let fields = build_enrichment_fields(
+        &result,
+        &note,
+        &CanonicalSet {
+            max_per_note: 2,
+            ..test_canon()
+        },
+    );
     let tags = fields.iter().find(|(k, _)| k == "tags").map(|(_, v)| v.clone());
     assert_eq!(
         tags,
@@ -644,4 +651,126 @@ fn retag_then_sweep_keeps_the_protected_tag() {
         "sweep dropped the protected tag the retag kept:\n{after_sweep}"
     );
     assert!(swept.len() <= 3, "sweep left the note over the cap:\n{after_sweep}");
+}
+
+/// B1: the enrichment cap protects `no-classifier-tags`. A note whose own tags
+/// already exceed the cap keeps the protected one; a plain truncate dropped it
+/// because it sat last in the preserved list.
+#[test]
+fn enrichment_cap_keeps_the_protected_tag_when_the_note_already_exceeds_it() {
+    let canon = CanonicalSet {
+        max_per_note: 2,
+        ..protecting_canon(&["work"])
+    };
+    let note = NoteBuilder::new("inbox/test.md")
+        .title("Test")
+        .tags(&["rust", "cli", "work"])
+        .build();
+    let result = ClassifyResult {
+        tags: TagOutput {
+            tags: vec!["ai".to_string()],
+            scores: None,
+            confidence: Confidence::High,
+            method: TagMethod::ClassifierDev,
+        },
+        reason: "test".to_string(),
+    };
+
+    let fields = build_enrichment_fields(&result, &note, &canon);
+    let tags = fields.iter().find(|(k, _)| k == "tags").map(|(_, v)| v.clone());
+    assert_eq!(
+        tags,
+        Some(tags_value(&["rust".to_string(), "work".to_string()])),
+        "the protected tag must survive the cap"
+    );
+}
+
+/// B2: a retag result is reported as retained-protected plus model-selected.
+#[test]
+fn retag_split_counts_protected_carryovers_apart_from_model_picks() {
+    let canon = protecting_canon(&["work"]);
+    let previous = vec!["work".to_string(), "rust".to_string()];
+    let fresh = vec!["work".to_string(), "ai".to_string(), "llm".to_string()];
+    assert_eq!(retag_split(&previous, &fresh, &canon), (1, 2));
+
+    // A protected tag the model picked on its own is a model pick, not a carryover.
+    let fresh_only = vec!["work".to_string(), "ai".to_string()];
+    assert_eq!(retag_split(&["rust".to_string()], &fresh_only, &canon), (0, 2));
+}
+
+/// B2: the retag report line carries both counts.
+#[test]
+fn retag_report_line_carries_retained_and_selected_counts() {
+    let vault = crate::testutil::TestVault::new();
+    vault.add_note(
+        "notes/split.md",
+        "---\ntitle: Split\ndate: 2026-03-20\ntype: note\norigin: assisted\ntags:\n  - work\n  - rust\n---\nBody.\n",
+    );
+    let classifiers = Classifiers::new(
+        Stub::answering(&["ai", "llm"], Confidence::High),
+        Stub::answering(&["ai", "llm"], Confidence::High),
+        protecting_canon(&["work"]),
+    );
+    let opts = ClassifyOpts {
+        retag: vec!["notes/split.md".to_string()],
+        ..apply_opts()
+    };
+    let (report, _) = apply_classify(vault.root(), &vault.scan(), &vault.config(), &opts, &classifiers).expect("apply");
+    let line = &report.violations[0].message;
+    assert!(
+        line.contains("retained-protected=1") && line.contains("model-selected=2"),
+        "missing split counts: {line}"
+    );
+}
+
+/// B4: the `fabric-closed` kind is selected when configured and a runner is
+/// present, for both the primary and the fallback slot.
+#[test]
+fn fabric_closed_is_selected_when_configured_with_a_runner() {
+    struct FakeRunner;
+    impl FabricRunner for FakeRunner {
+        fn run(&self, _pattern: &str, _input: &str) -> Result<String> {
+            Ok(r#"{"tags":["rust"]}"#.to_string())
+        }
+    }
+    let runner: Arc<dyn FabricRunner> = Arc::new(FakeRunner);
+
+    let cfg = TagsClassifierConfig {
+        classifier: ClassifierKind::FabricClosed,
+        fallback: ClassifierKind::Deterministic,
+        ..TagsClassifierConfig::default()
+    };
+    let pair = Classifiers::from_parts(&cfg, test_canon(), &TagMapping::default(), Some(runner.clone()));
+    assert_eq!(pair.primary.method(), TagMethod::FabricClosed);
+    assert_eq!(pair.fallback.method(), TagMethod::Deterministic);
+
+    let cfg = TagsClassifierConfig {
+        classifier: ClassifierKind::Deterministic,
+        fallback: ClassifierKind::FabricClosed,
+        ..TagsClassifierConfig::default()
+    };
+    let pair = Classifiers::from_parts(&cfg, test_canon(), &TagMapping::default(), Some(runner));
+    assert_eq!(pair.fallback.method(), TagMethod::FabricClosed);
+}
+
+/// B4: `load` only builds a Fabric runner when a slot asks for it, and it
+/// carries the `fabric:` block's knobs when it does.
+#[test]
+fn fabric_runner_is_built_only_when_a_slot_is_fabric_closed() {
+    let fabric = FabricConfig {
+        binary: "fabric-test".to_string(),
+        model: "test-model".to_string(),
+        ..FabricConfig::default()
+    };
+    let none = fabric_runner_for(&TagsClassifierConfig::default(), &fabric);
+    assert!(none.is_none(), "deterministic pair must not shell out to fabric");
+
+    let cfg = TagsClassifierConfig {
+        classifier: ClassifierKind::FabricClosed,
+        ..TagsClassifierConfig::default()
+    };
+    let some = fabric_runner_for(&cfg, &fabric);
+    assert!(some.is_some(), "fabric-closed needs a runner");
+    let pair = Classifiers::from_parts(&cfg, test_canon(), &TagMapping::default(), some);
+    assert_eq!(pair.primary.method(), TagMethod::FabricClosed);
 }
