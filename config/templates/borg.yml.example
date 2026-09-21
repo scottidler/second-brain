@@ -117,6 +117,36 @@ youtube:
       max-vision-concurrency: 4
       min-confidence: 0.6
 
+# Tag pipeline. `canonical-path` / `mapping-path` default to the shared files
+# `sb bootstrap` drops into ~/.config/sb/; `reject-concatenated` refuses tags
+# like `machinelearning` that concatenate two canonical ones.
+tags:
+  # canonical-path: ~/.config/sb/canonical-tags.yml
+  # mapping-path: ~/.config/sb/tag-mapping.yml
+  # reject-concatenated: true
+  # The closed-vocabulary tag classifier (`distillers::tags`). Same block, same
+  # shape, in the other subsystem's config; both parse it through
+  # `TagsClassifierConfig`. The nesting is load-bearing: `tags.classifier` is
+  # a struct, not a scalar, so the kind goes on the inner `classifier:` key.
+  classifier:
+    # deterministic | classifier-dev | fabric-closed. The shipped default is
+    # `deterministic`: it maps a note's existing tags and author-tags through
+    # the canonical vocabulary locally and never calls out. `classifier-dev`
+    # scores note text against the vocabulary over HTTP (needs network and
+    # the key below); `fabric-closed` asks the configured fabric model to pick
+    # from the vocabulary (needs the `fabric`/`llm` credential).
+    classifier: deterministic
+    # Minimum score a classifier-dev tag needs to be kept.
+    # threshold: 0.9
+    # Runs when the selected implementation errors. Borg marks the receipt
+    # degraded; cortex holds the note only if this also returns Low.
+    # fallback: deterministic
+    # NAME of the env var holding the classifier.dev key (classifier-dev
+    # only), never the key itself; supply the value via env-bootstrap.
+    # api-key-env: CLASSIFY_API_KEY
+    # endpoint: https://classifier.dev/v1/classify
+    # timeout-secs: 30
+
 # Distillation feature toggles (all default-on; set false to disable a feature).
 # Omitting this section (or any individual key) keeps today's shipped behavior.
 distill:

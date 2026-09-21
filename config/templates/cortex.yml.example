@@ -120,6 +120,13 @@ entities:
 # writes. The daemon tick is OFF by default - see `daemon.actions.association`
 # below.
 actions:
+  # Frontmatter lint. `deprecated-drops` names keys the lint reports as
+  # `frontmatter.deprecated.<key>` with a drop fix (`sb cortex lint --apply`
+  # removes them). Deployment-specific by design: a key a retired schema
+  # field left behind is named here, not in code. Default empty.
+  # frontmatter:
+  #   deprecated-drops:
+  #     - some-retired-key
   association:
     # Merge iff pairwise similarity >= this. Default 0.85 (mirrors
     # actions.duplicates' threshold).
@@ -170,6 +177,33 @@ daemon:
   # env-bootstrap:
   #   command: manifest age decrypt ~/repos/scottidler/secrets/.secrets -f env
   #   env-file: /run/user/1000/cortex.env
+
+# Tag pipeline. The vocabulary paths live under `sweep` (`sweep.canonical-path`,
+# `sweep.mapping-path`) and default to the shared files in ~/.config/sb/; this
+# block only selects the classifier `sb cortex classify` runs.
+tags:
+  # The closed-vocabulary tag classifier (`distillers::tags`). Same block, same
+  # shape, in the other subsystem's config; both parse it through
+  # `TagsClassifierConfig`. The nesting is load-bearing: `tags.classifier` is
+  # a struct, not a scalar, so the kind goes on the inner `classifier:` key.
+  classifier:
+    # deterministic | classifier-dev | fabric-closed. The shipped default is
+    # `deterministic`: it maps a note's existing tags and author-tags through
+    # the canonical vocabulary locally and never calls out. `classifier-dev`
+    # scores note text against the vocabulary over HTTP (needs network and
+    # the key below); `fabric-closed` asks the configured fabric model to pick
+    # from the vocabulary (needs the `fabric`/`llm` credential).
+    classifier: deterministic
+    # Minimum score a classifier-dev tag needs to be kept.
+    # threshold: 0.9
+    # Runs when the selected implementation errors. Borg marks the receipt
+    # degraded; cortex holds the note only if this also returns Low.
+    # fallback: deterministic
+    # NAME of the env var holding the classifier.dev key (classifier-dev
+    # only), never the key itself; supply the value via env-bootstrap.
+    # api-key-env: CLASSIFY_API_KEY
+    # endpoint: https://classifier.dev/v1/classify
+    # timeout-secs: 30
 
 # LLM used by intel / classify. Provider: claude | openai.
 llm:
