@@ -54,8 +54,21 @@ pub struct Distilled {
     #[serde(default)]
     pub claims: Vec<Claim>,
 
-    /// Canonical tags applied by the extractor, post-filtered against
-    /// `canonical-tags.yml`. Max 7. Empty if the extractor doesn't tag.
+    /// The extractor's RAW, PRE-FILTER candidate tags. NOT canonical and NOT
+    /// capped: 12 of the 26 shipped fabric patterns tell the model to
+    /// "propose freely from the content, don't try to guess the canonical
+    /// vocabulary yourself", and `write_distilled_yml` persists what it says
+    /// BEFORE any filtering runs. The canonical filter and the per-note cap
+    /// are applied later, at publish, by `borg::pipeline::tags::finalize_tags`
+    /// via `vault::canonical::filter_and_cap`.
+    ///
+    /// This field is therefore the system's open-vocabulary PROPOSAL SOURCE:
+    /// `cortex::proposals` reads it out of staging to feed
+    /// `tag-proposals.yml` (design `2026-09-21-staged-tag-proposals.md`).
+    /// This doc comment previously claimed the opposite - that the field was
+    /// already filtered against the canonical vocabulary and capped - which is
+    /// why six weeks of that signal went unread. Empty if the extractor
+    /// doesn't tag.
     #[serde(default)]
     pub tags: Vec<String>,
 
