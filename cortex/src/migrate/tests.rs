@@ -395,6 +395,16 @@ fn category_as_tag() -> MigrationConfig {
     }
 }
 
+/// A vocabulary holding exactly `tags`, capped at `max_per_note`.
+fn canon_with(tags: &[&str], max_per_note: usize) -> vault::canonical::CanonicalSet {
+    vault::canonical::CanonicalSet {
+        all: tags.iter().map(|t| (*t).to_string()).collect(),
+        no_segment: Default::default(),
+        no_classifier: Default::default(),
+        max_per_note,
+    }
+}
+
 fn tags_of(v: &TestVault, path: &str) -> Vec<String> {
     let content = v.read(path);
     let fm = content.split("\n---\n").next().expect("frontmatter");
@@ -484,7 +494,8 @@ fn field_to_tags_skips_excluded_values() {
 fn field_to_tags_strips_quotes_and_normalizes() {
     let v = TestVault::new();
     // 350 vault notes quote the value; the writer must strip the quotes and
-    // lowercase before writing the tag.
+    // lowercase before writing the tag. No vocabulary is loaded here, so the
+    // value is written as-is; the vocabulary filter has its own test below.
     std::fs::write(
         v.root().join("quoted.md"),
         "---\ntitle: Q\ndate: 2026-03-20\ntype: note\ncategory: \"Knowledge\"\norigin: authored\ntags: []\n---\nBody.\n",
@@ -518,7 +529,7 @@ fn lint_tag_transforms_flags_a_note_that_would_exceed_the_cap() {
     ).expect("write");
     let notes = v.scan();
     let migration = category_as_tag();
-    let report = lint_migrate_selected(&notes, &[&migration], Some(2));
+    let report = lint_migrate_selected(&notes, &[&migration], Some(&canon_with(&["tech", "a", "b"], 2)));
     let hit = report
         .violations
         .iter()
@@ -586,4 +597,82 @@ fn field_to_tags_leaves_empty_inline_lists_alone() {
 
     apply_migrate(v.root(), &v.scan(), std::slice::from_ref(&category_as_tag())).expect("apply");
     assert!(v.read("empty.md").contains("tags: []"), "empty list was churned");
+}
+
+/// B9: with a vocabulary loaded, `field-to-tags` drops a value that is not a
+/// canonical tag instead of writing one the next sweep would silently strip.
+#[test]
+fn field_to_tags_drops_a_value_outside_the_vocabulary() {
+    let v = TestVault::new();
+    std::fs::write(
+        v.root().join("legacy.md"),
+        "---\ntitle: L\ndate: 2026-03-20\ntype: note\ncategory: \"Knowledge\"\norigin: authored\ntags: []\n---\nBody.\n",
+    )
+    .expect("write");
+    let migration = category_as_tag();
+
+    let without = canon_with(&["tech"], 8);
+    let report = lint_migrate_selected(&v.scan(), &[&migration], Some(&without));
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|vi| vi.path.to_string_lossy() == "legacy.md"),
+        "dry-run must not plan a non-canonical tag: {:?}",
+        report.violations
+    );
+    apply_migrate_selected(v.root(), &v.scan(), &[&migration], Some(&without)).expect("apply");
+    assert!(tags_of(&v, "legacy.md").is_empty(), "non-canonical value written");
+
+    let with = canon_with(&["tech", "knowledge"], 8);
+    apply_migrate_selected(v.root(), &v.scan(), &[&migration], Some(&with)).expect("apply");
+    assert_eq!(tags_of(&v, "legacy.md"), vec!["knowledge".to_string()]);
+}
+
+/// B3: the dry-run lists a note already carrying two or more of the migrated
+/// names, whether or not the transform would change it.
+#[test]
+fn lint_tag_transforms_flags_a_note_already_carrying_two_migrated_names() {
+    let v = TestVault::new();
+    // Two notes give the migration two distinct names: tech and music.
+    std::fs::write(
+        v.root().join("music.md"),
+        "---\ntitle: M\ndate: 2026-03-20\ntype: note\ncategory: music\norigin: authored\ntags: []\n---\nBody.\n",
+    )
+    .expect("write");
+    // Already carries both names, and its own value is already present, so
+    // the transform itself is a no-op for it.
+    std::fs::write(
+        v.root().join("both.md"),
+        "---\ntitle: B\ndate: 2026-03-20\ntype: note\ncategory: tech\norigin: authored\ntags:\n  - tech\n  - music\n---\nBody.\n",
+    )
+    .expect("write");
+    std::fs::write(
+        v.root().join("one.md"),
+        "---\ntitle: O\ndate: 2026-03-20\ntype: note\ncategory: tech\norigin: authored\ntags:\n  - music\n---\nBody.\n",
+    )
+    .expect("write");
+    let migration = category_as_tag();
+    let report = lint_migrate_selected(&v.scan(), &[&migration], Some(&canon_with(&["tech", "music"], 8)));
+
+    let both = report
+        .violations
+        .iter()
+        .find(|vi| vi.path.to_string_lossy() == "both.md")
+        .expect("both.md listed even though nothing changes");
+    assert!(
+        both.message.contains("ALREADY CARRIES 2 migrated names"),
+        "not flagged: {}",
+        both.message
+    );
+    let one = report
+        .violations
+        .iter()
+        .find(|vi| vi.path.to_string_lossy() == "one.md")
+        .expect("one.md gains tech");
+    assert!(
+        !one.message.contains("ALREADY CARRIES"),
+        "one migrated name is not two: {}",
+        one.message
+    );
 }

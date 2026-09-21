@@ -8,6 +8,7 @@ use crate::config::{Config, MigrationConfig};
 use crate::opts::MigrateOpts;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::vault::{Note, scan_vault};
+use vault::canonical::CanonicalSet;
 
 /// Top-level orchestrator for `sb cortex migrate`. Scans the vault, then runs
 /// `apply_migrate` (when `opts.apply`) or `lint_migrate` (dry-run).
@@ -45,21 +46,29 @@ pub fn run(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Result<Rep
         None => migrations.iter().collect(),
     };
 
-    // The dry-run flags notes a tag transform would push over `max-per-note`.
-    // Best-effort: a missing or unreadable vocabulary file means no cap column,
-    // not a failed dry-run.
-    let cap = vault::canonical::CanonicalTagsFile::load(&config.sweep.canonical_path)
-        .map(|f| f.max_per_note)
-        .ok();
+    // The vocabulary gives the tag transforms two things: the cap the dry-run
+    // flags notes against, and the closed set a `field-to-tags` value must be
+    // in to be written at all. Best-effort: a missing or unreadable file means
+    // no cap column and no vocabulary filter, not a failed run.
+    let canon = match vault::canonical::CanonicalTagsFile::load(&config.sweep.canonical_path) {
+        Ok(file) => Some(file.canonical_set()),
+        Err(e) => {
+            log::warn!(
+                "migrate: no canonical vocabulary at {}; field-to-tags writes values unchecked: {e:#}",
+                config.sweep.canonical_path.display()
+            );
+            None
+        }
+    };
 
     if opts.apply {
-        let count = apply_migrate_selected(vault_root, &notes, &selected)?;
+        let count = apply_migrate_selected(vault_root, &notes, &selected, canon.as_ref())?;
         Ok(Report {
             applied: count,
             ..Default::default()
         })
     } else {
-        Ok(lint_migrate_selected(&notes, &selected, cap))
+        Ok(lint_migrate_selected(&notes, &selected, canon.as_ref()))
     }
 }
 
@@ -88,11 +97,13 @@ pub fn lint_migrate(notes: &[Note], migrations: &[MigrationConfig]) -> Report {
 
 /// Apply migrations: field transforms first, then file moves.
 pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationConfig]) -> Result<usize> {
-    apply_migrate_selected(vault_root, notes, &migrations.iter().collect::<Vec<_>>())
+    apply_migrate_selected(vault_root, notes, &migrations.iter().collect::<Vec<_>>(), None)
 }
 
-/// `lint_migrate` over an already-narrowed selection (`--only`).
-pub fn lint_migrate_selected(notes: &[Note], migrations: &[&MigrationConfig], cap: Option<usize>) -> Report {
+/// `lint_migrate` over an already-narrowed selection (`--only`). `canon` is
+/// the loaded vocabulary when there is one: its cap and its closed set both
+/// shape the tag-transform rows.
+pub fn lint_migrate_selected(notes: &[Note], migrations: &[&MigrationConfig], canon: Option<&CanonicalSet>) -> Report {
     let mut report = Report::default();
 
     for migration in migrations {
@@ -118,7 +129,7 @@ pub fn lint_migrate_selected(notes: &[Note], migrations: &[&MigrationConfig], ca
         lint_value_transforms(notes, migration, &mut report);
 
         // Report field-to-tags and tags-remove
-        lint_tag_transforms(notes, migration, cap, &mut report);
+        lint_tag_transforms(notes, migration, canon, &mut report);
     }
 
     log::info!("migrate lint complete: {} violation(s)", report.violations.len());
@@ -126,14 +137,19 @@ pub fn lint_migrate_selected(notes: &[Note], migrations: &[&MigrationConfig], ca
 }
 
 /// `apply_migrate` over an already-narrowed selection (`--only`).
-pub fn apply_migrate_selected(vault_root: &Path, notes: &[Note], migrations: &[&MigrationConfig]) -> Result<usize> {
+pub fn apply_migrate_selected(
+    vault_root: &Path,
+    notes: &[Note],
+    migrations: &[&MigrationConfig],
+    canon: Option<&CanonicalSet>,
+) -> Result<usize> {
     let mut total_count = 0;
 
     // Phase 0: tag transforms. They run FIRST so a later field-drop in the
     // same run cannot remove the source field before its value is copied.
     for migration in migrations {
         if !migration.field_to_tags.is_empty() || !migration.tags_remove.is_empty() {
-            total_count += apply_tag_transforms(vault_root, notes, migration)?;
+            total_count += apply_tag_transforms(vault_root, notes, migration, canon)?;
         }
     }
 
@@ -560,28 +576,71 @@ fn note_tags(note: &Note) -> Vec<String> {
 }
 
 /// The canonical tag a source field's value becomes, or `None` when the value
-/// is excluded, empty, or the note does not carry the field.
+/// is excluded, empty, outside the vocabulary, or the note does not carry
+/// the field.
 ///
 /// Values are quote-stripped and lowercased; a migration whose source field
 /// needs richer normalization (emoji folder paths, legacy aliases) applies
-/// its own before configuring `field-to-tags`.
-fn field_to_tag_value(note: &Note, field: &str, cfg: &crate::config::FieldToTags) -> Option<String> {
+/// its own before configuring `field-to-tags`. With a vocabulary loaded, a
+/// value that is not a canonical tag is dropped here, with a log line, rather
+/// than written and then silently stripped by the next sweep.
+fn field_to_tag_value(
+    note: &Note,
+    field: &str,
+    cfg: &crate::config::FieldToTags,
+    canon: Option<&CanonicalSet>,
+) -> Option<String> {
     let value = source_field_value(note, field)?;
     let normalized = value.to_lowercase();
     if cfg.exclude.iter().any(|e| e == &normalized || e == &value) {
         return None;
     }
+    if let Some(canon) = canon
+        && !canon.all.contains(&normalized)
+    {
+        log::info!(
+            "field-to-tags: {} {field}={value:?} is not a canonical tag, not written",
+            note.path.display()
+        );
+        return None;
+    }
     Some(normalized)
 }
 
+/// Every distinct tag `field-to-tags` would produce across `notes`: the
+/// migrated names the dry-run counts a note's existing tags against.
+fn migrated_names(notes: &[Note], migration: &MigrationConfig, canon: Option<&CanonicalSet>) -> HashSet<String> {
+    let names: HashSet<String> = notes
+        .iter()
+        .flat_map(|note| {
+            migration
+                .field_to_tags
+                .iter()
+                .filter_map(move |(field, cfg)| field_to_tag_value(note, field, cfg, canon))
+        })
+        .collect();
+    log::debug!(
+        "migrate::migrated_names: {} distinct name(s) for {}",
+        names.len(),
+        migration.name
+    );
+    names
+}
+
 /// Dry-run for `field-to-tags` and `tags-remove`.
-fn lint_tag_transforms(notes: &[Note], migration: &MigrationConfig, cap: Option<usize>, report: &mut Report) {
+///
+/// Lists the two conditions the design doc asks for beside the planned
+/// change: a note the transform would push over `max-per-note`, and a note
+/// already carrying two or more of the migrated names before the run (those
+/// are the ones a later `tags-remove` cannot undo cleanly).
+fn lint_tag_transforms(notes: &[Note], migration: &MigrationConfig, canon: Option<&CanonicalSet>, report: &mut Report) {
+    let names = migrated_names(notes, migration, canon);
     for note in notes {
         let current = note_tags(note);
         let mut would: Vec<String> = Vec::new();
 
         for (field, cfg) in &migration.field_to_tags {
-            if let Some(tag) = field_to_tag_value(note, field, cfg)
+            if let Some(tag) = field_to_tag_value(note, field, cfg, canon)
                 && !current.contains(&tag)
             {
                 would.push(tag);
@@ -592,21 +651,29 @@ fn lint_tag_transforms(notes: &[Note], migration: &MigrationConfig, cap: Option<
                 would.push(format!("-{tag}"));
             }
         }
-        if would.is_empty() {
+        let carried: Vec<&String> = current.iter().filter(|t| names.contains(*t)).collect();
+        if would.is_empty() && carried.len() < 2 {
             continue;
         }
 
-        // Surface the two conditions the design doc asks the dry-run to list:
-        // a note that would exceed the cap, and a note already carrying two or
-        // more of the migrated names before the run.
-        let mut message = format!("would set tags {would:?}");
+        let mut message = if would.is_empty() {
+            "would leave tags unchanged".to_string()
+        } else {
+            format!("would set tags {would:?}")
+        };
         let added = would.iter().filter(|t| !t.starts_with('-')).count();
-        if let Some(cap) = cap
+        if let Some(cap) = canon.map(|c| c.max_per_note)
             && current.len() + added > cap
         {
             message.push_str(&format!(
                 " (WOULD EXCEED max-per-note: {} tags against a cap of {cap})",
                 current.len() + added
+            ));
+        }
+        if carried.len() >= 2 {
+            message.push_str(&format!(
+                " (ALREADY CARRIES {} migrated names: {carried:?})",
+                carried.len()
             ));
         }
         report.add(Violation {
@@ -625,7 +692,12 @@ fn lint_tag_transforms(notes: &[Note], migration: &MigrationConfig, cap: Option<
 /// second `--apply` writes zero files. Every visited note's tag block is
 /// rewritten in canonical block form, which is also how a pre-P4 inline list
 /// gets normalized.
-fn apply_tag_transforms(vault_root: &Path, notes: &[Note], migration: &MigrationConfig) -> Result<usize> {
+fn apply_tag_transforms(
+    vault_root: &Path,
+    notes: &[Note],
+    migration: &MigrationConfig,
+    canon: Option<&CanonicalSet>,
+) -> Result<usize> {
     notes
         .par_iter()
         .map(|note| -> Result<usize> {
@@ -633,7 +705,7 @@ fn apply_tag_transforms(vault_root: &Path, notes: &[Note], migration: &Migration
             let mut next = current.clone();
 
             for (field, cfg) in &migration.field_to_tags {
-                if let Some(tag) = field_to_tag_value(note, field, cfg)
+                if let Some(tag) = field_to_tag_value(note, field, cfg, canon)
                     && !next.contains(&tag)
                 {
                     next.push(tag);
