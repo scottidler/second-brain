@@ -67,3 +67,26 @@
 
 ### Open questions
 - None.
+
+## Phase 5: Read and aggregate the staged candidates
+
+### Design decisions
+- `Proposal::source` / `ProposalSource` land here rather than in Phase 2, per the Phase 2 note above: this is the phase that can compute note/staged/both. `scan_proposals` sets `ProposalSource::Note` until Phase 6 wires the union.
+- **Tier 3's "source match" is `Note.frontmatter.source` vs the receipt's `raw_input`** (`cortex/src/proposals.rs:283`). The design doc says "whose `source` matches the receipt's", but the receipts table has no `source` column (`borg/src/receipts.rs:224`): the columns are `trace_id, received_at, method, kind, raw_input, status, terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded`. `raw_input` is the verbatim input, which for a URL ingest is the URL the note records as `source:`. That is the cross-check the doc describes.
+- `NoteIndex` borrows the notes rather than cloning (`vault/src/identity.rs:33`): it is rebuilt on every sweep tick over a 3,800-note vault.
+- `resolve_trace` returns `None` for three distinct situations (no claimant, several survivors, a `superseded-by` cycle) because every caller treats them identically: fall through to the next tier. Documented on the function so the collapsing is deliberate rather than accidental.
+- `read_staged_candidates` deserializes into a local `StagedDistilled { tags, meta }` (`cortex/src/proposals.rs:74`), not `vault::distilled::Distilled`: the full type pulls every per-kind payload and the transcript, and this parses 10.6 MB of YAML per tick. Unknown keys are ignored by design - a narrow read of someone else's artifact is not a schema this scanner owns, which is the opposite of the `deny_unknown_fields` call in Phase 2 (that one IS cortex's own file).
+
+### Deviations
+- **`read_staged_candidates` returns `StagedScan`, not `Vec<StagedCandidates>`.** The doc's API block gives the bare `Vec`, but the doc's own text requires two things a `Vec` cannot carry: "the report carries both counts" (missing vs unreadable) and `ProposalsFile.staged_window`. `StagedScan` also carries `scanned: bool`, which is how the Resolved-Decisions host rule ("staging root does not exist -> skip the arm, exit 0" vs "exists but unreadable -> Err") is expressed in one return value instead of making every caller re-run the `Path::exists` check.
+- **`vault::identity` and `cortex::proposals` are documented in `vault/AGENTS.md` and `cortex/AGENTS.md` in THIS phase**, not Phase 8. `otto ci`'s `agents-map` task fails any undocumented module the moment it exists (`FAIL: cortex/AGENTS.md: proposals.rs undocumented`), so deferring would mean shipping three red-CI phases. Phase 8 still owns the rest of its doc corrections.
+
+### Tradeoffs
+- The frozen fixture's first draft recorded `ht-970437f1`'s `note_path` under a basename (`course.md`) that matched no note, so no tier resolved it and the test failed with `system-prompt` at 3. The fixture was wrong, not the code: live, both receipts record the pre-classify `inbox/` path whose basename IS the surviving note's stem, so tier 3 resolves them. Corrected the fixture to that shape and left a comment saying so, because a fixture that cannot reproduce the bug it guards is worse than no fixture.
+- Clippy's workspace-wide `unwrap_used` ban applies to test code too; the new tests use `expect()` with a message.
+
+### Observed, one live read (not asserted anywhere)
+- `read_staged_candidates` over the live staging root: 659 traces with `distilled.yml`, 45,637 without, 0 unreadable, window `2026-08-05T07:54:16Z .. 2026-09-21T14:51:16Z`, **83.6 ms**. Matches the corpus the design doc measured.
+
+### Open questions
+- None.

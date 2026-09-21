@@ -24,6 +24,7 @@ pub mod memgraph;
 pub mod migrate;
 pub mod naming;
 pub mod opts;
+pub mod proposals;
 pub mod quality;
 pub mod report;
 pub mod schema_docs;

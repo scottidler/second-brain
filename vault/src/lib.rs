@@ -10,6 +10,7 @@ pub mod embedding;
 pub mod fabric;
 pub mod frontmatter;
 pub mod hygiene;
+pub mod identity;
 pub mod intake;
 pub mod ledger;
 pub mod logging;

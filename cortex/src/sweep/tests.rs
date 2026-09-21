@@ -603,6 +603,7 @@ fn test_write_proposals_propagates_corrupt_file() {
             tag: "novel-tag".to_string(),
             frequency: 3,
             sources: vec!["notes/a.md".to_string()],
+            source: ProposalSource::Note,
         }],
     )
     .expect_err("corrupt queue must not be silently replaced");
@@ -644,6 +645,7 @@ fn test_write_proposals_overwrites_including_empty_scan() {
             tag: "stale-tag".to_string(),
             frequency: 7,
             sources: vec!["notes/a.md".to_string()],
+            source: ProposalSource::Note,
         }],
     )
     .expect("first write");
