@@ -4,7 +4,7 @@
 
 ## Purpose
 
-The single source of truth for the Obsidian-vault domain schema (Domain / NoteType / Origin / Status / Method), YAML frontmatter, note parsing, path resolution, the search index, embeddings, and the L2 `Distilled` contract. Consumed by borg, cortex, oracle, distillers, and sb. If a primitive is shared across crates, it lives here — not in a consumer.
+The single source of truth for the Obsidian-vault note schema (NoteType / Origin / Status / Method; `Domain` was deleted 2026-09-20 and `tags` is the sole classification facet), YAML frontmatter, note parsing, path resolution, the search index, embeddings, and the L2 `Distilled` contract. Consumed by borg, cortex, oracle, distillers, and sb. If a primitive is shared across crates, it lives here — not in a consumer.
 
 ## Entry Points
 

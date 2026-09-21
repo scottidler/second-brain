@@ -201,12 +201,25 @@ migrations:
 
 ```yaml
 tags:
-  classifier: classifier-dev        # deterministic | fabric-closed | classifier-dev
-  threshold: 0.9
-  api-key-env: CLASSIFY_API_KEY     # classifier-dev only; value via env-bootstrap
-  fallback: deterministic           # when the selected impl errors: borg runs this and marks the receipt degraded;
+  classifier:                       # the whole block is `TagsClassifierConfig`
+    classifier: classifier-dev      # deterministic | fabric-closed | classifier-dev
+    threshold: 0.9
+    api-key-env: CLASSIFY_API_KEY   # classifier-dev only; value via env-bootstrap
+    fallback: deterministic         # when the selected impl errors: borg runs this and marks the receipt degraded;
                                     # cortex runs this over the note's existing tags and author-tags, and holds only if it returns Low
+    endpoint: https://classifier.dev/v1/classify
+    timeout-secs: 30
 ```
+
+The nesting is load-bearing: `tags.classifier` is the struct, not a scalar. Borg's `tags:` block also carries `canonical-path` / `mapping-path` / `reject-concatenated`, so the classifier's six keys live one level down. Amended 2026-09-20 during the implementation audit, which ran the flat shape this block originally showed against the built binary:
+
+```
+Error: failed to load configuration
+Caused by: tags.classifier: invalid type: string "classifier-dev",
+           expected struct TagsClassifierConfig at line 254 column 15
+```
+
+**The shipped default is `deterministic`, not `classifier-dev`** (`TagsClassifierConfig::default()`). A machine bootstrapped without this block classifies locally and never calls out; `classifier-dev` is opt-in per host because it needs both network and a key. The deployed `borg.yml` / `cortex.yml` set it explicitly, as above.
 
 **Confidence mapping (drives promotion and `cortex-confidence`).** Each method reports `High | Medium | Low` the way Tier 1/2 do today; promotion happens on `High` or `Medium`, hold on `Low` (today's rule):
 
@@ -241,7 +254,7 @@ pub trait TagClassifier {
 pub fn build(cfg: &TagsClassifierConfig, canon: &CanonicalSet, fabric: Option<&dyn FabricCaller>) -> Box<dyn TagClassifier>;
 ```
 
-`text` is the note summary when one exists, else the first 900 characters of the body; never the transcript. The trait is synchronous: borg and cortex call it from their existing blocking tag paths; `FabricClosedVocab` uses the `FabricShell` adapter (`distillers/src/fabric.rs:98`, `spawn_blocking`) with `fabric.timeout` from config and one in-flight call per call site; `ClassifierDev` overrides `classify_batch` to send up to 1,000 texts per call.
+`text` is the note summary when one exists, else the first 900 characters of the body; never a whole transcript. The ceiling is `distillers::tags::CLASSIFIER_TEXT_CHARS` and both callers clip through `body_excerpt` (borg: `TagSources::from_body`; cortex: `classify::classifier_text`). It is a data boundary, not a tuning knob: under `classifier-dev` this string is POSTed to a third-party API, so a summary-less audio note sends the head of its transcript, never all of it. The trait is synchronous: borg and cortex call it from their existing blocking tag paths; `FabricClosedVocab` uses the `FabricShell` adapter (`distillers/src/fabric.rs:98`, `spawn_blocking`) with `fabric.timeout` from config and one in-flight call per call site; `ClassifierDev` overrides `classify_batch` to send up to 1,000 texts per call.
 
 Candidate handling is what makes G5 hold:
 - `Deterministic` maps every candidate (`Author`, `Model`, `Preserved`) through `match_to_canonical` and caps. Pure function of its input; repeatable only when the candidates are. At cortex call sites the `Preserved` source is the note's existing canonical tags, which is exactly what today's Tier 1 `classify_by_tags` reads (`cortex/src/classify.rs:809-810`, deciding 53% of classified notes locally); mapping already-canonical tags is idempotent, so this carries no LLM drift.

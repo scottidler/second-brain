@@ -137,10 +137,6 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
         include_str!("../../../borg/patterns/distill-session-reduce.md"),
     ),
     (
-        "obsidian-classify.md",
-        include_str!("../../../borg/patterns/obsidian-classify.md"),
-    ),
-    (
         "obsidian-tags.md",
         include_str!("../../../borg/patterns/obsidian-tags.md"),
     ),
