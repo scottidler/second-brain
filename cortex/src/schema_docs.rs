@@ -291,6 +291,15 @@ fn stamp(now: chrono::DateTime<chrono::Utc>) -> String {
     now.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+/// The one tag every generated doc carries, in the block form the
+/// `tags.format` lint requires and `frontmatter.md` documents. The inline
+/// `[obsidian]` spelling these files used to carry was the lint's own
+/// finding against the files it generates.
+fn push_tags_block(out: &mut String) {
+    out.push_str("tags:\n");
+    out.push_str("  - obsidian\n");
+}
+
 /// Render one doc. `generated_at` is the only input that is not compiled in,
 /// which is exactly why the drift check can neutralise it.
 fn render_doc(spec: &DocSpec, generated_at: &str) -> String {
@@ -307,7 +316,7 @@ fn render_doc(spec: &DocSpec, generated_at: &str) -> String {
     // Pinned so the file can never surface in `cortex sweep --cold`: it is
     // reference material nobody "reads", and it is machine-owned anyway.
     out.push_str("pinned: true\n");
-    out.push_str("tags: [obsidian]\n");
+    push_tags_block(&mut out);
     out.push_str("---\n\n");
 
     out.push_str(&format!("# {}\n\n", spec.title));
@@ -361,7 +370,7 @@ fn render_tag_values_doc(tags: &[String], generated_at: &str) -> String {
     out.push_str(&format!("generated-at: {generated_at}\n"));
     out.push_str("generator: sb cortex schema\n");
     out.push_str("pinned: true\n");
-    out.push_str("tags: [obsidian]\n");
+    push_tags_block(&mut out);
     out.push_str("---\n\n");
 
     out.push_str("# Tag Values\n\n");

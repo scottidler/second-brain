@@ -295,3 +295,27 @@ fn doc_paths_names_the_four_generated_files() {
         "frontmatter.md stays hand-written"
     );
 }
+
+/// B6: the generated frontmatter spells `tags` in block form, the form the
+/// `tags.format` lint requires, for every generated doc including the
+/// data-driven tag doc.
+#[test]
+fn generated_frontmatter_writes_tags_in_block_form() {
+    let stamp = stamp(fixed_now());
+    let mut rendered: Vec<String> = SPECS.iter().map(|spec| render_doc(spec, &stamp)).collect();
+    rendered.push(render_tag_values_doc(&["rust".to_string()], &stamp));
+    for doc in rendered {
+        let (frontmatter, _) = doc
+            .strip_prefix("---\n")
+            .and_then(|b| b.split_once("\n---\n"))
+            .expect("frontmatter block");
+        assert!(
+            frontmatter.contains("\ntags:\n  - obsidian"),
+            "tags not in block form:\n{frontmatter}"
+        );
+        assert!(
+            !frontmatter.contains("tags: ["),
+            "inline tags list survived:\n{frontmatter}"
+        );
+    }
+}

@@ -6,7 +6,8 @@ origin: generated
 generated-at: 2026-09-05T00:00:00Z
 generator: sb cortex schema
 pinned: true
-tags: [obsidian]
+tags:
+  - obsidian
 ---
 
 # Status Values
