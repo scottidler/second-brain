@@ -1012,3 +1012,40 @@ Q5. Three commits: `ba5c97f` (M1), `220d426` (M3 + M5), `18b0311` (M2 + M4).
   `v5-domain-as-tag-undo.yml` ships in this repo instead because it is an
   inverse plan file, not a configured migration. The two live in different
   places by kind, not by omission.
+
+### Audit r1 cheap-wins and defers (recorded)
+
+The synthesis that named these lives in `/tmp/review-panel/T0LTagtM/synthesis.md`
+(tmpfs, gone on reboot), so the headings and one sentence of substance are
+copied here verbatim. Disposition is filled in by the lead after the fold
+merges.
+
+| ID | Synthesis heading (verbatim) | Substance (verbatim) | Disposition |
+|---|---|---|---|
+| C1 | `schema_docs` never deletes or flags an obsolete `domain-values.md`. DISCLOSED (notes:838-848). | "The renderer went; the deletion is absent from `cortex/src/schema_docs.rs` and the vault file was removed by hand. `--check` also does not flag a stray one." | pending fold |
+| C2 | `no_tool_has_a_domain_param` should be replaced, not just deleted. DISCLOSED (notes:894). Seats disagree; staff is right. | "a test that asserts each registered tool's property set equals an expected set held in a JSON fixture (outside AC1's `--include=*.rs`) satisfies both." | pending fold |
+| C3 | `tags` is accepted and ignored on three aggregate MCP branches. (staff; I verified, and verified it is NOT a regression) | "`tag_search` without `tag` (`oracle/src/server.rs:673`), `creator_browse` without `creator` (:876), `source_browse` without `host` (:921) all return global statistics and drop the filter." | pending fold |
+| C4 | `tags_all` AND-mode miscounts a duplicated request. (staff; I verified) | "`vault/src/search/query.rs:26` compares `count(DISTINCT t.tag)` against the *undeduplicated* `tags.len()`, so `tags_all=["privacy","privacy"]` matches nothing." | pending fold |
+| C5 | AC1's whole-file exclusions are broader than they need to be. (both seats converge; I measured the breadth) | "`harvest.rs` is 608 lines with **one** `domain` hit, and the exclusion list already carries `sb/src/cli/borg.rs` at 1,368 lines with **ten**, plus `borg/src/lib.rs` at 989 lines with **zero** (a dead exclusion)." | pending fold |
+| D1 | Duplicate frontmatter tags break AC4's standing equality. | "`note_tags` is `PRIMARY KEY (path, tag)` with `INSERT OR IGNORE` (`vault/src/search/schema.rs:59-63`); `json_each(notes.tags)` does not dedupe." | pending fold |
+| D2 | `cortex/src/scope.rs:222-232` emits sequence items unquoted. | "A string item `"x: y"` would now round-trip as a mapping, `"true"` as a bool, and an empty sequence as null." | pending fold |
+| D3 | `fabric-closed` is an unreachable config option that degrades silently. | "No production caller passes a `FabricRunner`: `borg/src/pipeline/tags.rs:142` and `cortex/src/classify.rs:105,109` all pass `None`, and `distillers/src/tags.rs:247-252` substitutes `Deterministic` with only a `log::debug!` -- no WARN, no `degraded`." | pending fold |
+| D4 | `classify_batch` has no caller and does not enforce the documented ceiling. | "`distillers/src/tags.rs:578` sends the whole slice with no ceiling and consumes no rate-limit headers, and nothing calls it." | pending fold |
+
+#### Staff-seat findings the synthesis dropped
+
+From `/tmp/review-panel/T0LTagtM/staff-r1.out` (same tmpfs). These never
+reached the synthesis as findings; recorded here in the same shape so they
+survive the reboot.
+
+| ID | Staff finding (verbatim) | Where it points | Disposition |
+|---|---|---|---|
+| S1 | "The session AC3 test also does not establish its advertised protection: `session/tests.rs:1194` repeats the union loop inside the test. Removing the production loop at `session.rs:638` leaves that assertion intact." | `borg/src/pipeline/session/tests.rs:1194` | pending fold |
+| S2 | "Forced non-session replacement bypasses preservation. For example, text ingestion classifies fresh tags and directly overwrites the resolved destination at `text.rs:129` and `text.rs:174`. `resolve_publish_path(force=true)` does not merge frontmatter. This behavior predates tags-only." | `borg/src/pipeline/text.rs:129,174` | pending fold |
+| S3 | "HTTP 200 with `{"results":[{}]}` is accepted because `scores` defaults empty. It produces a successful Low result, bypassing fallback and degraded reporting." | `distillers/src/tags.rs:514` | pending fold |
+| S4 | "every preserved list, not just `tags`, is unioned and capped at `atomic.rs:285`. A smaller configured tag cap truncates `cortex-quality-issues`." | `borg/src/pipeline/atomic.rs:285` | pending fold |
+| S5 | "P3 reports the wrong failure stage. The preserve-read error propagates through `?` at `pipeline.rs:641`, reaching the generic `FetchFailed` conversion at `pipeline.rs:523`. The old note is protected, but the specified `publish-failed` receipt is not delivered." | `borg/src/pipeline.rs:641,523` | pending fold |
+| S6 | "P4's 'every note' repair is incomplete. Valid `"tags": [tech]` with `domain: tech` escapes normalization because the detector recognizes only literal `tags:`. The same detector lets P9 lint miss it. Also, dry-run skips form-only changes that apply will write." | `cortex/src/migrate.rs:529,595,673` | pending fold |
+| S7 | "the new tag-schema document itself still emits inline tags at `schema_docs.rs:364`." | `cortex/src/schema_docs.rs:364` | pending fold |
+| S8 | "The '20-note' purity test actually supplies one input with 20 candidates." | `distillers/src/tags/tests.rs:88` | pending fold |
+| S9 | "the notes' statement that `tags_all` was threaded through every pipeline function is inaccurate: the pipeline hardcodes OR." | this file, Phase 8 Tradeoffs | pending fold |
