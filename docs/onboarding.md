@@ -111,9 +111,10 @@ $EDITOR ~/.config/sb/borg.yml      # set vault.root-path: ~/path/to/your/vault
 If unset, commands error with: "vault root not set: pass --vault, set
 `vault.root-path`, or run from a directory that contains a `.obsidian/`".
 
-> **You inherit the schema.** Domains, note types, and the 110 canonical tags
-> live in `vault::schema`. Out of the box your notes use *that* taxonomy; fork
-> it if you want your own.
+> **You inherit the schema.** Note types, origins and statuses live in
+> `vault::schema`; the 117 canonical tags, the sole classification facet, live
+> in `config/canonical-tags.yml` (deployed to `~/.config/sb/`). Out of the box
+> your notes use *that* taxonomy; fork it if you want your own.
 
 ### 5. Wire one transport (start with Telegram)
 

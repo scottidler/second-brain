@@ -9,7 +9,7 @@ that share one Obsidian vault:
 - **cortex** (vault governance daemon) - lint, link discovery, tag sweeps,
   classification, daily/weekly intel, semantic embedding.
 - **oracle** (MCP knowledge retrieval) - hybrid BM25 + vector search,
-  domain briefs, ledger queries. Launched on demand via `.mcp.json`.
+  tag briefs, ledger queries. Launched on demand via `.mcp.json`.
 
 All three operate against `~/.config/sb/` for config and the vault
 filesystem for content.

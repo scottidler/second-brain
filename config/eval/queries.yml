@@ -2,7 +2,8 @@
 #
 # Grounded in the live corpus (AI / claude-code, Obsidian, Rust, tech) — each
 # query sits on a dense answer cluster so the eval measures RANKING quality, not
-# missing content. No domain filters, mirroring how retrieval is actually used.
+# missing content. No tag filters (and no other facet filter), mirroring how
+# retrieval is actually used.
 #
 # 4 queries carry hand-labeled `calibration:` maps (Scott's blind 0-3 scores)
 # used to validate the LLM judge against human ground truth.

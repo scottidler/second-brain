@@ -16,13 +16,13 @@ The existing system is more mature than a casual read of CLAUDE.md suggests. Ver
 
 **Already shipped:**
 
-- `vault::search` (`vault/src/search.rs`, 1622 lines, feature-gated, enabled by oracle): SQLite + FTS5 virtual table over `(title, body, tags, summary)`, incremental indexing by mtime, triggers for insert/update/delete, `find_similar` via FTS5-term overlap, `domain_brief`, `tag_search`, `tag_cooccurrence`, inbound/outbound link traversal, orphan detection, duplicate groups, classify stats.
+- `vault::search` (`vault/src/search.rs`, 1622 lines, feature-gated, enabled by oracle): SQLite + FTS5 virtual table over `(title, body, tags, summary)`, incremental indexing by mtime, triggers for insert/update/delete, `find_similar` via FTS5-term overlap, `tag_brief` (was `domain_brief` until 2026-09-20), `tag_search`, `tag_cooccurrence`, inbound/outbound link traversal, orphan detection, duplicate groups, classify stats.
 - Oracle MCP exposes 18 tools wrapping the above (`oracle/src/server.rs:193-750`).
 - `vault::watcher` (331 lines) wired to oracle reindex.
 - Borg intake invariant: synchronous write to `borg-intake.md` before any classification, with DLQ mirror and `replay_of` chaining (`borg/src/intake.rs:73-180`).
 - Borg YouTube extractor: yt-dlp metadata, VTT subtitle fetch, audio for Whisper, frame extraction with mpdecimate (`borg/src/youtube.rs:21-485`).
 - Borg article extractor: `markitdown` with 30s timeout (`borg/src/extraction.rs:14-66`).
-- Cortex post-ingest passes: `autotag`, `quality`, `sweep`, `intel` (daily/weekly digests), `migrate`.
+- Cortex post-ingest passes: `classify`, `quality`, `sweep`, `intel` (daily/weekly digests), `migrate` (`autotag` was deleted 2026-09-20; classify assigns tags).
 
 **Real gaps** (where this roadmap focuses):
 
