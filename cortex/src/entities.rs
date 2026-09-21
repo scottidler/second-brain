@@ -230,13 +230,12 @@ pub fn promote_concept(proposals_path: &Path, glossary_path: &Path, slug: &str, 
     } else {
         EntityProposalsFile::default()
     };
-    if !pf.proposals.iter().any(|p| p.slug == slug) {
-        eyre::bail!(
-            "no proposal with slug {slug:?} in {} - promotion must trace to a pending proposal",
-            proposals_path.display()
-        );
-    }
-
+    // MEMBERSHIP FIRST, then traceability. The reverse order made a second
+    // `--apply` of the same slug exit non-zero: the first apply removed the
+    // very proposal the bail then demands. An operator re-running a batch
+    // should get an idempotent no-op, not a failure. (Same reorder as
+    // `cortex::proposals::promote_tags`; this became reachable when Phase 3
+    // made glossary.yml survive a deploy for the first time.)
     let glossary = crate::linking::load_glossary(glossary_path)?;
     if glossary.concepts.iter().any(|c| c == slug) {
         log::info!("cortex::entities::promote_concept: {slug} already a glossary concept; no-op");
@@ -246,6 +245,13 @@ pub fn promote_concept(proposals_path: &Path, glossary_path: &Path, slug: &str, 
             already_present: true,
             diff: String::new(),
         });
+    }
+
+    if !pf.proposals.iter().any(|p| p.slug == slug) {
+        eyre::bail!(
+            "no proposal with slug {slug:?} in {} - promotion must trace to a pending proposal",
+            proposals_path.display()
+        );
     }
 
     let mut concepts = glossary.concepts.clone();

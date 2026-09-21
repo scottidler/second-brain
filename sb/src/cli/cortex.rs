@@ -90,6 +90,9 @@ pub enum Command {
     /// Promote a proposed concept from entity-proposals.yml into glossary.yml
     /// (reviewable diff; dry-run unless --apply)
     ConceptPromote(ConceptPromoteArgs),
+    /// Promote pending tag proposals from tag-proposals.yml into a group of
+    /// canonical-tags.yml (reviewable diff; dry-run unless --apply)
+    TagPromote(TagPromoteArgs),
     /// One-time historical multi-repo backfill: LLM pass over pre-files-touched
     /// sessions proposing cross-repo bridges to bridge-proposals.yml (needs the
     /// live clyde catalog + fabric; the parent sequences the real env)
@@ -103,6 +106,26 @@ pub enum Command {
 pub struct ConceptPromoteArgs {
     /// The proposal slug to promote (must be a pending entity-proposals.yml entry).
     pub slug: String,
+    /// Write the change. Without it, prints the diff and writes nothing.
+    #[arg(long)]
+    pub apply: bool,
+}
+
+#[derive(Args)]
+pub struct TagPromoteArgs {
+    /// One or more tags to promote. Each must be a pending tag-proposals.yml
+    /// entry, or already canonical (which is an idempotent no-op).
+    #[arg(required = true, num_args = 1..)]
+    pub tags: Vec<String>,
+    /// The canonical-tags.yml group to insert into. Must already exist.
+    #[arg(long)]
+    pub group: String,
+    /// The canonical-tags.yml to edit. Defaults to the DEPLOYED copy, which
+    /// --apply refuses: `otto deploy` regenerates that file from the repo, so
+    /// a promotion written there is deleted by the next deploy. Pass the
+    /// repo's config/canonical-tags.yml, then commit and deploy.
+    #[arg(long)]
+    pub canonical: Option<PathBuf>,
     /// Write the change. Without it, prints the diff and writes nothing.
     #[arg(long)]
     pub apply: bool,
@@ -710,6 +733,30 @@ impl CortexCli {
                     println!("{}", report.diff);
                 }
             }
+            Command::TagPromote(a) => {
+                let deployed = vault::paths::canonical_tags();
+                let canonical = a.canonical.clone().unwrap_or_else(|| deployed.clone());
+                // The deployed copy is `write_always`-ed from the repo on every
+                // `otto deploy`, so applying there writes a promotion the next
+                // deploy deletes. Dry-run against it is allowed and useful:
+                // that is the file the daemon reads.
+                if a.apply && canonical == deployed {
+                    eyre::bail!(
+                        "refusing to --apply to the deployed {}: `otto deploy` regenerates it from the repo and \
+                         would revert this promotion. Pass --canonical config/canonical-tags.yml, then commit and \
+                         run `otto deploy`.",
+                        deployed.display()
+                    );
+                }
+                let report = cortex::proposals::promote_tags(
+                    &vault::paths::tag_proposals(),
+                    &canonical,
+                    &a.tags,
+                    &a.group,
+                    a.apply,
+                )?;
+                print_tag_promote_report(&report);
+            }
             Command::BridgeBackfill(a) => {
                 run_bridge_backfill(&vault_root, &config, a.limit).await?;
             }
@@ -1049,6 +1096,23 @@ fn print_sweep_report(r: &cortex::sweep::SweepReport) {
             println!("Proposals written to {path}");
         }
     }
+}
+
+/// Format a `cortex tag-promote` report. Three branches, mirroring
+/// `concept-promote`: nothing to do, applied, dry-run.
+fn print_tag_promote_report(r: &cortex::proposals::TagPromoteReport) {
+    for tag in &r.already_present {
+        println!("tag-promote: `{tag}` is already canonical; nothing to do");
+    }
+    if r.tags.is_empty() {
+        return;
+    }
+    if r.applied {
+        println!("tag-promote: promoted {:?} into group `{}`", r.tags, r.group);
+    } else {
+        println!("tag-promote (dry-run - pass --apply to write):");
+    }
+    print!("{}", r.diff);
 }
 
 /// Format a `cortex associate` report. Mirrors the `SweepMode` precedent:

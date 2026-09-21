@@ -113,3 +113,26 @@
 
 ### Open questions
 - None.
+
+## Phase 7: `sb cortex tag-promote`
+
+### Design decisions
+- `insert_tags_into_group` (`cortex/src/proposals.rs`) recognizes exactly two layouts and hard-bails on anything else: a block sequence (`  group:` then `    - tag` lines) and the empty-flow form (`  system: []`), which it rewrites to block form. It appends after the group's LAST entry and never re-sorts, because neither the 12 group keys nor the tags within a group are ordered in the shipped file.
+- The candidate buffer is validated with `serde_yaml::from_str::<CanonicalTagsFile>` before the atomic write, not `CanonicalTagsFile::load`: the latter takes a `&Path` and re-reads the old bytes, which would prove nothing about what is about to be written.
+- The `--apply`-refuses-the-deployed-copy guard lives in the CLI dispatch (`sb/src/cli/cortex.rs`), not the library, because it is a policy about which path the operator picked, and the library takes the path it is given. The library stays testable against a tempfile copy.
+- `promote_tags` takes a variadic tag list so the first curation batch over 112 candidates is one command.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- The byte-identity test reconstructs the before-image by removing the inserted line from the after-image and asserting positional equality with the original, rather than diffing line sets. A set comparison would pass if a line moved; this catches a move.
+- `promote_concept` got the same membership-before-traceability reorder, as the doc directs. It is a behavior change to an existing command (a repeat `--apply` now reports already-present and exits 0 instead of failing), and it became reachable because Phase 3 made `glossary.yml` survive a deploy for the first time.
+
+### Observed against the built binary
+- `sb cortex tag-promote --help` exits 0.
+- Dry run of `ci-cd --group tech --canonical config/canonical-tags.yml` left both `config/canonical-tags.yml` (md5 `835b4d1b9f508229c408c94d9325942e`) and `~/.config/sb/tag-proposals.yml` (md5 `e70715ba15a85dee52428ee50985331d`) byte-identical.
+- All four bails exit 1: `--apply` against the deployed copy (naming the repo path and the deploy consequence), a tag that is not a pending proposal, an unknown group, and the empty tag.
+
+### Open questions
+- None.

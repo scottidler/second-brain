@@ -408,3 +408,218 @@ pub fn aggregate(
 
 #[cfg(test)]
 mod tests;
+
+// ---------------------------------------------------------------------------
+// Promotion: a pending proposal becomes a canonical tag, as a reviewable diff.
+// ---------------------------------------------------------------------------
+
+/// Outcome of one `tag-promote` invocation. Three branches, mirroring
+/// `cortex::entities::PromoteReport`: already-present, applied, dry-run.
+#[derive(Debug, Clone)]
+pub struct TagPromoteReport {
+    pub tags: Vec<String>,
+    pub group: String,
+    pub applied: bool,
+    /// Tags that were already canonical, so nothing was done for them.
+    pub already_present: Vec<String>,
+    pub diff: String,
+}
+
+/// Promote pending tag proposals into a group of `canonical-tags.yml`.
+///
+/// Dry-run by default: prints nothing (this is a library), writes nothing, and
+/// returns the diff. `apply` writes the vocabulary and drops the promoted
+/// entries from the queue.
+///
+/// **Membership is checked BEFORE traceability.** `promote_concept` bails on
+/// "no pending proposal" before its already-present no-op, so a second
+/// `--apply` of the same slug exits non-zero: the first apply removed the very
+/// proposal it then demands. Checking membership first makes a repeat apply an
+/// idempotent no-op, which is what an operator re-running a batch expects.
+pub fn promote_tags(
+    proposals_path: &Path,
+    canonical_path: &Path,
+    tags: &[String],
+    group: &str,
+    apply: bool,
+) -> Result<TagPromoteReport> {
+    log::debug!(
+        "proposals::promote_tags: tags={tags:?} group={group} apply={apply} canonical={} proposals={}",
+        canonical_path.display(),
+        proposals_path.display()
+    );
+
+    let text = std::fs::read_to_string(canonical_path)
+        .with_context(|| format!("failed to read {}", canonical_path.display()))?;
+    let file: vault::canonical::CanonicalTagsFile =
+        serde_yaml::from_str(&text).with_context(|| format!("failed to parse {}", canonical_path.display()))?;
+
+    if !file.tags.contains_key(group) {
+        let mut groups: Vec<&String> = file.tags.keys().collect();
+        groups.sort();
+        eyre::bail!(
+            "group {group:?} is not in {}; valid groups: {groups:?}",
+            canonical_path.display()
+        );
+    }
+
+    let existing = file.all_tags();
+    let queue = load_queue(proposals_path)?;
+
+    let mut already_present = Vec::new();
+    let mut to_add = Vec::new();
+    for tag in tags {
+        if !vault::canonical::is_kebab_tag(tag) {
+            eyre::bail!("tag {tag:?} is not ^[a-z0-9]+(-[a-z0-9]+)*$");
+        }
+        // Membership first: a repeat --apply of an already-promoted tag is a
+        // no-op, not a failure.
+        if existing.contains(tag) {
+            already_present.push(tag.clone());
+            continue;
+        }
+        if !queue.iter().any(|p| &p.tag == tag) {
+            eyre::bail!(
+                "no proposal with tag {tag:?} in {} - promotion must trace to a pending proposal",
+                proposals_path.display()
+            );
+        }
+        to_add.push(tag.clone());
+    }
+
+    let projected = existing.len() + to_add.len();
+    if projected > file.max_canonical {
+        eyre::bail!(
+            "promoting {} tag(s) would take the vocabulary to {projected}, over max-canonical {} (currently {})",
+            to_add.len(),
+            file.max_canonical,
+            existing.len()
+        );
+    }
+
+    let mut diff = String::new();
+    for tag in &to_add {
+        diff.push_str(&format!("canonical-tags.yml:  + `{tag}` under group `{group}`\n"));
+        diff.push_str(&format!("tag-proposals.yml:   - proposal `{tag}` (promoted)\n"));
+    }
+    for tag in &already_present {
+        diff.push_str(&format!("canonical-tags.yml:    `{tag}` already canonical, no-op\n"));
+    }
+
+    if apply && !to_add.is_empty() {
+        let updated = insert_tags_into_group(&text, group, &to_add)?;
+        // Validate the CANDIDATE BUFFER, not the file on disk:
+        // `CanonicalTagsFile::load` takes a path and would re-read the old
+        // bytes, proving nothing about what is about to be written.
+        serde_yaml::from_str::<vault::canonical::CanonicalTagsFile>(&updated).with_context(|| {
+            format!(
+                "the edited {} would not parse; refusing to write",
+                canonical_path.display()
+            )
+        })?;
+        vault::note::write_atomic(canonical_path, updated.as_bytes())
+            .with_context(|| format!("failed to write {}", canonical_path.display()))?;
+
+        let remaining: Vec<crate::sweep::Proposal> = queue.into_iter().filter(|p| !to_add.contains(&p.tag)).collect();
+        overwrite_queue(proposals_path, remaining)?;
+        log::info!("proposals::promote_tags: promoted {to_add:?} into group {group}");
+    }
+
+    Ok(TagPromoteReport {
+        tags: to_add,
+        group: group.to_string(),
+        applied: apply,
+        already_present,
+        diff,
+    })
+}
+
+fn load_queue(path: &Path) -> Result<Vec<crate::sweep::Proposal>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let file: crate::sweep::ProposalsFile =
+        serde_yaml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(file.proposals)
+}
+
+/// Rewrite the queue in place, preserving its scan header.
+fn overwrite_queue(path: &Path, proposals: Vec<crate::sweep::Proposal>) -> Result<()> {
+    let existing: crate::sweep::ProposalsFile = if path.exists() {
+        serde_yaml::from_str(&std::fs::read_to_string(path)?)
+            .with_context(|| format!("failed to parse {}", path.display()))?
+    } else {
+        crate::sweep::ProposalsFile::default()
+    };
+    let out = crate::sweep::ProposalsFile {
+        scanned_at: existing.scanned_at,
+        staged_window: existing.staged_window,
+        proposals,
+    };
+    let yaml = serde_yaml::to_string(&out).wrap_err("failed to serialize proposals")?;
+    vault::note::write_atomic(path, yaml.as_bytes()).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+/// Append `tags` to the end of `group`'s sequence, changing NOTHING else.
+///
+/// A targeted textual insert, not a serde round-trip: no round-trip preserves
+/// sequence indentation, the empty-flow `  system: []` form, or comments, and
+/// the phase's contract is that every line outside the touched group is
+/// byte-identical.
+///
+/// Appends; never re-sorts. Neither the group keys nor the tags within a group
+/// are ordered in the shipped file (the `ai` group opens `ai, agents, claude,
+/// anthropic`), so "sorted position" has no defined meaning here and
+/// re-sorting would produce a whole-file diff.
+///
+/// Two layouts are recognized, and anything else is a hard bail rather than a
+/// guess: a block sequence (`  group:` followed by `    - tag` lines) and the
+/// empty-flow form (`  group: []`), which is rewritten to block form.
+fn insert_tags_into_group(text: &str, group: &str, tags: &[String]) -> Result<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let key_block = format!("  {group}:");
+    let key_flow = format!("  {group}: []");
+
+    let idx = lines
+        .iter()
+        .position(|l| *l == key_block || *l == key_flow)
+        .ok_or_else(|| {
+            eyre::eyre!("group {group:?} has no recognized `  {group}:` or `  {group}: []` line; refusing to guess")
+        })?;
+
+    let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    let trailing_newline = text.ends_with('\n');
+
+    if lines[idx] == key_flow {
+        // Empty-flow group: rewrite the one line to block form, then append.
+        out[idx] = key_block;
+        for (offset, tag) in tags.iter().enumerate() {
+            out.insert(idx + 1 + offset, format!("    - {tag}"));
+        }
+    } else {
+        // Block sequence: find its LAST `    - ` entry and append after it.
+        let mut last = None;
+        for (i, line) in lines.iter().enumerate().skip(idx + 1) {
+            if line.starts_with("    - ") {
+                last = Some(i);
+            } else if !line.trim().is_empty() {
+                // Any non-entry, non-blank line ends this group.
+                break;
+            }
+        }
+        let after = last.ok_or_else(|| {
+            eyre::eyre!("group {group:?} has no `    - ` entries and is not `[]`; refusing to guess its layout")
+        })?;
+        for (offset, tag) in tags.iter().enumerate() {
+            out.insert(after + 1 + offset, format!("    - {tag}"));
+        }
+    }
+
+    let mut joined = out.join("\n");
+    if trailing_newline {
+        joined.push('\n');
+    }
+    Ok(joined)
+}

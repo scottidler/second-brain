@@ -353,20 +353,27 @@ fn shipped_canonical_tags_file_parses_and_holds_its_invariants() {
     assert_eq!(file.no_segment_match.len(), 5, "{:?}", file.no_segment_match);
     assert_eq!(file.no_classifier_tags.len(), 5, "{:?}", file.no_classifier_tags);
 
+    // GROWTH-COMPATIBLE invariants, not a fixed count. `sb cortex tag-promote`
+    // is a shipped command whose whole job is to add a tag to this file, so an
+    // `assert_eq!(flat.len(), 117)` here would turn the first legitimate
+    // promotion into a red `cargo test --workspace`. What must hold is that
+    // the vocabulary is non-empty, stays under its own ceiling, never repeats
+    // a tag across groups, and is uniformly kebab-case.
     let mut flat: Vec<&String> = file.tags.values().flatten().collect();
-    assert_eq!(flat.len(), 117, "117 canonical tags");
+    assert!(!flat.is_empty(), "the vocabulary is never empty");
+    assert!(
+        flat.len() <= file.max_canonical,
+        "{} tags exceeds max-canonical {}",
+        flat.len(),
+        file.max_canonical
+    );
     let before = flat.len();
     flat.sort();
     flat.dedup();
     assert_eq!(flat.len(), before, "no tag appears under two groups");
 
-    let is_kebab = |t: &str| {
-        !t.is_empty()
-            && t.split('-')
-                .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
-    };
     for tag in &flat {
-        assert!(is_kebab(tag), "tag {tag:?} is not ^[a-z0-9]+(-[a-z0-9]+)*$");
+        assert!(is_kebab_tag(tag), "tag {tag:?} is not ^[a-z0-9]+(-[a-z0-9]+)*$");
     }
 
     let all = file.all_tags();
