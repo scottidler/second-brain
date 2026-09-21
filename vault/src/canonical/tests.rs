@@ -298,3 +298,61 @@ fn cap_protecting_keeps_the_cap_hard_when_every_tag_is_protected() {
     let result = cap_protecting(tags, 2, &protected);
     assert_eq!(result, vec!["work".to_string(), "life".to_string()]);
 }
+
+// ---- shipped vocabulary + strict parsing (review fold C7, C8) ----
+
+/// The shipped file, byte for byte. Path is relative to this source file
+/// (`vault/src/canonical/tests.rs` -> `config/canonical-tags.yml`).
+const SHIPPED_CANONICAL_TAGS: &str = include_str!("../../../config/canonical-tags.yml");
+
+#[test]
+fn default_max_per_note_matches_the_design_and_the_shipped_file() {
+    let file: CanonicalTagsFile = serde_yaml::from_str("tags: {}").expect("minimal file parses");
+    assert_eq!(file.max_per_note, 8, "default is the design's cap");
+    let shipped: CanonicalTagsFile = serde_yaml::from_str(SHIPPED_CANONICAL_TAGS).expect("shipped parses");
+    assert_eq!(shipped.max_per_note, file.max_per_note, "default and shipped agree");
+}
+
+/// A mistyped protect-list key must be a parse error, not an empty protect
+/// list that silently lets every capping path drop `work`/`life`/...
+#[test]
+fn canonical_tags_file_rejects_an_unknown_key() {
+    let yaml = "max-per-note: 8\nno-classifer-tags:\n  - work\ntags: {}\n";
+    let err = serde_yaml::from_str::<CanonicalTagsFile>(yaml).expect_err("typo must not parse");
+    assert!(
+        format!("{err}").contains("no-classifer-tags"),
+        "error names the offending key: {err}"
+    );
+}
+
+#[test]
+fn shipped_canonical_tags_file_parses_and_holds_its_invariants() {
+    let file: CanonicalTagsFile = serde_yaml::from_str(SHIPPED_CANONICAL_TAGS).expect("shipped file parses");
+    assert_eq!(file.max_per_note, 8);
+    assert_eq!(file.no_segment_match.len(), 5, "{:?}", file.no_segment_match);
+    assert_eq!(file.no_classifier_tags.len(), 5, "{:?}", file.no_classifier_tags);
+
+    let mut flat: Vec<&String> = file.tags.values().flatten().collect();
+    assert_eq!(flat.len(), 117, "117 canonical tags");
+    let before = flat.len();
+    flat.sort();
+    flat.dedup();
+    assert_eq!(flat.len(), before, "no tag appears under two groups");
+
+    let is_kebab = |t: &str| {
+        !t.is_empty()
+            && t.split('-')
+                .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+    };
+    for tag in &flat {
+        assert!(is_kebab(tag), "tag {tag:?} is not ^[a-z0-9]+(-[a-z0-9]+)*$");
+    }
+
+    let all = file.all_tags();
+    for guarded in file.no_segment_match.iter().chain(&file.no_classifier_tags) {
+        assert!(
+            all.contains(guarded),
+            "guard-list tag {guarded:?} is not in the vocabulary"
+        );
+    }
+}

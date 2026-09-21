@@ -3,8 +3,11 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+/// `canonical-tags.yml`. Unknown keys are an error: a mistyped
+/// `no-classifer-tags:` would otherwise parse as an absent (empty) protect
+/// list and every capping path would drop the tags it was meant to keep.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct CanonicalTagsFile {
     #[serde(default = "default_max_per_note")]
     pub max_per_note: usize,
@@ -41,8 +44,10 @@ pub struct CanonicalSet {
     pub max_per_note: usize,
 }
 
+/// Matches `max-per-note` in the shipped `config/canonical-tags.yml`
+/// (`shipped_canonical_tags_file_parses_and_holds_its_invariants` pins both).
 fn default_max_per_note() -> usize {
-    7
+    8
 }
 
 fn default_max_canonical() -> usize {
