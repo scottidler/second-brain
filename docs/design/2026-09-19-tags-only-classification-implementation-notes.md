@@ -896,3 +896,112 @@ is a doc defect fix, not a criterion bent to match the implementation.
   won over the regression test; worth revisiting if AC1 is ever retired.
 - The `untriaged.base` and `tags.base` filter expressions written in P10 are
   inferred Obsidian Bases syntax, unrenderable in this environment.
+
+## Audit fold: panel round 1 must-fix
+
+Mode 2 implementation audit, round 1 (`/tmp/review-panel/T0LTagtM/`). Folded
+while every phase commit was still local: nothing pushed, bumped or tagged.
+Four must-fix findings plus one silent-failure path the synthesis raised under
+Q5. Three commits: `ba5c97f` (M1), `220d426` (M3 + M5), `18b0311` (M2 + M4).
+
+### Design decisions
+
+- **The protect list belongs to the vocabulary, not to a caller** -
+  `vault::canonical::CanonicalSet.no_classifier` (populated in
+  `CanonicalTagsFile::canonical_set`) - M1's second defect was `cortex::sweep`
+  capping through `filter_and_cap` with no idea the protect list existed,
+  while `cortex::classify::Classifiers` held it in a private field two crates
+  away. The audit offered two seams (thread the set through, or a shared
+  protect-aware cap helper); both are needed and both reduce to the same
+  question of where the set lives. Putting it on the snapshot every capping
+  path already holds means a future third capping site gets it for free, and
+  `Classifiers.protected` is deleted rather than duplicated.
+- **One capping rule, `canonical::cap_protecting`** - `vault/src/canonical.rs`
+  - called by `filter_and_cap` and by `distillers::tags::apply_retag`. Under
+  the cap it is the identity, deliberately: making protected tags sort first
+  unconditionally would have reordered the frontmatter of every note in the
+  vault on the next sweep, for no gain. Over the cap, protected tags claim
+  slots first in the caller's existing priority order. The cap stays hard even
+  when every tag is protected, because a note over `max-per-note` fails
+  `tags.cap` lint either way.
+- **The 900-character ceiling is a shared constant, not a local one** -
+  `distillers::tags::{CLASSIFIER_TEXT_CHARS, body_excerpt}` - cortex already
+  had a correct private copy; borg had none. Naming it once in the crate that
+  owns the classifier seam is what makes "never a whole transcript" checkable
+  in one place, and it deletes cortex's duplicate.
+- **`TagSources::new` split into `from_summary` / `from_body`** -
+  `borg/src/pipeline/tags.rs` - a single `finalize_tags`-level truncation
+  would have clipped distilled summaries too, which cortex does not do, so the
+  two call paths would have scored different text for the same note. Two
+  constructors put the choice at the call site where the summary-or-body
+  decision is already being made, and make `text` unsettable any other way.
+- **A vocabulary failure publishes untagged and degraded** -
+  `borg/src/pipeline/tags.rs::vocabulary_unavailable` - extracted as a named
+  function so the contract has one place to read and one test to pin.
+
+### Deviations
+
+- M1's fix shape: the audit suggested capping inside `apply_retag` as the
+  smaller of two options, and noted teaching `filter_and_cap` the protect
+  list as the alternative. Both were implemented, because the reproduced
+  sequence needs both: capping `apply_retag` alone leaves the daemon's sweep
+  free to drop a protected tag off any note that is over the cap for some
+  other reason (a hand edit, an older migration).
+- M2 was resolved as a **doc defect, not a code defect**. Evidence: the
+  deployed `~/.config/sb/borg.yml:219-224` and `~/.config/sb/cortex.yml:253-258`
+  both use the nested shape; borg's `tags:` block already carries
+  `canonical-path`, `mapping-path` and `reject-concatenated` at the level the
+  doc put the classifier's six keys; and flattening would break both live
+  configs for a cosmetic gain. The doc block now shows the nested shape, the
+  deserialization error as evidence, the two keys it never listed
+  (`endpoint`, `timeout-secs`), and the fact that the shipped default is
+  `deterministic`. The default was **not** changed to `classifier-dev`: a
+  machine bootstrapped without the block should classify locally rather than
+  depend on network and a key it may not have.
+- M3: the doc's "never the transcript" is now "never a whole transcript". A
+  summary-less audio note's body *is* its transcript, so the doc's own
+  "first 900 characters of the body" rule and its "never the transcript" rule
+  contradicted each other. The head of the transcript is what ships.
+- M4 also corrected two CLAUDE.md lines P11's bullet did not name: the oracle
+  crate line still said "domain briefs" (`domain_brief` became `tag_brief` in
+  P8) and the tags line still said "110 canonical tags, max 7 per note. Borg
+  post-filters Fabric output" (117, 8, and the closed-vocabulary classifier).
+  Leaving a line that is wrong for the same reason next to one being fixed
+  would have been a second skipped bullet.
+
+### Tradeoffs
+
+- Protect-aware capping vs. raising `max-per-note` - the alternative reading
+  of M1 is that a protected tag plus a full fresh set is simply too many tags
+  and the cap should give. Rejected: `max-per-note` is a vault-wide display
+  and lint constraint, and the design already decided (OQ5/OQ6) that the
+  protect list, not the cap, is the mitigation for `--retag` drift.
+- Two `TagSources` constructors vs. one truncating seam - one seam is fewer
+  moving parts and is what the audit suggested, but it would silently clip
+  long summaries and diverge from cortex. Chose the pair; the cost is eight
+  call sites naming which they have, which they already knew.
+- `vocabulary_unavailable` as a testable function vs. driving the failure
+  through `finalize_tags` - the vocabulary is cached in a process-wide
+  `LazyLock`, so a test that loads a broken vocabulary would depend on test
+  ordering within the process. The extracted function pins the contract
+  without a flaky test.
+
+### Open questions
+
+- `sb/build.rs`'s `rerun-if-changed` paths do not exist from the `sb/` crate
+  directory (`.git/HEAD`, `.git/refs/`, `.git/packed-refs` resolve under
+  `sb/`), and in a worktree `../.git` is a file rather than a directory, so
+  the only remaining watch never fires either. Effect, observed: after P11
+  the deployed binary reported `v0.14.14-16-ga099ce4` while running post-P11
+  code, because cargo recompiled the crate without rerunning the build
+  script. It corrected itself on this deploy (`v0.14.14-21-g18b0311`) only
+  because an unrelated `Cargo.toml` edit invalidated the fingerprint. The
+  scaffold pattern this came from has the same paths; fixing it is a
+  cross-repo question, not a tags-only one.
+- The audit's cheap-wins C1-C5 and defers D1-D4 were left alone as instructed.
+  C1 (`schema_docs` never deletes or flags an obsolete `domain-values.md`) is
+  the one with a live consequence: any *other* machine that syncs the vault
+  keeps the file until someone notices.
+- The `v6-drop-domain` migration P11 specifies was run as a one-off and exists
+  nowhere in the repo, while its P4 counterpart `v5-domain-as-tag-undo.yml` is
+  a shipped artifact. A second machine would need the forward one.
