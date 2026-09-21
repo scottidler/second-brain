@@ -251,7 +251,7 @@ pub trait TagClassifier {
     fn classify_batch(&self, inputs: &[TagInput]) -> Vec<eyre::Result<TagOutput>> { inputs.iter().map(|i| self.classify(i)).collect() }
     fn method(&self) -> TagMethod;
 }
-pub fn build(cfg: &TagsClassifierConfig, canon: &CanonicalSet, fabric: Option<&dyn FabricCaller>) -> Box<dyn TagClassifier>;
+pub fn build(cfg: &TagsClassifierConfig, canon: &CanonicalSet, mapping: &TagMapping, fabric: Option<Arc<dyn FabricRunner>>) -> Box<dyn TagClassifier>;
 ```
 
 `text` is the note summary when one exists, else the first 900 characters of the body; never a whole transcript. The ceiling is `distillers::tags::CLASSIFIER_TEXT_CHARS` and both callers clip through `body_excerpt` (borg: `TagSources::from_body`; cortex: `classify::classifier_text`). It is a data boundary, not a tuning knob: under `classifier-dev` this string is POSTed to a third-party API, so a summary-less audio note sends the head of its transcript, never all of it. The trait is synchronous: borg and cortex call it from their existing blocking tag paths; `FabricClosedVocab` calls a sync `FabricRunner` port (`distillers/src/tags.rs:201`), whose production impl is `ShellFabricRunner` (`:207`) wired in by borg and cortex, with `fabric.timeout` from config and one in-flight call per call site; borg wraps the whole classify call in `spawn_blocking` (`borg/src/pipeline/tags.rs:166`) so the sync trait never blocks the runtime; `ClassifierDev` overrides `classify_batch` to send up to 1,000 texts per call.
