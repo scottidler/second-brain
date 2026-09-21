@@ -17,7 +17,7 @@ Per-kind Stage-2 processors that take a Stage-1 transcript (markitdown / VTT / t
 `vault::distilled::Distilled`:
 - **summary** — 2–4 sentence prose (feeds FTS5, embeddings, display).
 - **claims** — `Vec<Claim>` with optional anchors (video timestamp / article heading / tweet id).
-- **tags** — canonical, post-filtered against `canonical-tags.yml`, max 7.
+- **tags** — the extractor's RAW, PRE-FILTER candidates: neither canonical nor capped. 12 of the 26 shipped patterns instruct the model to propose freely; `filter_and_cap` runs later, at publish. This is the open-vocabulary proposal source `cortex::proposals` reads out of staging (`docs/design/2026-09-21-staged-tag-proposals.md`).
 - **links** — outbound URLs discovered in source (distinct from the source URL).
 - **kind_specific** — `Option<KindPayload>`: `RepoPayload` (stars/language/last_commit/topics/install), `VideoPayload` (channel/duration/published_at), `ThreadPayload` (author/post_count/platform).
 - **meta** — `DistilledMeta` (extractor id, model, tokens, produced_at, validation).

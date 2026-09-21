@@ -136,3 +136,28 @@
 
 ### Open questions
 - None.
+
+## Phase 8: Correct the docs
+
+### Design decisions
+- `Distilled.tags`' new doc comment states what the field IS (raw, pre-filter candidates), where the filter actually runs (`finalize_tags` -> `filter_and_cap`, at publish), and that it is the open-vocabulary proposal source. It also records that the old comment claimed the opposite, because "the false doc comment is the reason six weeks of signal went unread" is the part a future reader needs in order not to re-introduce it.
+- Root `CLAUDE.md` gained the change in two places rather than one: the **Tags** bullet (vocabulary growth is open again, the queue's rendered-view semantics, the reject rule, `tag-promote`) and the **One-way data flow** bullet (the second read-only staging edge, the read-only receipts read, why the config key is now top-level `staging-root`, and the host rule).
+
+### Deviations
+- The AGENTS.md module-map entries for `cortex/src/proposals.rs` and `vault/src/identity.rs` landed in Phase 5, not here, because `otto ci`'s `agents-map` task gates them at introduction. This phase extended the cortex entry with `promote_tags` / `tag-promote`.
+
+### Tradeoffs
+- The corrective comment originally QUOTED the old wording verbatim (`"post-filtered against \`canonical-tags.yml\`. Max 7."`), which left `rg -ni 'max 7' vault/src/distilled.rs` returning 1 and failed AC5. AC5 is a sound criterion (a grep cannot distinguish a claim from a quotation of it), so the comment was reworded to describe the old claim rather than reproduce it. The criterion was not amended.
+
+### Open questions
+- None.
+
+## Acceptance criteria, verified after Phase 8
+
+| AC | Result |
+|---|---|
+| **AC1** note arm alone = 0; combined >= 100 | **PASS.** Combined live scan: **112**. The note arm alone (`staged-proposals: false`) is empty, asserted in `test_scan_proposals_staged_arm_finds_what_the_note_arm_cannot`. |
+| **AC2** queue holds >= 100, each `sources` 1..=5, parses through `ProposalsFile` | **PASS.** The literal command prints `112`, the range assertion passes. The serde half is `test_staged_window_is_written_to_the_queue`, which parses the written file back through `ProposalsFile`. |
+| **AC3** no proposal carries a `null`-mapped tag | **PASS.** The literal command prints `0 []` against a POPULATED queue; all 13 named rejects confirmed absent from the live output. |
+| **AC4** `tag-promote` exists, dry-run by default, leaves both YAMLs byte-identical | **PASS.** `--help` exits 0; md5 of `config/canonical-tags.yml` and `~/.config/sb/tag-proposals.yml` unchanged across a dry run. All four bails exit 1. |
+| **AC5** nothing outside `docs/design/` claims the tags are canonical-filtered; neither file carries "max 7" | **PASS.** Both commands return `0`. The unrelated fourth hit (`borg/patterns/obsidian-note.md:44`) is untouched, as the doc requires. |
