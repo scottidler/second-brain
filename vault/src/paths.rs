@@ -417,7 +417,7 @@ pub fn legacy_oracle_dir() -> PathBuf {
 /// Refuse a vault root that is the second-brain workspace itself.
 ///
 /// cortex governs a vault by REWRITING it: lint fixes frontmatter, the naming
-/// rule renames files, autotag and link edit bodies. Pointed at this repo it
+/// rule renames files, classify and link edit frontmatter and bodies. Pointed at this repo it
 /// treats source as notes. On 2026-08-15 that happened for real (a `sb bootstrap`
 /// run from inside the checkout baked `--vault <repo>` into the systemd unit) and
 /// cortex rewrote 203 files: every `borg/patterns/*.md` prompt gained note
@@ -435,7 +435,7 @@ fn reject_self_repo(root: PathBuf) -> Result<PathBuf> {
     if looks_like_this_workspace {
         return Err(eyre!(
             "refusing to use the second-brain source tree as a vault root: {}\n\
-             cortex REWRITES what it governs (lint renames files, autotag and link edit bodies), \
+             cortex REWRITES what it governs (lint renames files, classify and link edit frontmatter and bodies), \
              so pointing it here corrupts patterns, eval fixtures, and docs.\n\
              Set `vault.root-path` in your config, or pass --vault <your Obsidian vault>.",
             root.display()
