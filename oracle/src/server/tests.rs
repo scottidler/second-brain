@@ -895,12 +895,29 @@ async fn list_notes_filters_by_tags() {
     assert_eq!(parsed["results"][0]["path"], json!("notes/a.md"));
 }
 
+/// A `Config` whose `tags.canonical-path` points at a vocabulary written into
+/// `tmp`, so the tag-validation tests are hermetic (no dependence on the
+/// host's `~/.config/sb/canonical-tags.yml`).
+fn config_with_vocabulary(tmp: &tempfile::TempDir, tags: &[&str]) -> Config {
+    let path = tmp.path().join("canonical-tags.yml");
+    let mut yaml = String::from("max-per-note: 8\ntags:\n  fixture:\n");
+    for tag in tags {
+        yaml.push_str(&format!("    - {tag}\n"));
+    }
+    std::fs::write(&path, yaml).expect("write vocabulary");
+    Config {
+        tags: crate::config::TagsConfig { canonical_path: path },
+        ..Config::default()
+    }
+}
+
 #[tokio::test]
 async fn tag_brief_dispatch_returns_expected_shape() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
     let db = SearchIndex::open_memory().expect("open db");
     seed_tagged_article(&db, "notes/a.md", "A", "body", &["privacy"]);
     seed_tagged_article(&db, "notes/b.md", "B", "body", &["privacy"]);
-    let server = OracleMcpServer::new(Config::default(), db);
+    let server = OracleMcpServer::new(config_with_vocabulary(&tmp, &["privacy"]), db);
 
     let result = server
         .dispatch("tag_brief", json!({"tag": "privacy"}))
@@ -911,6 +928,212 @@ async fn tag_brief_dispatch_returns_expected_shape() {
     assert_eq!(parsed["tag"], json!("privacy"));
     assert_eq!(parsed["total_notes"], json!(2));
     assert_eq!(parsed["results"].as_array().expect("results").len(), 2);
+    // The recent list is `results` only: the pre-rename keys stay gone.
+    assert!(parsed.get("recent").is_none(), "legacy `recent` key must be absent: {parsed}");
+    assert!(
+        parsed.get("recent_notes").is_none(),
+        "legacy `recent_notes` key must be absent: {parsed}"
+    );
+    assert!(parsed["unread"].is_u64(), "unread serialises as a number: {parsed}");
+    assert!(parsed["starred"].is_u64(), "starred serialises as a number: {parsed}");
+}
+
+/// C11: a tag outside the vocabulary is a caller error naming the closest
+/// canonical tags, not a silent `total_notes: 0`.
+#[tokio::test]
+async fn tag_brief_rejects_a_tag_outside_the_vocabulary_with_suggestions() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db = SearchIndex::open_memory().expect("open db");
+    seed_tagged_article(&db, "notes/a.md", "A", "body", &["privacy"]);
+    let server = OracleMcpServer::new(config_with_vocabulary(&tmp, &["privacy", "python", "rust"]), db);
+
+    let err = server
+        .dispatch("tag_brief", json!({"tag": "privacyy"}))
+        .await
+        .expect_err("unknown tag must be a tool error");
+    assert!(err.message.contains("privacyy"), "{}", err.message);
+    assert!(err.message.contains("closest canonical tags: privacy"), "{}", err.message);
+    assert!(!err.message.contains("rust"), "rust is not close to privacyy: {}", err.message);
+}
+
+/// With no vocabulary to check against the validation is skipped: an
+/// unloadable file must not make every tag_brief call an error.
+#[tokio::test]
+async fn tag_brief_skips_validation_when_the_vocabulary_is_unloadable() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db = SearchIndex::open_memory().expect("open db");
+    seed_tagged_article(&db, "notes/a.md", "A", "body", &["whatever"]);
+    let config = Config {
+        tags: crate::config::TagsConfig {
+            canonical_path: tmp.path().join("does-not-exist.yml"),
+        },
+        ..Config::default()
+    };
+    let server = OracleMcpServer::new(config, db);
+
+    let result = server
+        .dispatch("tag_brief", json!({"tag": "whatever"}))
+        .await
+        .expect("dispatch");
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(first_content_as_json(&result)["total_notes"], json!(1));
+}
+
+#[test]
+fn unknown_tag_message_is_none_for_canonical_or_unchecked_tags() {
+    let vocab = vec!["privacy".to_string(), "rust".to_string()];
+    assert_eq!(unknown_tag_message("rust", &vocab), None);
+    assert_eq!(unknown_tag_message("anything", &[]), None, "empty vocabulary skips the check");
+    let message = unknown_tag_message("zzzz-nothing-close", &vocab).expect("unknown tag");
+    assert!(message.contains("no close match among the 2 canonical tags"), "{message}");
+}
+
+#[test]
+fn closest_tags_ranks_near_edits_before_substring_matches() {
+    let vocab: Vec<String> = ["ai", "ai-safety", "api", "rust", "security", "sequrity-x"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    // One edit away, alphabetical within the tier; `ai-safety` is neither
+    // within two edits nor a substring relation of `aii`, so it stays out.
+    assert_eq!(closest_tags("aii", &vocab, 5), vec!["ai", "api"]);
+    // Substring relations in both directions share the tier behind the edits.
+    assert_eq!(closest_tags("ai-saf", &vocab, 5), vec!["ai", "ai-safety"]);
+    assert_eq!(closest_tags("sequrity", &vocab, 5), vec!["security", "sequrity-x"]);
+    assert_eq!(closest_tags("SECURITY", &vocab, 5), vec!["security"], "case-insensitive");
+    assert!(closest_tags("zzzz", &vocab, 5).is_empty());
+    assert_eq!(closest_tags("aii", &vocab, 1).len(), 1, "limit applies");
+}
+
+/// C10: request structs are `deny_unknown_fields`, so a stale client sending
+/// a parameter this server no longer has gets an error, not unfiltered rows.
+#[tokio::test]
+async fn dispatch_rejects_an_unknown_request_key() {
+    let db = SearchIndex::open_memory().expect("open db");
+    seed_tagged_article(&db, "notes/a.md", "A", "body", &["rust"]);
+    let server = OracleMcpServer::new(Config::default(), db);
+
+    let err = server
+        .dispatch("list_notes", json!({"bogus_filter": "x"}))
+        .await
+        .expect_err("unknown key must fail deserialization");
+    assert!(err.message.contains("bogus_filter"), "{}", err.message);
+
+    // Empty-struct requests reject too.
+    let err = server
+        .dispatch("vault_overview", json!({"bogus": 1}))
+        .await
+        .expect_err("empty request struct rejects unknown keys");
+    assert!(err.message.contains("bogus"), "{}", err.message);
+}
+
+/// C12: the aggregate branches honour `tags` instead of returning global
+/// stats while their descriptions advertise the filter.
+#[tokio::test]
+async fn aggregate_branches_honour_the_tags_filter() {
+    let db = SearchIndex::open_memory().expect("open db");
+    let seed = |path: &str, creator: &str, source: &str, tags: &[&str]| {
+        let fm = Frontmatter {
+            title: Some(path.to_string()),
+            note_type: Some("article".to_string()),
+            origin: Some("assisted".to_string()),
+            creator: Some(creator.to_string()),
+            source: Some(source.to_string()),
+            tags: Some(tags.iter().map(|t| t.to_string()).collect()),
+            ..Frontmatter::default()
+        };
+        db.index_one(
+            &Note {
+                path: PathBuf::from(path),
+                frontmatter: fm,
+                body: "body".to_string(),
+                raw: "---\n---\nbody".to_string(),
+            },
+            100,
+        )
+        .expect("seed");
+    };
+    seed("notes/a.md", "alice", "https://a.example/1", &["rust", "ai"]);
+    seed("notes/b.md", "bob", "https://b.example/2", &["cooking"]);
+    let server = OracleMcpServer::new(Config::default(), db);
+
+    let v = first_content_as_json(
+        &server
+            .dispatch("tag_search", json!({"tags": ["rust"]}))
+            .await
+            .expect("tag_search"),
+    );
+    let tags: Vec<&str> = v["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .map(|r| r["tag"].as_str().expect("tag"))
+        .collect();
+    assert!(tags.contains(&"rust") && tags.contains(&"ai") && !tags.contains(&"cooking"), "{v}");
+
+    let v = first_content_as_json(
+        &server
+            .dispatch("creator_browse", json!({"tags": ["cooking"]}))
+            .await
+            .expect("creator_browse"),
+    );
+    assert_eq!(v["count"], json!(1), "{v}");
+    assert_eq!(v["results"][0]["name"], json!("bob"), "{v}");
+
+    let v = first_content_as_json(
+        &server
+            .dispatch("source_browse", json!({"tags": ["rust"]}))
+            .await
+            .expect("source_browse"),
+    );
+    assert_eq!(v["count"], json!(1), "{v}");
+    assert_eq!(v["results"][0]["host"], json!("a.example"), "{v}");
+
+    // Unfiltered still lists everything.
+    let v = first_content_as_json(&server.dispatch("creator_browse", json!({})).await.expect("all"));
+    assert_eq!(v["count"], json!(2), "{v}");
+}
+
+/// C9: the MCP tool-schema guard. Every tool's `input_schema.properties` key
+/// set must match the checked-in fixture; a parameter added, renamed, or
+/// removed (including one named after a deleted facet) fails here with the
+/// replacement JSON printed for a deliberate fixture update.
+#[test]
+fn tool_input_properties_match_the_recorded_contract() {
+    use std::collections::BTreeMap;
+    const FIXTURE: &str = include_str!("fixtures/tool-properties.json");
+
+    let actual: BTreeMap<String, Vec<String>> = OracleMcpServer::list_tools()
+        .iter()
+        .map(|tool| {
+            let mut props: Vec<String> = tool
+                .input_schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default();
+            props.sort();
+            (tool.name.to_string(), props)
+        })
+        .collect();
+    let recorded: BTreeMap<String, Vec<String>> = serde_json::from_str(FIXTURE).expect("fixture parses");
+
+    if actual != recorded {
+        let mut diff = String::new();
+        for name in actual.keys().chain(recorded.keys()).collect::<std::collections::BTreeSet<_>>() {
+            match (actual.get(name), recorded.get(name)) {
+                (Some(a), Some(r)) if a != r => diff.push_str(&format!("  {name}: recorded {r:?}, actual {a:?}\n")),
+                (Some(a), None) => diff.push_str(&format!("  {name}: new tool, actual {a:?}\n")),
+                (None, Some(r)) => diff.push_str(&format!("  {name}: removed tool, recorded {r:?}\n")),
+                _ => {}
+            }
+        }
+        panic!(
+            "MCP tool input properties drifted from oracle/src/server/fixtures/tool-properties.json:\n{diff}\n\
+             If the change is intended, replace the fixture with:\n{}",
+            serde_json::to_string_pretty(&actual).expect("serialise actual")
+        );
+    }
 }
 
 /// `schema_info` includes a `tags` key driven by whatever vocabulary the

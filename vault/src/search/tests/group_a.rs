@@ -74,7 +74,7 @@ fn test_tag_stats() {
     insert_test_note(&index, "notes/b.md", "B", &["rust", "web"], "body");
     insert_test_note(&index, "notes/c.md", "C", &["rust", "ml"], "body");
 
-    let stats = index.tag_stats().expect("tag_stats");
+    let stats = index.tag_stats(None, false).expect("tag_stats");
     let rust_stat = stats.iter().find(|s| s.tag == "rust").expect("rust tag");
     assert_eq!(rust_stat.count, 3);
 
@@ -158,7 +158,7 @@ fn test_creator_stats() {
             [],
         ).expect("insert");
 
-    let stats = index.creator_stats().expect("creator_stats");
+    let stats = index.creator_stats(None, false).expect("creator_stats");
     assert_eq!(stats[0], ("Alice".to_string(), 2));
     assert_eq!(stats[1], ("Bob".to_string(), 1));
 }
@@ -182,7 +182,7 @@ fn test_source_domain_stats() {
             [],
         ).expect("insert");
 
-    let stats = index.source_domain_stats().expect("source_domain_stats");
+    let stats = index.source_domain_stats(None, false).expect("source_domain_stats");
     assert_eq!(stats[0], ("youtube.com".to_string(), 2));
     assert_eq!(stats[1], ("github.com".to_string(), 1));
 }

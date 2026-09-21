@@ -337,13 +337,19 @@ impl super::SearchIndex {
         Ok(rows)
     }
 
-    /// Get all tags with their note counts
-    pub fn tag_stats(&self) -> Result<Vec<TagStat>> {
-        let mut stmt = self.conn.prepare("SELECT tags FROM notes WHERE tags != ''")?;
+    /// Get all tags with their note counts, optionally over only the notes
+    /// that pass a `tags` facet filter (OR/AND per `tags_all`), so
+    /// `tag_search` without a `tag` honours the same sibling filter as the
+    /// note-returning branch.
+    pub fn tag_stats(&self, tags: Option<&[String]>, tags_all: bool) -> Result<Vec<TagStat>> {
+        log::debug!("search::tag_stats: tags={tags:?} tags_all={tags_all}");
+        let (sql, params) = self.aggregate_sql("tags", "tags != ''", tags, tags_all);
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let mut tag_counts: HashMap<String, u64> = HashMap::new();
 
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| row.get::<_, String>(0))?;
 
         for tags_json in rows.flatten() {
             if let Ok(tags) = serde_json::from_str::<Vec<String>>(&tags_json) {
@@ -390,16 +396,40 @@ impl super::SearchIndex {
         Ok(result)
     }
 
-    /// Get creator statistics (name -> count), sorted by count
-    pub fn creator_stats(&self) -> Result<Vec<(String, u64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT creator, COUNT(*) as cnt FROM notes WHERE creator != '' GROUP BY creator ORDER BY cnt DESC",
-        )?;
+    /// Get creator statistics (name -> count), sorted by count, optionally
+    /// over only the notes that pass a `tags` facet filter.
+    pub fn creator_stats(&self, tags: Option<&[String]>, tags_all: bool) -> Result<Vec<(String, u64)>> {
+        log::debug!("search::creator_stats: tags={tags:?} tags_all={tags_all}");
+        let (mut sql, params) = self.aggregate_sql("creator, COUNT(*) as cnt", "creator != ''", tags, tags_all);
+        sql.push_str(" GROUP BY creator ORDER BY cnt DESC");
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+            .query_map(params_refs.as_slice(), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?
             .filter_map(warn_row)
             .collect();
         Ok(rows)
+    }
+
+    /// `SELECT {select} FROM notes WHERE {base_where}` plus an optional
+    /// `tags` facet filter, for the three aggregate browsers (`tag_stats`,
+    /// `creator_stats`, `source_domain_stats`). Same shape as
+    /// `classify_filtered_sql`, without the GROUP BY.
+    fn aggregate_sql(
+        &self,
+        select: &str,
+        base_where: &str,
+        tags: Option<&[String]>,
+        tags_all: bool,
+    ) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+        let mut sql = format!("SELECT {select} FROM notes WHERE {base_where}");
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+        let mut param_idx = 1;
+        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
+        let _ = param_idx;
+        (sql, param_values)
     }
 
     /// Get notes by a specific creator
@@ -434,12 +464,16 @@ impl super::SearchIndex {
         Ok(rows)
     }
 
-    /// Get source-host statistics (host -> count), sorted by count
-    pub fn source_domain_stats(&self) -> Result<Vec<(String, u64)>> {
-        let mut stmt = self.conn.prepare("SELECT source FROM notes WHERE source != ''")?;
+    /// Get source-host statistics (host -> count), sorted by count,
+    /// optionally over only the notes that pass a `tags` facet filter.
+    pub fn source_domain_stats(&self, tags: Option<&[String]>, tags_all: bool) -> Result<Vec<(String, u64)>> {
+        log::debug!("search::source_domain_stats: tags={tags:?} tags_all={tags_all}");
+        let (sql, params) = self.aggregate_sql("source", "source != ''", tags, tags_all);
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let mut host_counts: HashMap<String, u64> = HashMap::new();
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| row.get::<_, String>(0))?;
 
         for row in rows.flatten() {
             if let Some(host) = extract_host(&row) {

@@ -302,7 +302,9 @@ pub struct LogCliArgs {
     /// SQL LIKE pattern matched against raw_input (e.g. `%youtube.com%`).
     #[arg(long)]
     pub source: Option<String>,
-    /// Show only degraded publishes (notes written from a distill fallback).
+    /// Show only degraded publishes: notes that landed through a distill
+    /// fallback (impoverished body), a tag-classifier fallback, or a
+    /// vocabulary load failure. `sb doctor` points here when degraded_24h > 0.
     #[arg(long)]
     pub degraded: bool,
     /// Cap the number of rows returned.

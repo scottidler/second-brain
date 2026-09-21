@@ -92,6 +92,10 @@ pub fn all_sections() -> Vec<Section> {
             findings: external_binaries_findings(),
         },
         Section {
+            name: "classifier",
+            findings: classifier_findings(),
+        },
+        Section {
             name: "embedding cache",
             findings: embedding_findings(),
         },
@@ -364,12 +368,13 @@ fn fabric_default_patterns_findings() -> Vec<Finding> {
         )];
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let required = ["extract_wisdom", "summarize", "create_tags"];
+    // `create_tags` left this list with P6 of the tags-only design: tag
+    // assignment goes through `distillers::tags`, and nothing calls the stock
+    // fabric pattern any more.
+    let required = ["extract_wisdom", "summarize"];
     let missing: Vec<&str> = required.iter().copied().filter(|name| !stdout.contains(name)).collect();
     if missing.is_empty() {
-        vec![Finding::ok(
-            "fabric default patterns present (extract_wisdom, summarize, create_tags)",
-        )]
+        vec![Finding::ok("fabric default patterns present (extract_wisdom, summarize)")]
     } else {
         vec![Finding::error(
             format!("missing default fabric patterns: {}", missing.join(", ")),
@@ -419,6 +424,91 @@ fn fabric_live_probe_findings() -> Vec<Finding> {
                 .to_string(),
         )],
     }
+}
+
+/// Static report of the `tags.classifier` block borg and cortex each carry.
+/// No network probe: the live classifier is exercised by ingest and classify
+/// themselves and shows up in `degraded_24h`. What doctor can see statically
+/// is the selected impl, the fallback, and whether the env var that
+/// `classifier-dev` reads is set in this shell.
+fn classifier_findings() -> Vec<Finding> {
+    let mut findings = Vec::new();
+    match borg::config::load_config::<borg::config::Config>(None) {
+        Ok(cfg) => findings.extend(classifier_findings_for(
+            "borg",
+            &cfg.tags.classifier,
+            "borg.env",
+            |name| std::env::var_os(name).is_some(),
+        )),
+        Err(e) => findings.push(Finding::warn(
+            format!("borg: could not load config for the classifier check: {e}"),
+            "sb bootstrap".to_string(),
+        )),
+    }
+    match cortex::config::Config::load(None) {
+        Ok(cfg) => findings.extend(classifier_findings_for(
+            "cortex",
+            &cfg.tags.classifier,
+            "cortex.env",
+            |name| std::env::var_os(name).is_some(),
+        )),
+        Err(e) => findings.push(Finding::warn(
+            format!("cortex: could not load config for the classifier check: {e}"),
+            "sb bootstrap".to_string(),
+        )),
+    }
+    findings
+}
+
+fn classifier_kind_name(kind: distillers::tags::ClassifierKind) -> &'static str {
+    use distillers::tags::ClassifierKind;
+    match kind {
+        ClassifierKind::Deterministic => "deterministic",
+        ClassifierKind::FabricClosed => "fabric-closed",
+        ClassifierKind::ClassifierDev => "classifier-dev",
+    }
+}
+
+/// Pure half of `classifier_findings`: `env_is_set` is injected so the
+/// Warn/Ok decision is unit-testable without mutating the process
+/// environment. Reports the variable's NAME only, never its value.
+fn classifier_findings_for(
+    subsystem: &str,
+    cfg: &distillers::tags::TagsClassifierConfig,
+    env_file: &str,
+    env_is_set: impl Fn(&str) -> bool,
+) -> Vec<Finding> {
+    use distillers::tags::ClassifierKind;
+    log::debug!(
+        "checks::classifier_findings_for: subsystem={subsystem} classifier={} fallback={} api_key_env={}",
+        classifier_kind_name(cfg.classifier),
+        classifier_kind_name(cfg.fallback),
+        cfg.api_key_env
+    );
+    let mut findings = vec![Finding::ok(format!(
+        "{subsystem}: tags.classifier.classifier={} fallback={}",
+        classifier_kind_name(cfg.classifier),
+        classifier_kind_name(cfg.fallback)
+    ))];
+    let uses_dev = cfg.classifier == ClassifierKind::ClassifierDev || cfg.fallback == ClassifierKind::ClassifierDev;
+    if !uses_dev {
+        return findings;
+    }
+    let var = cfg.api_key_env.as_str();
+    if env_is_set(var) {
+        findings.push(Finding::ok(format!(
+            "{subsystem}: {var} (tags.classifier.api-key-env) is set in this shell"
+        )));
+    } else {
+        findings.push(Finding::warn(
+            format!(
+                "{subsystem}: {var} (tags.classifier.api-key-env) is not set in this shell; the daemon reads it \
+                 from its EnvironmentFile ({env_file}), so its environment may differ from doctor's"
+            ),
+            format!("export {var} in this shell, or check `systemctl --user show -p EnvironmentFiles {subsystem}.service`"),
+        ));
+    }
+    findings
 }
 
 fn signal_rs_cli_findings() -> Vec<Finding> {
@@ -610,14 +700,15 @@ fn borg_findings() -> Vec<Finding> {
             if h.failed_24h > 0 {
                 findings.push(Finding::info(format!("{} failure(s) in the last 24h", h.failed_24h)));
             }
-            // The silent-quality signal: notes that landed but via a distill
-            // fallback (e.g. a fabric API error). They read as `succeeded`, so
-            // they never show up in the failed/crashed counts above - this is
-            // the one place doctor makes degraded ingestion loud.
+            // The silent-quality signal: notes that landed but through a
+            // fallback. They read as `succeeded`, so they never show up in the
+            // failed/crashed counts above - this is the one place doctor makes
+            // degraded ingestion loud.
             if h.degraded_24h > 0 {
                 findings.push(Finding::warn(
                     format!(
-                        "{} note(s) published degraded in the last 24h (distill fallback - impoverished body)",
+                        "{} note(s) published degraded in the last 24h: a distill fallback (impoverished body), \
+                         a tag-classifier fallback, or a vocabulary load failure (tags from the fallback classifier)",
                         h.degraded_24h
                     ),
                     "sb borg log --degraded --since 24h, then `sb borg replay <trace>` once the cause is fixed"

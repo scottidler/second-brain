@@ -469,11 +469,19 @@ impl OracleMcpServer {
 
     /// Get a briefing on a specific tag
     #[tool(
-        description = "Get a briefing on a specific tag - total notes, unread count, starred count, type breakdown, and recent notes. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "Get a briefing on a specific canonical tag - total notes, unread count, starred count, type breakdown, and recent notes. A tag outside the vocabulary is an error naming the closest canonical tags (see schema_info for the full list). Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn tag_brief(&self, params: Parameters<TagBriefRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
         let detail_level = req.detail.unwrap_or(DetailLevel::Tldr);
+
+        // A tag outside the vocabulary used to come back as `total_notes: 0`
+        // with nothing marking it as a typo. Validate before touching the
+        // index; an unloadable vocabulary (empty list) skips the check.
+        let vocabulary = load_canonical_tags(&self.config.tags.canonical_path);
+        if let Some(message) = unknown_tag_message(&req.tag, &vocabulary) {
+            return Err(Self::invalid(message));
+        }
 
         let db = self.db.lock().map_err(Self::err)?;
         let brief = db.tag_brief(&req.tag, req.limit).map_err(Self::err)?;
@@ -629,7 +637,7 @@ impl OracleMcpServer {
         description = "List all valid schema values - tags, note types, origins, statuses, and ingest methods. Use this to understand what filter values are available."
     )]
     async fn schema_info(&self, _params: Parameters<SchemaInfoRequest>) -> Result<CallToolResult, McpError> {
-        let tags = load_canonical_tags();
+        let tags = load_canonical_tags(&self.config.tags.canonical_path);
         Ok(CallToolResult::success(vec![Content::json(schema_info_payload(
             &tags,
         ))?]))
@@ -648,7 +656,7 @@ impl OracleMcpServer {
 
     /// Search notes by tag or list all tags
     #[tool(
-        description = "Search notes by tag, or list all tags with counts when no tag is specified. Supports exact match and prefix match (append * to tag). Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "Search notes by tag, or list all tags with counts when no tag is specified. Supports exact match and prefix match (append * to tag). The tags filter applies to both forms: with tag it narrows the returned notes, without it the counts cover only notes carrying one of the filter tags. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn tag_search(&self, params: Parameters<TagSearchRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -671,7 +679,7 @@ impl OracleMcpServer {
                 }))?]))
             }
             None => {
-                let stats = db.tag_stats().map_err(Self::err)?;
+                let stats = db.tag_stats(req.tags.as_deref(), false).map_err(Self::err)?;
                 let limit = req.limit.unwrap_or(50) as usize;
                 let stats: Vec<&vault::search::TagStat> = stats.iter().take(limit).collect();
                 let tags: Vec<serde_json::Value> = stats
@@ -852,7 +860,7 @@ impl OracleMcpServer {
 
     /// Browse notes by creator/channel
     #[tool(
-        description = "Browse notes by creator or channel. When creator is provided, returns matching notes. When omitted, lists all creators with counts. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "Browse notes by creator or channel. When creator is provided, returns matching notes. When omitted, lists all creators with counts. The tags filter applies to both forms: it narrows the returned notes, or restricts the counts to notes carrying one of the filter tags. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn creator_browse(&self, params: Parameters<CreatorBrowseRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -874,7 +882,7 @@ impl OracleMcpServer {
                 }))?]))
             }
             None => {
-                let stats = db.creator_stats().map_err(Self::err)?;
+                let stats = db.creator_stats(req.tags.as_deref(), false).map_err(Self::err)?;
                 let limit = req.limit.unwrap_or(50) as usize;
                 let creators: Vec<serde_json::Value> = stats
                     .iter()
@@ -897,7 +905,7 @@ impl OracleMcpServer {
 
     /// Browse notes by source URL host
     #[tool(
-        description = "Browse notes by source URL host. When host is provided, returns matching notes. When omitted, lists all source hosts with counts. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "Browse notes by source URL host. When host is provided, returns matching notes. When omitted, lists all source hosts with counts. The tags filter applies to both forms: it narrows the returned notes, or restricts the counts to notes carrying one of the filter tags. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn source_browse(&self, params: Parameters<SourceBrowseRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -919,7 +927,7 @@ impl OracleMcpServer {
                 }))?]))
             }
             None => {
-                let stats = db.source_domain_stats().map_err(Self::err)?;
+                let stats = db.source_domain_stats(req.tags.as_deref(), false).map_err(Self::err)?;
                 let limit = req.limit.unwrap_or(50) as usize;
                 let sources: Vec<serde_json::Value> = stats
                     .iter()
@@ -1101,13 +1109,16 @@ pub fn schema_info_payload(tags: &[String]) -> serde_json::Value {
     })
 }
 
-/// Load the canonical tag vocabulary (`~/.config/sb/canonical-tags.yml`) for
-/// `schema_info`, sorted for a stable payload. Soft-fails to an empty list
+/// Load the canonical tag vocabulary from `tags.canonical-path` in
+/// `oracle.yml` (default `~/.config/sb/canonical-tags.yml`) for `schema_info`
+/// and `tag_brief`, sorted for a stable payload. Soft-fails to an empty list
 /// with a `warn!` rather than erroring the tool: `schema_info` is purely
 /// informational, and a host with no vocabulary deployed yet (or a hermetic
 /// test environment) must not turn every other schema value unreachable.
-fn load_canonical_tags() -> Vec<String> {
-    match vault::canonical::CanonicalTagsFile::load(&vault::paths::canonical_tags()) {
+/// Callers treat the empty list as "no vocabulary to validate against".
+fn load_canonical_tags(path: &std::path::Path) -> Vec<String> {
+    debug!("load_canonical_tags: path={}", path.display());
+    match vault::canonical::CanonicalTagsFile::load(path) {
         Ok(file) => {
             let mut tags: Vec<String> = file.all_tags().into_iter().collect();
             tags.sort();
@@ -1118,6 +1129,74 @@ fn load_canonical_tags() -> Vec<String> {
             Vec::new()
         }
     }
+}
+
+/// Largest edit distance at which a vocabulary tag counts as "close" to a
+/// mistyped one (`privacyy` -> `privacy` is 1; `sequrity` -> `security` is 1).
+const CLOSEST_TAG_MAX_DISTANCE: usize = 2;
+/// How many suggestions an unknown-tag error carries.
+const CLOSEST_TAG_LIMIT: usize = 5;
+
+/// `Some(message)` when `tag` is not in a non-empty `vocabulary`; `None` when
+/// it is canonical or when there is no vocabulary to check against (an empty
+/// list, which is how `load_canonical_tags` reports an unloadable file).
+/// The message names the closest canonical tags so the caller can retry.
+fn unknown_tag_message(tag: &str, vocabulary: &[String]) -> Option<String> {
+    debug!("unknown_tag_message: tag={tag} vocabulary_len={}", vocabulary.len());
+    if vocabulary.is_empty() || vocabulary.iter().any(|t| t == tag) {
+        return None;
+    }
+    let close = closest_tags(tag, vocabulary, CLOSEST_TAG_LIMIT);
+    let hint = if close.is_empty() {
+        format!(
+            "no close match among the {} canonical tags (see schema_info)",
+            vocabulary.len()
+        )
+    } else {
+        format!("closest canonical tags: {}", close.join(", "))
+    };
+    Some(format!("tag {tag:?} is not in the canonical vocabulary; {hint}"))
+}
+
+/// Vocabulary tags within `CLOSEST_TAG_MAX_DISTANCE` edits of `tag`, or that
+/// contain / are contained by it, nearest first, at most `limit`. Pure, so
+/// the suggestion order is testable without a server.
+fn closest_tags(tag: &str, vocabulary: &[String], limit: usize) -> Vec<String> {
+    let needle = tag.to_ascii_lowercase();
+    let mut scored: Vec<(usize, &String)> = vocabulary
+        .iter()
+        .filter_map(|candidate| {
+            let distance = edit_distance(&needle, candidate);
+            if distance <= CLOSEST_TAG_MAX_DISTANCE {
+                Some((distance, candidate))
+            } else if candidate.contains(&needle) || needle.contains(candidate.as_str()) {
+                // A substring relation ranks behind every near-miss edit.
+                Some((CLOSEST_TAG_MAX_DISTANCE + 1, candidate))
+            } else {
+                None
+            }
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+    scored.into_iter().take(limit).map(|(_, t)| t.clone()).collect()
+}
+
+/// Levenshtein distance over chars. Inputs are short kebab-case tags, so the
+/// O(a*b) table is trivial.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitution = previous[j] + usize::from(ca != cb);
+            current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
 }
 
 fn schema_values<T>(

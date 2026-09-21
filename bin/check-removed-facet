@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# AC1 of docs/design/2026-09-19-tags-only-classification.md, verbatim: the
+# removed classification facet may not appear (case-insensitive substring) in
+# any .rs file outside the exclusion list, which names URL-host code that
+# keeps the word on purpose, the two retained schema lines, the source-host
+# statistics that keep their name, and the historical P4 undo plan file.
+# Runs from the second-brain root; exits non-zero on any hit and prints them.
+set -uo pipefail
+
+cd "$(dirname "$0")/.."
+
+FACET='domain'
+HITS="$(grep -rniE "$FACET" --include=*.rs vault borg cortex oracle sb distillers \
+  | grep -viE 'blocklist|stages/(alert|raw|artifact)|types\.rs|description\.rs|quality\.rs|cli/borg\.rs|borg/src/lib\.rs|borg/src/config\.rs|borg/src/github\.rs|harvest\.rs|harvest/select\.rs' \
+  | grep -viE 'anonymous access to domain|domain TEXT,|idx_notes_domain|source_domain_stats|notes_by_source_domain|source URL domain|subdomain|URL domain|v5-domain-as-tag-undo' \
+  || true)"
+
+echo "=== AC1: removed classification facet must not appear in *.rs ==="
+if [ -n "$HITS" ]; then
+  echo "$HITS"
+  echo ""
+  echo "FAIL: $(printf '%s\n' "$HITS" | wc -l) line(s) name the removed facet (AC1 == 0 required)"
+  exit 1
+fi
+echo "AC1 == 0: no .rs file names the removed facet"

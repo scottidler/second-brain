@@ -122,7 +122,6 @@ impl OracleMcpServer {
     /// retrieval path (no divergent re-implementation). `expand_hops` /
     /// `edge_kinds` / `min_edge_weight` are only consulted by the graph modes.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn run_search_mode(
         &self,
         db: &SearchIndex,

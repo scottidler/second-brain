@@ -293,6 +293,8 @@ impl From<DaemonArgs> for opts::DaemonOpts {
 
 #[derive(Args)]
 pub struct MigrateArgs {
+    /// Write the migrations to the vault. Without it the run is a dry run
+    /// that reports the files each migration would change.
     #[arg(long)]
     pub apply: bool,
     /// Read migrations from this plan file instead of cortex.yml. An inverse
@@ -455,6 +457,7 @@ pub struct SummarizeArgs {
     pub backfill: bool,
     #[arg(long)]
     pub since: Option<String>,
+    /// Only notes carrying this canonical tag.
     #[arg(long)]
     pub tag: Option<String>,
     #[arg(long)]

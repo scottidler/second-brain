@@ -1,0 +1,21 @@
+{
+  "classify_status": ["tags"],
+  "creator_browse": ["creator", "detail", "limit", "tags"],
+  "duplicate_groups": ["group_id", "limit"],
+  "failure_history": ["limit", "method", "since", "source", "stage"],
+  "find_links": ["detail", "direction", "path"],
+  "find_similar": ["content", "detail", "limit", "path", "tags"],
+  "inbox_status": ["detail", "limit"],
+  "ingest_history": ["after", "before", "limit", "source"],
+  "knowledge_search": ["detail", "edge_kinds", "expand_hops", "limit", "min_edge_weight", "mode", "note_type", "query", "status", "tags"],
+  "list_notes": ["after", "before", "detail", "limit", "note_type", "status", "tags"],
+  "note_read": ["detail", "path"],
+  "quality_report": ["detail", "limit", "quality"],
+  "recent_activity": ["days", "detail", "limit", "note_type", "tags"],
+  "reindex": [],
+  "schema_info": [],
+  "source_browse": ["detail", "host", "limit", "tags"],
+  "tag_brief": ["detail", "limit", "tag"],
+  "tag_search": ["detail", "limit", "tag", "tags"],
+  "vault_overview": []
+}

@@ -39,6 +39,29 @@ pub struct Config {
     /// built-in default (vector-only, stub-exclude, no rerank/transform).
     #[serde(default)]
     pub retrieval: RetrievalConfig,
+
+    /// Where the canonical tag vocabulary lives. Same key borg and cortex
+    /// read (`tags.canonical-path`), so all three subsystems can be pointed
+    /// at one non-default file together.
+    #[serde(default)]
+    pub tags: TagsConfig,
+}
+
+/// The `tags:` block. Only the vocabulary path today; `schema_info` and
+/// `tag_brief` read it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+pub struct TagsConfig {
+    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
+    pub canonical_path: PathBuf,
+}
+
+impl Default for TagsConfig {
+    fn default() -> Self {
+        Self {
+            canonical_path: vault::paths::canonical_tags(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -55,6 +78,7 @@ impl Default for Config {
             watcher: WatcherConfig::default(),
             inbound_recompute_interval_secs: default_inbound_recompute_interval_secs(),
             retrieval: RetrievalConfig::default(),
+            tags: TagsConfig::default(),
         }
     }
 }

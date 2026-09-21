@@ -2,6 +2,9 @@
 //!
 //! Filter parameters use vault schema enums for compile-time correctness.
 //! Invalid values fail deserialization with a clear error listing valid options.
+//! Every request struct is `deny_unknown_fields`: a client still sending a
+//! parameter this server no longer has (the removed classification facet, a
+//! misspelt `tags`) gets an error instead of silently unfiltered results.
 
 use rmcp::schemars;
 use schemars::JsonSchema;
@@ -40,6 +43,7 @@ pub enum SearchMode {
 /// (nDCG@10 0.876 vs 0.799 for equal-weight hybrid). Pass `mode` only to force
 /// one legacy path.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct KnowledgeSearchRequest {
     /// The search query (full-text search across titles, bodies, tags, and summaries)
     #[schemars(description = "Search query - searches across note titles, bodies, tags, and summaries")]
@@ -94,6 +98,7 @@ pub struct KnowledgeSearchRequest {
 
 /// Read a specific note by its vault-relative path.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NoteReadRequest {
     /// The vault-relative path to the note (e.g., 'ai/some-article.md')
     #[schemars(description = "Vault-relative path to the note (e.g., 'ai/some-article.md')")]
@@ -106,10 +111,12 @@ pub struct NoteReadRequest {
 
 /// Get an overview of the vault - total notes, distribution by type and status, plus schema gaps.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VaultOverviewRequest {}
 
 /// List notes with optional filters, without requiring a search query.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListNotesRequest {
     /// Filter to notes carrying any of these tags (OR across the list)
     #[schemars(description = "Filter to notes carrying any of these tags (OR across the list)")]
@@ -142,6 +149,7 @@ pub struct ListNotesRequest {
 
 /// Query the borg ingest ledger for ingestion history.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IngestHistoryRequest {
     /// Filter by source URL substring
     #[schemars(description = "Filter by source URL (substring match)")]
@@ -166,6 +174,7 @@ pub struct IngestHistoryRequest {
 /// subset (from `borg-ledger.md`), `failure_history` returns failures from
 /// the receipts SQLite DB at `~/.local/share/sb/borg/receipts.db`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FailureHistoryRequest {
     /// Optional `failure_stage` filter. One of `intake-rejected`,
     /// `classify-failed`, `fetch-failed`, `quality-blocked`,
@@ -192,6 +201,7 @@ pub struct FailureHistoryRequest {
 
 /// Search notes by tag, or list all tags with counts when no tag is specified.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TagSearchRequest {
     /// Specific tag to search for. Exact match by default; append * for prefix match (e.g. "rust*"). Omit to list all tags with counts.
     #[schemars(
@@ -215,6 +225,7 @@ pub struct TagSearchRequest {
 
 /// Get a briefing on a specific tag - stats, recent notes, unread count.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TagBriefRequest {
     /// The tag to get a briefing on
     #[schemars(description = "Tag to brief on")]
@@ -231,6 +242,7 @@ pub struct TagBriefRequest {
 
 /// Find notes similar to given content or another note.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FindSimilarRequest {
     /// Text to find similar notes for
     #[schemars(description = "Text content to find similar notes for. Provide either this or path, not both.")]
@@ -257,6 +269,7 @@ pub struct FindSimilarRequest {
 
 /// Timeline of recent vault activity.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RecentActivityRequest {
     /// How many days back to look
     #[schemars(description = "Number of days back to search (default: 7)")]
@@ -292,6 +305,7 @@ pub enum LinkDirection {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FindLinksRequest {
     /// Note path to inspect
     #[schemars(description = "Vault-relative path to the note to inspect links for")]
@@ -308,6 +322,7 @@ pub struct FindLinksRequest {
 
 /// Browse notes by creator/channel.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreatorBrowseRequest {
     /// Filter to specific creator (substring match). Omit to list all creators with counts.
     #[schemars(description = "Creator name to filter (substring match). Omit to list all creators with counts.")]
@@ -328,6 +343,7 @@ pub struct CreatorBrowseRequest {
 
 /// Browse notes by source URL host.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SourceBrowseRequest {
     /// Source host to filter (e.g., "youtube.com"). Omit to list all source hosts with counts.
     #[schemars(
@@ -350,6 +366,7 @@ pub struct SourceBrowseRequest {
 
 /// View inbox contents and classification pipeline health.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InboxStatusRequest {
     /// How much content to return per note
     #[schemars(description = "Detail level for returned notes. Default: tldr")]
@@ -383,6 +400,7 @@ impl QualityLevel {
 
 /// Notes by quality score and common issues.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QualityReportRequest {
     /// Filter by quality level: "low", "medium", "high"
     #[schemars(description = "Filter by quality level: low, medium, high. Omit for distribution overview.")]
@@ -399,6 +417,7 @@ pub struct QualityReportRequest {
 
 /// Browse duplicate note clusters.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DuplicateGroupsRequest {
     /// Specific group to inspect
     #[schemars(description = "Specific duplicate group ID to inspect. Omit to list all groups.")]
@@ -411,6 +430,7 @@ pub struct DuplicateGroupsRequest {
 
 /// Classification pipeline health and metadata.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClassifyStatusRequest {
     /// Filter statistics to notes carrying any of these tags (OR across the list)
     #[schemars(description = "Filter statistics to notes carrying any of these tags (OR across the list)")]
@@ -419,8 +439,10 @@ pub struct ClassifyStatusRequest {
 
 /// List all valid schema values (tags, note types, origins, statuses, methods).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SchemaInfoRequest {}
 
 /// Trigger a reindex of the vault into the SQLite database.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReindexRequest {}

@@ -16,11 +16,12 @@ The single source of truth for the Obsidian-vault note schema (NoteType / Origin
 - `vault::embedding::{EmbeddingModel, load_active_model, embed_query}` (Candle / fastembed, feature-gated).
 - `vault::distilled::Distilled { summary, tldr, slug, enumeration, key_ideas, claims, tags, links, kind_specific, meta, transcript }`.
 - `vault::watcher::VaultWatcher::start(vault_root, config, applying_flag)` — debounced change stream.
-- `vault::canonical::CanonicalSet { all, no_segment, max_per_note }`: the one loaded vocabulary snapshot, built by `CanonicalTagsFile::canonical_set()` and taken by `match_to_canonical` / `filter_and_cap`. Absorbed borg's private `CanonicalState` shape.
+- `vault::canonical::CanonicalSet { all, no_segment, no_classifier, max_per_note }`: the one loaded vocabulary snapshot, built by `CanonicalTagsFile::canonical_set()` and taken by `match_to_canonical` / `filter_and_cap` / `cap_protecting`. Absorbed borg's private `CanonicalState` shape. `CanonicalTagsFile` is `deny_unknown_fields`, so a mistyped key in `canonical-tags.yml` is a parse error rather than an empty list.
 
 ## Contracts & Invariants
 
 - **Schema is law.** `vault::schema` enums are THE source of truth — never hardcode `"ai"`/`"article"`/`"authored"` strings in consumer crates; import the enums.
+- **Tags are machine-managed.** `tags` is the sole classification facet and is written by the classifier (borg at ingest, cortex at classify / `--retag`), never curated by editing a note's list: `[]` means "not yet classified" and is repopulated by the next classification, and a tag removed by hand returns on the next reingest or `--retag`. The two curated exceptions are `no-classifier-tags` (never dropped by any capping path) and the publisher's own tags, which borg preserves separately under `author-tags` so a retag can union them again. Curation happens in `canonical-tags.yml`, `tag-mapping.yml`, and `--retag` (design doc `docs/design/2026-09-19-tags-only-classification.md`, Data Model "ownership" row).
 - **L2 Distilled contract** `{summary, tldr, slug, enumeration, key_ideas, claims, tags, links, kind_specific, meta, transcript}` is the finalized extractor output consumed by renderers (`distillers`) and borg's publish stage.
 - **Tilde expansion at the boundary.** Any user-supplied path MUST pass through `expand_tilde` / `deserialize_tilde_pathbuf` before a filesystem call. For `PathBuf` config fields use `#[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]`.
 - **Vault-root precedence:** CLI override > config (`vault.root-path`) > marker-gated CWD (a `.obsidian/` dir must exist). No silent CWD fallback.

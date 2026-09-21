@@ -247,3 +247,59 @@ mod drift {
         assert_eq!(warns[0].suggested_fix.as_deref(), Some("sb bootstrap --force"));
     }
 }
+
+// ---- classifier section (review fold C14) ----
+
+fn classifier_cfg(
+    classifier: distillers::tags::ClassifierKind,
+    fallback: distillers::tags::ClassifierKind,
+) -> distillers::tags::TagsClassifierConfig {
+    distillers::tags::TagsClassifierConfig {
+        classifier,
+        fallback,
+        api_key_env: "CLASSIFY_API_KEY".to_string(),
+        ..distillers::tags::TagsClassifierConfig::default()
+    }
+}
+
+#[test]
+fn classifier_findings_report_kinds_and_skip_the_env_check_without_classifier_dev() {
+    use distillers::tags::ClassifierKind;
+    let cfg = classifier_cfg(ClassifierKind::Deterministic, ClassifierKind::FabricClosed);
+    let findings = classifier_findings_for("borg", &cfg, "borg.env", |_| false);
+    assert_eq!(findings.len(), 1, "no env finding when nothing selects classifier-dev");
+    assert_eq!(findings[0].severity, Severity::Ok);
+    assert!(
+        findings[0]
+            .message
+            .contains("tags.classifier.classifier=deterministic fallback=fabric-closed"),
+        "{}",
+        findings[0].message
+    );
+}
+
+#[test]
+fn classifier_findings_warn_when_the_classifier_dev_key_var_is_unset() {
+    use distillers::tags::ClassifierKind;
+    let cfg = classifier_cfg(ClassifierKind::ClassifierDev, ClassifierKind::Deterministic);
+    let findings = classifier_findings_for("cortex", &cfg, "cortex.env", |_| false);
+    assert_eq!(findings.len(), 2);
+    assert_eq!(findings[1].severity, Severity::Warn);
+    assert!(findings[1].message.contains("CLASSIFY_API_KEY"), "{}", findings[1].message);
+    assert!(findings[1].message.contains("cortex.env"), "{}", findings[1].message);
+    assert!(findings[1].message.contains("is not set"), "{}", findings[1].message);
+}
+
+#[test]
+fn classifier_findings_ok_when_the_key_var_is_set_and_never_print_its_value() {
+    use distillers::tags::ClassifierKind;
+    let cfg = classifier_cfg(ClassifierKind::Deterministic, ClassifierKind::ClassifierDev);
+    let secret = "sk-this-must-not-appear";
+    let findings = classifier_findings_for("borg", &cfg, "borg.env", |name| name == "CLASSIFY_API_KEY");
+    assert_eq!(findings.len(), 2, "a classifier-dev fallback also needs the key");
+    assert_eq!(findings[1].severity, Severity::Ok);
+    assert!(findings[1].message.contains("CLASSIFY_API_KEY"), "{}", findings[1].message);
+    for f in &findings {
+        assert!(!f.message.contains(secret));
+    }
+}

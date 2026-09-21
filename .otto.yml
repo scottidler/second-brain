@@ -52,6 +52,11 @@ tasks:
     bash: |
       bin/agents-map
 
+  removed-facet:
+    help: "AC1 of the tags-only design: the removed classification facet appears in no .rs file"
+    bash: |
+      bin/check-removed-facet
+
   check:
     help: "Run all quality checks (compile, clippy, format)"
     bash: |
@@ -184,8 +189,8 @@ tasks:
       [ "$TEST_FAILED" = "1" ] || [ "$THRESHOLD_FAILED" = "1" ] && exit 1 || true
 
   ci:
-    help: "Full CI pipeline (lint + bloat + check + test in parallel)"
-    before: [lint, bloat, agents-map, check, test]
+    help: "Full CI pipeline (lint + bloat + agents-map + removed-facet + check + test in parallel)"
+    before: [lint, bloat, agents-map, removed-facet, check, test]
     bash: |
       echo "✅ All CI checks passed!"
 
