@@ -444,3 +444,65 @@ fn body_excerpt_leaves_short_text_and_multibyte_alone() {
     let multibyte = "\u{4e16}".repeat(CLASSIFIER_TEXT_CHARS + 10);
     assert_eq!(body_excerpt(&multibyte).chars().count(), CLASSIFIER_TEXT_CHARS);
 }
+
+// --- 0.15.3: keyless by default, optional workspace token ------------------
+
+/// The shipped default is the KEYLESS public tier. `CLASSIFY_API_KEY` sat in
+/// the environment and in the secrets manifest while classifier.dev rejected
+/// it (401 invalid_api_key), so every classify fell back to deterministic and
+/// nothing said so. Defaulting to no credential means the working path needs
+/// no setup, and a stale key cannot reintroduce that state.
+#[test]
+fn the_default_config_names_no_token_env() {
+    let cfg = TagsClassifierConfig::default();
+    assert_eq!(cfg.token_env, "", "the default must be the keyless tier");
+}
+
+/// `token-env` names an env var, never a token. An empty name, or a name
+/// whose variable is unset or blank, is the keyless path and NOT an error:
+/// falling through to the public tier is a working request.
+#[test]
+fn an_unset_or_blank_token_env_resolves_keyless() {
+    let c = canon();
+    let m = TagMapping::default();
+
+    let mut cfg = TagsClassifierConfig::default();
+    assert!(ClassifierDev::new(c.clone(), m.clone(), &cfg).token().is_none());
+
+    cfg.token_env = "DISTILLERS_TEST_UNSET_TOKEN_9c2f4b".to_string();
+    assert!(
+        ClassifierDev::new(c.clone(), m.clone(), &cfg).token().is_none(),
+        "a named-but-unset variable must fall through to keyless, not error"
+    );
+
+    // SAFETY: single-threaded test, variable is uniquely named to this test.
+    unsafe { std::env::set_var("DISTILLERS_TEST_BLANK_TOKEN_9c2f4b", "   ") };
+    cfg.token_env = "DISTILLERS_TEST_BLANK_TOKEN_9c2f4b".to_string();
+    assert!(
+        ClassifierDev::new(c.clone(), m.clone(), &cfg).token().is_none(),
+        "a whitespace-only value is not a token"
+    );
+
+    unsafe { std::env::set_var("DISTILLERS_TEST_REAL_TOKEN_9c2f4b", "sk-live-xyz") };
+    cfg.token_env = "DISTILLERS_TEST_REAL_TOKEN_9c2f4b".to_string();
+    assert_eq!(
+        ClassifierDev::new(c, m, &cfg).token().as_deref(),
+        Some("sk-live-xyz"),
+        "a set token must still be used"
+    );
+    unsafe {
+        std::env::remove_var("DISTILLERS_TEST_BLANK_TOKEN_9c2f4b");
+        std::env::remove_var("DISTILLERS_TEST_REAL_TOKEN_9c2f4b");
+    }
+}
+
+/// The public tier caps a call at 200 texts. Before the chunking the whole
+/// batch went in one request, and `summarize --backfill` / `classify --retag`
+/// can be thousands of notes long.
+#[test]
+fn the_text_chunk_ceiling_is_the_public_tier_limit() {
+    assert_eq!(MAX_TEXTS_PER_CALL, 200);
+    let texts: Vec<usize> = (0..451).collect();
+    let chunks: Vec<usize> = texts.chunks(MAX_TEXTS_PER_CALL).map(<[usize]>::len).collect();
+    assert_eq!(chunks, vec![200, 200, 51], "451 texts must go out as three calls");
+}

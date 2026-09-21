@@ -782,6 +782,44 @@ CLI: 57 clap flags across `sb borg` and `sb cortex` carried no help text,
 including the `--apply` / `--dry-run` gates. All 57 documented; the scan that
 found them now returns only the one intentionally `hide = true` flag.
 
+### C8. The classifier key, resolved (0.15.3)
+
+The shakedown listed the `CLASSIFY_API_KEY` 401 as out of scope, "a credential,
+not code". That was wrong, and the evidence is one pair of calls:
+
+- `classifier.dev` answered a multi-label request with **no credential at all**
+  (`{"rust": 0.98, "cooking": 0.01, "llm": 0.06}`, model jev-1.13.0, 113 ms).
+- The same service answered `POST /v1/classify` with
+  `authorization: Bearer $CLASSIFY_API_KEY` with **401 invalid_api_key**, both
+  from the shell environment AND from the value decrypted straight out of the
+  secrets manifest. Same rejected value in both places.
+
+So the service was never unavailable. `ClassifierDev` was the only thing
+failing, and it failed *because* it authenticated. The design's fallback did
+its job (nothing was lost; every note got deterministic tags) which is exactly
+why it ran unnoticed for so long.
+
+The fix is to stop authenticating by default:
+
+- `token-env` replaces `api-key-env`, defaults to **empty**, and empty means
+  the keyless public tier. The `authorization` header is only attached when a
+  token resolves. A named-but-unset or whitespace-only variable is not an
+  error; it falls through to keyless, because that is a working request.
+- The name is deliberately new. `CLASSIFY_API_KEY` is still exported in every
+  shell and still sits in the secrets manifest; reusing the name would let the
+  dead value silently reintroduce the 401. Set `token-env:
+  CLASSIFIER_DEV_TOKEN` only when a live workspace key from
+  classifier.dev/app/keys is actually wanted.
+- `MAX_TEXTS_PER_CALL` (200) chunks every batch. This was a C3 open item
+  ("`classify_batch` had no 1,000-input chunking") and becomes load-bearing on
+  the keyless tier, whose per-call ceiling is 200 rather than 1,000.
+  `summarize --backfill` and `classify --retag` can be thousands of notes.
+- `sb doctor`'s classifier section names the auth path it took, so "it works"
+  and "it works keylessly" are distinguishable facts.
+
+Keyless limits: 3,000 classifications/min on the fast model, 200/min on smart,
+200 texts per public call.
+
 ### C5. Version
 
-0.15.0 for the fold; 0.15.1 for the C6 conformance fixes (behavior-only, no public `vault` surface change beyond the added `TAGS_KEY` constant); 0.15.2 for the C7 shakedown fixes. C7 adds a request parameter and two response fields and starts rejecting unknown keys, which is a behavior change for any client that was sending them, but the MCP surface is 0.x and the rejected calls were silently wrong. `vault` removes `Domain`, `normalize_domain`, four search functions and several struct fields, and re-signatures nine public functions; that is a minor bump under 0.x, not a patch.
+0.15.0 for the fold; 0.15.1 for the C6 conformance fixes (behavior-only, no public `vault` surface change beyond the added `TAGS_KEY` constant); 0.15.2 for the C7 shakedown fixes; 0.15.3 for the C8 classifier switch. C7 adds a request parameter and two response fields and starts rejecting unknown keys, which is a behavior change for any client that was sending them, but the MCP surface is 0.x and the rejected calls were silently wrong. `vault` removes `Domain`, `normalize_domain`, four search functions and several struct fields, and re-signatures nine public functions; that is a minor bump under 0.x, not a patch.

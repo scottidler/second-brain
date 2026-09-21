@@ -141,9 +141,16 @@ tags:
     # Runs when the selected implementation errors. Borg marks the receipt
     # degraded; cortex holds the note only if this also returns Low.
     # fallback: deterministic
-    # NAME of the env var holding the classifier.dev key (classifier-dev
-    # only), never the key itself; supply the value via env-bootstrap.
-    # api-key-env: CLASSIFY_API_KEY
+    # classifier-dev talks to the KEYLESS public tier by default: no
+    # credential, rate-limited (3,000 classifications/min on the fast model,
+    # 200/min on smart, at most 200 texts per public call, which is the
+    # ceiling every batch chunks at).
+    #
+    # Set `token-env` only to use a paid workspace key from
+    # classifier.dev/app/keys. It names the ENV VAR, never the token itself;
+    # supply the value via env-bootstrap. A named-but-unset variable is not an
+    # error, it just falls through to the keyless tier.
+    # token-env: CLASSIFIER_DEV_TOKEN
     # endpoint: https://classifier.dev/v1/classify
     # timeout-secs: 30
 

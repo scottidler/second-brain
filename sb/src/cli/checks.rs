@@ -449,15 +449,14 @@ fn classifier_findings() -> Vec<Finding> {
             "tags.classifier is `deterministic` (local, no network); nothing to probe",
         )];
     }
-    if std::env::var(&cfg.api_key_env).is_err() {
-        return vec![Finding::warn(
-            format!("{} is not set; every classify will fall back", cfg.api_key_env),
-            format!(
-                "export {} (see the secrets manifest), then restart the daemons",
-                cfg.api_key_env
-            ),
-        )];
-    }
+
+    // Name the auth path in both outcomes: "it works" and "it works keylessly"
+    // are different facts, and so are the two ways it can fail.
+    let auth = match cfg.token_env.as_str() {
+        "" => "keyless public tier".to_string(),
+        var if std::env::var(var).is_ok_and(|v| !v.trim().is_empty()) => format!("token from {var}"),
+        var => format!("keyless public tier; {var} names no value"),
+    };
 
     let canon = vault::canonical::CanonicalSet {
         all: ["rust", "cooking", "llm"].iter().map(|t| (*t).to_string()).collect(),
@@ -474,14 +473,14 @@ fn classifier_findings() -> Vec<Finding> {
     };
     match classifier.classify(&input) {
         Ok(_) => vec![Finding::ok(format!(
-            "classifier live probe succeeded ({:?}, key from {})",
-            cfg.classifier, cfg.api_key_env
+            "classifier live probe succeeded ({:?}, {})",
+            cfg.classifier, auth
         ))],
         Err(e) => vec![Finding::warn(
             format!("classifier live probe failed: {e:#}"),
             format!(
-                "every ingest is silently falling back to {:?}. Check the value of {} (a classifier.dev workspace key from /app/keys, not a personal token) and provider egress; drill in with `sb borg log --degraded --since 24h`",
-                cfg.fallback, cfg.api_key_env
+                "every ingest is silently falling back to {:?} ({auth}). Check egress to the endpoint, and if a token is configured, that it is a live workspace key from classifier.dev/app/keys; drill in with `sb borg log --degraded --since 24h`",
+                cfg.fallback
             ),
         )],
     }

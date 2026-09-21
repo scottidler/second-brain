@@ -26,6 +26,12 @@ mod tests;
 /// schema 2026-09-20). The vocabulary is larger, so production always shards.
 pub const MAX_LABELS_PER_CALL: usize = 100;
 
+/// The keyless (public) tier's ceiling on texts per call. An authenticated
+/// workspace key raises it to 1,000, but the default path is keyless, so every
+/// batch chunks at the lower number: one limit, no branch, and a batch that is
+/// correct whether or not a token is configured.
+pub const MAX_TEXTS_PER_CALL: usize = 200;
+
 const DEFAULT_ENDPOINT: &str = "https://classifier.dev/v1/classify";
 
 /// Where a candidate tag came from. Provenance decides which implementations
@@ -170,8 +176,17 @@ pub enum ClassifierKind {
 pub struct TagsClassifierConfig {
     pub classifier: ClassifierKind,
     pub threshold: f32,
-    /// NAME of the env var holding the classifier.dev key, never the key.
-    pub api_key_env: String,
+    /// NAME of the env var holding an OPTIONAL classifier.dev workspace token,
+    /// never the token itself. Empty (the default) means the keyless public
+    /// tier, which is what classifier.dev serves without credentials.
+    ///
+    /// Deliberately not the old `api-key-env` / `CLASSIFY_API_KEY` pair. That
+    /// key was rejected upstream (`401 invalid_api_key`) while still being
+    /// present in every shell and in the secrets manifest, so every classify
+    /// fell back to `deterministic` and nothing said so. A fresh name means a
+    /// stale value cannot quietly reintroduce that state: set this only when
+    /// a workspace key from classifier.dev/app/keys is actually wanted.
+    pub token_env: String,
     /// Runs when the selected impl errors. Borg marks the receipt degraded;
     /// cortex holds the note only if the fallback also returns `Low`.
     pub fallback: ClassifierKind,
@@ -184,7 +199,7 @@ impl Default for TagsClassifierConfig {
         Self {
             classifier: ClassifierKind::Deterministic,
             threshold: 0.9,
-            api_key_env: "CLASSIFY_API_KEY".to_string(),
+            token_env: String::new(),
             fallback: ClassifierKind::Deterministic,
             endpoint: DEFAULT_ENDPOINT.to_string(),
             timeout_secs: 30,
@@ -532,7 +547,7 @@ pub struct ClassifierDev {
     canon: CanonicalSet,
     mapping: TagMapping,
     threshold: f32,
-    api_key_env: String,
+    token_env: String,
     endpoint: String,
     timeout: Duration,
 }
@@ -555,7 +570,7 @@ impl ClassifierDev {
             canon,
             mapping,
             threshold: cfg.threshold,
-            api_key_env: cfg.api_key_env.clone(),
+            token_env: cfg.token_env.clone(),
             endpoint: cfg.endpoint.clone(),
             timeout: Duration::from_secs(cfg.timeout_secs),
         }
@@ -567,9 +582,29 @@ impl ClassifierDev {
         v
     }
 
+    /// The optional workspace token, resolved from the configured env var.
+    ///
+    /// `None` on the keyless path, which is the default: no `token-env` named,
+    /// or the named variable absent or empty. A NAMED-but-unset variable is
+    /// not an error, because falling through to the public tier is a working
+    /// request, not a broken one.
+    fn token(&self) -> Option<String> {
+        if self.token_env.is_empty() {
+            return None;
+        }
+        match std::env::var(&self.token_env) {
+            Ok(v) if !v.trim().is_empty() => Some(v),
+            _ => {
+                log::debug!(
+                    "ClassifierDev::token: {} names no value; using the keyless tier",
+                    self.token_env
+                );
+                None
+            }
+        }
+    }
+
     fn post(&self, labels: &[String], texts: &[String]) -> Result<ClassifyResponse> {
-        let api_key = std::env::var(&self.api_key_env)
-            .with_context(|| format!("environment variable {} is not set", self.api_key_env))?;
         let body = serde_json::json!({
             "inputs": texts,
             "labels": labels,
@@ -581,12 +616,11 @@ impl ClassifierDev {
             .http_status_as_error(false)
             .build()
             .new_agent();
-        let mut response = agent
-            .post(&self.endpoint)
-            .header("authorization", &format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
-            .send_json(&body)
-            .context("classifier.dev request failed")?;
+        let mut request = agent.post(&self.endpoint).header("content-type", "application/json");
+        if let Some(token) = self.token() {
+            request = request.header("authorization", &format!("Bearer {token}"));
+        }
+        let mut response = request.send_json(&body).context("classifier.dev request failed")?;
         let status = response.status().as_u16();
         let text = response
             .body_mut()
@@ -598,31 +632,44 @@ impl ClassifierDev {
         serde_json::from_str(&text).wrap_err_with(|| format!("failed to parse classifier.dev response: {text}"))
     }
 
-    /// Shared by `classify` and `classify_batch`: one call per shard over the
-    /// whole batch, merged per input. Any shard failing fails the batch, so a
+    /// Shared by `classify` and `classify_batch`: one call per (text chunk x
+    /// label shard), merged per input. Any call failing fails the batch, so a
     /// partial vocabulary never produces a tag set that looks complete.
+    ///
+    /// Two ceilings apply and both are the API's, not ours: at most
+    /// `MAX_LABELS_PER_CALL` labels (the vocabulary is 117, so production
+    /// always shards) and at most `MAX_TEXTS_PER_CALL` texts. Before the
+    /// chunking the whole batch went in one request, which `summarize
+    /// --backfill` and `classify --retag` can make thousands of notes long.
     fn classify_texts(&self, inputs: &[TagInput]) -> Result<Vec<TagOutput>> {
         let texts: Vec<String> = inputs.iter().map(|i| format!("{}\n\n{}", i.title, i.text)).collect();
         let shards = shard_labels(&self.sorted_vocabulary());
         log::debug!(
-            "ClassifierDev::classify_texts: texts={} shards={} threshold={}",
+            "ClassifierDev::classify_texts: texts={} shards={} chunk={} threshold={}",
             texts.len(),
             shards.len(),
+            MAX_TEXTS_PER_CALL,
             self.threshold
         );
 
         let mut per_input: Vec<Vec<HashMap<String, f32>>> = vec![Vec::new(); inputs.len()];
         for shard in &shards {
-            let response = self.post(shard, &texts)?;
-            if response.results.len() != inputs.len() {
-                return Err(eyre!(
-                    "classifier.dev returned {} results for {} inputs",
-                    response.results.len(),
-                    inputs.len()
-                ));
-            }
-            for (slot, result) in per_input.iter_mut().zip(response.results) {
-                slot.push(result.scores);
+            // Offset walks with the chunks so a result lands on the input it
+            // came from; `per_input` is indexed over the WHOLE batch.
+            let mut offset = 0usize;
+            for chunk in texts.chunks(MAX_TEXTS_PER_CALL) {
+                let response = self.post(shard, chunk)?;
+                if response.results.len() != chunk.len() {
+                    return Err(eyre!(
+                        "classifier.dev returned {} results for {} inputs",
+                        response.results.len(),
+                        chunk.len()
+                    ));
+                }
+                for (slot, result) in per_input[offset..].iter_mut().zip(response.results) {
+                    slot.push(result.scores);
+                }
+                offset += chunk.len();
             }
         }
 

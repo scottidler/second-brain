@@ -252,10 +252,10 @@ async fn classifier_failure_degrades_visibly() {
     config.tags.classifier = distillers::tags::TagsClassifierConfig {
         classifier: distillers::tags::ClassifierKind::ClassifierDev,
         threshold: 0.9,
-        // Guaranteed-unset: `ClassifierDev::post` fails reading the API key
-        // before it ever makes a network call, so this forces the error path
-        // without depending on network reachability.
-        api_key_env: "BORG_TEST_UNSET_CLASSIFY_API_KEY_6f3a1c".to_string(),
+        // Keyless, like production. The error path comes from the
+        // unreachable endpoint below (port 1), not from a missing
+        // credential: an absent token is a valid keyless request now.
+        token_env: String::new(),
         fallback: distillers::tags::ClassifierKind::Deterministic,
         endpoint: "http://127.0.0.1:1/classify".to_string(),
         timeout_secs: 1,
