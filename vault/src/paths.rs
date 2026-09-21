@@ -300,12 +300,13 @@ pub fn borg_signal_bootstrap_marker() -> PathBuf {
 /// Default root for borg's per-trace staging directories, under the
 /// `sb/borg/` data namespace. Each ingest's staged artifacts (`fetched.html`,
 /// `transcript.md`, `distilled.yml`) live at `<this>/<trace_id>/`. borg's
-/// `StagingConfig.root` defaults to this, and cortex's `embed.staging-root`
-/// defaults to the same value so the two subsystems resolve the identical
-/// path without hardcoding it twice: cortex reads the staged `distilled.yml`
-/// (read-only) as the transcript-embedding source for Video/Article notes
-/// (2026-07-07-distillation-output-restore Phase 5). borg remains the sole
-/// staging WRITER.
+/// `StagingConfig.root` defaults to this, and cortex's top-level
+/// `staging-root` defaults to the same value so the two subsystems resolve the
+/// identical path without hardcoding it twice. cortex has TWO read-only
+/// readers of it: the embed loop's transcript source for Video/Article notes
+/// (2026-07-07-distillation-output-restore Phase 5) and the sweep's
+/// open-vocabulary tag candidates (2026-09-21-staged-tag-proposals). borg
+/// remains the sole staging WRITER.
 ///
 /// `~/.local/share/sb/borg/stages/` on Linux. Panics only when
 /// `xdg_data_dir()` returns `None` (see [`borg_signal_state_dir`]).

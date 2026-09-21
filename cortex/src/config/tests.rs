@@ -262,3 +262,52 @@ fn entities_render_rejects_unknown_field() {
     let err = serde_yaml::from_str::<Config>(yaml).expect_err("typo under entities.render: must fail");
     assert!(format!("{err}").contains("unknown field"), "{err}");
 }
+
+// ---------------------------------------------------------------------------
+// Design doc `2026-09-21-staged-tag-proposals.md`, Phase 4: `staging-root` is
+// ONE key at the TOP LEVEL, because cortex now has two read-only readers of
+// that one directory (the embed loop's transcript source and the sweep's tag
+// candidates). Two keys naming one directory can drift.
+// ---------------------------------------------------------------------------
+
+/// Parses LITERAL YAML TEXT, not a constructed struct: the whole risk in the
+/// hoist is the serde key name. Top-level `Config` does NOT carry
+/// `rename_all = "kebab-case"` (it renames per field, as `log-level` does), so
+/// without the explicit `#[serde(rename = "staging-root")]` this line would be
+/// silently ignored and the default used.
+#[test]
+fn top_level_staging_root_is_read_by_the_embed_reader() {
+    let yaml = "staging-root: ~/x\n";
+    let cfg: Config = serde_yaml::from_str(yaml).expect("deserialize");
+    assert_ne!(
+        cfg.staging_root,
+        vault::paths::borg_stages_dir(),
+        "the key must be honored, not silently defaulted"
+    );
+    assert!(
+        !cfg.staging_root.to_string_lossy().starts_with('~'),
+        "must be tilde-expanded at load, got {}",
+        cfg.staging_root.display()
+    );
+    assert!(cfg.staging_root.ends_with("x"), "got {}", cfg.staging_root.display());
+}
+
+/// A leftover `embed.staging-root` from before the hoist must fail LOUDLY
+/// rather than being ignored while the default is used. That is what
+/// `deny_unknown_fields` on `EmbedConfig` buys.
+#[test]
+fn leftover_embed_staging_root_is_rejected_by_name() {
+    let yaml = "embed:\n  staging-root: ~/x\n";
+    let err = serde_yaml::from_str::<Config>(yaml).expect_err("stale embed.staging-root must fail");
+    let rendered = format!("{err}");
+    assert!(rendered.contains("unknown field"), "{rendered}");
+    assert!(rendered.contains("staging-root"), "error must name the key: {rendered}");
+}
+
+/// Absent key falls back to borg's own staging default, so the two subsystems
+/// agree without the path being hardcoded twice.
+#[test]
+fn staging_root_defaults_to_borg_stages_dir() {
+    let cfg: Config = serde_yaml::from_str("log-level: info\n").expect("deserialize");
+    assert_eq!(cfg.staging_root, vault::paths::borg_stages_dir());
+}
