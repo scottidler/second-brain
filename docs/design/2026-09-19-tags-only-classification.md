@@ -555,7 +555,12 @@ Run against current `main` before ready-to-build; observed output recorded under
 
 ## Open Questions
 
-None. OQ5 was opened by the P0b measurement on 2026-09-20 and closed the same day by panel round 4; see Resolved Decisions.
+OQ1 through OQ5 are closed; see Resolved Decisions. Open at the audit r1 fold (2026-09-20):
+
+1. **`CLASSIFY_API_KEY` answers HTTP 401.** Production runs the `deterministic` fallback on every classify call, every daemon tick, with no backoff: each tick pays the failed HTTP call again and logs the same WARN. Needs a new workspace key from classifier.dev `/app/keys`; nothing in second-brain or `keep` can resolve it.
+2. **`untriaged.base` and `tags.base` are unrendered.** Their `tags == null` / `tags.isEmpty()` filter expressions are inferred Obsidian Bases syntax that no environment in this program could render. Scott opens both views once; if the function name differs, only those two filter lines change.
+3. **`sb oracle eval` has a pre-existing FTS5 quoting defect.** The query set is not passed through `fts_quote` the way `find_similar` is, so the MATCH parser trips on an unquoted `/`. It fails identically on the pre-P8 binary. It blocks P8's "eval scores unchanged" criterion, which is UNVERIFIED, not failed. Fix: quote the MATCH input via `fts_quote`.
+4. **The ledger rewrite is per-host.** P11's one-time row rewrite of `~/.local/share/sb/borg/borg-ledger.md` ran on the daemon host only. Any other host holding a receipts-era ledger keeps the `Domain` column until the same step runs there.
 
 ## References
 
