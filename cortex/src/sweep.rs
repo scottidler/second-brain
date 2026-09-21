@@ -205,6 +205,13 @@ pub fn scan_proposals(notes: &[Note], config: &SweepConfig) -> Result<Vec<Propos
         let tags = note.frontmatter.tags.clone().unwrap_or_default();
 
         for tag in &tags {
+            // A human already rejected this tag (explicit `null` mapping).
+            // `match_to_canonical` returns `vec![]` for both a rejection and
+            // "no match at all"; checking `is_rejected` first, before that
+            // emptiness test, is what keeps a reject from being re-proposed.
+            if canonical::is_rejected(tag, &mapping) {
+                continue;
+            }
             let matches = canonical::match_to_canonical(tag, &canonical_set, &mapping);
             if matches.is_empty() {
                 non_canonical

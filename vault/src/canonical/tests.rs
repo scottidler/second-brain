@@ -90,6 +90,27 @@ fn test_match_mapping_rejection() {
     assert!(result.is_empty());
 }
 
+// ---- is_rejected ----
+
+#[test]
+fn test_is_rejected_null_mapping() {
+    let mapping = test_mapping();
+    assert!(is_rejected("claudecodeai", &mapping));
+}
+
+#[test]
+fn test_is_rejected_false_for_no_match() {
+    let mapping = test_mapping();
+    // Not present in the mapping at all - "no match" is not "rejected".
+    assert!(!is_rejected("completely-unknown-topic", &mapping));
+}
+
+#[test]
+fn test_is_rejected_false_for_mapped_tag() {
+    let mapping = test_mapping();
+    assert!(!is_rejected("ai-agents", &mapping));
+}
+
 #[test]
 fn test_match_exact_canonical() {
     let canonical = test_canonical_set();
