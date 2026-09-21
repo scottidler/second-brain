@@ -32,3 +32,22 @@
 
 ### Open questions
 - None.
+
+## Phase 3: Stop `sb bootstrap --force` clobbering generated state
+
+### Design decisions
+- `extract_canonical_assets` now has three sets, not two (`sb/src/cli/bootstrap.rs:262`): per-host templates, **generated state** (`tag-proposals.yml`, `glossary.yml`), and shipped shared YAMLs (`canonical-tags.yml`, `tag-mapping.yml`). The generated set is its own loop with its own comment rather than being folded into the template loop, because the *reason* they are write-if-missing differs (machine-produced vs per-host) and a future reader deciding where a new file belongs needs that distinction.
+- `shared_config_findings` (`sb/src/cli/checks.rs:241`) carries a comment saying why `tag-proposals.yml` is absent and that `glossary.yml` was never there, so nobody "restores" either one later.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- Added a third test (`extract_seeds_generated_state_when_absent`) beyond the two preservation tests the doc names. Write-if-missing has two halves and the phase reclassifies two files; a test that only proves the preserve half would pass if the files stopped being written at all.
+- The live success criteria were verified by driving the built `sb` binary against two throwaway `XDG_CONFIG_HOME` trees rather than only through the unit tests, since the criterion is about `sb bootstrap --force` end to end. Observed: generated files byte-identical across `--force`, `canonical-tags.yml` still refreshed from the embedded copy, `sb doctor` printing no `tag-proposals`/`glossary` drift line, and a fresh tree receiving both seeds.
+
+### Open questions
+- None.
+
+### Consequence (stated per the design doc)
+- Existing installs stop receiving repo updates to `glossary.yml`. That is the point: a `concept-promote` must survive a deploy. The operator path for a genuine upstream glossary change is to delete the local file and re-run `sb bootstrap`.

@@ -124,7 +124,11 @@ mod drift {
 
         let findings = shared_config_findings();
         let errors: Vec<_> = findings.iter().filter(|f| f.severity == Severity::Error).collect();
-        assert_eq!(errors.len(), 3, "all three shared YAMLs should be missing");
+        assert_eq!(
+            errors.len(),
+            2,
+            "both SHIPPED shared YAMLs should be missing; tag-proposals.yml is generated state and no longer checked"
+        );
         for f in &errors {
             assert!(f.suggested_fix.as_deref() == Some("sb bootstrap"));
         }
