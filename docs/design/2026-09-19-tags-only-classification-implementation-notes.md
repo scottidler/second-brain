@@ -819,3 +819,80 @@ this phase.
 - `systemctl --user is-active borg cortex` after restart: `active active`.
 - Ledger backup: `~/.local/share/sb/borg/borg-ledger.md.pre-p11-backup` (taken before the 3302-row rewrite; rewritten header byte-matches `vault::ledger::LEDGER_HEADER`).
 - Obsidian commits: pre-migration undo point `2f752cb7`, post-migration (domain-stripped) `f3ac55c2`.
+
+## Finalization: acceptance-criteria walk (2026-09-20, orchestrator)
+
+Appended by the execution orchestrator, not a phase worker, during the
+workflow's step-0.5 criteria walk. Append-only: nothing above was edited.
+
+### AC5 gap closed after the P11 commit
+The P11 report recorded `sb doctor`, AC1, AC2 and AC4 but did not run AC5.
+Walking it found two clauses failing against the criterion as written:
+
+- `sb cortex schema --check` exited **1**, not 0. Cause: P11 removed the
+  domain renderer from `cortex::schema_docs`, which changed the binary's
+  rendered output for the four remaining value docs, so `type-values.md`,
+  `origin-values.md`, `status-values.md` and `tag-values.md` all read
+  `drifted`. The phase ran `otto deploy` but not the `sb cortex schema
+  --render` that the P9 bullet pairs with it.
+- `system/schemas/domain-values.md` was still **present**. The P11 bullet
+  says "`schema_docs` domain renderer plus deletion of
+  `system/schemas/domain-values.md`"; the renderer went, the vault file did
+  not.
+
+Both criteria are SOUND, so per the workflow they were fixed rather than
+amended: the criterion named a real artifact and the work had not delivered
+it. Fix: daemons stopped, `sb cortex schema --render`, `git rm` of
+`system/schemas/domain-values.md`, daemons restarted. Obsidian commit
+`e118df90`. Re-verified: `sb cortex schema --check` exit **0**,
+`tag-values.md` present, `domain-values.md` absent.
+
+### AC5's remaining clauses, observed on the live vault
+- `frontmatter.required.domain`: **0** (criterion: 0). PASS.
+- `tags.cap`: **0** (criterion: 0). PASS.
+- `tags.non-canonical`: 0. `tags.format`: 0. `frontmatter.required.tags`: 4.
+  `tags.orphan`: 2.
+- The three-note fixture clause (exactly one each of `tags.non-canonical`,
+  `tags.cap`, `tags.format`) is covered by the P9 unit test
+  `tags_schema_rules_fire_once_each`, which passes.
+
+### AC3, re-run by the orchestrator at HEAD
+`cargo test --workspace --features vec -- ingest_tags_are_repeatable_under_deterministic ingest_tags_are_stable_under_distiller_drift retag_never_removes_no_classifier_tags reingest_keeps_cortex_added_tag session_replace_merges_tags`
+-> all five pass (4 in `borg`, 1 in `cortex`).
+
+### AC1's doc amendment, independently re-verified
+P11 amended AC1's grep (case-insensitive exclusions; added `harvest.rs`,
+`harvest/select.rs`, `v5-domain-as-tag-undo`). The original command returns
+**7** at HEAD; all seven were read and classified before accepting the
+amendment:
+
+- `borg/src/harvest.rs:337` and `borg/src/harvest/select.rs:76`, both
+  `domain: None` on `RejectionRecord`, whose neighbours are `source`,
+  `blocklist_updated` and `retriable_after`. URL-host blocklist code, kept by
+  the doc's Non-Goals.
+- `borg/src/harvest/select.rs:1`, a doc comment on the Gate-0 harvest-source
+  selection gate. Same URL-host meaning.
+- `borg/src/stages/classify/tests.rs:50` and `cortex/src/quality/tests.rs:216`,
+  both blocklist fixture strings that leaked past a case-sensitive exclusion.
+- `cortex/src/migrate/tests.rs:541,544`, references to
+  `config/migrations/v5-domain-as-tag-undo.yml`, retained by design as the
+  migration's inverse plan file.
+
+No line among the seven is vault-classification domain code, so the amendment
+is a doc defect fix, not a criterion bent to match the implementation.
+
+### Open questions carried to the user
+- `CLASSIFY_API_KEY` returns HTTP 401 from classifier.dev and the keyless tier
+  returns 429 on this host (REOPENED risk row, folded in P7). Every classify
+  call falls through to the `deterministic` fallback, which is designed
+  behavior but means the classifier path is unexercised in production.
+- `sb oracle eval` cannot run on the current query set: a pre-existing FTS5
+  quoting defect (queries are not passed through `fts_quote` the way
+  `find_similar` does), confirmed identical on a throwaway build of the
+  pre-phase commit. P8's "eval scores unchanged" criterion is therefore
+  UNVERIFIED, not failed.
+- P11 deleted its own `no_tool_has_a_domain_param` test on the grounds that
+  any such test must contain the literal string AC1 greps for. The criterion
+  won over the regression test; worth revisiting if AC1 is ever retired.
+- The `untriaged.base` and `tags.base` filter expressions written in P10 are
+  inferred Obsidian Bases syntax, unrenderable in this environment.
