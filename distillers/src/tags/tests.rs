@@ -506,3 +506,34 @@ fn the_text_chunk_ceiling_is_the_public_tier_limit() {
     let chunks: Vec<usize> = texts.chunks(MAX_TEXTS_PER_CALL).map(<[usize]>::len).collect();
     assert_eq!(chunks, vec![200, 200, 51], "451 texts must go out as three calls");
 }
+
+#[test]
+fn the_request_uses_the_multi_field() {
+    let body = request_body(&["ai".to_string()], &["text".to_string()], 8);
+    assert_eq!(body["multi"], serde_json::json!(true));
+    assert!(
+        body.get("multi_label").is_none(),
+        "multi_label is not a classifier.dev field"
+    );
+    assert_eq!(body["max_labels"], serde_json::json!(8));
+}
+
+#[test]
+fn only_jev_answers_are_accepted() {
+    let parse = |json: &str| -> ClassifyResponse { serde_json::from_str(json).expect("parses") };
+
+    let jev = parse(r#"{"results":[{"scores":{"ai":0.9},"model":"jev-1.13.0"},{"scores":{},"model":"jev@vercel"}]}"#);
+    assert!(ensure_jev(&jev).is_ok());
+
+    let fallback = parse(
+        r#"{"results":[{"scores":{"ai":0.9},"model":"jev-1.13.0"},{"scores":{"ai":0.8},"model":"ling-3.0-flash"}]}"#,
+    );
+    let err = ensure_jev(&fallback).expect_err("a non-Jev answer must fail the call");
+    assert!(err.to_string().contains("ling-3.0-flash"), "{err}");
+
+    let unnamed = parse(r#"{"results":[{"scores":{"ai":0.9}}]}"#);
+    assert!(
+        ensure_jev(&unnamed).is_err(),
+        "an answer naming no model is not proven Jev"
+    );
+}

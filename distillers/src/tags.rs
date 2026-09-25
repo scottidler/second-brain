@@ -556,12 +556,45 @@ pub struct ClassifierDev {
 struct ClassifyResult {
     #[serde(default)]
     scores: HashMap<String, f32>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ClassifyResponse {
     #[serde(default)]
     results: Vec<ClassifyResult>,
+}
+
+/// `multi` is classifier.dev's multi-label switch; `multi_label` is not a field
+/// it reads, and only worked because a numeric `max_labels` also enables it.
+fn request_body(labels: &[String], texts: &[String], max_labels: usize) -> serde_json::Value {
+    serde_json::json!({
+        "inputs": texts,
+        "labels": labels,
+        "multi": true,
+        "max_labels": max_labels,
+    })
+}
+
+/// classifier.dev answers from a non-Jev LLM when Jev fails (`ling-*`,
+/// `mercury-*`), and those scores are not comparable to Jev's. Such an answer,
+/// or one naming no model, fails the call so the fallback runs and the ingest
+/// is marked degraded instead of accepting it as a Jev answer.
+fn ensure_jev(response: &ClassifyResponse) -> Result<()> {
+    for (i, result) in response.results.iter().enumerate() {
+        match result.model.as_deref() {
+            Some(model) if model.starts_with("jev") => {
+                log::debug!("ensure_jev: result {i} answered by {model}");
+            }
+            other => {
+                return Err(eyre!(
+                    "classifier.dev result {i} was answered by {other:?}, not Jev; refusing non-Jev scores"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl ClassifierDev {
@@ -605,12 +638,7 @@ impl ClassifierDev {
     }
 
     fn post(&self, labels: &[String], texts: &[String]) -> Result<ClassifyResponse> {
-        let body = serde_json::json!({
-            "inputs": texts,
-            "labels": labels,
-            "multi_label": true,
-            "max_labels": self.canon.max_per_note,
-        });
+        let body = request_body(labels, texts, self.canon.max_per_note);
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
             .http_status_as_error(false)
@@ -629,7 +657,10 @@ impl ClassifierDev {
         if status != 200 {
             return Err(eyre!("classifier.dev returned {status}: {text}"));
         }
-        serde_json::from_str(&text).wrap_err_with(|| format!("failed to parse classifier.dev response: {text}"))
+        let parsed: ClassifyResponse =
+            serde_json::from_str(&text).wrap_err_with(|| format!("failed to parse classifier.dev response: {text}"))?;
+        ensure_jev(&parsed)?;
+        Ok(parsed)
     }
 
     /// Shared by `classify` and `classify_batch`: one call per (text chunk x
