@@ -19,6 +19,9 @@ use eyre::{Context, Result, eyre};
 use serde::{Deserialize, Serialize};
 use vault::canonical::{self, CanonicalSet, TagMapping};
 
+pub mod bulk;
+pub mod spend;
+
 #[cfg(test)]
 mod tests;
 
@@ -52,6 +55,12 @@ const TOKENS_PER_NOTE: f64 = 26.9;
 const TOKENS_PER_TEXT_CHAR: f64 = 0.43;
 const TOKENS_PER_QUESTION: f64 = 24.7;
 const TOKENS_PER_LABEL_CHAR: f64 = 0.21;
+
+/// classifier.dev's price per input token as Phase 0 read it off
+/// `pricing.estimated_usd`: bare labels 99,952 tokens for $0.0042 and
+/// described labels 149,070 for $0.0063, both $0.042 per million. Only our
+/// estimates use it; the spend ledger records what the service reported.
+const USD_PER_INPUT_TOKEN: f64 = 0.042 / 1_000_000.0;
 
 const DEFAULT_ENDPOINT: &str = "https://classifier.dev/v1/classify";
 
@@ -183,7 +192,59 @@ pub trait TagClassifier: Send + Sync {
         inputs.iter().map(|i| self.classify(i)).collect()
     }
 
+    /// `classify_batch` plus what its calls cost, for the bulk paths that
+    /// write the spend ledger. Implementations that spend nothing on
+    /// classifier.dev report no calls.
+    fn classify_batch_metered(&self, inputs: &[TagInput]) -> MeteredBatch {
+        MeteredBatch {
+            outputs: self.classify_batch(inputs),
+            calls: Vec::new(),
+            service_limit: None,
+        }
+    }
+
+    /// What classifying `inputs` would cost on classifier.dev, or `None` for
+    /// an implementation that does not call it.
+    fn estimate(&self, _inputs: &[TagInput]) -> Option<SpendEstimate> {
+        None
+    }
+
     fn method(&self) -> TagMethod;
+}
+
+/// `classify_batch`'s outputs with the usage rows of the calls behind them.
+#[derive(Debug)]
+pub struct MeteredBatch {
+    pub outputs: Vec<Result<TagOutput>>,
+    pub calls: Vec<CallUsage>,
+    /// Set when classifier.dev refused a call over a limit a smaller request
+    /// cannot fix (see `ScoredBatch::service_limit`).
+    pub service_limit: Option<String>,
+}
+
+/// Our estimate of what scoring each input costs, from Phase 0's token model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpendEstimate {
+    /// One entry per input, in input order.
+    pub per_note_usd: Vec<f64>,
+}
+
+impl SpendEstimate {
+    pub fn total_usd(&self) -> f64 {
+        self.per_note_usd.iter().sum()
+    }
+
+    /// How many inputs, taken in order, fit inside `limit_usd`.
+    pub fn notes_within(&self, limit_usd: f64) -> usize {
+        let mut total = 0.0;
+        self.per_note_usd
+            .iter()
+            .take_while(|usd| {
+                total += *usd;
+                total <= limit_usd
+            })
+            .count()
+    }
 }
 
 // ---------------------------------------------------------------- config
@@ -219,6 +280,12 @@ pub struct TagsClassifierConfig {
     pub fallback: ClassifierKind,
     pub endpoint: String,
     pub timeout_secs: u64,
+    /// classifier.dev's free spend per IP per UTC day (`llms.txt`). Bulk runs
+    /// (more than one note) spend against it through the spend ledger.
+    pub daily_usd_budget: f64,
+    /// Headroom a bulk run leaves in the day for borg's live ingest, which
+    /// does not write the ledger (about 20 notes x 2 shards a day).
+    pub ingest_reserve_usd: f64,
 }
 
 impl Default for TagsClassifierConfig {
@@ -230,6 +297,8 @@ impl Default for TagsClassifierConfig {
             fallback: ClassifierKind::Deterministic,
             endpoint: DEFAULT_ENDPOINT.to_string(),
             timeout_secs: 30,
+            daily_usd_budget: 0.50,
+            ingest_reserve_usd: 0.10,
         }
     }
 }
@@ -577,6 +646,7 @@ pub struct ClassifierDev {
     mapping: TagMapping,
     threshold: f32,
     token_env: String,
+    endpoint: String,
     transport: Arc<dyn Transport>,
 }
 
@@ -589,6 +659,11 @@ pub struct ScoredBatch {
     pub notes: Vec<Result<HashMap<String, f32>>>,
     /// One row per HTTP call made, successful or not, in call order.
     pub calls: Vec<CallUsage>,
+    /// classifier.dev's answer when it refused a call over a limit that a
+    /// smaller request cannot fix: a 429 or a 402 other than
+    /// `request_spending_limit`, which is the per-IP day cap. Once set, no
+    /// further call was made, and every note not yet scored is `Err`.
+    pub service_limit: Option<String>,
 }
 
 /// What one classifier.dev call reported about its own cost. Both numbers
@@ -691,6 +766,9 @@ enum CallOutcome {
     /// HTTP 402 `request_spending_limit`: this request alone is over the free
     /// tier's per-request cap. Not the per-day cap, which splitting cannot fix.
     OverRequestLimit(String),
+    /// HTTP 429, or a 402 that is not `request_spending_limit`: a per-IP
+    /// minute, day, or spend limit. Every later call would meet it too.
+    ServiceLimit(String),
     Failed(eyre::Report),
 }
 
@@ -757,6 +835,13 @@ fn plan_chunks(text_chars: &[usize], labels: &[String]) -> Vec<usize> {
     chunks
 }
 
+/// Lowercase hex SHA-256: the cursor's config and wire-text digests, which
+/// must stay stable across builds (std's `DefaultHasher` does not promise to).
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// A note's scores from one shard, accepted only when they cover exactly the
 /// labels sent: a missing label would read as a zero and an unknown key would
 /// be a score for something we never asked about.
@@ -792,6 +877,7 @@ impl ClassifierDev {
             mapping,
             threshold: cfg.threshold,
             token_env: cfg.token_env.clone(),
+            endpoint: cfg.endpoint.clone(),
             transport,
         }
     }
@@ -832,6 +918,9 @@ impl ClassifierDev {
         };
         if status == 402 && text.contains("request_spending_limit") {
             return CallOutcome::OverRequestLimit(text);
+        }
+        if status == 402 || status == 429 {
+            return CallOutcome::ServiceLimit(format!("classifier.dev returned {status}: {text}"));
         }
         if status != 200 {
             return CallOutcome::Failed(eyre!("classifier.dev returned {status}: {text}"));
@@ -877,13 +966,14 @@ impl ClassifierDev {
 
         let mut per_note: Vec<Result<Vec<HashMap<String, f32>>>> = inputs.iter().map(|_| Ok(Vec::new())).collect();
         let mut calls = Vec::new();
+        let mut service_limit = None;
         for shard in &shards {
             let pending: Vec<usize> = (0..inputs.len()).filter(|i| per_note[*i].is_ok()).collect();
             let lengths: Vec<usize> = pending.iter().map(|i| texts[*i].chars().count()).collect();
             let mut start = 0usize;
             for size in plan_chunks(&lengths, shard) {
                 let chunk = &pending[start..start + size];
-                self.score_chunk(shard, chunk, &texts, &mut per_note, &mut calls);
+                self.score_chunk(shard, chunk, &texts, &mut per_note, &mut calls, &mut service_limit);
                 start += size;
             }
         }
@@ -892,7 +982,61 @@ impl ClassifierDev {
             .into_iter()
             .map(|note| note.map(|shard_scores| merge_shard_scores(&shard_scores).into_iter().collect()))
             .collect();
-        ScoredBatch { notes, calls }
+        ScoredBatch {
+            notes,
+            calls,
+            service_limit,
+        }
+    }
+
+    /// Our estimate of each input's cost across every shard, from the same
+    /// wire text and token model `score_batch` chunks by.
+    pub fn estimate_batch(&self, inputs: &[TagInput]) -> SpendEstimate {
+        let texts: Vec<String> = inputs.iter().map(|i| clip_classifier_text(i.title, i.text)).collect();
+        SpendEstimate {
+            per_note_usd: self.wire_usd(&texts),
+        }
+    }
+
+    fn wire_usd(&self, texts: &[String]) -> Vec<f64> {
+        let shards = shard_labels(&self.sorted_vocabulary());
+        texts
+            .iter()
+            .map(|text| {
+                let chars = text.chars().count();
+                let tokens: f64 = shards.iter().map(|shard| note_tokens(chars, shard)).sum();
+                tokens * USD_PER_INPUT_TOKEN
+            })
+            .collect()
+    }
+
+    /// Consecutive chunk sizes over `texts` such that each chunk fits one
+    /// request on every shard: planned against the shard whose labels cost
+    /// the most per note, which bounds the others.
+    fn plan_run_chunks(&self, texts: &[String]) -> Vec<usize> {
+        let shards = shard_labels(&self.sorted_vocabulary());
+        let Some(widest) = shards
+            .iter()
+            .max_by(|a, b| note_tokens(0, a).total_cmp(&note_tokens(0, b)))
+        else {
+            return Vec::new();
+        };
+        let lengths: Vec<usize> = texts.iter().map(|t| t.chars().count()).collect();
+        plan_chunks(&lengths, widest)
+    }
+
+    /// A stable digest of everything that changes a score: the endpoint, the
+    /// labels exactly as sent (shard by shard), `max_labels`, and the wire
+    /// text bound. A stored score is reusable only under the same digest.
+    pub fn scoring_config_hash(&self) -> String {
+        let shards = shard_labels(&self.sorted_vocabulary());
+        let config = serde_json::json!({
+            "endpoint": self.endpoint,
+            "shards": shards,
+            "max_labels": self.canon.max_per_note,
+            "text_chars": CLASSIFIER_TEXT_CHARS,
+        });
+        sha256_hex(config.to_string().as_bytes())
     }
 
     /// Score the notes at `chunk` (indices into `texts`) against one shard,
@@ -904,7 +1048,14 @@ impl ClassifierDev {
         texts: &[String],
         per_note: &mut [Result<Vec<HashMap<String, f32>>>],
         calls: &mut Vec<CallUsage>,
+        service_limit: &mut Option<String>,
     ) {
+        if let Some(limit) = service_limit {
+            for i in chunk {
+                per_note[*i] = Err(eyre!("not sent: {limit}"));
+            }
+            return;
+        }
         let chunk_texts: Vec<String> = chunk.iter().map(|i| texts[*i].clone()).collect();
         match self.post(shard, &chunk_texts) {
             CallOutcome::Scored(response) => {
@@ -938,13 +1089,21 @@ impl ClassifierDev {
                         chunk.len()
                     );
                     let (left, right) = chunk.split_at(chunk.len() / 2);
-                    self.score_chunk(shard, left, texts, per_note, calls);
-                    self.score_chunk(shard, right, texts, per_note, calls);
+                    self.score_chunk(shard, left, texts, per_note, calls, service_limit);
+                    self.score_chunk(shard, right, texts, per_note, calls, service_limit);
                 } else {
                     per_note[chunk[0]] = Err(eyre!(
                         "classifier.dev refused this note alone over its per-request spend limit: {body}"
                     ));
                 }
+            }
+            CallOutcome::ServiceLimit(limit) => {
+                log::warn!("ClassifierDev::score_chunk: {limit}; sending nothing more in this batch");
+                calls.push(CallUsage::failed());
+                for i in chunk {
+                    per_note[*i] = Err(eyre!("{limit}"));
+                }
+                *service_limit = Some(limit);
             }
             CallOutcome::Failed(e) => {
                 calls.push(CallUsage::failed());
@@ -992,12 +1151,25 @@ impl TagClassifier for ClassifierDev {
     /// Per note: one note's failure is that note's `Err` (and its caller's
     /// fallback), not the whole batch's.
     fn classify_batch(&self, inputs: &[TagInput]) -> Vec<Result<TagOutput>> {
+        self.classify_batch_metered(inputs).outputs
+    }
+
+    fn classify_batch_metered(&self, inputs: &[TagInput]) -> MeteredBatch {
         let batch = self.score_batch(inputs);
-        inputs
+        let outputs = inputs
             .iter()
             .zip(batch.notes)
             .map(|(input, scores)| scores.map(|s| self.finish(input, &s)))
-            .collect()
+            .collect();
+        MeteredBatch {
+            outputs,
+            calls: batch.calls,
+            service_limit: batch.service_limit,
+        }
+    }
+
+    fn estimate(&self, inputs: &[TagInput]) -> Option<SpendEstimate> {
+        Some(self.estimate_batch(inputs))
     }
 
     fn method(&self) -> TagMethod {

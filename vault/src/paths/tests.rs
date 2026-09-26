@@ -150,6 +150,18 @@ fn oracle_paths_land_under_the_sb_data_namespace() {
 }
 
 #[test]
+fn the_classifier_spend_ledger_is_shared_under_the_sb_data_namespace() {
+    // One ledger for every bulk path: not under `sb/cortex/` or `sb/borg/`.
+    let ledger = classifier_spend_ledger();
+    assert!(
+        ledger.ends_with("sb/classifier-spend.jsonl"),
+        "classifier_spend_ledger() = {}",
+        ledger.display()
+    );
+    assert_eq!(ledger.parent(), oracle_db_path().parent().and_then(|p| p.parent()));
+}
+
+#[test]
 fn all_config_files_land_under_config_root() {
     let root = config_root();
     assert_eq!(borg_config(), root.join("borg.yml"));

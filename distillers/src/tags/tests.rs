@@ -929,4 +929,98 @@ fn a_402_that_is_not_the_request_limit_does_not_split() {
     let batch = dev.score_batch(&as_inputs(&owned));
     assert!(batch.notes.iter().all(Result::is_err));
     assert_eq!(*service.0.lock().expect("lock"), 1, "no retry into the cap");
+    let limit = batch.service_limit.expect("the day cap is reported as a service limit");
+    assert!(limit.contains("daily_spending_limit"), "{limit}");
+}
+
+/// A 429 (or the day cap) on the first shard stops the batch: the second
+/// shard is never sent, and every note is `Err`.
+#[test]
+fn a_service_limit_sends_nothing_after_it() {
+    struct RateLimited(std::sync::Mutex<usize>);
+    impl Transport for RateLimited {
+        fn send(&self, _body: &serde_json::Value, _token: Option<&str>) -> Result<(u16, String)> {
+            *self.0.lock().expect("lock") += 1;
+            Ok((429, r#"{"error":{"code":"rate_limited"}}"#.to_string()))
+        }
+    }
+    let service = Arc::new(RateLimited(std::sync::Mutex::new(0)));
+    let dev = ClassifierDev::with_transport(
+        two_shard_canon(),
+        mapping(),
+        &TagsClassifierConfig::default(),
+        service.clone(),
+    );
+    let owned = owned_inputs(3);
+    let batch = dev.score_batch(&as_inputs(&owned));
+    assert_eq!(*service.0.lock().expect("lock"), 1, "the second shard is not sent");
+    assert!(batch.notes.iter().all(Result::is_err));
+    assert!(batch.service_limit.is_some_and(|l| l.contains("429")));
+    assert_eq!(batch.calls, vec![CallUsage::failed()]);
+}
+
+/// The estimate is the token model priced at Phase 0's $0.042 per million,
+/// summed over every shard.
+#[test]
+fn the_estimate_prices_every_shard_by_the_token_model() {
+    let dev = dev_over(two_shard_canon(), Arc::new(FakeService::default()));
+    let owned = owned_inputs(3);
+    let estimate = dev.estimate_batch(&as_inputs(&owned));
+    assert_eq!(estimate.per_note_usd.len(), 3);
+
+    let mut sorted: Vec<String> = two_shard_canon().all.into_iter().collect();
+    sorted.sort();
+    let chars = clip_classifier_text(&owned[0].0, &owned[0].1).chars().count();
+    let tokens: f64 = shard_labels(&sorted).iter().map(|s| note_tokens(chars, s)).sum();
+    assert!((estimate.per_note_usd[0] - tokens * 0.042 / 1_000_000.0).abs() < 1e-15);
+    assert_eq!(
+        Some(estimate.clone()),
+        dev.estimate(&as_inputs(&owned)),
+        "the trait reports the same"
+    );
+
+    let each = estimate.per_note_usd[0];
+    assert_eq!(estimate.notes_within(each * 2.5), 2);
+    assert_eq!(estimate.notes_within(0.0), 0);
+    assert_eq!(estimate.notes_within(1.0), 3);
+    assert!(
+        Deterministic::new(canon(), mapping())
+            .estimate(&as_inputs(&owned))
+            .is_none()
+    );
+}
+
+/// The cursor's config digest moves with the labels and the endpoint, and
+/// holds still otherwise.
+#[test]
+fn the_scoring_config_hash_tracks_labels_and_endpoint() {
+    let service = Arc::new(FakeService::default());
+    let base = dev_over(canon(), service.clone());
+    assert_eq!(
+        base.scoring_config_hash(),
+        dev_over(canon(), service.clone()).scoring_config_hash()
+    );
+
+    let mut grown = canon();
+    grown.all.insert("cooking".to_string());
+    assert_ne!(
+        base.scoring_config_hash(),
+        dev_over(grown, service.clone()).scoring_config_hash()
+    );
+
+    let elsewhere = TagsClassifierConfig {
+        endpoint: "https://example.test/v1/classify".to_string(),
+        ..TagsClassifierConfig::default()
+    };
+    let moved = ClassifierDev::with_transport(canon(), mapping(), &elsewhere, service);
+    assert_ne!(base.scoring_config_hash(), moved.scoring_config_hash());
+}
+
+#[test]
+fn the_spend_keys_default_to_the_free_day_and_parse_kebab_case() {
+    let cfg = TagsClassifierConfig::default();
+    assert_eq!((cfg.daily_usd_budget, cfg.ingest_reserve_usd), (0.50, 0.10));
+    let parsed: TagsClassifierConfig =
+        serde_yaml::from_str("daily-usd-budget: 1.5\ningest-reserve-usd: 0.25\n").expect("parses");
+    assert_eq!((parsed.daily_usd_budget, parsed.ingest_reserve_usd), (1.5, 0.25));
 }

@@ -358,7 +358,8 @@ fn test_lint_classify_includes_unclassified_notes() {
         &config,
         &opts,
         &stub_classifiers(&["rust"], Confidence::High),
-    );
+    )
+    .expect("lint");
     // Both should produce violations
     let paths: Vec<String> = report
         .violations
@@ -774,4 +775,203 @@ fn fabric_runner_is_built_only_when_a_slot_is_fabric_closed() {
     assert!(some.is_some(), "fabric-closed needs a runner");
     let pair = Classifiers::from_parts(&cfg, test_canon(), &TagMapping::default(), some);
     assert_eq!(pair.primary.method(), TagMethod::FabricClosed);
+}
+
+// ------------------------------------------------- bulk retag and spend
+
+/// A classifier that prices every note at `usd_per_note`, answers `llm` for
+/// each, charges `charge` per batch, and refuses at classifier.dev's limit
+/// from note `limit_from` on.
+struct Metered {
+    usd_per_note: f64,
+    charge: f64,
+    limit_from: Option<usize>,
+}
+
+impl TagClassifier for Metered {
+    fn classify(&self, _input: &TagInput) -> Result<TagOutput> {
+        Ok(TagOutput {
+            tags: vec!["llm".to_string()],
+            scores: None,
+            confidence: Confidence::High,
+            method: TagMethod::ClassifierDev,
+        })
+    }
+
+    fn classify_batch_metered(&self, inputs: &[TagInput]) -> distillers::tags::MeteredBatch {
+        let limited = self.limit_from.is_some_and(|n| n < inputs.len());
+        distillers::tags::MeteredBatch {
+            outputs: inputs
+                .iter()
+                .enumerate()
+                .map(|(i, input)| match self.limit_from {
+                    Some(n) if i >= n => Err(eyre::eyre!("classifier.dev returned 429")),
+                    _ => self.classify(input),
+                })
+                .collect(),
+            calls: vec![distillers::tags::CallUsage {
+                input_tokens: 1_000,
+                estimated_usd: self.charge,
+                ok: true,
+            }],
+            service_limit: limited.then(|| "classifier.dev returned 429".to_string()),
+        }
+    }
+
+    fn estimate(&self, inputs: &[TagInput]) -> Option<distillers::tags::SpendEstimate> {
+        Some(distillers::tags::SpendEstimate {
+            per_note_usd: vec![self.usd_per_note; inputs.len()],
+        })
+    }
+
+    fn method(&self) -> TagMethod {
+        TagMethod::ClassifierDev
+    }
+}
+
+struct FixedDay;
+
+impl distillers::tags::spend::Clock for FixedDay {
+    fn today_utc(&self) -> chrono::NaiveDate {
+        "2026-09-26".parse().expect("date")
+    }
+}
+
+/// Three retag targets under `notes/`, plus the ledger path and a
+/// `$0.05`-a-day spend context over it (budget 0.15, reserve 0.10).
+fn bulk_fixture() -> (crate::testutil::TestVault, std::path::PathBuf, DaySpend) {
+    let vault = crate::testutil::TestVault::new();
+    for name in ["a", "b", "c"] {
+        vault.add_note(
+            &format!("notes/{name}.md"),
+            &format!("---\ntitle: {name}\ndate: 2026-09-20\ntype: note\ntags:\n  - rust\n---\n\nbody {name}\n"),
+        );
+    }
+    let ledger = vault.root().join("spend/classifier-spend.jsonl");
+    let cfg = TagsClassifierConfig {
+        daily_usd_budget: 0.15,
+        ingest_reserve_usd: 0.10,
+        ..TagsClassifierConfig::default()
+    };
+    let spend = DaySpend::new(SpendLedger::new(&ledger), Arc::new(FixedDay), &cfg);
+    (vault, ledger, spend)
+}
+
+fn metered(usd_per_note: f64, limit_from: Option<usize>) -> Classifiers {
+    Classifiers::new(
+        Box::new(Metered {
+            usd_per_note,
+            charge: 0.012,
+            limit_from,
+        }),
+        Box::new(Deterministic::new(test_canon(), Default::default())),
+        test_canon(),
+    )
+}
+
+fn retag_all() -> ClassifyOpts {
+    ClassifyOpts {
+        retag: vec!["notes/*.md".to_string()],
+        ..apply_opts()
+    }
+}
+
+/// Phase 2: a multi-note `--retag` over the day allowance refuses, names how
+/// many notes fit, and neither writes a note nor spends.
+#[test]
+fn a_bulk_retag_over_the_allowance_refuses_and_says_how_many_fit() {
+    let (vault, ledger, spend) = bulk_fixture();
+    let classifiers = metered(0.02, None).with_spend(spend);
+    let before = vault.read("notes/a.md");
+
+    for apply in [true, false] {
+        let opts = ClassifyOpts { apply, ..retag_all() };
+        let result = if apply {
+            apply_classify(vault.root(), &vault.scan(), &vault.config(), &opts, &classifiers).map(|_| ())
+        } else {
+            lint_classify(&vault.scan(), vault.root(), &vault.config(), &opts, &classifiers).map(|_| ())
+        };
+        let err = result.expect_err("over the allowance must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("estimated at $0.0600"), "{msg}");
+        assert!(msg.contains("2 of the 3 notes fit"), "{msg}");
+    }
+    assert_eq!(vault.read("notes/a.md"), before, "nothing written");
+    assert!(!ledger.exists(), "nothing spent, nothing recorded");
+}
+
+/// Within the allowance the estimate is reported and every call is written
+/// to the ledger as `retag`.
+#[test]
+fn a_bulk_retag_reports_its_estimate_and_writes_the_ledger() {
+    let (vault, ledger, spend) = bulk_fixture();
+    let classifiers = metered(0.01, None).with_spend(spend);
+
+    let (report, written) =
+        apply_classify(vault.root(), &vault.scan(), &vault.config(), &retag_all(), &classifiers).expect("retag");
+    assert_eq!(written.len(), 3);
+    let notice = report
+        .violations
+        .iter()
+        .find(|v| v.path == ledger)
+        .expect("the estimate is reported against the ledger");
+    assert!(
+        notice.message.contains("retag of 3 notes estimated at $0.0300"),
+        "{}",
+        notice.message
+    );
+    assert!(
+        notice.message.contains("$0.0500 left of the $0.15 day"),
+        "{}",
+        notice.message
+    );
+
+    let rows = std::fs::read_to_string(&ledger).expect("ledger written");
+    assert_eq!(rows.lines().count(), 1, "{rows}");
+    assert!(
+        rows.contains(r#""usd":0.012"#) && rows.contains(r#""path":"retag""#),
+        "{rows}"
+    );
+    assert!(vault.read("notes/b.md").contains("- llm"));
+}
+
+/// classifier.dev's own limit mid-batch leaves the unscored notes exactly as
+/// they were, rather than writing the deterministic fallback over them.
+#[test]
+fn a_bulk_retag_at_the_service_limit_leaves_unscored_notes_unchanged() {
+    let (vault, ledger, spend) = bulk_fixture();
+    let classifiers = metered(0.01, Some(2)).with_spend(spend);
+    let before = vault.read("notes/c.md");
+
+    let (report, written) =
+        apply_classify(vault.root(), &vault.scan(), &vault.config(), &retag_all(), &classifiers).expect("retag");
+    assert_eq!(written, vec!["notes/a.md".to_string(), "notes/b.md".to_string()]);
+    assert_eq!(vault.read("notes/c.md"), before);
+    let warning = report
+        .violations
+        .iter()
+        .find(|v| v.path == std::path::Path::new("notes/c.md"))
+        .expect("the unscored note is reported");
+    assert_eq!(warning.severity, Severity::Warning);
+    assert!(warning.message.contains("rerun after 00:00 UTC"), "{}", warning.message);
+    assert!(ledger.exists(), "the calls that ran are still recorded");
+}
+
+/// A spending classifier with no ledger attached fails closed on a bulk
+/// retag; one note is not a bulk run and needs none.
+#[test]
+fn a_bulk_retag_without_a_ledger_fails_closed() {
+    let (vault, _ledger, _spend) = bulk_fixture();
+    let classifiers = metered(0.01, None);
+    let err = apply_classify(vault.root(), &vault.scan(), &vault.config(), &retag_all(), &classifiers)
+        .expect_err("no ledger, no bulk spend");
+    assert!(err.to_string().contains("spend ledger"), "{err}");
+
+    let one = ClassifyOpts {
+        retag: vec!["notes/a.md".to_string()],
+        ..apply_opts()
+    };
+    let (_report, written) =
+        apply_classify(vault.root(), &vault.scan(), &vault.config(), &one, &classifiers).expect("one note");
+    assert_eq!(written, vec!["notes/a.md".to_string()]);
 }

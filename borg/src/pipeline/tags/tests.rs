@@ -259,6 +259,7 @@ async fn classifier_failure_degrades_visibly() {
         fallback: distillers::tags::ClassifierKind::Deterministic,
         endpoint: "http://127.0.0.1:1/classify".to_string(),
         timeout_secs: 1,
+        ..distillers::tags::TagsClassifierConfig::default()
     };
 
     let mut sources = TagSources::from_summary("title", "text");

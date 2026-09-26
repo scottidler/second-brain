@@ -317,6 +317,22 @@ pub fn borg_stages_dir() -> PathBuf {
         .join("stages")
 }
 
+/// The classifier.dev spend ledger (design doc
+/// `2026-09-25-described-tag-classification.md`, Phase 2): one JSON line per
+/// bulk classifier call, read back to find what the UTC day has spent. Under
+/// the `sb/` data namespace, not a subsystem's, because every bulk path
+/// (cortex `--retag`, `tag-apply`) and `sb doctor` share the one IP-wide
+/// day. Panics only when `xdg_data_dir()` returns `None` (see
+/// [`borg_signal_state_dir`]).
+///
+/// `~/.local/share/sb/classifier-spend.jsonl` on Linux.
+pub fn classifier_spend_ledger() -> PathBuf {
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join(SB_DIR)
+        .join("classifier-spend.jsonl")
+}
+
 /// cortex's embed/graph file-lock path, under the `sb/cortex/` data
 /// namespace. The lock serializes the embed and graph passes (they share
 /// it). Lives under `sb/cortex/` like borg's data, NOT the legacy

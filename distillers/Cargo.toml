@@ -22,12 +22,16 @@ futures = "0.3.32"
 # workspace; `reqwest` stays borg-only.
 ureq = { version = "3.2.0", features = ["json"] }
 url = { workspace = true }
+# Stable digests for the resumable scoring cursor (`tags::bulk`); the same
+# version borg already builds.
+sha2 = "0.10"
 
 [dev-dependencies]
 # Tests round-trip rendered markdown through the vault::search body parsers,
 # which are feature-gated behind `search`. Production builds of distillers do
 # NOT enable this feature, so rusqlite stays out of the borg dependency tree.
 vault = { path = "../vault", features = ["search"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

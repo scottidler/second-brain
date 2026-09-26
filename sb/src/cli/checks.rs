@@ -444,16 +444,26 @@ fn fabric_live_probe_findings() -> Vec<Finding> {
 /// sharded pass over 117 tags.
 fn classifier_findings() -> Vec<Finding> {
     let borg_config = borg::config::load_config::<borg::config::Config>(None).ok();
+    let cortex_config = cortex::config::Config::load(None).ok();
     let mut findings = vec![
         match &borg_config {
             Some(config) => classifier_settings_finding("borg", &config.tags.classifier),
             None => Finding::info("borg config unavailable; borg classifier settings unknown"),
         },
-        match cortex::config::Config::load(None) {
-            Ok(config) => classifier_settings_finding("cortex", &config.tags.classifier),
-            Err(_) => Finding::info("cortex config unavailable; cortex classifier settings unknown"),
+        match &cortex_config {
+            Some(config) => classifier_settings_finding("cortex", &config.tags.classifier),
+            None => Finding::info("cortex config unavailable; cortex classifier settings unknown"),
         },
     ];
+    // Bulk runs (`--retag`, `tag-apply`) are cortex's, so the allowance is
+    // read with cortex's budget keys.
+    let bulk_cfg = cortex_config.map(|c| c.tags.classifier).unwrap_or_default();
+    let spend = distillers::tags::spend::DaySpend::new(
+        distillers::tags::spend::SpendLedger::shared(),
+        std::sync::Arc::new(distillers::tags::spend::SystemClock),
+        &bulk_cfg,
+    );
+    findings.push(classifier_spend_finding(&spend));
     match borg_config {
         Some(config) => findings.extend(classifier_probe_findings(&config.tags.classifier)),
         None => findings.push(Finding::info("borg config unavailable; classifier not probed")),
@@ -468,9 +478,34 @@ fn classifier_findings() -> Vec<Finding> {
 fn classifier_settings_finding(subsystem: &str, cfg: &distillers::tags::TagsClassifierConfig) -> Finding {
     let token_env = if cfg.token_env.is_empty() { "none (keyless)" } else { cfg.token_env.as_str() };
     Finding::info(format!(
-        "{subsystem} classifier settings: classifier {:?}, threshold {}, fallback {:?}, endpoint {}, timeout {}s, token-env {token_env}",
-        cfg.classifier, cfg.threshold, cfg.fallback, cfg.endpoint, cfg.timeout_secs
+        "{subsystem} classifier settings: classifier {:?}, threshold {}, fallback {:?}, endpoint {}, timeout {}s, token-env {token_env}, daily-usd-budget ${:.2}, ingest-reserve-usd ${:.2}",
+        cfg.classifier,
+        cfg.threshold,
+        cfg.fallback,
+        cfg.endpoint,
+        cfg.timeout_secs,
+        cfg.daily_usd_budget,
+        cfg.ingest_reserve_usd
     ))
+}
+
+/// Today's classifier.dev bulk spend from the ledger, and what a bulk run may
+/// still spend. Warn on a ledger that cannot be read: every bulk run refuses
+/// on it too.
+fn classifier_spend_finding(spend: &distillers::tags::spend::DaySpend) -> Finding {
+    let ledger = spend.ledger().path().display().to_string();
+    match spend.allowance() {
+        Ok(allowance) => Finding::info(format!(
+            "classifier.dev bulk spend today: ${:.4}; {allowance} (ledger {ledger})",
+            allowance.spent_usd
+        )),
+        Err(e) => Finding::warn(
+            format!("classifier.dev spend ledger unreadable: {e:#}"),
+            format!(
+                "bulk runs (`--retag` over several notes, `tag-apply`) refuse until {ledger} parses; fix or move the bad line"
+            ),
+        ),
+    }
 }
 
 fn classifier_probe_findings(cfg: &distillers::tags::TagsClassifierConfig) -> Vec<Finding> {

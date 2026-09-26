@@ -283,3 +283,64 @@ fn classifier_settings_name_the_subsystem_and_effective_values() {
     assert!(finding.message.contains("classifier ClassifierDev"));
     assert!(finding.message.contains("token-env CLASSIFIER_DEV_TOKEN"));
 }
+
+#[test]
+fn classifier_settings_carry_the_spend_budget_keys() {
+    let finding = classifier_settings_finding("cortex", &distillers::tags::TagsClassifierConfig::default());
+    for want in ["daily-usd-budget $0.50", "ingest-reserve-usd $0.10"] {
+        assert!(
+            finding.message.contains(want),
+            "missing {want:?} in {}",
+            finding.message
+        );
+    }
+}
+
+struct FixedDay(chrono::NaiveDate);
+
+impl distillers::tags::spend::Clock for FixedDay {
+    fn today_utc(&self) -> chrono::NaiveDate {
+        self.0
+    }
+}
+
+fn spend_over(ledger: &std::path::Path) -> distillers::tags::spend::DaySpend {
+    distillers::tags::spend::DaySpend::new(
+        distillers::tags::spend::SpendLedger::new(ledger),
+        std::sync::Arc::new(FixedDay("2026-09-26".parse().expect("date"))),
+        &distillers::tags::TagsClassifierConfig::default(),
+    )
+}
+
+#[test]
+fn classifier_spend_reports_todays_ledger_total_and_allowance() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ledger = tmp.path().join("classifier-spend.jsonl");
+    std::fs::write(
+        &ledger,
+        concat!(
+            r#"{"day":"2026-09-25","usd":0.3,"tokens":1,"path":"retag"}"#,
+            "\n",
+            r#"{"day":"2026-09-26","usd":0.0125,"tokens":1,"path":"tag-apply","tag":"ci-cd"}"#,
+            "\n",
+        ),
+    )
+    .expect("write");
+    let finding = classifier_spend_finding(&spend_over(&ledger));
+    assert_eq!(finding.severity, Severity::Info);
+    for want in [
+        "bulk spend today: $0.0125",
+        "$0.3875 left of the $0.50 day",
+        "2026-09-26 UTC",
+    ] {
+        assert!(
+            finding.message.contains(want),
+            "missing {want:?} in {}",
+            finding.message
+        );
+    }
+
+    std::fs::write(&ledger, "garbage\n").expect("write");
+    let finding = classifier_spend_finding(&spend_over(&ledger));
+    assert_eq!(finding.severity, Severity::Warn);
+}

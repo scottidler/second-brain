@@ -18,6 +18,7 @@ use crate::report::{Fix, Report, Severity, Violation};
 use crate::scope::insert_frontmatter_fields;
 use crate::vault::{Note, scan_vault};
 use ::vault::canonical::{self, CanonicalSet, CanonicalTagsFile, TagMapping};
+use distillers::tags::spend::{DaySpend, SpendLedger, SystemClock};
 use distillers::tags::{
     CandidateSource, ClassifierKind, Confidence, FabricRunner, ShellFabricRunner, TagCandidate, TagClassifier,
     TagInput, TagOutput, TagsClassifierConfig,
@@ -65,7 +66,10 @@ pub fn run_with_notes(
         apply_classify(vault_root, notes, config, opts, &classifiers)
     } else {
         // Dry-run writes nothing, so the written-paths list is always empty.
-        Ok((lint_classify(notes, vault_root, config, opts, &classifiers), Vec::new()))
+        Ok((
+            lint_classify(notes, vault_root, config, opts, &classifiers)?,
+            Vec::new(),
+        ))
     }
 }
 
@@ -84,6 +88,10 @@ pub struct Classifiers {
     primary: Box<dyn TagClassifier>,
     fallback: Box<dyn TagClassifier>,
     canon: CanonicalSet,
+    /// The spend ledger and day allowance a multi-note `--retag` spends
+    /// against. `None` only on the injected (`new`) path; a bulk retag on a
+    /// classifier that spends refuses to run without it.
+    spend: Option<DaySpend>,
 }
 
 impl Classifiers {
@@ -106,7 +114,8 @@ impl Classifiers {
             canon.no_classifier.len(),
         );
         let fabric = fabric_runner_for(cfg, &config.fabric);
-        Ok(Self::from_parts(cfg, canon, &mapping, fabric))
+        let spend = DaySpend::new(SpendLedger::shared(), Arc::new(SystemClock), cfg);
+        Ok(Self::from_parts(cfg, canon, &mapping, fabric).with_spend(spend))
     }
 
     /// Build the pair from an already-loaded vocabulary and an optional Fabric
@@ -128,6 +137,7 @@ impl Classifiers {
             primary: distillers::tags::build(cfg, &canon, mapping, fabric.clone()),
             fallback: distillers::tags::build_fallback(cfg, &canon, mapping, fabric),
             canon,
+            spend: None,
         }
     }
 
@@ -137,6 +147,15 @@ impl Classifiers {
             primary,
             fallback,
             canon,
+            spend: None,
+        }
+    }
+
+    /// Attach the spend ledger and day allowance bulk runs spend against.
+    pub fn with_spend(self, spend: DaySpend) -> Self {
+        Self {
+            spend: Some(spend),
+            ..self
         }
     }
 
@@ -148,21 +167,94 @@ impl Classifiers {
             Ok(out) => out,
             Err(e) => {
                 log::warn!("tag classifier failed, running the configured fallback: {e:#}");
-                match self.fallback.classify(input) {
-                    Ok(out) => out,
-                    Err(e) => {
-                        log::error!("tag classifier fallback also failed, holding the note: {e:#}");
-                        TagOutput {
-                            tags: Vec::new(),
-                            scores: None,
-                            confidence: Confidence::Low,
-                            method: self.fallback.method(),
-                        }
-                    }
+                self.run_fallback(input)
+            }
+        }
+    }
+
+    /// Classify many notes as one bulk run: estimated first and refused
+    /// above the day allowance, then sent as batches, with every successful
+    /// call written to the spend ledger. A note the primary fails runs the
+    /// fallback, except under classifier.dev's own limit, where it is left
+    /// unscored (`None`): a deterministic answer written because the day ran
+    /// out is not a retag.
+    ///
+    /// Implementations that do not call classifier.dev estimate nothing and
+    /// are classified note by note, as before.
+    fn classify_bulk(&self, inputs: &[TagInput]) -> Result<BulkClassified> {
+        let Some(estimate) = self.primary.estimate(inputs) else {
+            return Ok(BulkClassified {
+                outputs: inputs.iter().map(|i| Some(self.classify(i))).collect(),
+                notice: None,
+                service_limit: None,
+            });
+        };
+        let spend = self.spend.as_ref().ok_or_else(|| {
+            eyre::eyre!("a bulk retag on classifier.dev needs the spend ledger, and none is configured")
+        })?;
+        let allowance = spend.allowance()?;
+        let (estimated, available) = (estimate.total_usd(), allowance.available_usd());
+        if estimated > available {
+            eyre::bail!(
+                "--retag over {} notes is estimated at ${estimated:.4}, over today's classifier.dev allowance: {allowance}. {} of the {} notes fit; narrow the --retag set or rerun after 00:00 UTC",
+                inputs.len(),
+                estimate.notes_within(available),
+                inputs.len(),
+            );
+        }
+        let notice = format!(
+            "retag of {} notes estimated at ${estimated:.4}; {allowance}",
+            inputs.len()
+        );
+        log::info!("Classifiers::classify_bulk: {notice}");
+
+        let batch = self.primary.classify_batch_metered(inputs);
+        spend.record(&batch.calls, "retag", None)?;
+        let outputs = inputs
+            .iter()
+            .zip(batch.outputs)
+            .map(|(input, out)| match out {
+                Ok(out) => Some(out),
+                Err(e) if batch.service_limit.is_some() => {
+                    log::warn!("tag classifier stopped at classifier.dev's limit, leaving the note unscored: {e:#}");
+                    None
+                }
+                Err(e) => {
+                    log::warn!("tag classifier failed, running the configured fallback: {e:#}");
+                    Some(self.run_fallback(input))
+                }
+            })
+            .collect();
+        Ok(BulkClassified {
+            outputs,
+            notice: Some((spend.ledger().path().to_path_buf(), notice)),
+            service_limit: batch.service_limit,
+        })
+    }
+
+    fn run_fallback(&self, input: &TagInput) -> TagOutput {
+        match self.fallback.classify(input) {
+            Ok(out) => out,
+            Err(e) => {
+                log::error!("tag classifier fallback also failed, holding the note: {e:#}");
+                TagOutput {
+                    tags: Vec::new(),
+                    scores: None,
+                    confidence: Confidence::Low,
+                    method: self.fallback.method(),
                 }
             }
         }
     }
+}
+
+/// What `Classifiers::classify_bulk` produced: one output per input (`None`
+/// for a note left unscored at classifier.dev's limit), the estimate line to
+/// report, and the limit's message when one stopped the run.
+struct BulkClassified {
+    outputs: Vec<Option<TagOutput>>,
+    notice: Option<(PathBuf, String)>,
+    service_limit: Option<String>,
 }
 
 /// The Fabric runner `fabric-closed` needs, built from cortex's `fabric:`
@@ -201,6 +293,18 @@ pub struct ClassifyResult {
 }
 
 impl ClassifyResult {
+    fn from_tags(tags: TagOutput) -> Self {
+        let reason = if tags.confidence == Confidence::Low {
+            "no tag cleared the classifier"
+        } else {
+            "tags classifier"
+        };
+        Self {
+            tags,
+            reason: reason.to_string(),
+        }
+    }
+
     pub fn confidence(&self) -> Confidence {
         self.tags.confidence
     }
@@ -303,6 +407,64 @@ fn select_targets<'a>(notes: &'a [Note], vault_root: &Path, config: &Config, opt
     inbox.into_iter().chain(unclassified).collect()
 }
 
+/// Classify every target before anything is written. A `--retag` over more
+/// than one note is a bulk run (`Classifiers::classify_bulk`): its estimate
+/// is reported, it refuses above the day allowance, and a note left
+/// unscored at classifier.dev's limit is `None` and reported as unchanged.
+fn classify_targets(
+    targets: &[&Note],
+    classifiers: &Classifiers,
+    is_retag: bool,
+    report: &mut Report,
+) -> Result<Vec<Option<ClassifyResult>>> {
+    if !is_retag || targets.len() < 2 {
+        return Ok(targets.iter().map(|n| Some(classify_note(n, classifiers))).collect());
+    }
+    let parts: Vec<(String, Vec<TagCandidate>)> = targets
+        .iter()
+        .map(|n| (classifier_text(n), note_candidates(n)))
+        .collect();
+    let inputs: Vec<TagInput> = targets
+        .iter()
+        .zip(&parts)
+        .map(|(note, (text, candidates))| TagInput {
+            title: note_title(note),
+            text,
+            candidates,
+        })
+        .collect();
+    let bulk = classifiers.classify_bulk(&inputs)?;
+    if let Some((ledger, notice)) = bulk.notice {
+        report.add(Violation {
+            path: ledger,
+            rule: "classify".to_string(),
+            severity: Severity::Info,
+            message: notice,
+            fix: None,
+        });
+    }
+    Ok(targets
+        .iter()
+        .zip(bulk.outputs)
+        .map(|(note, out)| match out {
+            Some(tags) => Some(ClassifyResult::from_tags(tags)),
+            None => {
+                report.add(Violation {
+                    path: note.path.clone(),
+                    rule: "classify".to_string(),
+                    severity: Severity::Warning,
+                    message: format!(
+                        "left unchanged: classifier.dev refused over its own limit ({}); rerun after 00:00 UTC",
+                        bulk.service_limit.as_deref().unwrap_or("no reason given")
+                    ),
+                    fix: None,
+                });
+                None
+            }
+        })
+        .collect())
+}
+
 /// Dry-run: returns planned classifications as violations in a Report
 pub fn lint_classify(
     notes: &[Note],
@@ -310,13 +472,14 @@ pub fn lint_classify(
     config: &Config,
     opts: &ClassifyOpts,
     classifiers: &Classifiers,
-) -> Report {
+) -> Result<Report> {
     let mut report = Report::default();
     let targets = select_targets(notes, vault_root, config, opts);
+    let results = classify_targets(&targets, classifiers, !opts.retag.is_empty(), &mut report)?;
 
-    for note in &targets {
+    for (note, result) in targets.iter().zip(results) {
+        let Some(result) = result else { continue };
         let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
-        let result = classify_note(note, classifiers);
 
         if !opts.retag.is_empty() {
             if result.confidence() == Confidence::Low {
@@ -395,7 +558,7 @@ pub fn lint_classify(
     }
 
     log::info!("classify lint complete: {} target note(s)", targets.len());
-    report
+    Ok(report)
 }
 
 /// Apply: classify and move notes from inbox/ to notes/.
@@ -426,10 +589,11 @@ pub fn apply_classify(
     // may not have changed on disk, or promotions the daemon used to sniff by
     // matching the substring "promoted" in a violation message).
     let mut written: Vec<String> = Vec::new();
+    let results = classify_targets(&target_notes, classifiers, is_retag, &mut report)?;
 
-    for note in &target_notes {
+    for (note, result) in target_notes.iter().zip(results) {
+        let Some(result) = result else { continue };
         let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
-        let result = classify_note(note, classifiers);
 
         // `--retag`: replace, not union. The fresh classification wins outright;
         // the previous tags survive only through the protect list or when the
@@ -657,28 +821,19 @@ fn write_fields(
     }
 }
 
+fn note_title(note: &Note) -> &str {
+    note.frontmatter.title.as_deref().unwrap_or("Untitled")
+}
+
 /// Classify a single note: tags from the shared classifier, nothing else.
 fn classify_note(note: &Note, classifiers: &Classifiers) -> ClassifyResult {
     let candidates = note_candidates(note);
     let text = classifier_text(note);
-    let title = note.frontmatter.title.as_deref().unwrap_or("Untitled");
-    let tags = classifiers.classify(&TagInput {
-        title,
+    ClassifyResult::from_tags(classifiers.classify(&TagInput {
+        title: note_title(note),
         text: &text,
         candidates: &candidates,
-    });
-
-    if tags.confidence == Confidence::Low {
-        return ClassifyResult {
-            tags,
-            reason: "no tag cleared the classifier".to_string(),
-        };
-    }
-
-    ClassifyResult {
-        tags,
-        reason: "tags classifier".to_string(),
-    }
+    }))
 }
 
 /// Filter notes to the `--retag` set. Each argument is a vault-relative path

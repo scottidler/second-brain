@@ -153,6 +153,12 @@ tags:
     # token-env: CLASSIFIER_DEV_TOKEN
     # endpoint: https://classifier.dev/v1/classify
     # timeout-secs: 30
+    # Bulk runs (a `--retag` over several notes, `tag-apply`) spend at most
+    # daily-usd-budget, less today's ledger total, less ingest-reserve-usd:
+    # classifier.dev's keyless tier gives each IP $0.50 a UTC day, shared with
+    # live ingest. `sb doctor` prints today's total.
+    # daily-usd-budget: 0.50
+    # ingest-reserve-usd: 0.10
 
 # Distillation feature toggles (all default-on; set false to disable a feature).
 # Omitting this section (or any individual key) keeps today's shipped behavior.

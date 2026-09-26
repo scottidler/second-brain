@@ -51,3 +51,35 @@ Design doc: `docs/design/2026-09-25-described-tag-classification.md`
 
 ### Open questions
 - None.
+
+## Phase 2: Spend ledger and resumable bulk runs
+
+### Design decisions
+- The ledger and day allowance live in `distillers::tags::spend` (`SpendLedger`, `DaySpend`, `Allowance`, the `Clock` port). The resumable loop lives in `distillers::tags::bulk` (`BulkRun::run`, `ScoreCursor`). Both are submodules of `tags`, so their tests reach the private `Transport` and `ClassifierDev::with_transport` with no widening.
+- The ledger path is `vault::paths::classifier_spend_ledger()` (`~/.local/share/sb/classifier-spend.jsonl`). It sits under `sb/`, not a subsystem's directory, because every bulk path and `sb doctor` share one IP-wide day.
+- Rows are written only for calls with `ok: true`, from the response's `pricing.estimated_usd`. A refused or failed call carries no pricing, so it has nothing to record. A ledger line that does not parse is an error (`SpendLedger::day_total`), because reading it as low spend would let a run spend into the cap.
+- The generic cursor is `ScoreCursor { scoring_config_hash, scores: {id: {scores, wire_text_hash}}, failed }`. P8 adds `tag`, `candidate_mode`, and `candidates` around it and owns the file path. `BulkRun::run` takes a `persist` callback rather than a path, and `ScoreCursor::save` writes atomically. `keep` limits the slugs stored per note, since P8 needs only the target slug.
+- `scoring_config_hash` (`ClassifierDev::scoring_config_hash`) is SHA-256 over the endpoint, the shards exactly as sent, `max_labels`, and `CLASSIFIER_TEXT_CHARS`. P5 (instructions, described labels) and P6 (repeats) extend it. `wire_text_hash` is SHA-256 of `clip_classifier_text`. I used sha2 over std's `DefaultHasher` because the digest must survive a toolchain upgrade. `sha2 = "0.10"` is the version borg already builds.
+- Run chunks (`plan_run_chunks`) are planned against the shard whose labels cost the most per note. So each run chunk is one request per shard, and "a chunk" costs one call per shard.
+- The stop rule: before each chunk, the prediction is the model's estimate scaled up (never down) by what the service has charged against the model so far in this run. Spend counted against the limit is, per chunk, the larger of the reported and estimated cost. A response that under-reports, or has no `pricing`, cannot run the day dry. This is also what makes the $0.02-per-chunk fake stop after two chunks at $0.05.
+- Service limit: `CallOutcome::ServiceLimit` covers any 429 and any 402 that is not `request_spending_limit`. `score_batch` sends nothing after one and reports it in `ScoredBatch::service_limit`. Notes it left unscored stay pending in the cursor, not failed.
+- A multi-note `--retag` is a bulk path: `Classifiers::classify_bulk` (`cortex/src/classify.rs`). The primary's `estimate` is checked against the allowance, and the run refuses above it, naming how many notes fit. The estimate line is reported as an Info row against the ledger path. The batch then goes through `classify_batch_metered`, and every successful call is written as `path: "retag"`. `TagClassifier` gains two defaulted methods, `estimate` (`None`) and `classify_batch_metered` (no calls), so Deterministic and Fabric retags are unchanged and borg is untouched.
+- A retag note left unscored at classifier.dev's limit is left unchanged and reported as a Warning. It does not get the deterministic fallback written over it.
+- `sb doctor`: the settings line for each subsystem now shows `daily-usd-budget` and `ingest-reserve-usd`. A new `classifier_spend_finding` prints today's ledger total and the allowance, read with cortex's keys since bulk runs are cortex's, and warns on an unreadable ledger.
+- Both config templates document the two keys, commented out, since code defaults carry the values.
+
+### Deviations
+- `daily-usd-budget` and `ingest-reserve-usd` are `f64`, not the doc's `f32`. `CallUsage.estimated_usd` and the ledger are `f64`, and mixing in `0.1f32` noise would put comparisons at the allowance boundary off by rounding.
+- `--retag` has no `--max-usd`: the doc lists that flag only for `tag-apply`. `BulkRun` takes `max_usd` for P8.
+- `--retag` classified one note per call before this phase. A multi-note retag now batches through `classify_batch_metered`, so it can be metered and written to the ledger. As P1 recorded, one non-Jev answer now fails its chunk-mates (they get the fallback), where a per-note call would have failed only itself.
+- `lint_classify` now returns `Result<Report>`, because a dry-run retag also spends and must be able to refuse.
+
+### Tradeoffs
+- Scale the next chunk's prediction by what the service charged, vs. trusting the token model alone. The model does not know what the service will charge, and the success criterion's fake charges far more than the model predicts. Scaling only upward keeps the rule fail-closed.
+- `failed` is a report, not a skip list: the next run retries failed notes, vs. skipping them for good. A transient 500 should not strand a note, and a note that keeps failing costs nothing, because failed calls are not billed.
+- The retag estimate is checked once, up front, against the whole set, vs. scoring until the allowance runs out as the cursor does. `--retag` has no cursor to resume from, so a partial retag would leave a set half-rewritten with no record. The doc asks for refusal.
+- Cortex's daemon classify (inbox and catch-up) is not treated as a bulk path and writes no ledger rows. The doc names only `--retag` over more than one note, and `tag-apply`. See Open questions.
+
+### Open questions
+- Cortex's daemon classify pass also calls classifier.dev once per inbox or catch-up note when `classifier: classifier-dev`, and it writes no ledger rows. That spend comes out of `ingest-reserve-usd` alongside borg's. Should it be metered too?
+- Not run live: no `--retag` over several notes against classifier.dev, and no `sb doctor` on a host. Both were exercised only through fakes. A live check after deploy: `sb cortex classify --retag 'notes/a*.md'` (dry run) should print the estimate row, and `sb doctor` should show the spend line.
