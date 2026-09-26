@@ -53,10 +53,10 @@ pub(crate) async fn get_or_init_canonical(config: &Config) -> Option<std::sync::
 /// provenance is gone, which is why candidates are built before it.
 pub(crate) struct TagSources<'a> {
     pub title: &'a str,
-    /// What the classifier scores, and - under `classifier-dev` - what leaves
-    /// the machine. The note summary when one exists, else a
-    /// `CLASSIFIER_TEXT_CHARS` body excerpt. Never a whole transcript, which
-    /// is why the two constructors are the only way to set it.
+    /// What the classifier scores: the note summary when one exists, else the
+    /// body. Held whole; the classifiers bound what leaves the machine through
+    /// `distillers::tags::clip_classifier_text`, the one clip on the assembled
+    /// title + text.
     pub text: String,
     /// Publisher hashtags, yt-dlp tags, the note's own `author-tags`.
     pub author: Vec<String>,
@@ -65,17 +65,17 @@ pub(crate) struct TagSources<'a> {
 }
 
 impl<'a> TagSources<'a> {
-    /// A note that already has a distilled summary: scored verbatim, the same
-    /// text `cortex::classify::classifier_text` picks for the same note.
+    /// A note that already has a distilled summary: the same text
+    /// `cortex::classify::classifier_text` picks for the same note.
     pub fn from_summary(title: &'a str, summary: &str) -> Self {
         Self::build(title, summary.to_string())
     }
 
-    /// A note with no summary: only the head of the body is scored. Audio is
-    /// the case that matters - without this clip the whole transcript was
-    /// POSTed to classifier.dev verbatim (implementation audit r1, M3).
+    /// A note with no summary: the body. Audio is the case that matters; its
+    /// transcript is clipped at the wire, not here, so borg and cortex share
+    /// one clip (implementation audit r1, M3; design doc G6).
     pub fn from_body(title: &'a str, body: &str) -> Self {
-        Self::build(title, distillers::tags::body_excerpt(body))
+        Self::build(title, body.to_string())
     }
 
     fn build(title: &'a str, text: String) -> Self {

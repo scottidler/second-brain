@@ -326,24 +326,30 @@ async fn author_tags_are_recorded() {
     );
 }
 
-/// Implementation audit r1, M3: `text` is what leaves the machine under
-/// `classifier-dev`. A summary-less audio note used to hand the classifier
-/// its whole transcript; `from_body` is the one seam that clips it.
+/// Implementation audit r1, M3, moved to the wire by design doc G6: a
+/// summary-less audio note used to hand the classifier its whole transcript.
+/// `from_body` used to clip it; now it holds the body whole and the one clip
+/// on the assembled title + text bounds what leaves the machine, the same
+/// clip cortex's path goes through.
 #[test]
-fn from_body_clips_a_transcript_to_the_documented_excerpt() {
+fn from_body_leaves_the_clip_to_the_wire_builder() {
     let transcript = "word ".repeat(4_000);
     let sources = TagSources::from_body("A voice note", &transcript);
+    assert_eq!(sources.text, transcript, "from_body clipped on its own");
+    let wire = distillers::tags::clip_classifier_text(sources.title, &sources.text);
     assert_eq!(
-        sources.text.chars().count(),
+        wire.chars().count(),
         distillers::tags::CLASSIFIER_TEXT_CHARS,
-        "the transcript was not clipped"
+        "the wire text was not clipped"
     );
-    assert!(transcript.starts_with(&sources.text), "the excerpt is the head");
+    assert!(
+        wire.starts_with("A voice note\n\nword "),
+        "the wire text is title + body head"
+    );
 }
 
-/// The other constructor is deliberately verbatim: a distilled summary is
-/// already short, and cortex's `classifier_text` does not clip one either, so
-/// both call paths score identical text for the same note.
+/// The other constructor is verbatim too: the clip happens once, at the wire,
+/// for both call paths, so borg and cortex score identical text for a note.
 #[test]
 fn from_summary_is_verbatim() {
     let summary = "A distilled summary.";

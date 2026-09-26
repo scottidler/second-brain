@@ -296,13 +296,13 @@ fn confidence_mapping_per_method() {
     let dev = ClassifierDev::new(c, m, &cfg);
     let mut scores = HashMap::new();
     scores.insert("rust".to_string(), 0.95);
-    let out = dev.finish(&input(&[]), std::slice::from_ref(&scores));
+    let out = dev.finish(&input(&[]), &scores);
     assert_eq!(out.confidence, Confidence::High);
     assert_eq!(out.tags, vec!["rust".to_string()]);
 
     let mut below = HashMap::new();
     below.insert("rust".to_string(), 0.87);
-    let out = dev.finish(&input(&[]), &[below]);
+    let out = dev.finish(&input(&[]), &below);
     assert_eq!(out.confidence, Confidence::Low);
     assert_ne!(out.confidence, Confidence::Medium);
     assert!(out.tags.is_empty());
@@ -380,7 +380,7 @@ fn a_high_result_always_carries_a_tag() {
     let det = Deterministic::new(c, m);
 
     for out in [
-        dev.finish(&input(&[]), &[HashMap::new()]),
+        dev.finish(&input(&[]), &HashMap::new()),
         det.classify(&input(&[])).expect("classify"),
     ] {
         if out.confidence == Confidence::High {
@@ -425,24 +425,29 @@ fn retag_never_writes_over_the_cap() {
 
 // -------------------------------------------------------- classifier text
 
-/// Implementation audit r1, M3: the 900-character ceiling the design doc
-/// promises had no implementation in borg, so an audio note with no summary
-/// POSTed its whole transcript to classifier.dev.
+/// Implementation audit r1, M3 and design doc G6: the ceiling holds on the
+/// assembled title + text, the exact string sent, not on the text alone.
 #[test]
-fn body_excerpt_clips_at_the_documented_ceiling() {
+fn clip_classifier_text_bounds_the_assembled_string() {
     let long = "x".repeat(5_000);
-    assert_eq!(body_excerpt(&long).chars().count(), CLASSIFIER_TEXT_CHARS);
-    assert!(long.starts_with(&body_excerpt(&long)), "the excerpt is the head");
+    let wire = clip_classifier_text("Title", &long);
+    assert_eq!(wire.chars().count(), CLASSIFIER_TEXT_CHARS);
+    assert!(
+        wire.starts_with("Title\n\nxxx"),
+        "the wire text is title + text head: {wire:.20}"
+    );
 }
 
 #[test]
-fn body_excerpt_leaves_short_text_and_multibyte_alone() {
-    let short = "A short body.";
-    assert_eq!(body_excerpt(short), short);
+fn clip_classifier_text_leaves_short_text_and_multibyte_alone() {
+    assert_eq!(clip_classifier_text("T", "A short body."), "T\n\nA short body.");
 
     // Char-wise, not byte-wise: a 3-byte char at the boundary must not panic.
     let multibyte = "\u{4e16}".repeat(CLASSIFIER_TEXT_CHARS + 10);
-    assert_eq!(body_excerpt(&multibyte).chars().count(), CLASSIFIER_TEXT_CHARS);
+    assert_eq!(
+        clip_classifier_text("T", &multibyte).chars().count(),
+        CLASSIFIER_TEXT_CHARS
+    );
 }
 
 // --- 0.15.3: keyless by default, optional workspace token ------------------
@@ -498,13 +503,44 @@ fn an_unset_or_blank_token_env_resolves_keyless() {
 
 /// The public tier caps a call at 200 texts. Before the chunking the whole
 /// batch went in one request, and `summarize --backfill` / `classify --retag`
-/// can be thousands of notes long.
+/// can be thousands of notes long. With labels this cheap the token budget
+/// never binds, so the text ceiling is what splits.
 #[test]
 fn the_text_chunk_ceiling_is_the_public_tier_limit() {
     assert_eq!(MAX_TEXTS_PER_CALL, 200);
-    let texts: Vec<usize> = (0..451).collect();
-    let chunks: Vec<usize> = texts.chunks(MAX_TEXTS_PER_CALL).map(<[usize]>::len).collect();
-    assert_eq!(chunks, vec![200, 200, 51], "451 texts must go out as three calls");
+    let labels = vec!["ai".to_string()];
+    assert_eq!(
+        plan_chunks(&[10; 451], &labels),
+        vec![200, 200, 51],
+        "451 texts must go out as three calls"
+    );
+}
+
+/// Phase 0: a 159-note bare-label call returned 402 and 53 notes passed. The
+/// budget comes from the largest pass, so a full-vocabulary shard of
+/// production-sized wire text chunks well under 159 and every chunk's
+/// estimate stays inside it.
+#[test]
+fn a_production_shard_chunks_under_the_token_budget() {
+    let shard: Vec<String> = (0..59).map(|i| format!("tag-{i:04}")).collect();
+    let lengths = vec![715usize; 400];
+    let chunks = plan_chunks(&lengths, &shard);
+    assert_eq!(chunks.iter().sum::<usize>(), 400, "every note is planned once");
+    for size in &chunks {
+        assert!(*size < 159, "chunk of {size} would repeat the measured 402");
+        assert!(*size as f64 * note_tokens(715, &shard) <= REQUEST_TOKEN_BUDGET);
+    }
+    assert!(chunks[0] >= 53, "the measured passing chunk must still fit: {chunks:?}");
+}
+
+/// A chunk always holds at least one note: a note over budget on its own is
+/// sent alone, and the service's 402 is what decides it.
+#[test]
+fn an_over_budget_note_still_goes_out_alone() {
+    let labels = vec!["ai".to_string()];
+    assert!(note_tokens(1_000_000, &labels) > REQUEST_TOKEN_BUDGET);
+    assert_eq!(plan_chunks(&[1_000_000, 1_000_000], &labels), vec![1, 1]);
+    assert_eq!(plan_chunks(&[], &labels), Vec::<usize>::new());
 }
 
 #[test]
@@ -536,4 +572,361 @@ fn only_jev_answers_are_accepted() {
         ensure_jev(&unnamed).is_err(),
         "an answer naming no model is not proven Jev"
     );
+}
+
+// ------------------------------------------------------------ score_batch
+
+/// A fake classifier.dev: scores every label it is sent at 0.95 (or 0.10 for
+/// labels in `low`), answers as Jev, and records the inputs of every call.
+#[derive(Default)]
+struct FakeService {
+    /// 402 `request_spending_limit` on any call with more inputs than this.
+    max_inputs: Option<usize>,
+    /// 402 `request_spending_limit` on any call whose inputs contain this.
+    poison: Option<String>,
+    /// For an input containing `.0`, leave out the score for label `.1`.
+    drop_label: Option<(String, String)>,
+    /// For an input containing `.0`, add a score for the unsent label `.1`.
+    extra_label: Option<(String, String)>,
+    /// 500 on any call whose labels include this one.
+    fail_label: Option<String>,
+    low: Vec<String>,
+    sent: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+const SPEND_402: &str = r#"{"error":{"code":"request_spending_limit","message":"Split the batch, shorten input text, labels or instructions"}}"#;
+
+impl Transport for FakeService {
+    fn send(&self, body: &serde_json::Value, _token: Option<&str>) -> Result<(u16, String)> {
+        let inputs: Vec<String> = body["inputs"]
+            .as_array()
+            .expect("inputs")
+            .iter()
+            .map(|v| v.as_str().expect("input").to_string())
+            .collect();
+        let labels: Vec<String> = body["labels"]
+            .as_array()
+            .expect("labels")
+            .iter()
+            .map(|v| v.as_str().expect("label").to_string())
+            .collect();
+        self.sent.lock().expect("lock").push(inputs.clone());
+
+        if self.max_inputs.is_some_and(|max| inputs.len() > max)
+            || self
+                .poison
+                .as_ref()
+                .is_some_and(|p| inputs.iter().any(|i| i.contains(p)))
+        {
+            return Ok((402, SPEND_402.to_string()));
+        }
+        if self.fail_label.as_ref().is_some_and(|f| labels.contains(f)) {
+            return Ok((500, r#"{"error":"upstream"}"#.to_string()));
+        }
+
+        let results: Vec<serde_json::Value> = inputs
+            .iter()
+            .map(|input| {
+                let mut scores = serde_json::Map::new();
+                for label in &labels {
+                    let dropped = self
+                        .drop_label
+                        .as_ref()
+                        .is_some_and(|(marker, l)| input.contains(marker) && l == label);
+                    if !dropped {
+                        let score = if self.low.contains(label) { 0.10 } else { 0.95 };
+                        scores.insert(label.clone(), serde_json::json!(score));
+                    }
+                }
+                if let Some((marker, extra)) = &self.extra_label
+                    && input.contains(marker)
+                {
+                    scores.insert(extra.clone(), serde_json::json!(0.5));
+                }
+                serde_json::json!({"model": "jev-1.13.0", "scores": scores})
+            })
+            .collect();
+        let tokens = 1_000 * inputs.len() as u64;
+        let reply = serde_json::json!({
+            "results": results,
+            "usage": {"input_tokens": tokens},
+            "pricing": {"estimated_usd": tokens as f64 * 0.042 / 1_000_000.0},
+        });
+        Ok((200, reply.to_string()))
+    }
+}
+
+impl FakeService {
+    fn calls(&self) -> Vec<Vec<String>> {
+        self.sent.lock().expect("lock").clone()
+    }
+}
+
+fn dev_over(canon: CanonicalSet, service: Arc<FakeService>) -> ClassifierDev {
+    ClassifierDev::with_transport(canon, mapping(), &TagsClassifierConfig::default(), service)
+}
+
+/// A vocabulary past `MAX_LABELS_PER_CALL`, so it shards in two like
+/// production's 117.
+fn two_shard_canon() -> CanonicalSet {
+    let mut c = canon();
+    c.all = (0..117).map(|i| format!("tag-{i:03}")).collect();
+    c
+}
+
+fn owned_inputs(n: usize) -> Vec<(String, String)> {
+    (0..n)
+        .map(|i| (format!("Note {i}"), format!("Summary of note {i}.")))
+        .collect()
+}
+
+fn as_inputs(owned: &[(String, String)]) -> Vec<TagInput<'_>> {
+    owned
+        .iter()
+        .map(|(title, text)| TagInput {
+            title,
+            text,
+            candidates: &[],
+        })
+        .collect()
+}
+
+/// Success criterion 1: the 129,928-char summary measured on oracle.db (the
+/// usage report) went out whole. The string handed to `post` is now bounded.
+#[test]
+fn the_string_posted_for_a_huge_summary_is_clipped() {
+    let service = Arc::new(FakeService::default());
+    let dev = dev_over(canon(), service.clone());
+    let title = "t".repeat(200);
+    let summary = "s".repeat(129_928);
+    let batch = dev.score_batch(&[TagInput {
+        title: &title,
+        text: &summary,
+        candidates: &[],
+    }]);
+    assert!(batch.notes[0].is_ok(), "{:?}", batch.notes[0]);
+
+    let calls = service.calls();
+    assert!(!calls.is_empty());
+    for inputs in &calls {
+        for wire in inputs {
+            assert!(
+                wire.chars().count() <= CLASSIFIER_TEXT_CHARS,
+                "posted {} chars",
+                wire.chars().count()
+            );
+            assert!(wire.starts_with(&title), "the title leads the wire text");
+        }
+    }
+}
+
+/// Success criterion 2a: a service that 402s above 10 notes still scores a
+/// 40-note batch, by halving, and every call it accepted held at most 10.
+#[test]
+fn a_402_splits_the_chunk_until_it_passes() {
+    let service = Arc::new(FakeService {
+        max_inputs: Some(10),
+        ..FakeService::default()
+    });
+    let dev = dev_over(canon(), service.clone());
+    let owned = owned_inputs(40);
+    let batch = dev.score_batch(&as_inputs(&owned));
+
+    assert_eq!(batch.notes.len(), 40);
+    assert!(batch.notes.iter().all(Result::is_ok), "every note should score");
+    let accepted: Vec<usize> = service.calls().iter().map(Vec::len).filter(|n| *n <= 10).collect();
+    assert_eq!(accepted.iter().sum::<usize>(), 40, "every note scored exactly once");
+    assert_eq!(
+        batch.calls.iter().filter(|c| c.ok).count(),
+        accepted.len(),
+        "one ok usage row per accepted call"
+    );
+    assert!(batch.calls.iter().any(|c| !c.ok), "the refused calls are recorded too");
+}
+
+/// Success criterion 2b: a note the service refuses even alone is that
+/// note's `Err`; the other 39 still score.
+#[test]
+fn a_note_that_402s_alone_fails_only_itself() {
+    let service = Arc::new(FakeService {
+        max_inputs: Some(10),
+        poison: Some("note 17.".to_string()),
+        ..FakeService::default()
+    });
+    let dev = dev_over(canon(), service);
+    let owned = owned_inputs(40);
+    let batch = dev.score_batch(&as_inputs(&owned));
+
+    for (i, note) in batch.notes.iter().enumerate() {
+        if i == 17 {
+            let err = note.as_ref().expect_err("the poisoned note must fail");
+            assert!(err.to_string().contains("per-request spend limit"), "{err}");
+        } else {
+            assert!(note.is_ok(), "note {i} failed: {note:?}");
+        }
+    }
+}
+
+/// Success criterion 3a: a response missing one sent label fails that note,
+/// not its neighbours, and never reads as a zero score.
+#[test]
+fn a_missing_label_fails_that_note_only() {
+    let service = Arc::new(FakeService {
+        drop_label: Some(("note 2.".to_string(), "rust".to_string())),
+        ..FakeService::default()
+    });
+    let dev = dev_over(canon(), service);
+    let owned = owned_inputs(4);
+    let batch = dev.score_batch(&as_inputs(&owned));
+
+    let err = batch.notes[2].as_ref().expect_err("the short note must fail");
+    assert!(err.to_string().contains("\"rust\""), "{err}");
+    for i in [0, 1, 3] {
+        let scores = batch.notes[i].as_ref().expect("neighbour scores");
+        assert_eq!(scores.len(), canon().all.len(), "every slug is scored");
+    }
+}
+
+#[test]
+fn an_unknown_returned_key_fails_that_note_only() {
+    let service = Arc::new(FakeService {
+        extra_label: Some(("note 1.".to_string(), "golang".to_string())),
+        ..FakeService::default()
+    });
+    let dev = dev_over(canon(), service);
+    let owned = owned_inputs(3);
+    let batch = dev.score_batch(&as_inputs(&owned));
+
+    let err = batch.notes[1].as_ref().expect_err("an unsent key must fail the note");
+    assert!(err.to_string().contains("golang"), "{err}");
+    assert!(batch.notes[0].is_ok() && batch.notes[2].is_ok());
+}
+
+/// Success criterion 3b: the first shard succeeded, the second failed. The
+/// note is `Err`, not `Ok` with half a vocabulary of scores.
+#[test]
+fn a_failed_second_shard_is_err_not_partial() {
+    let canon = two_shard_canon();
+    let mut sorted: Vec<String> = canon.all.iter().cloned().collect();
+    sorted.sort();
+    let shards = shard_labels(&sorted);
+    assert_eq!(shards.len(), 2);
+
+    let service = Arc::new(FakeService {
+        fail_label: Some(shards[1][0].clone()),
+        ..FakeService::default()
+    });
+    let dev = dev_over(canon.clone(), service);
+    let owned = owned_inputs(3);
+    let batch = dev.score_batch(&as_inputs(&owned));
+    for note in &batch.notes {
+        let err = note.as_ref().expect_err("a second-shard failure must fail the note");
+        assert!(err.to_string().contains("500"), "{err}");
+    }
+    assert_eq!(batch.calls.iter().map(|c| c.ok).collect::<Vec<_>>(), vec![true, false]);
+
+    // The same, for one note: its second-shard answer is short a label.
+    let service = Arc::new(FakeService {
+        drop_label: Some(("note 1.".to_string(), shards[1][5].clone())),
+        ..FakeService::default()
+    });
+    let dev = dev_over(canon.clone(), service);
+    let batch = dev.score_batch(&as_inputs(&owned));
+    assert!(batch.notes[1].is_err(), "a short second shard must fail the note");
+    for i in [0, 2] {
+        assert_eq!(
+            batch.notes[i].as_ref().expect("scored").len(),
+            117,
+            "both shards merged"
+        );
+    }
+}
+
+/// A note that failed the first shard is not sent (or paid for) again in the
+/// second.
+#[test]
+fn a_note_failed_in_one_shard_is_not_sent_to_the_next() {
+    let canon = two_shard_canon();
+    let mut sorted: Vec<String> = canon.all.iter().cloned().collect();
+    sorted.sort();
+    let first = shard_labels(&sorted)[0][0].clone();
+    let service = Arc::new(FakeService {
+        drop_label: Some(("note 0.".to_string(), first)),
+        ..FakeService::default()
+    });
+    let dev = dev_over(canon, service.clone());
+    let owned = owned_inputs(2);
+    let batch = dev.score_batch(&as_inputs(&owned));
+    assert!(batch.notes[0].is_err() && batch.notes[1].is_ok());
+    let calls = service.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].len(), 1, "only the surviving note goes to shard two");
+}
+
+#[test]
+fn call_usage_comes_from_the_response() {
+    let service = Arc::new(FakeService::default());
+    let dev = dev_over(canon(), service);
+    let owned = owned_inputs(3);
+    let batch = dev.score_batch(&as_inputs(&owned));
+    assert_eq!(batch.calls.len(), 1);
+    assert_eq!(batch.calls[0].input_tokens, 3_000);
+    assert!((batch.calls[0].estimated_usd - 0.000126).abs() < 1e-12);
+    assert!(batch.calls[0].ok);
+}
+
+/// The P0 call log's shape (`calls.jsonl`, 2026-09-26): usage and pricing are
+/// read, and a response without them (the 2026-09-20 fixture) still parses.
+#[test]
+fn usage_and_pricing_parse_from_a_live_response_shape() {
+    let live: ClassifyResponse = serde_json::from_str(
+        r#"{"results":[],"usage":{"input_tokens":100663,"output_tokens":64567,"classifications":53},
+            "pricing":{"currency":"USD","input_tokens":100663,"estimated_usd":0.004227846,"total_usd":0}}"#,
+    )
+    .expect("parses");
+    let usage = live.call_usage();
+    assert_eq!(usage.input_tokens, 100_663);
+    assert!((usage.estimated_usd - 0.004227846).abs() < 1e-12);
+
+    let fixture: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture parses");
+    let old: ClassifyResponse = serde_json::from_value(fixture["responses"]["a"].clone()).expect("parses");
+    assert_eq!(old.call_usage().input_tokens, 0);
+}
+
+/// `classify_batch` used to fail every input when one call failed. Now one
+/// note's failure is that note's `Err`, and the rest select tags as usual.
+#[test]
+fn classify_batch_fails_per_note() {
+    let service = Arc::new(FakeService {
+        drop_label: Some(("note 1.".to_string(), "rust".to_string())),
+        low: canon().all.iter().filter(|t| *t != "rust").cloned().collect(),
+        ..FakeService::default()
+    });
+    let dev = dev_over(canon(), service);
+    let owned = owned_inputs(3);
+    let out = dev.classify_batch(&as_inputs(&owned));
+    assert!(out[1].is_err());
+    for i in [0, 2] {
+        let tags = &out[i].as_ref().expect("classified").tags;
+        assert_eq!(tags, &vec!["rust".to_string()]);
+    }
+}
+
+/// A day-cap 402 (or any 402 not naming the per-request limit) is not split:
+/// halving cannot fix it, so the chunk fails as it stands.
+#[test]
+fn a_402_that_is_not_the_request_limit_does_not_split() {
+    struct DayCap(std::sync::Mutex<usize>);
+    impl Transport for DayCap {
+        fn send(&self, _body: &serde_json::Value, _token: Option<&str>) -> Result<(u16, String)> {
+            *self.0.lock().expect("lock") += 1;
+            Ok((402, r#"{"error":{"code":"daily_spending_limit"}}"#.to_string()))
+        }
+    }
+    let service = Arc::new(DayCap(std::sync::Mutex::new(0)));
+    let dev = ClassifierDev::with_transport(canon(), mapping(), &TagsClassifierConfig::default(), service.clone());
+    let owned = owned_inputs(8);
+    let batch = dev.score_batch(&as_inputs(&owned));
+    assert!(batch.notes.iter().all(Result::is_err));
+    assert_eq!(*service.0.lock().expect("lock"), 1, "no retry into the cap");
 }

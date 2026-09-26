@@ -211,11 +211,11 @@ impl ClassifyResult {
 }
 
 /// The note text a classifier scores: its `## Summary` when it has one, else
-/// the head of the body, clipped through the shared
-/// `distillers::tags::body_excerpt` so borg and cortex send the same amount
-/// of a summary-less note to classifier.dev.
+/// the body. Unclipped here: the classifiers pass it through
+/// `distillers::tags::clip_classifier_text` with the title, so borg and
+/// cortex send the same bounded string for the same note.
 fn classifier_text(note: &Note) -> String {
-    ::vault::search::parse_body_summary(&note.body).unwrap_or_else(|| distillers::tags::body_excerpt(&note.body))
+    ::vault::search::parse_body_summary(&note.body).unwrap_or_else(|| note.body.clone())
 }
 
 /// Publisher hashtags borg recorded at ingest. Read back as `Author`

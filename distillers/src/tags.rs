@@ -32,6 +32,27 @@ pub const MAX_LABELS_PER_CALL: usize = 100;
 /// correct whether or not a token is configured.
 pub const MAX_TEXTS_PER_CALL: usize = 200;
 
+/// Estimated input tokens one classifier.dev request may carry, from the
+/// largest call Phase 0 saw pass: 53 notes against the decomposed labels,
+/// 157,708 tokens, $0.0066 (design doc, Phase 0 Results). The free tier refuses
+/// any request over $0.01 (`402 request_spending_limit`; 159 bare-label notes,
+/// about 300k tokens, did), and that cap is not published in tokens, so the
+/// budget is the measured pass rather than an extrapolation toward the cap.
+/// A code constant, not a knob: it describes the service, and a 402 still
+/// splits the chunk if the service moves.
+const REQUEST_TOKEN_BUDGET: f64 = 157_708.0;
+
+/// Phase 0's least-squares cost model over 46 calls (max relative error
+/// 1.7%): tokens per note per call = `TOKENS_PER_NOTE` + `TOKENS_PER_TEXT_CHAR`
+/// x wire-text chars + questions (labels sent) x `TOKENS_PER_QUESTION` +
+/// `TOKENS_PER_LABEL_CHAR` x the chars of every label sent. Every fitted call
+/// had 53 notes, so the per-note and per-question terms are not separately
+/// identified; their sum over a real shard is what the calls measured.
+const TOKENS_PER_NOTE: f64 = 26.9;
+const TOKENS_PER_TEXT_CHAR: f64 = 0.43;
+const TOKENS_PER_QUESTION: f64 = 24.7;
+const TOKENS_PER_LABEL_CHAR: f64 = 0.21;
+
 const DEFAULT_ENDPOINT: &str = "https://classifier.dev/v1/classify";
 
 /// Where a candidate tag came from. Provenance decides which implementations
@@ -66,7 +87,8 @@ impl TagCandidate {
 }
 
 /// What a classifier scores. `text` is the note summary when one exists, else
-/// a `CLASSIFIER_TEXT_CHARS` body excerpt. Never a whole transcript.
+/// the note body. Neither leaves the machine as is: every outbound path builds
+/// its text through `clip_classifier_text`, which bounds the assembled string.
 #[derive(Debug, Clone, Copy)]
 pub struct TagInput<'a> {
     pub title: &'a str,
@@ -74,20 +96,25 @@ pub struct TagInput<'a> {
     pub candidates: &'a [TagCandidate],
 }
 
-/// How much body text the scoring classifiers read when a note has no
-/// summary (design doc, API Design).
+/// The most characters of note text any classifier sends off the machine
+/// (design doc G6, API Design).
 ///
-/// This is a data-boundary number, not a tuning knob: `text` is shipped
-/// verbatim to classifier.dev, so an untruncated body means a whole
-/// transcript of captured audio leaves the machine. Both callers clip
-/// through `body_excerpt` (borg: `TagSources::from_body`; cortex:
-/// `classify::classifier_text`).
+/// This is a data-boundary number, not a tuning knob: the wire text is shipped
+/// verbatim to classifier.dev, so an unbounded one means a whole transcript of
+/// captured audio, or a 129,928-char summary, leaves the machine. Phase 0 kept
+/// 900: clipping cost 0.006 F1 against unclipped, inside the 0.02 bar.
 pub const CLASSIFIER_TEXT_CHARS: usize = 900;
 
-/// The head of a note body, clipped to `CLASSIFIER_TEXT_CHARS`. Counts
-/// characters rather than bytes so a multi-byte boundary cannot panic.
-pub fn body_excerpt(body: &str) -> String {
-    body.chars().take(CLASSIFIER_TEXT_CHARS).collect()
+/// The only builder of classifier wire text: `title + "\n\n" + text`, clipped
+/// as one string at `CLASSIFIER_TEXT_CHARS`. Clipping the assembled string,
+/// not `text` alone, is what makes the bound hold for the exact bytes sent; a
+/// long title eats into the text's share. Counts characters rather than bytes
+/// so a multi-byte boundary cannot panic.
+pub fn clip_classifier_text(title: &str, text: &str) -> String {
+    format!("{title}\n\n{text}")
+        .chars()
+        .take(CLASSIFIER_TEXT_CHARS)
+        .collect()
 }
 
 /// Drives inbox promotion and `cortex-confidence`. Promotion happens on `High`
@@ -151,7 +178,7 @@ impl TagOutput {
 pub trait TagClassifier: Send + Sync {
     fn classify(&self, input: &TagInput) -> Result<TagOutput>;
 
-    /// Overridden by `ClassifierDev`, which sends up to 1,000 texts per call.
+    /// Overridden by `ClassifierDev`, which sends many texts per call.
     fn classify_batch(&self, inputs: &[TagInput]) -> Vec<Result<TagOutput>> {
         inputs.iter().map(|i| self.classify(i)).collect()
     }
@@ -485,12 +512,14 @@ impl FabricClosedVocab {
         let mut vocab: Vec<&String> = self.canon.all.iter().collect();
         vocab.sort();
         let vocab: Vec<&str> = vocab.into_iter().map(String::as_str).collect();
+        // The title leads the clipped text rather than sitting on its own
+        // line, so this prompt carries the same bounded string classifier.dev
+        // gets and a summary-less transcript never reaches Fabric whole.
         format!(
-            "VOCABULARY (choose only from this list, at most {} entries):\n{}\n\nTITLE: {}\n\nTEXT:\n{}\n",
+            "VOCABULARY (choose only from this list, at most {} entries):\n{}\n\nTEXT:\n{}\n",
             self.canon.max_per_note,
             vocab.join("\n"),
-            input.title,
-            input.text
+            clip_classifier_text(input.title, input.text)
         )
     }
 }
@@ -548,8 +577,38 @@ pub struct ClassifierDev {
     mapping: TagMapping,
     threshold: f32,
     token_env: String,
-    endpoint: String,
-    timeout: Duration,
+    transport: Arc<dyn Transport>,
+}
+
+/// Every slug's score for each input, or why that input has none, plus what
+/// each HTTP call cost.
+#[derive(Debug)]
+pub struct ScoredBatch {
+    /// One entry per input, in input order. `Ok` holds a score for every
+    /// vocabulary slug; anything less is that note's `Err`, never a partial map.
+    pub notes: Vec<Result<HashMap<String, f32>>>,
+    /// One row per HTTP call made, successful or not, in call order.
+    pub calls: Vec<CallUsage>,
+}
+
+/// What one classifier.dev call reported about its own cost. Both numbers
+/// are the service's (`usage.input_tokens`, `pricing.estimated_usd`), not our
+/// estimate; a failed call reports zero because no response carried them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CallUsage {
+    pub input_tokens: u64,
+    pub estimated_usd: f64,
+    pub ok: bool,
+}
+
+impl CallUsage {
+    fn failed() -> Self {
+        Self {
+            input_tokens: 0,
+            estimated_usd: 0.0,
+            ok: false,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -560,10 +619,79 @@ struct ClassifyResult {
     model: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct Usage {
+    #[serde(default)]
+    input_tokens: u64,
+}
+
+#[derive(Deserialize, Default)]
+struct Pricing {
+    #[serde(default)]
+    estimated_usd: f64,
+}
+
 #[derive(Deserialize)]
 struct ClassifyResponse {
     #[serde(default)]
     results: Vec<ClassifyResult>,
+    #[serde(default)]
+    usage: Option<Usage>,
+    #[serde(default)]
+    pricing: Option<Pricing>,
+}
+
+impl ClassifyResponse {
+    fn call_usage(&self) -> CallUsage {
+        CallUsage {
+            input_tokens: self.usage.as_ref().map_or(0, |u| u.input_tokens),
+            estimated_usd: self.pricing.as_ref().map_or(0.0, |p| p.estimated_usd),
+            ok: true,
+        }
+    }
+}
+
+/// Sync port over one classifier.dev HTTP exchange: the JSON body out, the
+/// status and raw body back. Status handling stays in `ClassifierDev::post`
+/// so the fake responder in tests exercises the same path production does.
+trait Transport: Send + Sync {
+    fn send(&self, body: &serde_json::Value, token: Option<&str>) -> Result<(u16, String)>;
+}
+
+struct UreqTransport {
+    endpoint: String,
+    timeout: Duration,
+}
+
+impl Transport for UreqTransport {
+    fn send(&self, body: &serde_json::Value, token: Option<&str>) -> Result<(u16, String)> {
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .http_status_as_error(false)
+            .build()
+            .new_agent();
+        let mut request = agent.post(&self.endpoint).header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", &format!("Bearer {token}"));
+        }
+        let mut response = request.send_json(body).context("classifier.dev request failed")?;
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .context("failed to read classifier.dev response body")?;
+        Ok((status, text))
+    }
+}
+
+/// How one call ended. The per-request spend refusal is its own arm because
+/// it is the one failure a smaller request fixes.
+enum CallOutcome {
+    Scored(ClassifyResponse),
+    /// HTTP 402 `request_spending_limit`: this request alone is over the free
+    /// tier's per-request cap. Not the per-day cap, which splitting cannot fix.
+    OverRequestLimit(String),
+    Failed(eyre::Report),
 }
 
 /// `multi` is classifier.dev's multi-label switch; `multi_label` is not a field
@@ -597,15 +725,74 @@ fn ensure_jev(response: &ClassifyResponse) -> Result<()> {
     Ok(())
 }
 
+/// Estimated input tokens one note costs in a call over `labels`, from the
+/// Phase 0 cost model (see `REQUEST_TOKEN_BUDGET`).
+fn note_tokens(text_chars: usize, labels: &[String]) -> f64 {
+    let label_chars: usize = labels.iter().map(|l| l.chars().count()).sum();
+    TOKENS_PER_NOTE
+        + TOKENS_PER_TEXT_CHAR * text_chars as f64
+        + TOKENS_PER_QUESTION * labels.len() as f64
+        + TOKENS_PER_LABEL_CHAR * label_chars as f64
+}
+
+/// Split notes (given by wire-text length) into consecutive chunk sizes, each
+/// estimated under `REQUEST_TOKEN_BUDGET` and at most `MAX_TEXTS_PER_CALL`.
+/// A chunk always holds at least one note: one note over budget is still
+/// sent, and the service's 402 decides it.
+fn plan_chunks(text_chars: &[usize], labels: &[String]) -> Vec<usize> {
+    let mut chunks = Vec::new();
+    let (mut count, mut tokens) = (0usize, 0f64);
+    for &chars in text_chars {
+        let cost = note_tokens(chars, labels);
+        if count > 0 && (count == MAX_TEXTS_PER_CALL || tokens + cost > REQUEST_TOKEN_BUDGET) {
+            chunks.push(count);
+            (count, tokens) = (0, 0.0);
+        }
+        count += 1;
+        tokens += cost;
+    }
+    if count > 0 {
+        chunks.push(count);
+    }
+    chunks
+}
+
+/// A note's scores from one shard, accepted only when they cover exactly the
+/// labels sent: a missing label would read as a zero and an unknown key would
+/// be a score for something we never asked about.
+fn check_shard_scores(sent: &[String], scores: HashMap<String, f32>) -> Result<HashMap<String, f32>> {
+    if let Some(unknown) = scores.keys().find(|k| !sent.contains(k)) {
+        return Err(eyre!(
+            "classifier.dev returned a score for {unknown:?}, which was not a label sent"
+        ));
+    }
+    if let Some(missing) = sent.iter().find(|l| !scores.contains_key(*l)) {
+        return Err(eyre!("classifier.dev returned no score for the sent label {missing:?}"));
+    }
+    Ok(scores)
+}
+
 impl ClassifierDev {
     pub fn new(canon: CanonicalSet, mapping: TagMapping, cfg: &TagsClassifierConfig) -> Self {
+        let transport = UreqTransport {
+            endpoint: cfg.endpoint.clone(),
+            timeout: Duration::from_secs(cfg.timeout_secs),
+        };
+        Self::with_transport(canon, mapping, cfg, Arc::new(transport))
+    }
+
+    fn with_transport(
+        canon: CanonicalSet,
+        mapping: TagMapping,
+        cfg: &TagsClassifierConfig,
+        transport: Arc<dyn Transport>,
+    ) -> Self {
         Self {
             canon,
             mapping,
             threshold: cfg.threshold,
             token_env: cfg.token_env.clone(),
-            endpoint: cfg.endpoint.clone(),
-            timeout: Duration::from_secs(cfg.timeout_secs),
+            transport,
         }
     }
 
@@ -637,83 +824,141 @@ impl ClassifierDev {
         }
     }
 
-    fn post(&self, labels: &[String], texts: &[String]) -> Result<ClassifyResponse> {
+    fn post(&self, labels: &[String], texts: &[String]) -> CallOutcome {
         let body = request_body(labels, texts, self.canon.max_per_note);
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(self.timeout))
-            .http_status_as_error(false)
-            .build()
-            .new_agent();
-        let mut request = agent.post(&self.endpoint).header("content-type", "application/json");
-        if let Some(token) = self.token() {
-            request = request.header("authorization", &format!("Bearer {token}"));
+        let (status, text) = match self.transport.send(&body, self.token().as_deref()) {
+            Ok(reply) => reply,
+            Err(e) => return CallOutcome::Failed(e),
+        };
+        if status == 402 && text.contains("request_spending_limit") {
+            return CallOutcome::OverRequestLimit(text);
         }
-        let mut response = request.send_json(&body).context("classifier.dev request failed")?;
-        let status = response.status().as_u16();
-        let text = response
-            .body_mut()
-            .read_to_string()
-            .context("failed to read classifier.dev response body")?;
         if status != 200 {
-            return Err(eyre!("classifier.dev returned {status}: {text}"));
+            return CallOutcome::Failed(eyre!("classifier.dev returned {status}: {text}"));
         }
-        let parsed: ClassifyResponse =
-            serde_json::from_str(&text).wrap_err_with(|| format!("failed to parse classifier.dev response: {text}"))?;
-        ensure_jev(&parsed)?;
-        Ok(parsed)
+        let parsed: ClassifyResponse = match serde_json::from_str(&text) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                return CallOutcome::Failed(eyre!("failed to parse classifier.dev response: {e}: {text}"));
+            }
+        };
+        if let Err(e) = ensure_jev(&parsed) {
+            return CallOutcome::Failed(e);
+        }
+        let usage = parsed.call_usage();
+        log::debug!(
+            "ClassifierDev::post: texts={} labels={} input_tokens={} estimated_usd={}",
+            texts.len(),
+            labels.len(),
+            usage.input_tokens,
+            usage.estimated_usd
+        );
+        CallOutcome::Scored(parsed)
     }
 
-    /// Shared by `classify` and `classify_batch`: one call per (text chunk x
-    /// label shard), merged per input. Any call failing fails the batch, so a
-    /// partial vocabulary never produces a tag set that looks complete.
+    /// Every vocabulary slug's score for each input: one call per (chunk x
+    /// label shard), with the result decided per note.
     ///
-    /// Two ceilings apply and both are the API's, not ours: at most
-    /// `MAX_LABELS_PER_CALL` labels (the vocabulary is 117, so production
-    /// always shards) and at most `MAX_TEXTS_PER_CALL` texts. Before the
-    /// chunking the whole batch went in one request, which `summarize
-    /// --backfill` and `classify --retag` can make thousands of notes long.
-    fn classify_texts(&self, inputs: &[TagInput]) -> Result<Vec<TagOutput>> {
-        let texts: Vec<String> = inputs.iter().map(|i| format!("{}\n\n{}", i.title, i.text)).collect();
+    /// Two API ceilings shape the calls: at most `MAX_LABELS_PER_CALL` labels
+    /// (the vocabulary is 117, so production always shards) and the free
+    /// tier's per-request spend, which `plan_chunks` stays under and a 402
+    /// `request_spending_limit` enforces by halving the chunk down to one
+    /// note. A note is `Ok` only if every shard scored every label it sent;
+    /// a note that failed one shard is not sent in the next.
+    pub fn score_batch(&self, inputs: &[TagInput]) -> ScoredBatch {
+        let texts: Vec<String> = inputs.iter().map(|i| clip_classifier_text(i.title, i.text)).collect();
         let shards = shard_labels(&self.sorted_vocabulary());
         log::debug!(
-            "ClassifierDev::classify_texts: texts={} shards={} chunk={} threshold={}",
+            "ClassifierDev::score_batch: texts={} shards={} threshold={}",
             texts.len(),
             shards.len(),
-            MAX_TEXTS_PER_CALL,
             self.threshold
         );
 
-        let mut per_input: Vec<Vec<HashMap<String, f32>>> = vec![Vec::new(); inputs.len()];
+        let mut per_note: Vec<Result<Vec<HashMap<String, f32>>>> = inputs.iter().map(|_| Ok(Vec::new())).collect();
+        let mut calls = Vec::new();
         for shard in &shards {
-            // Offset walks with the chunks so a result lands on the input it
-            // came from; `per_input` is indexed over the WHOLE batch.
-            let mut offset = 0usize;
-            for chunk in texts.chunks(MAX_TEXTS_PER_CALL) {
-                let response = self.post(shard, chunk)?;
-                if response.results.len() != chunk.len() {
-                    return Err(eyre!(
-                        "classifier.dev returned {} results for {} inputs",
-                        response.results.len(),
-                        chunk.len()
-                    ));
-                }
-                for (slot, result) in per_input[offset..].iter_mut().zip(response.results) {
-                    slot.push(result.scores);
-                }
-                offset += chunk.len();
+            let pending: Vec<usize> = (0..inputs.len()).filter(|i| per_note[*i].is_ok()).collect();
+            let lengths: Vec<usize> = pending.iter().map(|i| texts[*i].chars().count()).collect();
+            let mut start = 0usize;
+            for size in plan_chunks(&lengths, shard) {
+                let chunk = &pending[start..start + size];
+                self.score_chunk(shard, chunk, &texts, &mut per_note, &mut calls);
+                start += size;
             }
         }
 
-        Ok(inputs
-            .iter()
-            .zip(per_input)
-            .map(|(input, shard_scores)| self.finish(input, &shard_scores))
-            .collect())
+        let notes = per_note
+            .into_iter()
+            .map(|note| note.map(|shard_scores| merge_shard_scores(&shard_scores).into_iter().collect()))
+            .collect();
+        ScoredBatch { notes, calls }
     }
 
-    fn finish(&self, input: &TagInput, shard_scores: &[HashMap<String, f32>]) -> TagOutput {
-        let merged = merge_shard_scores(shard_scores);
-        let mut selected = select_above_threshold(&merged, self.threshold, self.canon.max_per_note);
+    /// Score the notes at `chunk` (indices into `texts`) against one shard,
+    /// halving on a per-request spend refusal. Each call appends one usage row.
+    fn score_chunk(
+        &self,
+        shard: &[String],
+        chunk: &[usize],
+        texts: &[String],
+        per_note: &mut [Result<Vec<HashMap<String, f32>>>],
+        calls: &mut Vec<CallUsage>,
+    ) {
+        let chunk_texts: Vec<String> = chunk.iter().map(|i| texts[*i].clone()).collect();
+        match self.post(shard, &chunk_texts) {
+            CallOutcome::Scored(response) => {
+                calls.push(response.call_usage());
+                if response.results.len() != chunk.len() {
+                    let got = response.results.len();
+                    for i in chunk {
+                        per_note[*i] = Err(eyre!(
+                            "classifier.dev returned {got} results for {} inputs",
+                            chunk.len()
+                        ));
+                    }
+                    return;
+                }
+                for (i, result) in chunk.iter().zip(response.results) {
+                    match check_shard_scores(shard, result.scores) {
+                        Ok(scores) => {
+                            if let Ok(shard_scores) = &mut per_note[*i] {
+                                shard_scores.push(scores);
+                            }
+                        }
+                        Err(e) => per_note[*i] = Err(e),
+                    }
+                }
+            }
+            CallOutcome::OverRequestLimit(body) => {
+                calls.push(CallUsage::failed());
+                if chunk.len() > 1 {
+                    log::debug!(
+                        "ClassifierDev::score_chunk: 402 request_spending_limit on {} notes; splitting",
+                        chunk.len()
+                    );
+                    let (left, right) = chunk.split_at(chunk.len() / 2);
+                    self.score_chunk(shard, left, texts, per_note, calls);
+                    self.score_chunk(shard, right, texts, per_note, calls);
+                } else {
+                    per_note[chunk[0]] = Err(eyre!(
+                        "classifier.dev refused this note alone over its per-request spend limit: {body}"
+                    ));
+                }
+            }
+            CallOutcome::Failed(e) => {
+                calls.push(CallUsage::failed());
+                for i in chunk {
+                    per_note[*i] = Err(eyre!("{e:#}"));
+                }
+            }
+        }
+    }
+
+    /// Select a note's tags from its complete score map.
+    fn finish(&self, input: &TagInput, scores: &HashMap<String, f32>) -> TagOutput {
+        let scored: Vec<(String, f32)> = scores.iter().map(|(t, s)| (t.clone(), *s)).collect();
+        let mut selected = select_above_threshold(&scored, self.threshold, self.canon.max_per_note);
 
         // Author candidates join at tier 0, above anything the model scored.
         for tag in author_tags(input, &self.canon, &self.mapping) {
@@ -739,23 +984,20 @@ impl ClassifierDev {
 
 impl TagClassifier for ClassifierDev {
     fn classify(&self, input: &TagInput) -> Result<TagOutput> {
-        let mut out = self.classify_texts(std::slice::from_ref(input))?;
-        out.pop()
-            .ok_or_else(|| eyre!("classifier.dev returned no result for a single input"))
+        self.classify_batch(std::slice::from_ref(input))
+            .pop()
+            .ok_or_else(|| eyre!("classifier.dev returned no result for a single input"))?
     }
 
+    /// Per note: one note's failure is that note's `Err` (and its caller's
+    /// fallback), not the whole batch's.
     fn classify_batch(&self, inputs: &[TagInput]) -> Vec<Result<TagOutput>> {
-        match self.classify_texts(inputs) {
-            Ok(outputs) => outputs.into_iter().map(Ok).collect(),
-            Err(e) => {
-                // Whole-batch failure: one shard short means every input's
-                // ranking is missing part of the vocabulary.
-                inputs
-                    .iter()
-                    .map(|_| Err(eyre!("classifier.dev batch failed: {e}")))
-                    .collect()
-            }
-        }
+        let batch = self.score_batch(inputs);
+        inputs
+            .iter()
+            .zip(batch.notes)
+            .map(|(input, scores)| scores.map(|s| self.finish(input, &s)))
+            .collect()
     }
 
     fn method(&self) -> TagMethod {

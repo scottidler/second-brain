@@ -443,10 +443,37 @@ fn fabric_live_probe_findings() -> Vec<Finding> {
 /// vocabulary rather than the real one so it is a single cheap request, not a
 /// sharded pass over 117 tags.
 fn classifier_findings() -> Vec<Finding> {
-    let Ok(config) = borg::config::load_config::<borg::config::Config>(None) else {
-        return vec![Finding::info("borg config unavailable; classifier not probed")];
-    };
-    let cfg = &config.tags.classifier;
+    let borg_config = borg::config::load_config::<borg::config::Config>(None).ok();
+    let mut findings = vec![
+        match &borg_config {
+            Some(config) => classifier_settings_finding("borg", &config.tags.classifier),
+            None => Finding::info("borg config unavailable; borg classifier settings unknown"),
+        },
+        match cortex::config::Config::load(None) {
+            Ok(config) => classifier_settings_finding("cortex", &config.tags.classifier),
+            Err(_) => Finding::info("cortex config unavailable; cortex classifier settings unknown"),
+        },
+    ];
+    match borg_config {
+        Some(config) => findings.extend(classifier_probe_findings(&config.tags.classifier)),
+        None => findings.push(Finding::info("borg config unavailable; classifier not probed")),
+    }
+    findings
+}
+
+/// The effective `tags.classifier` block one subsystem runs with. Bootstrap
+/// writes `borg.yml` / `cortex.yml` only when missing, so an existing host
+/// runs code defaults for every key added since; this line is where the
+/// operator sees those values, for both subsystems, not just borg's.
+fn classifier_settings_finding(subsystem: &str, cfg: &distillers::tags::TagsClassifierConfig) -> Finding {
+    let token_env = if cfg.token_env.is_empty() { "none (keyless)" } else { cfg.token_env.as_str() };
+    Finding::info(format!(
+        "{subsystem} classifier settings: classifier {:?}, threshold {}, fallback {:?}, endpoint {}, timeout {}s, token-env {token_env}",
+        cfg.classifier, cfg.threshold, cfg.fallback, cfg.endpoint, cfg.timeout_secs
+    ))
+}
+
+fn classifier_probe_findings(cfg: &distillers::tags::TagsClassifierConfig) -> Vec<Finding> {
     if cfg.classifier == distillers::tags::ClassifierKind::Deterministic {
         return vec![Finding::info(
             "tags.classifier is `deterministic` (local, no network); nothing to probe",

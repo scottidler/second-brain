@@ -251,3 +251,35 @@ mod drift {
         assert_eq!(warns[0].suggested_fix.as_deref(), Some("sb bootstrap --force"));
     }
 }
+
+#[test]
+fn classifier_settings_name_the_subsystem_and_effective_values() {
+    let cfg = distillers::tags::TagsClassifierConfig::default();
+    let finding = classifier_settings_finding("cortex", &cfg);
+    assert_eq!(finding.severity, Severity::Info);
+    for want in [
+        "cortex classifier settings",
+        "classifier Deterministic",
+        "threshold 0.9",
+        "fallback Deterministic",
+        "https://classifier.dev/v1/classify",
+        "timeout 30s",
+        "token-env none (keyless)",
+    ] {
+        assert!(
+            finding.message.contains(want),
+            "missing {want:?} in {}",
+            finding.message
+        );
+    }
+
+    let named = distillers::tags::TagsClassifierConfig {
+        classifier: distillers::tags::ClassifierKind::ClassifierDev,
+        token_env: "CLASSIFIER_DEV_TOKEN".to_string(),
+        ..cfg
+    };
+    let finding = classifier_settings_finding("borg", &named);
+    assert!(finding.message.starts_with("borg classifier settings"));
+    assert!(finding.message.contains("classifier ClassifierDev"));
+    assert!(finding.message.contains("token-env CLASSIFIER_DEV_TOKEN"));
+}
