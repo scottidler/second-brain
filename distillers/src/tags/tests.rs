@@ -34,6 +34,7 @@ fn canon() -> CanonicalSet {
         no_segment,
         no_classifier: protect_list(),
         max_per_note: 8,
+        descriptions: Default::default(),
     }
 }
 

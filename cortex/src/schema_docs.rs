@@ -27,6 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use eyre::{Context, Result};
+use vault::canonical::TagEntry;
 use vault::schema::{NoteType, Origin, Status};
 
 /// Vault-relative directory the three generated docs live in.
@@ -229,11 +230,11 @@ impl RenderReport {
 /// reports `Written`; files that already match are left alone, which is what
 /// keeps `generated-at` from churning on every run.
 ///
-/// `tags` is the caller's already-loaded canonical vocabulary (sorted), used
+/// `tags` is the caller's already-loaded canonical vocabulary (sorted by slug), used
 /// only for `tag-values.md` - this function stays filesystem-free for the
 /// vocabulary the same way `schema_info_payload` (oracle, P8) does, so it
 /// stays unit-testable with no config or `canonical-tags.yml` on disk.
-pub fn render_all(vault_root: &Path, apply: bool, tags: &[String]) -> Result<RenderReport> {
+pub fn render_all(vault_root: &Path, apply: bool, tags: &[TagEntry]) -> Result<RenderReport> {
     let now = chrono::Utc::now();
     render_all_at(vault_root, apply, now, tags)
 }
@@ -243,7 +244,7 @@ pub fn render_all_at(
     vault_root: &Path,
     apply: bool,
     now: chrono::DateTime<chrono::Utc>,
-    tags: &[String],
+    tags: &[TagEntry],
 ) -> Result<RenderReport> {
     let dir = vault_root.join(SCHEMAS_DIR);
     let mut report = RenderReport::default();
@@ -426,7 +427,7 @@ const TAG_RULES: &str = "\
 /// doctor` both resolve it through `config.sweep.canonical_path`), not a
 /// compiled enum, so this function takes it as a parameter rather than
 /// reading a `rows: fn() -> Vec<Row>`.
-fn render_tag_values_doc(tags: &[String], generated_at: &str) -> String {
+fn render_tag_values_doc(tags: &[TagEntry], generated_at: &str) -> String {
     let date = generated_at.split('T').next().unwrap_or(generated_at);
 
     let mut out = String::new();
@@ -450,10 +451,12 @@ fn render_tag_values_doc(tags: &[String], generated_at: &str) -> String {
     out.push_str("See also: [[frontmatter]], [[type-values]], [[origin-values]], [[status-values]]\n\n");
 
     out.push_str(&format!("## Values ({})\n\n", tags.len()));
-    out.push_str("| Tag |\n");
-    out.push_str("|-----|\n");
+    out.push_str("| Tag | Description |\n");
+    out.push_str("|-----|-------------|\n");
     for tag in tags {
-        out.push_str(&format!("| {tag} |\n"));
+        // A `|` in a description would end the cell early.
+        let description = tag.description.as_deref().unwrap_or("").replace('|', "\\|");
+        out.push_str(&format!("| {} | {description} |\n", tag.slug));
     }
     out.push('\n');
 
@@ -465,7 +468,7 @@ fn render_tag_values_doc(tags: &[String], generated_at: &str) -> String {
 
 /// Same neutralise-the-timestamp comparison as `matches_render`, for the
 /// data-driven tag doc.
-fn matches_tag_render(tags: &[String], disk: &str) -> bool {
+fn matches_tag_render(tags: &[TagEntry], disk: &str) -> bool {
     match disk_generated_at(disk) {
         Some(stamp) => render_tag_values_doc(tags, &stamp) == disk,
         None => false,

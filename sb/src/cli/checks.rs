@@ -455,6 +455,17 @@ fn classifier_findings() -> Vec<Finding> {
             None => Finding::info("cortex config unavailable; cortex classifier settings unknown"),
         },
     ];
+    if let Some(config) = &cortex_config {
+        findings.push(
+            match vault::canonical::CanonicalTagsFile::load(&config.sweep.canonical_path) {
+                Ok(file) => tag_description_finding(&file.canonical_set()),
+                Err(e) => Finding::warn(
+                    format!("could not load canonical tags to count descriptions: {e:#}"),
+                    "sb bootstrap",
+                ),
+            },
+        );
+    }
     // Bulk runs (`--retag`, `tag-apply`) are cortex's, so the allowance is
     // read with cortex's budget keys.
     let bulk_cfg = cortex_config.map(|c| c.tags.classifier).unwrap_or_default();
@@ -487,6 +498,18 @@ fn classifier_settings_finding(subsystem: &str, cfg: &distillers::tags::TagsClas
         cfg.daily_usd_budget,
         cfg.ingest_reserve_usd
     ))
+}
+
+/// How much of the vocabulary still reaches classifier.dev as a bare slug.
+/// Info, not Warn: an undescribed tag still classifies, and descriptions are
+/// backfilled by hand (`sb cortex tag-describe`).
+fn tag_description_finding(canon: &vault::canonical::CanonicalSet) -> Finding {
+    let undescribed = canon
+        .all
+        .iter()
+        .filter(|t| !canon.descriptions.contains_key(*t))
+        .count();
+    Finding::info(format!("{undescribed} of {} tags have no description", canon.all.len()))
 }
 
 /// Today's classifier.dev bulk spend from the ledger, and what a bulk run may
@@ -528,6 +551,7 @@ fn classifier_probe_findings(cfg: &distillers::tags::TagsClassifierConfig) -> Ve
         no_segment: std::collections::HashSet::new(),
         no_classifier: std::collections::HashSet::new(),
         max_per_note: 3,
+        descriptions: Default::default(),
     };
     let mapping = vault::canonical::TagMapping::default();
     let classifier = distillers::tags::build(cfg, &canon, &mapping, None);

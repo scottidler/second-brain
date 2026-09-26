@@ -29,6 +29,7 @@ fn test_canonical_set() -> CanonicalSet {
         no_segment: HashSet::new(),
         no_classifier: HashSet::new(),
         max_per_note: 7,
+        descriptions: Default::default(),
     }
 }
 
@@ -210,6 +211,7 @@ fn segment_match_skips_no_segment_tags_in_both_matchers() {
         no_segment: ["work", "life"].iter().map(|s| s.to_string()).collect(),
         no_classifier: HashSet::new(),
         max_per_note: 7,
+        descriptions: Default::default(),
     };
     let mapping = TagMapping::new();
 
@@ -276,6 +278,7 @@ fn protecting_set(protected: &[&str], max_per_note: usize) -> CanonicalSet {
         no_segment: HashSet::new(),
         no_classifier: protected.iter().map(|s| (*s).to_string()).collect(),
         max_per_note,
+        descriptions: Default::default(),
     }
 }
 
@@ -359,7 +362,7 @@ fn shipped_canonical_tags_file_parses_and_holds_its_invariants() {
     // promotion into a red `cargo test --workspace`. What must hold is that
     // the vocabulary is non-empty, stays under its own ceiling, never repeats
     // a tag across groups, and is uniformly kebab-case.
-    let mut flat: Vec<&String> = file.tags.values().flatten().collect();
+    let mut flat: Vec<&String> = file.tags.values().flatten().map(|e| &e.slug).collect();
     assert!(!flat.is_empty(), "the vocabulary is never empty");
     assert!(
         flat.len() <= file.max_canonical,
@@ -383,4 +386,143 @@ fn shipped_canonical_tags_file_parses_and_holds_its_invariants() {
             "guard-list tag {guarded:?} is not in the vocabulary"
         );
     }
+
+    let set = file.canonical_set();
+    for described in set.descriptions.keys() {
+        assert!(
+            set.all.contains(described),
+            "description for {described:?} outside the vocabulary"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tag entries: a bare slug or a one-key `slug: "description"` map.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bare_only_entries_parse() {
+    let yaml = "tags:\n  tech:\n    - rust\n    - cli\n  system: []\n";
+    let file: CanonicalTagsFile = serde_yaml::from_str(yaml).expect("bare-only file parses");
+    assert_eq!(
+        file.tags.get("tech").map(Vec::as_slice),
+        Some(&[TagEntry::bare("rust"), TagEntry::bare("cli")][..])
+    );
+    let set = file.canonical_set();
+    assert_eq!(set.all.len(), 2);
+    assert!(set.descriptions.is_empty(), "no entry carries a description");
+}
+
+#[test]
+fn mixed_entries_parse() {
+    let yaml = "\
+tags:
+  homelab:
+    - homelab: \"self-hosted servers and home network: NAS, Proxmox, k3s at home; not work infrastructure\"
+    - home-automation
+";
+    let file: CanonicalTagsFile = serde_yaml::from_str(yaml).expect("mixed file parses");
+    let group = file.tags.get("homelab").expect("homelab group");
+    assert_eq!(group[0].slug, "homelab");
+    assert_eq!(
+        group[0].description.as_deref(),
+        Some("self-hosted servers and home network: NAS, Proxmox, k3s at home; not work infrastructure")
+    );
+    assert_eq!(group[1], TagEntry::bare("home-automation"));
+
+    let set = file.canonical_set();
+    assert_eq!(
+        set.all,
+        ["homelab", "home-automation"].iter().map(|s| s.to_string()).collect()
+    );
+    assert_eq!(set.descriptions.len(), 1, "only the described tag is in the map");
+    assert!(set.descriptions["homelab"].starts_with("self-hosted"));
+}
+
+#[test]
+fn two_key_entry_is_an_error() {
+    let yaml = "tags:\n  tech:\n    - rust: \"systems language\"\n      go: \"another language\"\n";
+    let err = serde_yaml::from_str::<CanonicalTagsFile>(yaml).expect_err("two keys in one entry must not parse");
+    let rendered = format!("{err}");
+    assert!(rendered.contains("one-key"), "{rendered}");
+    assert!(
+        rendered.contains("rust") && rendered.contains("go"),
+        "names both keys: {rendered}"
+    );
+}
+
+/// The entry rules live in `Deserialize`, so the raw `serde_yaml::from_str`
+/// that `promote_tags` runs enforces them with no `load()` wrapper.
+#[test]
+fn raw_serde_parse_enforces_entry_rules() {
+    let over_cap = "x".repeat(MAX_DESCRIPTION_CHARS + 1);
+    let cases = [
+        ("    - rust: 'the \"fast\" language'\n".to_string(), "`\"`"),
+        (format!("    - rust: \"{over_cap}\"\n"), "201 chars"),
+        ("    - rust: \"\"\n".to_string(), "empty"),
+        ("    - rust: \"a\\nb\"\n".to_string(), "control character"),
+        ("    - rust: 0.9\n".to_string(), "must be a string"),
+        ("    - rust:\n".to_string(), "must be a string"),
+    ];
+    for (entry, expected) in cases {
+        let yaml = format!("tags:\n  tech:\n{entry}");
+        let err = serde_yaml::from_str::<CanonicalTagsFile>(&yaml).expect_err(&format!("{entry:?} must not parse"));
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains(expected),
+            "{entry:?}: expected {expected:?} in {rendered}"
+        );
+        assert!(rendered.contains("rust"), "names the tag: {rendered}");
+    }
+}
+
+#[test]
+fn a_description_at_the_cap_parses() {
+    let at_cap = "x".repeat(MAX_DESCRIPTION_CHARS);
+    let yaml = format!("tags:\n  tech:\n    - rust: \"{at_cap}\"\n");
+    let file: CanonicalTagsFile = serde_yaml::from_str(&yaml).expect("200 chars is legal");
+    assert_eq!(
+        file.canonical_set().descriptions["rust"].chars().count(),
+        MAX_DESCRIPTION_CHARS
+    );
+}
+
+#[test]
+fn described_holds_the_parse_rules() {
+    assert!(TagEntry::described("rust", "systems language; not python").is_ok());
+    let err = TagEntry::described("rust", "the \"fast\" one").expect_err("quote refused");
+    assert!(format!("{err}").contains("rust"), "{err}");
+    assert!(TagEntry::described("rust", "").is_err());
+    assert!(TagEntry::described("rust", "x".repeat(MAX_DESCRIPTION_CHARS + 1)).is_err());
+}
+
+/// What `yaml_line` writes reads back as the same entry, including a `\\`
+/// that a double-quoted scalar would otherwise treat as an escape.
+#[test]
+fn yaml_line_reads_back_as_the_same_entry() {
+    let entries = [
+        TagEntry::bare("rust"),
+        TagEntry::described("homelab", "self-hosted: NAS, k3s; not work").expect("valid"),
+        TagEntry::described("windows", r"C:\Users paths and \n literals").expect("valid"),
+    ];
+    for entry in entries {
+        let line = entry.yaml_line();
+        let back: TagEntry = serde_yaml::from_str(&line).unwrap_or_else(|e| panic!("{line:?} reparses: {e}"));
+        assert_eq!(back, entry, "{line:?}");
+    }
+    assert_eq!(TagEntry::bare("rust").yaml_line(), "rust");
+    assert_eq!(
+        TagEntry::described("rust", "systems language")
+            .expect("valid")
+            .yaml_line(),
+        "rust: \"systems language\""
+    );
+}
+
+#[test]
+fn sorted_entries_are_sorted_by_slug_across_groups() {
+    let yaml = "tags:\n  b:\n    - zig\n    - ai: \"artificial intelligence\"\n  a:\n    - rust\n";
+    let file: CanonicalTagsFile = serde_yaml::from_str(yaml).expect("parses");
+    let slugs: Vec<String> = file.sorted_entries().into_iter().map(|e| e.slug).collect();
+    assert_eq!(slugs, vec!["ai", "rust", "zig"]);
 }

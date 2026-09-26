@@ -83,3 +83,29 @@ Design doc: `docs/design/2026-09-25-described-tag-classification.md`
 ### Open questions
 - Cortex's daemon classify pass also calls classifier.dev once per inbox or catch-up note when `classifier: classifier-dev`, and it writes no ledger rows. That spend comes out of `ingest-reserve-usd` alongside borg's. Should it be metered too?
 - Not run live: no `--retag` over several notes against classifier.dev, and no `sb doctor` on a host. Both were exercised only through fakes. A live check after deploy: `sb cortex classify --retag 'notes/a*.md'` (dry run) should print the estimate row, and `sb doctor` should show the spend line.
+
+## Phase 3: Descriptions in the vocabulary schema
+
+### Design decisions
+- Gate: under the doc's rule neither A2 nor A3 beat baseline in P0. Scott overrode the rule on 2026-09-26 ("build it"; see Resolved Decisions and Phase 0 Results), so this phase is built on that decision. Descriptions are still not sent to classifier.dev: that is P5, which stays gated on the `gold-2` confirmation run.
+- `TagEntry { slug, description: Option<String> }` (`vault/src/canonical.rs`) deserializes through `#[serde(try_from = "RawTagEntry")]`, where `RawTagEntry` is the untagged enum `Bare(String) | Described(serde_yaml::Mapping)`. The entry rules run in `TryFrom`, so the raw `serde_yaml::from_str` in `promote_tags` enforces them. The errors carry serde_yaml's path and location (`tags.tech: tag "go": description contains ... at line 3 column 5`).
+- The map arm reads a `serde_yaml::Mapping`, not a `HashMap<String, String>`, so a non-string value (`- rust: 0.9`, `- rust:`) gets its own message naming the tag, not serde's "did not match any variant".
+- `CanonicalSet.descriptions` (slug -> description) holds described tags only. `all` still holds every slug, so every reader of `all_tags()` / `canonical_set()` compiles unchanged. Test literals of `CanonicalSet` gained `descriptions: Default::default()`.
+- `TagEntry::yaml_line` is the one writer of an entry's text: `slug` or `slug: "description"`, with `\` escaped. A validated description holds no `"` and no control character, so that escape is all a double-quoted scalar needs to read back the same string. `yaml_line_reads_back_as_the_same_entry` pins this.
+- `insert_tags_into_group` now takes `&[TagEntry]` and writes each through `yaml_line`. `promote_tags` passes bare entries, so its output is unchanged until P7.
+- `describe_entry_in_group(text, group, slug, description)` (`cortex/src/proposals.rs`) is `pub` for P4 and has no production caller yet. It parses each entry line of the group as a `TagEntry`. It rewrites the target line only if that line reads exactly as `yaml_line` would write it. So a trailing comment or a single-quoted form bails instead of being dropped or reformatted. It returns the buffer; the caller validates the whole file before writing, as `promote_tags` does.
+- `tag-values.md` renders `| Tag | Description |`. An undescribed tag gets an empty cell, and a `|` in a description is escaped as `\|`. `load_canonical_tags` (`sb/src/cli/cortex.rs`) returns `CanonicalTagsFile::sorted_entries()`, sorted by slug as before. `render_all` / `render_all_at` take `&[TagEntry]`. oracle's own `load_canonical_tags` is untouched, since it lists slugs only.
+- `sb doctor`: `tag_description_finding` (`sb/src/cli/checks.rs`) prints an Info line in the classifier section, `N of M tags have no description`. It reads the vocabulary at cortex's `sweep.canonical_path`. It is Info, not Warn, because an undescribed tag still classifies.
+
+### Deviations
+- The doc says "`TagEntry` untagged enum". The public `TagEntry` is a validated struct, and the untagged enum is the private raw form it is converted from. Same effect, correct seam: consumers read `slug` and `description` without matching two variants.
+- Beyond the doc's three entry rules (one key, at most 200 chars, no `"`), parsing also refuses an empty description and one containing a control character (a line break or tab). An empty one would reach Jev as `slug: `. A line break would split the label's line both in the file and in the Jev question.
+- The success criterion `sb cortex schema --render` ran with the worktree binary (`target/debug/sb cortex --vault <scratch copy> schema --render`) against a scratch copy of the live `system/schemas/`, not against `~/repos/scottidler/obsidian`. Result: exit 0, `tag-values.md` written with `| Tag | Description |` and 117 rows with empty description cells; the other three docs were `unchanged`.
+
+### Tradeoffs
+- Row format `| slug |  |` (empty cell) vs. omitting undescribed tags or writing `-`. The empty cell keeps every tag listed and makes the backfill gap visible in the vault. A placeholder would read as a description.
+- The describe rewrite bails on any line not in the written form, vs. rewriting it anyway. A hand-formatted line (comment, single quotes) is rare, and silently losing a comment or re-quoting Scott's text is worse than a refusal naming the line.
+
+### Open questions
+- The live vault's `system/schemas/tag-values.md` still has the one-column table. After this ships, `sb doctor` and `sb cortex schema --check` report it as drifted until someone runs `sb cortex schema --render` on the host. Run it as part of the deploy?
+- Not run live: `sb doctor` on a host (the finding is unit-tested, and it is checked against the shipped file).

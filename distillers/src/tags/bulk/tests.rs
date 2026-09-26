@@ -88,6 +88,7 @@ fn one_shard_canon() -> CanonicalSet {
         no_segment: HashSet::new(),
         no_classifier: HashSet::new(),
         max_per_note: 8,
+        descriptions: Default::default(),
     }
 }
 

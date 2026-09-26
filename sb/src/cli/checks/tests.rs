@@ -296,6 +296,25 @@ fn classifier_settings_carry_the_spend_budget_keys() {
     }
 }
 
+#[test]
+fn tag_description_finding_counts_the_undescribed_tags() {
+    let file: vault::canonical::CanonicalTagsFile =
+        serde_yaml::from_str("tags:\n  tech:\n    - rust: \"the Rust language\"\n    - cli\n  ai:\n    - ai\n")
+            .expect("mixed vocabulary");
+    let finding = tag_description_finding(&file.canonical_set());
+    assert_eq!(finding.severity, Severity::Info);
+    assert_eq!(finding.message, "2 of 3 tags have no description");
+
+    let shipped: vault::canonical::CanonicalTagsFile =
+        serde_yaml::from_str(crate::cli::bootstrap::CANONICAL_TAGS_YML).expect("shipped vocabulary");
+    let set = shipped.canonical_set();
+    let undescribed = set.all.len() - set.descriptions.len();
+    assert_eq!(
+        tag_description_finding(&set).message,
+        format!("{undescribed} of {} tags have no description", set.all.len())
+    );
+}
+
 struct FixedDay(chrono::NaiveDate);
 
 impl distillers::tags::spend::Clock for FixedDay {

@@ -497,6 +497,114 @@ fn apply_changes_exactly_one_line_and_nothing_else() {
     assert_eq!(reparsed.no_classifier_tags.len(), 5);
 }
 
+/// Every line other than the one inserted or rewritten, in order.
+fn lines_without(text: &str, at: usize) -> Vec<&str> {
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.remove(at);
+    lines
+}
+
+/// A described insert into the shipped vocabulary adds exactly one
+/// `    - slug: "desc"` line, the result parses with the description attached,
+/// and every other line is byte-identical.
+#[test]
+fn a_described_insert_changes_exactly_one_line_and_round_trips() {
+    let entry = TagEntry::described(
+        "ci-cd",
+        "build and deploy pipelines: GitHub Actions, Drone; not k8s ops",
+    )
+    .expect("valid");
+    let after = insert_tags_into_group(SHIPPED_CANONICAL, "tech", std::slice::from_ref(&entry)).expect("insert");
+
+    let line = format!("    - {}", entry.yaml_line());
+    assert_eq!(
+        line,
+        "    - ci-cd: \"build and deploy pipelines: GitHub Actions, Drone; not k8s ops\""
+    );
+    let at = after.lines().position(|l| l == line).expect("inserted line");
+    assert_eq!(lines_without(&after, at), SHIPPED_CANONICAL.lines().collect::<Vec<_>>());
+    assert!(after.ends_with('\n'), "the trailing newline survives");
+
+    let reparsed: vault::canonical::CanonicalTagsFile = serde_yaml::from_str(&after).expect("must parse");
+    assert!(reparsed.tags["tech"].contains(&entry));
+    assert_eq!(reparsed.canonical_set().descriptions.len(), 1);
+}
+
+/// Describing a bare shipped entry rewrites that one line in place: same line
+/// count, same position, every other line byte-identical, and a second
+/// describe of the now-described entry replaces its wording.
+#[test]
+fn describe_entry_in_group_rewrites_one_line_in_place() {
+    let before: Vec<&str> = SHIPPED_CANONICAL.lines().collect();
+    let at = before
+        .iter()
+        .position(|l| *l == "    - rust")
+        .expect("shipped rust entry");
+
+    let after = describe_entry_in_group(
+        SHIPPED_CANONICAL,
+        "tech",
+        "rust",
+        "the Rust language: cargo, crates; not python",
+    )
+    .expect("describe");
+    let after_lines: Vec<&str> = after.lines().collect();
+    assert_eq!(after_lines.len(), before.len(), "no line added or removed");
+    assert_eq!(
+        after_lines[at],
+        "    - rust: \"the Rust language: cargo, crates; not python\""
+    );
+    assert_eq!(lines_without(&after, at), lines_without(SHIPPED_CANONICAL, at));
+
+    let reparsed: vault::canonical::CanonicalTagsFile = serde_yaml::from_str(&after).expect("must parse");
+    assert_eq!(
+        reparsed.canonical_set().descriptions.get("rust").map(String::as_str),
+        Some("the Rust language: cargo, crates; not python")
+    );
+    assert_eq!(
+        reparsed.all_tags(),
+        serde_yaml::from_str::<vault::canonical::CanonicalTagsFile>(SHIPPED_CANONICAL)
+            .expect("shipped")
+            .all_tags()
+    );
+
+    let reworded = describe_entry_in_group(&after, "tech", "rust", "rustc and cargo").expect("re-describe");
+    assert_eq!(reworded.lines().nth(at), Some("    - rust: \"rustc and cargo\""));
+    assert_eq!(lines_without(&reworded, at), lines_without(SHIPPED_CANONICAL, at));
+}
+
+#[test]
+fn describe_entry_in_group_bails_on_what_it_does_not_recognize() {
+    let cases: [(&str, &str, &str, &str, &str); 6] = [
+        (SHIPPED_CANONICAL, "tech", "no-such-tag", "x", "not an entry"),
+        (SHIPPED_CANONICAL, "ai", "rust", "x", "not an entry"),
+        (SHIPPED_CANONICAL, "nope", "rust", "x", "no recognized"),
+        (SHIPPED_CANONICAL, "tech", "rust", "the \"fast\" one", "`\"`"),
+        (
+            "tags:\n  tech:\n    - rust # keep\n",
+            "tech",
+            "rust",
+            "x",
+            "refusing to rewrite",
+        ),
+        (
+            "tags:\n  tech:\n    - rust: 'single quoted'\n",
+            "tech",
+            "rust",
+            "x",
+            "refusing to rewrite",
+        ),
+    ];
+    for (text, group, slug, desc, expected) in cases {
+        let err = describe_entry_in_group(text, group, slug, desc).expect_err(&format!("{group}/{slug} must bail"));
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(expected),
+            "{group}/{slug}: expected {expected:?} in {rendered}"
+        );
+    }
+}
+
 /// `  system: []` has no `    - ` line to anchor on: the insert rewrites that
 /// one line to block form.
 #[test]
@@ -512,7 +620,7 @@ fn promoting_into_the_empty_flow_group_produces_valid_block_form() {
     let reparsed: vault::canonical::CanonicalTagsFile = serde_yaml::from_str(&after).expect("must parse");
     assert_eq!(
         reparsed.tags.get("system").map(Vec::as_slice),
-        Some(&["jsonl".to_string()][..])
+        Some(&[TagEntry::bare("jsonl")][..])
     );
 }
 
@@ -626,9 +734,9 @@ fn several_tags_promote_in_one_call() {
     let reparsed: vault::canonical::CanonicalTagsFile =
         serde_yaml::from_str(&std::fs::read_to_string(&canonical).expect("read")).expect("parse");
     let tech = reparsed.tags.get("tech").expect("tech group");
-    assert!(tech.contains(&"ci-cd".to_string()));
-    assert!(tech.contains(&"jsonl".to_string()));
-    assert!(tech.contains(&"helm".to_string()));
+    assert!(tech.contains(&TagEntry::bare("ci-cd")));
+    assert!(tech.contains(&TagEntry::bare("jsonl")));
+    assert!(tech.contains(&TagEntry::bare("helm")));
 }
 
 // ---------------------------------------------------------------------------
@@ -702,7 +810,7 @@ fn a_repeated_tag_in_one_call_is_inserted_once() {
     assert_eq!(after.matches("\n    - ci-cd").count(), 1, "exactly one line written");
 
     let reparsed: vault::canonical::CanonicalTagsFile = serde_yaml::from_str(&after).expect("parse");
-    let mut flat: Vec<&String> = reparsed.tags.values().flatten().collect();
+    let mut flat: Vec<&String> = reparsed.tags.values().flatten().map(|e| &e.slug).collect();
     let before_dedup = flat.len();
     flat.sort();
     flat.dedup();

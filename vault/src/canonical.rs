@@ -23,7 +23,127 @@ pub struct CanonicalTagsFile {
     /// `CanonicalSet::no_classifier`.
     #[serde(default)]
     pub no_classifier_tags: Vec<String>,
-    pub tags: HashMap<String, Vec<String>>,
+    pub tags: HashMap<String, Vec<TagEntry>>,
+}
+
+/// The longest description a tag may carry: classifier.dev's documented
+/// long-context label cap, applied everywhere so one rule holds.
+pub const MAX_DESCRIPTION_CHARS: usize = 200;
+
+/// One vocabulary entry: a bare slug (`- rust`) or a one-key map
+/// (`- homelab: "self-hosted servers ..."`). Both forms are legal in one file.
+///
+/// The entry rules (one key, a string description of at most
+/// `MAX_DESCRIPTION_CHARS`, no `"`) run inside `Deserialize` through
+/// `try_from`, not in a `load()` wrapper, because `promote_tags` parses the
+/// file with raw `serde_yaml::from_str` and would bypass a wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawTagEntry")]
+pub struct TagEntry {
+    pub slug: String,
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawTagEntry {
+    Bare(String),
+    Described(serde_yaml::Mapping),
+}
+
+impl TryFrom<RawTagEntry> for TagEntry {
+    type Error = String;
+
+    fn try_from(raw: RawTagEntry) -> std::result::Result<Self, Self::Error> {
+        let map = match raw {
+            RawTagEntry::Bare(slug) => return Ok(Self::bare(slug)),
+            RawTagEntry::Described(map) => map,
+        };
+        if map.len() != 1 {
+            let keys: Vec<String> = map
+                .keys()
+                .map(|k| k.as_str().map_or_else(|| format!("{k:?}"), str::to_string))
+                .collect();
+            return Err(format!(
+                "a tag entry is a bare slug or a one-key `slug: \"description\"` map; got {} keys {keys:?}",
+                map.len()
+            ));
+        }
+        let (key, value) = map.into_iter().next().expect("one key, checked above");
+        let serde_yaml::Value::String(slug) = key else {
+            return Err(format!("tag entry key {key:?} is not a string slug"));
+        };
+        let serde_yaml::Value::String(description) = value else {
+            return Err(format!(
+                "tag {slug:?}: description must be a string, got {value:?} (write a bare `- {slug}` for no description)"
+            ));
+        };
+        validate_description(&slug, &description)?;
+        Ok(Self {
+            slug,
+            description: Some(description),
+        })
+    }
+}
+
+/// The description rules, shared by parsing and by `TagEntry::described`.
+/// Empty and multi-line descriptions are refused too: an empty one would send
+/// `slug: ` as a label, and a line break would split the label's line in the
+/// file and in the classifier question.
+fn validate_description(slug: &str, description: &str) -> std::result::Result<(), String> {
+    if description.trim().is_empty() {
+        return Err(format!(
+            "tag {slug:?}: description is empty (write a bare `- {slug}` for no description)"
+        ));
+    }
+    let chars = description.chars().count();
+    if chars > MAX_DESCRIPTION_CHARS {
+        return Err(format!(
+            "tag {slug:?}: description is {chars} chars, over the {MAX_DESCRIPTION_CHARS}-char cap"
+        ));
+    }
+    if description.contains('"') {
+        return Err(format!(
+            "tag {slug:?}: description contains `\"`, which classifier.dev uses to quote the label"
+        ));
+    }
+    if description.chars().any(char::is_control) {
+        return Err(format!(
+            "tag {slug:?}: description contains a control character (line break or tab); keep it on one line"
+        ));
+    }
+    Ok(())
+}
+
+impl TagEntry {
+    pub fn bare(slug: impl Into<String>) -> Self {
+        Self {
+            slug: slug.into(),
+            description: None,
+        }
+    }
+
+    /// A described entry, held to the same rules parsing enforces.
+    pub fn described(slug: impl Into<String>, description: impl Into<String>) -> Result<Self> {
+        let slug = slug.into();
+        let description = description.into();
+        validate_description(&slug, &description).map_err(|e| eyre::eyre!(e))?;
+        Ok(Self {
+            slug,
+            description: Some(description),
+        })
+    }
+
+    /// The entry as it is written after `    - ` in `canonical-tags.yml`:
+    /// `slug`, or `slug: "description"`. A validated description holds no
+    /// `"` or control character, so escaping `\` is all a double-quoted YAML
+    /// scalar needs to read back the same string.
+    pub fn yaml_line(&self) -> String {
+        match &self.description {
+            None => self.slug.clone(),
+            Some(d) => format!("{}: \"{}\"", self.slug, d.replace('\\', "\\\\")),
+        }
+    }
 }
 
 /// The loaded canonical-tag vocabulary shared by borg, cortex, and (from
@@ -42,6 +162,9 @@ pub struct CanonicalSet {
     /// instead of in it is how sweep came to cap without one.
     pub no_classifier: HashSet<String>,
     pub max_per_note: usize,
+    /// slug -> description, for described tags only. An undescribed tag is
+    /// in `all` and absent here.
+    pub descriptions: HashMap<String, String>,
 }
 
 /// Matches `max-per-note` in the shipped `config/canonical-tags.yml`
@@ -64,7 +187,22 @@ impl CanonicalTagsFile {
     }
 
     pub fn all_tags(&self) -> HashSet<String> {
-        self.tags.values().flatten().cloned().collect()
+        self.tags.values().flatten().map(|e| e.slug.clone()).collect()
+    }
+
+    /// Every entry across all groups, sorted by slug.
+    pub fn sorted_entries(&self) -> Vec<TagEntry> {
+        let mut entries: Vec<TagEntry> = self.tags.values().flatten().cloned().collect();
+        entries.sort_by(|a, b| a.slug.cmp(&b.slug));
+        entries
+    }
+
+    fn descriptions(&self) -> HashMap<String, String> {
+        self.tags
+            .values()
+            .flatten()
+            .filter_map(|e| e.description.clone().map(|d| (e.slug.clone(), d)))
+            .collect()
     }
 
     /// Build the shared `CanonicalSet` snapshot every matcher takes.
@@ -74,6 +212,7 @@ impl CanonicalTagsFile {
             no_segment: self.no_segment_match.iter().cloned().collect(),
             no_classifier: self.no_classifier_tags.iter().cloned().collect(),
             max_per_note: self.max_per_note,
+            descriptions: self.descriptions(),
         }
     }
 }

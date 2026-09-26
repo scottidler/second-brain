@@ -402,6 +402,7 @@ fn canon_with(tags: &[&str], max_per_note: usize) -> vault::canonical::Canonical
         no_segment: Default::default(),
         no_classifier: Default::default(),
         max_per_note,
+        descriptions: Default::default(),
     }
 }
 

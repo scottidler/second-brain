@@ -9,6 +9,11 @@ fn fixed_now() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::<chrono::Utc>::from_timestamp(1_788_566_400, 0).expect("fixed now")
 }
 
+/// A bare (undescribed) vocabulary, in the order given.
+fn bare(slugs: &[&str]) -> Vec<TagEntry> {
+    slugs.iter().map(|s| TagEntry::bare(*s)).collect()
+}
+
 fn fixture_path(filename: &str) -> String {
     format!("{FIXTURE_DIR}/{filename}")
 }
@@ -134,7 +139,7 @@ fn render_all_drifts_then_writes_then_settles() {
         std::fs::write(dir.join(spec.filename), "---\ntitle: hand written\n---\n\nold\n").expect("seed");
     }
     std::fs::write(dir.join(TAG_VALUES_FILENAME), "---\ntitle: hand written\n---\n\nold\n").expect("seed");
-    let tags = vec!["rust".to_string(), "tech".to_string()];
+    let tags = bare(&["rust", "tech"]);
 
     let check = render_all_at(tmp.path(), false, fixed_now(), &tags).expect("check");
     assert!(check.drifted(), "hand-written files drift");
@@ -175,7 +180,7 @@ fn render_all_drifts_then_writes_then_settles() {
 fn render_all_creates_missing_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(tmp.path().join(SCHEMAS_DIR)).expect("create schemas dir");
-    let tags = vec!["rust".to_string()];
+    let tags = bare(&["rust"]);
 
     let check = render_all_at(tmp.path(), false, fixed_now(), &tags).expect("check");
     assert!(check.drifted(), "absent files count as drift");
@@ -201,7 +206,7 @@ fn render_all_creates_missing_files() {
 fn tag_values_doc_lists_every_canonical_tag() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(tmp.path().join(SCHEMAS_DIR)).expect("create schemas dir");
-    let tags = vec!["ai".to_string(), "rust".to_string(), "tech".to_string()];
+    let tags = bare(&["ai", "rust", "tech"]);
 
     let rendered = render_all_at(tmp.path(), true, fixed_now(), &tags).expect("render");
     assert!(
@@ -213,8 +218,9 @@ fn tag_values_doc_lists_every_canonical_tag() {
 
     let content = std::fs::read_to_string(tmp.path().join(SCHEMAS_DIR).join(TAG_VALUES_FILENAME)).expect("read");
     for tag in &tags {
+        let tag = &tag.slug;
         assert!(
-            content.contains(&format!("| {tag} |")),
+            content.contains(&format!("| {tag} |  |")),
             "missing tag row: {tag}\n{content}"
         );
     }
@@ -231,12 +237,7 @@ fn tag_values_doc_lists_every_canonical_tag() {
     );
 
     // A vocabulary change is drift.
-    let grown = vec![
-        "ai".to_string(),
-        "rust".to_string(),
-        "tech".to_string(),
-        "security".to_string(),
-    ];
+    let grown = bare(&["ai", "rust", "tech", "security"]);
     let check = render_all_at(tmp.path(), false, fixed_now(), &grown).expect("check");
     assert!(
         check
@@ -303,7 +304,7 @@ fn doc_paths_names_the_four_generated_files() {
 fn generated_frontmatter_writes_tags_in_block_form() {
     let stamp = stamp(fixed_now());
     let mut rendered: Vec<String> = SPECS.iter().map(|spec| render_doc(spec, &stamp)).collect();
-    rendered.push(render_tag_values_doc(&["rust".to_string()], &stamp));
+    rendered.push(render_tag_values_doc(&bare(&["rust"]), &stamp));
     for doc in rendered {
         let (frontmatter, _) = doc
             .strip_prefix("---\n")
@@ -328,7 +329,7 @@ fn unowned_values_doc_is_obsolete_in_check_and_removed_in_render() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path().join(SCHEMAS_DIR);
     std::fs::create_dir_all(&dir).expect("create schemas dir");
-    let tags = vec!["rust".to_string()];
+    let tags = bare(&["rust"]);
     render_all_at(tmp.path(), true, fixed_now(), &tags).expect("seed owned docs");
     let owned_before: Vec<String> = doc_paths()
         .iter()
@@ -364,4 +365,35 @@ fn unowned_values_doc_is_obsolete_in_check_and_removed_in_render() {
 
     let settled = render_all_at(tmp.path(), false, fixed_now(), &tags).expect("recheck");
     assert!(settled.strangers.is_empty());
+}
+
+/// Phase 3: `tag-values.md` is a `| Tag | Description |` table. A described
+/// tag's row carries its description (a `|` escaped so the cell holds), an
+/// undescribed tag's row an empty cell, and a description change is drift.
+#[test]
+fn tag_values_doc_carries_each_tags_description() {
+    let tags = vec![
+        TagEntry::described("homelab", "self-hosted servers | home network; not work").expect("valid"),
+        TagEntry::bare("rust"),
+    ];
+    let doc = render_tag_values_doc(&tags, &stamp(fixed_now()));
+    assert!(doc.contains("| Tag | Description |\n|-----|-------------|\n"), "{doc}");
+    assert!(
+        doc.contains("| homelab | self-hosted servers \\| home network; not work |\n"),
+        "{doc}"
+    );
+    assert!(doc.contains("| rust |  |\n"), "undescribed: empty cell\n{doc}");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join(SCHEMAS_DIR)).expect("create schemas dir");
+    render_all_at(tmp.path(), true, fixed_now(), &tags).expect("render");
+    let reworded = vec![
+        TagEntry::described("homelab", "self-hosted servers").expect("valid"),
+        TagEntry::bare("rust"),
+    ];
+    let check = render_all_at(tmp.path(), false, fixed_now(), &reworded).expect("check");
+    assert_eq!(
+        check.drifted_paths(),
+        vec![format!("{SCHEMAS_DIR}/{TAG_VALUES_FILENAME}")]
+    );
 }

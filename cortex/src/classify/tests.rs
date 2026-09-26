@@ -15,6 +15,7 @@ fn test_canon() -> CanonicalSet {
         no_segment: HashSet::new(),
         no_classifier: HashSet::new(),
         max_per_note: 7,
+        descriptions: Default::default(),
     }
 }
 
@@ -260,6 +261,7 @@ fn test_build_enrichment_fields_cap_keeps_preserved() {
         &note,
         &CanonicalSet {
             max_per_note: 2,
+            descriptions: Default::default(),
             ..test_canon()
         },
     );
@@ -596,6 +598,7 @@ fn retag_then_sweep_keeps_the_protected_tag() {
     let canon = CanonicalSet {
         no_classifier: ["work".to_string()].into_iter().collect(),
         max_per_note: 3,
+        descriptions: Default::default(),
         ..test_canon()
     };
     let classifiers = Classifiers::new(
@@ -662,6 +665,7 @@ fn retag_then_sweep_keeps_the_protected_tag() {
 fn enrichment_cap_keeps_the_protected_tag_when_the_note_already_exceeds_it() {
     let canon = CanonicalSet {
         max_per_note: 2,
+        descriptions: Default::default(),
         ..protecting_canon(&["work"])
     };
     let note = NoteBuilder::new("inbox/test.md")

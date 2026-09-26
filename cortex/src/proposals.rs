@@ -19,7 +19,7 @@ use eyre::{Context, Result};
 use rayon::prelude::*;
 use serde::Deserialize;
 
-use vault::canonical::{self, CanonicalSet, TagMapping};
+use vault::canonical::{self, CanonicalSet, TagEntry, TagMapping};
 use vault::identity::NoteIndex;
 use vault::note::Note;
 
@@ -525,7 +525,8 @@ pub fn promote_tags(
     }
 
     if apply && !to_add.is_empty() {
-        let updated = insert_tags_into_group(&text, group, &to_add)?;
+        let entries: Vec<TagEntry> = to_add.iter().map(|t| TagEntry::bare(t.as_str())).collect();
+        let updated = insert_tags_into_group(&text, group, &entries)?;
         // Validate the CANDIDATE BUFFER, not the file on disk:
         // `CanonicalTagsFile::load` takes a path and would re-read the old
         // bytes, proving nothing about what is about to be written.
@@ -580,7 +581,8 @@ fn overwrite_queue(path: &Path, proposals: Vec<crate::sweep::Proposal>) -> Resul
     Ok(())
 }
 
-/// Append `tags` to the end of `group`'s sequence, changing NOTHING else.
+/// Append `entries` to the end of `group`'s sequence, changing NOTHING else.
+/// Each is written as `    - slug` or `    - slug: "description"`.
 ///
 /// A targeted textual insert, not a serde round-trip: no round-trip preserves
 /// sequence indentation, the empty-flow `  system: []` form, or comments, and
@@ -595,7 +597,7 @@ fn overwrite_queue(path: &Path, proposals: Vec<crate::sweep::Proposal>) -> Resul
 /// Two layouts are recognized, and anything else is a hard bail rather than a
 /// guess: a block sequence (`  group:` followed by `    - tag` lines) and the
 /// empty-flow form (`  group: []`), which is rewritten to block form.
-fn insert_tags_into_group(text: &str, group: &str, tags: &[String]) -> Result<String> {
+fn insert_tags_into_group(text: &str, group: &str, entries: &[TagEntry]) -> Result<String> {
     let lines: Vec<&str> = text.lines().collect();
     let key_block = format!("  {group}:");
     let key_flow = format!("  {group}: []");
@@ -613,8 +615,8 @@ fn insert_tags_into_group(text: &str, group: &str, tags: &[String]) -> Result<St
     if lines[idx] == key_flow {
         // Empty-flow group: rewrite the one line to block form, then append.
         out[idx] = key_block;
-        for (offset, tag) in tags.iter().enumerate() {
-            out.insert(idx + 1 + offset, format!("    - {tag}"));
+        for (offset, entry) in entries.iter().enumerate() {
+            out.insert(idx + 1 + offset, format!("    - {}", entry.yaml_line()));
         }
     } else {
         // Block sequence: find its LAST `    - ` entry and append after it.
@@ -630,13 +632,66 @@ fn insert_tags_into_group(text: &str, group: &str, tags: &[String]) -> Result<St
         let after = last.ok_or_else(|| {
             eyre::eyre!("group {group:?} has no `    - ` entries and is not `[]`; refusing to guess its layout")
         })?;
-        for (offset, tag) in tags.iter().enumerate() {
-            out.insert(after + 1 + offset, format!("    - {tag}"));
+        for (offset, entry) in entries.iter().enumerate() {
+            out.insert(after + 1 + offset, format!("    - {}", entry.yaml_line()));
         }
     }
 
     let mut joined = out.join("\n");
     if trailing_newline {
+        joined.push('\n');
+    }
+    Ok(joined)
+}
+
+/// Rewrite `slug`'s one entry line inside `group` to `    - slug: "description"`,
+/// changing NOTHING else. Same contract as `insert_tags_into_group`: a
+/// targeted textual edit, and a hard bail on any layout it does not
+/// recognize rather than a guess.
+///
+/// The entry may be bare or already described; either way the line is
+/// replaced whole. The target line must read exactly as `TagEntry::yaml_line`
+/// writes it, so a trailing comment or a single-quoted form bails instead of
+/// being dropped or reformatted. The caller validates the returned buffer as a
+/// whole file before writing it, as `promote_tags` does.
+pub fn describe_entry_in_group(text: &str, group: &str, slug: &str, description: &str) -> Result<String> {
+    log::debug!("proposals::describe_entry_in_group: group={group} slug={slug}");
+    let entry = TagEntry::described(slug, description)?;
+    let lines: Vec<&str> = text.lines().collect();
+    let key_block = format!("  {group}:");
+
+    let idx = lines
+        .iter()
+        .position(|l| *l == key_block)
+        .ok_or_else(|| eyre::eyre!("group {group:?} has no recognized `  {group}:` block line; refusing to guess"))?;
+
+    let mut target = None;
+    for (i, line) in lines.iter().enumerate().skip(idx + 1) {
+        let Some(item) = line.strip_prefix("    - ") else {
+            if line.trim().is_empty() {
+                continue;
+            }
+            // Any non-entry, non-blank line ends this group.
+            break;
+        };
+        let parsed: TagEntry = serde_yaml::from_str(item)
+            .with_context(|| format!("group {group:?} line {} is not a recognized tag entry: {line:?}", i + 1))?;
+        if parsed.slug == slug {
+            if item != parsed.yaml_line() {
+                eyre::bail!(
+                    "{slug:?}'s entry line {line:?} is not in the written `    - slug` | `    - slug: \"...\"` form; refusing to rewrite it"
+                );
+            }
+            target = Some(i);
+            break;
+        }
+    }
+    let at = target.ok_or_else(|| eyre::eyre!("tag {slug:?} is not an entry of group {group:?}"))?;
+
+    let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    out[at] = format!("    - {}", entry.yaml_line());
+    let mut joined = out.join("\n");
+    if text.ends_with('\n') {
         joined.push('\n');
     }
     Ok(joined)

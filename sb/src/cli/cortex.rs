@@ -1017,18 +1017,16 @@ fn print_unlink_stats(s: &cortex::unlink::UnlinkStats) {
     }
 }
 
-/// Load and sort the canonical tag vocabulary for `sb cortex schema`'s
-/// `tag-values.md` renderer. Shared with `sb doctor`'s schema-drift check
+/// Load the canonical tag vocabulary, sorted by slug, for `sb cortex
+/// schema`'s `tag-values.md` renderer. Shared with `sb doctor`'s schema-drift check
 /// (`checks.rs`) so the two can never compare against a different
 /// vocabulary. Propagates the load error (fail loud): a schema command that
 /// silently rendered an empty or stale vocabulary would be worse than one
 /// that refuses.
-pub(crate) fn load_canonical_tags(config: &cortex::config::Config) -> Result<Vec<String>> {
+pub(crate) fn load_canonical_tags(config: &cortex::config::Config) -> Result<Vec<vault::canonical::TagEntry>> {
     let file = vault::canonical::CanonicalTagsFile::load(&config.sweep.canonical_path)
         .context("failed to load canonical tags for schema docs")?;
-    let mut tags: Vec<String> = file.all_tags().into_iter().collect();
-    tags.sort();
-    Ok(tags)
+    Ok(file.sorted_entries())
 }
 
 fn print_schema_report(r: &cortex::schema_docs::RenderReport) {
