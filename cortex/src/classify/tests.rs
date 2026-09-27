@@ -979,3 +979,83 @@ fn a_bulk_retag_without_a_ledger_fails_closed() {
         apply_classify(vault.root(), &vault.scan(), &vault.config(), &one, &classifiers).expect("one note");
     assert_eq!(written, vec!["notes/a.md".to_string()]);
 }
+
+/// Answers `rust` and, on every call, records how many vault notes carry
+/// `cortex-classified: true`, so a test can see whether writes land between
+/// classifications or only after all of them.
+struct WriteObserver {
+    root: std::path::PathBuf,
+    written_before_each_call: std::sync::Mutex<Vec<usize>>,
+}
+
+impl TagClassifier for WriteObserver {
+    fn classify(&self, _input: &TagInput) -> Result<TagOutput> {
+        let written = ["inbox", "notes"]
+            .iter()
+            .filter_map(|dir| std::fs::read_dir(self.root.join(dir)).ok())
+            .flatten()
+            .filter_map(|entry| std::fs::read_to_string(entry.ok()?.path()).ok())
+            .filter(|c| c.contains("cortex-classified: true"))
+            .count();
+        self.written_before_each_call.lock().expect("lock").push(written);
+        Ok(TagOutput {
+            tags: vec!["rust".to_string()],
+            scores: None,
+            confidence: Confidence::High,
+            method: TagMethod::ClassifierDev,
+        })
+    }
+
+    fn method(&self) -> TagMethod {
+        TagMethod::ClassifierDev
+    }
+}
+
+/// Implementation audit r1 (P2): an ordinary (non-`--retag`) run writes
+/// each note before it classifies the next, as v0.15.4's per-note loop did.
+/// Before the fix every target was classified first, so the second call saw
+/// zero notes written.
+#[test]
+fn an_ordinary_run_writes_each_note_before_classifying_the_next() {
+    use crate::testutil::TestVault;
+
+    let vault = TestVault::new();
+    for name in ["orphan-a", "orphan-b"] {
+        vault.add_note(
+            &format!("notes/{name}.md"),
+            &format!("---\ntitle: {name}\ndate: 2026-03-20\ntype: link\ntags: []\n---\nA tag-less note.\n"),
+        );
+    }
+    let observer = std::sync::Arc::new(WriteObserver {
+        root: vault.root().to_path_buf(),
+        written_before_each_call: std::sync::Mutex::new(Vec::new()),
+    });
+    struct Shared(std::sync::Arc<WriteObserver>);
+    impl TagClassifier for Shared {
+        fn classify(&self, input: &TagInput) -> Result<TagOutput> {
+            self.0.classify(input)
+        }
+        fn method(&self) -> TagMethod {
+            self.0.method()
+        }
+    }
+    let classifiers = Classifiers::new(Box::new(Shared(observer.clone())), Stub::failing(), test_canon());
+
+    let notes = vault.scan();
+    let (_, written) = apply_classify(vault.root(), &notes, &vault.config(), &apply_opts(), &classifiers).unwrap();
+
+    let seen = observer.written_before_each_call.lock().expect("lock").clone();
+    assert_eq!(
+        seen.len(),
+        written.len(),
+        "one classification per written note: {written:?}"
+    );
+    assert!(seen.len() >= 2, "{seen:?}");
+    for pair in seen.windows(2) {
+        assert_eq!(
+            pair[1],
+            pair[0] + 1,
+            "each note must be written before the next is classified: {seen:?}"
+        );
+    }
+}

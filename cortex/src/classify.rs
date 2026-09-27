@@ -407,18 +407,24 @@ fn select_targets<'a>(notes: &'a [Note], vault_root: &Path, config: &Config, opt
     inbox.into_iter().chain(unclassified).collect()
 }
 
-/// Classify every target before anything is written. A `--retag` over more
-/// than one note is a bulk run (`Classifiers::classify_bulk`): its estimate
-/// is reported, it refuses above the day allowance, and a note left
-/// unscored at classifier.dev's limit is `None` and reported as unchanged.
-fn classify_targets(
-    targets: &[&Note],
-    classifiers: &Classifiers,
+/// Each target's classification, in target order. A `--retag` over more
+/// than one note is a bulk run (`Classifiers::classify_bulk`), classified in
+/// full before anything is written: its estimate is reported, it refuses
+/// above the day allowance, and a note left unscored at classifier.dev's
+/// limit is `None` and reported as unchanged.
+///
+/// Every other run is lazy: a note is classified only when the caller
+/// reaches it, so each write lands before the next note is classified and a
+/// pass that dies midway keeps what it already wrote, as v0.15.4's per-note
+/// loop did (implementation audit r1, P2).
+fn classify_targets<'a>(
+    targets: &'a [&'a Note],
+    classifiers: &'a Classifiers,
     is_retag: bool,
     report: &mut Report,
-) -> Result<Vec<Option<ClassifyResult>>> {
+) -> Result<Box<dyn Iterator<Item = Option<ClassifyResult>> + 'a>> {
     if !is_retag || targets.len() < 2 {
-        return Ok(targets.iter().map(|n| Some(classify_note(n, classifiers))).collect());
+        return Ok(Box::new(targets.iter().map(|n| Some(classify_note(n, classifiers)))));
     }
     let parts: Vec<(String, Vec<TagCandidate>)> = targets
         .iter()
@@ -443,7 +449,7 @@ fn classify_targets(
             fix: None,
         });
     }
-    Ok(targets
+    let results: Vec<Option<ClassifyResult>> = targets
         .iter()
         .zip(bulk.outputs)
         .map(|(note, out)| match out {
@@ -462,7 +468,8 @@ fn classify_targets(
                 None
             }
         })
-        .collect())
+        .collect();
+    Ok(Box::new(results.into_iter()))
 }
 
 /// Dry-run: returns planned classifications as violations in a Report
