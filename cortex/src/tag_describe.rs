@@ -68,7 +68,11 @@ impl CachedDraft {
         cache_dir.join(format!("{tag}.json"))
     }
 
-    fn save(&self, cache_dir: &Path) -> Result<PathBuf> {
+    /// `pub(crate)`: `proposals::promote_tags` (Phase 7) reuses this cache
+    /// format and directory for a promoted tag's draft, so a promotion's
+    /// dry-run and `--apply` share the same cache-then-write contract this
+    /// module established.
+    pub(crate) fn save(&self, cache_dir: &Path) -> Result<PathBuf> {
         std::fs::create_dir_all(cache_dir).with_context(|| format!("failed to create {}", cache_dir.display()))?;
         let path = Self::path(cache_dir, &self.tag);
         let json = serde_json::to_string_pretty(self).wrap_err("failed to serialize draft")?;
@@ -79,8 +83,8 @@ impl CachedDraft {
 
     /// Read `tag`'s cached draft, held to the same description rules the
     /// vocabulary parser enforces. A missing cache is an error naming the
-    /// dry run that makes one.
-    fn load(cache_dir: &Path, tag: &str) -> Result<Self> {
+    /// dry run that makes one. `pub(crate)`, same reason as `save`.
+    pub(crate) fn load(cache_dir: &Path, tag: &str) -> Result<Self> {
         let path = Self::path(cache_dir, tag);
         if !path.exists() {
             eyre::bail!(
@@ -234,7 +238,9 @@ pub fn select_samples<'a>(notes: &'a [Note], tag: &str, exclude: &HashSet<String
     picked
 }
 
-fn sample_of(note: &Note) -> Sample {
+/// `pub(crate)`: `proposals::promote_tags` (Phase 7) builds the same shape of
+/// sample for a note-derived proposal source.
+pub(crate) fn sample_of(note: &Note) -> Sample {
     Sample {
         path: note.path.to_string_lossy().to_string(),
         text: distillers::tags::clip_classifier_text(

@@ -410,15 +410,25 @@ fn the_frozen_fixture_reproduces_the_shipped_counting_rule() {
 const SHIPPED_CANONICAL: &str = include_str!("../../../config/canonical-tags.yml");
 
 fn promote_fixture(dir: &Path, queue_tags: &[&str]) -> (PathBuf, PathBuf) {
+    let entries: Vec<(&str, Vec<String>)> = queue_tags
+        .iter()
+        .map(|t| (*t, vec!["notes/a.md".to_string()]))
+        .collect();
+    promote_fixture_with_sources(dir, &entries)
+}
+
+/// Same as `promote_fixture`, with each tag's own proposal `sources` (Phase 7
+/// describing drafts from them), instead of the fixed `notes/a.md`.
+fn promote_fixture_with_sources(dir: &Path, entries: &[(&str, Vec<String>)]) -> (PathBuf, PathBuf) {
     let canonical = dir.join("canonical-tags.yml");
     std::fs::write(&canonical, SHIPPED_CANONICAL).expect("copy shipped vocabulary");
 
-    let proposals: Vec<crate::sweep::Proposal> = queue_tags
+    let proposals: Vec<crate::sweep::Proposal> = entries
         .iter()
-        .map(|t| crate::sweep::Proposal {
+        .map(|(t, sources)| crate::sweep::Proposal {
             tag: t.to_string(),
             frequency: 9,
-            sources: vec!["notes/a.md".to_string()],
+            sources: sources.clone(),
             source: ProposalSource::Staged,
         })
         .collect();
@@ -443,7 +453,7 @@ fn a_dry_run_leaves_both_files_byte_identical() {
     let before_c = std::fs::read(&canonical).expect("read");
     let before_q = std::fs::read(&queue).expect("read");
 
-    let report = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", false).expect("dry run");
+    let report = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", false, None).expect("dry run");
     assert!(!report.applied);
     assert!(report.diff.contains("ci-cd"));
 
@@ -464,7 +474,7 @@ fn apply_changes_exactly_one_line_and_nothing_else() {
     let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
     let before = std::fs::read_to_string(&canonical).expect("read");
 
-    promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true).expect("apply");
+    promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true, None).expect("apply");
     let after = std::fs::read_to_string(&canonical).expect("read");
 
     let before_lines: Vec<&str> = before.lines().collect();
@@ -612,7 +622,7 @@ fn promoting_into_the_empty_flow_group_produces_valid_block_form() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let (queue, canonical) = promote_fixture(dir.path(), &["jsonl"]);
 
-    promote_tags(&queue, &canonical, &["jsonl".to_string()], "system", true).expect("apply");
+    promote_tags(&queue, &canonical, &["jsonl".to_string()], "system", true, None).expect("apply");
     let after = std::fs::read_to_string(&canonical).expect("read");
 
     assert!(!after.contains("  system: []"), "the flow form is gone");
@@ -632,10 +642,10 @@ fn a_repeat_apply_is_idempotent() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
 
-    promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true).expect("first apply");
+    promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true, None).expect("first apply");
     let after_first = std::fs::read(&canonical).expect("read");
 
-    let second = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true)
+    let second = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true, None)
         .expect("a second apply must succeed, not bail on the proposal it consumed");
     assert_eq!(second.already_present, vec!["ci-cd".to_string()]);
     assert!(second.tags.is_empty(), "nothing left to add");
@@ -651,7 +661,7 @@ fn apply_drops_the_promoted_entry_from_the_queue() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd", "jsonl"]);
 
-    promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true).expect("apply");
+    promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true, None).expect("apply");
     let file: crate::sweep::ProposalsFile =
         serde_yaml::from_str(&std::fs::read_to_string(&queue).expect("read")).expect("parse");
     let tags: Vec<&str> = file.proposals.iter().map(|p| p.tag.as_str()).collect();
@@ -664,7 +674,7 @@ fn apply_drops_the_promoted_entry_from_the_queue() {
 fn a_tag_that_is_not_a_pending_proposal_bails() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
-    let err = promote_tags(&queue, &canonical, &["never-proposed".to_string()], "tech", false)
+    let err = promote_tags(&queue, &canonical, &["never-proposed".to_string()], "tech", false, None)
         .expect_err("promotion must trace to a proposal");
     assert!(format!("{err}").contains("never-proposed"), "{err}");
 }
@@ -673,7 +683,7 @@ fn a_tag_that_is_not_a_pending_proposal_bails() {
 fn an_unknown_group_bails_naming_the_valid_ones() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
-    let err = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "nope", false).expect_err("bad group");
+    let err = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "nope", false, None).expect_err("bad group");
     let rendered = format!("{err}");
     assert!(rendered.contains("nope"), "{rendered}");
     assert!(rendered.contains("tech"), "must name the valid groups: {rendered}");
@@ -686,7 +696,7 @@ fn an_empty_or_non_kebab_tag_bails() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
     for bad in ["", "Not-Kebab", "trailing-", "double--dash", "under_score"] {
-        let err = promote_tags(&queue, &canonical, &[bad.to_string()], "tech", false)
+        let err = promote_tags(&queue, &canonical, &[bad.to_string()], "tech", false, None)
             .expect_err(&format!("{bad:?} must be rejected"));
         assert!(
             format!("{err}").contains("a-z0-9"),
@@ -711,7 +721,7 @@ fn promotion_at_the_cap_bails_naming_the_count() {
     )
     .expect("write");
 
-    let err = promote_tags(&queue, &canonical, &["jsonl".to_string()], "tech", false).expect_err("at the cap");
+    let err = promote_tags(&queue, &canonical, &["jsonl".to_string()], "tech", false, None).expect_err("at the cap");
     let rendered = format!("{err}");
     assert!(rendered.contains("max-canonical"), "{rendered}");
     assert!(rendered.contains('2'), "must name the count: {rendered}");
@@ -728,6 +738,7 @@ fn several_tags_promote_in_one_call() {
         &["ci-cd".to_string(), "jsonl".to_string(), "helm".to_string()],
         "tech",
         true,
+        None,
     )
     .expect("batch apply");
 
@@ -802,6 +813,7 @@ fn a_repeated_tag_in_one_call_is_inserted_once() {
         &["ci-cd".to_string(), "ci-cd".to_string()],
         "tech",
         true,
+        None,
     )
     .expect("apply");
     assert_eq!(report.tags, vec!["ci-cd".to_string()], "deduped before the insert");
@@ -815,4 +827,176 @@ fn a_repeated_tag_in_one_call_is_inserted_once() {
     flat.sort();
     flat.dedup();
     assert_eq!(flat.len(), before_dedup, "the uniqueness invariant still holds");
+}
+
+// ---------------------------------------------------------------------------
+// promote_tags: Phase 7 describing. `describe: None` is `--no-describe` and
+// is exercised by every `promote_tags` test above; these cover `Some(ctx)`.
+// ---------------------------------------------------------------------------
+
+/// A fake fabric runner: records every request and answers from `reply`.
+struct FakeDrafter {
+    reply: String,
+    requests: std::cell::RefCell<Vec<DescribeRequest>>,
+}
+
+impl FakeDrafter {
+    fn answering(reply: &str) -> Self {
+        Self {
+            reply: reply.to_string(),
+            requests: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl TagDrafter for FakeDrafter {
+    fn draft(&self, request: &DescribeRequest) -> Result<String> {
+        self.requests.borrow_mut().push(request.clone());
+        crate::tag_describe::parse_description(&request.tag, &self.reply)
+    }
+}
+
+const CI_CD_REPLY: &str =
+    r#"{"description": "continuous integration and deployment pipelines: github actions, otto, buildkite"}"#;
+
+/// The two Phase 7 success criteria in one flow: a dry run drafts and caches
+/// the description (`+ \`tag\`: "desc"` in the diff), then `--apply` writes
+/// exactly the cached text and does not draft again.
+#[test]
+fn a_dry_run_drafts_and_caches_the_description_then_apply_writes_it() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
+    let cache = dir.path().join("cache");
+    let staging = dir.path().join("stages");
+    let drafter = FakeDrafter::answering(CI_CD_REPLY);
+    let ctx = PromotionDescribe {
+        notes: &[],
+        staging_root: &staging,
+        cache_dir: &cache,
+        drafter: &drafter,
+    };
+
+    let dry = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", false, Some(&ctx)).expect("dry run");
+    assert!(!dry.applied);
+    assert!(dry.failed.is_empty(), "{:?}", dry.failed);
+    assert!(dry.diff.contains("+ `ci-cd`: \"continuous integration"), "{}", dry.diff);
+    assert_eq!(drafter.requests.borrow().len(), 1);
+    assert_eq!(drafter.requests.borrow()[0].group, "tech");
+    assert_eq!(
+        std::fs::read_to_string(&canonical).expect("read"),
+        SHIPPED_CANONICAL,
+        "dry run wrote the vocabulary"
+    );
+
+    let cached = CachedDraft::load(&cache, "ci-cd").expect("cached");
+    assert_eq!(cached.source, DraftSource::Fabric);
+    assert!(cached.description.starts_with("continuous integration"));
+
+    let report = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true, Some(&ctx)).expect("apply");
+    assert!(report.applied);
+    assert!(report.failed.is_empty());
+    assert_eq!(report.tags, vec!["ci-cd".to_string()]);
+
+    let after = std::fs::read_to_string(&canonical).expect("read");
+    assert!(
+        after.contains(&format!("    - ci-cd: \"{}\"", cached.description)),
+        "{after}"
+    );
+    assert_eq!(
+        drafter.requests.borrow().len(),
+        1,
+        "apply reads the cache and must not draft again"
+    );
+}
+
+/// `--no-describe` (`describe: None`) skips drafting entirely, even with a
+/// drafter in reach: today's bare insert, no LLM call.
+#[test]
+fn no_describe_keeps_the_bare_insert_and_never_calls_the_drafter() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture(dir.path(), &["ci-cd"]);
+
+    let report = promote_tags(&queue, &canonical, &["ci-cd".to_string()], "tech", true, None).expect("apply");
+    assert!(report.failed.is_empty());
+    assert!(report.diff.contains("+ `ci-cd` under group"), "{}", report.diff);
+    assert!(!report.diff.contains("ci-cd`:"), "{}", report.diff);
+
+    let after = std::fs::read_to_string(&canonical).expect("read");
+    assert!(after.contains("\n    - ci-cd\n"), "{after}");
+}
+
+/// A `trace:<id>` proposal source reads the staged `distilled.yml` summary
+/// (the new `StagedDistilled::summary` field); a bad draft fails only its own
+/// tag, is not cached, and is not promoted this run, while a sibling in the
+/// same call still drafts, caches, and is promoted.
+#[test]
+fn a_trace_source_feeds_the_staged_summary_and_a_bad_draft_does_not_block_a_sibling() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (queue, canonical) = promote_fixture_with_sources(
+        dir.path(),
+        &[
+            ("ci-cd", vec!["trace:ht-1".to_string()]),
+            ("helm", vec!["notes/a.md".to_string()]),
+        ],
+    );
+    let staging = dir.path().join("stages");
+    std::fs::create_dir_all(staging.join("ht-1")).expect("trace dir");
+    std::fs::write(
+        staging.join("ht-1").join("distilled.yml"),
+        "summary: \"github actions pipelines that build and release otto\"\ntags:\n  - ci-cd\n",
+    )
+    .expect("write staged distilled.yml");
+    let cache = dir.path().join("cache");
+
+    struct PerTag;
+    impl TagDrafter for PerTag {
+        fn draft(&self, request: &DescribeRequest) -> Result<String> {
+            match request.tag.as_str() {
+                "ci-cd" => {
+                    assert_eq!(request.samples.len(), 1, "the trace source resolved to one sample");
+                    assert_eq!(request.samples[0].path, "trace:ht-1");
+                    assert!(
+                        request.samples[0].text.contains("github actions pipelines"),
+                        "{}",
+                        request.samples[0].text
+                    );
+                    crate::tag_describe::parse_description("ci-cd", "no json here")
+                }
+                _ => crate::tag_describe::parse_description(
+                    &request.tag,
+                    r#"{"description": "kubernetes package manager: charts, releases, values.yaml"}"#,
+                ),
+            }
+        }
+    }
+    let ctx = PromotionDescribe {
+        notes: &[],
+        staging_root: &staging,
+        cache_dir: &cache,
+        drafter: &PerTag,
+    };
+
+    let report = promote_tags(
+        &queue,
+        &canonical,
+        &["ci-cd".to_string(), "helm".to_string()],
+        "tech",
+        false,
+        Some(&ctx),
+    )
+    .expect("dry run");
+
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.failed[0].0, "ci-cd");
+    assert_eq!(
+        report.tags,
+        vec!["helm".to_string()],
+        "only the good draft is promoted this run"
+    );
+    assert!(
+        !CachedDraft::path(&cache, "ci-cd").exists(),
+        "a failed draft was cached"
+    );
+    assert!(CachedDraft::path(&cache, "helm").exists());
+    assert!(report.diff.contains("! `ci-cd` description failed"), "{}", report.diff);
 }

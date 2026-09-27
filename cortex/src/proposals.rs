@@ -23,7 +23,9 @@ use vault::canonical::{self, CanonicalSet, TagEntry, TagMapping};
 use vault::identity::NoteIndex;
 use vault::note::Note;
 
+use crate::config::Config;
 use crate::sweep::{Proposal, ProposalSource};
+use crate::tag_describe::{CachedDraft, DescribeRequest, DraftSource, FabricDrafter, Sample, TagDrafter};
 
 /// Sample provenance cap, matching `cortex::entities::MAX_SAMPLE_NOTES`.
 pub const MAX_SAMPLE_SOURCES: usize = 5;
@@ -75,6 +77,12 @@ struct StagedDistilled {
     tags: Vec<String>,
     #[serde(default)]
     meta: Option<StagedMeta>,
+    /// The distiller's prose summary. Read only by Phase 7's `trace:<id>`
+    /// promotion samples; `read_staged_candidates` never touches it. Absent
+    /// on legacy staged files that predate this read, hence `Option` +
+    /// `default` rather than widening the narrow-read contract further.
+    #[serde(default)]
+    summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -428,7 +436,7 @@ mod tests;
 
 /// Outcome of one `tag-promote` invocation. Three branches, mirroring
 /// `cortex::entities::PromoteReport`: already-present, applied, dry-run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TagPromoteReport {
     pub tags: Vec<String>,
     pub group: String,
@@ -436,6 +444,27 @@ pub struct TagPromoteReport {
     /// Tags that were already canonical, so nothing was done for them.
     pub already_present: Vec<String>,
     pub diff: String,
+    /// Tags whose description draft failed (Phase 7 describing only). A dry
+    /// run keeps drafting the rest, same tolerance as `tag_describe`'s
+    /// `DescribeReport::failed`; the CLI exits non-zero when this is
+    /// non-empty. Always empty under `--no-describe`.
+    pub failed: Vec<(String, String)>,
+}
+
+/// Context Phase 7's promotion drafting needs, gathered by the caller so
+/// `proposals.rs` stays free of vault-scan and fabric-runner setup. `None` at
+/// the call site is `--no-describe`: today's bare insert, no LLM call, no
+/// cache read or write.
+pub struct PromotionDescribe<'a> {
+    /// The governed vault notes, for a note-path proposal source.
+    pub notes: &'a [Note],
+    /// borg's staging root, for a `trace:<id>` proposal source.
+    pub staging_root: &'a std::path::Path,
+    /// `~/.cache/sb/tag-describe/<tag>.json`, shared with `tag-describe`
+    /// (Phase 4): the same cache format and the same dry-run-caches,
+    /// apply-reads-the-cache contract.
+    pub cache_dir: &'a std::path::Path,
+    pub drafter: &'a dyn TagDrafter,
 }
 
 /// Promote pending tag proposals into a group of `canonical-tags.yml`.
@@ -449,15 +478,28 @@ pub struct TagPromoteReport {
 /// `--apply` of the same slug exits non-zero: the first apply removed the very
 /// proposal it then demands. Checking membership first makes a repeat apply an
 /// idempotent no-op, which is what an operator re-running a batch expects.
+///
+/// **Describing (Phase 7).** `describe: None` is `--no-describe`: today's bare
+/// insert, no LLM call. `Some(ctx)` drafts (dry run) or reads the cache
+/// (`apply`) a description for each newly promoted tag, reusing Phase 4's
+/// `TagDrafter` and `CachedDraft` cache. Describing is fail-closed PER TAG,
+/// not for the whole call: a tag whose draft errors (dry run) or whose cache
+/// is missing (`apply`) is left off this run entirely - not written, not
+/// dropped from the queue, reported in `TagPromoteReport::failed` - while a
+/// sibling tag in the same invocation still lands. A hard bail (bad slug, no
+/// pending proposal, over `max-canonical`) still fails the WHOLE call before
+/// anything is drafted or written, unchanged from before Phase 7.
 pub fn promote_tags(
     proposals_path: &Path,
     canonical_path: &Path,
     tags: &[String],
     group: &str,
     apply: bool,
+    describe: Option<&PromotionDescribe>,
 ) -> Result<TagPromoteReport> {
     log::debug!(
-        "proposals::promote_tags: tags={tags:?} group={group} apply={apply} canonical={} proposals={}",
+        "proposals::promote_tags: tags={tags:?} group={group} apply={apply} describe={} canonical={} proposals={}",
+        describe.is_some(),
         canonical_path.display(),
         proposals_path.display()
     );
@@ -515,17 +557,72 @@ pub fn promote_tags(
         );
     }
 
+    // Phase 7: draft (dry run) or read the cache (apply) a description for
+    // each candidate. `descriptions` and `failed` stay empty under
+    // `--no-describe`, which reproduces the pre-Phase-7 diff and write
+    // exactly (every `descriptions.get(tag)` below misses).
+    let mut descriptions: HashMap<String, String> = HashMap::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
+    if let Some(ctx) = describe {
+        let siblings: Vec<TagEntry> = file.tags.get(group).cloned().unwrap_or_default();
+        for tag in &to_add {
+            let outcome: Result<String> = if apply {
+                CachedDraft::load(ctx.cache_dir, tag).map(|d| d.description)
+            } else {
+                let sources: &[String] = queue
+                    .iter()
+                    .find(|p| &p.tag == tag)
+                    .map(|p| p.sources.as_slice())
+                    .unwrap_or(&[]);
+                draft_promotion_description(tag, group, &siblings, sources, ctx)
+            };
+            match outcome {
+                Ok(description) => {
+                    descriptions.insert(tag.clone(), description);
+                }
+                Err(e) => {
+                    log::warn!("proposals::promote_tags: describing {tag:?} failed: {e:#}");
+                    failed.push((tag.clone(), format!("{e:#}")));
+                }
+            }
+        }
+    }
+
+    // What this run actually promotes: every candidate minus any that just
+    // failed to describe.
+    let promoted: Vec<String> = to_add
+        .iter()
+        .filter(|t| !failed.iter().any(|(f, _)| f == *t))
+        .cloned()
+        .collect();
+
     let mut diff = String::new();
-    for tag in &to_add {
-        diff.push_str(&format!("canonical-tags.yml:  + `{tag}` under group `{group}`\n"));
+    for tag in &promoted {
+        match descriptions.get(tag) {
+            Some(description) => diff.push_str(&format!(
+                "canonical-tags.yml:  + `{tag}`: \"{description}\" under group `{group}`\n"
+            )),
+            None => diff.push_str(&format!("canonical-tags.yml:  + `{tag}` under group `{group}`\n")),
+        }
         diff.push_str(&format!("tag-proposals.yml:   - proposal `{tag}` (promoted)\n"));
     }
     for tag in &already_present {
         diff.push_str(&format!("canonical-tags.yml:    `{tag}` already canonical, no-op\n"));
     }
+    for (tag, error) in &failed {
+        diff.push_str(&format!(
+            "canonical-tags.yml:  ! `{tag}` description failed, not promoted this run: {error}\n"
+        ));
+    }
 
-    if apply && !to_add.is_empty() {
-        let entries: Vec<TagEntry> = to_add.iter().map(|t| TagEntry::bare(t.as_str())).collect();
+    if apply && !promoted.is_empty() {
+        let entries: Vec<TagEntry> = promoted
+            .iter()
+            .map(|t| match descriptions.get(t) {
+                Some(description) => TagEntry::described(t.as_str(), description.as_str()),
+                None => Ok(TagEntry::bare(t.as_str())),
+            })
+            .collect::<Result<Vec<_>>>()?;
         let updated = insert_tags_into_group(&text, group, &entries)?;
         // Validate the CANDIDATE BUFFER, not the file on disk:
         // `CanonicalTagsFile::load` takes a path and would re-read the old
@@ -539,18 +636,164 @@ pub fn promote_tags(
         vault::note::write_atomic(canonical_path, updated.as_bytes())
             .with_context(|| format!("failed to write {}", canonical_path.display()))?;
 
-        let remaining: Vec<crate::sweep::Proposal> = queue.into_iter().filter(|p| !to_add.contains(&p.tag)).collect();
+        let remaining: Vec<crate::sweep::Proposal> = queue.into_iter().filter(|p| !promoted.contains(&p.tag)).collect();
         overwrite_queue(proposals_path, remaining)?;
-        log::info!("proposals::promote_tags: promoted {to_add:?} into group {group}");
+        log::info!("proposals::promote_tags: promoted {promoted:?} into group {group}");
     }
 
     Ok(TagPromoteReport {
-        tags: to_add,
+        tags: promoted,
         group: group.to_string(),
         applied: apply,
         already_present,
         diff,
+        failed,
     })
+}
+
+/// The command's production entry: scans the vault and builds the shared
+/// fabric drafter exactly as `tag_describe::run_draft` does, so `sb cortex
+/// tag-promote` needs no vault-scanning or fabric-runner code of its own.
+/// `describe = false` is `--no-describe`: skips the scan and the drafter
+/// entirely, and `promote_tags` falls back to today's bare insert.
+pub fn run_promote(
+    vault_root: &Path,
+    config: &Config,
+    proposals_path: &Path,
+    canonical_path: &Path,
+    tags: &[String],
+    group: &str,
+    apply: bool,
+    describe: bool,
+) -> Result<TagPromoteReport> {
+    if !describe {
+        return promote_tags(proposals_path, canonical_path, tags, group, apply, None);
+    }
+    let notes = crate::vault::scan_vault(vault_root, &config.vault)?;
+    let exclude_patterns = crate::parse_patterns(&config.vault.exclude);
+    let include_patterns = crate::parse_patterns(&config.vault.include);
+    let governed: Vec<Note> = notes
+        .into_iter()
+        .filter(|n| !crate::is_excluded(n, &exclude_patterns, &include_patterns))
+        .collect();
+    let cache_dir = vault::paths::tag_describe_cache_dir();
+    let drafter = FabricDrafter {
+        fabric: &config.fabric,
+        pattern: crate::tag_describe::DESCRIBE_TAG_PATTERN,
+        timeout_secs: config.fabric.timeout_secs,
+    };
+    let ctx = PromotionDescribe {
+        notes: &governed,
+        staging_root: &config.staging_root,
+        cache_dir: &cache_dir,
+        drafter: &drafter,
+    };
+    promote_tags(proposals_path, canonical_path, tags, group, apply, Some(&ctx))
+}
+
+/// Draft (never read from cache) a description for a tag that is not yet a
+/// vocabulary entry, from the proposal's own `sources`, and cache it under
+/// the shared `tag-describe` cache. Mirrors `tag_describe::draft_one`, minus
+/// its `describe_entry_in_group` landing check: a not-yet-promoted tag has no
+/// entry line to rewrite, so `insert_tags_into_group` is what proves the draft
+/// lands, at `--apply` time.
+fn draft_promotion_description(
+    tag: &str,
+    group: &str,
+    siblings: &[TagEntry],
+    sources: &[String],
+    ctx: &PromotionDescribe,
+) -> Result<String> {
+    let request = DescribeRequest {
+        tag: tag.to_string(),
+        group: group.to_string(),
+        siblings: siblings.to_vec(),
+        samples: samples_from_sources(sources, ctx.notes, ctx.staging_root),
+    };
+    let description = ctx.drafter.draft(&request)?;
+    // Prove the entry line itself would be well-formed before caching it.
+    TagEntry::described(tag, &description)?;
+    let paths = request.samples.into_iter().map(|s| s.path).collect();
+    CachedDraft {
+        tag: tag.to_string(),
+        group: group.to_string(),
+        description: description.clone(),
+        source: DraftSource::Fabric,
+        samples: paths,
+    }
+    .save(ctx.cache_dir)?;
+    Ok(description)
+}
+
+/// Build the drafter's sample notes from a proposal's own `sources`: a vault
+/// path is read as a note (the same text the classifier scores, via
+/// `tag_describe::sample_of`); a `trace:<id>` source reads the staged
+/// `distilled.yml` summary (`sample_from_trace`). A source that no longer
+/// resolves - a moved/deleted note, an expired or unreadable staged file - is
+/// skipped, not a hard failure: bounded reach, same rule as
+/// `embed::read_staged_transcript`. Drafting off zero samples is not an
+/// error either (mirrors `select_samples` finding none): the drafter still
+/// has the tag, its group, and its siblings.
+fn samples_from_sources(sources: &[String], notes: &[Note], staging_root: &Path) -> Vec<Sample> {
+    let mut out = Vec::new();
+    for source in sources {
+        if let Some(trace) = source.strip_prefix("trace:") {
+            if let Some(sample) = sample_from_trace(staging_root, trace) {
+                out.push(sample);
+            }
+            continue;
+        }
+        match notes.iter().find(|n| n.path.to_string_lossy() == *source) {
+            Some(note) => out.push(crate::tag_describe::sample_of(note)),
+            None => log::warn!(
+                "proposals::samples_from_sources: proposal source {source:?} is not a governed vault note; skipping"
+            ),
+        }
+    }
+    out
+}
+
+/// Read a `trace:<id>` proposal source's staged `distilled.yml` summary at
+/// `<staging_root>/<trace>/distilled.yml`, the same narrow read
+/// `read_staged_candidates` makes (plus its new `summary` field). `None` on
+/// every failure mode (missing/expired, unreadable, malformed, empty
+/// summary): fail-closed but bounded, same as `embed::read_staged_transcript`
+/// - this one trace is skipped as a sample, never a hard error for the tag.
+fn sample_from_trace(staging_root: &Path, trace: &str) -> Option<Sample> {
+    let path = staging_root.join(trace).join("distilled.yml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!(
+                "proposals::sample_from_trace: {trace} staged distilled.yml unreadable at {}: {e}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let parsed: StagedDistilled = match serde_yaml::from_str(&text) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!(
+                "proposals::sample_from_trace: {trace} staged distilled.yml at {} is malformed: {e}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    match parsed.summary {
+        Some(s) if !s.trim().is_empty() => Some(Sample {
+            path: format!("trace:{trace}"),
+            text: distillers::tags::clip_classifier_text("", &s),
+        }),
+        _ => {
+            log::warn!(
+                "proposals::sample_from_trace: {trace} staged distilled.yml at {} has no summary",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 fn load_queue(path: &Path) -> Result<Vec<crate::sweep::Proposal>> {

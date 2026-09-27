@@ -132,6 +132,10 @@ pub struct TagPromoteArgs {
     /// Write the change. Without it, prints the diff and writes nothing.
     #[arg(long)]
     pub apply: bool,
+    /// Skip drafting a description for the promoted tag: today's bare
+    /// `    - tag` insert, no LLM call.
+    #[arg(long)]
+    pub no_describe: bool,
 }
 
 #[derive(Args)]
@@ -791,14 +795,20 @@ impl CortexCli {
                 if a.apply {
                     refuse_deployed_apply(&canonical, &deployed, "promotion")?;
                 }
-                let report = cortex::proposals::promote_tags(
+                let report = cortex::proposals::run_promote(
+                    &vault_root,
+                    &config,
                     &config.sweep.proposals_path,
                     &canonical,
                     &a.tags,
                     &a.group,
                     a.apply,
+                    !a.no_describe,
                 )?;
                 print_tag_promote_report(&report);
+                if !report.failed.is_empty() {
+                    return Err(crate::error::SilentFailure.into());
+                }
             }
             Command::TagDescribe(a) => {
                 let deployed = vault::paths::canonical_tags();
@@ -1173,10 +1183,15 @@ fn print_tag_promote_report(r: &cortex::proposals::TagPromoteReport) {
     for tag in &r.already_present {
         println!("tag-promote: `{tag}` is already canonical; nothing to do");
     }
-    if r.tags.is_empty() {
+    // NOT `r.tags.is_empty()` alone: a tag whose description failed (Phase 7)
+    // is off `r.tags` too, so that case must still print its `!` diff line
+    // rather than silently returning as if nothing had been asked.
+    if r.tags.is_empty() && r.failed.is_empty() {
         return;
     }
-    if r.applied {
+    if r.tags.is_empty() {
+        println!("tag-promote: describing failed for every requested tag; nothing promoted");
+    } else if r.applied {
         println!("tag-promote: promoted {:?} into group `{}`", r.tags, r.group);
     } else {
         println!("tag-promote (dry-run - pass --apply to write):");
