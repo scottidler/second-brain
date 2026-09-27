@@ -152,6 +152,10 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
         include_str!("../../../borg/patterns/obsidian-youtube-slides.md"),
     ),
     (
+        "describe-tag.md",
+        include_str!("../../../borg/patterns/describe-tag.md"),
+    ),
+    (
         "extract-entities.md",
         include_str!("../../../borg/patterns/extract-entities.md"),
     ),

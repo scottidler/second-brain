@@ -55,6 +55,19 @@ pub fn xdg_data_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".local").join("share"))
 }
 
+/// XDG cache dir, honoring `$XDG_CACHE_HOME` and falling back to `$HOME/.cache`.
+/// Same rationale as `xdg_config_dir`: `dirs::cache_dir()` returns `~/Library/Caches`
+/// on macOS, ignoring `$XDG_CACHE_HOME`.
+pub fn xdg_cache_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
+        let path = PathBuf::from(dir);
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".cache"))
+}
+
 /// Expand a leading `~` or `~/` in a user-supplied path to `$HOME`.
 ///
 /// Users routinely type `~/foo` in YAML config; YAML stores that as the
@@ -331,6 +344,21 @@ pub fn classifier_spend_ledger() -> PathBuf {
         .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
         .join(SB_DIR)
         .join("classifier-spend.jsonl")
+}
+
+/// `sb cortex tag-describe`'s draft cache (design doc
+/// `2026-09-25-described-tag-classification.md`, Phase 4): one
+/// `<tag>.json` per drafted description, holding the sample paths it was
+/// drafted from. `--apply` writes the cached draft, never a fresh one, so
+/// what was reviewed is what lands. Panics only when `xdg_cache_dir()`
+/// returns `None` (see [`borg_signal_state_dir`]).
+///
+/// `~/.cache/sb/tag-describe/` on Linux.
+pub fn tag_describe_cache_dir() -> PathBuf {
+    xdg_cache_dir()
+        .expect("xdg_cache_dir() returned None (set HOME or XDG_CACHE_HOME)")
+        .join(SB_DIR)
+        .join("tag-describe")
 }
 
 /// cortex's embed/graph file-lock path, under the `sb/cortex/` data

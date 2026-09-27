@@ -130,3 +130,37 @@ fn hub_args_asymmetry_combines_with_apply_and_synthesize_at_parse_time() {
     assert!(parsed.hub.synthesize);
     assert!(parsed.hub.asymmetry);
 }
+
+#[derive(Parser)]
+struct TagDescribeHarness {
+    #[command(flatten)]
+    describe: TagDescribeArgs,
+}
+
+#[test]
+fn tag_describe_parses_set_pairs_and_needs_no_positional_tag_with_one() {
+    let parsed =
+        TagDescribeHarness::try_parse_from(["sb", "--set", "work=my job: on-call, sprints", "--apply"]).unwrap();
+    assert!(parsed.describe.tags.is_empty());
+    assert_eq!(
+        parsed.describe.set,
+        vec![("work".to_string(), "my job: on-call, sprints".to_string())]
+    );
+    assert_eq!(parsed.describe.samples, cortex::tag_describe::DEFAULT_SAMPLES);
+}
+
+#[test]
+fn tag_describe_needs_a_tag_or_a_set() {
+    assert!(TagDescribeHarness::try_parse_from(["sb"]).is_err());
+    assert!(TagDescribeHarness::try_parse_from(["sb", "--set", "=text"]).is_err());
+    assert!(TagDescribeHarness::try_parse_from(["sb", "--set", "no-equals"]).is_err());
+}
+
+#[test]
+fn tag_describe_bounds_samples() {
+    assert!(TagDescribeHarness::try_parse_from(["sb", "rust", "--samples", "0"]).is_err());
+    assert!(TagDescribeHarness::try_parse_from(["sb", "rust", "--samples", "11"]).is_err());
+    let parsed = TagDescribeHarness::try_parse_from(["sb", "rust", "go", "--samples", "5"]).unwrap();
+    assert_eq!(parsed.describe.tags, ["rust", "go"]);
+    assert_eq!(parsed.describe.samples, 5);
+}

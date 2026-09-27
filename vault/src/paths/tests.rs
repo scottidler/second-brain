@@ -162,6 +162,17 @@ fn the_classifier_spend_ledger_is_shared_under_the_sb_data_namespace() {
 }
 
 #[test]
+fn the_tag_describe_cache_sits_under_the_sb_cache_namespace() {
+    let dir = tag_describe_cache_dir();
+    assert!(
+        dir.ends_with("sb/tag-describe"),
+        "tag_describe_cache_dir() = {}",
+        dir.display()
+    );
+    assert_eq!(dir.parent().and_then(|p| p.parent()), xdg_cache_dir().as_deref());
+}
+
+#[test]
 fn all_config_files_land_under_config_root() {
     let root = config_root();
     assert_eq!(borg_config(), root.join("borg.yml"));

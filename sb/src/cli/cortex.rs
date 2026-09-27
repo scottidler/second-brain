@@ -93,6 +93,9 @@ pub enum Command {
     /// Promote pending tag proposals from tag-proposals.yml into a group of
     /// canonical-tags.yml (reviewable diff; dry-run unless --apply)
     TagPromote(TagPromoteArgs),
+    /// Draft descriptions for canonical tags from notes that carry them, then
+    /// write the reviewed drafts into canonical-tags.yml (dry-run unless --apply)
+    TagDescribe(TagDescribeArgs),
     /// One-time historical multi-repo backfill: LLM pass over pre-files-touched
     /// sessions proposing cross-repo bridges to bridge-proposals.yml (needs the
     /// live clyde catalog + fabric; the parent sequences the real env)
@@ -129,6 +132,51 @@ pub struct TagPromoteArgs {
     /// Write the change. Without it, prints the diff and writes nothing.
     #[arg(long)]
     pub apply: bool,
+}
+
+#[derive(Args)]
+pub struct TagDescribeArgs {
+    /// Tags to describe. Each must already be canonical. Tags given only
+    /// through --set need not repeat here.
+    #[arg(num_args = 1.., required_unless_present = "set")]
+    pub tags: Vec<String>,
+    /// The canonical-tags.yml to read and, with --apply, edit. Defaults to the
+    /// DEPLOYED copy, which --apply refuses for the reason tag-promote does.
+    #[arg(long)]
+    pub canonical: Option<PathBuf>,
+    /// Sample notes per draft (newest first among notes carrying the tag).
+    #[arg(long, default_value_t = cortex::tag_describe::DEFAULT_SAMPLES, value_parser = parse_samples)]
+    pub samples: usize,
+    /// A file of vault-relative note paths, one per line, never used as
+    /// samples (the gold sets).
+    #[arg(long)]
+    pub exclude_from: Option<PathBuf>,
+    /// Your own wording for a tag, used instead of a draft: TAG=TEXT. Repeatable.
+    #[arg(long, value_parser = parse_set_arg)]
+    pub set: Vec<(String, String)>,
+    /// Allow a drafted description for a protect-list (`no-classifier-tags`) tag.
+    #[arg(long)]
+    pub allow_protected: bool,
+    /// Write the cached drafts (and --set wording). Never drafts.
+    #[arg(long)]
+    pub apply: bool,
+}
+
+fn parse_samples(s: &str) -> std::result::Result<usize, String> {
+    let n: usize = s.parse().map_err(|e| format!("{s:?} is not a number: {e}"))?;
+    if n == 0 || n > cortex::tag_describe::MAX_SAMPLES {
+        return Err(format!("must be 1-{}", cortex::tag_describe::MAX_SAMPLES));
+    }
+    Ok(n)
+}
+
+fn parse_set_arg(s: &str) -> std::result::Result<(String, String), String> {
+    let (tag, text) = s.split_once('=').ok_or_else(|| format!("{s:?} is not TAG=TEXT"))?;
+    let tag = tag.trim();
+    if tag.is_empty() {
+        return Err(format!("{s:?} has no tag before `=`"));
+    }
+    Ok((tag.to_string(), text.trim().to_string()))
 }
 
 #[derive(Args)]
@@ -740,20 +788,8 @@ impl CortexCli {
                 // `otto deploy`, so applying there writes a promotion the next
                 // deploy deletes. Dry-run against it is allowed and useful:
                 // that is the file the daemon reads.
-                //
-                // Compare RESOLVED paths, not the raw PathBufs: `==` is
-                // lexical, so `$XDG/sb/../sb/canonical-tags.yml` names the
-                // deployed file and slips past a raw comparison. Fall back to
-                // the given path when canonicalize fails (the file may not
-                // exist yet), which only ever makes the guard stricter.
-                let resolve = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-                if a.apply && resolve(&canonical) == resolve(&deployed) {
-                    eyre::bail!(
-                        "refusing to --apply to the deployed {}: `otto deploy` regenerates it from the repo and \
-                         would revert this promotion. Pass --canonical config/canonical-tags.yml, then commit and \
-                         run `otto deploy`.",
-                        deployed.display()
-                    );
+                if a.apply {
+                    refuse_deployed_apply(&canonical, &deployed, "promotion")?;
                 }
                 let report = cortex::proposals::promote_tags(
                     &config.sweep.proposals_path,
@@ -763,6 +799,34 @@ impl CortexCli {
                     a.apply,
                 )?;
                 print_tag_promote_report(&report);
+            }
+            Command::TagDescribe(a) => {
+                let deployed = vault::paths::canonical_tags();
+                let canonical = a.canonical.clone().unwrap_or_else(|| deployed.clone());
+                if a.apply {
+                    refuse_deployed_apply(&canonical, &deployed, "description")?;
+                }
+                let exclude = match &a.exclude_from {
+                    Some(path) => cortex::tag_describe::load_exclude_list(path)?,
+                    None => Default::default(),
+                };
+                let opts = cortex::tag_describe::DescribeOpts {
+                    tags: a.tags,
+                    samples: a.samples,
+                    exclude,
+                    set: a.set,
+                    allow_protected: a.allow_protected,
+                };
+                let cache_dir = vault::paths::tag_describe_cache_dir();
+                let report = if a.apply {
+                    cortex::tag_describe::apply_descriptions(&canonical, &cache_dir, &opts)?
+                } else {
+                    cortex::tag_describe::run_draft(&vault_root, &config, &canonical, &cache_dir, &opts)?
+                };
+                print_tag_describe_report(&report, &canonical);
+                if !report.failed.is_empty() {
+                    return Err(crate::error::SilentFailure.into());
+                }
             }
             Command::BridgeBackfill(a) => {
                 run_bridge_backfill(&vault_root, &config, a.limit).await?;
@@ -1118,6 +1182,55 @@ fn print_tag_promote_report(r: &cortex::proposals::TagPromoteReport) {
         println!("tag-promote (dry-run - pass --apply to write):");
     }
     print!("{}", r.diff);
+}
+
+/// The deployed canonical-tags.yml is `write_always`-ed from the repo on every
+/// `otto deploy`, so an --apply there writes a change the next deploy deletes.
+///
+/// Compare RESOLVED paths, not the raw PathBufs: `==` is lexical, so
+/// `$XDG/sb/../sb/canonical-tags.yml` names the deployed file and slips past a
+/// raw comparison. Fall back to the given path when canonicalize fails (the
+/// file may not exist yet), which only ever makes the guard stricter.
+fn refuse_deployed_apply(canonical: &std::path::Path, deployed: &std::path::Path, what: &str) -> Result<()> {
+    let resolve = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if resolve(canonical) == resolve(deployed) {
+        eyre::bail!(
+            "refusing to --apply to the deployed {}: `otto deploy` regenerates it from the repo and would revert \
+             this {what}. Pass --canonical config/canonical-tags.yml, then commit and run `otto deploy`.",
+            deployed.display()
+        );
+    }
+    Ok(())
+}
+
+/// Format a `cortex tag-describe` report: one `+ tag: "description"` line per
+/// described tag, where its draft is cached, and one `! tag:` line per failure.
+fn print_tag_describe_report(r: &cortex::tag_describe::DescribeReport, canonical: &std::path::Path) {
+    use cortex::tag_describe::DraftSource;
+    if r.applied {
+        println!(
+            "tag-describe: wrote {} description(s) into {}",
+            r.described.len(),
+            canonical.display()
+        );
+    } else {
+        println!("tag-describe (dry-run - pass --apply to write the cached drafts):");
+    }
+    for d in &r.described {
+        println!("+ {}: \"{}\"", d.draft.tag, d.draft.description);
+        let from = match d.draft.source {
+            DraftSource::Fabric => format!("drafted from {} sample note(s)", d.draft.samples.len()),
+            DraftSource::Set => "--set wording".to_string(),
+        };
+        println!(
+            "  {from}, group `{}`; cached at {}",
+            d.draft.group,
+            d.cache_path.display()
+        );
+    }
+    for (tag, error) in &r.failed {
+        println!("! {tag}: {error}");
+    }
 }
 
 /// Format a `cortex associate` report. Mirrors the `SweepMode` precedent:

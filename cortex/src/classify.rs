@@ -318,7 +318,7 @@ impl ClassifyResult {
 /// the body. Unclipped here: the classifiers pass it through
 /// `distillers::tags::clip_classifier_text` with the title, so borg and
 /// cortex send the same bounded string for the same note.
-fn classifier_text(note: &Note) -> String {
+pub(crate) fn classifier_text(note: &Note) -> String {
     ::vault::search::parse_body_summary(&note.body).unwrap_or_else(|| note.body.clone())
 }
 
@@ -821,7 +821,7 @@ fn write_fields(
     }
 }
 
-fn note_title(note: &Note) -> &str {
+pub(crate) fn note_title(note: &Note) -> &str {
     note.frontmatter.title.as_deref().unwrap_or("Untitled")
 }
 
