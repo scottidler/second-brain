@@ -292,6 +292,13 @@ pub struct TagsClassifierConfig {
     /// (rubric-tightening instructions) did not beat baseline, so nothing
     /// ships by default. A host may still set one.
     pub instructions: String,
+    /// How many times each shard is called, so `score_batch` can select on
+    /// the mean rather than a single call. Default 3 (design doc Phase 0
+    /// Results, repeat mean): on the baseline winner's six calls, mean-of-3
+    /// instability (0.170) beat single-call (0.195) and mean-of-3 F1 (0.743)
+    /// did not fall below single-call F1 (0.741). Every repeat costs a full
+    /// call, so this multiplies both ingest and bulk spend by `repeats`.
+    pub repeats: u8,
 }
 
 impl Default for TagsClassifierConfig {
@@ -306,6 +313,7 @@ impl Default for TagsClassifierConfig {
             daily_usd_budget: 0.50,
             ingest_reserve_usd: 0.10,
             instructions: String::new(),
+            repeats: 3,
         }
     }
 }
@@ -681,6 +689,7 @@ pub struct ClassifierDev {
     token_env: String,
     endpoint: String,
     instructions: String,
+    repeats: u8,
     transport: Arc<dyn Transport>,
 }
 
@@ -922,6 +931,10 @@ impl ClassifierDev {
             token_env: cfg.token_env.clone(),
             endpoint: cfg.endpoint.clone(),
             instructions: cfg.instructions.clone(),
+            // A misconfigured 0 reads as 1: zero calls would silently score
+            // nothing rather than failing loud, and a bulk caller's cost
+            // estimate (`wire_usd`) assumes at least one call per shard too.
+            repeats: cfg.repeats.max(1),
             transport,
         }
     }
@@ -1000,22 +1013,27 @@ impl ClassifierDev {
         CallOutcome::Scored(parsed)
     }
 
-    /// Every vocabulary slug's score for each input: one call per (chunk x
-    /// label shard), with the result decided per note.
+    /// Every vocabulary slug's mean score (over `repeats` calls) for each
+    /// input: `repeats` calls per (chunk x label shard), with the result
+    /// decided per note.
     ///
     /// Two API ceilings shape the calls: at most `MAX_LABELS_PER_CALL` labels
     /// (the vocabulary is 117, so production always shards) and the free
     /// tier's per-request spend, which `plan_chunks` stays under and a 402
     /// `request_spending_limit` enforces by halving the chunk down to one
-    /// note. A note is `Ok` only if every shard scored every label it sent;
-    /// a note that failed one shard is not sent in the next.
+    /// note. A note is `Ok` only if every repeat of every shard scored every
+    /// label it sent: a note that fails on any repeat of a shard is that
+    /// note's `Err` for the whole batch, never `Ok` with the average of
+    /// whichever repeats happened to succeed, and it is not sent to the next
+    /// shard (or the shard's remaining repeats, once pending drops to none).
     pub fn score_batch(&self, inputs: &[TagInput]) -> ScoredBatch {
         let texts: Vec<String> = inputs.iter().map(|i| clip_classifier_text(i.title, i.text)).collect();
         let label_shards = self.label_shards();
         log::debug!(
-            "ClassifierDev::score_batch: texts={} shards={} threshold={}",
+            "ClassifierDev::score_batch: texts={} shards={} repeats={} threshold={}",
             texts.len(),
             label_shards.len(),
+            self.repeats,
             self.threshold
         );
 
@@ -1025,21 +1043,64 @@ impl ClassifierDev {
         for pairs in &label_shards {
             let wire_labels: Vec<String> = pairs.iter().map(|(wire, _)| wire.clone()).collect();
             let wire_to_slug: HashMap<String, String> = pairs.iter().cloned().collect();
-            let pending: Vec<usize> = (0..inputs.len()).filter(|i| per_note[*i].is_ok()).collect();
-            let lengths: Vec<usize> = pending.iter().map(|i| texts[*i].chars().count()).collect();
-            let mut start = 0usize;
-            for size in plan_chunks(&lengths, &wire_labels) {
-                let chunk = &pending[start..start + size];
-                self.score_chunk(
-                    &wire_labels,
-                    &wire_to_slug,
-                    chunk,
-                    &texts,
-                    &mut per_note,
-                    &mut calls,
-                    &mut service_limit,
+
+            // Sum and count of each label's score across this shard's
+            // repeats, for the notes still pending going into it. `Err`
+            // means some repeat of this shard already failed the note; it is
+            // folded into `per_note` only once every repeat has run (or the
+            // shard gives up early), never from a partial average.
+            let mut shard_acc: Vec<Result<HashMap<String, (f32, u32)>>> = per_note
+                .iter()
+                .map(|note| match note {
+                    Ok(_) => Ok(HashMap::new()),
+                    Err(_) => Err(eyre!("note already failed a prior shard")),
+                })
+                .collect();
+
+            for repeat in 0..self.repeats {
+                let pending: Vec<usize> = (0..inputs.len()).filter(|i| shard_acc[*i].is_ok()).collect();
+                if pending.is_empty() {
+                    break;
+                }
+                log::debug!(
+                    "ClassifierDev::score_batch: shard repeat {}/{} over {} notes",
+                    repeat + 1,
+                    self.repeats,
+                    pending.len()
                 );
-                start += size;
+                let lengths: Vec<usize> = pending.iter().map(|i| texts[*i].chars().count()).collect();
+                let mut start = 0usize;
+                for size in plan_chunks(&lengths, &wire_labels) {
+                    let chunk = &pending[start..start + size];
+                    self.score_chunk(
+                        &wire_labels,
+                        &wire_to_slug,
+                        chunk,
+                        &texts,
+                        &mut shard_acc,
+                        &mut calls,
+                        &mut service_limit,
+                    );
+                    start += size;
+                }
+            }
+
+            for (i, note) in per_note.iter_mut().enumerate() {
+                if note.is_err() {
+                    continue;
+                }
+                match &shard_acc[i] {
+                    Ok(sums) => {
+                        let averaged: HashMap<String, f32> = sums
+                            .iter()
+                            .map(|(slug, (sum, count))| (slug.clone(), sum / *count as f32))
+                            .collect();
+                        if let Ok(shard_scores) = note {
+                            shard_scores.push(averaged);
+                        }
+                    }
+                    Err(e) => *note = Err(eyre!("{e:#}")),
+                }
             }
         }
 
@@ -1073,13 +1134,17 @@ impl ClassifierDev {
             .collect()
     }
 
+    /// Priced at `repeats` calls per shard: `score_batch` posts each shard
+    /// `repeats` times, so the estimate a bulk caller checks against its
+    /// allowance (`BulkRun::run`, `estimate_batch`) must scale the same way.
     fn wire_usd(&self, texts: &[String]) -> Vec<f64> {
         let shards = self.wire_label_shards();
+        let repeats = f64::from(self.repeats);
         texts
             .iter()
             .map(|text| {
                 let chars = text.chars().count();
-                let tokens: f64 = shards.iter().map(|shard| note_tokens(chars, shard)).sum();
+                let tokens: f64 = shards.iter().map(|shard| note_tokens(chars, shard)).sum::<f64>() * repeats;
                 tokens * USD_PER_INPUT_TOKEN
             })
             .collect()
@@ -1087,7 +1152,9 @@ impl ClassifierDev {
 
     /// Consecutive chunk sizes over `texts` such that each chunk fits one
     /// request on every shard: planned against the shard whose labels cost
-    /// the most per note, which bounds the others.
+    /// the most per note, which bounds the others. This is one physical
+    /// request's budget; `repeats` multiplies how many such requests
+    /// `score_batch` sends per chunk, not this chunk's own size.
     fn plan_run_chunks(&self, texts: &[String]) -> Vec<usize> {
         let shards = self.wire_label_shards();
         let Some(widest) = shards
@@ -1102,7 +1169,8 @@ impl ClassifierDev {
 
     /// A stable digest of everything that changes a score: the endpoint, the
     /// labels exactly as sent (shard by shard, descriptions included),
-    /// `max_labels`, `instructions`, and the wire text bound. A stored score
+    /// `max_labels`, `instructions`, and `repeats` (more or fewer repeats
+    /// changes the averaged score), and the wire text bound. A stored score
     /// is reusable only under the same digest.
     pub fn scoring_config_hash(&self) -> String {
         let shards = self.wire_label_shards();
@@ -1112,12 +1180,16 @@ impl ClassifierDev {
             "max_labels": self.canon.max_per_note,
             "text_chars": CLASSIFIER_TEXT_CHARS,
             "instructions": self.instructions,
+            "repeats": self.repeats,
         });
         sha256_hex(config.to_string().as_bytes())
     }
 
-    /// Score the notes at `chunk` (indices into `texts`) against one shard,
-    /// halving on a per-request spend refusal. Each call appends one usage row.
+    /// Score the notes at `chunk` (indices into `texts`) against one call of
+    /// one shard, halving on a per-request spend refusal. Each call appends
+    /// one usage row and adds its scores into `acc`'s running sum/count per
+    /// slug, so the repeat this call belongs to averages with its siblings
+    /// rather than overwriting them.
     ///
     /// `labels` is the shard's wire labels (post-description); `wire_to_slug`
     /// maps each back to the slug it describes, so a returned score lands on
@@ -1128,13 +1200,13 @@ impl ClassifierDev {
         wire_to_slug: &HashMap<String, String>,
         chunk: &[usize],
         texts: &[String],
-        per_note: &mut [Result<Vec<HashMap<String, f32>>>],
+        acc: &mut [Result<HashMap<String, (f32, u32)>>],
         calls: &mut Vec<CallUsage>,
         service_limit: &mut Option<String>,
     ) {
         if let Some(limit) = service_limit {
             for i in chunk {
-                per_note[*i] = Err(eyre!("not sent: {limit}"));
+                acc[*i] = Err(eyre!("not sent: {limit}"));
             }
             return;
         }
@@ -1145,7 +1217,7 @@ impl ClassifierDev {
                 if response.results.len() != chunk.len() {
                     let got = response.results.len();
                     for i in chunk {
-                        per_note[*i] = Err(eyre!(
+                        acc[*i] = Err(eyre!(
                             "classifier.dev returned {got} results for {} inputs",
                             chunk.len()
                         ));
@@ -1155,21 +1227,19 @@ impl ClassifierDev {
                 for (i, result) in chunk.iter().zip(response.results) {
                     match check_shard_scores(labels, result.scores) {
                         Ok(scores) => {
-                            let by_slug: HashMap<String, f32> = scores
-                                .into_iter()
-                                .map(|(wire, score)| {
+                            if let Ok(sums) = &mut acc[*i] {
+                                for (wire, score) in scores {
                                     let slug = wire_to_slug
                                         .get(&wire)
                                         .cloned()
                                         .expect("check_shard_scores validated this key against the sent labels");
-                                    (slug, score)
-                                })
-                                .collect();
-                            if let Ok(shard_scores) = &mut per_note[*i] {
-                                shard_scores.push(by_slug);
+                                    let entry = sums.entry(slug).or_insert((0.0, 0));
+                                    entry.0 += score;
+                                    entry.1 += 1;
+                                }
                             }
                         }
-                        Err(e) => per_note[*i] = Err(e),
+                        Err(e) => acc[*i] = Err(e),
                     }
                 }
             }
@@ -1181,10 +1251,10 @@ impl ClassifierDev {
                         chunk.len()
                     );
                     let (left, right) = chunk.split_at(chunk.len() / 2);
-                    self.score_chunk(labels, wire_to_slug, left, texts, per_note, calls, service_limit);
-                    self.score_chunk(labels, wire_to_slug, right, texts, per_note, calls, service_limit);
+                    self.score_chunk(labels, wire_to_slug, left, texts, acc, calls, service_limit);
+                    self.score_chunk(labels, wire_to_slug, right, texts, acc, calls, service_limit);
                 } else {
-                    per_note[chunk[0]] = Err(eyre!(
+                    acc[chunk[0]] = Err(eyre!(
                         "classifier.dev refused this note alone over its per-request spend limit: {body}"
                     ));
                 }
@@ -1193,14 +1263,14 @@ impl ClassifierDev {
                 log::warn!("ClassifierDev::score_chunk: {limit}; sending nothing more in this batch");
                 calls.push(CallUsage::failed());
                 for i in chunk {
-                    per_note[*i] = Err(eyre!("{limit}"));
+                    acc[*i] = Err(eyre!("{limit}"));
                 }
                 *service_limit = Some(limit);
             }
             CallOutcome::Failed(e) => {
                 calls.push(CallUsage::failed());
                 for i in chunk {
-                    per_note[*i] = Err(eyre!("{e:#}"));
+                    acc[*i] = Err(eyre!("{e:#}"));
                 }
             }
         }

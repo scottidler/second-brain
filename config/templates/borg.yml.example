@@ -162,6 +162,11 @@ tags:
     # Appended after classifier.dev's fixed rubric on every question. Empty
     # (the default) sends no `instructions` field.
     # instructions: ""
+    # How many times each label shard is called; score_batch selects on the
+    # mean rather than a single call. Default 3 (design doc Phase 0's
+    # repeat-mean measurement). Every repeat is a full extra call, so this
+    # multiplies ingest and bulk spend by repeats.
+    # repeats: 3
 
 # Distillation feature toggles (all default-on; set false to disable a feature).
 # Omitting this section (or any individual key) keeps today's shipped behavior.

@@ -164,3 +164,24 @@ Design doc: `docs/design/2026-09-25-described-tag-classification.md`
 
 ### Open questions
 - None beyond what P0/P4 already left open: whether A2's near-miss justifies shipping past a strict reading of the rule (Scott already answered "build it" for P3-P4; this phase is the send-path half of that same call), and when Scott labels `gold-2.md` so the confirmation run in this phase's second success criterion can actually run.
+
+## Phase 6: Repeat mean
+
+### Design decisions
+- Gate: Phase 0 Results already recorded P6 as go on the baseline winner's six calls (P5 is no-go, so A0's six calls are the like-for-like comparison): mean-of-3 instability 0.170 below single-call 0.195, and mean-of-3 F1 0.743 not below single-call F1 0.741.
+- `TagsClassifierConfig.repeats: u8` (`distillers/src/tags.rs`), code default 3 (Phase 0's arm). `ClassifierDev` stores `cfg.repeats.max(1)`: a misconfigured 0 reads as 1 rather than silently scoring nothing, since `wire_usd`'s estimate and a bulk caller's allowance check both assume at least one call per shard.
+- `score_batch` restructures its per-shard loop: for each label shard, an accumulator (`Vec<Result<HashMap<slug, (sum, count)>>>`) runs the shard's `repeats` calls, each adding its scores into the running sum/count per slug rather than overwriting. `pending` is recomputed from the accumulator (not just `per_note`) before every repeat, so a note that fails partway through a shard's repeats is dropped from later repeats of that same shard immediately, not only from the next shard: a 402/429/failed chunk marks the accumulator `Err` for those notes, and an empty `pending` set breaks the repeat loop early with no extra calls. Only after all of a shard's repeats finish (or give up early) does the shard fold into `per_note`: `Ok` becomes the per-slug average (`sum / count`), `Err` becomes the note's `Err` for the whole batch. This is what makes "a note whose later repeat fails is Err, not Ok with partial scores" hold: the first repeat's scores are discarded, never surfaced, once a later repeat of the same shard fails.
+- `score_chunk` (same recursive halving-on-402 shape as before) now writes into that per-shard accumulator instead of appending a `HashMap` to a per-note `Vec`; averaging happens once per shard in `score_batch`, not per call. This also means a single repeat (`repeats: 1`, or any host that sets it) takes the identical code path as three, with `count` always 1: there is no separate single-call branch to keep in sync.
+- `wire_usd` multiplies its per-shard token sum by `repeats` before pricing: `score_batch` posts every shard `repeats` times, so the estimate `BulkRun::run` checks against the day allowance, and `TagClassifier::estimate` reports to `--retag`, must scale the same way the real call count does. `plan_run_chunks` (a single physical request's token/text-count budget) is unchanged; `repeats` multiplies how many such requests are sent per chunk, not one request's own size.
+- `scoring_config_hash` now hashes `repeats` alongside the shards, endpoint, `max_labels`, `text_chars`, and `instructions`: a `tag-apply` cursor scored under one repeat count must not be read as valid under another, since the averaged score itself would differ.
+
+### Deviations
+- None. The doc's `score_batch(&self, &[TagInput]) -> ScoredBatch` signature, the per-note all-or-nothing rule, and the `repeats: u8` config key are implemented as specified.
+
+### Tradeoffs
+- Accumulating sum/count per slug inside the existing per-shard loop, vs. calling the old single-repeat `score_chunk` `repeats` times and averaging the resulting per-shard `HashMap`s afterward. The chosen shape lets a note that fails partway through a shard's repeats stop being sent for that shard's remaining repeats too (not only the next shard), which avoids paying for calls whose answer would be discarded anyway; the cost is that `score_chunk` now takes a `(f32, u32)`-valued accumulator instead of a plain score map, a less obvious type at the call site, documented in its doc comment.
+- Existing fixtures in `distillers/src/tags/tests.rs` and `distillers/src/tags/bulk/tests.rs` pin exact HTTP call counts and chunk sizes to test P1/P2 mechanics (chunking, 402 handling, the spend cursor) that are orthogonal to repeat averaging. Rather than multiply every expected count by 3 (and re-derive which failures short-circuit early), both files' `dev_over` test helpers now pin `repeats: 1` explicitly, with a doc comment saying why; repeat-mean behavior itself is covered by dedicated tests instead of folded into those fixtures.
+- `sb doctor`'s `classifier_settings_finding` is not extended to print `repeats`, matching the precedent Phase 5 set for `instructions` (not named in this phase's bullets or success criteria either).
+
+### Open questions
+- None.

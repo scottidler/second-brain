@@ -92,13 +92,15 @@ fn one_shard_canon() -> CanonicalSet {
     }
 }
 
+/// `repeats: 1`: these fixtures pin exact call counts and chunk sizes to
+/// exercise `BulkRun`'s allowance and cursor mechanics (Phase 2), which
+/// `repeats` (Phase 6) would multiply without changing what is under test.
 fn dev_over(service: Arc<PricedService>) -> ClassifierDev {
-    ClassifierDev::with_transport(
-        one_shard_canon(),
-        TagMapping::new(),
-        &TagsClassifierConfig::default(),
-        service,
-    )
+    let cfg = TagsClassifierConfig {
+        repeats: 1,
+        ..TagsClassifierConfig::default()
+    };
+    ClassifierDev::with_transport(one_shard_canon(), TagMapping::new(), &cfg, service)
 }
 
 fn notes(n: usize) -> Vec<(String, String, String)> {
