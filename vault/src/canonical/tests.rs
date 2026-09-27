@@ -526,3 +526,52 @@ fn sorted_entries_are_sorted_by_slug_across_groups() {
     let slugs: Vec<String> = file.sorted_entries().into_iter().map(|e| e.slug).collect();
     assert_eq!(slugs, vec!["ai", "rust", "zig"]);
 }
+
+/// Implementation audit r1 (P3): a bare slug YAML types as a number, bool, or
+/// null loads as that slug, as v0.15.4's `Vec<String>` did, in both the
+/// bare and the described (key) form.
+#[test]
+fn bare_slugs_yaml_types_as_non_strings_load_as_slugs() {
+    for slug in ["123", "2024", "true", "false", "null"] {
+        let yaml = format!("tags:\n  tech:\n    - {slug}\n    - {slug}: \"a described one\"\n");
+        let file: CanonicalTagsFile = serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("{slug:?} must load: {e}"));
+        let entries = &file.tags["tech"];
+        assert_eq!(entries[0], TagEntry::bare(slug));
+        assert_eq!(entries[1], TagEntry::described(slug, "a described one").expect("valid"));
+    }
+}
+
+/// A float scalar has no faithful slug (`1e3` resolves to `1000.0`), so it
+/// fails loudly and names the fix rather than loading as some other slug.
+#[test]
+fn a_float_scalar_slug_is_refused() {
+    let err = serde_yaml::from_str::<CanonicalTagsFile>("tags:\n  tech:\n    - 1e3\n").expect_err("refused");
+    assert!(err.to_string().contains("quote it"), "{err}");
+}
+
+/// The writer and the loader agree on the slugs YAML would type: `yaml_line`
+/// quotes them, and what it writes reads back as the same entry.
+#[test]
+fn yaml_line_quotes_and_round_trips_slugs_yaml_would_type() {
+    for slug in ["123", "2024", "true", "false", "null", "0x1f", "1e3"] {
+        for entry in [
+            TagEntry::bare(slug),
+            TagEntry::described(slug, "a described one").expect("valid"),
+        ] {
+            let line = entry.yaml_line();
+            assert!(line.starts_with(&format!("\"{slug}\"")), "{line:?} must quote the slug");
+            let back: TagEntry = serde_yaml::from_str(&line).unwrap_or_else(|e| panic!("{line:?} reparses: {e}"));
+            assert_eq!(back, entry, "{line:?}");
+        }
+    }
+    assert_eq!(
+        TagEntry::bare("rust").yaml_line(),
+        "rust",
+        "a plain slug stays unquoted"
+    );
+    assert_eq!(
+        TagEntry::bare("007").yaml_line(),
+        "007",
+        "YAML reads 007 as a string already"
+    );
+}

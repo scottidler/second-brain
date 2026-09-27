@@ -44,11 +44,37 @@ pub struct TagEntry {
     pub description: Option<String>,
 }
 
+/// `Scalar` catches a bare slug YAML resolves to a non-string (`123`,
+/// `true`, `null`): the untagged buffer has already typed it, so `Bare`
+/// cannot take it, and v0.15.4's `Vec<String>` read those as slugs
+/// (implementation audit r1, P3).
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum RawTagEntry {
     Bare(String),
     Described(serde_yaml::Mapping),
+    Scalar(serde_yaml::Value),
+}
+
+/// A plain scalar YAML typed as something other than a string, read back as
+/// the slug it was written as. A float is refused rather than guessed at:
+/// `1e3` resolves to `1000.0`, and no stringification recovers `1e3`.
+fn scalar_slug(value: &serde_yaml::Value) -> std::result::Result<String, String> {
+    match value {
+        serde_yaml::Value::String(s) => Ok(s.clone()),
+        serde_yaml::Value::Bool(b) => Ok(b.to_string()),
+        serde_yaml::Value::Null => Ok("null".to_string()),
+        serde_yaml::Value::Number(n) if n.is_u64() || n.is_i64() => Ok(n.to_string()),
+        other => Err(format!(
+            "tag entry {other:?} is not a slug YAML reads back unchanged; quote it (`- \"...\"`)"
+        )),
+    }
+}
+
+/// Whether `slug` written unquoted would read back as some other YAML type
+/// or string, so `yaml_line` must quote it.
+fn needs_quoting(slug: &str) -> bool {
+    !matches!(serde_yaml::from_str::<serde_yaml::Value>(slug), Ok(serde_yaml::Value::String(s)) if s == slug)
 }
 
 impl TryFrom<RawTagEntry> for TagEntry {
@@ -57,6 +83,7 @@ impl TryFrom<RawTagEntry> for TagEntry {
     fn try_from(raw: RawTagEntry) -> std::result::Result<Self, Self::Error> {
         let map = match raw {
             RawTagEntry::Bare(slug) => return Ok(Self::bare(slug)),
+            RawTagEntry::Scalar(value) => return scalar_slug(&value).map(Self::bare),
             RawTagEntry::Described(map) => map,
         };
         if map.len() != 1 {
@@ -70,9 +97,7 @@ impl TryFrom<RawTagEntry> for TagEntry {
             ));
         }
         let (key, value) = map.into_iter().next().expect("one key, checked above");
-        let serde_yaml::Value::String(slug) = key else {
-            return Err(format!("tag entry key {key:?} is not a string slug"));
-        };
+        let slug = scalar_slug(&key).map_err(|e| format!("tag entry key: {e}"))?;
         let serde_yaml::Value::String(description) = value else {
             return Err(format!(
                 "tag {slug:?}: description must be a string, got {value:?} (write a bare `- {slug}` for no description)"
@@ -137,11 +162,18 @@ impl TagEntry {
     /// The entry as it is written after `    - ` in `canonical-tags.yml`:
     /// `slug`, or `slug: "description"`. A validated description holds no
     /// `"` or control character, so escaping `\` is all a double-quoted YAML
-    /// scalar needs to read back the same string.
+    /// scalar needs to read back the same string. A slug YAML would type as
+    /// a number, bool, or null (`123`, `true`) is written quoted, so the
+    /// line reads back as the same slug without leaning on `scalar_slug`.
     pub fn yaml_line(&self) -> String {
+        let slug = if needs_quoting(&self.slug) {
+            format!("\"{}\"", self.slug)
+        } else {
+            self.slug.clone()
+        };
         match &self.description {
-            None => self.slug.clone(),
-            Some(d) => format!("{}: \"{}\"", self.slug, d.replace('\\', "\\\\")),
+            None => slug,
+            Some(d) => format!("{slug}: \"{}\"", d.replace('\\', "\\\\")),
         }
     }
 }
