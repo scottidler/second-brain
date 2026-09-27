@@ -150,6 +150,12 @@ impl OracleCli {
     }
 }
 
+/// Widest display width of any name in the column, so the count field never
+/// collides with a name longer than a hardcoded guess (e.g. "software-engineering").
+fn col_width(names: &[(String, u64)], floor: usize) -> usize {
+    names.iter().map(|(n, _)| n.width()).max().unwrap_or(0).max(floor)
+}
+
 fn print_vault_stats(config: &oracle::Config, stats: &vault::search::VaultStats) {
     match config.vault_root() {
         Ok(root) => println!("Vault: {}", root.display()),
@@ -159,26 +165,30 @@ fn print_vault_stats(config: &oracle::Config, stats: &vault::search::VaultStats)
 
     if !stats.schema_gaps.is_empty() {
         println!("\nSchema gaps:");
+        let width = col_width(&stats.schema_gaps, 10);
         for (field, count) in &stats.schema_gaps {
-            println!("  missing {} {count}", pad_display(field, 10));
+            println!("  missing {} {count}", pad_display(field, width));
         }
     }
 
     println!("Distinct tags: {}", stats.distinct_tags);
 
     println!("\nBy tag (top 20):");
+    let width = col_width(&stats.by_tag, 15);
     for (tag, count) in &stats.by_tag {
-        println!("  {} {count}", pad_display(tag, 15));
+        println!("  {} {count}", pad_display(tag, width));
     }
 
     println!("\nBy type:");
+    let width = col_width(&stats.by_type, 15);
     for (note_type, count) in &stats.by_type {
-        println!("  {} {count}", pad_display(note_type, 15));
+        println!("  {} {count}", pad_display(note_type, width));
     }
 
     println!("\nBy status:");
+    let width = col_width(&stats.by_status, 15);
     for (status, count) in &stats.by_status {
-        println!("  {} {count}", pad_display(status, 15));
+        println!("  {} {count}", pad_display(status, width));
     }
 }
 
