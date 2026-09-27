@@ -146,20 +146,31 @@ impl EvalReport {
             if self.judge_model.is_empty() { "<fabric default>" } else { &self.judge_model },
         ));
 
+        // Kind names are fixture directory names (open vocabulary via --fixtures),
+        // so size the column to the widest one instead of a fixed 12.
+        let width = self
+            .kinds
+            .iter()
+            .map(|k| k.kind.chars().count())
+            .chain([self.overall.kind.chars().count(), "kind".len()])
+            .max()
+            .unwrap_or(0)
+            .max(12);
+        let rule = "-".repeat(width + 48);
         o.push_str(&format!(
-            "{:<12} {:>4} {:>10} {:>10} {:>10} {:>10}\n",
+            "{:<width$} {:>4} {:>10} {:>10} {:>10} {:>10}\n",
             "kind", "n", "coverage", "anchor", "summary", "composite"
         ));
-        o.push_str(&format!("{}\n", "-".repeat(60)));
+        o.push_str(&format!("{rule}\n"));
         for k in &self.kinds {
             o.push_str(&format!(
-                "{:<12} {:>4} {:>10.3} {:>10.3} {:>10.3} {:>10.3}\n",
+                "{:<width$} {:>4} {:>10.3} {:>10.3} {:>10.3} {:>10.3}\n",
                 k.kind, k.n, k.claim_coverage, k.anchor_validity, k.summary_faithfulness, k.composite,
             ));
         }
-        o.push_str(&format!("{}\n", "-".repeat(60)));
+        o.push_str(&format!("{rule}\n"));
         o.push_str(&format!(
-            "{:<12} {:>4} {:>10.3} {:>10.3} {:>10.3} {:>10.3}\n",
+            "{:<width$} {:>4} {:>10.3} {:>10.3} {:>10.3} {:>10.3}\n",
             self.overall.kind,
             self.overall.n,
             self.overall.claim_coverage,

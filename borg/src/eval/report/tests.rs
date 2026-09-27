@@ -166,3 +166,25 @@ fn render_aligns_failing_note_size_bytes_past_the_old_fifty_five_char_floor() {
     assert_eq!(cols.len(), 2);
     assert_eq!(cols[0], cols[1]);
 }
+
+#[test]
+fn render_keeps_the_twelve_wide_kind_column_for_short_kinds() {
+    let text = stub_report(vec![], None, vec![]).render();
+    assert!(text.contains(&format!("{:<12} {:>4}", "kind", "n")));
+    assert!(text.contains(&"-".repeat(60)));
+}
+
+#[test]
+fn render_widens_the_kind_column_for_a_kind_past_twelve_chars() {
+    let long = "custom-long-fixture-kind";
+    assert!(long.len() > 12);
+    let mut report = stub_report(vec![], None, vec![]);
+    report.kinds.push(KindReport::aggregate(long, &[s(2, 3, 3)]));
+    let text = report.render();
+    let header = text.lines().find(|l| l.starts_with("kind")).expect("header row");
+    let row = text.lines().find(|l| l.starts_with(long)).expect("long kind row");
+    let overall = text.lines().find(|l| l.starts_with("ALL")).expect("overall row");
+    assert_eq!(header.len(), row.len());
+    assert_eq!(row.len(), overall.len());
+    assert!(row.starts_with(&format!("{long} ")));
+}
