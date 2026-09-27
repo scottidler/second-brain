@@ -488,10 +488,16 @@ fn classifier_findings() -> Vec<Finding> {
 /// operator sees those values, for both subsystems, not just borg's.
 fn classifier_settings_finding(subsystem: &str, cfg: &distillers::tags::TagsClassifierConfig) -> Finding {
     let token_env = if cfg.token_env.is_empty() { "none (keyless)" } else { cfg.token_env.as_str() };
+    let instructions = if cfg.instructions.is_empty() {
+        "none".to_string()
+    } else {
+        format!("{:?}", cfg.instructions)
+    };
     Finding::info(format!(
-        "{subsystem} classifier settings: classifier {:?}, threshold {}, fallback {:?}, endpoint {}, timeout {}s, token-env {token_env}, daily-usd-budget ${:.2}, ingest-reserve-usd ${:.2}",
+        "{subsystem} classifier settings: classifier {:?}, threshold {}, repeats {}, fallback {:?}, endpoint {}, timeout {}s, token-env {token_env}, daily-usd-budget ${:.2}, ingest-reserve-usd ${:.2}, instructions {instructions}",
         cfg.classifier,
         cfg.threshold,
+        cfg.repeats,
         cfg.fallback,
         cfg.endpoint,
         cfg.timeout_secs,

@@ -296,6 +296,35 @@ fn classifier_settings_carry_the_spend_budget_keys() {
     }
 }
 
+/// Implementation audit r1: an existing host silently runs the code default
+/// `repeats` (3, so three calls per shard) and `instructions`; doctor is where
+/// the operator sees both.
+#[test]
+fn classifier_settings_carry_repeats_and_instructions() {
+    let default = classifier_settings_finding("cortex", &distillers::tags::TagsClassifierConfig::default());
+    for want in ["repeats 3", "instructions none"] {
+        assert!(
+            default.message.contains(want),
+            "missing {want:?} in {}",
+            default.message
+        );
+    }
+
+    let set = distillers::tags::TagsClassifierConfig {
+        repeats: 1,
+        instructions: "Apply strictly.".to_string(),
+        ..distillers::tags::TagsClassifierConfig::default()
+    };
+    let finding = classifier_settings_finding("borg", &set);
+    for want in ["repeats 1", "instructions \"Apply strictly.\""] {
+        assert!(
+            finding.message.contains(want),
+            "missing {want:?} in {}",
+            finding.message
+        );
+    }
+}
+
 #[test]
 fn tag_description_finding_counts_the_undescribed_tags() {
     let file: vault::canonical::CanonicalTagsFile =
