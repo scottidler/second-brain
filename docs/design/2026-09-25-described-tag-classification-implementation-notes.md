@@ -271,3 +271,21 @@ Audit: review panel round 1, mode 2 (3e79b72..12c6f21 vs v0.15.4). Each fix has 
 - P6 gate re-run: the audit relays an unverified staff replay claiming mean-of-3 F1 0.7310 below single-call 0.7407 under the f32 arithmetic. Not re-run here: the Phase 0 per-call scores are not in the repo, and no live classifier.dev calls were allowed. The fix makes the code's mean match an f64 replay's, so the P0 measurement (if computed in f64) now describes the shipped arithmetic; confirm by re-running the P6 gate replay offline.
 - Deferred, finding 8: a `classifier-dev` fallback behind a non-classifier.dev primary runs unmetered (`cortex/src/classify.rs:235-247`; the fallback is a `ClassifierKind`, default `Deterministic`, `distillers/src/tags.rs:310`). Config-only edge; daemon unmetered spend is already disclosed. No code change.
 - Deferred, finding 9: P4's confirmation-harness disjointness assertion and the `gold-2` labeling and confirmation table are still absent, as the Status line and Phase 4/5 notes disclose. No code change.
+
+## Implementation audit r1: P6 gate replay (orchestrator)
+
+### Design decisions
+- Replayed the P6 gate offline on Phase 0's saved runs (`~/Claude/tags-only-trial/p0/runs/A0-*.json`, `A3-*.json`) with two ways of averaging:
+  - f32 with no tolerance: A0 mean-of-3 F1 0.7310 vs 0.7407 for a single call, so the gate fails. This reproduces the audit's number.
+  - f64 with the 1e-6 tolerance that shipped: A0 mean-of-3 F1 0.7430 vs 0.7407 single, instability 0.170 vs 0.195, so the gate passes.
+- The audit's 0.7310 came from the f32 bug in finding 1, not from averaging itself. P6 stays a go on the baseline.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- None.
+
+### Open questions
+- A3, the arm with instructions, still fails the gate after the fix (F1 0.7132 vs 0.7172), but A3 is not the arm that would ship.
+- If P5's confirmation passes, the shipping arm is A2 (descriptions, no instructions), which Phase 0 ran only 3 times, not the 6 this check needs. The confirmation run should include 6 A2 calls so P6 can be re-checked on the configuration that actually ships.
