@@ -106,6 +106,26 @@ impl super::SearchIndex {
         Ok(rows)
     }
 
+    /// Paths of every note whose `title`, `body`, or `summary` holds `phrase`
+    /// as a phrase. The `tags` and `claims` columns are left out on purpose:
+    /// `sb cortex tag-apply`'s screen looks for notes a tag belongs on, and
+    /// searching `tags` would find them through the tag itself. The phrase
+    /// is quoted, so a hyphenated slug (`ci-cd`) is not read as a column
+    /// filter. Sorted by path.
+    pub fn content_phrase_matches(&self, phrase: &str) -> Result<Vec<String>> {
+        let query = format!("{{title body summary}} : {}", fts_quote(phrase));
+        log::debug!("search::content_phrase_matches: query={query}");
+        let mut stmt = self.conn.prepare(
+            "SELECT n.path FROM notes n JOIN notes_fts f ON n.rowid = f.rowid
+             WHERE notes_fts MATCH ?1 ORDER BY n.path",
+        )?;
+        let paths = stmt
+            .query_map(params![query], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .wrap_err_with(|| format!("fts5 phrase match failed for {phrase:?}"))?;
+        Ok(paths)
+    }
+
     /// Find notes most similar to the given content using FTS5 term matching
     pub fn find_similar(&self, content: &str, limit: usize) -> Result<Vec<NoteRow>> {
         // Extract significant words from content for FTS5 query

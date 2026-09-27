@@ -1129,3 +1129,37 @@ fn cosine_between_returns_none_when_either_note_unembedded() {
         "a note with no embedding at all is uncomputable even against itself"
     );
 }
+
+#[test]
+fn search_summary_vectors_ignores_transcript_chunk_rows() {
+    let index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-test-v1");
+    insert_note(&index, "notes/a.md", "article", 100);
+    insert_note(&index, "notes/b.md", "article", 100);
+    upsert_summary(&index, &m, "notes/a.md", "kubernetes operator pattern", 100);
+    upsert_summary(&index, &m, "notes/b.md", "sourdough bread baking", 100);
+    // b's transcript chunk is the query text itself: it wins on every kind,
+    // and must not count when ranking summaries only.
+    let q_text = "durable execution temporal";
+    let chunk = m.embed_one(q_text).expect("embed");
+    index
+        .upsert_embedding(
+            "notes/b.md",
+            EmbeddingKind::TranscriptChunk,
+            0,
+            q_text,
+            &chunk,
+            m.model_version(),
+            100,
+        )
+        .expect("chunk");
+    let q = m.embed_one(q_text).expect("query");
+
+    let any_kind = index.search_vector(&q, 1, None, false, None, None).expect("search");
+    assert_eq!(any_kind[0].note_path, "notes/b.md");
+    assert!(any_kind[0].distance.abs() < 1e-5);
+
+    let summaries = index.search_summary_vectors(&q, 2).expect("search");
+    assert_eq!(summaries.len(), 2);
+    assert!(summaries.iter().all(|h| h.distance > 1e-3), "{summaries:?}");
+}

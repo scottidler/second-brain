@@ -732,3 +732,34 @@ fn find_similar_lossy_degrades_to_empty_without_panicking() {
     // Nothing indexed: no hits, no error, no panic.
     assert!(index.find_similar_lossy("anything at all", 5).is_empty());
 }
+
+#[test]
+fn content_phrase_matches_reads_title_body_summary_but_not_tags() {
+    let index = SearchIndex::open_memory().expect("open");
+    insert_test_note(
+        &index,
+        "notes/body.md",
+        "Pipelines",
+        &[],
+        "we moved our ci-cd to actions",
+    );
+    insert_test_note(&index, "notes/title.md", "CI-CD at work", &[], "nothing here");
+    insert_test_note(&index, "notes/tag-only.md", "Other", &["ci-cd"], "unrelated text");
+    insert_test_note(&index, "notes/split.md", "Other", &[], "ci then later cd");
+    index
+        .conn
+        .execute(
+            "UPDATE notes SET summary = ?1 WHERE path = ?2",
+            params!["a summary about ci-cd", "notes/split.md"],
+        )
+        .expect("summary");
+
+    let hits = index.content_phrase_matches("ci-cd").expect("match");
+    assert_eq!(hits, vec!["notes/body.md", "notes/split.md", "notes/title.md"]);
+    assert!(
+        index
+            .content_phrase_matches("no-such-phrase")
+            .expect("match")
+            .is_empty()
+    );
+}

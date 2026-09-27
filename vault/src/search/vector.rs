@@ -208,6 +208,28 @@ impl SearchIndex {
         note_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<Vec<VectorHit>> {
+        self.search_vector_of_kind(query_vec, limit, None, tags, tags_all, note_type, status)
+    }
+
+    /// `search_vector` over the `summary` rows only: one vector per note, so
+    /// a note with many transcript-chunk or claim rows gets no extra chances.
+    /// `sb cortex tag-apply`'s screen ranks by this (design doc
+    /// `2026-09-25-described-tag-classification.md`, Phase 8).
+    pub fn search_summary_vectors(&self, query_vec: &[f32], limit: u32) -> Result<Vec<VectorHit>> {
+        self.search_vector_of_kind(query_vec, limit, Some(EmbeddingKind::Summary), None, false, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn search_vector_of_kind(
+        &self,
+        query_vec: &[f32],
+        limit: u32,
+        kind: Option<EmbeddingKind>,
+        tags: Option<&[String]>,
+        tags_all: bool,
+        note_type: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Vec<VectorHit>> {
         let active_model = self.active_embedding_model()?;
         let active_dim = self.active_embedding_dim()?;
         if query_vec.len() != active_dim {
@@ -226,6 +248,11 @@ impl SearchIndex {
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(active_model)];
         let mut param_idx = 2;
+        if let Some(k) = kind {
+            sql.push_str(&format!(" AND e.kind = ?{param_idx}"));
+            param_values.push(Box::new(k.as_str()));
+            param_idx += 1;
+        }
         super::query::push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "n", tags, tags_all);
         if let Some(t) = note_type {
             sql.push_str(&format!(" AND n.note_type = ?{param_idx}"));

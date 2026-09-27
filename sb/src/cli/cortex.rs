@@ -96,6 +96,9 @@ pub enum Command {
     /// Draft descriptions for canonical tags from notes that carry them, then
     /// write the reviewed drafts into canonical-tags.yml (dry-run unless --apply)
     TagDescribe(TagDescribeArgs),
+    /// Add a deployed canonical tag to the existing notes classifier.dev
+    /// scores it on (scores are cached per tag; dry-run unless --apply)
+    TagApply(TagApplyArgs),
     /// One-time historical multi-repo backfill: LLM pass over pre-files-touched
     /// sessions proposing cross-repo bridges to bridge-proposals.yml (needs the
     /// live clyde catalog + fabric; the parent sequences the real env)
@@ -164,6 +167,44 @@ pub struct TagDescribeArgs {
     /// Write the cached drafts (and --set wording). Never drafts.
     #[arg(long)]
     pub apply: bool,
+}
+
+#[derive(Args)]
+pub struct TagApplyArgs {
+    /// The tag to apply. It must be in the DEPLOYED vocabulary: after
+    /// `tag-promote --apply`, commit and run `otto deploy` first.
+    pub tag: String,
+    /// Score only the top N notes by summary similarity to the tag, plus
+    /// every note whose title, body, or summary holds the slug. Opt-in: the
+    /// screen missed too many notes in Phase 0 to be the default.
+    #[arg(long, value_name = "N", conflicts_with = "all", value_parser = parse_candidates)]
+    pub candidates: Option<usize>,
+    /// Score every eligible note. The default for a tag with no cursor yet;
+    /// a rerun without --candidates or --all resumes the cursor's own mode.
+    #[arg(long)]
+    pub all: bool,
+    /// Spend at most this much (USD) this run, below today's allowance.
+    #[arg(long, value_name = "USD", value_parser = parse_max_usd)]
+    pub max_usd: Option<f64>,
+    /// Write the tag into every note whose cached score clears the
+    /// threshold and that has room under max-per-note. Scores any remainder
+    /// the day allows first; never re-scores a cached note.
+    #[arg(long)]
+    pub apply: bool,
+}
+
+fn parse_candidates(s: &str) -> std::result::Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err(format!("{s:?} is not a positive number of notes")),
+    }
+}
+
+fn parse_max_usd(s: &str) -> std::result::Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(usd) if usd.is_finite() && usd >= 0.0 => Ok(usd),
+        _ => Err(format!("{s:?} is not a non-negative dollar amount")),
+    }
 }
 
 fn parse_samples(s: &str) -> std::result::Result<usize, String> {
@@ -838,6 +879,23 @@ impl CortexCli {
                     return Err(crate::error::SilentFailure.into());
                 }
             }
+            Command::TagApply(a) => {
+                let mode = match (a.candidates, a.all) {
+                    (Some(n), _) => Some(cortex::tag_apply::CandidateMode::Screen(n)),
+                    (None, true) => Some(cortex::tag_apply::CandidateMode::All),
+                    (None, false) => None,
+                };
+                let opts = cortex::tag_apply::TagApplyOpts {
+                    mode,
+                    max_usd: a.max_usd,
+                    apply: a.apply,
+                };
+                let report = cortex::tag_apply::run(&vault_root, &config, &a.tag, &opts)?;
+                print_tag_apply_report(&report);
+                if !report.failed.is_empty() {
+                    return Err(crate::error::SilentFailure.into());
+                }
+            }
             Command::BridgeBackfill(a) => {
                 run_bridge_backfill(&vault_root, &config, a.limit).await?;
             }
@@ -1246,6 +1304,51 @@ fn print_tag_describe_report(r: &cortex::tag_describe::DescribeReport, canonical
     for (tag, error) in &r.failed {
         println!("! {tag}: {error}");
     }
+}
+
+/// Format a `cortex tag-apply` report: the candidate set, what this run
+/// scored and spent, one line per note the tag lands on (or would), the
+/// notes at the cap and the failures, then the totals.
+fn print_tag_apply_report(r: &cortex::tag_apply::TagApplyReport) {
+    if r.applied {
+        println!("tag-apply `{}`:", r.tag);
+    } else {
+        println!("tag-apply `{}` (dry-run - pass --apply to write):", r.tag);
+    }
+    let missing = if r.missing > 0 {
+        format!(", {} no longer in the vault", r.missing)
+    } else {
+        String::new()
+    };
+    println!("  candidates: {} ({} note(s){missing})", r.candidate_mode, r.candidates);
+    if r.scores_discarded {
+        println!("  the scoring config changed since the last run: every cached score was discarded");
+    }
+    println!("  scoring: {}", r.scoring);
+    let verb = if r.applied { "added" } else { "would add" };
+    for n in &r.added {
+        println!("+ {} ({:.2}) {verb}", n.path, n.score);
+    }
+    for n in &r.at_cap {
+        println!(
+            "= {} ({:.2}) skipped: already at max-per-note ({})",
+            n.path, n.score, r.max_per_note
+        );
+    }
+    for (path, error) in &r.failed {
+        println!("! {path}: {error}");
+    }
+    println!(
+        "  {} {verb}, {} at the cap, {} already tagged, {} below {:.2}, {} failed, {} not yet scored",
+        r.added.len(),
+        r.at_cap.len(),
+        r.already_tagged,
+        r.below_threshold,
+        r.threshold,
+        r.failed.len(),
+        r.unscored
+    );
+    println!("  cursor: {}", r.cursor_path.display());
 }
 
 /// Format a `cortex associate` report. Mirrors the `SweepMode` precedent:

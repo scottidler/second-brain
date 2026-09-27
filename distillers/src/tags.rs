@@ -772,7 +772,9 @@ impl ClassifyResponse {
 /// Sync port over one classifier.dev HTTP exchange: the JSON body out, the
 /// status and raw body back. Status handling stays in `ClassifierDev::post`
 /// so the fake responder in tests exercises the same path production does.
-trait Transport: Send + Sync {
+/// Public so a bulk caller in another crate (`cortex::tag_apply`) can test
+/// against a fake service through `ClassifierDev::with_transport`.
+pub trait Transport: Send + Sync {
     fn send(&self, body: &serde_json::Value, token: Option<&str>) -> Result<(u16, String)>;
 }
 
@@ -918,7 +920,7 @@ impl ClassifierDev {
         Self::with_transport(canon, mapping, cfg, Arc::new(transport))
     }
 
-    fn with_transport(
+    pub fn with_transport(
         canon: CanonicalSet,
         mapping: TagMapping,
         cfg: &TagsClassifierConfig,

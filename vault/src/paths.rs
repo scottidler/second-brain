@@ -361,6 +361,21 @@ pub fn tag_describe_cache_dir() -> PathBuf {
         .join("tag-describe")
 }
 
+/// `sb cortex tag-apply`'s cursors (design doc
+/// `2026-09-25-described-tag-classification.md`, Phase 8): one `<tag>.json`
+/// per applied tag, holding its candidate list and every score paid for, so a
+/// run that stops at the day's allowance resumes the next UTC day. Data, not
+/// cache: a deleted cursor is spend thrown away. Panics only when
+/// `xdg_data_dir()` returns `None` (see [`borg_signal_state_dir`]).
+///
+/// `~/.local/share/sb/cortex/tag-apply/` on Linux.
+pub fn tag_apply_cursor_dir() -> PathBuf {
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("sb/cortex")
+        .join("tag-apply")
+}
+
 /// cortex's embed/graph file-lock path, under the `sb/cortex/` data
 /// namespace. The lock serializes the embed and graph passes (they share
 /// it). Lives under `sb/cortex/` like borg's data, NOT the legacy

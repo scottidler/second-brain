@@ -173,6 +173,17 @@ fn the_tag_describe_cache_sits_under_the_sb_cache_namespace() {
 }
 
 #[test]
+fn tag_apply_cursors_sit_under_the_sb_cortex_data_namespace() {
+    let dir = tag_apply_cursor_dir();
+    assert!(
+        dir.ends_with("sb/cortex/tag-apply"),
+        "tag_apply_cursor_dir() = {}",
+        dir.display()
+    );
+    assert_eq!(dir.parent(), cortex_lock_path().parent());
+}
+
+#[test]
 fn all_config_files_land_under_config_root() {
     let root = config_root();
     assert_eq!(borg_config(), root.join("borg.yml"));

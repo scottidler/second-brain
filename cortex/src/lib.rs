@@ -34,6 +34,7 @@ pub mod state;
 pub mod stopwords;
 pub mod summarize;
 pub mod sweep;
+pub mod tag_apply;
 pub mod tag_describe;
 pub mod tags;
 pub mod testutil;
