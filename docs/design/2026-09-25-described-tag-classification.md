@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler (via agent)
 **Date:** 2026-09-25
-**Status:** In Review. Panel r1 folded (6 must-fix, 7 cheap-win). Panel r2 folded (6 must-fix, 5 cheap-win; both deferrals addressed in Rollout and P4): infrastructure split into ungated P1-P2, resumable spend ledger, clip on the assembled wire text, per-note results, like-for-like repeat comparison, content-only BM25 for screen recall, confirmation gold set before P5. All three r1 pushbacks accepted by both seats. Panel r4 (Scott-ordered, final): every r2 item confirmed fixed; 3 must-fix and 3 cheap-win folded, 1 defer recorded in Resolved Decisions. Phase 0 run 2026-09-26 (Results below): P1 and P6 go, P3-P5 no-go under the rule with A2 a near-miss, P8 screen no-go.
+**Status:** Implemented (2026-09-27, branch `described-tag-classification`, phases 0-8). Pending before descriptions reach classifier.dev: Scott labels `gold-2.md`, approves the P4 backfill drafts, and P5's confirmation run passes.
 **Review Passes Completed:** 5/5. Pass 2 (correctness) measured the free spend cap: a 159-note call returns 402, so batch sizing, a spend guard, and a vector screen for `tag-apply` were added. Pass 3 (clarity) pinned the embed and vector APIs by path:line and the slug-sorted shard rule. Pass 4 (edge cases) excluded gold notes from description samples, banned `"` in descriptions, failed loud on unmapped score keys, and added the in-place describe rewrite. Pass 5 (voice) lint clean; acceptance criteria run on main with output recorded.
 
 ## Summary
@@ -314,12 +314,16 @@ Go | no-go:
   - Observed 2026-09-26 after P0: Phase 0 Results holds every arm row (A0-A6, SH), the cost-model constants, the screen recall table, and go | no-go for P3, P4, P5, P6 and P8's screen.
 - [ ] no classifier wire text exceeds `CLASSIFIER_TEXT_CHARS`: P1's test feeding a 129,928-char summary with a 200-char title passes
   - Observed on main: cannot run yet, the test is added in P1. The defect it guards is measured in Problem.
+  - Observed on b61897e: `the_string_posted_for_a_huge_summary_is_clipped` passes in `otto ci`.
 - [ ] `sb doctor` output reports the effective classifier settings for both borg and cortex, and (after P3) how many tags have no description
   - Observed on main: `sb doctor | grep -ic descri` -> `0`; the classifier line reports borg only.
+  - Observed on b61897e: `target/debug/sb doctor` prints `borg classifier settings: ...` and `cortex classifier settings: ...` lines and `117 of 117 tags have no description`.
 - [ ] if P3-P5 went: `grep -c ': "' config/canonical-tags.yml` (counts lines, one per described entry) equals the number of descriptions Scott approved through P4, and is `>= 1`
   - Observed on main: `0` (no descriptions yet).
+  - Observed on b61897e: `0`. UNVERIFIED until Scott approves backfill drafts through P4 `--apply`.
 - [ ] `sb cortex tag-apply --help` exits 0
   - Observed on main: exit `2` (subcommand does not exist; P8 adds it).
+  - Observed on b61897e: `target/debug/sb cortex tag-apply --help` exit `0`.
 
 ## Resolved Decisions
 
