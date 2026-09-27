@@ -182,8 +182,14 @@ impl EvalReport {
                     self.listicle.len(),
                     if self.listicle.len() == 1 { "" } else { "s" },
                 ));
+                let width = self
+                    .listicle
+                    .iter()
+                    .map(|m| m.fixture.chars().count())
+                    .max()
+                    .unwrap_or(0);
                 for m in &self.listicle {
-                    o.push_str(&format!("    {:<60} {:.3}\n", m.fixture, m.score));
+                    o.push_str(&format!("    {:<width$} {:.3}\n", m.fixture, m.score));
                 }
             }
             None => o.push_str("  listicle-survival: N/A (no fixture declares a declared-count)\n"),
@@ -195,8 +201,9 @@ impl EvalReport {
             self.note_size.len(),
             MAX_NOTE_BYTES,
         ));
+        let width = failing.iter().map(|m| m.fixture.chars().count()).max().unwrap_or(0);
         for m in &failing {
-            o.push_str(&format!("    FAIL {:<55} {} bytes\n", m.fixture, m.rendered_bytes));
+            o.push_str(&format!("    FAIL {:<width$} {} bytes\n", m.fixture, m.rendered_bytes));
         }
 
         match &self.calibration {
