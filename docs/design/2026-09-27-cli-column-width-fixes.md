@@ -58,5 +58,5 @@ Both reviewers and the original session missed that a missing watched path makes
 
 1. **`sb/build.rs`:** now shells out to `git rev-parse --path-format=absolute --git-path HEAD --git-path refs --git-path packed-refs` and emits `cargo:rerun-if-changed` only for paths that exist. Correct in a plain checkout, this worktree, and any other worktree name; `sb` no longer recompiles on every build.
 2. **Regression tests:** `sb/src/cli/oracle/tests.rs` covers `pad_display` (wide, combining, no-truncate) and `col_width` (longest name over floor, floor for short/empty, wide names). `borg/src/eval/report/tests.rs` asserts the listicle and note-size FAIL value columns line up for names past the old 60/55-char floors.
-3. **Open:** `borg`'s 12-wide `kind` column (latent, noted above), owner's call.
+3. **`borg`'s `kind` column:** `94bbf48` sizes it to the widest of the header, every kind, and the overall row (floor 12); the divider follows. Tests cover the 12-wide default and a kind past 12 chars.
 4. **Open, outside this repo:** `sweep-repos-watchdog` can `cargo sweep` a target during a live build (dotfiles).
