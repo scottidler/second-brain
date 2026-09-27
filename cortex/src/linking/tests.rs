@@ -904,3 +904,37 @@ fn hub_bodies_are_skipped_for_writes_but_stay_link_targets() {
         "hub body must not be rewritten by the linker"
     );
 }
+
+#[test]
+fn insert_first_wikilink_skips_hyphenated_compounds() {
+    let content = "Uses github-actions and the claude-plugin, then github itself.";
+    let result = insert_first_wikilink(content, "github", "github").expect("standalone mention links");
+    assert!(result.contains("github-actions"), "compound left alone: {result}");
+    assert!(result.contains("then [[github]] itself"), "standalone linked: {result}");
+    assert_eq!(
+        insert_first_wikilink("only claude-plugin here", "claude", "claude"),
+        None
+    );
+}
+
+#[test]
+fn session_note_is_never_a_link_target() {
+    let cfg = LinkingConfig {
+        scan_for: vec!["concepts".to_string()],
+        min_word_length: 3,
+        ..Default::default()
+    };
+    let mut session = note_with_body("notes/renew-cli-review.md", "body");
+    session.frontmatter.note_type = Some("session".to_string());
+    session.frontmatter.title = Some("Security review".to_string());
+    let prose = note_with_body("notes/article.md", "A security review found nothing.");
+    let report = lint_linking(&[session, prose], &cfg, &Stopwords::default());
+    assert!(
+        report
+            .violations
+            .iter()
+            .all(|v| !v.message.contains("renew-cli-review")),
+        "session title must not be linked: {:?}",
+        report.violations
+    );
+}

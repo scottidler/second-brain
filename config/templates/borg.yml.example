@@ -201,7 +201,13 @@ harvest:
   # bare "sure"/empty prompts, navigational lookups). Space/repeated-flag
   # semantics on the CLI equivalent; here it is a plain YAML list - never
   # comma-delimited.
-  exclude-patterns: []
+  exclude-patterns:
+    - '^Review this change for security vulnerabilities'
+    - '^You previously flagged these candidate vulnerabilities'
+    - '^You are a per-PR maintenance agent for the babysit-prs skill'
+    - '^You are a \*\*self-review\*\* agent'
+    - '^reply with exactly:'
+    - '^Write one sentence summarizing the JSON on stdin'
   # Inter-session gap that splits two sessions sharing the same (cwd,
   # git-branch) into separate thread notes instead of merging them into one.
   # A human-time span (e.g. 2h, 90m).

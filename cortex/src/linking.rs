@@ -104,6 +104,12 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig, stopwords: &Stopword
             {
                 return None;
             }
+            // A harvested session is a record of one conversation, not a
+            // concept: its title ("Security review") once became a link
+            // target in 290 unrelated notes.
+            if n.frontmatter.note_type.as_deref() == Some(vault::schema::NoteType::Session.as_str()) {
+                return None;
+            }
             // Filter by path
             if is_path_filtered(&n.path, &config.targets.paths) {
                 return None;
@@ -602,8 +608,11 @@ fn is_word_char(c: char) -> bool {
 /// now derives its body via `vault::frontmatter::split_raw`, the same
 /// splitter that produces `Note::body`).
 fn is_clean_mention(body: &str, start: usize, end: usize) -> bool {
-    let before_is_word = body[..start].chars().next_back().is_some_and(is_word_char);
-    let after_is_word = body[end..].chars().next().is_some_and(is_word_char);
+    // A hyphen joins a compound name: `claude` inside `claude-plugin` or
+    // `github` inside `github-actions` is not a mention of that note.
+    let joins = |c: char| is_word_char(c) || c == '-';
+    let before_is_word = body[..start].chars().next_back().is_some_and(joins);
+    let after_is_word = body[end..].chars().next().is_some_and(joins);
     if before_is_word || after_is_word {
         return false;
     }

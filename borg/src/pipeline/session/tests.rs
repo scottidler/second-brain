@@ -353,6 +353,21 @@ fn harvest_slug_stem_falls_back_to_title_when_slug_absent_or_blank() {
 }
 
 #[test]
+fn harvest_note_title_reads_the_content_slug_not_the_clyde_title() {
+    assert_eq!(
+        harvest_note_title(Some("claude-code-otel-telemetry-pipeline-design"), "Security review"),
+        "Claude code otel telemetry pipeline design"
+    );
+}
+
+#[test]
+fn harvest_note_title_falls_back_to_clyde_title_without_a_slug() {
+    assert_eq!(harvest_note_title(None, "Review panel"), "Review panel");
+    assert_eq!(harvest_note_title(Some("  "), "Review panel"), "Review panel");
+    assert_eq!(harvest_note_title(Some("---"), "Review panel"), "Review panel");
+}
+
+#[test]
 fn harvest_slug_stem_falls_back_to_trace_id_when_title_sanitizes_to_empty() {
     // Slug absent AND the title sanitizes to empty (box-drawing/decorative
     // characters only): the empty-slug fallback (F1) wins over the plain

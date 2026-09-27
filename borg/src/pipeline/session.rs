@@ -36,6 +36,22 @@ pub(crate) fn harvest_slug_stem(slug: Option<&str>, title: &str, trace_id: &str)
     }
 }
 
+/// The note's display title, from the same content slug that names the file.
+/// The clyde title labels the session's opening prompt ("Security review",
+/// "Review panel"), not its outcome, and a generic one became a vault-wide
+/// auto-link target. Falls back to the clyde title only when there is no slug.
+pub(crate) fn harvest_note_title(slug: Option<&str>, clyde_title: &str) -> String {
+    let Some(slug) = slug.map(str::trim).filter(|s| !s.is_empty()) else {
+        return clyde_title.to_string();
+    };
+    let words = slug.split('-').filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => clyde_title.to_string(),
+    }
+}
+
 /// Resolve the harvest note path DETERMINISTICALLY (harvest-content-slug-naming
 /// Phase 3). The shared `atomic::resolve_publish_path` disambiguates collisions
 /// with an order-dependent `-N` counter, which is nondeterministic across
@@ -668,6 +684,7 @@ pub(crate) async fn process_session_inner(
         None => distilled_body,
     };
 
+    let title = harvest_note_title(distilled.slug.as_deref(), &title);
     let note = NoteContent {
         title: title.clone(),
         source_url: Some(source_url.clone()),
