@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 fn main() {
@@ -14,12 +15,29 @@ fn main() {
         .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
 
     println!("cargo:rustc-env=GIT_DESCRIBE={}", git_describe);
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs/");
-    // After `git pack-refs`, loose refs move into packed-refs; without watching
-    // it the embedded GIT_DESCRIBE goes stale (a new tag wouldn't trigger a
-    // rebuild). The path is relative to this crate dir; the workspace .git is a
-    // parent, so reference it explicitly.
-    println!("cargo:rerun-if-changed=.git/packed-refs");
-    println!("cargo:rerun-if-changed=../.git/packed-refs");
+
+    // Ask git where HEAD/refs/packed-refs live instead of guessing `../.git/...`:
+    // in a worktree `.git` is a file, HEAD sits under `<bare>/worktrees/<name>/`
+    // and refs are shared under `<bare>/`. Only existing paths are emitted,
+    // because Cargo treats a missing watched path as always-stale and would
+    // recompile sb on every build.
+    let watched = Command::new("git")
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "HEAD",
+            "--git-path",
+            "refs",
+            "--git-path",
+            "packed-refs",
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    for path in watched.lines().filter(|p| Path::new(p).exists()) {
+        println!("cargo:rerun-if-changed={path}");
+    }
 }

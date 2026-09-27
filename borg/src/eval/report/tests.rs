@@ -108,3 +108,61 @@ fn render_reports_note_size_pass_count_and_failing_fixtures() {
     assert!(text.contains("FAIL video/b"));
     assert!(!text.contains("FAIL video/a"));
 }
+
+/// Byte offset where the trailing value column starts on each line that
+/// contains `marker`, so tests can assert every row's value lines up.
+fn value_columns(text: &str, marker: &str, value_suffix: &str) -> Vec<usize> {
+    text.lines()
+        .filter(|l| l.contains(marker) && l.ends_with(value_suffix))
+        .map(|l| {
+            l.trim_end_matches(value_suffix)
+                .rfind(' ')
+                .expect("value column is space-separated")
+                + 1
+        })
+        .collect()
+}
+
+#[test]
+fn render_aligns_listicle_scores_past_the_old_sixty_char_floor() {
+    let long = "video/a-fixture-slug-that-runs-well-past-the-old-sixty-character-column-floor";
+    assert!(long.len() > 60);
+    let listicle = vec![
+        ListicleMetric {
+            fixture: "video/short".to_string(),
+            score: 0.5,
+        },
+        ListicleMetric {
+            fixture: long.to_string(),
+            score: 1.0,
+        },
+    ];
+    let text = stub_report(listicle, Some(0.75), vec![]).render();
+    assert!(text.contains(&format!("    {long} 1.000")));
+    let cols = value_columns(&text, "video/", "0");
+    assert_eq!(cols.len(), 2);
+    assert_eq!(cols[0], cols[1]);
+}
+
+#[test]
+fn render_aligns_failing_note_size_bytes_past_the_old_fifty_five_char_floor() {
+    let long = "video/a-failing-fixture-slug-well-past-the-old-fifty-five-char-floor";
+    assert!(long.len() > 55);
+    let note_size = vec![
+        NoteSizeMetric {
+            fixture: "video/b".to_string(),
+            rendered_bytes: 100_000,
+            within_ceiling: false,
+        },
+        NoteSizeMetric {
+            fixture: long.to_string(),
+            rendered_bytes: 200_000,
+            within_ceiling: false,
+        },
+    ];
+    let text = stub_report(vec![], None, note_size).render();
+    assert!(text.contains(&format!("FAIL {long} 200000 bytes")));
+    let cols = value_columns(&text, "FAIL ", " bytes");
+    assert_eq!(cols.len(), 2);
+    assert_eq!(cols[0], cols[1]);
+}
