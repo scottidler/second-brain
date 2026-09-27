@@ -8,11 +8,7 @@ use unicode_width::UnicodeWidthStr;
 /// Unicode characters.
 fn pad_display(s: &str, width: usize) -> String {
     let w = s.width();
-    if w >= width {
-        s.to_string()
-    } else {
-        format!("{s}{}", " ".repeat(width - w))
-    }
+    if w >= width { s.to_string() } else { format!("{s}{}", " ".repeat(width - w)) }
 }
 
 #[derive(Args)]
