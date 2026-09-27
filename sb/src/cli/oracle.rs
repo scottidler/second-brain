@@ -1,6 +1,19 @@
 use clap::{Args, Subcommand};
 use eyre::{Context, Result};
 use std::path::PathBuf;
+use unicode_width::UnicodeWidthStr;
+
+/// Right-pad `s` with spaces to `width` display columns (not byte/char count),
+/// so columns stay aligned when a tag/type/status contains wide or combining
+/// Unicode characters.
+fn pad_display(s: &str, width: usize) -> String {
+    let w = s.width();
+    if w >= width {
+        s.to_string()
+    } else {
+        format!("{s}{}", " ".repeat(width - w))
+    }
+}
 
 #[derive(Args)]
 pub struct OracleCli {
@@ -151,7 +164,7 @@ fn print_vault_stats(config: &oracle::Config, stats: &vault::search::VaultStats)
     if !stats.schema_gaps.is_empty() {
         println!("\nSchema gaps:");
         for (field, count) in &stats.schema_gaps {
-            println!("  missing {field:<10} {count}");
+            println!("  missing {} {count}", pad_display(field, 10));
         }
     }
 
@@ -159,17 +172,17 @@ fn print_vault_stats(config: &oracle::Config, stats: &vault::search::VaultStats)
 
     println!("\nBy tag (top 20):");
     for (tag, count) in &stats.by_tag {
-        println!("  {tag:<15} {count}");
+        println!("  {} {count}", pad_display(tag, 15));
     }
 
     println!("\nBy type:");
     for (note_type, count) in &stats.by_type {
-        println!("  {note_type:<15} {count}");
+        println!("  {} {count}", pad_display(note_type, 15));
     }
 
     println!("\nBy status:");
     for (status, count) in &stats.by_status {
-        println!("  {status:<15} {count}");
+        println!("  {} {count}", pad_display(status, 15));
     }
 }
 
@@ -212,13 +225,13 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 fn print_tool_list(tools: &[rmcp::model::Tool]) {
-    let name_col = tools.iter().map(|t| t.name.len()).max().unwrap_or(0) + NAME_COL_GAP;
+    let name_col = tools.iter().map(|t| t.name.width()).max().unwrap_or(0) + NAME_COL_GAP;
     let desc_width = terminal_width().saturating_sub(name_col).max(MIN_DESC_WIDTH);
     for tool in tools {
         let lines = wrap(tool.description.as_deref().unwrap_or(""), desc_width);
         match lines.split_first() {
             Some((first, rest)) => {
-                println!("{:<name_col$}{first}", tool.name);
+                println!("{}{first}", pad_display(&tool.name, name_col));
                 for line in rest {
                     println!("{:name_col$}{line}", "");
                 }
