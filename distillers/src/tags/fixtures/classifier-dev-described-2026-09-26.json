@@ -1,0 +1,32 @@
+{
+  "recorded": "2026-09-26",
+  "source": "~/Claude/tags-only-trial/p0/runs/A2-1.json (arm A2, described labels, repeat 1), p0/wire.json note 31, p0/descriptions.json",
+  "note": [
+    "Derived, not a fresh classifier.dev recording: Phase 5 ships before the",
+    "gold-2 confirmation run, so no live described-label call exists yet to log.",
+    "Phase 0's harness (arms.py) logged only the final per-note {slug: score}",
+    "map after its own inverse mapping, not the raw per-shard response keyed by",
+    "wire label. This fixture reconstructs that shard response for one real P0",
+    "note, using the real title/summary, the real Opus-drafted `homelab`",
+    "description, and the real score A2's first repeat recorded, so the test",
+    "exercises real described-label numbers rather than invented ones.",
+    "`homelab` is P0's trial description; the P4 backfill approves the",
+    "description that actually ships, which may differ."
+  ],
+  "path": "notes/these-git-repositories-changed-how-i-manage-my-home-lab.md",
+  "title": "These Git Repositories Changed How I Manage My Home Lab",
+  "summary": "This article describes six Git repository types the author recommends every serious home lab operator maintain, drawn from personal experience rebuilding and managing [[proxmox|Proxmox]], Docker, and [[kubernetes|Kubernetes]] environments. It is aimed at home lab enthusiasts who want to adopt GitOps and infrastructure-as-code practices. The article covers repository structure, what to store in each, and what should never be committed to Git.",
+  "descriptions": {
+    "homelab": "self-hosted servers and home network: NAS, Proxmox, k3s at home, self-hosted apps; not work infrastructure"
+  },
+  "shard_slugs": ["git", "homelab"],
+  "expected_wire_labels": [
+    "git",
+    "homelab: self-hosted servers and home network: NAS, Proxmox, k3s at home, self-hosted apps; not work infrastructure"
+  ],
+  "response_scores": {
+    "git": 0.96,
+    "homelab: self-hosted servers and home network: NAS, Proxmox, k3s at home, self-hosted apps; not work infrastructure": 0.96
+  },
+  "model": "jev-1.13.0"
+}

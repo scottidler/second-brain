@@ -546,13 +546,24 @@ fn an_over_budget_note_still_goes_out_alone() {
 
 #[test]
 fn the_request_uses_the_multi_field() {
-    let body = request_body(&["ai".to_string()], &["text".to_string()], 8);
+    let body = request_body(&["ai".to_string()], &["text".to_string()], 8, "");
     assert_eq!(body["multi"], serde_json::json!(true));
     assert!(
         body.get("multi_label").is_none(),
         "multi_label is not a classifier.dev field"
     );
     assert_eq!(body["max_labels"], serde_json::json!(8));
+}
+
+/// An empty `instructions` (the code default) is omitted, not sent as `""`:
+/// the request a bare-only vocabulary sends is byte-identical to today's.
+#[test]
+fn empty_instructions_is_omitted_from_the_request() {
+    let bare = request_body(&["ai".to_string()], &["text".to_string()], 8, "");
+    assert!(bare.get("instructions").is_none(), "{bare}");
+
+    let with = request_body(&["ai".to_string()], &["text".to_string()], 8, "Apply strictly.");
+    assert_eq!(with["instructions"], serde_json::json!("Apply strictly."));
 }
 
 #[test]
@@ -573,6 +584,211 @@ fn only_jev_answers_are_accepted() {
         ensure_jev(&unnamed).is_err(),
         "an answer naming no model is not proven Jev"
     );
+}
+
+// -------------------------------------------------------- described labels
+
+const DESCRIBED_FIXTURE: &str = include_str!("fixtures/classifier-dev-described-2026-09-26.json");
+
+/// `labels_for_shard` sorts by slug, not by the wire string: a described
+/// entry sorting after its bare neighbour (`git` < `homelab:`) must land in
+/// the same order the bare partition would, per Phase 0b's pinned 59/58 rule.
+#[test]
+fn labels_for_shard_sorts_by_slug_and_maps_described_and_bare() {
+    let fixture: serde_json::Value = serde_json::from_str(DESCRIBED_FIXTURE).expect("fixture parses");
+    let descriptions: HashMap<String, String> = fixture["descriptions"]
+        .as_object()
+        .expect("descriptions")
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().expect("description").to_string()))
+        .collect();
+    let shard: Vec<String> = fixture["shard_slugs"]
+        .as_array()
+        .expect("shard_slugs")
+        .iter()
+        .map(|v| v.as_str().expect("slug").to_string())
+        .collect();
+    // Deliberately unsorted input: labels_for_shard must sort by slug itself.
+    let unsorted = vec![shard[1].clone(), shard[0].clone()];
+
+    let expected_wire: Vec<String> = fixture["expected_wire_labels"]
+        .as_array()
+        .expect("expected_wire_labels")
+        .iter()
+        .map(|v| v.as_str().expect("label").to_string())
+        .collect();
+
+    for input in [&shard, &unsorted] {
+        let pairs = labels_for_shard(input, &descriptions);
+        let wire: Vec<String> = pairs.iter().map(|(w, _)| w.clone()).collect();
+        let slugs: Vec<String> = pairs.iter().map(|(_, s)| s.clone()).collect();
+        assert_eq!(wire, expected_wire, "wire labels for {input:?}");
+        assert_eq!(slugs, vec!["git".to_string(), "homelab".to_string()]);
+    }
+
+    // A slug with no description is sent bare.
+    assert_eq!(
+        labels_for_shard(&["git".to_string()], &descriptions),
+        vec![("git".to_string(), "git".to_string())]
+    );
+}
+
+/// Success criterion: the request body for a described tag carries the label
+/// `homelab: <description>`, and the returned score lands on slug `homelab`,
+/// using real Phase 0 A2 numbers (see the fixture's `note`).
+#[test]
+fn a_described_label_request_carries_the_description_and_the_score_maps_back_to_its_slug() {
+    let fixture: serde_json::Value = serde_json::from_str(DESCRIBED_FIXTURE).expect("fixture parses");
+    let title = fixture["title"].as_str().expect("title").to_string();
+    let summary = fixture["summary"].as_str().expect("summary").to_string();
+    let descriptions: HashMap<String, String> = fixture["descriptions"]
+        .as_object()
+        .expect("descriptions")
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().expect("description").to_string()))
+        .collect();
+    let shard_slugs: HashSet<String> = fixture["shard_slugs"]
+        .as_array()
+        .expect("shard_slugs")
+        .iter()
+        .map(|v| v.as_str().expect("slug").to_string())
+        .collect();
+    let expected_wire: Vec<String> = fixture["expected_wire_labels"]
+        .as_array()
+        .expect("expected_wire_labels")
+        .iter()
+        .map(|v| v.as_str().expect("label").to_string())
+        .collect();
+    let response_scores: HashMap<String, f64> = fixture["response_scores"]
+        .as_object()
+        .expect("response_scores")
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_f64().expect("score")))
+        .collect();
+
+    // A fake that plays back the recorded response for exactly the wire
+    // labels it expects, so a drift between labels_for_shard's output and
+    // the fixture fails loudly rather than silently scoring the wrong thing.
+    struct DescribedReplay {
+        expected_wire: Vec<String>,
+        response_scores: HashMap<String, f64>,
+    }
+    impl Transport for DescribedReplay {
+        fn send(&self, body: &serde_json::Value, _token: Option<&str>) -> Result<(u16, String)> {
+            let sent: Vec<String> = body["labels"]
+                .as_array()
+                .expect("labels")
+                .iter()
+                .map(|v| v.as_str().expect("label").to_string())
+                .collect();
+            assert_eq!(sent, self.expected_wire, "the request must carry the described label");
+            let scores: serde_json::Map<String, serde_json::Value> = sent
+                .iter()
+                .map(|label| (label.clone(), serde_json::json!(self.response_scores[label])))
+                .collect();
+            let reply = serde_json::json!({
+                "results": [{"model": "jev-1.13.0", "scores": scores}],
+                "usage": {"input_tokens": 1_000},
+                "pricing": {"estimated_usd": 0.000042},
+            });
+            Ok((200, reply.to_string()))
+        }
+    }
+
+    let canon = CanonicalSet {
+        all: shard_slugs,
+        no_segment: HashSet::new(),
+        no_classifier: HashSet::new(),
+        max_per_note: 8,
+        descriptions,
+    };
+    let dev = ClassifierDev::with_transport(
+        canon,
+        TagMapping::default(),
+        &TagsClassifierConfig::default(),
+        Arc::new(DescribedReplay {
+            expected_wire: expected_wire.clone(),
+            response_scores: response_scores.clone(),
+        }),
+    );
+    let batch = dev.score_batch(&[TagInput {
+        title: &title,
+        text: &summary,
+        candidates: &[],
+    }]);
+
+    let scores = batch.notes[0].as_ref().expect("the described note must score");
+    let homelab_wire = expected_wire
+        .iter()
+        .find(|l| l.starts_with("homelab:"))
+        .expect("a described homelab label");
+    assert_eq!(
+        scores.get("homelab").copied(),
+        Some(response_scores[homelab_wire] as f32),
+        "the score for the wire label must land on slug homelab, not on the wire string: {scores:?}"
+    );
+    assert!(
+        !scores.contains_key(homelab_wire),
+        "the wire label itself must not survive as a key: {scores:?}"
+    );
+    assert_eq!(scores.get("git").copied(), Some(response_scores["git"] as f32));
+}
+
+/// The shipping safety property (design doc P5): described labels only go
+/// out for vocabulary entries that carry a description. Today's shipped
+/// `canonical-tags.yml` has none, so a bare-only vocabulary under the code
+/// defaults (`descriptions` empty, `instructions` empty) must post the exact
+/// same request body this code sent before Phase 5: bare slugs, no
+/// `instructions` key. Merging Phase 5 changes nothing on the wire until a
+/// description is approved and applied.
+#[test]
+fn a_bare_only_vocabulary_posts_a_request_byte_identical_to_before_phase_5() {
+    struct Capture(std::sync::Mutex<Option<serde_json::Value>>);
+    impl Transport for Capture {
+        fn send(&self, body: &serde_json::Value, _token: Option<&str>) -> Result<(u16, String)> {
+            *self.0.lock().expect("lock") = Some(body.clone());
+            let labels: Vec<&str> = body["labels"]
+                .as_array()
+                .expect("labels")
+                .iter()
+                .map(|v| v.as_str().expect("label"))
+                .collect();
+            let scores: serde_json::Map<String, serde_json::Value> = labels
+                .iter()
+                .map(|l| ((*l).to_string(), serde_json::json!(0.5)))
+                .collect();
+            let reply = serde_json::json!({
+                "results": [{"model": "jev-1.13.0", "scores": scores}],
+                "usage": {"input_tokens": 100},
+                "pricing": {"estimated_usd": 0.0000042},
+            });
+            Ok((200, reply.to_string()))
+        }
+    }
+
+    let capture = Arc::new(Capture(std::sync::Mutex::new(None)));
+    // `canon()` carries no descriptions (`descriptions: Default::default()`)
+    // and `TagsClassifierConfig::default()` carries no instructions, matching
+    // the shipped `canonical-tags.yml` today.
+    let dev = ClassifierDev::with_transport(canon(), mapping(), &TagsClassifierConfig::default(), capture.clone());
+    let batch = dev.score_batch(&[TagInput {
+        title: "A note",
+        text: "Some text.",
+        candidates: &[],
+    }]);
+    assert!(batch.notes[0].is_ok());
+
+    let sent = capture.0.lock().expect("lock").clone().expect("a call was made");
+    let mut expected_labels: Vec<String> = canon().all.into_iter().collect();
+    expected_labels.sort();
+    let want = request_body(
+        &expected_labels,
+        &["A note\n\nSome text.".to_string()],
+        canon().max_per_note,
+        "",
+    );
+    assert_eq!(sent, want, "the posted body must match the pre-Phase-5 shape exactly");
+    assert!(sent.get("instructions").is_none(), "no instructions field, {sent}");
 }
 
 // ------------------------------------------------------------ score_batch

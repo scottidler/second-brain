@@ -231,6 +231,9 @@ tags:
     # live ingest. `sb doctor` prints today's total.
     # daily-usd-budget: 0.50
     # ingest-reserve-usd: 0.10
+    # Appended after classifier.dev's fixed rubric on every question. Empty
+    # (the default) sends no `instructions` field.
+    # instructions: ""
 
 # LLM used by intel / classify. Provider: claude | openai.
 llm:

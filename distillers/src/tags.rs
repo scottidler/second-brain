@@ -286,6 +286,12 @@ pub struct TagsClassifierConfig {
     /// Headroom a bulk run leaves in the day for borg's live ingest, which
     /// does not write the ledger (about 20 notes x 2 shards a day).
     pub ingest_reserve_usd: f64,
+    /// Appended after classifier.dev's fixed rubric ("A category applies if
+    /// the text meaningfully touches it, even briefly.") on every question.
+    /// Empty (the default) sends no `instructions` field: Phase 0's A3 arm
+    /// (rubric-tightening instructions) did not beat baseline, so nothing
+    /// ships by default. A host may still set one.
+    pub instructions: String,
 }
 
 impl Default for TagsClassifierConfig {
@@ -299,6 +305,7 @@ impl Default for TagsClassifierConfig {
             timeout_secs: 30,
             daily_usd_budget: 0.50,
             ingest_reserve_usd: 0.10,
+            instructions: String::new(),
         }
     }
 }
@@ -446,6 +453,32 @@ pub fn shard_labels(sorted_labels: &[String]) -> Vec<Vec<String>> {
     let shards = sorted_labels.len().div_ceil(MAX_LABELS_PER_CALL);
     let per = sorted_labels.len().div_ceil(shards);
     sorted_labels.chunks(per).map(<[String]>::to_vec).collect()
+}
+
+/// The wire label sent for each slug of one shard (`slug: description` when
+/// the vocabulary carries one, else the bare slug), paired with the slug it
+/// maps back to.
+///
+/// Sorted by **slug**, not by the wire string: `shard_labels` fixes the
+/// pinned 59/58 partition on the bare, slug-sorted vocabulary (Phase 0b,
+/// panel r4 OQ8), and sorting the described strings instead would move `ai:`
+/// after `ai-safety`, an untested co-label context. `score_batch`'s
+/// missing/unknown-key rule (`check_shard_scores`) covers the mapping back:
+/// a label the service doesn't echo, or echoes under a key we never sent,
+/// fails that note rather than silently landing on the wrong slug.
+pub fn labels_for_shard(shard: &[String], descriptions: &HashMap<String, String>) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = shard
+        .iter()
+        .map(|slug| {
+            let wire = match descriptions.get(slug) {
+                Some(description) => format!("{slug}: {description}"),
+                None => slug.clone(),
+            };
+            (wire, slug.clone())
+        })
+        .collect();
+    pairs.sort_by(|a, b| a.1.cmp(&b.1));
+    pairs
 }
 
 /// Merge per-shard score maps into one ranking. Valid because the API returns
@@ -647,6 +680,7 @@ pub struct ClassifierDev {
     threshold: f32,
     token_env: String,
     endpoint: String,
+    instructions: String,
     transport: Arc<dyn Transport>,
 }
 
@@ -774,13 +808,22 @@ enum CallOutcome {
 
 /// `multi` is classifier.dev's multi-label switch; `multi_label` is not a field
 /// it reads, and only worked because a numeric `max_labels` also enables it.
-fn request_body(labels: &[String], texts: &[String], max_labels: usize) -> serde_json::Value {
-    serde_json::json!({
+///
+/// `instructions` is omitted entirely when empty (the code default), rather
+/// than sent as `""`: an empty request body is byte-identical to what today's
+/// bare, undescribed vocabulary already sends, so shipping this code changes
+/// nothing on the wire until a description or an instructions string is set.
+fn request_body(labels: &[String], texts: &[String], max_labels: usize, instructions: &str) -> serde_json::Value {
+    let mut body = serde_json::json!({
         "inputs": texts,
         "labels": labels,
         "multi": true,
         "max_labels": max_labels,
-    })
+    });
+    if !instructions.is_empty() {
+        body["instructions"] = serde_json::json!(instructions);
+    }
+    body
 }
 
 /// classifier.dev answers from a non-Jev LLM when Jev fails (`ling-*`,
@@ -878,6 +921,7 @@ impl ClassifierDev {
             threshold: cfg.threshold,
             token_env: cfg.token_env.clone(),
             endpoint: cfg.endpoint.clone(),
+            instructions: cfg.instructions.clone(),
             transport,
         }
     }
@@ -886,6 +930,17 @@ impl ClassifierDev {
         let mut v: Vec<String> = self.canon.all.iter().cloned().collect();
         v.sort();
         v
+    }
+
+    /// Every shard's wire labels paired with the slug each maps back to, in
+    /// the fixed 59/58 partition. The one place `labels_for_shard` is called
+    /// against this vocabulary's descriptions, so every caller (scoring, the
+    /// cost estimate, the config hash) sees the same shards.
+    fn label_shards(&self) -> Vec<Vec<(String, String)>> {
+        shard_labels(&self.sorted_vocabulary())
+            .iter()
+            .map(|shard| labels_for_shard(shard, &self.canon.descriptions))
+            .collect()
     }
 
     /// The optional workspace token, resolved from the configured env var.
@@ -911,7 +966,7 @@ impl ClassifierDev {
     }
 
     fn post(&self, labels: &[String], texts: &[String]) -> CallOutcome {
-        let body = request_body(labels, texts, self.canon.max_per_note);
+        let body = request_body(labels, texts, self.canon.max_per_note, &self.instructions);
         let (status, text) = match self.transport.send(&body, self.token().as_deref()) {
             Ok(reply) => reply,
             Err(e) => return CallOutcome::Failed(e),
@@ -956,24 +1011,34 @@ impl ClassifierDev {
     /// a note that failed one shard is not sent in the next.
     pub fn score_batch(&self, inputs: &[TagInput]) -> ScoredBatch {
         let texts: Vec<String> = inputs.iter().map(|i| clip_classifier_text(i.title, i.text)).collect();
-        let shards = shard_labels(&self.sorted_vocabulary());
+        let label_shards = self.label_shards();
         log::debug!(
             "ClassifierDev::score_batch: texts={} shards={} threshold={}",
             texts.len(),
-            shards.len(),
+            label_shards.len(),
             self.threshold
         );
 
         let mut per_note: Vec<Result<Vec<HashMap<String, f32>>>> = inputs.iter().map(|_| Ok(Vec::new())).collect();
         let mut calls = Vec::new();
         let mut service_limit = None;
-        for shard in &shards {
+        for pairs in &label_shards {
+            let wire_labels: Vec<String> = pairs.iter().map(|(wire, _)| wire.clone()).collect();
+            let wire_to_slug: HashMap<String, String> = pairs.iter().cloned().collect();
             let pending: Vec<usize> = (0..inputs.len()).filter(|i| per_note[*i].is_ok()).collect();
             let lengths: Vec<usize> = pending.iter().map(|i| texts[*i].chars().count()).collect();
             let mut start = 0usize;
-            for size in plan_chunks(&lengths, shard) {
+            for size in plan_chunks(&lengths, &wire_labels) {
                 let chunk = &pending[start..start + size];
-                self.score_chunk(shard, chunk, &texts, &mut per_note, &mut calls, &mut service_limit);
+                self.score_chunk(
+                    &wire_labels,
+                    &wire_to_slug,
+                    chunk,
+                    &texts,
+                    &mut per_note,
+                    &mut calls,
+                    &mut service_limit,
+                );
                 start += size;
             }
         }
@@ -998,8 +1063,18 @@ impl ClassifierDev {
         }
     }
 
+    /// Every shard's wire labels only, in `label_shards`' order. The token
+    /// model prices whatever text is actually sent, so a described label
+    /// (longer than its bare slug) costs more here too.
+    fn wire_label_shards(&self) -> Vec<Vec<String>> {
+        self.label_shards()
+            .into_iter()
+            .map(|pairs| pairs.into_iter().map(|(wire, _)| wire).collect())
+            .collect()
+    }
+
     fn wire_usd(&self, texts: &[String]) -> Vec<f64> {
-        let shards = shard_labels(&self.sorted_vocabulary());
+        let shards = self.wire_label_shards();
         texts
             .iter()
             .map(|text| {
@@ -1014,7 +1089,7 @@ impl ClassifierDev {
     /// request on every shard: planned against the shard whose labels cost
     /// the most per note, which bounds the others.
     fn plan_run_chunks(&self, texts: &[String]) -> Vec<usize> {
-        let shards = shard_labels(&self.sorted_vocabulary());
+        let shards = self.wire_label_shards();
         let Some(widest) = shards
             .iter()
             .max_by(|a, b| note_tokens(0, a).total_cmp(&note_tokens(0, b)))
@@ -1026,24 +1101,31 @@ impl ClassifierDev {
     }
 
     /// A stable digest of everything that changes a score: the endpoint, the
-    /// labels exactly as sent (shard by shard), `max_labels`, and the wire
-    /// text bound. A stored score is reusable only under the same digest.
+    /// labels exactly as sent (shard by shard, descriptions included),
+    /// `max_labels`, `instructions`, and the wire text bound. A stored score
+    /// is reusable only under the same digest.
     pub fn scoring_config_hash(&self) -> String {
-        let shards = shard_labels(&self.sorted_vocabulary());
+        let shards = self.wire_label_shards();
         let config = serde_json::json!({
             "endpoint": self.endpoint,
             "shards": shards,
             "max_labels": self.canon.max_per_note,
             "text_chars": CLASSIFIER_TEXT_CHARS,
+            "instructions": self.instructions,
         });
         sha256_hex(config.to_string().as_bytes())
     }
 
     /// Score the notes at `chunk` (indices into `texts`) against one shard,
     /// halving on a per-request spend refusal. Each call appends one usage row.
+    ///
+    /// `labels` is the shard's wire labels (post-description); `wire_to_slug`
+    /// maps each back to the slug it describes, so a returned score lands on
+    /// `homelab`, not on `"homelab: self-hosted servers..."`.
     fn score_chunk(
         &self,
-        shard: &[String],
+        labels: &[String],
+        wire_to_slug: &HashMap<String, String>,
         chunk: &[usize],
         texts: &[String],
         per_note: &mut [Result<Vec<HashMap<String, f32>>>],
@@ -1057,7 +1139,7 @@ impl ClassifierDev {
             return;
         }
         let chunk_texts: Vec<String> = chunk.iter().map(|i| texts[*i].clone()).collect();
-        match self.post(shard, &chunk_texts) {
+        match self.post(labels, &chunk_texts) {
             CallOutcome::Scored(response) => {
                 calls.push(response.call_usage());
                 if response.results.len() != chunk.len() {
@@ -1071,10 +1153,20 @@ impl ClassifierDev {
                     return;
                 }
                 for (i, result) in chunk.iter().zip(response.results) {
-                    match check_shard_scores(shard, result.scores) {
+                    match check_shard_scores(labels, result.scores) {
                         Ok(scores) => {
+                            let by_slug: HashMap<String, f32> = scores
+                                .into_iter()
+                                .map(|(wire, score)| {
+                                    let slug = wire_to_slug
+                                        .get(&wire)
+                                        .cloned()
+                                        .expect("check_shard_scores validated this key against the sent labels");
+                                    (slug, score)
+                                })
+                                .collect();
                             if let Ok(shard_scores) = &mut per_note[*i] {
-                                shard_scores.push(scores);
+                                shard_scores.push(by_slug);
                             }
                         }
                         Err(e) => per_note[*i] = Err(e),
@@ -1089,8 +1181,8 @@ impl ClassifierDev {
                         chunk.len()
                     );
                     let (left, right) = chunk.split_at(chunk.len() / 2);
-                    self.score_chunk(shard, left, texts, per_note, calls, service_limit);
-                    self.score_chunk(shard, right, texts, per_note, calls, service_limit);
+                    self.score_chunk(labels, wire_to_slug, left, texts, per_note, calls, service_limit);
+                    self.score_chunk(labels, wire_to_slug, right, texts, per_note, calls, service_limit);
                 } else {
                     per_note[chunk[0]] = Err(eyre!(
                         "classifier.dev refused this note alone over its per-request spend limit: {body}"
