@@ -505,12 +505,25 @@ pub fn merge_shard_scores(shard_scores: &[HashMap<String, f32>]) -> Vec<(String,
     merged.into_iter().collect()
 }
 
+/// How far below the threshold a score may sit and still meet it. A repeat
+/// mean is arithmetic on f32 scores: three identical 0.90 answers averaged in
+/// f32 come to 0.8999999166, which failed the default 0.9 threshold the single
+/// score passes (implementation audit r1, P6).
+pub const THRESHOLD_TOLERANCE: f32 = 1e-6;
+
+/// Whether `score` meets `threshold`, within `THRESHOLD_TOLERANCE`. Every
+/// threshold test on a classifier score goes through here, so selection and
+/// `tag-apply` agree on the boundary.
+pub fn meets_threshold(score: f32, threshold: f32) -> bool {
+    score >= threshold - THRESHOLD_TOLERANCE
+}
+
 /// Apply the threshold, then rank and cap. Selection and promotion share the
 /// threshold on purpose, so a promoted note carries the tags that promoted it.
 pub fn select_above_threshold(scores: &[(String, f32)], threshold: f32, max_per_note: usize) -> Vec<(String, f32)> {
     let kept: Vec<(String, f32)> = scores
         .iter()
-        .filter(|(_, s)| *s >= threshold)
+        .filter(|(_, s)| meets_threshold(*s, threshold))
         .map(|(t, s)| (t.clone(), *s))
         .collect();
     rank_and_cap(kept, max_per_note)
@@ -838,23 +851,21 @@ fn request_body(labels: &[String], texts: &[String], max_labels: usize, instruct
 }
 
 /// classifier.dev answers from a non-Jev LLM when Jev fails (`ling-*`,
-/// `mercury-*`), and those scores are not comparable to Jev's. Such an answer,
-/// or one naming no model, fails the call so the fallback runs and the ingest
-/// is marked degraded instead of accepting it as a Jev answer.
-fn ensure_jev(response: &ClassifyResponse) -> Result<()> {
-    for (i, result) in response.results.iter().enumerate() {
-        match result.model.as_deref() {
-            Some(model) if model.starts_with("jev") => {
-                log::debug!("ensure_jev: result {i} answered by {model}");
-            }
-            other => {
-                return Err(eyre!(
-                    "classifier.dev result {i} was answered by {other:?}, not Jev; refusing non-Jev scores"
-                ));
-            }
+/// `mercury-*`), and those scores are not comparable to Jev's. Such a result,
+/// or one naming no model, fails its own note so that note's fallback runs and
+/// the ingest is marked degraded instead of accepting it as a Jev answer. The
+/// other results in the same response still count: one note's non-Jev answer
+/// does not fail its chunk (implementation audit r1, Q3).
+fn ensure_jev(i: usize, result: &ClassifyResult) -> Result<()> {
+    match result.model.as_deref() {
+        Some(model) if model.starts_with("jev") => {
+            log::debug!("ensure_jev: result {i} answered by {model}");
+            Ok(())
         }
+        other => Err(eyre!(
+            "classifier.dev result {i} was answered by {other:?}, not Jev; refusing non-Jev scores"
+        )),
     }
-    Ok(())
 }
 
 /// Estimated input tokens one note costs in a call over `labels`, from the
@@ -1001,9 +1012,6 @@ impl ClassifierDev {
                 return CallOutcome::Failed(eyre!("failed to parse classifier.dev response: {e}: {text}"));
             }
         };
-        if let Err(e) = ensure_jev(&parsed) {
-            return CallOutcome::Failed(e);
-        }
         let usage = parsed.call_usage();
         log::debug!(
             "ClassifierDev::post: texts={} labels={} input_tokens={} estimated_usd={}",
@@ -1051,7 +1059,7 @@ impl ClassifierDev {
             // means some repeat of this shard already failed the note; it is
             // folded into `per_note` only once every repeat has run (or the
             // shard gives up early), never from a partial average.
-            let mut shard_acc: Vec<Result<HashMap<String, (f32, u32)>>> = per_note
+            let mut shard_acc: Vec<Result<HashMap<String, (f64, u32)>>> = per_note
                 .iter()
                 .map(|note| match note {
                     Ok(_) => Ok(HashMap::new()),
@@ -1095,7 +1103,7 @@ impl ClassifierDev {
                     Ok(sums) => {
                         let averaged: HashMap<String, f32> = sums
                             .iter()
-                            .map(|(slug, (sum, count))| (slug.clone(), sum / *count as f32))
+                            .map(|(slug, (sum, count))| (slug.clone(), (sum / f64::from(*count)) as f32))
                             .collect();
                         if let Ok(shard_scores) = note {
                             shard_scores.push(averaged);
@@ -1202,7 +1210,7 @@ impl ClassifierDev {
         wire_to_slug: &HashMap<String, String>,
         chunk: &[usize],
         texts: &[String],
-        acc: &mut [Result<HashMap<String, (f32, u32)>>],
+        acc: &mut [Result<HashMap<String, (f64, u32)>>],
         calls: &mut Vec<CallUsage>,
         service_limit: &mut Option<String>,
     ) {
@@ -1226,7 +1234,11 @@ impl ClassifierDev {
                     }
                     return;
                 }
-                for (i, result) in chunk.iter().zip(response.results) {
+                for (n, (i, result)) in chunk.iter().zip(response.results).enumerate() {
+                    if let Err(e) = ensure_jev(n, &result) {
+                        acc[*i] = Err(e);
+                        continue;
+                    }
                     match check_shard_scores(labels, result.scores) {
                         Ok(scores) => {
                             if let Ok(sums) = &mut acc[*i] {
@@ -1236,7 +1248,7 @@ impl ClassifierDev {
                                         .cloned()
                                         .expect("check_shard_scores validated this key against the sent labels");
                                     let entry = sums.entry(slug).or_insert((0.0, 0));
-                                    entry.0 += score;
+                                    entry.0 += f64::from(score);
                                     entry.1 += 1;
                                 }
                             }

@@ -409,7 +409,7 @@ pub fn tag_apply(run: &TagApplyRun, vault_root: &Path, notes: &[&Note], opts: &T
                 .push((id.to_string(), format!("the cursor holds no {tag} score for this note")));
             continue;
         };
-        if score < run.threshold {
+        if !distillers::tags::meets_threshold(score, run.threshold) {
             report.below_threshold += 1;
             continue;
         }
