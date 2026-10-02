@@ -152,7 +152,7 @@ pub async fn fetch_subtitles_raw(url: &str, pipeline: &PipelineConfig) -> Result
         .args([
             "--write-auto-sub",
             "--sub-lang",
-            "en",
+            &SUBTITLE_LANG_PREFERENCE.join(","),
             "--sub-format",
             "vtt",
             "--skip-download",
@@ -194,7 +194,8 @@ pub async fn fetch_subtitles_raw(url: &str, pipeline: &PipelineConfig) -> Result
     }
 
     let subs: serde_json::Value = serde_json::from_str(trimmed).unwrap_or_default();
-    if let Some(en_sub) = subs.get("en") {
+    for (lang, en_sub) in preferred_subtitle_entries(&subs) {
+        log::debug!("Trying '{lang}' subtitle entry");
         if let Some(filepath) = en_sub.get("filepath").and_then(|f| f.as_str()) {
             log::debug!("Reading subtitle file: {filepath}");
             let content = std::fs::read_to_string(filepath).context("Failed to read subtitle file")?;
@@ -222,12 +223,26 @@ pub async fn fetch_subtitles_raw(url: &str, pipeline: &PipelineConfig) -> Result
                 let content = response.text().await.context("Failed to read subtitle response")?;
                 return Ok(Some(content));
             }
-            log::warn!("Subtitle download returned status {}", response.status());
+            log::warn!("Subtitle download for '{lang}' returned status {}", response.status());
         }
     }
 
-    log::debug!("No usable 'en' subtitle entry found in JSON");
+    log::debug!("No usable English subtitle entry found in JSON");
     Ok(None)
+}
+
+/// `en-orig` is YouTube's original-language English ASR track. Plain `en` on
+/// an auto-caption video is a machine translation (`tlang=en`), which YouTube
+/// rate-limits with HTTP 429 regardless of IP (yt-dlp/yt-dlp#13831). `en`
+/// stays as the fallback because manual English subtitles are keyed `en`.
+const SUBTITLE_LANG_PREFERENCE: [&str; 2] = ["en-orig", "en"];
+
+/// The `requested_subtitles` entries present in `subs`, in preference order.
+fn preferred_subtitle_entries(subs: &serde_json::Value) -> Vec<(&'static str, &serde_json::Value)> {
+    SUBTITLE_LANG_PREFERENCE
+        .iter()
+        .filter_map(|lang| subs.get(*lang).map(|entry| (*lang, entry)))
+        .collect()
 }
 
 /// Parse a raw VTT subtitle file into `(start_secs, text)` segments. Each

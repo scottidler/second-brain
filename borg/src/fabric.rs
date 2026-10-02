@@ -75,7 +75,10 @@ pub fn fetch_transcript(url: &str, fabric: &FabricConfig, pipeline: &PipelineCon
     let timeout_secs = pipeline.fabric_transcript_timeout_secs;
     log::debug!("fabric: fetching YouTube transcript for {url} (timeout={timeout_secs}s)");
     let mut child = Command::new(&binary)
-        .args(["-y", url, "--transcript"])
+        // fabric defaults to `--sub-langs en,en.*`, which includes the
+        // machine-translated `en` track YouTube 429s (yt-dlp/yt-dlp#13831,
+        // danielmiessler/Fabric#2231). `en-orig` is the original ASR track.
+        .args(["-y", url, "--transcript", "--yt-dlp-args=--sub-lang en-orig"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

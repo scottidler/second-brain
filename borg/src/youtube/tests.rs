@@ -360,3 +360,27 @@ async fn test_extract_frames_synthetic_video() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn test_preferred_subtitle_entries_prefers_en_orig_over_translated_en() {
+    let subs = serde_json::json!({
+        "en": { "url": "https://example.test/timedtext?lang=en&tlang=en" },
+        "en-orig": { "url": "https://example.test/timedtext?lang=en" },
+    });
+    let langs: Vec<&str> = preferred_subtitle_entries(&subs).iter().map(|(l, _)| *l).collect();
+    assert_eq!(langs, vec!["en-orig", "en"]);
+}
+
+#[test]
+fn test_preferred_subtitle_entries_falls_back_to_en_without_en_orig() {
+    let subs = serde_json::json!({ "en": { "url": "https://example.test/manual-en" } });
+    let langs: Vec<&str> = preferred_subtitle_entries(&subs).iter().map(|(l, _)| *l).collect();
+    assert_eq!(langs, vec!["en"]);
+}
+
+#[test]
+fn test_preferred_subtitle_entries_ignores_other_languages() {
+    let subs = serde_json::json!({ "de": { "url": "x" }, "en-US": { "url": "y" } });
+    assert!(preferred_subtitle_entries(&subs).is_empty());
+    assert!(preferred_subtitle_entries(&serde_json::Value::Null).is_empty());
+}
