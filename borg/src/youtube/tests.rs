@@ -384,3 +384,87 @@ fn test_preferred_subtitle_entries_ignores_other_languages() {
     assert!(preferred_subtitle_entries(&subs).is_empty());
     assert!(preferred_subtitle_entries(&serde_json::Value::Null).is_empty());
 }
+
+const DIAG_STDOUT_OK: &str = "\
+[youtube] Extracting URL: https://www.youtube.com/watch?v=jNQXAC9IVRw
+[youtube] jNQXAC9IVRw: Downloading webpage
+[youtube] jNQXAC9IVRw: Downloading visionos player API JSON
+[youtube] jNQXAC9IVRw: Downloading m3u8 information
+[info] jNQXAC9IVRw: Downloading 1 format(s): 251
+[ExtractAudio] Destination: /tmp/obsidian-borg/jNQXAC9IVRw.mp3
+";
+
+const DIAG_STDERR_OK: &str = "\
+[debug] yt-dlp version stable@2026.08.19 from yt-dlp/yt-dlp [594bd50c2] (pip)
+[debug] JS runtimes: deno-2.9.7
+[debug] [youtube] [pot] PO Token Providers: none
+[debug] [youtube] Rn4nmFRPe0s: Detected experiment to bind GVS PO Token to video ID for web client
+[debug] Invoking http downloader on \"https://rr3---sn-x.googlevideo.com/videoplayback?expire=1&ip=203.0.113.7&itag=251&mime=audio%2Fwebm&fexp=51000%2C51001&c=VISIONOS&sig=SECRETSIG&lsig=SECRETLSIG\"
+";
+
+const DIAG_STDERR_403: &str = "\
+[debug] yt-dlp version stable@2026.08.19 from yt-dlp/yt-dlp [594bd50c2] (pip)
+[debug] Invoking http downloader on \"https://rr3---sn-x.googlevideo.com/videoplayback?ip=203.0.113.7&itag=140&c=WEB&pot=TOKEN&sig=SECRETSIG\"
+ERROR: unable to download video data: HTTP Error 403: Forbidden
+";
+
+#[test]
+fn test_download_diagnostics_extracts_client_format_and_experiments() {
+    let diag = diagnostics::download_diagnostics(DIAG_STDOUT_OK, DIAG_STDERR_OK);
+    assert_eq!(diag.yt_dlp_version.as_deref(), Some("stable@2026.08.19"));
+    assert_eq!(diag.player_clients, vec!["visionos".to_string()]);
+    assert_eq!(diag.formats.as_deref(), Some("format(s): 251"));
+    assert_eq!(diag.stream_client.as_deref(), Some("VISIONOS"));
+    assert_eq!(diag.stream_itag.as_deref(), Some("251"));
+    assert_eq!(diag.stream_mime.as_deref(), Some("audio/webm"));
+    assert_eq!(diag.stream_fexp.as_deref(), Some("51000,51001"));
+    assert!(!diag.stream_has_pot);
+    assert_eq!(diag.po_token_providers.as_deref(), Some("none"));
+    assert_eq!(diag.js_runtimes.as_deref(), Some("deno-2.9.7"));
+    assert_eq!(diag.notes.len(), 1, "experiment line kept as a note: {:?}", diag.notes);
+    assert!(diag.error.is_none());
+}
+
+#[test]
+fn test_download_diagnostics_display_never_leaks_signed_url_parts() {
+    for (out, err) in [(DIAG_STDOUT_OK, DIAG_STDERR_OK), ("", DIAG_STDERR_403)] {
+        let line = diagnostics::download_diagnostics(out, err).to_string();
+        for secret in ["203.0.113.7", "SECRETSIG", "SECRETLSIG", "TOKEN", "googlevideo"] {
+            assert!(!line.contains(secret), "{secret} leaked into: {line}");
+        }
+    }
+}
+
+#[test]
+fn test_download_diagnostics_403_reports_pot_and_error() {
+    let diag = diagnostics::download_diagnostics("", DIAG_STDERR_403);
+    assert_eq!(diag.stream_client.as_deref(), Some("WEB"));
+    assert_eq!(diag.stream_itag.as_deref(), Some("140"));
+    assert!(diag.stream_has_pot);
+    assert_eq!(
+        diag.error.as_deref(),
+        Some("ERROR: unable to download video data: HTTP Error 403: Forbidden")
+    );
+}
+
+#[test]
+fn test_is_http_403_only_matches_error_lines_with_403() {
+    assert!(diagnostics::is_http_403(DIAG_STDERR_403));
+    assert!(!diagnostics::is_http_403(DIAG_STDERR_OK));
+    assert!(!diagnostics::is_http_403(
+        "ERROR: Unable to download: HTTP Error 429: Too Many Requests"
+    ));
+    assert!(!diagnostics::is_http_403(
+        "[debug] retrying after HTTP Error 403\nERROR: video unavailable"
+    ));
+}
+
+#[test]
+fn test_error_summary_prefers_last_error_line() {
+    assert_eq!(
+        diagnostics::error_summary(DIAG_STDERR_403),
+        "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+    );
+    assert_eq!(diagnostics::error_summary("[debug] a\nlast line\n\n"), "last line");
+    assert_eq!(diagnostics::error_summary(""), "(no stderr)");
+}

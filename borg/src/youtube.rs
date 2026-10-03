@@ -330,6 +330,53 @@ pub async fn extract_audio(url: &str, output_dir: &str, ffmpeg_threads: usize, t
     log::debug!(
         "yt-dlp: extracting audio for {url} to {output_dir} (ffmpeg-threads={ffmpeg_threads} timeout={timeout_secs}s)"
     );
+    let first = run_audio_extraction(url, output_dir, ffmpeg_threads, timeout_secs, 1).await?;
+    let output = if !first.status.success() && is_http_403(&String::from_utf8_lossy(&first.stderr)) {
+        // Both 403s seen so far (2026-09-28, 2026-10-02) cleared on a manual
+        // retry minutes later; one delayed retry absorbs that without masking
+        // a persistent block, and its diagnostics are logged for comparison.
+        log::warn!(
+            "yt-dlp audio extraction got HTTP 403 for {url}; retrying once in {}s",
+            AUDIO_403_RETRY_DELAY.as_secs()
+        );
+        tokio::time::sleep(AUDIO_403_RETRY_DELAY).await;
+        run_audio_extraction(url, output_dir, ffmpeg_threads, timeout_secs, 2).await?
+    } else {
+        first
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        bail!("yt-dlp audio extraction failed: {}", error_summary(&stderr));
+    }
+
+    // Find the output file
+    log::debug!("yt-dlp audio extraction stdout:\n{stdout}");
+    for line in stdout.lines() {
+        if line.contains("[ExtractAudio] Destination:")
+            && let Some(path) = line.split("Destination:").nth(1)
+        {
+            return Ok(path.trim().to_string());
+        }
+    }
+
+    bail!("Could not determine audio output path from yt-dlp")
+}
+
+const AUDIO_403_RETRY_DELAY: Duration = Duration::from_secs(10);
+
+/// One `yt-dlp -v -x` run. Always verbose so a 403 is diagnosable from the
+/// first occurrence: the parsed client/format/experiment summary is logged at
+/// INFO on success (the baseline to compare against) and ERROR on failure.
+async fn run_audio_extraction(
+    url: &str,
+    output_dir: &str,
+    ffmpeg_threads: usize,
+    timeout_secs: u64,
+    attempt: u32,
+) -> Result<std::process::Output> {
+    log::debug!("yt-dlp: audio extraction attempt {attempt} for {url}");
     let output_template = format!("{output_dir}/%(id)s.%(ext)s");
     let postprocessor_args = format!("ffmpeg:-threads {ffmpeg_threads} -vn -ac 1 -ar 16000 -b:a 64k");
 
@@ -340,6 +387,7 @@ pub async fn extract_audio(url: &str, output_dir: &str, ffmpeg_threads: usize, t
     // blocked OS thread.
     let yt_dlp_fut = TokioCommand::new("yt-dlp")
         .args([
+            "-v",
             "-x",
             "--audio-format",
             "mp3",
@@ -360,27 +408,22 @@ pub async fn extract_audio(url: &str, output_dir: &str, ffmpeg_threads: usize, t
 
     let output = match tokio::time::timeout(Duration::from_secs(timeout_secs), yt_dlp_fut).await {
         Ok(res) => res.context("Failed to run yt-dlp for audio extraction")?,
-        Err(_) => bail!("yt-dlp audio extraction timed out after {timeout_secs}s for {url}"),
+        Err(_) => bail!("yt-dlp audio extraction timed out after {timeout_secs}s for {url} (attempt {attempt})"),
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        log::error!("yt-dlp audio extraction failed (exit {}): {stderr}", output.status);
-        bail!("yt-dlp audio extraction failed: {stderr}");
+    let diag = download_diagnostics(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    );
+    if output.status.success() {
+        log::info!("yt-dlp audio extraction ok for {url} (attempt {attempt}): {diag}");
+    } else {
+        log::error!(
+            "yt-dlp audio extraction failed for {url} (attempt {attempt}, exit {}): {diag}",
+            output.status
+        );
     }
-
-    // Find the output file
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    log::debug!("yt-dlp audio extraction stdout:\n{stdout}");
-    for line in stdout.lines() {
-        if line.contains("[ExtractAudio] Destination:")
-            && let Some(path) = line.split("Destination:").nth(1)
-        {
-            return Ok(path.trim().to_string());
-        }
-    }
-
-    bail!("Could not determine audio output path from yt-dlp")
+    Ok(output)
 }
 
 /// One extracted frame: where it lives on disk and when in the source video it occurred.
@@ -626,6 +669,9 @@ fn clean_vtt(vtt: &str) -> String {
     log::debug!("clean_vtt: collapsed to {} lines ({} bytes)", lines.len(), result.len());
     result
 }
+
+pub(crate) mod diagnostics;
+use diagnostics::{download_diagnostics, error_summary, is_http_403};
 
 #[cfg(test)]
 mod tests;

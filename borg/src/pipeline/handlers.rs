@@ -241,7 +241,10 @@ pub(crate) async fn try_extract_slides(
     let output_template = video_path.to_string_lossy().to_string();
     let dl_fut = tokio::process::Command::new("yt-dlp")
         .args([
-            "--no-warnings",
+            // Verbose for the same 403 diagnostics as audio extraction
+            // (youtube::diagnostics); this download 403'd on most ingests
+            // 2026-09-02..09-22 and the log only ever showed the ERROR line.
+            "-v",
             "-f",
             "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b",
             "--merge-output-format",
@@ -261,10 +264,13 @@ pub(crate) async fn try_extract_slides(
         Ok(res) => res.context("yt-dlp video download")?,
         Err(_) => eyre::bail!("yt-dlp video download timed out after {yt_dlp_timeout}s"),
     };
+    let dl_stderr = String::from_utf8_lossy(&dl.stderr);
+    let diag = youtube::diagnostics::download_diagnostics(&String::from_utf8_lossy(&dl.stdout), &dl_stderr);
     if !dl.status.success() {
-        let stderr = String::from_utf8_lossy(&dl.stderr);
-        eyre::bail!("yt-dlp failed: {stderr}");
+        log::warn!("yt-dlp video download failed for {url} (exit {}): {diag}", dl.status);
+        eyre::bail!("yt-dlp failed: {}", youtube::diagnostics::error_summary(&dl_stderr));
     }
+    log::debug!("yt-dlp video download ok for {url}: {diag}");
 
     // The merge step may write the file with a different extension; locate
     // whatever yt-dlp produced under the work_dir.
