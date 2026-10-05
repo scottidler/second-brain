@@ -17,7 +17,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       msg.textContent = `Not a valid URL: ${value}`;
       return;
     }
-    const origin = `${url.protocol}//${url.host}/*`;
+    // Firefox match patterns reject a port (bugs 1362809, 1468162): use hostname, not host.
+    const origin = `${url.protocol}//${url.hostname}/*`;
     const allowed = await chrome.permissions.contains({ origins: [origin] });
     if (!allowed) {
       msg.textContent =
