@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler (drafted with Claude)
 **Date:** 2026-10-05
-**Status:** Approved
+**Status:** Implemented
 **Review Passes Completed:** 5/5
 
 ## Summary
@@ -531,16 +531,21 @@ New CLI surface: `sb cortex graph --rebuild` (deterministic edges only, `build(.
 
 ## Acceptance Criteria
 
-- [ ] `otto ci` exits 0, and its output includes the `source-lint` task
+- [x] `otto ci` exits 0, and its output includes the `source-lint` task
   - Observed on main: exit 0, 2,775 passed, 4 ignored (2026-10-05); no `source-lint` task
-- [ ] `rg -n 'try_wait|Client::new\(\)|Client::builder\(\)|param_idx|let _ = h\.await' --type rust -g '!vault/src/process.rs' -g '!vault/src/http.rs' -g '!*tests*' -g '!**/tests/**'` prints nothing
+  - Verified at 5774e14: exit 0, 3,059 passed, `[source-lint] source-lint: clean`
+- [x] `rg -n 'try_wait|Client::new\(\)|Client::builder\(\)|param_idx|let _ = h\.await' --type rust -g '!vault/src/process.rs' -g '!vault/src/http.rs' -g '!*tests*' -g '!**/tests/**'` prints nothing
   - Observed on main: 67 lines
-- [ ] `bin/source-lint` exits 0 with all six checks (skip idiom, inline test modules, member lints, toolchain parity, `Phase N`, design-path resolution)
+  - Verified at 5774e14: prints nothing (rc 1)
+- [x] `bin/source-lint` exits 0 with all six checks (skip idiom, inline test modules, member lints, toolchain parity, `Phase N`, design-path resolution)
   - Observed on main: the script does not exist; the `Phase` probe alone finds 745 lines and the skip probe 10
-- [ ] `otto cov` runs a `unittests src/lib.rs` binary for each of vault, borg, cortex, oracle, distillers, sb; `otto ignored` reports `3 passed`
+  - Verified at 5774e14: `source-lint: clean`, rc 0; seven checks (the six above plus the freed-port idiom from the orchestrator closed-port fix)
+- [x] `otto cov` runs a `unittests src/lib.rs` binary for each of vault, borg, cortex, oracle, distillers, sb; `otto ignored` reports `3 passed`
   - Observed on main: cov runs sb only (6.1% lines); no `ignored` task
+  - Verified: `otto cov` at 2c10bb4 ran `unittests src/lib.rs` for all six crates (81.3% lines); its scope line is unchanged through 5774e14. `otto ignored` at 5774e14: rc 0, 3 passed (1+1+1)
 - [ ] on desk after the final deploy: `sb doctor` reports no unit drift, `sb cortex graph --rebuild` leaves the fact-edge count unchanged, and `sb borg hotkey --install` binds a command that runs
   - Observed on main: installed `cortex.service` differs from its renderer (`ReadWritePaths`); `--rebuild` does not exist; the live keybinding points at a missing `obsidian-borg` binary
+  - UNVERIFIED: needs the deploy and Scott's rollout steps; checked after the finalization checkpoint
 
 ## Resolved Decisions
 
