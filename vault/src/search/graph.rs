@@ -473,6 +473,7 @@ impl SearchIndex {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     /// Insert a note row with full graph-relevant fields, for graph tests in
     /// other crates (cortex). `tags` is JSON-encoded into the `tags` column so
     /// `graph_note_rows` parses it back; `summary` is set to `body` so the

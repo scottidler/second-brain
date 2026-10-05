@@ -73,7 +73,8 @@ impl OracleMcpServer {
     }
 
     /// Resolve the vocabulary from `borg_yml` instead of the shared location.
-    pub fn with_borg_config(mut self, borg_yml: std::path::PathBuf) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_borg_config(mut self, borg_yml: std::path::PathBuf) -> Self {
         self.borg_config = Some(borg_yml);
         self
     }
