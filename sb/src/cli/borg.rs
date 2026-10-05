@@ -80,8 +80,8 @@ impl BorgCli {
                             println!("{msg}");
                         } else {
                             println!("Hotkey installed: {key} -> {command}");
-                            println!("Daemon target: http://{host}:{port}/ingest (hotkey.host/port in borg.yml)");
                         }
+                        println!("Daemon target: http://{host}:{port}/ingest (hotkey.host/port in borg.yml)");
                     }
                     borg::HotkeyOutcome::Uninstalled => {
                         println!("Hotkey uninstalled.");

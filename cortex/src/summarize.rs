@@ -307,8 +307,8 @@ async fn process_one<F: FabricCaller + Clone>(
     // inside Distilled.transcript, and render.rs emits it under `## Transcript`.
     // Any H1/H2 in the legacy body would collide with the new L2 section
     // headings (## Summary / ## Claims / ## Links), so we demote them two
-    // levels here at the source. See docs/design/2026-05-18-fabric-pattern-
-    // resolve-and-distill-dlq.md follow-up.
+    // levels here at the source. See
+    // docs/design/2026-05-18-fabric-pattern-resolve-and-distill-dlq.md follow-up.
     let demoted_body = demote_headings(&note.body, 2);
     let inputs = DistillInputs {
         transcript: demoted_body.as_str(),

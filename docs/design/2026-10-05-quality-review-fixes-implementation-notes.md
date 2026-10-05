@@ -486,6 +486,7 @@
 - `cortex/src/linking.rs:in_code_context` is untouched: its remaining callers (`inside_structure` in the linker's writer path, `unlink`) are Phase 16.
 - Deleted tests that pinned removed private functions: vault `test_extract_wikilinks_{simple,with_alias,with_heading,skips_code_blocks}` (covered by `wikilink::tests`) and cortex `links::tests` `test_extract_wikilinks`, `test_strip_fenced_code_blocks{,_with_language,_preserves_no_fence}`. The links title/slug tests are unchanged and pass.
 - Code detection is the stricter `vault::wikilink` one (Phase 14 deviation): a link in inline code or an indented line is no longer counted by quality, linking, dedupe, or inbound counts.
+- `cortex/src/linking.rs` compares lowercased link stems, not `Resolver` paths as the Phase 15 bullet says (raised by the implementation audit). Reason: the linker's candidates are note stems, `people`, `projects`, and slugs, and a person or project need not have a note, so there is no path for a `Resolver` to match. Consequence: a dangling `[[missing/rust]]` counts as already linking `rust` and suppresses that suggestion.
 - The doc's probe line for `naming.rs` says `:275`; the match is now at `cortex/src/naming.rs:304` (line drift, same content).
 
 ### Tradeoffs
@@ -739,7 +740,7 @@
 ## Orchestrator fix after Phase 22: `sb borg wait` timing bounds
 
 - Observed: Phase 22's first `otto ci` (load avg 55) failed `wait_never_drains_exits_five_at_timeout_with_last_snapshot` (9.40 s) and `wait_stub_never_responds_exits_five_not_a_hang` (10.11 s) against `elapsed < 8s` with `--timeout 3s`; both passed on rerun.
-- Cause, measured: the floor is ~4.8 s by design (2 s `POLL_INTERVAL`, so a 3 s deadline is seen at the 4 s poll). Isolated runs at load 15-19: 4.67-4.97 s. Under 64 busy loops: 6.40 s and 6.49 s. Only 3.2 s of slack separated the floor from the bound, and the bound sat 2 s under the 10 s default `request-timeout` it was meant to distinguish from. Not a Phase 9 regression: the per-request cap holds (a never-responding stub ends at 4.7 s, not 10 s).
+- Cause, measured: the observed floor is ~4.8 s. (Corrected by the implementation audit: the poll sleep is capped by the time left, `sb/src/cli/borg/wait.rs:134`, so the 3 s deadline is not deferred to the 4 s poll; the gap above 3 s is process and request overhead, not separately measured.) Isolated runs at load 15-19: 4.67-4.97 s. Under 64 busy loops: 6.40 s and 6.49 s. Only 3.2 s of slack separated the floor from the bound, and the bound sat 2 s under the 10 s default `request-timeout` it was meant to distinguish from. Not a Phase 9 regression: the per-request cap holds (a never-responding stub ends at 4.7 s, not 10 s).
 - Fix: the test config sets `hotkey.request-timeout: 60s`, so a request that ignores `min(request-timeout, time left)` runs into the 30 s `PROCESS_CAP`; both asserts use `UNCAPPED_BOUND = 20s`.
 - Break-it: `sb/src/cli/borg/wait.rs:92` changed to `config.hotkey.request_timeout` (cap removed): `wait_stub_never_responds_exits_five_not_a_hang` FAILED at the 30 s process cap. Restored, no diff.
 - `otto ci < /dev/null`: exit 0, 3046 passed.
@@ -978,6 +979,7 @@ Also kept, not comments: code identifiers/strings/test data carrying dates, e.g.
 - Harvest watchdog (`2026-07-24-harvest-watchdog-cross-process-reaping.md`): `pipeline/permits.rs:35` (why permits are cross-process)
 - Clyde export contract (`clyde/docs/design/2026-07-17-session-export-contract.md`, cross-repo prefix): `harvest/contract.rs:3`
 - Discovery remediation (`2026-09-05-discovery-remediation.md`): `tests/empty_slug_publish_falls_back_to_trace_id.rs:2` (regression guard source)
+- Shakedown v0.8.5 cleanup (`2026-05-20-shakedown-v0.8.5-cleanup.md`): `vault/src/rss.rs:10`, `vault/tests/candle-bounded.rs:4` (added by the implementation audit: missing from this inventory)
 - Content-aware slide filtering (`2026-06-28-content-aware-slide-filtering.md`): `config.rs:606,677,709`, `slides.rs:75`, `slides/classify.rs:14`, `config/tests.rs:555`
 - Frame-aware YouTube ingestion (`2026-04-29-frame-aware-youtube-ingestion.md`): `config.rs:747`, `slides.rs:7`, `slides/publish.rs:3`
 - Video distill token budget (`2026-08-30-video-distill-token-budget.md`): `config.rs:1000` (why the cap exists)
@@ -1161,3 +1163,23 @@ All unprefixed and all resolve to an existing `docs/design/` file (checked by sc
 ### Proof (success criteria)
 - `bin/source-lint` exits 0 on the final tree (PASS). `otto ci < /dev/null` exits 0, 3059 tests passed, the `[source-lint]` task ran (`source-lint: clean`).
 - Planted `// Phase 3 wires this` in `borg/src/lib.rs`: exit 1, `borg/src/lib.rs:121: ... plan-phase tag` (PASS). Planted `// see docs/design/1999-01-01-x.md`: exit 1, `borg/src/lib.rs:121: cites docs/design/1999-01-01-x.md, which does not exist` (PASS). Planted `// pre-Phase-2 shape`: exit 1 (PASS). Also exit 1: `// Phases 3-4 did it`, `fn phase7_x() {}`, `Phase 4 note` in `CLAUDE.md`. A repo-prefixed `other-repo/docs/design/1999-01-01-x.md` is skipped (clean). All plants reverted; `git status` shows `borg/src/lib.rs` and `CLAUDE.md` unmodified.
+
+## Orchestrator: implementation audit fold-in
+
+Panel round 2 (run dir `/tmp/review-panel/NXcIoLGX/`, synthesis + `probes.md`); round 1 never launched (sandbox bridge down). 4 must-fix, 10 cheap-win, 5 defer. Every code fix carries a test that was run against the pre-fix code and failed, except the HOME lock (a race; no deterministic break).
+
+- Branch rebased onto `main` at v0.15.14 (`4233f93`). `0166890` on main is the same options.js hostname fix as Phase 25; the conflict resolved to main's text, so the Phase 25 commit now carries only its test.
+- Gate-0 rejections replay: `stage_0_init` stages the capture before the gate (`borg/src/stages/raw.rs`). Test `gate_0_rejection_is_recoverable_by_replay` (replay dry-run finds the trace and re-POSTs the original URL).
+- WAL retry bounded: 5 s wall-clock deadline, `busy_timeout` zeroed for the loop (`borg/src/receipts.rs`). Break-it: without the zeroing the bound test took 5.0 s against a 1 s limit.
+- `vault::process::run` detaches the drain threads on timeout instead of joining them. Break-it: a `setsid` descendant held the old code 10.0 s.
+- source-lint: check 2 tolerates attributes and comments between `#[cfg(test)]` and `mod`; check 5 catches a listener temporary dropped in the statement that reads its port. Both verified on planted files.
+- `try_exists` in `Blocklist::from_file` and `index_changed`: a stat error fails Gate-0 closed and keeps the index row.
+- Gated `SearchIndex::insert_test_note_graph` (`test-util`) and `OracleMcpServer::with_borg_config` (`#[cfg(test)]`).
+- Doctor cortex drift renders with the `--vault` read back from the installed ExecStart (`installed_vault_arg`).
+- `search_vector` note_type/status filters tested both directions; `index_vault` stat-outside-transaction ordering tested via `is_autocommit`.
+- oracle `HomeGuard::hold()` for tests that read `$HOME`-derived paths.
+- `cortex::graph::record_watermark`: one helper for both passes, SQL errors propagate.
+- Hotkey install prints the daemon target on every platform; the wrapped design-doc cite in `cortex/src/summarize.rs` unwrapped; `--rebuild` help and doc wording say what a post-swap failure leaves.
+- Riding, disclosed: Phase 9 per-entry-point timeout matrix partial; checkpoint/manifest WARNs guarded by the rg criterion only.
+- Carried, not fixed: ExecStart is `argv.join(" ")` (`vault/src/systemd.rs:236`), so a path with a space breaks the unit (pre-existing for exe/vault); source-lint check 7 still cannot see a cite wrapped across comment lines.
+
