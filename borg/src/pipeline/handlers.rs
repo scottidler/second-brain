@@ -577,7 +577,12 @@ pub(crate) async fn process_article_jina(
     config: &Config,
     trace_id: &str,
 ) -> Result<(String, String, Option<String>)> {
-    let (article_md, byline) = jina::fetch_article_markdown(url, config.pipeline.jina_timeout_secs).await?;
+    let (article_md, byline) = jina::fetch_article_markdown(
+        url,
+        config.pipeline.jina_timeout_secs,
+        config.pipeline.browser_ua_timeout,
+    )
+    .await?;
     if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
         config,
         trace_id,

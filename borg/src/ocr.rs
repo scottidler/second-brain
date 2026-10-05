@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use vault::process::{self, Outcome};
 
 use crate::config::{self, LlmConfig, VisionConfig};
 
@@ -78,50 +79,40 @@ pub struct VisionResult {
 }
 
 /// Extract text from an image using tesseract CLI.
-/// Returns empty string if tesseract is not available or fails.
 /// Synchronous (called from both rayon `par_iter` and tokio `spawn_blocking`),
-/// bounded by `timeout_secs` via a poll-based internal timeout that kills the
-/// child process on elapsed.
+/// bounded by `timeout_secs` through `vault::process::run`. A missing binary
+/// or a timeout is `Err`; a non-zero exit is an empty string with a WARN.
 pub fn ocr_extract(image_path: &Path, timeout_secs: u64) -> Result<String> {
-    let mut child = Command::new("tesseract")
-        .args([
-            image_path.to_str().unwrap_or_default(),
-            "stdout",
-            "--oem",
-            "3",
-            "--psm",
-            "3",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("Failed to spawn tesseract")?;
+    run_tesseract(
+        tesseract_command(image_path),
+        Duration::from_secs(timeout_secs),
+        &image_path.display().to_string(),
+    )
+}
 
-    let timeout = Duration::from_secs(timeout_secs);
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    log::warn!("tesseract timed out after {timeout_secs}s");
-                    return Ok(String::new());
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => return Err(eyre::eyre!("Failed to wait for tesseract: {e}")),
+fn tesseract_command(image_path: &Path) -> Command {
+    let mut cmd = Command::new("tesseract");
+    cmd.args([
+        image_path.to_str().unwrap_or_default(),
+        "stdout",
+        "--oem",
+        "3",
+        "--psm",
+        "3",
+    ]);
+    cmd
+}
+
+fn run_tesseract(cmd: Command, timeout: Duration, subject: &str) -> Result<String> {
+    log::debug!("ocr: running tesseract for {subject} (timeout={timeout:?})");
+    match process::run(cmd, None, timeout, &format!("tesseract {subject}"))? {
+        Outcome::TimedOut { after } => eyre::bail!("tesseract timed out after {after:?} for {subject}"),
+        Outcome::Exited { status, stderr, .. } if !status.success() => {
+            log::warn!("tesseract failed: {}", String::from_utf8_lossy(&stderr));
+            Ok(String::new())
         }
+        Outcome::Exited { stdout, .. } => Ok(String::from_utf8_lossy(&stdout).trim().to_string()),
     }
-
-    let output = child.wait_with_output().context("Failed to collect tesseract output")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        log::warn!("tesseract failed: {stderr}");
-        return Ok(String::new());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Shared HTTP/auth/base64 core for every Anthropic vision call. Resolves the

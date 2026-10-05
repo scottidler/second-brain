@@ -1052,3 +1052,24 @@ fn queue_config_rejects_bad_batch_gap_naming_it() {
     let err = serde_yaml::from_str::<Config>("queue:\n  batch-gap: 2 fortnights-ish\n").expect_err("bad gap");
     assert!(err.to_string().contains("batch-gap"), "{err}");
 }
+
+#[test]
+fn browser_ua_timeout_defaults_to_30s_and_parses_humantime() {
+    assert_eq!(
+        PipelineConfig::default().browser_ua_timeout,
+        std::time::Duration::from_secs(30)
+    );
+    let p: PipelineConfig = serde_yaml::from_str("browser-ua-timeout: 45s\n").expect("parse");
+    assert_eq!(p.browser_ua_timeout, std::time::Duration::from_secs(45));
+    assert_eq!(p.hard_timeout_secs, 1800, "other defaults preserved");
+    let yaml = serde_yaml::to_string(&p).expect("serialize");
+    let back: PipelineConfig = serde_yaml::from_str(&yaml).expect("round trip");
+    assert_eq!(back.browser_ua_timeout, p.browser_ua_timeout);
+}
+
+#[test]
+fn browser_ua_timeout_rejects_a_bad_duration_naming_the_key() {
+    let err = serde_yaml::from_str::<PipelineConfig>("browser-ua-timeout: soonish\n").expect_err("bad duration");
+    let msg = err.to_string();
+    assert!(msg.contains("browser-ua-timeout") && msg.contains("soonish"), "{msg}");
+}

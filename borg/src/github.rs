@@ -423,12 +423,9 @@ impl Default for GitHubFetcher {
     }
 }
 
-/// `Fetcher` adapter for `MultiFetcher`. Returns a `FetchResult` whose bytes
-/// are the rendered markdown transcript; structured metadata is discarded
-/// here. Callers that need the structured fields must call `fetch_repo`
-/// directly. As of Phase 4 this trait impl is wired into `MultiFetcher` but
-/// not yet on the legacy hot path (process_article_fabric calls
-/// `fabric::fetch_article` directly).
+/// `Fetcher` adapter. Returns a `FetchResult` whose bytes are the rendered
+/// markdown transcript; structured metadata is discarded here. Callers that
+/// need the structured fields must call `fetch_repo` directly.
 #[async_trait]
 impl Fetcher for GitHubFetcher {
     async fn fetch(&self, url: &str) -> Result<FetchResult> {

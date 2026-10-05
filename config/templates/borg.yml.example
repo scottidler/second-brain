@@ -117,6 +117,12 @@ youtube:
       max-vision-concurrency: 4
       min-confidence: 0.6
 
+# Pipeline subprocess bounds. `browser-ua-timeout` (humantime) bounds the
+# markitdown conversion in the browser-UA article fallback; the other
+# `*-timeout-secs` keys are plain seconds. Defaults shown.
+# pipeline:
+#   browser-ua-timeout: 30s
+
 # Tag pipeline. `canonical-path` / `mapping-path` default to the shared files
 # `sb bootstrap` drops into ~/.config/sb/; `reject-concatenated` refuses tags
 # like `machinelearning` that concatenate two canonical ones.

@@ -14,12 +14,16 @@ use crate::stages::fetcher::{BrowserUaFetcher, Fetcher};
 ///
 /// A Jina-JSON author source is a separate, in-progress workstream; when it
 /// lands it composes here as `json_author.or(browser_byline)`.
-pub async fn fetch_article_markdown(url: &str, timeout_secs: u64) -> Result<(String, Option<String>)> {
+pub async fn fetch_article_markdown(
+    url: &str,
+    timeout_secs: u64,
+    browser_ua_timeout: Duration,
+) -> Result<(String, Option<String>)> {
     match jina_fetch(url, timeout_secs).await {
         Ok(text) => Ok((text, None)),
         Err(e) => {
             log::warn!("jina: failed for {url} ({e:#}); falling back to browser-UA");
-            let browser = BrowserUaFetcher::new();
+            let browser = BrowserUaFetcher::new(browser_ua_timeout);
             let result = browser
                 .fetch(url)
                 .await

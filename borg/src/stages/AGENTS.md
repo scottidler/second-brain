@@ -45,4 +45,4 @@ Config-selectable via `StagingLayout`:
 - `extract.rs` — Stage 1 extractor dispatch (text / OCR / transcription).
 - `summarize.rs` — Stage 2 LLM summarize/distill + Gate 2 paraphrase detection.
 - `distill.rs` — per-type distillers → `vault::distilled::Distilled`.
-- `fetcher.rs` — `Fetcher` trait + Jina / browser-UA / fabric / caching / multi implementations.
+- `fetcher.rs` — `Fetcher` trait + browser-UA and caching implementations (the Jina/fabric/multi chain was removed as dead code).

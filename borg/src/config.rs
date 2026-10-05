@@ -174,6 +174,9 @@ pub const DEFAULT_QUEUE_WEDGED_AFTER: Duration = Duration::from_secs(15 * 60);
 /// this close join one batch.
 pub const DEFAULT_QUEUE_BATCH_GAP: Duration = Duration::from_secs(2 * 60);
 
+/// Default `pipeline.browser-ua-timeout`.
+pub const DEFAULT_BROWSER_UA_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The `queue:` block of `borg.yml`: thresholds for the ingest-queue snapshot
 /// (`borg::queue`, `GET /queue`). Durations are humantime strings (`15m`,
 /// `2m`) typed at deserialize time, so a bad value fails the YAML load itself
@@ -219,6 +222,12 @@ pub fn deserialize_humantime<'de, D: Deserializer<'de>>(
 
 fn deserialize_wedged_after<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Duration, D::Error> {
     deserialize_humantime(deserializer, "wedged-after")
+}
+
+fn deserialize_browser_ua_timeout<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Duration, D::Error> {
+    deserialize_humantime(deserializer, "browser-ua-timeout")
 }
 
 fn deserialize_batch_gap<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Duration, D::Error> {
@@ -404,6 +413,13 @@ pub struct PipelineConfig {
     pub fabric_url_timeout_secs: u64,
     pub fabric_transcript_timeout_secs: u64,
     pub markitdown_timeout_secs: u64,
+    /// Bound on `BrowserUaFetcher`'s markitdown subprocess (humantime, e.g.
+    /// `30s`). Before this key it had no bound at all.
+    #[serde(
+        deserialize_with = "deserialize_browser_ua_timeout",
+        serialize_with = "serialize_humantime"
+    )]
+    pub browser_ua_timeout: Duration,
     pub max_concurrent_traces: usize,
     pub max_concurrent_heavy_traces: usize,
     /// Hard ceiling on the final composed note body in bytes. See
@@ -422,6 +438,7 @@ impl Default for PipelineConfig {
             fabric_url_timeout_secs: DEFAULT_FABRIC_URL_TIMEOUT_SECS,
             fabric_transcript_timeout_secs: DEFAULT_FABRIC_TRANSCRIPT_TIMEOUT_SECS,
             markitdown_timeout_secs: DEFAULT_MARKITDOWN_TIMEOUT_SECS,
+            browser_ua_timeout: DEFAULT_BROWSER_UA_TIMEOUT,
             max_concurrent_traces: DEFAULT_MAX_CONCURRENT_TRACES,
             max_concurrent_heavy_traces: DEFAULT_MAX_CONCURRENT_HEAVY_TRACES,
             max_note_bytes: MAX_NOTE_BYTES,
