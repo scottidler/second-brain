@@ -24,6 +24,12 @@ enum RerankOutcome {
     Disable(Vec<String>),
 }
 
+/// How many candidates a retriever pulls for a call: its configured depth, or
+/// `limit` when the caller asks for more than that.
+fn retrieval_depth(configured: u32, limit: u32) -> u32 {
+    configured.max(limit)
+}
+
 impl OracleMcpServer {
     #[allow(clippy::too_many_arguments)]
     fn bm25_paths(
@@ -59,7 +65,11 @@ impl OracleMcpServer {
         k: u32,
     ) -> Result<Vec<String>, McpError> {
         let active_model = db.active_embedding_model().map_err(Self::err)?;
-        let q_vec = vault::embedding::embed_query(query, &active_model).map_err(Self::err)?;
+        let q_vec = match &self.query_embedder {
+            Some(embedder) => embedder.embed_one(query),
+            None => vault::embedding::embed_query(query, &active_model),
+        }
+        .map_err(Self::err)?;
         let hits = db
             .search_vector(&q_vec, k, tags, tags_all, note_type, status)
             .map_err(Self::err)?;
@@ -149,10 +159,9 @@ impl OracleMcpServer {
                 Self::resolve_note_paths(db, paths.iter().map(|p| p.as_str()))
             }
             SearchMode::Hybrid => {
-                let bm25_paths =
-                    self.bm25_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
-                let vec_paths =
-                    self.vector_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
+                let depth = retrieval_depth(vault::search::K_RRF_INPUT, limit);
+                let bm25_paths = self.bm25_paths(db, query, tags, tags_all, note_type, status, depth)?;
+                let vec_paths = self.vector_paths(db, query, tags, tags_all, note_type, status, depth)?;
                 let fused = vault::search::reciprocal_rank_fusion(
                     &[&bm25_paths, &vec_paths],
                     vault::search::RRF_K,
@@ -179,7 +188,7 @@ impl OracleMcpServer {
     /// Graph-expansion retrieval shared by `mode=graph` and
     /// `mode=graph-hybrid`.
     ///
-    /// 1. Seed via hybrid (BM25 ∪ vector, top `K_RRF_INPUT` each, fused).
+    /// 1. Seed via hybrid (BM25 ∪ vector, top `max(K_RRF_INPUT, limit)` each, fused).
     /// 2. Expand the seed set `hops` hops along the materialized `edges` graph
     ///    (`SearchIndex::expand_graph` — the edge read lives in vault; oracle
     ///    never builds edges).
@@ -204,15 +213,13 @@ impl OracleMcpServer {
         min_weight: f32,
         include_base_lists: bool,
     ) -> Result<Vec<NoteRow>, McpError> {
-        let bm25_paths = self.bm25_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
-        let vec_paths = self.vector_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
+        let depth = retrieval_depth(vault::search::K_RRF_INPUT, limit);
+        let bm25_paths = self.bm25_paths(db, query, tags, tags_all, note_type, status, depth)?;
+        let vec_paths = self.vector_paths(db, query, tags, tags_all, note_type, status, depth)?;
 
         // Seed list = the hybrid-fused order; seed rank feeds w_seed.
-        let seed_fused = vault::search::reciprocal_rank_fusion(
-            &[&bm25_paths, &vec_paths],
-            vault::search::RRF_K,
-            vault::search::K_RRF_INPUT as usize,
-        );
+        let seed_fused =
+            vault::search::reciprocal_rank_fusion(&[&bm25_paths, &vec_paths], vault::search::RRF_K, depth as usize);
         let seed_paths: Vec<String> = seed_fused.iter().map(|h| h.note_path.clone()).collect();
 
         // Expand and score (edge read lives in vault). Legacy graph modes use
@@ -335,21 +342,41 @@ impl OracleMcpServer {
         if cfg.methods.vector.enabled {
             let per_variant = queries
                 .iter()
-                .map(|q| self.vector_paths(db, q, tags, tags_all, note_type, status, cfg.methods.vector.top_k))
+                .map(|q| {
+                    self.vector_paths(
+                        db,
+                        q,
+                        tags,
+                        tags_all,
+                        note_type,
+                        status,
+                        retrieval_depth(cfg.methods.vector.top_k, limit),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             lists.push((crate::transform::union_lists(per_variant), 1.0));
         }
         if cfg.methods.bm25.enabled {
             let per_variant = queries
                 .iter()
-                .map(|q| self.bm25_paths(db, q, tags, tags_all, note_type, status, cfg.methods.bm25.top_k))
+                .map(|q| {
+                    self.bm25_paths(
+                        db,
+                        q,
+                        tags,
+                        tags_all,
+                        note_type,
+                        status,
+                        retrieval_depth(cfg.methods.bm25.top_k, limit),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             lists.push((crate::transform::union_lists(per_variant), cfg.methods.bm25.weight));
         }
         if cfg.methods.graph.enabled {
             let per_variant = queries
                 .iter()
-                .map(|q| self.pipeline_graph_paths(db, cfg, q, tags, tags_all, note_type, status))
+                .map(|q| self.pipeline_graph_paths(db, cfg, q, tags, tags_all, note_type, status, limit))
                 .collect::<Result<Vec<_>, _>>()?;
             lists.push((crate::transform::union_lists(per_variant), cfg.methods.graph.weight));
         }
@@ -446,11 +473,12 @@ impl OracleMcpServer {
         tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
+        limit: u32,
     ) -> Result<Vec<String>, McpError> {
-        let bm25 = self.bm25_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
-        let vec = self.vector_paths(db, query, tags, tags_all, note_type, status, vault::search::K_RRF_INPUT)?;
-        let seed =
-            vault::search::reciprocal_rank_fusion(&[&bm25, &vec], cfg.fusion.k, vault::search::K_RRF_INPUT as usize);
+        let depth = retrieval_depth(vault::search::K_RRF_INPUT, limit);
+        let bm25 = self.bm25_paths(db, query, tags, tags_all, note_type, status, depth)?;
+        let vec = self.vector_paths(db, query, tags, tags_all, note_type, status, depth)?;
+        let seed = vault::search::reciprocal_rank_fusion(&[&bm25, &vec], cfg.fusion.k, depth as usize);
         let seed_paths: Vec<String> = seed.iter().map(|h| h.note_path.clone()).collect();
         let mut g = self.expand_to_graph_paths(
             db,
@@ -466,7 +494,7 @@ impl OracleMcpServer {
             cfg.methods.graph.min_edge_weight,
             cfg.methods.graph.hop_decay,
         )?;
-        g.truncate(cfg.methods.graph.top_k as usize);
+        g.truncate(retrieval_depth(cfg.methods.graph.top_k, limit) as usize);
         Ok(g)
     }
 

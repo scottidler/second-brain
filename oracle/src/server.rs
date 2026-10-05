@@ -38,6 +38,9 @@ pub struct OracleMcpServer {
     /// Test seam: the borg.yml the vocabulary is resolved from. `None` is the
     /// shared `vault::paths::borg_config()`.
     borg_config: Option<std::path::PathBuf>,
+    /// Test seam: embeds the query instead of loading the production model.
+    /// `None` is `vault::embedding::embed_query`.
+    query_embedder: Option<std::sync::Arc<dyn vault::embedding::EmbeddingModel>>,
 }
 
 impl OracleMcpServer {
@@ -55,7 +58,18 @@ impl OracleMcpServer {
             config,
             db: std::sync::Arc::new(Mutex::new(db)),
             borg_config: None,
+            query_embedder: None,
         }
+    }
+
+    /// Embed queries with `embedder` instead of the production model.
+    #[cfg(test)]
+    pub(crate) fn with_query_embedder(
+        mut self,
+        embedder: std::sync::Arc<dyn vault::embedding::EmbeddingModel>,
+    ) -> Self {
+        self.query_embedder = Some(embedder);
+        self
     }
 
     /// Resolve the vocabulary from `borg_yml` instead of the shared location.

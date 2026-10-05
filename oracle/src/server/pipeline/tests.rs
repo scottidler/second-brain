@@ -1,9 +1,13 @@
 use super::*;
+use crate::config::GraphMethod;
 use crate::config::{Bm25Method, Config, MethodsConfig, RerankConfig, RetrievalConfig, VectorMethod};
+use crate::tools::SearchMode;
 use std::path::PathBuf;
+use std::sync::Arc;
+use vault::embedding::{EmbeddingModel, MockEmbedder};
 use vault::frontmatter::Frontmatter;
 use vault::note::Note;
-use vault::search::{Edge, MockReranker, SearchIndex};
+use vault::search::{BatchUpsert, Edge, EmbeddingKind, MockReranker, SearchIndex};
 
 fn seed(db: &SearchIndex, path: &str, body: &str) {
     seed_tagged(db, path, body, &[]);
@@ -312,4 +316,197 @@ fn rerank_over_budget_disables() {
         RerankOutcome::Disable(paths) => assert_eq!(paths, fused),
         _ => panic!("expected Disable (over budget)"),
     }
+}
+
+const MATCHING_NOTES: usize = 60;
+const MOCK_MODEL: &str = "mock-limit-v1";
+
+fn mock_embedder() -> Arc<MockEmbedder> {
+    Arc::new(MockEmbedder::new(64, MOCK_MODEL))
+}
+
+fn matching_path(i: usize) -> String {
+    format!("notes/m{i:02}.md")
+}
+
+fn neighbor_path(i: usize) -> String {
+    format!("notes/n{i:02}.md")
+}
+
+/// `MATCHING_NOTES` notes that all match the query `zebra`, with a varying term
+/// frequency so bm25 order is non-trivial, each embedded by the mock embedder.
+/// With `neighbors`, every match also links to one unembedded note that does
+/// not match, so the graph arm has exactly `MATCHING_NOTES` neighbors to reach.
+fn limit_index(neighbors: bool) -> SearchIndex {
+    let mut db = SearchIndex::open_memory().expect("db");
+    let m = mock_embedder();
+    db.set_active_embedding(m.model_version(), m.dim()).expect("active");
+    for i in 0..MATCHING_NOTES {
+        let path = matching_path(i);
+        let body = format!("{} filler{i}", "zebra ".repeat(i % 7 + 1));
+        db.insert_test_note_full(&path, "article", &body, &body, 100)
+            .expect("note");
+        let v = m.embed_one(&body).expect("embed");
+        db.upsert_embeddings_batch(&[BatchUpsert {
+            note_path: &path,
+            kind: EmbeddingKind::Summary,
+            chunk_index: 0,
+            text: &body,
+            embedding: &v,
+            model_version: m.model_version(),
+            source_modified_at: 100,
+        }])
+        .expect("upsert");
+    }
+    if neighbors {
+        let mut edges = Vec::new();
+        for i in 0..MATCHING_NOTES {
+            db.insert_test_note_full(&neighbor_path(i), "article", "unrelated", "unrelated", 100)
+                .expect("neighbor");
+            let mut edge = link_edge(&matching_path(i), &neighbor_path(i));
+            edge.kind = "wikilink".to_string();
+            edges.push(edge);
+        }
+        db.insert_edges(&edges).expect("edges");
+    }
+    db
+}
+
+fn limit_server(db: SearchIndex, retrieval: RetrievalConfig) -> OracleMcpServer {
+    let cfg = Config {
+        retrieval,
+        ..Default::default()
+    };
+    OracleMcpServer::new(cfg, db).with_query_embedder(mock_embedder())
+}
+
+fn retrieval_with(vector: bool, bm25: bool, graph: bool) -> RetrievalConfig {
+    RetrievalConfig {
+        methods: MethodsConfig {
+            vector: VectorMethod {
+                enabled: vector,
+                ..Default::default()
+            },
+            bm25: Bm25Method {
+                enabled: bm25,
+                weight: 1.0,
+                ..Default::default()
+            },
+            graph: GraphMethod {
+                enabled: graph,
+                weight: 1.0,
+                ..Default::default()
+            },
+        },
+        ..Default::default()
+    }
+}
+
+fn configured_paths(server: &OracleMcpServer, limit: u32) -> Vec<String> {
+    let handle = server.db_handle();
+    let guard = handle.lock().expect("lock");
+    server
+        .run_configured_pipeline(&guard, "zebra", None, false, None, None, limit)
+        .expect("configured pipeline")
+        .into_iter()
+        .map(|r| r.path)
+        .collect()
+}
+
+fn legacy_paths(server: &OracleMcpServer, mode: SearchMode, limit: u32) -> Vec<String> {
+    let handle = server.db_handle();
+    let guard = handle.lock().expect("lock");
+    server
+        .run_search_mode(&guard, mode, "zebra", None, false, None, None, limit, 1, None, 0.0)
+        .expect("run_search_mode")
+        .into_iter()
+        .map(|r| r.path)
+        .collect()
+}
+
+#[test]
+fn bm25_only_retrieval_returns_all_sixty_matches_at_limit_100() {
+    let server = limit_server(limit_index(false), bm25_only_retrieval(1.0));
+    assert_eq!(configured_paths(&server, 100).len(), MATCHING_NOTES);
+}
+
+#[test]
+fn vector_only_retrieval_returns_all_sixty_matches_at_limit_100() {
+    let server = limit_server(limit_index(false), retrieval_with(true, false, false));
+    assert_eq!(configured_paths(&server, 100).len(), MATCHING_NOTES);
+}
+
+#[test]
+fn configured_hybrid_returns_all_sixty_matches_at_limit_100() {
+    let server = limit_server(limit_index(false), retrieval_with(true, true, false));
+    assert_eq!(configured_paths(&server, 100).len(), MATCHING_NOTES);
+}
+
+/// Graph is the only enabled method, so every result is a neighbor reached from
+/// a seed: the seed depth and the graph `top-k` both bound the count.
+#[test]
+fn configured_graph_returns_all_sixty_neighbors_at_limit_100() {
+    let server = limit_server(limit_index(true), retrieval_with(false, false, true));
+    let paths = configured_paths(&server, 100);
+    assert_eq!(paths.len(), MATCHING_NOTES, "{paths:?}");
+    assert!(paths.iter().all(|p| p.starts_with("notes/n")), "{paths:?}");
+}
+
+#[test]
+fn legacy_hybrid_returns_all_sixty_matches_at_limit_100() {
+    let server = limit_server(limit_index(false), Config::default().retrieval);
+    assert_eq!(legacy_paths(&server, SearchMode::Hybrid, 100).len(), MATCHING_NOTES);
+}
+
+#[test]
+fn legacy_graph_returns_all_sixty_matches_at_limit_100() {
+    let server = limit_server(limit_index(false), Config::default().retrieval);
+    assert_eq!(legacy_paths(&server, SearchMode::Graph, 100).len(), MATCHING_NOTES);
+}
+
+#[test]
+fn legacy_graph_hybrid_returns_all_sixty_matches_at_limit_100() {
+    let server = limit_server(limit_index(false), Config::default().retrieval);
+    assert_eq!(
+        legacy_paths(&server, SearchMode::GraphHybrid, 100).len(),
+        MATCHING_NOTES
+    );
+}
+
+/// A limit at or below `top-k` retrieves at the same depth as before, so the
+/// order is unchanged. The literals were captured on the code before the
+/// `max(top-k, limit)` depth change.
+#[test]
+fn limit_10_order_is_unchanged_by_the_depth_change() {
+    let bm25 = limit_server(limit_index(false), bm25_only_retrieval(1.0));
+    let hybrid = limit_server(limit_index(false), retrieval_with(true, true, false));
+    let legacy = limit_server(limit_index(false), Config::default().retrieval);
+    let strs = |paths: Vec<String>| {
+        paths
+            .iter()
+            .map(|p| p.trim_start_matches("notes/").to_string())
+            .collect::<Vec<_>>()
+    };
+    let expect = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        strs(configured_paths(&bm25, 10)),
+        expect(&[
+            "m06.md", "m13.md", "m20.md", "m27.md", "m34.md", "m41.md", "m48.md", "m55.md", "m05.md", "m12.md"
+        ]),
+        "configured bm25"
+    );
+    let fused = expect(&[
+        "m13.md", "m55.md", "m26.md", "m54.md", "m06.md", "m04.md", "m18.md", "m11.md", "m09.md", "m53.md",
+    ]);
+    assert_eq!(strs(configured_paths(&hybrid, 10)), fused, "configured hybrid");
+    assert_eq!(
+        strs(legacy_paths(&legacy, SearchMode::Hybrid, 10)),
+        fused,
+        "legacy hybrid"
+    );
+    assert_eq!(
+        strs(legacy_paths(&legacy, SearchMode::Graph, 10)),
+        fused,
+        "legacy graph"
+    );
 }
