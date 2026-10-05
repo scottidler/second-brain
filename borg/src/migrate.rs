@@ -446,7 +446,7 @@ pub async fn reingest_failed(
             }
             Err(e) => {
                 if e.is_connect() {
-                    eyre::bail!("cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?");
+                    eyre::bail!("cannot reach the borg daemon at http://{host}:{port} - is the daemon running?");
                 }
                 progress(&ReingestFailedEvent::HttpError {
                     path: path.clone(),

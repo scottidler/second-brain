@@ -209,7 +209,7 @@ impl ServerHandle {
 /// Boot every borg subsystem (HTTP server, telegram, discord, ntfy, watchdog)
 /// and return a startup snapshot plus an opaque handle the caller awaits.
 pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartup, ServerHandle)> {
-    log::info!("Starting obsidian-borg daemon");
+    log::info!("Starting borg daemon");
 
     // Refuse to start without canonical assets present and parseable. The
     // alternative (silent-degrade ingest) lets junk tags accumulate in the
@@ -872,7 +872,7 @@ pub async fn reingest(
             }
             Err(e) => {
                 if e.is_connect() {
-                    eyre::bail!("Cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?");
+                    eyre::bail!("cannot reach the borg daemon at http://{host}:{port} - is the daemon running?");
                 }
                 let s = e.to_string();
                 progress(&ReingestEvent::ItemError(s.clone()));
@@ -917,7 +917,7 @@ pub async fn ingest(
     // counterpart to the `fail()` / `catch (err)` path in popup.js.
     let response = daemon.post_json("/ingest", &body).await.map_err(|e| {
         let msg = if e.is_connect() {
-            format!("cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?")
+            format!("cannot reach the borg daemon at http://{host}:{port} - is the daemon running?")
         } else {
             format!("{e}")
         };
@@ -951,7 +951,7 @@ fn send_notification(summary: &str, body: &str) {
     }
     let _ = notify_rust::Notification::new()
         .appname(config::APP_NAME)
-        .summary(&format!("obsidian-borg: {summary}"))
+        .summary(&format!("borg: {summary}"))
         .body(body)
         .timeout(notify_rust::Timeout::Milliseconds(HOTKEY_NOTIFY_DISPLAY_MS))
         .show();
@@ -963,6 +963,7 @@ fn send_notification(summary: &str, body: &str) {
 pub enum HotkeyOutcome {
     Installed {
         key: String,
+        command: String,
         host: String,
         port: u16,
         post_install: Option<String>,
@@ -972,17 +973,16 @@ pub enum HotkeyOutcome {
 }
 
 pub async fn hotkey(opts: opts::HotkeyOpts, config: &Config) -> Result<HotkeyOutcome> {
-    // CLI args override config; if CLI has default values, fall back to config
-    let host = if opts.host == "localhost" { config.hotkey.host.clone() } else { opts.host };
-    let port = if opts.port == 8181 { config.hotkey.port } else { opts.port };
+    // CLI key overrides config; the default value falls back to config
     let key = if opts.key == "<Ctrl><Shift>b" { config.hotkey.key.clone() } else { opts.key };
 
     if opts.install {
-        let post_install = service::install_hotkey(&host, port, &key).await?;
+        let (command, post_install) = service::install_hotkey(&key).await?;
         Ok(HotkeyOutcome::Installed {
             key,
-            host,
-            port,
+            command,
+            host: config.hotkey.host.clone(),
+            port: config.hotkey.port,
             post_install,
         })
     } else if opts.uninstall {

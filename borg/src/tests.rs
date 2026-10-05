@@ -177,7 +177,7 @@ async fn test_ingest_connection_refused() {
     assert!(result.is_err());
     let err = format!("{}", result.expect_err("expected error"));
     assert!(
-        err.contains("cannot reach obsidian-borg"),
+        err.contains("cannot reach the borg daemon"),
         "expected connection error message, got: {err}"
     );
 }
