@@ -439,7 +439,8 @@ pub struct GraphArgs {
     pub backfill: bool,
     /// Rebuild only the deterministic edge kinds (semantic, wikilink,
     /// shared-*, *-member) in one transaction; `fact` and `bridge` edges are
-    /// kept, and a failure leaves every previous edge in place.
+    /// kept, and a failed edge swap leaves every previous edge in place. The
+    /// per-note watermarks are written after the swap commits.
     #[arg(long, conflicts_with = "backfill")]
     pub rebuild: bool,
 }
