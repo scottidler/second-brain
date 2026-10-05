@@ -185,14 +185,37 @@ pub(crate) async fn launchctl(args: &[&str]) -> Result<()> {
 /// filesystem or environment access beyond the args - so `install_systemd`
 /// and its tests share one seam (tests assert on the returned string instead
 /// of touching the real `~/.config/systemd/user/`).
-fn render_systemd_unit(exe_path: &str, home: &Path, vault_path: &Path, data_path: &Path, config: &Config) -> String {
+///
+/// `config_path` is the borg.yml to pin with `--config` (`None` omits the
+/// flag); the caller passes the file when it exists so the daemon's stripped
+/// environment can't resolve a different one (cortex and harvest do the same).
+fn render_systemd_unit(
+    exe_path: &str,
+    home: &Path,
+    vault_path: &Path,
+    data_path: &Path,
+    config_path: Option<&Path>,
+    config: &Config,
+) -> String {
     log::debug!(
-        "service::render_systemd_unit: exe_path={exe_path} vault_path={} env_bootstrap={}",
+        "service::render_systemd_unit: exe_path={exe_path} vault_path={} config_path={config_path:?} env_bootstrap={}",
         vault_path.display(),
         config.daemon.env_bootstrap.is_some(),
     );
 
     let log_level = config.log_level.as_deref().unwrap_or("info");
+    // `--config` is a flag on `sb borg`, so it goes before `daemon`.
+    let mut exec_start = vec![exe_path.to_string(), "borg".to_string()];
+    if let Some(path) = config_path {
+        exec_start.push("--config".to_string());
+        exec_start.push(path.display().to_string());
+    }
+    exec_start.extend([
+        "--log-level".to_string(),
+        log_level.to_string(),
+        "daemon".to_string(),
+        "--start".to_string(),
+    ]);
     let unit = ServiceUnit {
         description: "borg - Obsidian ingestion daemon (second-brain)".to_string(),
         after: vec!["network-online.target".to_string()],
@@ -206,14 +229,7 @@ fn render_systemd_unit(exe_path: &str, home: &Path, vault_path: &Path, data_path
         home: home.to_path_buf(),
         path_comment: None,
         extra_env: Vec::new(),
-        exec_start: vec![
-            exe_path.to_string(),
-            "borg".to_string(),
-            "--log-level".to_string(),
-            log_level.to_string(),
-            "daemon".to_string(),
-            "--start".to_string(),
-        ],
+        exec_start,
         restart: Some(Restart {
             policy: RestartPolicy::Always,
             sec: 5,
@@ -226,31 +242,57 @@ fn render_systemd_unit(exe_path: &str, home: &Path, vault_path: &Path, data_path
     render_service(&unit)
 }
 
-pub(crate) async fn install_systemd(exe_path: &str, config: &Config) -> Result<PathBuf> {
+/// The `borg.service` text `--install` writes, resolved from ambient state
+/// (home, vault, data dir, borg.yml). `sb doctor` calls this too, so drift is
+/// measured against exactly what an install would write now.
+pub fn desired_systemd_unit(exe_path: &str, config: &Config) -> Result<String> {
+    log::debug!("service::desired_systemd_unit: exe_path={exe_path}");
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
-    let unit_dir = home.join(".config/systemd/user");
-    let unit_path = unit_dir.join("borg.service");
 
-    // Derive the vault path from config (was hardcoded). The borg-owned data
-    // dir (`~/.local/share/sb/borg`: receipts DB, signal-state, staged
-    // artifacts) MUST be in ReadWritePaths too - it only worked before because
-    // the user manager wasn't enforcing ProtectHome; the moment it does, every
+    // The vault must resolve: a unit that grants write access to a guessed
+    // directory is worse than no unit. The borg-owned data dir
+    // (`~/.local/share/sb/borg`: receipts DB, signal-state, staged artifacts)
+    // MUST be in ReadWritePaths too - it only worked before because the user
+    // manager wasn't enforcing ProtectHome; the moment it does, every
     // receipts/signal/stages write fails.
     let vault_path = config
         .vault_root()
-        .unwrap_or_else(|_| home.join("repos/scottidler/obsidian"));
+        .context("cannot render borg.service: vault root does not resolve (set vault.root-path in borg.yml)")?;
     let data_path = vault::receipts::receipts_dir()
         .map(|d| d.parent().map(|p| p.to_path_buf()).unwrap_or(d))
         .unwrap_or_else(|_| home.join(".local/share/sb"));
+    let borg_config = vault::paths::borg_config();
+    let config_path = borg_config.exists().then_some(borg_config.as_path());
 
-    let unit_content = render_systemd_unit(exe_path, &home, &vault_path, &data_path, config);
+    Ok(render_systemd_unit(
+        exe_path,
+        &home,
+        &vault_path,
+        &data_path,
+        config_path,
+        config,
+    ))
+}
+
+/// Render and write `borg.service` under the XDG user unit dir; returns its path.
+fn write_systemd_unit(exe_path: &str, config: &Config) -> Result<PathBuf> {
+    let unit_dir = vault::systemd::user_unit_dir()?;
+    let unit_path = unit_dir.join("borg.service");
+    let unit_content = desired_systemd_unit(exe_path, config)?;
+    std::fs::create_dir_all(&unit_dir).context("Failed to create systemd user unit directory")?;
+    std::fs::write(&unit_path, &unit_content).context("Failed to write systemd unit file")?;
+    Ok(unit_path)
+}
+
+pub(crate) async fn install_systemd(exe_path: &str, config: &Config) -> Result<PathBuf> {
+    // Render before stopping the running service: a render error must not
+    // leave the daemon stopped.
+    desired_systemd_unit(exe_path, config)?;
 
     // Stop the running service if active (ignore errors - may not be running)
     systemctl(&["stop", "borg"]).await.ok();
 
-    // Write (or overwrite) the unit file
-    std::fs::create_dir_all(&unit_dir).context("Failed to create systemd user unit directory")?;
-    std::fs::write(&unit_path, &unit_content).context("Failed to write systemd unit file")?;
+    let unit_path = write_systemd_unit(exe_path, config)?;
 
     // Reload so systemd picks up changes, then enable + start
     systemctl(&["daemon-reload"]).await?;
@@ -311,8 +353,7 @@ fn best_effort(program: &str, args: &[&str]) {
 }
 
 pub(crate) async fn uninstall_systemd() -> Result<UninstallOutcome> {
-    let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
-    let unit_path = home.join(".config/systemd/user/borg.service");
+    let unit_path = vault::systemd::user_unit_dir()?.join("borg.service");
 
     if !unit_path.exists() {
         return Ok(UninstallOutcome {

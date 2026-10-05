@@ -150,7 +150,7 @@ pub fn stage_0_init(config: &Config, content: &ContentKind, method: IngestMethod
     let store = FsArtifactStore::from_config(&config.staging);
 
     if let ContentKind::Url { url, .. } = content {
-        let blocklist_path = blocklist::default_path();
+        let blocklist_path = blocklist::default_path()?;
         // Fail closed: an unloadable blocklist rejects the capture instead of
         // letting every domain through. A MISSING file is an empty blocklist
         // (`Blocklist::from_file`); only a file that exists and cannot be
@@ -254,7 +254,7 @@ pub fn run_gate_1(config: &Config, trace_id: &str, url: &str, bytes: &[u8], stat
         reason = matched.reason,
         retry = matched.retriable_after.to_rfc3339(),
     );
-    let blocklist_path = blocklist::default_path();
+    let blocklist_path = blocklist::default_path()?;
     // The capture is rejected either way; only the write-back is conditional.
     // A blocklist that exists but does not load is never overwritten: Gate-0
     // fails closed on it, and rewriting it here would destroy the operator's

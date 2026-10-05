@@ -297,3 +297,51 @@ fn fabric_patterns_match_whole_lines_not_substrings() {
     let findings = fabric_pattern_findings("summarize_paper\n", None);
     assert_eq!(findings[0].severity, Severity::Error);
 }
+
+fn unit_file(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("borg.service");
+    std::fs::write(&path, contents).expect("write unit");
+    (dir, path)
+}
+
+#[test]
+fn drift_finding_warns_on_one_byte_edit_and_names_reinstall() {
+    let rendered = "[Service]\nExecStart=/bin/sb borg daemon --start\n";
+    let (_dir, path) = unit_file(&rendered.replace("sb borg", "sc borg"));
+    let finding = drift_finding("borg.service", &path, rendered, "sb borg daemon --install").expect("drift");
+    assert_eq!(finding.severity, Severity::Warn);
+    assert!(finding.message.contains("borg.service"));
+    assert!(
+        finding
+            .suggested_fix
+            .as_deref()
+            .unwrap()
+            .contains("sb borg daemon --install"),
+        "names the reinstall command: {finding:?}"
+    );
+}
+
+#[test]
+fn drift_finding_is_silent_for_a_fresh_install() {
+    let rendered = "[Service]\nExecStart=/bin/sb borg daemon --start\n";
+    let (_dir, path) = unit_file(rendered);
+    assert!(drift_finding("borg.service", &path, rendered, "sb borg daemon --install").is_none());
+}
+
+#[test]
+fn drift_finding_is_silent_when_the_unit_is_absent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("borg.service");
+    assert!(drift_finding("borg.service", &path, "anything", "sb borg daemon --install").is_none());
+}
+
+#[test]
+fn drift_finding_errors_when_the_unit_cannot_be_read() {
+    // A directory at the unit path: exists, but is not readable as a file.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("borg.service");
+    std::fs::create_dir(&path).expect("mkdir");
+    let finding = drift_finding("borg.service", &path, "x", "sb borg daemon --install").expect("read error");
+    assert_eq!(finding.severity, Severity::Error);
+}

@@ -100,21 +100,26 @@ pub fn render_units(home: &Path, binary: &Path, config_path: Option<&Path>, conf
     (render_service(&service), render_timer(&timer))
 }
 
-/// Install the harvest service + timer into `~/.config/systemd/user/`.
-/// Returns the lines `sb` should print (paths written, follow-up systemctl).
-pub fn install(config: &Config) -> Result<Vec<String>> {
-    log::debug!("harvest::timer::install: schedule={:?}", config.harvest.schedule);
-    let service_dir = vault::paths::xdg_config_dir()
-        .expect("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
-        .join("systemd")
-        .join("user");
-    std::fs::create_dir_all(&service_dir).context("failed to create systemd user dir")?;
-
+/// The `(service, timer)` texts `install` writes, resolved from ambient state
+/// (home, current binary, borg.yml). `sb doctor` calls this too, so drift is
+/// measured against exactly what an install would write now.
+pub fn desired_units(config: &Config) -> Result<(String, String)> {
+    log::debug!("harvest::timer::desired_units: schedule={:?}", config.harvest.schedule);
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let binary = std::env::current_exe().context("failed to get current executable path")?;
     let borg_config = vault::paths::borg_config();
     let config_path = borg_config.exists().then_some(borg_config.as_path());
-    let (service, timer) = render_units(&home, &binary, config_path, config);
+    Ok(render_units(&home, &binary, config_path, config))
+}
+
+/// Install the harvest service + timer into `~/.config/systemd/user/`.
+/// Returns the lines `sb` should print (paths written, follow-up systemctl).
+pub fn install(config: &Config) -> Result<Vec<String>> {
+    log::debug!("harvest::timer::install: schedule={:?}", config.harvest.schedule);
+    let service_dir = vault::systemd::user_unit_dir()?;
+    std::fs::create_dir_all(&service_dir).context("failed to create systemd user dir")?;
+
+    let (service, timer) = desired_units(config)?;
 
     let service_path = service_dir.join(HARVEST_SERVICE);
     let timer_path = service_dir.join(HARVEST_TIMER);
@@ -139,10 +144,7 @@ pub fn install(config: &Config) -> Result<Vec<String>> {
 /// not an error).
 pub fn uninstall() -> Result<Vec<String>> {
     log::debug!("harvest::timer::uninstall");
-    let service_dir = vault::paths::xdg_config_dir()
-        .expect("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
-        .join("systemd")
-        .join("user");
+    let service_dir = vault::systemd::user_unit_dir()?;
 
     let mut lines = Vec::new();
     for unit in [HARVEST_SERVICE, HARVEST_TIMER] {
