@@ -279,7 +279,7 @@ fn index_repo_session(index: &SearchIndex, path: &str, repo: Option<&str>, repos
     index.index_one(&note, 100).expect("index session");
 }
 
-/// Phase 4 positive: a session touching repos X+Y joins BOTH repo hubs via
+/// Multi-repo positive: a session touching repos X+Y joins BOTH repo hubs via
 /// deterministic repo-member edges, and the `repo:` anchor that ALSO appears in
 /// `repos-touched` collapses to ONE edge (deduped on the resolved hub path). The
 /// hub notes must exist at their nested paths for the edges to resolve.
@@ -321,7 +321,7 @@ fn multi_repo_member_edges_join_every_touched_repo_hub_deduped() {
     }
 }
 
-/// Phase 4 negative: with `repos-touched` absent (`None`) or present-empty
+/// Multi-repo negative: with `repos-touched` absent (`None`) or present-empty
 /// (`Some(vec![])`), only the single `repo:` anchor yields a repo-member edge -
 /// no phantom multi-repo edges. Proves `None` and `[]` behave identically to a
 /// bare `repo:` (the three-state's edge-layer collapse).
@@ -349,7 +349,7 @@ fn no_extra_repo_member_edges_when_repos_touched_absent_or_empty() {
     );
 }
 
-/// Phase 6 (harvest-completion): extends the Phase 4 determinism harness from a
+/// harvest-completion: extends the multi-repo determinism harness from a
 /// single full-rebuild snapshot to the INCREMENTAL path - the shape every real
 /// nightly `cortex graph` run takes after the first full rebuild. Growing the
 /// corpus with a NEW multi-repo note must only ADD repo-member edges; a prior
@@ -406,7 +406,7 @@ fn repo_member_edges_are_monotonic_across_incremental_builds() {
     );
 }
 
-// --- entity-hub-two-vector-synthesis Phase 1 -------------------------------
+// --- entity-hub-two-vector-synthesis: wikilink stopwords ---------------------
 
 /// A `cfg()` with the design's seeded stopwords, so the stoplisted tests read
 /// the same shape the shipped `cortex.yml.example` configures.
@@ -478,7 +478,7 @@ fn unstoplisted_wikilink_still_mints_an_edge() {
     assert_eq!(stats.wikilink, 1, "with no stopword configured the prose match links");
 }
 
-/// Landed note bodies are NEVER retracted by this phase (the harvest doc's
+/// Landed note bodies are NEVER retracted by the stopword (the harvest doc's
 /// binding rule): the stopword drops the EDGE, and the `[[Every]]` markup stays
 /// byte-identical in the body so Obsidian keeps rendering it.
 #[test]
@@ -638,7 +638,7 @@ fn creator_member_dst_matches_the_minted_creator_hub_path() {
 }
 
 /// The run report must SHOW the three membership kinds. `tally`'s `_ => {}` arm
-/// swallowed `repo-member` from every report since Phase 10 shipped; explicit
+/// swallowed `repo-member` from every report since repo hubs shipped; explicit
 /// arms are the fix, and this pins all three at once.
 #[test]
 fn run_report_counts_all_three_membership_kinds() {

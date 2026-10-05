@@ -269,7 +269,7 @@ fn test_apply_quality_clears_stale_fields() {
     assert!(!content.contains("empty-body"), "stale empty-body issue should be gone");
 }
 
-/// Phase 2a determinism guard: parallel `lint_quality` produces violations in the same order
+/// Determinism guard: parallel `lint_quality` produces violations in the same order
 /// as the sequential implementation would over the same input slice. Concretely, the
 /// `path`-keyed sequence of violations must equal the sequence the input slice's path
 /// ordering would dictate.

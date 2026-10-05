@@ -1,13 +1,13 @@
-//! `sb cortex hub`: stub/refresh entity hub notes (Phase 3 of
-//! graph-augmented-memory).
+//! `sb cortex hub`: stub/refresh entity hub notes
+//! (graph-augmented-memory).
 //!
 //! For each glossary concept (and alias target), each distinct note `creator`,
 //! each distinct source host, and each over-fan-out-cap tag, a hub note is
 //! stubbed under `entities/<slug>.md` if absent (idempotent otherwise). Hub
 //! notes carry `type: entity` frontmatter and an `ontotype`, double as
-//! human-navigable knowledge, and serve as the resolved targets that Phase 2's
+//! human-navigable knowledge, and serve as the resolved targets that
 //! `[[concept]]` wikilinks point at and that over-cap shared-tag buckets route
-//! through (Phase 1) instead of exploding into pairwise edges.
+//! through instead of exploding into pairwise edges.
 //!
 //! The pass also populates the `entities` table (id / kind / hub_path /
 //! ontotype) in oracle's index so cortex/oracle share one entity catalogue.
@@ -33,19 +33,19 @@ pub use render::{HubMember, Vector, render_hub_body};
 pub const HUB_DIR: &str = "entities";
 
 /// Ontology class for a hub, written into `ontotype` frontmatter + the
-/// `entities` table. Phase 5 refines these against `vault::schema`.
+/// `entities` table. To be refined against `vault::schema`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubKind {
     Concept,
     Creator,
     Source,
     Tag,
-    /// A `<org>/<repo>` GitHub repo (harvest-clyde-sessions design, Phase 10).
+    /// A `<org>/<repo>` GitHub repo (harvest-clyde-sessions design).
     /// Minted from a note's `repo:` frontmatter. Its `entities` id (slug) is the
     /// injective `repo-<org>--<repo>` from `repo_hub_slug` - a namespace disjoint
     /// from the bare-token Concept/Creator/Source/Tag slugs. Its ON-DISK path is
     /// NOT the flat slug: repo hubs nest at `entities/repos/<org>/<repo>.md`
-    /// (mirrors `~/repos`) via `repo_hub_path` (Scott, 2026-07-20). Slug =
+    /// (mirrors `~/repos`) via `repo_hub_path` (Scott). Slug =
     /// stable DB id; path = human-navigable nested file.
     Repo,
 }
@@ -73,8 +73,7 @@ impl HubKind {
     }
 }
 
-/// Hub slug for a `<org>/<repo>` value (harvest-clyde-sessions design, Phase
-/// 10). Flat hub filenames can't hold the `/`, and the generic `slugify` would
+/// Hub slug for a `<org>/<repo>` value (harvest-clyde-sessions design). Flat hub filenames can't hold the `/`, and the generic `slugify` would
 /// collapse `a/b-c` and `a-b/c` to the same `a-b-c`. So repo hubs get a
 /// dedicated slug: `repo-<slugify(org)>--<slugify(repo)>`, splitting on the
 /// single `/`. INJECTIVE on the org/repo split - the `--` boundary can't be
@@ -92,7 +91,7 @@ pub fn repo_hub_slug(repo: &str) -> String {
 }
 
 /// On-disk (vault-relative) path of a repo hub note: nested folders mirroring
-/// `~/repos/<org>/<repo>` under `entities/repos/` (Scott, 2026-07-20),
+/// `~/repos/<org>/<repo>` under `entities/repos/` (Scott),
 /// superseding the flat `entities/repo-<org>--<repo>.md` scheme. Real directory
 /// nesting makes the path INJECTIVE on the `<org>/<repo>` split for free: the
 /// adversarial pair `a/b-c` and `a-b/c` land at DISTINCT paths
@@ -177,7 +176,7 @@ pub struct HubReport {
     pub bodies_preserved: usize,
     /// Member notes skipped across the run as missing/unreadable.
     pub members_skipped: usize,
-    /// Populated only when `--asymmetry` was requested (Phase 3): the
+    /// Populated only when `--asymmetry` was requested: the
     /// read-only per-hub source/session membership split. `None` for every
     /// other invocation - this run never touches the vault or the entities
     /// table.
@@ -272,7 +271,7 @@ pub fn collect_stubs(
                 insert(slug, HubKind::Source, host);
             }
         }
-        // Repo hub (Phase 10): unconditional - every note carrying a well-formed
+        // Repo hub: unconditional - every note carrying a well-formed
         // `repo:` mints/joins its repo hub. The `repo-<org>--<repo>` slug is a
         // namespace disjoint from the bare-token kinds above, so it never
         // collides. A malformed slug skips the edge and logs loudly, but the
@@ -289,7 +288,7 @@ pub fn collect_stubs(
                 );
             }
         }
-        // Multi-repo hubs (harvest-completion Phase 4): mint a Repo stub for
+        // Multi-repo hubs (harvest-completion): mint a Repo stub for
         // EVERY validated element of `repos-touched`, so a session touching
         // repos X+Y gets BOTH hubs stubbed and neither secondary-repo edge is
         // dropped silently (`insert_edges` skips an edge whose `dst` hub note
@@ -430,7 +429,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &HubOpts) -> Result<HubRepo
     log::info!("cortex::hub: {} candidate hub(s)", stubs.len());
 
     // `--asymmetry` is checked FIRST and returns early. It is read-only by
-    // contract (Phase 3): a combined `--asymmetry --apply --synthesize`
+    // contract: a combined `--asymmetry --apply --synthesize`
     // invocation must still write nothing, so this branch never falls through
     // into `write_stubs`/`populate_entities`/`build_hub_bodies` below.
     if opts.asymmetry {

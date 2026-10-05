@@ -30,7 +30,7 @@ use distillers::tags::{
 /// vault-relative paths this call ACTUALLY wrote (promotions + catch-up
 /// enrichment + needs-review marks) - the daemon's oscillation fingerprint
 /// draws only from this, never from the report's violation messages. This
-/// mirrors the Phase 1 lint seam (`lint_with_notes` -> `LintApplyReport`).
+/// mirrors the lint seam (`lint_with_notes` -> `LintApplyReport`).
 pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<(Report, Vec<String>)> {
     crate::startup::validate_canonical_assets()?;
     log::info!("starting classify command (vault_root={})", vault_root.display());
@@ -39,8 +39,8 @@ pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<(R
 }
 
 /// Same as `run`, but takes an already-scanned note list instead of scanning
-/// the vault itself. Phase 5 (design doc
-/// `2026-07-05-cortex-daemon-oscillation-loop.md`) seam: the daemon scans
+/// the vault itself. Seam from the design doc
+/// `2026-07-05-cortex-daemon-oscillation-loop.md`: the daemon scans
 /// once per cycle and shares the result across every action - `run` stays
 /// the scan-then-delegate entry point every other caller (CLI, tests) keeps
 /// using unmodified.
@@ -613,7 +613,7 @@ pub fn apply_classify(
 
     written.sort();
     written.dedup();
-    // Surface the real write count/paths on the report too, matching the Phase 1
+    // Surface the real write count/paths on the report too, matching the
     // lint seam (`report.applied` / `report.applied_paths`); sb prints this.
     report.applied = written.len();
     report.applied_paths = written.clone();
@@ -825,7 +825,7 @@ fn ensure_origin(fields: &mut Vec<(String, serde_yaml::Value)>, note: &Note) {
 
 /// Mark a note as needing manual review. Returns `true` iff it wrote to disk.
 ///
-/// Idempotent by construction - this is the Phase 8 audit fix. A no-signal or
+/// Idempotent by construction - this is the audit fix. A no-signal or
 /// low-confidence INBOX note is never marked `cortex-classified`, so
 /// `filter_inbox_notes` re-selects it on EVERY classify cycle; the previous
 /// unconditional `insert_frontmatter_fields` + `write_atomic` therefore

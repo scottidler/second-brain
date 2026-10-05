@@ -134,7 +134,7 @@ fn a_candidate_that_resolves_canonically_is_dropped() {
     assert!(out.is_empty(), "everything here resolves: {out:?}");
 }
 
-/// Phase 1's guard, enforced on the staged arm too: a `null` mapping is a
+/// The null-mapping guard, enforced on the staged arm too: a `null` mapping is a
 /// human reject and must never be re-proposed.
 #[test]
 fn a_human_rejected_candidate_is_dropped() {
@@ -632,12 +632,12 @@ fn several_tags_promote_in_one_call() {
 }
 
 // ---------------------------------------------------------------------------
-// Implementation-audit regressions (panel round 1, Mode 2, 2026-09-21).
+// Implementation-audit regressions (panel round 1, Mode 2).
 // ---------------------------------------------------------------------------
 
 /// **The queue-wipe path.** `Path::exists()` maps EVERY stat error to false,
 /// including EACCES on a PARENT component. That reported "no staging root",
-/// exited 0, and let Phase 2's unconditional write replace a 112-entry queue
+/// exited 0, and let the unconditional write replace a 112-entry queue
 /// with `proposals: []`. Only NotFound may be a skip.
 ///
 /// The precondition is a regular file standing where a parent directory
@@ -678,8 +678,8 @@ fn a_genuinely_absent_root_is_still_a_skip() {
 }
 
 /// `tag-promote ci ci --apply` wrote two identical `    - ci` lines, breaking
-/// the cross-group uniqueness invariant Phase 7 itself added to the
-/// shipped-file test.
+/// the cross-group uniqueness invariant the
+/// shipped-file test enforces.
 #[test]
 fn a_repeated_tag_in_one_call_is_inserted_once() {
     let dir = tempfile::tempdir().expect("tmpdir");

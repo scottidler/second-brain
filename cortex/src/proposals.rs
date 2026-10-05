@@ -498,8 +498,8 @@ pub fn promote_tags(
             );
         }
         // Dedupe: `tag-promote ci ci --apply` would otherwise write two
-        // identical `    - ci` lines and break the uniqueness invariant Phase
-        // 7 itself introduced into the shipped-file test.
+        // identical `    - ci` lines and break the uniqueness invariant the
+        // shipped-file test enforces.
         if !to_add.contains(tag) {
             to_add.push(tag.clone());
         }
@@ -584,7 +584,7 @@ fn overwrite_queue(path: &Path, proposals: Vec<crate::sweep::Proposal>) -> Resul
 ///
 /// A targeted textual insert, not a serde round-trip: no round-trip preserves
 /// sequence indentation, the empty-flow `  system: []` form, or comments, and
-/// the phase's contract is that every line outside the touched group is
+/// the contract is that every line outside the touched group is
 /// byte-identical.
 ///
 /// Appends; never re-sorts. Neither the group keys nor the tags within a group

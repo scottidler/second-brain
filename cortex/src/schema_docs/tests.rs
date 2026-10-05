@@ -54,7 +54,7 @@ fn regenerate_schema_docs_snapshots() {
 }
 
 /// Every enum variant reaches the rendered table. This is the drift the whole
-/// phase exists to kill: the hand-written `type-values.md` listed 15 of
+/// module exists to kill: the hand-written `type-values.md` listed 15 of
 /// `NoteType`'s 25 variants.
 #[test]
 fn every_enum_variant_appears_in_its_table() {

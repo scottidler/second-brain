@@ -314,12 +314,12 @@ async fn backfill_rewrites_article_note_with_structured_sections() {
     assert!(raw.contains("Raft simplifies replication."));
     assert!(raw.contains("distilled: true"));
     assert!(raw.contains("distilled-extractor: distill-article-v1"));
-    // Phase 7: articles now preserve their fetched markdown in-note under
+    // articles now preserve their fetched markdown in-note under
     // `## Transcript` (both live ingest and backfill), matching the
     // video/voicenote precedent this backfill path already followed. On
     // backfill the "transcript" input is the legacy note body, so the prior
     // prose survives verbatim under `## Transcript` rather than being
-    // discarded. (Was `!raw.contains(...)` pre-Phase-7.)
+    // discarded. (Was `!raw.contains(...)` before articles kept the transcript.)
     assert!(raw.contains("## Transcript"), "expected Transcript section:\n{raw}");
     assert!(
         raw.contains("Legacy prose summary about consensus."),

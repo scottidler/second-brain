@@ -1,5 +1,5 @@
 //! The hub retrieval contract, asserted under the REAL BGE tokenizer
-//! (`docs/design/2026-08-15-entity-hub-two-vector-synthesis.md`, Phase 2).
+//! (`docs/design/2026-08-15-entity-hub-two-vector-synthesis.md`).
 //!
 //! For a both-vector hub, the text cortex actually embeds
 //! (`title + capture_note + summary`) must carry at least one SESSION claim AND
@@ -32,7 +32,7 @@ use vault::distilled::Claim;
 /// declared by bge-small-en-v1.5; a change there is a deliberate model change).
 const MAX_SEQ_LEN: usize = 512;
 
-/// The real `claude.md` cohort under the simulated post-Phase-1 membership.
+/// The real `claude.md` cohort under the simulated membership after per-note hub routing.
 const SOURCE_MEMBERS: usize = 345;
 const SESSION_MEMBERS: usize = 63;
 

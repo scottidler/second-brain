@@ -8,8 +8,8 @@ use crate::report::{Fix, Report, Severity, Violation};
 use crate::stopwords::Stopwords;
 use crate::vault::Note;
 
-/// The concept glossary + alias table, loaded from `glossary.yml` (Phase 2 of
-/// graph-augmented-memory). Mirrors `canonical-tags.yml`: kebab-case concept
+/// The concept glossary + alias table, loaded from `glossary.yml`
+/// (graph-augmented-memory). Mirrors `canonical-tags.yml`: kebab-case concept
 /// slugs plus an `aliases` map of surface form → canonical slug.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -241,7 +241,7 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig, stopwords: &Stopword
             }
         }
 
-        // Match glossary concepts (Phase 2): kebab-case slugs linked at first
+        // Match glossary concepts: kebab-case slugs linked at first
         // body mention as [[slug]] (or [[slug|Surface]] when the prose case
         // differs). Plus alias surface forms -> canonical slug as piped links.
         if scan_for.contains("concepts") || scan_for.contains("all") {

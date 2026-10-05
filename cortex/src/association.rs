@@ -1,20 +1,20 @@
 //! `cortex associate`: groups harvest session notes that share a
 //! content-derived `slug:` (borg's deterministic collision naming, shipped
 //! v0.12.2) and, per pairwise similarity, decides whether to merge them into
-//! one note or cross-link them (2026-07-24 cortex-association-sweep design).
+//! one note or cross-link them (cortex-association-sweep design).
 //!
-//! Phase 1 landed the pure grouping core plus the shared config/opts shapes;
-//! Phase 2 adds the pure similarity decision core (`decide`): pairwise
-//! similarity (embedding cosine primary, claim TF-IDF fallback, uncomputable
-//! treated as below-threshold) fed into union-find transitive clustering.
-//! Phase 3 adds the merge executor (`execute_merge`): it enriches the survivor
+//! Layers: the pure grouping core plus the shared config/opts shapes; the
+//! pure similarity decision core (`decide`): pairwise similarity (embedding
+//! cosine primary, claim TF-IDF fallback, uncomputable treated as
+//! below-threshold) fed into union-find transitive clustering; the merge
+//! executor (`execute_merge`): it enriches the survivor
 //! with the idempotent union of every absorbed note's claims,
 //! `## Session Details`, and `cortex-session-ids`, then soft-retires each
-//! absorbed note to a `superseded-by:` tombstone (no deletion). Phase 4 adds
+//! absorbed note to a `superseded-by:` tombstone (no deletion); and
 //! the cross-link executor (`execute_cross_link`): it inserts a reciprocal
 //! `## Related` `[[wikilink]]` in every note named by an
 //! `AssociationOutcome::CrossLink` (the distinct clusters' representatives),
-//! skipping any link already present. Phase 5 (this phase) wires it all
+//! skipping any link already present. `apply` wires it all
 //! together: the pure `apply` orchestrator (group -> whole-group quiescence
 //! guard -> decide -> conditionally execute), the `run` composition root that
 //! opens the oracle index + embed lock the way `graph::run` does, and
@@ -36,8 +36,8 @@ use crate::vault::Note;
 /// Group session notes by durable session identity: `trace:` frontmatter,
 /// falling back to `cortex-session-ids` overlap ONLY for legacy notes that
 /// carry no `trace:` at all
-/// (`docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md`
-/// Phase 5, `apply`'s grouping function).
+/// (`docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md`,
+/// `apply`'s grouping function).
 ///
 /// Two tracks, never mixed:
 ///
@@ -45,7 +45,7 @@ use crate::vault::Note;
 ///   grouped by that value alone, exact match. Two notes carrying DIFFERENT
 ///   non-empty traces are never grouped, even if they share every
 ///   `cortex-session-ids` entry - that is exactly the genuine follow-up case
-///   Phase 4 made a real, linked thing (`follows:`), not a duplicate to merge.
+///   the cross-link executor makes a real, linked thing (`follows:`), not a duplicate to merge.
 /// - **Legacy fallback.** A note with no `trace:` groups by transitive
 ///   `cortex-session-ids` overlap (union-find: any two legacy notes sharing
 ///   at least one session id land in the same cluster, and that clustering
@@ -120,7 +120,7 @@ pub fn group_by_session_identity(notes: &[Note]) -> Vec<Vec<usize>> {
 }
 
 /// What `decide` concludes for a same-slug group. Typed so `sb` (and the
-/// Phase 3-5 executors) format/act without re-inspecting opts, mirroring the
+/// merge, cross-link, and apply executors) format/act without re-inspecting opts, mirroring the
 /// `SweepMode` precedent.
 ///
 /// A `Merge` names the survivor plus the notes it absorbs and the deduped
@@ -133,7 +133,7 @@ pub enum AssociationOutcome {
     /// One survivor absorbs the other cluster members. `absorbed` and
     /// `session_ids` are sorted for deterministic output; `survivor` is chosen
     /// by earliest `date`, ties broken by smallest primary session id (the
-    /// Phase 3 executor consumes these fields as-is).
+    /// merge executor consumes these fields as-is).
     Merge {
         survivor: PathBuf,
         absorbed: Vec<PathBuf>,
@@ -145,7 +145,7 @@ pub enum AssociationOutcome {
     CrossLink { notes: Vec<PathBuf> },
 }
 
-/// Outcome of a `cortex associate` invocation (Phase 5). Mirrors the
+/// Outcome of a `cortex associate` invocation. Mirrors the
 /// `SweepMode` precedent: dry-run and apply produce distinct variants so `sb`
 /// formats the result without re-inspecting `AssociateOpts`.
 ///
@@ -186,7 +186,7 @@ impl AssociationReport {
 /// SQLite index required in tests. `Ok(None)` means "either note lacks a
 /// summary embedding" (uncomputable via this signal); the `Result` wrapper
 /// carries a genuine DB error up rather than silently degrading it to
-/// uncomputable (Phase 1 `cosine_between` deviation note).
+/// uncomputable (the `cosine_between` deviation).
 pub trait EmbeddingCosine {
     fn cosine_between(&self, note_a: &Path, note_b: &Path) -> Result<Option<f32>>;
 }
@@ -232,7 +232,7 @@ pub struct DecideCtx<'a, E: EmbeddingCosine> {
 ///
 /// Returns `Result` because the embedding signal is a fallible SQLite read;
 /// `Ok(None)` from the port is the "uncomputable" case (same effect, correct
-/// seam vs the design's bare `Vec` signature - Phase 1 recommended this).
+/// seam vs the design's bare `Vec` signature - recommended in review).
 pub fn decide<E: EmbeddingCosine>(group: &[&Note], ctx: &DecideCtx<'_, E>) -> Result<Vec<AssociationOutcome>> {
     log::debug!(
         "association::decide: members={} threshold={} source={:?}",
@@ -310,8 +310,8 @@ fn pairwise_similarity<E: EmbeddingCosine>(ctx: &DecideCtx<'_, E>, a: &Note, b: 
 }
 
 /// Claim-text TF cosine fallback: tokenize each note's `## Claims` section into
-/// term counts and cosine them (the exact primitive the Phase 1 promotion
-/// exposed). `None` when either note has no claim tokens - there is nothing to
+/// term counts and cosine them (the exact primitive the `duplicates`
+/// promotion exposed). `None` when either note has no claim tokens - there is nothing to
 /// compare, so the pair is uncomputable via this signal (never a spurious
 /// zero-similarity merge). Two notes that both HAVE claims but share no terms
 /// return `Some(0.0)` - a real below-threshold measurement, not uncomputable.
@@ -451,7 +451,7 @@ impl UnionFind {
     }
 }
 
-// -- Phase 5: CLI + daemon orchestration ------------------------------------
+// -- CLI + daemon orchestration ------------------------------------
 
 /// Glob-exclude check, mirroring `duplicates::matches_exclude` exactly (not
 /// promoted/shared: it is three lines and association's own `exclude` list is
@@ -525,7 +525,7 @@ fn group_is_quiescing(vault_root: &Path, notes: &[Note], members: &[usize], min_
 /// Pure(ish) top-level orchestrator: group -> whole-group quiescence guard ->
 /// decide -> (only when `do_apply`) execute. This is exactly the composition
 /// `association/tests.rs`'s `associate_run` fixture already exercises for
-/// Phases 3/4; Phase 5 wraps it in a public, generic-over-the-embedding-port
+/// the merge and cross-link executors; `apply` wraps it in a public, generic-over-the-embedding-port
 /// entry point and adds the exclude filter and the quiescence guard.
 ///
 /// Same-effect, correct-seam deviation from the design's bare
@@ -533,7 +533,7 @@ fn group_is_quiescing(vault_root: &Path, notes: &[Note], members: &[usize], min_
 /// the embedding port and the apply-vs-dry-run flag are threaded as explicit
 /// arguments rather than implied by `config` or re-derived from
 /// `AssociateOpts`, so this stays unit-testable with the same `FakeEmbeddings`
-/// fixture Phase 2 already built, with no SQLite index required. `run` below
+/// fixture the decision core already built, with no SQLite index required. `run` below
 /// is the production composition root that supplies the real port (a
 /// `vault::search::SearchIndex`) and the real `AssociateOpts.apply` value.
 ///
@@ -664,7 +664,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &AssociateOpts) -> Result<A
     Ok(report)
 }
 
-/// Daemon tick (Phase 5): the NEW periodic interval arm, modeled on the
+/// Daemon tick: the NEW periodic interval arm, modeled on the
 /// `embed`/`cold`/`graph` ticks - always AUTO-APPLIES (there is no per-tick
 /// dry-run; the daemon either associates or, per `is_enabled("association")`,
 /// does not run at all). The caller (`daemon::start_watching`) is responsible
@@ -675,14 +675,14 @@ pub fn daemon_tick(vault_root: &Path, config: &Config) -> Result<AssociationRepo
     run(vault_root, config, &AssociateOpts { apply: true })
 }
 
-// -- Phase 3: merge executor -----------------------------------------------
+// -- merge executor -----------------------------------------------
 
 /// The `## Claims` section heading (as `distillers::render` writes it).
 const CLAIMS_HEADING: &str = "## Claims";
 /// The `## Session Details` section heading (as `borg::pipeline::session`
 /// writes it).
 const SESSION_DETAILS_HEADING: &str = "## Session Details";
-/// The `## Related` cross-link section heading Phase 4's `execute_cross_link`
+/// The `## Related` cross-link section heading `execute_cross_link`
 /// writes/appends to.
 const RELATED_HEADING: &str = "## Related";
 
@@ -693,7 +693,7 @@ const RELATED_HEADING: &str = "## Related";
 /// the port (no `dyn`) per the repo's Rust conventions.
 ///
 /// The sibling `apply_scope`/`apply_duplicates` call `write_atomic` directly;
-/// the port here is the one deviation, earned by Phase 3's requirement to test
+/// the port here is the one deviation, earned by the requirement to test
 /// a mid-cluster tombstone-write failure (a break-the-code self-heal proof).
 pub trait NoteWriter {
     fn write(&self, dest: &Path, bytes: &[u8]) -> Result<()>;
@@ -1013,7 +1013,7 @@ fn tombstone_content(content: &str, survivor: &Path) -> Option<String> {
 
 /// A note's filename without its `.md` extension - the wikilink target for
 /// both the merge tombstone's `superseded-by:`/redirect (e.g.
-/// `foo--a1b2c3d4.md` -> `foo--a1b2c3d4`) and the Phase 4 cross-link
+/// `foo--a1b2c3d4.md` -> `foo--a1b2c3d4`) and the cross-link
 /// executor. Always the actual filename stem, never the shared `slug:`
 /// frontmatter value: same-slug notes are exactly what a same-slug GROUP is,
 /// so the slug alone cannot disambiguate which sibling a wikilink targets -
@@ -1046,7 +1046,7 @@ fn swap_body(content: &str, new_body: &str) -> Option<String> {
     Some(format!("{prefix}---\n{fm_block}\n{closing_fence}\n\n{new_body}"))
 }
 
-// -- Phase 4: cross-link executor -------------------------------------------
+// -- cross-link executor -------------------------------------------
 
 /// Execute ONE `AssociationOutcome::CrossLink`: insert a reciprocal
 /// `## Related` `[[wikilink]]` bullet in every named note, pointing at each

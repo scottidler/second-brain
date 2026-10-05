@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Fake `IntelLlm` that counts `complete` calls and returns a fixed, non-empty
 /// synthesis. Lets the idempotency test assert that an unchanged-input second
-/// run makes ZERO LLM calls (the core Phase 2 contract).
+/// run makes ZERO LLM calls (the core idempotency contract).
 struct CountingLlm {
     calls: AtomicUsize,
     reply: String,
@@ -38,7 +38,7 @@ impl IntelLlm for CountingLlm {
     }
 }
 
-/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`, Phase 2 success
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md` success
 /// criterion (a): a second `generate` on UNCHANGED inputs makes ZERO LLM calls
 /// and writes ZERO files. The input-side idempotency key (hash of input notes +
 /// model + prompt) is persisted as `intel-input-hash` frontmatter and read back

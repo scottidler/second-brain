@@ -123,7 +123,7 @@ fn populate_entities_sets_hub_path_only_when_materialized() {
     assert_eq!(rag.1, None, "not materialized -> hub_path NULL");
 }
 
-/// Phase-3 out-of-band hub deletion: a tag hub is stubbed, the graph pass
+/// Out-of-band hub deletion: a tag hub is stubbed, the graph pass
 /// routes an over-cap tag's notes through it, the hub note is deleted out of
 /// band (cascade clears its edges), and the next graph pass skips the
 /// stale-`dst` edge without aborting — re-stubbing returns the edge.
@@ -218,8 +218,8 @@ fn repo_hub_slug_is_injective_on_the_org_repo_split() {
 
 #[test]
 fn repo_hub_path_nests_and_is_injective_across_orgs() {
-    // Nested folders mirror ~/repos/<org>/<repo> under entities/repos/ (Scott,
-    // 2026-07-20), superseding the flat repo-<org>--<repo>.md scheme.
+    // Nested folders mirror ~/repos/<org>/<repo> under entities/repos/ (Scott),
+    // superseding the flat repo-<org>--<repo>.md scheme.
     assert_eq!(
         repo_hub_path("tatari-tv/okta-auth-py"),
         "entities/repos/tatari-tv/okta-auth-py.md"
@@ -368,7 +368,7 @@ fn collect_stubs_skips_malformed_repo() {
 
 #[test]
 fn frozen_corpus_hub_groupings_are_deterministic_across_sweeps() {
-    // Phase 13 acceptance (3f frozen-corpus determinism), extended for Phase 4
+    // Acceptance (3f frozen-corpus determinism), extended for
     // multi-repo: a mixed corpus (single-repo + multi-repo + creator + source +
     // over-cap tag) sweeps to byte-identical groupings twice, and the
     // multi-repo note bridges BOTH touched hubs.
@@ -413,7 +413,7 @@ fn frozen_corpus_hub_groupings_are_deterministic_across_sweeps() {
 
 #[test]
 fn collect_stubs_repos_touched_three_state_distinction_byte_for_byte() {
-    // Phase 4: the None vs [] vs populated distinction, byte-for-byte at the
+    // the None vs [] vs populated distinction, byte-for-byte at the
     // hub-minting seam. None (touched set unknowable) and Some(vec![])
     // (definitively touched nothing) BOTH mint no repo hub - identical output.
     // The populated case mints one hub per element and is DISTINCT from both.
@@ -448,7 +448,7 @@ fn collect_stubs_repos_touched_three_state_distinction_byte_for_byte() {
 
 #[test]
 fn collect_stubs_mints_every_touched_repo_deduped_against_repo() {
-    // Phase 4: repo: X + repos-touched [X, Y] -> hubs for X and Y, with X
+    // repo: X + repos-touched [X, Y] -> hubs for X and Y, with X
     // (present in BOTH) minted exactly once. Deterministic across sweeps.
     let notes = vec![multi_repo_note(
         "s.md",
@@ -497,7 +497,7 @@ fn collect_stubs_mints_every_touched_repo_deduped_against_repo() {
 
 #[test]
 fn hub_membership_is_monotonic_additions_only() {
-    // Phase 13 acceptance (monotonicity): adding notes only ADDS stubs; every
+    // Acceptance (monotonicity): adding notes only ADDS stubs; every
     // previously-collected stub survives unchanged (no move, no removal).
     let base = vec![repo_note("r1.md", "scottidler/loopr")];
     let stubs_before = collect_stubs(&[], &[], &base, 10);
@@ -518,9 +518,9 @@ fn hub_membership_is_monotonic_additions_only() {
     assert!(stubs_after.len() > stubs_before.len(), "growth adds stubs");
 }
 
-// --- entity-hub-two-vector-synthesis Phase 1 -------------------------------
+// --- entity-hub-two-vector-synthesis: shared host parser ---------------------
 
-/// The divergence-killer. Before this phase the hub side and the graph side each
+/// The divergence-killer. Previously the hub side and the graph side each
 /// carried their own host parser with DIFFERENT signatures, so the hub minted
 /// nothing exactly where the graph produced a bucket key. Now a Source stub's
 /// on-disk path and the `source-member` edge's `dst` come from one seam, and
@@ -579,7 +579,7 @@ fn source_hub_path_is_flat_under_the_hub_dir() {
     );
 }
 
-// --- entity-hub-two-vector-synthesis Phase 2 -------------------------------
+// --- entity-hub-two-vector-synthesis: hub body synthesis ---------------------
 
 /// The live refusal marker: 134 hub bodies carry it today, all `quality=medium`,
 /// so oracle's stub filter passes them and serves them as search results.

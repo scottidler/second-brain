@@ -96,8 +96,8 @@ pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<(Repo
 }
 
 /// Same as `lint`, but takes an already-scanned note list instead of scanning
-/// the vault itself. Phase 5 (design doc
-/// `2026-07-05-cortex-daemon-oscillation-loop.md`) seam: the daemon scans
+/// the vault itself. Seam from the design doc
+/// `2026-07-05-cortex-daemon-oscillation-loop.md`: the daemon scans
 /// once per cycle and shares the result across every action - `lint` stays
 /// the scan-then-delegate entry point every other caller (CLI, tests) keeps
 /// using unmodified.
@@ -261,8 +261,8 @@ pub fn link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Repor
 }
 
 /// Same as `link`, but takes an already-scanned note list instead of scanning
-/// the vault itself. Phase 5 (design doc
-/// `2026-07-05-cortex-daemon-oscillation-loop.md`) seam: the daemon scans
+/// the vault itself. Seam from the design doc
+/// `2026-07-05-cortex-daemon-oscillation-loop.md`: the daemon scans
 /// once per cycle and shares the result across every action - `link` stays
 /// the scan-then-delegate entry point every other caller (CLI, tests) keeps
 /// using unmodified.
@@ -284,7 +284,7 @@ pub fn link_with_notes(all_notes: &[Note], vault_root: &Path, config: &Config, o
 
     // Build the effective linking config: start from the base (config or the
     // `--scan`-overridden scan-for), then fold in the shared `glossary.yml`
-    // concepts + aliases (Phase 2). `ScanScope::All` falls through to whatever
+    // concepts + aliases. `ScanScope::All` falls through to whatever
     // the config holds; any other variant overrides `actions.linking.scan-for`.
     let mut linking_config = config.actions.linking.clone();
     if opts.scan != crate::opts::ScanScope::All {

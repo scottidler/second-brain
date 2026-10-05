@@ -378,7 +378,7 @@ fn test_extract_frontmatter_block() {
     assert!(after.contains("Body here."));
 }
 
-// ---- Phase 4: field-to-tags / tags-remove ----
+// ---- field-to-tags / tags-remove ----
 
 fn category_as_tag() -> MigrationConfig {
     let mut field_to_tags = std::collections::HashMap::new();

@@ -19,7 +19,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Result<Rep
     // `--plan <file>` reads its migrations from a standalone YAML file instead
     // of `cortex.yml`. The inverse of a migration lives in such a file rather
     // than in the config, so `migrate --apply` can never run it by accident;
-    // it was parsed but ignored before this phase.
+    // it was parsed but ignored before `--plan` was wired.
     let from_plan;
     let migrations: &[MigrationConfig] = match &opts.plan {
         Some(path) => {
@@ -31,7 +31,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Result<Rep
 
     // `--only <name>` narrows to one migration. `apply_migrate` runs every
     // configured migration otherwise, which is exactly what makes a two-step
-    // rollout (v5 now, v6 seven phases later) unsafe without it.
+    // rollout (v5 now, v6 later) unsafe without it.
     let selected: Vec<&MigrationConfig> = match &opts.only {
         Some(name) => {
             let hit: Vec<&MigrationConfig> = migrations.iter().filter(|m| m.name == *name).collect();
@@ -155,7 +155,7 @@ pub fn apply_migrate_selected(
 ) -> Result<MigrateApplied> {
     let mut total_count = 0;
 
-    // Phase 0: tag transforms. They run FIRST so a later field-drop in the
+    // tag transforms. They run FIRST so a later field-drop in the
     // same run cannot remove the source field before its value is copied.
     for migration in migrations {
         if !migration.field_to_tags.is_empty() || !migration.tags_remove.is_empty() {
@@ -163,7 +163,7 @@ pub fn apply_migrate_selected(
         }
     }
 
-    // Phase 1: Apply field transforms (renames and drops)
+    // Apply field transforms (renames and drops)
     for migration in migrations {
         if !migration.field_renames.is_empty() || !migration.field_drops.is_empty() {
             let count = apply_field_transforms(vault_root, notes, migration)?;
@@ -171,7 +171,7 @@ pub fn apply_migrate_selected(
         }
     }
 
-    // Phase 1b: Apply value transforms (value renames within fields)
+    // Apply value transforms (value renames within fields)
     for migration in migrations {
         if !migration.value_renames.is_empty() {
             let count = apply_value_transforms(vault_root, notes, migration)?;
@@ -179,7 +179,7 @@ pub fn apply_migrate_selected(
         }
     }
 
-    // Phase 2: Apply file moves
+    // Apply file moves
     let mut all_moves: Vec<PlannedMove> = Vec::new();
     for migration in migrations {
         all_moves.extend(plan_migration(notes, migration));

@@ -127,7 +127,7 @@ fn link_scan_concepts_is_strict_subset_of_all() {
     assert!(!concepts.contains("linking.project"));
 }
 
-/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`, Phase 1,
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`,
 /// success criterion (b): the lint apply fingerprint must exclude every
 /// `fix: None` violation. `hobby-project.md` (TestVault fixture) carries a
 /// single `tags.non-canonical` violation - Severity::Info, `fix: None` - and

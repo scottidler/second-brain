@@ -1,10 +1,10 @@
 //! `sb cortex entities --discover`: an off-hot-path LLM pass that proposes new
-//! glossary entries from distilled notes into `entity-proposals.yml` (Phase 4
-//! of graph-augmented-memory).
+//! glossary entries from distilled notes into `entity-proposals.yml`
+//! (graph-augmented-memory).
 //!
 //! Mirrors `tag-proposals.yml`: it never auto-promotes — a human reviews the
 //! proposals and moves the good ones into `glossary.yml`. It only grows the
-//! vocabulary; it never links inline (that is Phase 2's `cortex link`).
+//! vocabulary; it never links inline (that is `cortex link`'s job).
 //!
 //! Scoped to *ingested* notes (`origin: assisted`) per the ingested-only
 //! convention, and bounded by `max_per_run` notes per pass so a backlog cannot
@@ -217,7 +217,7 @@ fn write_proposals(path: &Path, fresh: Vec<EntityProposal>) -> Result<()> {
     Ok(())
 }
 
-/// Outcome of a concept promotion (harvest-clyde-sessions design, Phase 11).
+/// Outcome of a concept promotion (harvest-clyde-sessions design).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromoteReport {
     pub slug: String,
@@ -250,8 +250,8 @@ pub fn promote_concept(proposals_path: &Path, glossary_path: &Path, slug: &str, 
     // `--apply` of the same slug exit non-zero: the first apply removed the
     // very proposal the bail then demands. An operator re-running a batch
     // should get an idempotent no-op, not a failure. (Same reorder as
-    // `cortex::proposals::promote_tags`; this became reachable when Phase 3
-    // made glossary.yml survive a deploy for the first time.)
+    // `cortex::proposals::promote_tags`; this became reachable once
+    // glossary.yml survived a deploy for the first time.)
     let glossary = crate::linking::load_glossary(glossary_path)?;
     if glossary.concepts.iter().any(|c| c == slug) {
         log::info!("cortex::entities::promote_concept: {slug} already a glossary concept; no-op");

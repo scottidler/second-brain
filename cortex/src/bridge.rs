@@ -1,9 +1,9 @@
 //! `sb cortex bridge-backfill` / `sb cortex bridge-apply`: the ONE-TIME
-//! historical multi-repo backfill (harvest-completion design, Phase 7).
+//! historical multi-repo backfill (harvest-completion design).
 //!
 //! ## Why this exists
 //!
-//! Forward multi-repo bridging (Phase 4) is deterministic: a note carrying
+//! Forward multi-repo bridging is deterministic: a note carrying
 //! `repos-touched: [X, Y]` joins hub `repo-X` AND `repo-Y` on every sweep, keyed
 //! on clyde's `files-touched` set. But `files-touched` is populable only going
 //! FORWARD and only for sessions whose transcripts still survive. The
@@ -13,7 +13,7 @@
 //! retroactivity caveat).
 //!
 //! This module is the bounded semantic fallback Scott approved (goals-doc §3b,
-//! harvest-completion Resolved Decisions 2026-07-20): a ONE-TIME LLM pass over
+//! harvest-completion Resolved Decisions): a ONE-TIME LLM pass over
 //! pre-`files-touched` sessions whose transcripts are still un-reaped, proposing
 //! cross-repo bridges as APPROVE-GATED hub-body wikilink diffs. It never touches
 //! a landed note (goals-doc §3a attachment mechanism: semantic membership lives
@@ -177,7 +177,7 @@ fn member_wikilink(note_path: &str) -> String {
 /// `repo:` but NO `repos-touched` key (pre-`files-touched`, so they have no
 /// deterministic multi-repo bridge). Pure and deterministic (sorted by note
 /// path). A note whose `repos-touched` is `Some(..)` is SKIPPED: the forward
-/// Phase-4 path already bridges it, so re-bridging it semantically would be
+/// multi-repo path already bridges it, so re-bridging it semantically would be
 /// redundant churn.
 pub fn candidate_members(notes: &[Note]) -> Vec<CandidateMember> {
     log::debug!("cortex::bridge::candidate_members: scanning {} note(s)", notes.len());
@@ -192,8 +192,8 @@ pub fn candidate_members(notes: &[Note]) -> Vec<CandidateMember> {
         if session_id.is_empty() {
             continue;
         }
-        // Pre-`files-touched` only: a present `repos-touched` means Phase 4 owns
-        // the bridge deterministically.
+        // Pre-`files-touched` only: a present `repos-touched` means the forward path
+        // owns the bridge deterministically.
         if note.frontmatter.repos_touched.is_some() {
             continue;
         }
@@ -222,7 +222,7 @@ pub fn candidate_members(notes: &[Note]) -> Vec<CandidateMember> {
 /// of proposed cross-repo bridges. PURE aside from the injected detector.
 ///
 /// FAIL-CLOSED: if `detector.detect` returns `Err` for ANY session, this returns
-/// that `Err` and NO proposals — never a partial set (design doc Phase 7
+/// that `Err` and NO proposals — never a partial set (design doc
 /// success criterion: "a forced-failure of the LLM pass yields ZERO proposals +
 /// a visible error, never silent partial output").
 ///

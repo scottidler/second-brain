@@ -157,7 +157,7 @@ pub struct MigrateOpts {
 
     /// Run only the named migration. Without it every configured migration
     /// runs, which is unsafe once the config holds a migration meant for a
-    /// later phase.
+    /// later release.
     pub only: Option<String>,
 }
 
@@ -187,11 +187,11 @@ pub struct EmbedOpts {
     pub backfill: bool,
 
     /// Restrict the pass to a single embedding kind. Accepts
-    /// `summary` (Phase A), `transcript-chunk` (Phase B), or `claim`
-    /// (Phase 9). Omit to embed all three.
+    /// `summary`, `transcript-chunk`, or `claim`.
+    /// Omit to embed all three.
     pub kind: Option<String>,
 
-    /// Rollback verb (Phase 9): delete every embedding row of this kind
+    /// Rollback verb: delete every embedding row of this kind
     /// (`summary` | `transcript-chunk` | `claim`) and exit without
     /// embedding. This is the real rollback for a kind - reverting cortex
     /// code does not stop oracle reading the rows, since `search_vector`
@@ -226,12 +226,12 @@ pub struct EntitiesOpts {
 pub struct HubOpts {
     /// Write hub notes to disk (default: report what would be stubbed).
     pub apply: bool,
-    /// Re-synthesize each materialized hub's body from its membership (Phase
-    /// 12). Requires `apply` (it writes note bodies) + the oracle index.
+    /// Re-synthesize each materialized hub's body from its membership.
+    /// Requires `apply` (it writes note bodies) + the oracle index.
     pub synthesize: bool,
     /// Report each hub's source/session membership split, classified
-    /// both/learned-not-applied/applied-not-read/unlinked (Phase 3:
-    /// entity-hub-two-vector-synthesis). Read-only: never writes the vault or
+    /// both/learned-not-applied/applied-not-read/unlinked
+    /// (entity-hub-two-vector-synthesis). Read-only: never writes the vault or
     /// the entities table, regardless of `apply`/`synthesize` - checked first
     /// so a combined invocation still writes nothing.
     pub asymmetry: bool,

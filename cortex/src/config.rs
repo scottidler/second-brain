@@ -26,7 +26,7 @@ pub struct Config {
     /// Root of borg's per-trace staging directories. cortex reads
     /// `<staging-root>/<trace>/distilled.yml` READ-ONLY from two places: the
     /// embed loop's transcript source for Video/Article notes
-    /// (2026-07-07-distillation-output-restore Phase 5) and the sweep's
+    /// (2026-07-07-distillation-output-restore) and the sweep's
     /// open-vocabulary tag candidates (2026-09-21-staged-tag-proposals).
     /// It is one directory, so it is one key: it was `embed.staging-root`
     /// until the second reader arrived. Defaults to borg's own
@@ -68,7 +68,7 @@ impl Default for Config {
     }
 }
 
-/// Knobs for `cortex entities --discover` (Phase 4 of graph-augmented-memory):
+/// Knobs for `cortex entities --discover` (graph-augmented-memory):
 /// an off-hot-path LLM pass that proposes new glossary entries into
 /// `entity-proposals.yml`. Bounded by `max_per_run` (notes per pass) so a
 /// backlog never fans unbounded LLM calls; daemon cadence defaults to daily.
@@ -105,7 +105,7 @@ impl Default for EntitiesConfig {
 }
 
 /// Bounds on the deterministic hub-body renderer
-/// (`docs/design/2026-08-15-entity-hub-two-vector-synthesis.md`, Phase 2). Two
+/// (`docs/design/2026-08-15-entity-hub-two-vector-synthesis.md`). Two
 /// readability caps, one embedding-window bound, one mass-reset backstop.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
@@ -168,14 +168,14 @@ pub struct GraphConfig {
     /// Minimum cosine similarity for a semantic edge.
     pub min_cosine: f32,
     /// Tags/creators/sources held by more than this many notes are
-    /// skipped for pairwise edge emission (routed through hub notes in
-    /// Phase 3 instead) so blanket buckets do not explode the table.
+    /// skipped for pairwise edge emission (routed through hub notes
+    /// instead) so blanket buckets do not explode the table.
     pub fanout_cap: usize,
     /// Fixed weight for shared-creator edges.
     pub creator_weight: f32,
     /// Fixed weight for shared-source-host edges.
     pub source_weight: f32,
-    // --- Phase 5 (MemGraphRAG) ---
+    // --- MemGraphRAG ---
     /// Fabric pattern that extracts subject-predicate-object triples.
     pub fact_pattern: String,
     /// Weight assigned to typed `fact` edges.
@@ -349,7 +349,7 @@ impl Default for EmbedKindsConfig {
     }
 }
 
-/// Phase-7 backfill knobs. `max-concurrent` defaults to 2 so a one-pass
+/// Backfill knobs. `max-concurrent` defaults to 2 so a one-pass
 /// `--since 30d` over the inbox doesn't hammer Fabric harder than borg's
 /// own pipeline.
 #[derive(Debug, Deserialize)]
@@ -653,7 +653,7 @@ pub struct LinkingConfig {
     pub min_word_length: usize,
     /// Alias surface form → canonical concept slug. When `find_mention` matches
     /// a surface form, the linker emits a piped wikilink `[[slug|surface]]`.
-    /// Loaded from `glossary.yml` (Phase 2 of graph-augmented-memory).
+    /// Loaded from `glossary.yml` (graph-augmented-memory).
     #[serde(default)]
     pub aliases: HashMap<String, String>,
 }
@@ -677,7 +677,7 @@ pub struct LinkingEntities {
     pub projects: Vec<String>,
     /// Concept glossary: kebab-case slugs (mirroring `canonical-tags.yml`),
     /// loaded from `glossary.yml`. Each is linked at first body mention as
-    /// `[[slug]]` (Phase 2 of graph-augmented-memory).
+    /// `[[slug]]` (graph-augmented-memory).
     pub concepts: Vec<String>,
 }
 
@@ -779,7 +779,7 @@ pub enum SimilaritySource {
 /// Knobs for `cortex associate` (`sb cortex associate`): groups harvest
 /// session notes sharing a content-derived `slug:` (borg's harvest naming,
 /// v0.12.2) and, per pairwise similarity, merges or cross-links them
-/// (2026-07-24 cortex-association-sweep design). `deny_unknown_fields` so a
+/// (cortex-association-sweep design). `deny_unknown_fields` so a
 /// typo'd key fails the loader loud (see `Config::load_inner`) instead of
 /// silently running with a default threshold.
 #[derive(Debug, Clone, Deserialize)]
@@ -795,7 +795,7 @@ pub struct AssociationConfig {
     pub min_quiescence_secs: u64,
     /// Glob paths excluded from association entirely.
     pub exclude: Vec<String>,
-    /// Daemon cadence (seconds) for the association tick (Phase 5). A NEW
+    /// Daemon cadence (seconds) for the association tick. A NEW
     /// periodic interval arm, modeled on `graph_interval_secs` /
     /// `discover_interval_secs` - not part of the doc's Data Model YAML
     /// example, added here because the Architecture section requires "own
@@ -1023,7 +1023,7 @@ impl Config {
 
         let primary = vault::paths::cortex_config();
         if primary.exists() {
-            // Fail-closed (2026-07-24 cortex-association-sweep design, panel
+            // Fail-closed (cortex-association-sweep design, panel
             // finding 8): a PRESENT config that fails to parse used to warn and
             // silently fall back to defaults, so a typo'd key ran the daemon on
             // defaults with zero visible signal. A present-but-unparseable file
@@ -1041,7 +1041,7 @@ impl Config {
         // enum-derived vocabulary (`SchemaConfig::default`, built from
         // `vault::schema`) with a hand-written copy that can drift from the
         // enums. Warn so a leftover block is visible instead of quietly
-        // governing lint (Phase 7, F5).
+        // governing lint.
         if let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(&content)
             && map.contains_key(serde_yaml::Value::String("schema".to_string()))
         {

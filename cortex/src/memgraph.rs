@@ -1,4 +1,4 @@
-//! Phase 5 (MemGraphRAG): typed `fact` edges + the three consolidation agents.
+//! MemGraphRAG: typed `fact` edges + the three consolidation agents.
 //!
 //! Per the design, the value here concentrates in **cluster bridging** (the
 //! islands are real); noise removal is moderate and contradiction resolution is

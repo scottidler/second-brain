@@ -1,11 +1,11 @@
-//! `sb cortex hub --asymmetry` (Phase 3 of
+//! `sb cortex hub --asymmetry` (see
 //! `docs/design/2026-08-15-entity-hub-two-vector-synthesis.md`).
 //!
 //! Answers the design's original question - "what have I read about X but
 //! never applied" - at zero LLM cost: per hub, split its DELIBERATE inbound
 //! membership into source-vector and session-vector counts, then classify the
 //! hub into one of four buckets. The membership query is
-//! `SearchIndex::hub_members_deliberate` - the EXACT filter Phase 2's body
+//! `SearchIndex::hub_members_deliberate` - the EXACT filter the body
 //! builder reads from (deliberate kinds only, no `entities/%` src) - reused
 //! verbatim, not re-derived: a second membership query could silently drift
 //! from the builder's and report a different reality than the one the hub
@@ -119,7 +119,7 @@ impl AsymmetryReport {
     /// Deterministic text rendering for `sb cortex hub --asymmetry`. `sb`
     /// prints this; the library never touches stdout (`sb/AGENTS.md`: stdio
     /// belongs to `sb`). Pure function of the report's own data, so calling it
-    /// twice against unchanged state produces byte-identical text (Phase 3
+    /// twice against unchanged state produces byte-identical text (the design's
     /// success criterion: two runs produce byte-identical output).
     pub fn render(&self) -> String {
         let t = self.totals();
@@ -146,7 +146,7 @@ impl AsymmetryReport {
 
 /// Build the report: one row per hub that actually exists on disk, classified
 /// from its DELIBERATE membership only via `hub_members_deliberate` - the
-/// same query Phase 2's body builder reads from, never a second one.
+/// same query the body builder reads from, never a second one.
 ///
 /// Read-only: only issues `SELECT`s against `index` and reads member note
 /// files off disk; writes nothing to the vault or the index.

@@ -33,7 +33,7 @@ impl Drop for EnvGuard {
 
 #[test]
 fn load_inner_defaults_when_primary_config_missing() {
-    // 2026-07-24 cortex-association-sweep design, Phase 1 fail-closed loader:
+    // cortex-association-sweep design, fail-closed loader:
     // a MISSING config file still defaults (this half of the contract is
     // unchanged - only the present-but-unparseable half hard-errors now).
     let _lock = crate::testutil::lock_env();
@@ -48,7 +48,7 @@ fn load_inner_defaults_when_primary_config_missing() {
 #[test]
 fn load_inner_fails_loud_on_present_but_unparseable_config() {
     // The fail-closed fix itself: a PRESENT config with a typo'd key must
-    // hard-error, never silently fall back to defaults (the pre-Phase-1 bug -
+    // hard-error, never silently fall back to defaults (the old bug -
     // a typo ran the daemon on defaults with zero visible signal).
     let _lock = crate::testutil::lock_env();
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -72,8 +72,8 @@ fn load_inner_fails_loud_on_present_but_unparseable_config() {
 
 #[test]
 fn load_inner_explicit_path_hard_errors_on_unparseable_content() {
-    // The explicit `--config <path>` branch already hard-errored before this
-    // phase; pinning it here so a future refactor of `load_inner` cannot
+    // The explicit `--config <path>` branch already hard-errored before the
+    // fail-closed loader; pinning it here so a future refactor of `load_inner` cannot
     // silently regress it back to a warn-and-default.
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("explicit.yml");
@@ -90,7 +90,7 @@ fn association_config_default_values() {
     assert_eq!(cfg.similarity_source, SimilaritySource::Both);
     assert_eq!(cfg.min_quiescence_secs, 600);
     assert!(cfg.exclude.is_empty());
-    // Phase 5: the daemon's own cadence knob, hourly by default (a merge is
+    // the daemon's own cadence knob, hourly by default (a merge is
     // soft-retire-destructive, so it runs far less often than the
     // read-mostly embed/graph ticks).
     assert_eq!(cfg.interval_secs, 3_600);
@@ -141,7 +141,7 @@ fn test_schema_config_default_matches_enums() {
     assert_eq!(schema.origins.len(), Origin::all().len());
     assert_eq!(schema.statuses.len(), Status::all().len());
     assert_eq!(schema.methods.len(), Method::all().len());
-    // The two NoteType variants this phase added must flow through.
+    // The two newer NoteType variants must flow through.
     assert!(schema.types.contains(&"digest".to_string()));
     assert!(schema.types.contains(&"review".to_string()));
 }
@@ -150,7 +150,7 @@ fn test_schema_config_default_matches_enums() {
 fn test_embed_kinds_absent_config_disables_claim() {
     // An existing cortex.yml with NO `embed` section must deserialize to the
     // claim-free baseline: summary + transcript-chunk ON, claim OFF. This is
-    // the 2026-07-05 retrieval-gate remediation - claim regressed retrieval and
+    // the retrieval-gate remediation - claim regressed retrieval and
     // the daemon tick embedded it unconditionally, so absent config must land
     // claim OFF.
     let cfg: Config = serde_yaml::from_str("log-level: info\n").expect("parse minimal config");
@@ -170,7 +170,7 @@ fn test_embed_kinds_explicit_claim_true_enables_claim() {
     assert!(cfg.embed.kinds.transcript_chunk, "transcript-chunk stays default ON");
 }
 
-// --- entity-hub-two-vector-synthesis Phase 1 -------------------------------
+// --- entity-hub-two-vector-synthesis: graph wikilink stopwords ---------------
 
 #[test]
 fn graph_wikilink_stopwords_default_empty() {
@@ -224,7 +224,7 @@ fn entities_typo_under_full_config_fails_loud() {
     assert!(format!("{err}").contains("unknown field"), "{err}");
 }
 
-// --- entity-hub-two-vector-synthesis Phase 2 -------------------------------
+// --- entity-hub-two-vector-synthesis: hub body rendering ---------------------
 
 #[test]
 fn entities_render_defaults_are_the_designed_bounds() {
@@ -264,7 +264,7 @@ fn entities_render_rejects_unknown_field() {
 }
 
 // ---------------------------------------------------------------------------
-// Design doc `2026-09-21-staged-tag-proposals.md`, Phase 4: `staging-root` is
+// Design doc `2026-09-21-staged-tag-proposals.md`: `staging-root` is
 // ONE key at the TOP LEVEL, because cortex now has two read-only readers of
 // that one directory (the embed loop's transcript source and the sweep's tag
 // candidates). Two keys naming one directory can drift.
