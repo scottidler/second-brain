@@ -116,3 +116,34 @@ fn render_systemd_unit_path_includes_mise_shims_and_excludes_go_bin() {
         "mise shims must come before .local/bin so mise-managed tools win:\n{path_line}"
     );
 }
+
+// Byte-exact goldens (2026-10-05 quality-review-fixes, Phase 18): the
+// renderer's output at fixed inputs, so a refactor of the unit renderers
+// cannot change a byte unnoticed. `render_systemd_unit` is pure, so the
+// inputs are just the args.
+
+fn golden_unit(config: &Config) -> String {
+    render_systemd_unit(
+        "/home/tester/.cargo/bin/sb",
+        Path::new("/home/tester"),
+        Path::new("/home/tester/repos/scottidler/obsidian"),
+        Path::new("/home/tester/.local/share/sb"),
+        config,
+    )
+}
+
+#[test]
+fn golden_borg_service_minimal() {
+    assert_eq!(golden_unit(&cfg()), include_str!("golden/minimal.service"));
+}
+
+#[test]
+fn golden_borg_service_full() {
+    let mut config = cfg();
+    config.log_level = Some("debug".to_string());
+    config.daemon.env_bootstrap = Some(EnvBootstrapConfig {
+        command: "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env".to_string(),
+        env_file: PathBuf::from("/run/user/1000/borg.env"),
+    });
+    assert_eq!(golden_unit(&config), include_str!("golden/full.service"));
+}

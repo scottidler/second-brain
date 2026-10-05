@@ -1,0 +1,25 @@
+[Unit]
+Description=cortex - Obsidian vault governance daemon (second-brain)
+After=default.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'manifest age decrypt ~/repos/scottidler/keep/.secrets -f env > /run/user/1000/cortex.env'
+EnvironmentFile=-/run/user/1000/cortex.env
+Environment="PATH=/home/tester/.local/share/mise/shims:/home/tester/.local/bin:/home/tester/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Cap rayon's global thread pool (candle's gemm degree reads the same var)
+Environment="RAYON_NUM_THREADS=8"
+ExecStart=/home/tester/.cargo/bin/sb cortex --config <XDG_CONFIG_HOME>/sb/cortex.yml --vault /home/tester/repos/scottidler/obsidian --log-level debug daemon --start
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/home/tester
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/tester/repos/scottidler/obsidian /golden-xdg-data-home/sb
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
