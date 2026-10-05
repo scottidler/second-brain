@@ -67,12 +67,9 @@ pub fn binary_descriptor(kind: IntakeKind, filename: &str, bytes_len: usize, mim
 /// Capture an input at the door: write the raw-input sidecar AND the
 /// `received` receipts row. BOTH writes propagate - on any failure the caller
 /// (the door) surfaces `Failed` and does not dispatch. This is the
-/// immediate-capture invariant. The sidecar payload is unchanged from the
-/// legacy path: verbatim text/URL, or a short descriptor for large binaries
-/// (the remote doors do not hold the raw bytes at this checkpoint).
-///
-/// Replaces `record_intake` / `record_intake_with_sidecar` (markdown +
-/// sidecar + best-effort receipts) once the call sites are switched in Phase 2.
+/// immediate-capture invariant. The sidecar payload is the verbatim text/URL,
+/// or a short descriptor for large binaries (the remote doors do not hold the
+/// raw bytes at this checkpoint).
 pub fn record_received_with_sidecar(
     config: &Config,
     method: IngestMethod,
@@ -112,9 +109,9 @@ fn record_received_with_sidecar_to(
     Ok(())
 }
 
-/// Record a terminal failure at the door (rejection or fetch-fail), replacing
-/// `record_dlq`. Carries the per-site `FailureStage` so Signal's `FetchFailed`
-/// is not collapsed to `IntakeRejected`. Best-effort: the input's durability
+/// Record a terminal failure at the door (rejection or fetch-fail). Carries
+/// the per-site `FailureStage` so Signal's `FetchFailed` is not collapsed to
+/// `IntakeRejected`. Best-effort: the input's durability
 /// is already guaranteed by the preceding [`record_received_with_sidecar`]; a
 /// failed `mark_failed` leaves the row `received` for the watchdog to
 /// crash-promote, so we log and move on.

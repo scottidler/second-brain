@@ -250,8 +250,9 @@ pub struct AssociateOpts {
 #[derive(Debug, Clone)]
 pub struct GraphOpts {
     /// Force a full rebuild of the `edges` table (clear-then-rebuild every
-    /// note), bypassing the incremental watermarks. Implied on the first run
-    /// after a daemon restart (no persisted `last_run_at`).
+    /// note), bypassing the incremental watermarks. Implied only when the
+    /// index has never run (no `last_run_at` row in SQLite); a daemon restart
+    /// keeps it and resumes incrementally.
     pub backfill: bool,
 }
 

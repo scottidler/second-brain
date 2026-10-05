@@ -206,7 +206,8 @@ pub fn format_telegram_reply(result: &IngestResult, display_source: &str) -> Str
 /// (which the notification daemon renders as plain text - no HTML escape).
 /// Kept as a thin wrapper so the desktop body is testably byte-equal to the
 /// Telegram body before HTML escaping; any divergence in either channel is
-/// caught by `test_format_desktop_body_matches_format_reply` in `notify/tests.rs`.
+/// caught by the `test_format_desktop_body_matches_format_reply_completed` / `_failed` tests (and
+/// the duplicate and queued variants) in `notify/tests.rs`.
 pub fn format_desktop_body(result: &IngestResult, display_source: &str) -> String {
     let base = format_reply(result, display_source);
     match &result.obsidian_url {

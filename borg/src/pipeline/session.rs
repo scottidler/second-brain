@@ -143,7 +143,7 @@ const FOLLOWS_KEY: &str = "follows";
 /// carried forward verbatim.
 ///
 /// Derived from the writer rather than hand-listed, per the design doc's
-/// governing rule - `borg_owned_key_policy_matches_the_writer` fails if
+/// governing rule - `markdown::tests::render_note_keys_matches_the_writer` fails if
 /// `render_note` gains a key this policy has not accounted for.
 pub(crate) fn borg_owned_keys() -> HashSet<&'static str> {
     markdown::RENDER_NOTE_KEYS

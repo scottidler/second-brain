@@ -24,8 +24,8 @@ use rusqlite::{TransactionBehavior, params};
 use super::SearchIndex;
 use crate::schema::NoteType;
 
-/// One row of the `note_embeddings` scan. Phase A returns these directly;
-/// Phase A6's RRF dispatch fuses them with BM25 hits.
+/// One row of the `note_embeddings` scan. `search_vector` returns these
+/// directly; the RRF dispatch fuses them with BM25 hits.
 #[derive(Debug, Clone)]
 pub struct VectorHit {
     pub note_path: String,
@@ -195,10 +195,13 @@ impl SearchIndex {
     /// `push_tags_filter` helper (`query.rs`) - same OR/AND semantics as
     /// `search`/`list_notes`/`recent_notes`.
     ///
-    /// Performance contract: at ~25 K total rows (21 K summary + a
-    /// handful of chunks for transcript-eligible notes at the three-
-    /// year horizon) the scan runs in well under 20 ms single-
-    /// threaded. Phase A7's benchmark enforces the budget.
+    /// Performance: the design target (hybrid-retrieval design doc) is a
+    /// scan "well under 20 ms" at ~21 K rows, single-threaded. The current
+    /// brute-force scan does not meet it: measured release p50 is ~44 ms at
+    /// 21 K rows x 384 dims on a 3.10 GHz 32-thread Intel host (debug ~292
+    /// ms; `docs/design/2026-10-05-quality-review-fixes.md`, Addendum D).
+    /// `otto perf` (`perf_search_vector_21k`, `vault/tests/perf.rs`) enforces
+    /// only a 450 ms regression ceiling, not the 20 ms target.
     pub fn search_vector(
         &self,
         query_vec: &[f32],
