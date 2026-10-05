@@ -57,6 +57,11 @@ tasks:
     bash: |
       bin/agents-map
 
+  source-lint:
+    help: "Mechanical source rules: no self-skipping tests, no inline test modules, workspace lints, one toolchain"
+    bash: |
+      bin/source-lint
+
   check:
     help: "Run all quality checks (compile, clippy, format)"
     bash: |
@@ -204,7 +209,7 @@ tasks:
 
   ci:
     help: "Full CI pipeline (lint + bloat + check + test in parallel)"
-    before: [lint, bloat, agents-map, check, test]
+    before: [lint, bloat, agents-map, source-lint, check, test]
     bash: |
       echo "✅ All CI checks passed!"
 

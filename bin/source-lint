@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Mechanical source rules that clippy and rustc cannot express.
+#
+# Checks (each prints `file:line: reason`; any hit exits 1):
+#   1. no self-skipping tests: `eprintln!("...skip...")` in test code. A test
+#      that prints and returns passes without testing (F16).
+#   2. no inline test modules: `#[cfg(test)]` followed by `mod x {`. Tests live
+#      in a sibling `x/tests.rs` (F20).
+#   3. every workspace member opts into the workspace lints via
+#      `[lints]` + `workspace = true`, so a new crate cannot dodge unwrap_used (F9).
+#   4. `RUST_VERSION:` is the same in ci.yml and release.yml, so the compiler
+#      that tests is the compiler that ships (F20).
+#
+# Exit: 0 clean | 1 violation | 2 `rg` missing or failed.
+# Every rg call names explicit paths: a bare `rg` reads stdin and hangs.
+set -euo pipefail
+
+if ! command -v rg >/dev/null 2>&1; then
+  echo "source-lint: ripgrep (rg) is not on PATH" >&2
+  exit 2
+fi
+
+CRATES=(borg cortex vault distillers oracle sb bin/strip-transcripts)
+FAILED=0
+
+# rg exits 0 (match), 1 (no match), 2 (error). Run it, print hits, record failure
+# on a match, and die with 2 on a real error.
+hits() {
+  local reason="$1"; shift
+  local out status=0
+  out="$(rg "$@")" || status=$?
+  case "$status" in
+    0) printf '%s\n' "$out" | sed "s|\$| ($reason)|"; FAILED=1 ;;
+    1) ;;
+    *) echo "source-lint: rg failed (exit $status): rg $*" >&2; exit 2 ;;
+  esac
+}
+
+echo "=== source-lint ==="
+
+# 1. Self-skipping tests. Test files only: user-facing "skipped" status lines in
+# production code (sb/src/cli/borg.rs) are legitimate.
+# TEMPORARY allowlist: vault/src/fabric/tests.rs skips when `sh` is missing.
+# Phase 7 of docs/design/2026-10-05-quality-review-fixes.md moves those tests to
+# vault::process, where a missing `sh` panics. Phase 7 MUST delete the `-g '!...'`
+# line below; with the file gone the allowlist entry is a dead exemption.
+hits "test skips itself with eprintln instead of failing or #[ignore]" \
+  -n -U -i --no-heading 'eprintln!\(\s*"[^"]*skip' \
+  -g '*tests*' -g '**/tests/**' \
+  -g '!vault/src/fabric/tests.rs' \
+  "${CRATES[@]}"
+
+# 2. Inline test modules.
+hits "inline test module: move the body to a sibling tests.rs and write \`mod tests;\`" \
+  -n -U --no-heading --type rust '#\[cfg\(test\)\]\s*\n\s*(pub(\([a-z]+\))? )?mod \w+\s*\{' \
+  "${CRATES[@]}"
+
+# 3. Workspace lints opt-in.
+members="$(rg -o -N '^members\s*=\s*\[[^]]*\]' Cargo.toml | rg -o -N '"[^"]+"' | tr -d '"')"
+[ -n "$members" ] || { echo "source-lint: no workspace members found in Cargo.toml" >&2; exit 2; }
+while IFS= read -r member; do
+  manifest="$member/Cargo.toml"
+  if [ ! -f "$manifest" ]; then
+    echo "$manifest:1: workspace member has no Cargo.toml"
+    FAILED=1
+    continue
+  fi
+  status=0
+  rg -q -U '^\[lints\]\s*\nworkspace\s*=\s*true' "$manifest" || status=$?
+  case "$status" in
+    0) ;;
+    1) echo "$manifest:1: missing [lints] workspace = true (crate is not opted into workspace lints)"; FAILED=1 ;;
+    *) echo "source-lint: rg failed (exit $status) on $manifest" >&2; exit 2 ;;
+  esac
+done <<< "$members"
+
+# 4. Matching toolchain pins.
+rust_version() {
+  local v status=0
+  v="$(rg -o -N '^\s*RUST_VERSION:\s*(\S+)' -r '$1' "$1")" || status=$?
+  if [ "$status" -ge 2 ]; then
+    echo "source-lint: rg failed (exit $status) on $1" >&2; exit 2
+  fi
+  printf '%s' "$v"
+}
+ci_ver="$(rust_version .github/workflows/ci.yml)"
+rel_ver="$(rust_version .github/workflows/release.yml)"
+if [ -z "$ci_ver" ] || [ -z "$rel_ver" ] || [ "$ci_ver" != "$rel_ver" ]; then
+  line="$(rg -n 'RUST_VERSION:' .github/workflows/release.yml | head -1 | cut -d: -f1)"
+  echo ".github/workflows/release.yml:${line:-1}: RUST_VERSION '${rel_ver:-unset}' differs from ci.yml '${ci_ver:-unset}'"
+  FAILED=1
+fi
+
+if [ "$FAILED" -eq 1 ]; then
+  echo ""
+  echo "source-lint: violations above."
+  exit 1
+fi
+echo "source-lint: clean"
