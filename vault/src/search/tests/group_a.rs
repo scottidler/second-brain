@@ -484,7 +484,7 @@ fn parse_body_claims_does_not_extract_anchor_when_brackets_are_inline() {
 
 #[test]
 fn parse_body_claims_strips_kind_who_and_quote_decoration() {
-    // Phase 3: FTS text must be the clean claim sentence, with the
+    // FTS text must be the clean claim sentence, with the
     // `**kind**` / `(who)` prefix, trailing `[anchor]`, and `  > "quote"`
     // continuation line all peeled off — but recovered into the fields.
     let body = concat!(
@@ -572,7 +572,7 @@ fn index_one_update_preserves_signal_columns() {
     assert_eq!(summary, "Revised body.");
 }
 
-// --- entity-hub-two-vector-synthesis Phase 2 -------------------------------
+// --- entity-hub-two-vector-synthesis: hub-body membership -------------------------------
 
 /// The structural half of the hub-body membership contract: only DELIBERATE
 /// note->hub kinds count, and a hub is never a member of a hub. Both filters

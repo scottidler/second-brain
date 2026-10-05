@@ -300,7 +300,7 @@ async fn lowercases_tag_strings() {
 
 #[tokio::test]
 async fn single_call_repo_populates_enumeration_and_strips_item_anchors() {
-    // Phase 4: an awesome-list README yields the enumeration; repos carry no
+    // An awesome-list README yields the enumeration; repos carry no
     // positional anchor, so any item anchor the model emits is stripped.
     let fake = FakeFabric::new();
     fake.set_response(

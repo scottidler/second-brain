@@ -16,7 +16,7 @@ pub struct Distilled {
     pub summary: String,
 
     /// One-sentence hook rendered as a `> [!tldr]` Obsidian callout at the top
-    /// of the note body (April `obsidian-note.md` shape restored, 2026-07-07
+    /// of the note body (April `obsidian-note.md` shape restored,
     /// distillation-output-restore). `cortex::quality` accepts the callout as a
     /// summary marker. `#[serde(default)]` keeps legacy staged `distilled.yml`
     /// files (no `tldr:` key) deserializable unchanged.
@@ -24,8 +24,8 @@ pub struct Distilled {
     pub tldr: Option<String>,
 
     /// Content-derived kebab-case slug naming the note's real subject/outcome,
-    /// emitted by the distiller from the full source (harvest-content-slug-naming,
-    /// 2026-07-24). Borg derives the harvest note's FILENAME from this (falling
+    /// emitted by the distiller from the full source (harvest-content-slug-naming).
+    /// Borg derives the harvest note's FILENAME from this (falling
     /// back to the title-slug only when the distiller omits it) and persists it
     /// as the frontmatter `slug:` so the name is stable across re-harvest. It is
     /// display/addressing only — the load-bearing identity anchor stays the
@@ -39,7 +39,7 @@ pub struct Distilled {
     /// Enumerated points harvested when the source is a listicle ("Top N X").
     /// `None` when the content is not enumerable — no forced enumeration.
     /// Rendered as `## Enumerated Points`; rides the body FTS column only,
-    /// never parsed back into `notes.claims` (Resolved Decision 2026-07-07).
+    /// never parsed back into `notes.claims` (distillation-output-restore Resolved Decision).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enumeration: Option<Enumeration>,
 
@@ -89,8 +89,8 @@ pub struct Distilled {
     /// Raw extracted text the distiller received as input. Preserved for kinds
     /// whose published note is the only persistent source (Image, VoiceNote,
     /// Idea, Vocabulary) so the verbatim content is searchable in Obsidian
-    /// months later, AND — as of Phase B2 — for Video and Thread, whose
-    /// transcripts power chunked semantic recall, AND, as of the 2026-07-05
+    /// months later, AND for Video and Thread, whose
+    /// transcripts power chunked semantic recall, AND, since the
     /// distillation overhaul, for Article, whose fetched markdown is kept as the
     /// durable staged record. Repo still leaves this `None`: the
     /// structurally-summarized README plus origin URL is the recoverable archive.
@@ -101,8 +101,8 @@ pub struct Distilled {
     /// source; for Video/Article, cortex embeds transcript chunks by reading
     /// this out of staging via the `notes.trace` join.
     ///
-    /// RENDER, by contrast, is caller-gated (2026-07-07
-    /// distillation-output-restore): `distillers::render` emits a `## Transcript`
+    /// RENDER, by contrast, is caller-gated
+    /// (distillation-output-restore): `distillers::render` emits a `## Transcript`
     /// body section only when `RenderOptions.include_transcript` is set. The
     /// verbatim kinds (VoiceNote/Idea/Vocabulary/Image/Thread) and cortex
     /// summarize backfill set it; Video and Article publish do NOT. So a
@@ -124,7 +124,7 @@ pub struct Distilled {
 #[serde(rename_all = "kebab-case")]
 pub enum ClaimKind {
     /// A factual assertion. The default, so legacy `distilled.yml` artifacts
-    /// (no `kind:` field) and fact claims render with the exact pre-Phase-3
+    /// (no `kind:` field) and fact claims render with the exact legacy
     /// visual shape (no `**kind**` prefix).
     #[default]
     Fact,
@@ -325,8 +325,8 @@ pub struct ThreadPayload {
     pub platform: String,
 }
 
-/// Claude Code session/thread metadata (harvest-clyde-sessions design, Phase
-/// 1 schema seam; populated by `SessionDistiller` in Phase 4).
+/// Claude Code session/thread metadata (harvest-clyde-sessions design;
+/// schema seam, populated by `SessionDistiller`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SessionPayload {
@@ -388,7 +388,7 @@ pub struct ValidationMeta {
     pub anchors_stripped: u32,
     /// The distiller populated an `enumeration` whose item count fell short of
     /// its declared count (`items.len() < declared_count`). LLM variance on the
-    /// all-N rule must NOT block ingestion (Resolved Decision 2026-07-07), so a
+    /// all-N rule must NOT block ingestion (distillation-output-restore Resolved Decision), so a
     /// shortfall publishes but marks the receipt degraded. This is a DISTINCT
     /// degradation signal from `fallback_reason`: a shortfall is not a fallback,
     /// so the borg pipeline ORs this into its `degraded` receipt flag rather

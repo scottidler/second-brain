@@ -5,7 +5,7 @@
 //!
 //! The harness builds a tempdir vault of `NOTE_COUNT` markdown files with frontmatter and reports
 //! wall-clock time for a single `scan_vault` call. Use this to compare before/after timings when
-//! evaluating the par_iter conversion (Phase 1 of the rayon design doc).
+//! evaluating the par_iter conversion (per the rayon design doc).
 
 use std::fs;
 use std::time::{Duration, Instant};
@@ -47,7 +47,7 @@ fn perf_scan_vault_thousand_notes() {
 
 /// Regression ceiling for `search_vector` at 21K rows x 384 dims, release
 /// profile: 10x the 44.37 ms release p50 measured on a Genuine Intel 3.10 GHz,
-/// 32-logical-CPU host (design doc Addendum D, 2026-10-05). This is NOT the
+/// 32-logical-CPU host (design doc Addendum D). This is NOT the
 /// 20 ms design target, which the current scan misses; it only catches an
 /// order-of-magnitude regression. Run with `otto perf`.
 #[cfg(feature = "vec")]

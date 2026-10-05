@@ -81,13 +81,13 @@ pub struct Frontmatter {
     /// Absolute policy expiry (`YYYY-MM-DD`), stamped by borg at publish from
     /// `ingested + retention-days`. Oracle echoes it; it never recomputes it.
     pub trace_expires: Option<String>,
-    /// Canonical `<org>/<repo>` anchor (harvest-clyde-sessions design, Phase 9),
+    /// Canonical `<org>/<repo>` anchor (harvest-clyde-sessions design),
     /// verbatim from clyde's export `repo` field. `None` when absent OR
     /// present-as-`null` (a session whose cwd has no `~/repos/<org>/<repo>`).
     /// Never re-derived here - stored as-is; validation + hub wiring live in
     /// `vault::schema::validate_repo_slug` / the graph edge.
     pub repo: Option<String>,
-    /// Every repo the session touched (Phase 9, populated once clyde ships
+    /// Every repo the session touched (populated once clyde ships
     /// files-touched). THREE-STATE, and the distinction is load-bearing for the
     /// cross-repo bridge: `None` = the key was OMITTED (touched set unknowable,
     /// never infer "touched nothing"); `Some(vec![])` = present-but-empty (no
@@ -323,7 +323,7 @@ impl Frontmatter {
                 serde_yaml::Value::Bool(pinned),
             );
         }
-        // Promoted repo join keys (Phase 9): emit explicitly so a to_yaml()
+        // Promoted repo join keys: emit explicitly so a to_yaml()
         // round-trip never strips them. `repo` present-null is not preserved
         // (None on read), which is fine - borg's renderer is the only writer
         // that emits `repo: null`, never this rewrite path.

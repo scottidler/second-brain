@@ -110,7 +110,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
             has_metadata
         );
 
-        // The chunk count drives the size-aware claim budget (Phase 5). The
+        // The chunk count drives the size-aware claim budget. The
         // single-call path is chunk_count = 1 (cap 10); the map-reduce path
         // computes the chunks once here and hands them to distill_long so the
         // real count scales the budget instead of the flat max_claims(1).
@@ -123,7 +123,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
         };
 
         validate_anchors(&mut distilled, inputs.video_metadata);
-        // Phase B2: populate transcript for chunked semantic recall AFTER
+        // Populate transcript for chunked semantic recall AFTER
         // distill_short / distill_long so neither path needs to know about
         // it (mirrors `voicenote.rs`). build_distilled, fallback_distilled,
         // and the map-reduce return in distill_long all default to None;
@@ -131,12 +131,12 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
         // long ones routed through the map-reduce path.
         let transcript_owned = if transcript.trim().is_empty() { None } else { Some(transcript.to_string()) };
         distilled.transcript = transcript_owned.clone();
-        // Phase 5: the real chunk count scales the claim budget so a long
+        // The real chunk count scales the claim budget so a long
         // video keeps proportionally more selected claims (single-call path
         // passes chunk_count = 1, holding the cap at 10 as before).
         let mut bounded = enforce_bounds(distilled, max_claims(chunk_count));
         debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
-        // Enumeration shortfall (Resolved Decision 2026-07-07): flag AFTER
+        // Enumeration shortfall (distillation-output-restore Resolved Decision): flag AFTER
         // enforce_bounds so the item-count cap (which only trims counts ABOVE
         // declared_count) can never manufacture a false shortfall. Publishes
         // degraded, never blocks.
@@ -234,7 +234,7 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
         let mut combined_claims: Vec<Claim> = Vec::new();
         let mut combined_links: Vec<Link> = Vec::new();
         let mut combined_tags: Vec<String> = Vec::new();
-        // Phase 4: pool enumeration candidates across chunks for the reduce step,
+        // Pool enumeration candidates across chunks for the reduce step,
         // and carry the first declared count any chunk saw (stated once, in the
         // intro chunk).
         let mut combined_candidates: Vec<EnumCandidate> = Vec::new();
@@ -290,7 +290,7 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty()),
             );
-            // Phase 4: pool this chunk's enumeration candidates and adopt the
+            // Pool this chunk's enumeration candidates and adopt the
             // first declared count seen (the intro states it once).
             if declared_count.is_none() {
                 declared_count = parsed.declared_count;
@@ -320,12 +320,12 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
             ));
         }
 
-        // Reduce step (Phase 5): the reduce pattern re-synthesizes the summary
+        // Reduce step: the reduce pattern re-synthesizes the summary
         // AND SELECTS the final claims from the pooled chunk claims, spanning
         // the whole timeline. `combined_claims` is both the selection pool
         // (rendered into the reduce input) and the chronological fallback used
         // when selection fails — that fallback silently reintroduces the
-        // head-bias this phase removes, so it is recorded as a distinct
+        // head-bias the reduce step removes, so it is recorded as a distinct
         // `reduce-selection-failed` reason (never folded into
         // bounds_truncations) for the eval harness to watch.
         let joined = chunk_summaries.join("\n\n");
@@ -389,7 +389,7 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
 
         let mut validation = ValidationMeta::default();
         // reduce-selection-failed takes precedence over partial-chunk-failure:
-        // reintroduced head-bias is the signal this phase exists to surface.
+        // reintroduced head-bias is the signal this check exists to surface.
         if reduce_selection_failed {
             validation.fallback_reason = Some("reduce-selection-failed".to_string());
         } else if any_chunk_failed {
@@ -494,7 +494,7 @@ fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str
         log::warn!("VideoDistiller: empty claims for transcript with {word_count} words (possible pattern drift)");
     }
 
-    // Phase 4: single-call enumeration/tldr/key-ideas straight off the parsed
+    // Single-call enumeration/tldr/key-ideas straight off the parsed
     // pattern output. `into_enumeration` returns None for an empty `items:`
     // list so a stray `enumeration:` header never renders an empty section.
     let tldr = parsed.tldr.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
@@ -543,7 +543,7 @@ pub fn validate_anchors(distilled: &mut Distilled, metadata: Option<&VideoMetada
             stripped += 1;
         }
     }
-    // Enumeration item anchors ride the same anchor-honesty rule (Phase 4): a
+    // Enumeration item anchors ride the same anchor-honesty rule: a
     // malformed timestamp, or one past the video duration, is not a real
     // transcript position, so strip it (item text retained). Reduce-path items
     // already passed the candidate-pool gate; this catches the single-call path

@@ -121,7 +121,7 @@ fn first_content_as_json(result: &rmcp::model::CallToolResult) -> serde_json::Va
     serde_json::from_str(&text).expect("content text is valid JSON")
 }
 
-/// Phase 2 invariant: every list-shaped tool's response is keyed on
+/// Invariant: every list-shaped tool's response is keyed on
 /// `results`. After the clean rename, the legacy keys (`tags`,
 /// `creators`, `sources`, `recent`) must be absent.
 #[tokio::test]
@@ -244,7 +244,7 @@ async fn find_links_missing_path_returns_found_false() {
 }
 
 /// D4: ingest_history should return its rows under the canonical
-/// `results` key, not the legacy `entries` key. The Phase 2 design
+/// `results` key, not the legacy `entries` key. The original design
 /// classified ingest_history as "per-tool object - unchanged," but the
 /// shakedown showed it's really a list-of-things tool that should
 /// follow the same convention as tag_search/source_browse/etc.
@@ -331,7 +331,7 @@ fn bm25_only_config() -> Config {
     }
 }
 
-/// Phase 2: a `knowledge_search` with no `mode` routes to `run_pipeline`
+/// A `knowledge_search` with no `mode` routes to `run_pipeline`
 /// (reported as `mode: "configured"`) and returns the configured retrievers'
 /// results. Uses a bm25-only pipeline to avoid the embedding-model load.
 #[tokio::test]
@@ -412,7 +412,7 @@ fn bm25_config_with_exclude(exclude: ExcludeConfig) -> Config {
     cfg
 }
 
-/// Phase 3: the stub filter (on by default) drops a `quality=low` note from
+/// The stub filter (on by default) drops a `quality=low` note from
 /// the results while keeping a `quality=high` note that matches the query.
 #[tokio::test]
 async fn pipeline_stub_filter_drops_low_quality() {
@@ -458,7 +458,7 @@ async fn pipeline_stub_filter_drops_low_quality() {
     );
 }
 
-/// Phase 3: with `exclude.stub = false`, the same low-quality note survives.
+/// With `exclude.stub = false`, the same low-quality note survives.
 #[tokio::test]
 async fn pipeline_stub_filter_disabled_keeps_low_quality() {
     let db = SearchIndex::open_memory().expect("open db");
@@ -495,7 +495,7 @@ async fn pipeline_stub_filter_disabled_keeps_low_quality() {
     );
 }
 
-/// Phase 3: `min_body_chars` drops a note whose body is shorter than the
+/// `min_body_chars` drops a note whose body is shorter than the
 /// threshold and keeps a longer one.
 #[tokio::test]
 async fn pipeline_min_body_chars_drops_short_body() {
@@ -539,7 +539,7 @@ async fn pipeline_min_body_chars_drops_short_body() {
     );
 }
 
-/// Phase 2: a pipeline with every retriever disabled returns no results
+/// A pipeline with every retriever disabled returns no results
 /// (and does not error) - the degenerate operator config.
 #[tokio::test]
 async fn run_pipeline_no_methods_enabled_returns_empty() {
@@ -677,7 +677,7 @@ fn note_returning_tools_advertise_trace_block() {
     }
 }
 
-// --- Phase 2: trace block (staged-source availability) -----------------------
+// --- trace block (staged-source availability) -----------------------
 
 /// Build a NoteRow carrying just the fields the trace block reads. Other
 /// columns get inert placeholders.
@@ -758,7 +758,7 @@ fn trace_block_unparseable_expires_is_null_window() {
     assert_eq!(block["within-window"], json!(null));
 }
 
-/// Regression guard for the harvest-clyde-sessions design, Phase 1:
+/// Regression guard for the harvest-clyde-sessions design:
 /// `schema_info` derives `note_types` from `NoteType::all()`, so a new
 /// schema variant (`NoteType::Session`) must appear here with zero
 /// oracle-side wiring. If this ever fails, `schema_info` stopped deriving
@@ -836,7 +836,7 @@ fn schema_info_payload_emits_value_description_pairs() {
     );
 }
 
-// --- Phase 8: MCP request structs and CLI gain tags siblings ---------------
+// --- MCP request structs and CLI gain tags siblings ---------------
 
 fn seed_tagged_article(db: &SearchIndex, path: &str, title: &str, body: &str, tags: &[&str]) {
     let fm = Frontmatter {

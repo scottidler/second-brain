@@ -278,7 +278,7 @@ links: []
     assert!(!distilled.claims.is_empty(), "claims should come from reduce selection");
     assert!(distilled.meta.validation.fallback_reason.is_none());
     // Regression: the map-reduce (long) path must also populate the
-    // transcript field so Phase B2 chunk-embedding has a source to work
+    // transcript field so chunk-embedding has a source to work
     // from. Earlier wiring left this `None` and silently dropped every
     // long video from the chunked-embedding pass.
     assert_eq!(
@@ -334,10 +334,10 @@ async fn long_transcript_partial_chunk_failure_keeps_surviving_claims() {
 #[tokio::test]
 async fn long_transcript_reduce_failure_falls_back_to_concatenated_summaries() {
     // All chunks succeed but the reduce call fails; the final summary is the
-    // concatenation of per-chunk summaries. Phase 5: a failed reduce call also
+    // concatenation of per-chunk summaries. A failed reduce call also
     // means claim SELECTION never ran, so the claims revert to the chronological
     // chunk merge — head-bias reintroduced — recorded as the distinct
-    // `reduce-selection-failed` reason (was `None` pre-Phase-5, when the reduce
+    // `reduce-selection-failed` reason (it was `None` when the reduce
     // only touched the summary).
     let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
     let transcript = sentence.repeat(800);
@@ -725,7 +725,7 @@ async fn no_metadata_leaves_kind_specific_unset() {
 
 #[tokio::test]
 async fn single_call_populates_enumeration_tldr_and_key_ideas() {
-    // Phase 4: a single-call "Top 3" video yields the enumeration, tldr, and
+    // A single-call "Top 3" video yields the enumeration, tldr, and
     // key ideas straight off the pattern output, items in creator order.
     let fake = FakeFabric::new();
     fake.set_response(

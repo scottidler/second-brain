@@ -1,7 +1,7 @@
 //! Vector search and reciprocal rank fusion over the `note_embeddings`
 //! BLOB column.
 //!
-//! Phase A3 of the hybrid retrieval design
+//! Built for the hybrid retrieval design
 //! (`docs/design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md`).
 //!
 //! Storage is a regular SQLite table with `embedding BLOB NOT NULL` (one
@@ -11,9 +11,8 @@
 //! short-lived vectors per query would blow the latency budget at the
 //! three-year scale envelope.
 //!
-//! Phase A reads only `kind = 'summary'` rows. Phase B3 will add
-//! max-pool aggregation across summary + transcript-chunk rows; the
-//! storage and API shapes here do not need to change for that work.
+//! Summary rows are the base case; max-pool aggregation across summary +
+//! transcript-chunk rows rides the same storage and API shapes.
 
 use std::path::Path;
 
@@ -42,7 +41,7 @@ pub struct VectorHit {
 pub enum EmbeddingKind {
     Summary,
     TranscriptChunk,
-    /// One embedding per group of a note's extracted claims (Phase 9 of
+    /// One embedding per group of a note's extracted claims (see
     /// `docs/design/2026-07-05-distillation-knowledge-extraction.md`).
     /// Added so the default vector-only retrieval pipeline reaches claim
     /// text, which is otherwise only FTS-indexed. `search_vector` scans
@@ -81,7 +80,7 @@ pub struct BatchUpsert<'a> {
 
 /// One row identifying a note whose `kind` embedding is missing or stale
 /// relative to `notes.modified_at`. Cortex's re-embed loop drives this
-/// list (see Phase A5).
+/// list.
 #[derive(Debug, Clone)]
 pub struct StaleTarget {
     pub note_path: String,
@@ -106,10 +105,10 @@ pub struct StaleTarget {
     /// may be empty.
     pub title: String,
     /// Snapshot of `notes.capture_note` at query time (the operator's
-    /// "why I captured this" annotation, Phase 8/9). For Summary embeddings
+    /// "why I captured this" annotation). For Summary embeddings
     /// cortex splices it between the title and summary so the annotation is
     /// semantically searchable; empty for notes without one, in which case
-    /// the assembled embed text is byte-identical to the pre-Phase-9 form
+    /// the assembled embed text is byte-identical to the older form
     /// (title + summary), so staleness detection re-embeds nothing
     /// retroactively. Empty for the TranscriptChunk and Claim arms.
     pub capture_note: String,
@@ -117,7 +116,7 @@ pub struct StaleTarget {
     /// (the per-trace directory name under the staging root). For the
     /// TranscriptChunk arm, cortex resolves Video/Article transcripts from
     /// `<staging-root>/<trace>/distilled.yml` rather than the note body
-    /// (2026-07-07-distillation-output-restore Phase 5). Empty for notes
+    /// (2026-07-07-distillation-output-restore). Empty for notes
     /// ingested before the trace column existed, and for the Summary/Claim arms
     /// (which carry their text in `summary`).
     pub trace: String,
@@ -198,17 +197,17 @@ impl SearchIndex {
     /// space smaller is closer, so the minimum over the rows is the
     /// max-pool similarity.
     ///
-    /// NAMED CONTINGENCY (Phase 9, retrieval invariant "claim rows add
+    /// NAMED CONTINGENCY (retrieval invariant "claim rows add
     /// recall, never displace precision"): the max-pool below is
     /// kind-agnostic, so a note's up-to-24 narrow `claim` vectors get the
     /// same weight as its `summary` vector and can let it win on a
-    /// tangential sentence. If the Phase 9 operator eval shows a per-query
+    /// tangential sentence. If the operator eval shows a per-query
     /// nDCG regression on the calibration set, the fix is **kind-weighted
     /// pooling here**: pull `e.kind` in the SELECT and apply a per-kind
     /// distance penalty (e.g. add a small epsilon to claim-row distances)
     /// so claims can only rescue a note the summary missed, never outrank
     /// a note whose summary answered the query. Not implemented until the
-    /// eval demands it - see the Phase 9 measurement step.
+    /// eval demands it - see the claim-embedding measurement step.
     ///
     /// The note-side filters (`tags`, `note_type`, `status`) are
     /// pushed into SQL so the scan only visits rows that pass them;
@@ -459,7 +458,7 @@ impl SearchIndex {
     /// inference runs in auto-commit, then this short transaction
     /// flushes the results. Per row work is just an INSERT OR REPLACE,
     /// so a 64-row batch comfortably runs under 200 ms even on slow
-    /// disks. Phase A5's regression test asserts the budget.
+    /// disks. A regression test asserts the budget.
     pub fn upsert_embeddings_batch(&mut self, items: &[BatchUpsert<'_>]) -> Result<()> {
         // BEGIN IMMEDIATE: acquire the write lock at transaction start, not at
         // first write. transaction_with_behavior issues the IMMEDIATE itself
@@ -495,7 +494,7 @@ impl SearchIndex {
     /// inside one short write transaction (`BEGIN IMMEDIATE` → DELETE
     /// → INSERTs → `COMMIT`).
     ///
-    /// Phase B2's re-embed loop: when a transcript's text changes, the
+    /// The re-embed loop: when a transcript's text changes, the
     /// chunk boundaries shift, so there is no stable per-chunk identity
     /// to preserve. Wiping the existing chunks and writing the new ones
     /// in one transaction means hybrid search never sees a half-replaced
@@ -520,7 +519,7 @@ impl SearchIndex {
     /// one short write transaction (`BEGIN IMMEDIATE` → DELETE → INSERTs
     /// → `COMMIT`). Generalizes the transcript-chunk swap to any
     /// multi-row kind whose per-chunk identity is not stable across
-    /// re-embeds - the Phase 9 `claim` kind reuses it: when a note's
+    /// re-embeds - the `claim` kind reuses it: when a note's
     /// claims change the group boundaries shift, so wipe-and-rewrite in
     /// one transaction keeps hybrid search from seeing a half-replaced
     /// chunk set.
@@ -568,7 +567,7 @@ impl SearchIndex {
 
     /// Delete every embedding row of a single `kind`, returning the number
     /// of rows removed. This is the first-class rollback verb behind
-    /// `sb cortex embed --drop-kind claim` (Phase 9): reverting cortex code
+    /// `sb cortex embed --drop-kind claim`: reverting cortex code
     /// does NOT stop oracle reading claim rows, because `search_vector`
     /// scans all kinds, so removing the rows is the only real rollback.
     pub fn delete_embeddings_of_kind(&self, kind: EmbeddingKind) -> Result<usize> {
@@ -599,7 +598,7 @@ impl SearchIndex {
     /// because `ON DELETE CASCADE` runs automatically when the
     /// matching `notes` row is removed; cortex calls this explicitly
     /// when it needs to wipe transcript-chunk rows ahead of a re-chunk
-    /// (Phase B2's atomic swap).
+    /// (the atomic swap).
     pub fn delete_embeddings_for_note(&self, note_path: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM note_embeddings WHERE note_path = ?1", params![note_path])?;
@@ -625,8 +624,8 @@ impl SearchIndex {
     /// enum (rather than a hand-typed SQL string list) means a future
     /// `NoteType` variant rename cannot silently re-break this path.
     ///
-    /// **Examined sentinel (Phase 3,
-    /// `docs/design/2026-07-05-cortex-daemon-oscillation-loop.md`).** A
+    /// **Examined sentinel
+    /// (`docs/design/2026-07-05-cortex-daemon-oscillation-loop.md`).** A
     /// transcript-eligible note with no `## Transcript` section is scanned,
     /// found unembeddable, and writes no `note_embeddings` row - so `e.id`
     /// stays NULL and it re-qualifies every tick forever (~127 notes in the
@@ -638,7 +637,7 @@ impl SearchIndex {
     /// mtime), exactly like the `note_embeddings.source_modified_at` staleness
     /// watermark above it.
     ///
-    /// Claim rows (Phase 9): every note with non-empty `notes.claims` is a
+    /// Claim rows: every note with non-empty `notes.claims` is a
     /// candidate. The claim text is carried in the `summary` field of the
     /// returned `StaleTarget` (no file I/O); cortex groups it into
     /// token-window-sized chunks before embedding.
@@ -657,8 +656,8 @@ impl SearchIndex {
         let sql = match kind {
             // Summary: the text carrier is `notes.summary`; `notes.capture_note`
             // is threaded through so the embed text becomes title + capture-note
-            // + summary (Phase 9). Notes without a capture note carry '' and the
-            // assembled text stays byte-identical to the pre-Phase-9 form.
+            // + summary. Notes without a capture note carry '' and the
+            // assembled text stays byte-identical to the older form.
             EmbeddingKind::Summary => {
                 "SELECT n.path, n.note_type, n.modified_at, n.summary, n.title, n.capture_note, n.trace
                  FROM notes n
@@ -705,7 +704,7 @@ impl SearchIndex {
             // note with non-empty claims text is a candidate. Cortex groups the
             // newline-joined claims into token-window-sized chunks before
             // embedding so a note's tail claims are never dropped by silent
-            // model-side truncation (the Phase 9 defect).
+            // model-side truncation (the defect claim chunking fixes).
             EmbeddingKind::Claim => "SELECT n.path, n.note_type, n.modified_at, n.claims, n.title, '', n.trace
                  FROM notes n
                  LEFT JOIN note_embeddings e
@@ -803,7 +802,7 @@ impl SearchIndex {
 
     /// Count embedding rows matching an optional kind. Used by tests
     /// outside the vault crate (e.g. cortex's embed integration tests)
-    /// to assert the write phase produced the expected number of rows
+    /// to assert the write step produced the expected number of rows
     /// without reaching into the private `conn` field.
     pub fn count_embeddings(&self, kind: Option<EmbeddingKind>) -> Result<i64> {
         let count: i64 = match kind {
@@ -820,8 +819,8 @@ impl SearchIndex {
     }
 
     /// Count the TranscriptChunk embedding rows for a single note. Lets tests in
-    /// other crates assert that the staged-source re-point (2026-07-07
-    /// distillation-output-restore) produced chunks for the intended note and
+    /// other crates assert that the staged-source re-point (distillation-output-restore)
+    /// produced chunks for the intended note and
     /// zero for a note it must skip, without reaching into the private `conn`.
     pub fn transcript_chunk_count(&self, note_path: &str) -> Result<i64> {
         let count: i64 = self.conn.query_row(
@@ -876,7 +875,7 @@ impl SearchIndex {
     }
 
     #[cfg(any(test, feature = "test-util"))]
-    /// Set the `notes.capture_note` column for a test row (Phase 9). Lets
+    /// Set the `notes.capture_note` column for a test row. Lets
     /// tests in other crates exercise the title + capture-note + summary
     /// embed-text assembly without reaching into the private `conn`.
     pub fn set_test_capture_note(&self, path: &str, capture_note: &str) -> Result<()> {
@@ -888,7 +887,7 @@ impl SearchIndex {
     }
 
     #[cfg(any(test, feature = "test-util"))]
-    /// Set the `notes.claims` column for a test row (Phase 9). Claims are
+    /// Set the `notes.claims` column for a test row. Claims are
     /// stored as newline-joined text (the shape the indexer writes); lets
     /// tests in other crates drive the claim-embedding arm without reaching
     /// into the private `conn`.
@@ -899,8 +898,8 @@ impl SearchIndex {
     }
 
     #[cfg(any(test, feature = "test-util"))]
-    /// Set the `notes.trace` column for a test row (2026-07-07 distillation
-    /// output restore). The trace is the per-trace staging directory name; lets
+    /// Set the `notes.trace` column for a test row (distillation-output-restore).
+    /// The trace is the per-trace staging directory name; lets
     /// tests in other crates drive the staged-transcript embedding arm without
     /// reaching into the private `conn`.
     pub fn set_test_trace(&self, path: &str, trace: &str) -> Result<()> {
@@ -1059,7 +1058,7 @@ pub const RRF_K: usize = 60;
 
 /// Number of candidates pulled from each list before fusion. Over-
 /// pulling 50 from each is cheap and improves recall vs. pulling
-/// exactly `limit`. Phase A6's dispatch uses this constant.
+/// exactly `limit`. The search dispatch uses this constant.
 pub const K_RRF_INPUT: u32 = 50;
 
 #[cfg(test)]

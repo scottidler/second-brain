@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 /// Per-file byte cap for the rotated daemon log. Chosen so a debug-level
 /// day of daemon activity (the pre-fix live unit ran `--log-level debug`
 /// unrotated, growing to 16 GB over 46 days - ~350 MB/day) still rotates
-/// well within a day at info level; see the Phase 6 implementation notes
+/// well within a day at info level; see the cortex-daemon-oscillation-loop implementation notes
 /// (`docs/design/2026-07-05-cortex-daemon-oscillation-loop-implementation-notes.md`)
 /// for the measured info-level rate this was picked against.
 pub const LOG_ROTATE_MAX_BYTES: usize = 50 * 1024 * 1024; // 50 MiB per file

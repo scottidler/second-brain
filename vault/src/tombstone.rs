@@ -3,7 +3,7 @@
 //!
 //! - `cortex::association` retires a note absorbed by a similarity merge.
 //! - `borg::dedupe` retires the surplus forks a single harvest trace produced
-//!   (design `2026-08-15-harvest-note-identity-trace-keyed-replace.md`, Phase 6).
+//!   (design `2026-08-15-harvest-note-identity-trace-keyed-replace.md`).
 //!
 //! Before this module the two carried independent hardcoded copies of
 //! `"superseded-by"` and `"Merged into [[{stem}]].\n"`, each pinned only by its

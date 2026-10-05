@@ -1,6 +1,6 @@
 //! Synthetic memory-bounding test for the candle embedding backend.
 //!
-//! This test is the validation boundary Phase 7 of the v0.8.5 shakedown
+//! This test is the validation boundary that the v0.8.5 shakedown
 //! cleanup design (`docs/design/2026-05-20-shakedown-v0.8.5-cleanup.md`)
 //! gated the daemon-side "long-lived model" lifecycle change on. The cortex
 //! daemon now holds a single `CandleBertModel` for its entire lifetime; if

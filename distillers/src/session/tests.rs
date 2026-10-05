@@ -410,7 +410,7 @@ async fn no_metadata_yields_no_payload() {
     assert!(distilled.kind_specific.is_none(), "no metadata -> no session payload");
 }
 
-// ---- SUCCESS CRITERION (Phase 3): bounded per-chunk retry -----------------
+// ---- SUCCESS CRITERION: bounded per-chunk retry -----------------
 //
 // These exercise `distill_long` directly with hand-built chunk vectors so the
 // retry behavior is deterministic (the normal `distill()` entry cannot produce

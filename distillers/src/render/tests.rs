@@ -334,7 +334,7 @@ fn render_round_trips_through_vault_body_parsers() {
 #[test]
 fn render_fact_claim_with_no_who_or_quote_is_byte_identical_to_legacy() {
     // Regression guard: the default (fact, no who, no quote) claim must render
-    // exactly as it did pre-Phase-3 — no `**kind**` prefix, no `: ` separator.
+    // exactly as it did before claim kinds — no `**kind**` prefix, no `: ` separator.
     let distilled = Distilled {
         summary: "s".to_string(),
         claims: vec![
@@ -486,7 +486,7 @@ fn render_omits_transcript_section_when_empty_string() {
     assert!(!body.contains("## Transcript"));
 }
 
-// ---- 2026-07-07 distillation-output-restore: transcript render is caller-gated
+// ---- distillation-output-restore: transcript render is caller-gated
 
 #[test]
 fn render_omits_transcript_section_when_include_false_even_if_field_is_some() {
@@ -768,7 +768,7 @@ fn render_round_trips_new_sections_through_vault_body_parsers() {
 // ---- Per-call-site transcript policy (one test per render call site) -------
 //
 // The six production render call sites and the policy each passes
-// (2026-07-07 distillation-output-restore, Architecture policy table):
+// (distillation-output-restore, Architecture policy table):
 //   1. borg/src/pipeline.rs (URL: video/article/repo/thread) -> for_url_publish
 //   2. borg/src/pipeline/text.rs   (text/idea)   -> include_transcript: true
 //   3. borg/src/pipeline/text.rs   (vocabulary)  -> include_transcript: true

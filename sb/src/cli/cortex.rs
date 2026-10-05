@@ -77,7 +77,7 @@ pub enum Command {
     Schema(SchemaArgs),
     /// Distill legacy notes into the structured L2 contract (backfill)
     Summarize(SummarizeArgs),
-    /// Embed note summaries (and Phase B transcripts) into the search DB
+    /// Embed note summaries (and transcripts) into the search DB
     Embed(EmbedArgs),
     /// Build the deterministic edge graph oracle's graph retrieval reads
     Graph(GraphArgs),
@@ -837,7 +837,7 @@ impl CortexCli {
 }
 
 /// Composition root for the one-time historical multi-repo backfill
-/// (harvest-completion Phase 7). cortex owns the LLM detector + the pure
+/// (harvest-completion). cortex owns the LLM detector + the pure
 /// backfill/proposal logic; borg owns the clyde transcript reader; this glues
 /// the two: scan the vault for pre-`files-touched` candidate notes, fetch each
 /// survivor's transcript via borg's reader, and run the fail-closed backfill.

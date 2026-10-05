@@ -8,7 +8,7 @@ fn test_generate_format() {
 }
 
 /// Widening the trace field from 24 to 32 bits (design doc
-/// `2026-08-15-harvest-note-identity-trace-keyed-replace.md`, Phase 1) must
+/// `2026-08-15-harvest-note-identity-trace-keyed-replace.md`) must
 /// not retroactively invalidate any already-minted 6-hex-char trace id: the
 /// two widths coexist in the vault as opaque strings (receipts TEXT key,
 /// exact-equality lookups, no fixed-width parsing anywhere but this test file

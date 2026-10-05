@@ -7,7 +7,7 @@ use tempfile::TempDir;
 /// `env_logger::Builder::init()` involved - `init()` installs a process-global
 /// logger exactly once, so touching it here would break every other test in
 /// this binary. Writing past `LOG_ROTATE_MAX_BYTES` must produce a `.1`
-/// backup: proof the 16 GB unrotated-log defect (Phase 6 design doc) cannot
+/// backup: proof the 16 GB unrotated-log defect (cortex-daemon-oscillation-loop design) cannot
 /// recur silently.
 #[test]
 fn test_rotating_log_writer_rotates_past_the_byte_cap() {
@@ -31,7 +31,7 @@ fn test_rotating_log_writer_rotates_past_the_byte_cap() {
 
 /// Rotating well past `LOG_ROTATE_MAX_FILES` backups must never accumulate
 /// more than `LOG_ROTATE_MAX_FILES` rotated files plus the active one -
-/// the retention half of the size+retention contract this phase pins.
+/// the retention half of the size+retention contract.
 #[test]
 fn test_rotating_log_writer_caps_backup_count() {
     let dir = TempDir::new().unwrap();

@@ -183,7 +183,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
         let input_tokens = approx_tokens(inputs.transcript.len()) as u32;
         let output_tokens = approx_tokens(raw.len()) as u32;
 
-        // Phase 4: repos get tldr/enumeration/key-ideas too. READMEs carry no
+        // Repos get tldr/enumeration/key-ideas too. READMEs carry no
         // positional anchors, so any item anchor is stripped for honesty.
         let tldr = parsed.tldr.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         let enumeration = parsed
@@ -255,7 +255,7 @@ fn attach_metadata(mut distilled: Distilled, metadata: Option<&RepoMetadata>, in
     distilled
 }
 
-/// Strip every enumerated-item anchor (Phase 4 anchor-honesty rule). A repo
+/// Strip every enumerated-item anchor (anchor-honesty rule). A repo
 /// README carries no timestamps or positional anchors, so any anchor the model
 /// attaches to an item is fabricated; drop it.
 fn strip_item_anchors(mut enumeration: Enumeration) -> Enumeration {
@@ -277,8 +277,8 @@ struct PatternYaml {
     links: Option<Vec<PatternLink>>,
     #[serde(default)]
     install: Option<String>,
-    /// Phase 4: repos get the April note shape too (an awesome-list README is a
-    /// listicle). Serde-defaulted so a pre-Phase-4 `distill-repo` output parses.
+    /// Repos get the April note shape too (an awesome-list README is a
+    /// listicle). Serde-defaulted so an older `distill-repo` output parses.
     #[serde(default)]
     tldr: Option<String>,
     #[serde(default)]

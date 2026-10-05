@@ -1,4 +1,4 @@
-//! Query-transform stage (Phase 5 of the configurable-retrieval-pipeline doc).
+//! Query-transform stage (configurable-retrieval-pipeline doc).
 //!
 //! This is the LLM-bearing pre-retrieval stage, and it lives in **oracle**, not
 //! `vault`: it issues a Fabric subprocess call (`vault::fabric::run_pattern`),

@@ -19,7 +19,7 @@ async fn passthrough_summary_matches_transcript() {
     assert!(distilled.kind_specific.is_none());
     assert_eq!(distilled.meta.extractor, "distill-idea-v2");
     assert!(distilled.meta.validation.fallback_reason.is_none());
-    // Phase 9c-hotfix: the full input lands in `transcript` so the published
+    // The full input lands in `transcript` so the published
     // note is a verbatim archive.
     assert_eq!(
         distilled.transcript.as_deref(),
@@ -29,7 +29,7 @@ async fn passthrough_summary_matches_transcript() {
 
 #[tokio::test]
 async fn preserves_long_input_verbatim_in_transcript() {
-    // Phase 9c-hotfix: the per-distiller 280-char cap was deleted; the global
+    // The per-distiller 280-char cap was deleted; the global
     // 2000-char cap in `validate::enforce_bounds` is the only schema protection.
     // IdeaDistiller itself returns the full trimmed input as summary; the
     // `transcript` field is the verbatim archive regardless.

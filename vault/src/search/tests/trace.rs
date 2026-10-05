@@ -1,4 +1,4 @@
-//! Phase-1 tests for the borg staged-source (`trace`) columns: schema
+//! Tests for the borg staged-source (`trace`) columns: schema
 //! migration, `index_one` write/read-back, and the forced-reindex repopulation
 //! path that backfills the additive columns past the mtime gate.
 

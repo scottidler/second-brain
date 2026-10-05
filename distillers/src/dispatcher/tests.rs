@@ -19,13 +19,13 @@ async fn dispatches_idea_to_idea_distiller() {
         session_metadata: None,
     };
     let distilled = dispatcher.distill(DistillKind::Idea, inputs).await.expect("distill");
-    // Phase 9c-hotfix: IdeaDistiller ID bumped to v2 after 280-cap deletion.
+    // IdeaDistiller ID bumped to v2 after 280-cap deletion.
     assert_eq!(distilled.meta.extractor, "distill-idea-v2");
 }
 
 #[tokio::test]
 async fn dispatches_vocabulary_to_idea_distiller() {
-    // Phase 9c-hotfix: Vocabulary is now wired in the dispatcher and routes
+    // Vocabulary is wired in the dispatcher and routes
     // through IdeaDistiller (degenerate path - full verbatim text preserved
     // in Distilled.transcript with no Fabric call).
     let dispatcher = make_dispatcher();
@@ -51,7 +51,7 @@ async fn dispatches_vocabulary_to_idea_distiller() {
 
 #[tokio::test]
 async fn dispatches_image_to_image_distiller() {
-    // Phase 9c-image: Image now routes to ImageDistiller (Fabric-backed).
+    // Image routes to ImageDistiller (Fabric-backed).
     // With a stub FakeFabric (no canned response) the call falls back; the
     // fallback path mirrors the live extractor id.
     let dispatcher = make_dispatcher();
@@ -70,7 +70,7 @@ async fn dispatches_image_to_image_distiller() {
 
 #[tokio::test]
 async fn dispatches_voice_note_to_voicenote_distiller() {
-    // Phase 9c-voicenote: VoiceNote now routes to VoiceNoteDistiller (Fabric-
+    // VoiceNote routes to VoiceNoteDistiller (Fabric-
     // backed with map-reduce for long transcripts). With a stub FakeFabric
     // (no canned response) the short path falls back; the fallback id matches
     // the live extractor.
@@ -209,9 +209,9 @@ async fn dispatches_thread_to_fabric_backed_distiller() {
 
 #[tokio::test]
 async fn dispatches_session_to_fabric_backed_distiller() {
-    // Phase 4 (harvest-clyde-sessions): the dispatcher routes DistillKind::Session
+    // harvest-clyde-sessions: the dispatcher routes DistillKind::Session
     // to the SessionDistiller (it used to bail loudly). This test pins the
-    // wiring the phase most commonly skips.
+    // wiring most commonly skipped.
     let fake = Arc::new(FakeFabric::new());
     fake.set_response(
         "distill-session",

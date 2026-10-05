@@ -52,14 +52,14 @@ pub enum NoteType {
     System,
     /// Auto-stubbed entity hub note (concept / creator / source) produced by
     /// `sb cortex hub`. Doubles as human-navigable knowledge and a
-    /// machine-readable knowledge bundle (graph-augmented-memory Phase 3).
+    /// machine-readable knowledge bundle (graph-augmented-memory).
     Entity,
     /// Periodic intel digest note produced by `cortex intel`.
     Digest,
     /// Review note produced by `cortex intel`.
     Review,
     /// Distilled Claude Code session/thread note produced by `sb borg harvest`
-    /// (harvest-clyde-sessions design, Phase 1).
+    /// (harvest-clyde-sessions design).
     Session,
 }
 
@@ -162,7 +162,7 @@ impl NoteType {
     }
 
     /// Note kinds whose published body carries a `## Transcript` section that
-    /// Phase B chunks and embeds. Drives the SQL `note_type IN (...)` filter
+    /// the embed loop chunks and embeds. Drives the SQL `note_type IN (...)` filter
     /// in `vault::search::vector::stale_embedding_targets` so it can never
     /// drift from the actual enum strings. Adding a new transcript-bearing
     /// kind means adding a variant here, not editing SQL.
@@ -176,8 +176,8 @@ impl NoteType {
     /// - Video            -> `Video`
     /// - Thread           -> `Social` (X/Twitter) and `Reddit`
     ///
-    /// `Article` and `Youtube` were added in the 2026-07-05 distillation
-    /// overhaul (Phase 7): articles now persist their fetched markdown in-note
+    /// `Article` and `Youtube` were added in the distillation
+    /// overhaul: articles now persist their fetched markdown in-note
     /// under `## Transcript`, and slide-published YouTube notes gain the
     /// appended distilled `## Transcript` section. Without them here the embed
     /// loop's `note_type IN (...)` filter would FTS-index those new sections
@@ -198,7 +198,7 @@ impl NoteType {
 
     /// Transcript-eligible kinds whose verbatim transcript lives in the staged
     /// `distilled.yml` (resolved via `notes.trace`), NOT in the published note
-    /// body. As of the 2026-07-07 distillation-output-restore, Video / Youtube /
+    /// body. As of the distillation-output-restore, Video / Youtube /
     /// Article notes no longer carry a `## Transcript` body section — the
     /// verbatim text is a consumed intermediate kept in borg's staging, and
     /// cortex embeds transcript chunks by reading it out of staging. The
@@ -384,7 +384,7 @@ pub enum Method {
     Signal,
     Manual,
     /// Nightly/on-demand `sb borg harvest` pull from clyde's session export
-    /// contract (harvest-clyde-sessions design, Phase 1).
+    /// contract (harvest-clyde-sessions design).
     Harvest,
 }
 
@@ -461,7 +461,7 @@ impl FromStr for Method {
 }
 
 /// Validate a `<org>/<repo>` repo slug: exactly one `/` splitting two
-/// non-empty components (harvest-clyde-sessions design, Phase 9). Second-brain
+/// non-empty components (harvest-clyde-sessions design). Second-brain
 /// NEVER re-derives the slug - clyde ships it canonical - so this is the ONLY
 /// check applied. A value that fails (`""`, no `/`, more than one `/`, an
 /// empty component) SKIPS the repo hub edge and is logged loudly by the caller,

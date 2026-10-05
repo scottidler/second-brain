@@ -1,7 +1,7 @@
 //! Materialized edge graph: read/write helpers for the `edges` table and the
 //! graph-expansion traversal oracle uses for `mode=graph`/`graph-hybrid`.
 //!
-//! Phase 1 of the graph-augmented-memory design
+//! Part of the graph-augmented-memory design
 //! (`docs/design/2026-06-05-graph-augmented-memory.md`).
 //!
 //! The cortex graph pass *writes* edges here (deterministic semantic-kNN /
@@ -27,9 +27,9 @@ pub struct Edge {
     pub dst: String,
     pub kind: String,
     pub weight: f32,
-    /// `""` for deterministic kinds; a relation string for Phase-5 `fact` edges.
+    /// `""` for deterministic kinds; a relation string for typed `fact` edges.
     pub predicate: String,
-    /// Provenance: the note a typed edge was derived from (Phase 5); `""`
+    /// Provenance: the note a typed edge was derived from; `""`
     /// for deterministic kinds.
     pub src_note: String,
 }
@@ -47,7 +47,7 @@ impl Edge {
         }
     }
 
-    /// Construct a Phase-5 typed `fact` edge: `kind = "fact"`, the relation in
+    /// Construct a typed `fact` edge: `kind = "fact"`, the relation in
     /// `predicate`, and the originating note in `src_note` for provenance.
     pub fn fact(
         src: impl Into<String>,
@@ -67,7 +67,7 @@ impl Edge {
     }
 }
 
-/// One materialized `fact` edge (Phase 5), with provenance.
+/// One materialized `fact` edge, with provenance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactEdge {
     pub src: String,
@@ -87,10 +87,10 @@ pub struct GraphNoteRow {
     pub creator: String,
     pub body: String,
     pub modified_at: i64,
-    /// Canonical `<org>/<repo>` anchor (harvest-clyde-sessions Phase 9), empty
-    /// when the note has no repo. Feeds the Phase 10 `repo-member` hub edge.
+    /// Canonical `<org>/<repo>` anchor (harvest-clyde-sessions), empty
+    /// when the note has no repo. Feeds the `repo-member` hub edge.
     pub repo: String,
-    /// Every repo the session touched (harvest-completion Phase 4), feeding the
+    /// Every repo the session touched (harvest-completion), feeding the
     /// deterministic multi-repo-member hub edge. Flattened to the SET of repos
     /// here, mirroring `repo` (empty = no bridge), because the edge is a set
     /// operation: `None` and `Some(vec![])` both yield an empty Vec (no extra
@@ -122,7 +122,7 @@ impl SearchIndex {
     /// Create the graph-augmented-memory tables: the materialized `edges`
     /// table, the always-present `graph_state` key/value store, the per-note
     /// `edge_build_state` incremental watermarks, and the `entities` table
-    /// (Phase 3/5). All are plain tables (no FTS / virtual table) and exist in
+    /// (concept and typed-fact graph). All are plain tables (no FTS / virtual table) and exist in
     /// every build, `vec` or not — the `edges` read path does not require
     /// embeddings. The `dst`/`src` foreign keys with `ON DELETE CASCADE`
     /// mirror `note_embeddings`: when `index_vault` removes a deleted note from
@@ -238,7 +238,7 @@ impl SearchIndex {
     }
 
     /// Member note paths of a hub: the distinct `src` of every edge whose `dst`
-    /// is the hub note path (harvest-clyde-sessions design, Phase 12 - feeds
+    /// is the hub note path (harvest-clyde-sessions design; feeds
     /// `cortex hub --synthesize`). Sorted for deterministic synthesis input.
     pub fn hub_members(&self, hub_path: &str) -> Result<Vec<String>> {
         let mut stmt = self
@@ -286,9 +286,9 @@ impl SearchIndex {
         Ok(out)
     }
 
-    /// Upsert an `entities` row (Phase 3). `id` is the entity slug; `kind` is
+    /// Upsert an `entities` row. `id` is the entity slug; `kind` is
     /// `concept`/`creator`/`source`/`tag`; `hub_path` is the stubbed hub note's
-    /// vault path (when one exists); `ontotype` is the Phase-5 ontology class.
+    /// vault path (when one exists); `ontotype` is the ontology class.
     pub fn upsert_entity(&self, id: &str, kind: &str, hub_path: Option<&str>, ontotype: Option<&str>) -> Result<()> {
         self.conn.execute(
             "INSERT INTO entities (id, kind, hub_path, ontotype) VALUES (?1, ?2, ?3, ?4)
@@ -328,7 +328,7 @@ impl SearchIndex {
     /// `src` OR `dst` is absent from `notes` is skipped (and logged at debug),
     /// never inserted, so neither foreign key can abort the batch. (For
     /// deterministic edges `src` is always the note being processed and exists;
-    /// the `src` check matters for Phase-5 `fact` edges whose `src` is an entity
+    /// the `src` check matters for typed `fact` edges whose `src` is an entity
     /// hub that may not be stubbed.) Self-edges (`src == dst`) are likewise
     /// skipped. Returns `(inserted, skipped)`.
     pub fn insert_edges(&mut self, edges: &[Edge]) -> Result<(usize, usize)> {
@@ -508,7 +508,7 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// All `fact` edges (Phase 5), for consolidation passes. Ordered by
+    /// All `fact` edges, for consolidation passes. Ordered by
     /// `(src, predicate)` so contradiction detection can group functional
     /// predicates with multiple distinct objects.
     pub fn fact_edges(&self) -> Result<Vec<FactEdge>> {
@@ -665,7 +665,7 @@ impl SearchIndex {
             && !kinds.is_empty()
         {
             // A filter value matches either the edge `kind` (e.g. "semantic",
-            // "fact") or, for Phase-5 typed edges, the `predicate` (e.g.
+            // "fact") or, for typed edges, the `predicate` (e.g.
             // "uses", "released-on") — so callers can target a relation
             // directly. Each value is bound twice (kind list and predicate list).
             let kind_ph: Vec<String> = (0..kinds.len()).map(|i| format!("?{}", i + 3)).collect();

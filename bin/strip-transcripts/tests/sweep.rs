@@ -1,4 +1,4 @@
-//! Integration tests for the Phase 6 backfill sweep. Each test builds a
+//! Integration tests for the backfill sweep. Each test builds a
 //! throwaway git-backed vault fixture, runs the sweep against it, and asserts
 //! on-disk file contents afterward -- this is a destructive one-shot tool, so
 //! the only trustworthy assertion is "what actually landed on disk".

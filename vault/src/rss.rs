@@ -7,7 +7,7 @@
 //!
 //! The cortex embed loop pairs an entry-side and exit-side reading to size
 //! per-tick allocator deltas; see `docs/design/2026-05-19-cortex-embed-memory-bounding.md`
-//! and Phase 7 of `docs/design/2026-05-20-shakedown-v0.8.5-cleanup.md`.
+//! and `docs/design/2026-05-20-shakedown-v0.8.5-cleanup.md`.
 
 /// Resident set size in bytes for the current process, or `None` if the
 /// platform doesn't expose `/proc/self/status` (macOS, Windows) or the

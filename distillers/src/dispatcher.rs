@@ -2,16 +2,16 @@
 //!
 //! Distillers crate exports its own `DistillKind` rather than reaching into
 //! `borg::types::IngestKind`. Borg translates IngestKind -> DistillKind at
-//! the call site; cortex's backfill (Phase 7) infers DistillKind from
+//! the call site; cortex's backfill infers DistillKind from
 //! frontmatter `type:` + `source:`. This keeps the distillers crate free of
 //! borg/cortex deps.
 //!
-//! As of Phase 6 the dispatcher is generic over a `FabricCaller` so each
+//! The dispatcher is generic over a `FabricCaller` so each
 //! Fabric-backed distiller (Article, Repo, Video, Thread) can be tested
 //! with `FakeFabric` and run in production with `FabricShell`. All four
 //! Fabric-backed kinds are wired.
 //!
-//! As of Phase 9c-hotfix `DistillKind::Vocabulary` is also wired (degenerate:
+//! `DistillKind::Vocabulary` is also wired (degenerate:
 //! routes through `IdeaDistiller` for full verbatim preservation in
 //! `Distilled.transcript` with no Fabric call).
 
@@ -35,9 +35,8 @@ pub enum DistillKind {
     Repo,
     Video,
     Thread,
-    /// Claude Code session/thread (harvest-clyde-sessions design). Enum arm
-    /// added in Phase 1 (schema seam); `SessionDistiller` is wired in Phase 4
-    /// - `Dispatcher::distill` fails loudly for this kind until then.
+    /// Claude Code session/thread (harvest-clyde-sessions design). Routed to
+    /// `SessionDistiller`.
     Session,
 }
 
@@ -57,7 +56,7 @@ impl DistillKind {
     }
 }
 
-/// Phase-6 dispatcher. Routes Idea / Image / VoiceNote through the no-LLM
+/// The dispatcher. Routes Idea / Image / VoiceNote through the no-LLM
 /// distillers, Article through `ArticleDistiller<F>`, Repo through
 /// `RepoDistiller<F>`, Video through `VideoDistiller<F>`, and Thread
 /// through `ThreadDistiller<F>`. All four Fabric-backed kinds are now
@@ -108,7 +107,7 @@ impl<F: FabricCaller + Clone> Dispatcher<F> {
             ..VoiceNoteConfig::default()
         };
         // Session inherits model/max_chars/timeout from the article config and
-        // keeps the default token_cap (12K); borg's harvest handler (Phase 5)
+        // keeps the default token_cap (12K); borg's harvest handler
         // rebuilds it via `with_configs` when `harvest.token-cap` differs.
         let session_config = SessionConfig {
             model: article_config.model.clone(),
@@ -166,14 +165,14 @@ impl<F: FabricCaller + Clone> Dispatch for Dispatcher<F> {
         match kind {
             DistillKind::Idea | DistillKind::Vocabulary => self.idea.distill(inputs).await,
             DistillKind::Image => self.image.distill(inputs).await,
-            // Phase 9c-voicenote: VoiceNote now routes to its own Fabric-backed
+            // VoiceNote routes to its own Fabric-backed
             // distiller with map-reduce orchestration for long Groq transcripts.
             DistillKind::VoiceNote => self.voicenote.distill(inputs).await,
             DistillKind::Article => self.article.distill(inputs).await,
             DistillKind::Repo => self.repo.distill(inputs).await,
             DistillKind::Video => self.video.distill(inputs).await,
             DistillKind::Thread => self.thread.distill(inputs).await,
-            // Phase 4 (harvest-clyde-sessions): sessions route through the
+            // harvest-clyde-sessions: sessions route through the
             // SessionDistiller (head+tail windowing + KindPayload::Session).
             DistillKind::Session => self.session.distill(inputs).await,
         }

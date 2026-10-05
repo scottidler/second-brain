@@ -243,10 +243,10 @@ async fn long_path_partial_chunk_failure_keeps_surviving_claims() {
 #[tokio::test]
 async fn long_path_reduce_failure_falls_back_to_concatenated_summaries() {
     // All chunks succeed but the reduce call fails; the final summary is the
-    // concatenation of per-chunk summaries. Phase 5: a failed reduce call also
+    // concatenation of per-chunk summaries. A failed reduce call also
     // means claim SELECTION never ran, so the claims revert to the chronological
     // chunk merge — recorded as the distinct `reduce-selection-failed` reason
-    // (was `None` pre-Phase-5, when the reduce only touched the summary).
+    // (it was `None` when the reduce only touched the summary).
     let long_transcript = "This is a single sentence about an idea. ".repeat(1500);
     assert!(approx_tokens(long_transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
 

@@ -26,8 +26,8 @@ pub struct CanonicalTagsFile {
     pub tags: HashMap<String, Vec<String>>,
 }
 
-/// The loaded canonical-tag vocabulary shared by borg, cortex, and (from
-/// Phase 2) distillers: the flattened tag set, the segment-guard list, the
+/// The loaded canonical-tag vocabulary shared by borg, cortex, and
+/// distillers: the flattened tag set, the segment-guard list, the
 /// protect list, and the per-note cap. Absorbs borg's former private
 /// `CanonicalState` (`borg/src/pipeline.rs`) so every caller loads one
 /// vocabulary shape.

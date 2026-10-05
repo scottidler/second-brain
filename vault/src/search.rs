@@ -203,7 +203,7 @@ pub fn parse_body_summary(body: &str) -> Option<String> {
 /// while the kind / who / quote / anchor fields are recovered for round-trip.
 ///
 /// The `fact` kind and an absent `who` produce no prefix (the legacy shape
-/// `- text [anchor]`), so pre-Phase-3 notes parse exactly as before. Returns an
+/// `- text [anchor]`), so older notes parse exactly as before. Returns an
 /// empty Vec when no `## Claims` section is present.
 pub fn parse_body_claims(body: &str) -> Vec<Claim> {
     let mut claims: Vec<Claim> = Vec::new();

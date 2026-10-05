@@ -1,4 +1,4 @@
-//! Phase A7 regression tests for the hybrid retrieval path.
+//! Regression tests for the hybrid retrieval path.
 //!
 //! These run on every `cargo test --features vec` against a synthetic
 //! 20-note vault. For each of 20 fixed queries the hybrid result list
@@ -172,10 +172,10 @@ fn build_index() -> SearchIndex {
     index
 }
 
-/// Phase B4: notes whose summary is orthogonal to the query but whose
+/// Notes whose summary is orthogonal to the query but whose
 /// transcript chunks carry the matching tokens. Tests max-pool
 /// behavior end-to-end (chunks reachable via vector search after the
-/// max-pool aggregation in Phase B3).
+/// max-pool aggregation).
 fn transcript_corpus() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
     // (path, note_type, summary, transcript)
     //
@@ -236,7 +236,7 @@ fn transcript_queries() -> Vec<&'static str> {
 #[test]
 fn hybrid_recovers_union_top3_with_transcript_chunks() {
     // Build a small vault that mixes summary-only notes with notes
-    // whose semantic signal lives in transcript chunks. Phase B3's
+    // whose semantic signal lives in transcript chunks. The
     // max-pool aggregation must let the chunk-only matches surface
     // via the vector path; RRF then keeps them in the fused result.
     let mut index = SearchIndex::open_memory().expect("open");

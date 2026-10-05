@@ -4,9 +4,8 @@
 //! verbatim archive even after the global `MAX_SUMMARY_CHARS` cap in
 //! `validate::enforce_bounds` clips the summary.
 //!
-//! As of Phase 9c-hotfix the per-distiller 280-char cap (a Rev-1 design
-//! defect that silently truncated multi-paragraph idea text) has been
-//! removed. The global 2000-char cap is the only schema protection now.
+//! The per-distiller 280-char cap (a Rev-1 design defect that silently
+//! truncated multi-paragraph idea text) has been removed. The global 2000-char cap is the only schema protection now.
 
 use async_trait::async_trait;
 use chrono::Utc;

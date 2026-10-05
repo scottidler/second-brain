@@ -15,7 +15,7 @@ pub const MAX_TAGS: usize = 7;
 /// Maximum enumerated items kept before truncation. A genuine listicle rarely
 /// exceeds a "Top 25"; anything past this is either LLM runaway or the section
 /// being mistaken for the whole transcript. Bounds the `## Enumerated Points`
-/// section so it can never approach the note-size ceiling (Phase 3 gate).
+/// section so it can never approach the note-size ceiling.
 pub const MAX_ENUMERATION_ITEMS: usize = 30;
 /// Per-item length cap (name + text combined) before that item's `text` is
 /// truncated at a sentence boundary. Each item is meant to be one line.
@@ -89,7 +89,7 @@ pub fn enforce_bounds(mut distilled: Distilled, max_claims: usize) -> Distilled 
     distilled
 }
 
-/// Cap the `tldr` callout hook (Phase 4). A one-sentence hook that runs long is
+/// Cap the `tldr` callout hook. A one-sentence hook that runs long is
 /// truncated at a sentence boundary; the truncation is recorded so an operator
 /// sees the model produced an over-length tldr.
 fn enforce_tldr_bound(distilled: &mut Distilled) {
@@ -108,7 +108,7 @@ fn enforce_tldr_bound(distilled: &mut Distilled) {
     }
 }
 
-/// Cap the enumeration item count and each item's combined length (Phase 4).
+/// Cap the enumeration item count and each item's combined length.
 /// The item count is capped at [`MAX_ENUMERATION_ITEMS`]; per-item overflow
 /// truncates the item's `text` (never its `name`) at a sentence boundary. A
 /// count cap that trips is recorded as `enumeration-items:N>MAX`; a per-item
@@ -141,7 +141,7 @@ fn enforce_enumeration_bounds(distilled: &mut Distilled) {
     distilled.meta.validation.bounds_truncations.extend(item_cuts);
 }
 
-/// Cap the key-idea bullet count and each bullet's length (Phase 4).
+/// Cap the key-idea bullet count and each bullet's length.
 fn enforce_key_idea_bounds(distilled: &mut Distilled) {
     if distilled.key_ideas.len() > MAX_KEY_IDEAS {
         let original = distilled.key_ideas.len();
@@ -163,7 +163,7 @@ fn enforce_key_idea_bounds(distilled: &mut Distilled) {
     distilled.meta.validation.bounds_truncations.extend(idea_cuts);
 }
 
-/// Mark an enumeration shortfall (Resolved Decision 2026-07-07): when the source
+/// Mark an enumeration shortfall (distillation-output-restore Resolved Decision): when the source
 /// declared N items (`enumeration.declared_count == Some(n)`) but the distiller
 /// recovered fewer (`items.len() < n`), the note still publishes but the receipt
 /// is marked degraded so the miss surfaces via `sb doctor` (`degraded_24h`) and

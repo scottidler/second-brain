@@ -54,7 +54,7 @@ fn pool_batch_matches_one_at_a_time_real_model() {
 fn supported_model_resolves_default_and_candidate() {
     // Default (bge-small) maps to its repo + 384 dim.
     assert_eq!(supported_model(CANDLE_MODEL_VERSION), Some((MODEL_REPO, DIM)));
-    // Phase 7b candidate (bge-base) maps to its repo + 768 dim.
+    // The bge-base candidate maps to its repo + 768 dim.
     assert_eq!(
         supported_model(BGE_BASE_MODEL_VERSION),
         Some(("BAAI/bge-base-en-v1.5", 768))

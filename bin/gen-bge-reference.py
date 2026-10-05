@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the reference BGE embeddings the Phase 3 parity test compares against.
+"""Generate the reference BGE embeddings the parity test compares against.
 
 Run this once on any machine that has `sentence-transformers` installed.
 The resulting JSON sits next to the test and ships in the repo; CI does

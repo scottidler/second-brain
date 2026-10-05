@@ -1,6 +1,6 @@
 //! `sb borg wait` end to end: the built `sb` binary as a subprocess against a
 //! stub HTTP daemon on 127.0.0.1, pointed there by a temp `borg.yml`
-//! (`hotkey.host/port`). Never touches the live daemon. One test per Phase 5
+//! (`hotkey.host/port`). Never touches the live daemon. One test per
 //! success criterion in `docs/design/2026-10-04-ingest-queue-status.md`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

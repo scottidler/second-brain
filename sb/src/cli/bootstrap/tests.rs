@@ -164,7 +164,7 @@ fn extract_force_preserves_templates() {
     assert_eq!(after, edited, "--force must NOT overwrite per-host templates");
 }
 
-// Design doc `2026-09-21-staged-tag-proposals.md`, Phase 3: `otto deploy` runs
+// Design doc `2026-09-21-staged-tag-proposals.md`: `otto deploy` runs
 // `sb bootstrap --force`, so anything in the force-overwrite set is reset on
 // every deploy. `tag-proposals.yml` (written by `sb cortex sweep`) and
 // `glossary.yml` (written by `sb cortex concept-promote`) are machine-generated

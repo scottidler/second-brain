@@ -1,8 +1,8 @@
 //! The relevance judge: grades how well a note answers a query.
 //!
 //! Injected via the [`RelevanceJudge`] trait so the eval pipeline runs against a
-//! deterministic [`MockJudge`] in tests and the LLM-backed `FabricJudge` (added
-//! in Phase 4) in production. The contract is strict for anti-circularity: a
+//! deterministic [`MockJudge`] in tests and the LLM-backed `FabricJudge` in
+//! production. The contract is strict for anti-circularity: a
 //! judge receives ONLY the query plus the note's title and text — never the
 //! search mode, score, tags, embeddings, or graph edges.
 

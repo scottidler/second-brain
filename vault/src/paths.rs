@@ -126,21 +126,21 @@ pub fn tag_proposals() -> PathBuf {
     config_root().join("tag-proposals.yml")
 }
 
-/// Concept glossary + alias table used by `cortex link` (Phase 2 of the
-/// graph-augmented-memory design). Kebab-case concept slugs mirror
+/// Concept glossary + alias table used by `cortex link` (graph-augmented-memory
+/// design). Kebab-case concept slugs mirror
 /// `canonical-tags.yml`; the `aliases` block maps surface forms to slugs.
 pub fn glossary() -> PathBuf {
     config_root().join("glossary.yml")
 }
 
-/// LLM-proposed glossary entries awaiting human promotion (Phase 4 of the
-/// graph-augmented-memory design), mirroring `tag-proposals.yml`.
+/// LLM-proposed glossary entries awaiting human promotion (graph-augmented-memory
+/// design), mirroring `tag-proposals.yml`.
 pub fn entity_proposals() -> PathBuf {
     config_root().join("entity-proposals.yml")
 }
 
 /// LLM-proposed cross-repo bridges awaiting human approval (harvest-completion
-/// design, Phase 7 historical multi-repo backfill), mirroring
+/// design, historical multi-repo backfill), mirroring
 /// `entity-proposals.yml`. Each proposal adds a `[[member]]` wikilink to a
 /// secondary repo hub's body; never applied silently.
 pub fn bridge_proposals() -> PathBuf {
@@ -304,7 +304,7 @@ pub fn borg_signal_bootstrap_marker() -> PathBuf {
 /// `staging-root` defaults to the same value so the two subsystems resolve the
 /// identical path without hardcoding it twice. cortex has TWO read-only
 /// readers of it: the embed loop's transcript source for Video/Article notes
-/// (2026-07-07-distillation-output-restore Phase 5) and the sweep's
+/// (2026-07-07-distillation-output-restore) and the sweep's
 /// open-vocabulary tag candidates (2026-09-21-staged-tag-proposals). borg
 /// remains the sole staging WRITER.
 ///

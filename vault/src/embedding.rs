@@ -1,8 +1,8 @@
 //! Local text embedding for hybrid retrieval.
 //!
-//! Phase A2 of the hybrid retrieval design
+//! Built for the hybrid retrieval design
 //! (`docs/design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md`) and
-//! Phase 1 of the backend-swap design
+//! the backend-swap design
 //! (`docs/design/2026-05-17-candle-embedding-backend.md`).
 //!
 //! Two roles share this module:
@@ -42,7 +42,7 @@ pub use fastembed::FastEmbedModel;
 
 /// Pin: `bge-small-en-v1.5` outputs 384-dim L2-normalized vectors. Cosine
 /// similarity reduces to a plain dot product because both query and stored
-/// vectors are unit-length; Phase A3's brute-force scan relies on this.
+/// vectors are unit-length; the brute-force vector scan relies on this.
 pub const BGE_SMALL_EN_V15_DIM: usize = 384;
 
 /// Canonical model identifier written into `note_embeddings.model_version`
@@ -126,7 +126,7 @@ pub fn load_active_model(workers: usize) -> Result<ActiveModel> {
     load_model_version(ACTIVE_MODEL_VERSION, workers)
 }
 
-/// Load a specific supported model by `model_version` (Phase 7b A/B path).
+/// Load a specific supported model by `model_version` (the A/B path).
 /// `workers == 0` means platform-default parallelism. The Candle backend
 /// supports the BERT-family registry (`candle::SUPPORTED_MODELS`); the fastembed
 /// backend pins only the default model and errors on any other version.
@@ -180,7 +180,7 @@ pub fn prefetch_active_model() -> Result<()> {
     prefetch_model_version(ACTIVE_MODEL_VERSION)
 }
 
-/// Prefetch a specific supported model's weights into the cache (Phase 7b: warm
+/// Prefetch a specific supported model's weights into the cache (warm
 /// a candidate before re-embedding). Candle uses the registry; fastembed pins
 /// only the default model.
 #[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
@@ -246,7 +246,7 @@ fn get_or_load_model(model_version: &str) -> Result<Arc<ActiveModel>> {
 
 /// Sliding-window chunker for transcript text.
 ///
-/// Phase B1 of the hybrid retrieval design. Splits `text` into
+/// From the hybrid retrieval design. Splits `text` into
 /// overlapping chunks suitable for embedding. The window is measured
 /// in whitespace-separated words, which is a coarse approximation of
 /// the BPE token count. For English with the bge-small-en-v1.5
@@ -305,7 +305,7 @@ pub fn chunk_transcript(text: &str, max_tokens: usize, overlap_tokens: usize) ->
 /// unit vectors). Two different inputs produce different vectors; the
 /// same input is stable across calls and across processes.
 ///
-/// Used by Phase A3+ tests that need a real `EmbeddingModel` without the
+/// Used by tests that need a real `EmbeddingModel` without the
 /// ~1-2 s real-model load cost.
 pub struct MockEmbedder {
     dim: usize,

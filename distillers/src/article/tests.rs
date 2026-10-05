@@ -48,8 +48,8 @@ links:
     assert_eq!(distilled.links.len(), 1);
     assert_eq!(distilled.links[0].url, "https://raft.github.io");
     assert!(distilled.meta.validation.fallback_reason.is_none());
-    // Phase 7: the short single-call path now persists the fetched markdown
-    // verbatim in-note (was `None` pre-Phase-7 - "origin URL is the archive").
+    // The short single-call path now persists the fetched markdown
+    // verbatim in-note (it was `None` when the "origin URL is the archive").
     assert_eq!(
         distilled.transcript.as_deref(),
         Some("Article body about Raft and Paxos."),
@@ -315,7 +315,7 @@ async fn records_request_pattern_in_fake_history() {
     assert_eq!(calls[0].pattern, PATTERN);
 }
 
-// ---- Phase 6: map-reduce long path ----
+// ---- map-reduce long path ----
 
 const UNIQUE_FACT: &str = "The Zorblax coefficient measured forty-two across every independent trial.";
 
@@ -454,7 +454,7 @@ async fn long_article_covers_whole_input_with_zero_truncation() {
 
     assert!(distilled.meta.validation.fallback_reason.is_none());
     assert_eq!(distilled.summary, "Synthesized whole-article summary.");
-    // Phase 7: the long (map-reduce) path persists the FULL fetched markdown
+    // The long (map-reduce) path persists the FULL fetched markdown
     // in-note too - not just the short path - so a chunked essay is as durable
     // as a short one past staging retention.
     assert_eq!(
@@ -649,7 +649,7 @@ async fn sub_threshold_oversize_input_records_loud_truncation() {
 
 #[tokio::test]
 async fn single_call_article_populates_enumeration_and_strips_item_anchors() {
-    // Phase 4: an awesome-list article yields the enumeration; article items
+    // An awesome-list article yields the enumeration; article items
     // carry no honest anchor, so any anchor the model emits is stripped.
     let fake = FakeFabric::new();
     fake.set_response(
