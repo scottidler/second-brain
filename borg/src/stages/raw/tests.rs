@@ -355,9 +355,43 @@ fn gate_0_with_a_corrupt_blocklist_rejects_the_url_capture_and_fires_one_alert()
     assert_eq!(std::fs::read(&bl_path).unwrap(), CORRUPT_BLOCKLIST, "bytes unchanged");
     assert_eq!(crate::stages::alert::fired_count(trace), 1, "exactly one gate alert");
     assert!(
-        store.read_envelope(trace).is_err(),
-        "a rejected capture writes no staged artifacts"
+        store.read_envelope(trace).is_ok(),
+        "a rejected capture is staged so replay can recover it"
     );
+}
+
+#[test]
+fn gate_0_rejection_is_recoverable_by_replay() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = staging_config(tmp.path());
+    let trace = "tg-gate0-replayable";
+    let url = "https://gate0-replayable.example/post";
+    let content = ContentKind::Url {
+        url: url.to_string(),
+        note: None,
+    };
+
+    with_xdg(tmp.path(), || {
+        seed_corrupt_blocklist();
+        stage_0_init(&config, &content, IngestMethod::Telegram, trace).expect_err("an unloadable blocklist fails closed");
+    });
+
+    let opts = crate::replay::ReplayOptions {
+        trace_id: Some(trace.to_string()),
+        dry_run: true,
+        ..Default::default()
+    };
+    let mut sources = Vec::new();
+    let report = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(crate::replay::run(config, opts, |ev| {
+            if let crate::replay::ReplayEvent::TraceHeader { source, .. } = ev {
+                sources.push(source.clone());
+            }
+        }))
+        .expect("replay finds the rejected trace in staging");
+    assert_eq!(sources, vec![url.to_string()], "replay re-POSTs the original URL");
+    assert_eq!(report.attempted, 1);
 }
 
 #[test]

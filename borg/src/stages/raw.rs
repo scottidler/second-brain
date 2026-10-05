@@ -140,21 +140,25 @@ pub fn write_capture<S: ArtifactStore>(
 /// Stage-0 entry hook called at the top of `pipeline::process_content`.
 ///
 /// When `staging.enabled` is true: writes envelope/body/attachments to the
-/// configured artifact store and runs Gate-0 (domain blocklist) for URL
+/// configured artifact store, then runs Gate-0 (domain blocklist) for URL
 /// captures; on rejection, returns an error the caller converts into a
-/// Failed ingest result. When staging is disabled this is a no-op.
+/// Failed ingest result. The capture is staged BEFORE the gate so a rejected
+/// trace keeps the source `sb borg replay` re-POSTs. When staging is disabled
+/// this is a no-op.
 pub fn stage_0_init(config: &Config, content: &ContentKind, method: IngestMethod, trace_id: &str) -> Result<()> {
     if !config.staging.enabled {
         return Ok(());
     }
     let store = FsArtifactStore::from_config(&config.staging);
+    write_capture(&store, trace_id, content, method, None, HashMap::new())
+        .with_context(|| format!("stage_0_init: write_capture for trace {trace_id}"))?;
 
     if let ContentKind::Url { url, .. } = content {
         let blocklist_path = blocklist::default_path()?;
         // Fail closed: an unloadable blocklist rejects the capture instead of
         // letting every domain through. A MISSING file is an empty blocklist
         // (`Blocklist::from_file`); only a file that exists and cannot be
-        // read or parsed lands here. The capture is durable at the door, so
+        // read or parsed lands here. The capture is already staged above, so
         // `sb borg replay` recovers it once the file is repaired.
         let blocklist = match Blocklist::from_file(&blocklist_path) {
             Ok(bl) => bl,
@@ -193,8 +197,6 @@ pub fn stage_0_init(config: &Config, content: &ContentKind, method: IngestMethod
             bail!("{err}");
         }
     }
-    write_capture(&store, trace_id, content, method, None, HashMap::new())
-        .with_context(|| format!("stage_0_init: write_capture for trace {trace_id}"))?;
     Ok(())
 }
 
