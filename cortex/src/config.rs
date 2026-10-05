@@ -894,29 +894,10 @@ pub struct DaemonConfig {
     /// Optional secret/environment bootstrap for the installed systemd unit.
     /// `None` (the default) omits both the `ExecStartPre` and
     /// `EnvironmentFile` directives, so a host with no secret bootstrap
-    /// still gets a valid, complete unit. See [`EnvBootstrapConfig`].
+    /// still gets a valid, complete unit. Same type as borg.yml's
+    /// `daemon.env-bootstrap`: [`vault::systemd::EnvBootstrap`].
     #[serde(rename = "env-bootstrap")]
-    pub env_bootstrap: Option<EnvBootstrapConfig>,
-}
-
-/// Secret/environment bootstrap for the installed systemd unit: `command`'s
-/// stdout is captured into `env_file` via
-/// `ExecStartPre=/bin/sh -c '<command> > <env_file>'`, then the unit loads it
-/// with `EnvironmentFile=-<env_file>` (the leading `-` makes a missing file
-/// non-fatal). Lets a `sb cortex daemon --install` re-run reproduce a live
-/// unit's `manifest age decrypt ... > /run/user/<uid>/cortex.env` secret
-/// bootstrap without baking any UID or secrets path into Rust source - the
-/// defect this phase closes (2026-07-05 cortex-daemon-oscillation-loop design
-/// doc, Problem Statement defect 5).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct EnvBootstrapConfig {
-    /// Shell command whose stdout is redirected into `env_file`.
-    pub command: String,
-    /// Destination path for the captured environment, e.g.
-    /// `/run/user/1000/cortex.env`. Tilde-expanded at load time.
-    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
-    pub env_file: PathBuf,
+    pub env_bootstrap: Option<vault::systemd::EnvBootstrap>,
 }
 
 #[derive(Debug, Deserialize, Default)]

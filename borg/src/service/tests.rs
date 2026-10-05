@@ -1,5 +1,6 @@
 use super::*;
-use crate::config::{Config, EnvBootstrapConfig};
+use crate::config::Config;
+use vault::systemd::EnvBootstrap;
 
 fn cfg() -> Config {
     Config::default()
@@ -65,7 +66,7 @@ fn render_systemd_unit_omits_env_bootstrap_when_unconfigured() {
 #[test]
 fn render_systemd_unit_carries_env_bootstrap_when_configured() {
     let mut config = cfg();
-    config.daemon.env_bootstrap = Some(EnvBootstrapConfig {
+    config.daemon.env_bootstrap = Some(EnvBootstrap {
         command: "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env".to_string(),
         env_file: PathBuf::from("/run/user/1000/borg.env"),
     });
@@ -117,10 +118,9 @@ fn render_systemd_unit_path_includes_mise_shims_and_excludes_go_bin() {
     );
 }
 
-// Byte-exact goldens (2026-10-05 quality-review-fixes, Phase 18): the
-// renderer's output at fixed inputs, so a refactor of the unit renderers
-// cannot change a byte unnoticed. `render_systemd_unit` is pure, so the
-// inputs are just the args.
+// Byte-exact goldens (2026-10-05 quality-review-fixes): the renderer's output
+// at fixed inputs, so a refactor of the unit renderers cannot change a byte
+// unnoticed. `render_systemd_unit` is pure, so the inputs are just the args.
 
 fn golden_unit(config: &Config) -> String {
     render_systemd_unit(
@@ -141,7 +141,7 @@ fn golden_borg_service_minimal() {
 fn golden_borg_service_full() {
     let mut config = cfg();
     config.log_level = Some("debug".to_string());
-    config.daemon.env_bootstrap = Some(EnvBootstrapConfig {
+    config.daemon.env_bootstrap = Some(EnvBootstrap {
         command: "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env".to_string(),
         env_file: PathBuf::from("/run/user/1000/borg.env"),
     });

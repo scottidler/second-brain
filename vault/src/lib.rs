@@ -25,6 +25,7 @@ pub mod rss;
 pub mod schema;
 #[cfg(feature = "search")]
 pub mod search;
+pub mod systemd;
 pub mod table;
 pub mod text;
 pub mod tombstone;

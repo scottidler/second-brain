@@ -920,6 +920,40 @@ harvest:
     assert_ne!(bootstrap.env_file, PathBuf::from("/run/user/1000/borg.env"));
 }
 
+/// borg.yml's two `env-bootstrap` blocks (`daemon:` and `harvest:`) both
+/// deserialize into the one shared `vault::systemd::EnvBootstrap`, the same
+/// type cortex.yml's `daemon.env-bootstrap` uses.
+#[test]
+fn test_env_bootstrap_blocks_deserialize_into_shared_type() {
+    let yaml = r#"
+daemon:
+  env-bootstrap:
+    command: manifest age decrypt ~/repos/scottidler/keep/.secrets -f env
+    env-file: /run/user/1000/borg.env
+harvest:
+  env-bootstrap:
+    command: manifest age decrypt ~/repos/scottidler/keep/.secrets -f env
+    env-file: /run/user/1000/sb-harvest.env
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("should parse");
+    let daemon: Option<vault::systemd::EnvBootstrap> = config.daemon.env_bootstrap;
+    let harvest: Option<vault::systemd::EnvBootstrap> = config.harvest.env_bootstrap;
+    assert_eq!(
+        daemon,
+        Some(vault::systemd::EnvBootstrap {
+            command: "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env".to_string(),
+            env_file: PathBuf::from("/run/user/1000/borg.env"),
+        })
+    );
+    assert_eq!(
+        harvest,
+        Some(vault::systemd::EnvBootstrap {
+            command: "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env".to_string(),
+            env_file: PathBuf::from("/run/user/1000/sb-harvest.env"),
+        })
+    );
+}
+
 #[test]
 fn test_harvest_mode_resolve_dry_run() {
     // Config default DryRun, no CLI flags -> dry-run (fresh install never

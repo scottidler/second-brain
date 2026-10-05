@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::opts;
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
+use vault::systemd::{Hardening, Restart, RestartPolicy, ServiceUnit, StartLimit, UnitType, render_service};
 
 /// Outcome of a `sb borg daemon <flag>` invocation (everything except
 /// `--start`, which sb routes to `serve_init`). Variants carry the typed
@@ -180,11 +181,10 @@ pub(crate) async fn launchctl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Render the `borg.service` unit content. Pure - no filesystem or
-/// environment access beyond the args - so `install_systemd` and its tests
-/// share one seam (tests assert on the returned string instead of touching
-/// the real `~/.config/systemd/user/`), mirroring
-/// `cortex::daemon::render_systemd_unit`.
+/// Describe `borg.service` and render it through `vault::systemd`. Pure - no
+/// filesystem or environment access beyond the args - so `install_systemd`
+/// and its tests share one seam (tests assert on the returned string instead
+/// of touching the real `~/.config/systemd/user/`).
 fn render_systemd_unit(exe_path: &str, home: &Path, vault_path: &Path, data_path: &Path, config: &Config) -> String {
     log::debug!(
         "service::render_systemd_unit: exe_path={exe_path} vault_path={} env_bootstrap={}",
@@ -192,53 +192,38 @@ fn render_systemd_unit(exe_path: &str, home: &Path, vault_path: &Path, data_path
         config.daemon.env_bootstrap.is_some(),
     );
 
-    let mut service = String::from(
-        r#"[Unit]
-Description=borg - Obsidian ingestion daemon (second-brain)
-After=network-online.target
-Wants=network-online.target
-StartLimitBurst=5
-StartLimitIntervalSec=60
-
-[Service]
-Type=simple
-"#,
-    );
-
-    if let Some(bootstrap) = &config.daemon.env_bootstrap {
-        service.push_str(&format!(
-            "ExecStartPre=/bin/sh -c '{command} > {env_file}'\n",
-            command = bootstrap.command,
-            env_file = bootstrap.env_file.display(),
-        ));
-        service.push_str(&format!("EnvironmentFile=-{}\n", bootstrap.env_file.display()));
-    }
-
     let log_level = config.log_level.as_deref().unwrap_or("info");
-
-    service.push_str(&format!(
-        r#"Environment="PATH={home}/.local/share/mise/shims:{home}/.local/bin:{home}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart={exe_path} borg --log-level {log_level} daemon --start
-Restart=always
-RestartSec=5
-WorkingDirectory={home}
-
-# Hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths={vault} {data}
-PrivateTmp=true
-
-[Install]
-WantedBy=default.target
-"#,
-        home = home.display(),
-        vault = vault_path.display(),
-        data = data_path.display(),
-    ));
-
-    service
+    let unit = ServiceUnit {
+        description: "borg - Obsidian ingestion daemon (second-brain)".to_string(),
+        after: vec!["network-online.target".to_string()],
+        wants: vec!["network-online.target".to_string()],
+        start_limit: Some(StartLimit {
+            burst: 5,
+            interval_sec: 60,
+        }),
+        unit_type: UnitType::Simple,
+        env_bootstrap: config.daemon.env_bootstrap.clone(),
+        home: home.to_path_buf(),
+        path_comment: None,
+        extra_env: Vec::new(),
+        exec_start: vec![
+            exe_path.to_string(),
+            "borg".to_string(),
+            "--log-level".to_string(),
+            log_level.to_string(),
+            "daemon".to_string(),
+            "--start".to_string(),
+        ],
+        restart: Some(Restart {
+            policy: RestartPolicy::Always,
+            sec: 5,
+        }),
+        hardening: Hardening::Strict {
+            rw_paths: vec![vault_path.to_path_buf(), data_path.to_path_buf()],
+        },
+        wanted_by: Some("default.target".to_string()),
+    };
+    render_service(&unit)
 }
 
 pub(crate) async fn install_systemd(exe_path: &str, config: &Config) -> Result<PathBuf> {

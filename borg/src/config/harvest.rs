@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::EnvBootstrapConfig;
+use vault::systemd::EnvBootstrap;
 
 /// Absolute, tilde-expanded default location for the clyde binary. The
 /// harvest systemd timer (Phase 8) runs with a stripped PATH, so a bare
@@ -151,7 +151,7 @@ pub struct HarvestConfig {
     /// `env-file` from the daemon's (e.g. `/run/user/1000/sb-harvest.env`)
     /// so the timer's one-shot run never clobbers the long-running daemon's
     /// captured environment.
-    pub env_bootstrap: Option<EnvBootstrapConfig>,
+    pub env_bootstrap: Option<EnvBootstrap>,
 }
 
 impl Default for HarvestConfig {
