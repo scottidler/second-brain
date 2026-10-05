@@ -853,7 +853,7 @@ pub async fn run(
 
     let marker_path = vault::paths::borg_signal_bootstrap_marker();
     let mut bootstrap_attempted = false;
-    let mut backoff = ExponentialBackoff::new();
+    let mut backoff = ExponentialBackoff::reconnect();
 
     loop {
         let client = open_or_fail(&state_dir).await?;
@@ -871,7 +871,7 @@ pub async fn run(
             }
             Err(e) => {
                 log::warn!("signal: status pre-flight failed: {e}");
-                backoff.wait().await;
+                backoff.wait("reconnecting").await;
                 continue;
             }
         };
@@ -891,7 +891,7 @@ pub async fn run(
             Some(s) => s,
             None => {
                 log::error!("signal: notify::Signal::new returned None despite valid config");
-                backoff.wait().await;
+                backoff.wait("reconnecting").await;
                 continue;
             }
         };
@@ -979,6 +979,6 @@ pub async fn run(
         // Reset only after a sustained-healthy run; an immediate post-handshake
         // drop keeps the backoff growing instead of hot-looping at the base.
         backoff.reset_if_healthy(connected_at);
-        backoff.wait().await;
+        backoff.wait("reconnecting").await;
     }
 }

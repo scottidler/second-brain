@@ -48,6 +48,7 @@ signal-rs = { git = "https://github.com/scottidler/signal-rs", tag = "v0.2.1", v
 humantime = "2.3.0"
 dom_smoothie = "0.18.0"
 htmd = "0.5.4"
+httpdate = "1.0.3"
 
 [dependencies.serenity]
 version = "0.12"

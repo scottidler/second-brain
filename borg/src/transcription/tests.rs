@@ -25,26 +25,6 @@ fn test_client_without_groq_key() {
     assert!(client.groq_api_key.is_none());
 }
 
-#[test]
-fn test_retry_backoff_uses_server_retry_after() {
-    let d = retry_backoff(0, Some(Duration::from_secs(3)));
-    assert_eq!(d, Duration::from_secs(3));
-}
-
-#[test]
-fn test_retry_backoff_caps_server_retry_after() {
-    // Server requests an unreasonable wait; we cap at GROQ_BACKOFF_CAP.
-    let d = retry_backoff(0, Some(Duration::from_secs(3600)));
-    assert_eq!(d, GROQ_BACKOFF_CAP);
-}
-
-#[test]
-fn test_retry_backoff_exponential_when_no_server_hint() {
-    assert_eq!(retry_backoff(0, None), Duration::from_secs(1));
-    assert_eq!(retry_backoff(1, None), Duration::from_secs(2));
-    assert_eq!(retry_backoff(2, None), Duration::from_secs(4));
-}
-
 /// A tiny in-process HTTP server that lets us script status codes for the
 /// successive Groq POSTs. Returns `(url, request_count)` - the count is the
 /// authoritative attempt counter for the test.

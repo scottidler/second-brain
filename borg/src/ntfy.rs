@@ -8,7 +8,7 @@ use crate::types::{ContentKind, IngestMethod};
 use eyre::{Context, Result};
 use serde::Deserialize;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncBufReadExt;
 use tokio_stream::StreamExt;
 use vault::http::Timeouts;
@@ -105,7 +105,7 @@ pub async fn run(
     .build()
     .context("ntfy: cannot build the HTTP client")?;
     let mut last_event_id: Option<String> = None;
-    let mut backoff = ExponentialBackoff::new();
+    let mut backoff = ExponentialBackoff::reconnect();
 
     loop {
         let mut url = format!("{server}/{topic}/json");
@@ -124,17 +124,18 @@ pub async fn run(
             Ok(resp) if resp.status().is_success() => resp,
             Ok(resp) => {
                 log::warn!("ntfy: server returned {}", resp.status());
-                backoff.wait().await;
+                backoff.wait("reconnecting").await;
                 continue;
             }
             Err(e) => {
                 log::warn!("ntfy: connection failed: {e}");
-                backoff.wait().await;
+                backoff.wait("reconnecting").await;
                 continue;
             }
         };
 
         log::info!("ntfy: connected to {topic}");
+        let connected_at = Instant::now();
 
         let stream = response.bytes_stream();
         let reader = tokio_util::io::StreamReader::new(stream.map(|r| r.map_err(std::io::Error::other)));
@@ -171,7 +172,7 @@ pub async fn run(
                 continue;
             }
 
-            backoff.reset();
+            settle_backoff(&mut backoff, connected_at);
 
             // Generate trace at the door so every event - including empty
             // and undeliverable ones - gets a durable record.
@@ -260,8 +261,15 @@ pub async fn run(
             }
         }
 
-        backoff.wait().await;
+        settle_backoff(&mut backoff, connected_at);
+        backoff.wait("reconnecting").await;
     }
+}
+
+/// A stream earns a backoff reset only by staying up `HEALTHY_RUN_SECS`; a
+/// server that accepts, sends one message and drops keeps the backoff growing.
+fn settle_backoff(backoff: &mut ExponentialBackoff, connected_at: Instant) {
+    backoff.reset_if_healthy(connected_at);
 }
 
 #[cfg(test)]

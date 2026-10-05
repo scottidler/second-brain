@@ -341,7 +341,7 @@ pub async fn run(token: String, dc_config: DiscordConfig, config: Arc<Config>, d
         dc_config.channel_id,
         desktop.is_some()
     );
-    let mut backoff = ExponentialBackoff::new();
+    let mut backoff = ExponentialBackoff::reconnect();
 
     loop {
         log::info!("discord: starting bot");
@@ -356,7 +356,7 @@ pub async fn run(token: String, dc_config: DiscordConfig, config: Arc<Config>, d
             Ok(c) => c,
             Err(e) => {
                 log::error!("discord: failed to create client: {e}");
-                backoff.wait().await;
+                backoff.wait("reconnecting").await;
                 continue;
             }
         };
@@ -373,7 +373,7 @@ pub async fn run(token: String, dc_config: DiscordConfig, config: Arc<Config>, d
         // Reset only after a sustained-healthy run; a fast drop keeps the
         // backoff growing rather than hot-looping at the base delay.
         backoff.reset_if_healthy(connected_at);
-        backoff.wait().await;
+        backoff.wait("reconnecting").await;
     }
 }
 
