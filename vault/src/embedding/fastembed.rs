@@ -1,6 +1,6 @@
 //! fastembed-backed embedding adapter (gated behind `vec-fastembed`).
 //!
-//! Phase 1 of `docs/design/2026-05-17-candle-embedding-backend.md`
+//! `docs/design/2026-05-17-candle-embedding-backend.md`
 //! relocated this code out of `embedding.rs` so the default Candle
 //! backend and the legacy fastembed backend coexist behind separate
 //! Cargo features.

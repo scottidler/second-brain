@@ -348,7 +348,7 @@ fn stale_embedding_targets_returns_unembedded_notes_for_summary() {
 
 #[test]
 fn stale_embedding_targets_excludes_merge_tombstones() {
-    // cortex association-sweep Phase 3: a soft-retired tombstone carries a
+    // cortex association-sweep: a soft-retired tombstone carries a
     // non-empty `superseded_by`. It MUST NOT surface as an embedding target,
     // for any kind. Both notes here have a NON-EMPTY summary (insert_note sets
     // `summary`), so exclusion can only come from the `superseded_by` predicate,
@@ -379,7 +379,7 @@ fn stale_embedding_targets_excludes_merge_tombstones() {
 
 #[test]
 fn stale_embedding_targets_carry_note_title() {
-    // Phase 7a: cortex needs the title to prepend it to the summary before
+    // Cortex needs the title to prepend it to the summary before
     // embedding, so the target rows must surface `notes.title`.
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
@@ -421,8 +421,8 @@ fn stale_embedding_targets_transcript_kind_filters_by_note_type() {
     // not 101. Without the note_type filter, every non-eligible note matches
     // `e.id IS NULL` forever.
     //
-    // The filler is `github`/repo - the one URL kind Phase 7 keeps
-    // transcript-free (article and youtube became eligible in Phase 7, so
+    // The filler is `github`/repo - the one URL kind that stays
+    // transcript-free (article and youtube became eligible, so
     // they can no longer serve as the non-eligible sentinel).
     //
     // The schema enum string for VoiceNote is `audio` (see
@@ -458,7 +458,7 @@ fn stale_embedding_targets_transcript_kind_covers_all_transcript_eligible_kinds(
         insert_note(&index, &format!("notes/n{i}.md"), t.as_str(), 100);
     }
     // A non-eligible kind that must NOT surface. `github`/repo stays
-    // transcript-free (Phase 7 keeps repos transcript-free deliberately), so
+    // transcript-free (deliberately), so
     // it is the sentinel here now that `article`/`youtube` ARE eligible.
     insert_note(&index, "notes/repo.md", "github", 100);
 
@@ -479,11 +479,11 @@ fn stale_embedding_targets_transcript_kind_covers_all_transcript_eligible_kinds(
     );
 }
 
-// ---- Phase 3: examined sentinel (cortex-daemon-oscillation-loop) ----
+// ---- examined sentinel (cortex-daemon-oscillation-loop) ----
 
 #[test]
 fn stale_transcript_targets_exclude_examined_until_modified_at_bumps() {
-    // Phase 3: a transcript-eligible note marked "examined, nothing to embed"
+    // A transcript-eligible note marked "examined, nothing to embed"
     // must leave the stale set until its indexed modified_at advances past the
     // recorded watermark. This is the convergence guarantee that stops the
     // ~127-note transcript re-scan every daemon tick.
@@ -542,7 +542,7 @@ fn stale_transcript_targets_exclude_examined_until_modified_at_bumps() {
 
 #[test]
 fn search_vector_returns_no_row_for_examined_sentinel_note() {
-    // Phase 3 anti-poison guarantee: the sentinel lives in a side table, NOT a
+    // Anti-poison guarantee: the sentinel lives in a side table, NOT a
     // note_embeddings row, so a note that was examined-and-skipped never
     // surfaces in vector search (no BLOB to score) and cannot dilute cosine
     // similarity.
@@ -713,7 +713,7 @@ fn active_embedding_model_reads_the_default_seed() {
     assert_eq!(d, 384);
 }
 
-// --- Phase B3: max-pool aggregation over summary + transcript-chunk -----
+// --- max-pool aggregation over summary + transcript-chunk -----
 
 #[test]
 fn search_vector_returns_one_row_per_note_when_chunks_exist() {
@@ -878,7 +878,7 @@ fn weighted_rrf_higher_weight_dominates_ranking() {
     assert!(pos("strong-top") < pos("weak-top"), "vector hit must outrank bm25 hit");
 }
 
-// ---- Phase 9: claim embeddings ----
+// ---- claim embeddings ----
 
 #[test]
 fn stale_claim_targets_selects_notes_with_claims_and_carries_claim_text() {

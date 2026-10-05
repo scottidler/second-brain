@@ -22,7 +22,7 @@ use vault::canonical::{self, CanonicalSet, TagMapping};
 #[cfg(test)]
 mod tests;
 
-/// The API's hard ceiling on labels per call (Phase 0, observed in the tool
+/// The API's hard ceiling on labels per call (observed in the tool
 /// schema 2026-09-20). The vocabulary is larger, so production always shards.
 pub const MAX_LABELS_PER_CALL: usize = 100;
 
@@ -340,7 +340,7 @@ fn rank_and_cap(mut scored: Vec<(String, f32)>, max_per_note: usize) -> Vec<(Str
 }
 
 /// Split a sorted label list into shards of at most `MAX_LABELS_PER_CALL`,
-/// **evenly**: Phase 0b validated a 59/58 partition and panel r4 OQ8 pins it,
+/// **evenly**: the shard-invariance trial validated a 59/58 partition and panel r4 OQ8 pins it,
 /// because a greedy 100/17 split is an untested co-label context. Re-run the
 /// shard-invariance trial before the vocabulary passes ~200 labels.
 pub fn shard_labels(sorted_labels: &[String]) -> Vec<Vec<String>> {
@@ -353,8 +353,8 @@ pub fn shard_labels(sorted_labels: &[String]) -> Vec<Vec<String>> {
 }
 
 /// Merge per-shard score maps into one ranking. Valid because the API returns
-/// independent per-label probabilities rather than a softmax, measured in
-/// Phase 0b: re-partitioning moves scores no more than two identical calls do.
+/// independent per-label probabilities rather than a softmax: in the
+/// shard-invariance trial, re-partitioning moved scores no more than two identical calls do.
 pub fn merge_shard_scores(shard_scores: &[HashMap<String, f32>]) -> Vec<(String, f32)> {
     let mut merged: HashMap<String, f32> = HashMap::new();
     for shard in shard_scores {
@@ -384,7 +384,7 @@ pub fn select_above_threshold(scores: &[(String, f32)], threshold: f32, max_per_
 /// overwrites what is already there.
 ///
 /// The protect list exists because the classifier recovers 0 of 17 migrated
-/// `work`/`life`/`homelab`/`diy`/`writing` values from note text (Phase 0b).
+/// `work`/`life`/`homelab`/`diy`/`writing` values from note text.
 ///
 /// The result is capped through `canonical::cap_protecting`, the same helper
 /// `filter_and_cap` uses: prepending protected tags to an already-capped

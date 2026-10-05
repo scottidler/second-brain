@@ -164,7 +164,7 @@ pub fn run(config: &Config, opts: &EvalOpts) -> Result<EvalOutcome> {
     evaluate(&queries, &runs, &cache, &judge, opts)
 }
 
-/// Phase A: for each query, run every mode + the fact ablation and collect the
+/// For each query, run every mode + the fact ablation and collect the
 /// ranked lists and the judge text of every pooled note. Holds the DB lock only
 /// here — never across the (slow) judging in [`evaluate`].
 pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) -> Result<Vec<QueryRun>> {
@@ -250,7 +250,7 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) ->
     Ok(runs)
 }
 
-/// Phases B + C: judge each pooled note (cache-first, blind), score each mode's
+/// Judge each pooled note (cache-first, blind), score each mode's
 /// ranked list, and aggregate. `runs` is aligned with `queries.queries` by index.
 /// In `--emit-calibration` mode, write the sheet and short-circuit.
 pub fn evaluate(
@@ -276,7 +276,7 @@ pub fn evaluate(
             fact_touched += 1;
         }
 
-        // Phase B: judge every pooled note, cache-first.
+        // Judge every pooled note, cache-first.
         let mut judgments: metrics::Judgments = metrics::Judgments::new();
         for (path, jt) in &run.texts {
             let key = cache::CacheKey {
@@ -326,7 +326,7 @@ pub fn evaluate(
             }
         }
 
-        // Phase C: score each mode/label against this query's judgments.
+        // Score each mode/label against this query's judgments.
         for (label, list) in &run.ranked {
             let qs = metrics::score_query(list, &judgments, opts.k as usize, judge::HIT_THRESHOLD);
             scores.entry(label.clone()).or_default().push(qs);

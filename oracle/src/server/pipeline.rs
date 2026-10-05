@@ -387,8 +387,7 @@ impl OracleMcpServer {
         }
 
         // Candidate pool kept ahead of the final truncate so the later exclude
-        // (Phase 3) and rerank (Phase 4) stages have headroom and the result
-        // still fills `limit`.
+        // and rerank stages have headroom and the result still fills `limit`.
         let candidate_limit = (limit as usize)
             .max(vault::search::K_RRF_INPUT as usize)
             .max(if cfg.rerank.enabled { cfg.rerank.input_k as usize } else { 0 });

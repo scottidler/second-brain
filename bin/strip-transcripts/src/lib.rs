@@ -1,7 +1,7 @@
 //! One-shot backfill sweep: strip the `## Transcript`-to-EOF section from
 //! Video/Article notes ingested on or after [`CUTOFF_RFC3339`].
 //!
-//! Phase 6 of `docs/design/2026-07-07-distillation-output-restore.md`. Housed
+//! See `docs/design/2026-07-07-distillation-output-restore.md`. Housed
 //! under `bin/` (NOT a permanent `sb` subcommand), beside `bin/migrate-receipts`
 //! -- one-shot surgery does not earn a forever spot on the CLI surface.
 //!
@@ -34,7 +34,7 @@ use vault::schema::NoteType;
 pub const CUTOFF_RFC3339: &str = "2026-06-28T00:00:00Z";
 
 /// The section this sweep removes. Render always emits it last for
-/// Video/Article/Youtube publishes minted before Phase 3 of this design
+/// Video/Article/Youtube publishes minted before this design
 /// landed -- there is no "preserve the footer" case in the distilled shape,
 /// so strip-to-EOF is exact.
 const TRANSCRIPT_HEADING: &str = "## Transcript";
@@ -85,7 +85,7 @@ fn cutoff() -> DateTime<Utc> {
 
 /// Video+Article scope: [`NoteType::transcript_from_staging`] is the exact
 /// set (Youtube/Video/Article) whose transcript moved out of the note body in
-/// this design -- the same seam Phase 5's embed re-point keys on. Imported,
+/// this design -- the same seam the embed re-point keys on. Imported,
 /// never hardcoded, so this sweep can't drift from the schema.
 fn in_scope_kind(note: &Note) -> bool {
     note.frontmatter

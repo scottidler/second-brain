@@ -1,4 +1,4 @@
-//! Cross-encoder reranking - Phase 4 of the configurable-retrieval-pipeline
+//! Cross-encoder reranking - part of the configurable-retrieval-pipeline
 //! design (`docs/design/2026-06-06-configurable-retrieval-pipeline.md`).
 //!
 //! A cross-encoder scores a `(query, doc)` pair *jointly* (both texts in one

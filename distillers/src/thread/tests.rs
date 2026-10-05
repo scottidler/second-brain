@@ -371,7 +371,7 @@ async fn records_request_pattern_in_fake_history() {
     assert_eq!(calls[0].pattern, PATTERN);
 }
 
-// ---- Phase 6: map-reduce long path ----
+// ---- map-reduce long path ----
 
 /// A thread transcript above the long-path threshold (>48K chars) whose author
 /// handle sits at the very top (the thread head).

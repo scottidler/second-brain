@@ -1,6 +1,6 @@
 //! Numerical parity test for `CandleBertModel`.
 //!
-//! Phase 3 of `docs/design/2026-05-17-candle-embedding-backend.md`.
+//! From `docs/design/2026-05-17-candle-embedding-backend.md`.
 //!
 //! Asserts that our Candle-backed `bge-small-en-v1.5` produces vectors
 //! within cosine distance 1e-3 of the canonical PyTorch reference output

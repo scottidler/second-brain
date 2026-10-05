@@ -49,7 +49,7 @@ impl super::SearchIndex {
             for link in crate::wikilink::parse(body) {
                 if link.stem() == source_stem {
                     // Self-link (same stem as the source): no structural
-                    // signal. Stem equality is the pre-Phase-15 rule, kept.
+                    // signal. Stem equality is the older rule, kept.
                     continue;
                 }
                 for resolved in resolver.resolve(link.target) {
@@ -189,7 +189,7 @@ impl super::SearchIndex {
     }
 
     fn compute_schema_gaps(&self) -> Result<Vec<(String, u64)>> {
-        // `status` dropped (Phase 7, F5): optional per `status-values.md` and
+        // `status` dropped: optional per `status-values.md` and
         // `frontmatter.md`, so an empty `status` is not a gap. The other two
         // stay required raw-index counts for oracle's `vault_overview`; `tags`
         // joins them below.

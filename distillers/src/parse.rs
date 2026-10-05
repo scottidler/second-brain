@@ -1,6 +1,6 @@
 //! Shared parse helpers for the per-kind distillers: fence stripping (with the
 //! truncation bug fixed), token estimation, and the common `Pattern*` YAML leaf
-//! structs. Consolidated in Phase 9 from six near-identical copies.
+//! structs. Consolidated from six near-identical copies.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub fn approx_tokens(chars: usize) -> usize {
 /// LLM added one despite the prompt asking it not to. We do not repair
 /// otherwise-malformed YAML.
 ///
-/// FIX (Phase 9 consolidation): only strip a CLOSING fence when an OPENING
+/// FIX (consolidation): only strip a CLOSING fence when an OPENING
 /// fence was actually present. The previous six copies ran `rfind("```")`
 /// unconditionally, so any unfenced output containing an embedded code fence
 /// was silently truncated at that fence.
@@ -41,7 +41,7 @@ pub fn strip_fences(raw: &str) -> &str {
 }
 
 /// Tolerant deserialization of a distiller pattern's YAML output (harvest
-/// distill-parsing robustness, 2026-07-24).
+/// distill-parsing robustness).
 ///
 /// The model occasionally drifts into two observed shapes that `serde_yaml`
 /// (0.9, strict) refuses outright — a duplicate mapping key (verified to be
@@ -230,7 +230,7 @@ struct DedupeScope {
     seen: HashMap<String, (usize, ValueClass)>,
 }
 
-/// Indent-aware duplicate-key dedupe (mechanism (c) — chosen in Phase 0 after
+/// Indent-aware duplicate-key dedupe (mechanism (c) — chosen after
 /// verifying `serde_yaml` rejects duplicate keys even for the untyped `Value`,
 /// and adding a lenient YAML crate is out of scope).
 ///
@@ -447,8 +447,8 @@ fn mark_block_scalar_bodies(lines: &[String]) -> Vec<bool> {
 }
 
 /// The YAML leaf mirroring `vault::distilled::Claim` as a distiller pattern
-/// emits it. All Phase 3 fields are serde-defaulted, so a pattern that omits
-/// `kind` / `who` / `quote` (every pre-Phase-4 pattern) parses unchanged and
+/// emits it. All claim-kind fields are serde-defaulted, so a pattern that omits
+/// `kind` / `who` / `quote` (every older pattern) parses unchanged and
 /// the forward-compat `ClaimKind` shim absorbs any drifting `kind:` value.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PatternClaim {
@@ -485,7 +485,7 @@ pub struct PatternLink {
     pub label: Option<String>,
 }
 
-/// One enumerated item as a single-call / reduce pattern emits it (Phase 4).
+/// One enumerated item as a single-call / reduce pattern emits it.
 /// Mirrors `vault::distilled::EnumeratedItem`; every field past `name`/`text`
 /// is serde-defaulted so a pattern that omits `anchor` still parses.
 #[derive(Debug, Deserialize, Serialize)]
@@ -509,7 +509,7 @@ impl PatternEnumeratedItem {
     }
 }
 
-/// The `enumeration:` block a single-call / reduce pattern emits (Phase 4).
+/// The `enumeration:` block a single-call / reduce pattern emits.
 /// Mirrors `vault::distilled::Enumeration`. All fields serde-defaulted so a
 /// pattern that emits `enumeration: null` (the common, non-listicle case)
 /// parses to `None` at the `Option<PatternEnumeration>` site above it.
@@ -545,8 +545,8 @@ impl PatternEnumeration {
     }
 }
 
-/// One per-chunk enumeration candidate as a `distill-*-chunk` pattern emits it
-/// (Phase 4). A chunk reports the items IT saw; the reduce step merges
+/// One per-chunk enumeration candidate as a `distill-*-chunk` pattern emits it.
+/// A chunk reports the items IT saw; the reduce step merges
 /// candidates across chunks and decides whether they form a real enumeration.
 /// `ordinal` is the position number when the speaker states it (`#N`), `None`
 /// when the item is mentioned without a number (`#?`).
@@ -588,10 +588,10 @@ pub struct EnumCandidate {
 }
 
 /// The YAML shape of the map-reduce reduce step (video / voicenote long path):
-/// a re-synthesized summary over the per-chunk summaries plus (Phase 5) the
+/// a re-synthesized summary over the per-chunk summaries plus the
 /// claims the reduce pattern SELECTED from the pooled chunk claims. `claims`
 /// is serde-defaulted so a reduce pattern that emits only `summary` (the
-/// pre-Phase-5 shape) still parses; the distiller falls back to the
+/// legacy shape) still parses; the distiller falls back to the
 /// chronological chunk-claim merge in that case.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ReduceYaml {
@@ -599,20 +599,20 @@ pub struct ReduceYaml {
     pub summary: Option<String>,
     #[serde(default)]
     pub claims: Option<Vec<PatternClaim>>,
-    /// One-sentence hook (Phase 4). Serde-defaulted so a pre-Phase-4 reduce
+    /// One-sentence hook. Serde-defaulted so an older reduce
     /// pattern (summary + claims only) still parses.
     #[serde(default)]
     pub tldr: Option<String>,
     /// Content-derived kebab-case slug for the whole session, reduce path
-    /// (harvest-content-slug-naming, 2026-07-24). The reduce pass names the
+    /// (harvest-content-slug-naming). The reduce pass names the
     /// whole; serde-defaulted so a pre-slug reduce output still parses.
     #[serde(default)]
     pub slug: Option<String>,
     /// The merged enumeration the reduce step restored from the pooled chunk
-    /// candidates (Phase 4). `None` when the source is not a listicle.
+    /// candidates. `None` when the source is not a listicle.
     #[serde(default)]
     pub enumeration: Option<PatternEnumeration>,
-    /// Thematic key ideas synthesized across chunks (Phase 4).
+    /// Thematic key ideas synthesized across chunks.
     #[serde(default)]
     pub key_ideas: Option<Vec<String>>,
 }
@@ -622,11 +622,11 @@ pub struct ReduceYaml {
 /// pool and the candidate list are the reduce's ONLY permitted sources.
 ///
 /// - `## Chunk Summaries`: the per-chunk summaries, chronological, blank-line
-///   joined (Phase 5).
+///   joined.
 /// - `## Claim Pool`: every pooled chunk claim, one per line, prefixed with its
 ///   `[HH:MM:SS]` anchor when it carries one (voice-note / article claims carry
-///   none, so those lines are plain text) (Phase 5).
-/// - `## Enumeration Candidates` (Phase 4): every pooled chunk enumeration
+///   none, so those lines are plain text).
+/// - `## Enumeration Candidates`: every pooled chunk enumeration
 ///   candidate, one per line as `[HH:MM:SS] #N name - text` (the anchor bracket
 ///   omitted when the candidate has no anchor, `#?` when the speaker did not
 ///   number it), preceded by a `Declared count: N` line when any chunk saw a
@@ -654,7 +654,7 @@ pub fn build_reduce_input(
     input
 }
 
-/// Render the `## Enumeration Candidates` section body (Phase 4). Kept separate
+/// Render the `## Enumeration Candidates` section body. Kept separate
 /// so [`build_reduce_input`] and [`build_thread_reduce_input`] share one format
 /// and so the "section absent when empty" gate lives in exactly one place.
 fn build_enumeration_candidates_section(enum_candidates: &[EnumCandidate], declared_count: Option<u32>) -> String {
@@ -680,7 +680,7 @@ fn build_enumeration_candidates_section(enum_candidates: &[EnumCandidate], decla
     section
 }
 
-/// Apply the Phase 5 anchor-honesty rule to the claims the reduce pattern
+/// Apply the anchor-honesty rule to the claims the reduce pattern
 /// selected, resolving each against the pooled chunk claims.
 ///
 /// The rule tolerates paraphrase without permitting invention:
@@ -728,11 +728,11 @@ pub fn select_reduce_claims(
     if selected.is_empty() { None } else { Some(selected) }
 }
 
-/// Apply the anchor-honesty rule to the enumeration the reduce pattern restored
-/// (Phase 4), resolving each item's anchor against the pooled chunk CANDIDATE
+/// Apply the anchor-honesty rule to the enumeration the reduce pattern restored,
+/// resolving each item's anchor against the pooled chunk CANDIDATE
 /// anchors — the only positions a chunk actually observed in the transcript.
 ///
-/// Anchor-honesty rule (Phase 4 decision): an enumeration item's anchor is
+/// Anchor-honesty rule: an enumeration item's anchor is
 /// honest ONLY if it maps to a real transcript position. The candidate pool is
 /// exactly the set of transcript positions the chunks reported, so:
 /// - an item anchor present in the candidate pool is kept (normalized);
@@ -770,7 +770,7 @@ pub fn resolve_reduce_enumeration(
     Some(enumeration)
 }
 
-/// Thread long-path reduce input (Phase 6). Same two labeled sections as
+/// Thread long-path reduce input. Same two labeled sections as
 /// [`build_reduce_input`], PLUS a leading `## Thread Head` section carrying the
 /// verbatim transcript head. Thread metadata (the author handle and post
 /// structure) lives at the top of the rendered thread, so the thread reduce
@@ -785,7 +785,7 @@ pub fn build_thread_reduce_input(head: &str, chunk_summaries: &[String], pool_cl
     format!("## Thread Head\n\n{head}\n\n{base}")
 }
 
-/// Loud sub-threshold truncation signal (Phase 6). `vault::fabric::run_pattern`
+/// Loud sub-threshold truncation signal. `vault::fabric::run_pattern`
 /// calls `truncate_input`, which silently cuts the tail of any single-call
 /// distiller input longer than `max_chars`, logging only a daemon-log WARN with
 /// no trace id (the LLM-free vault crate has none in scope). A distiller
@@ -803,7 +803,7 @@ pub fn input_truncation_tag(char_count: usize, max_chars: usize) -> Option<Strin
 }
 
 /// Compose the single-call fabric input for a distiller, prepending the
-/// operator's capture note as a LABELED block when present (Phase 8).
+/// operator's capture note as a LABELED block when present.
 ///
 /// The capture note is trusted operator text (borg renders it verbatim
 /// in-note, NOT injection-guarded), but it still reaches the LLM inside an
@@ -911,29 +911,29 @@ pub struct PatternYaml {
     pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub links: Option<Vec<PatternLink>>,
-    /// One-sentence hook, single-call path (Phase 4). Serde-defaulted so every
-    /// pre-Phase-4 pattern output (no `tldr:` key) still parses unchanged.
+    /// One-sentence hook, single-call path. Serde-defaulted so every
+    /// older pattern output (no `tldr:` key) still parses unchanged.
     #[serde(default)]
     pub tldr: Option<String>,
-    /// Content-derived kebab-case slug (harvest-content-slug-naming, 2026-07-24).
+    /// Content-derived kebab-case slug (harvest-content-slug-naming).
     /// Only the `distill-session` pattern emits it today; serde-defaulted so
     /// every other pattern (no `slug:` key) parses unchanged.
     #[serde(default)]
     pub slug: Option<String>,
-    /// Detected enumeration, single-call path (Phase 4). `None`/absent for
+    /// Detected enumeration, single-call path. `None`/absent for
     /// non-listicle sources.
     #[serde(default)]
     pub enumeration: Option<PatternEnumeration>,
-    /// Thematic key ideas, single-call path (Phase 4).
+    /// Thematic key ideas, single-call path.
     #[serde(default)]
     pub key_ideas: Option<Vec<String>>,
-    /// The declared item count a CHUNK saw ("top 10 tools"), map step (Phase 4).
+    /// The declared item count a CHUNK saw ("top 10 tools"), map step.
     /// Distinct from `enumeration.declared_count`: a chunk reports a raw count
     /// sighting, the reduce step assembles the full `enumeration`. `None` when
     /// this chunk saw no declared count.
     #[serde(default)]
     pub declared_count: Option<u32>,
-    /// Per-chunk enumeration candidates, map step (Phase 4). The reduce step
+    /// Per-chunk enumeration candidates, map step. The reduce step
     /// pools these across chunks. Absent/empty for a single-call output or a
     /// chunk that enumerated nothing.
     #[serde(default)]

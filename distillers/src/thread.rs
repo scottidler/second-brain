@@ -5,7 +5,7 @@
 //! shared `chunk_transcript`/`find_boundary`: each chunk runs through
 //! `distill-thread-chunk` (attribution-aware, anchorless), and a single
 //! `distill-thread-reduce` call synthesizes the summary, SELECTS the final
-//! claims from the pool (Phase 5 mechanics), AND re-emits `author`/`post-count`.
+//! claims from the pool (the reduce mechanics), AND re-emits `author`/`post-count`.
 //! Those two fields live at the TOP of the rendered thread, so the reduce input
 //! prepends a verbatim `## Thread Head` section — the mechanism that keeps
 //! `KindPayload::Thread` fields alive through the long path (the single-call
@@ -482,7 +482,7 @@ fn thread_transcript(transcript: &str) -> Option<String> {
 
 /// Build the `KindPayload::Thread` from the inferred platform plus the
 /// LLM-extracted author and post count. Attaches even when `platform` is
-/// `"unknown"` so the payload's presence is itself a Phase 6 signal.
+/// `"unknown"` so the payload's presence is itself a signal.
 fn attach_platform(mut distilled: Distilled, platform: String, author: Option<String>, post_count: u32) -> Distilled {
     distilled.kind_specific = Some(KindPayload::Thread(ThreadPayload {
         author,

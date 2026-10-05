@@ -40,7 +40,7 @@ pub const CANDLE_MODEL_VERSION: &str = "bge-small-en-v1.5-candle";
 /// Embedding dimensionality of `BAAI/bge-small-en-v1.5`.
 pub const DIM: usize = 384;
 
-/// Phase 7b candidate: the larger 768-dim bge model. Same `BertModel`
+/// The larger 768-dim bge model. Same `BertModel`
 /// architecture as bge-small, so it rides the identical load + CLS-pool +
 /// forward path - only the weights and dim differ.
 pub const BGE_BASE_MODEL_VERSION: &str = "bge-base-en-v1.5-candle";

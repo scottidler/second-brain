@@ -105,7 +105,7 @@ fn test_scan_vault_finds_notes() {
     assert_eq!(notes.len(), 2);
 }
 
-/// Phase 1 determinism guard: parallel `scan_vault` must return notes sorted by path,
+/// Determinism guard: parallel `scan_vault` must return notes sorted by path,
 /// independent of parallel completion order. Build a vault with notes whose unsorted
 /// natural traversal order would differ from the sorted order, then assert the result is
 /// sorted.
@@ -165,7 +165,7 @@ fn scan_vault_default_config_excludes_quarantine_subdirs() {
     );
 }
 
-/// Phase 1 error-path guard: an unreadable `.md` file (non-UTF-8 bytes) is warn-logged and
+/// Error-path guard: an unreadable `.md` file (non-UTF-8 bytes) is warn-logged and
 /// skipped without aborting the whole scan; sibling notes still parse. This exercises the
 /// `parse_note` -> `fs::read_to_string` error branch, which is the only branch that returns
 /// `Err` in practice (frontmatter parsing is lenient by design).

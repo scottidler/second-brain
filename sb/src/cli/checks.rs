@@ -285,7 +285,7 @@ fn config_findings() -> Vec<Finding> {
         parse_typed::<oracle::Config>("oracle", &oracle_path),
     ];
 
-    // Surface unset vault.root-path values per Phase 1b. A missing root_path is
+    // Surface unset vault.root-path values. A missing root_path is
     // valid but every subsequent operation must fall back to --vault or the
     // marker-gated CWD - flag it so the user knows.
     if let Ok(cfg) = borg::config::load_config::<borg::config::Config>(None)
@@ -832,7 +832,7 @@ fn borg_findings() -> Vec<Finding> {
             "sb borg log --status failed (manual investigation)".to_string(),
         )),
     }
-    // Harvest drift guard (harvest-completion Phase 6): distinguishes "harvest
+    // Harvest drift guard (harvest-completion): distinguishes "harvest
     // has never run yet" (no warning - nothing installed/soaked) from "the
     // timer runs but a FUTURE clyde contract drift silently produced zero
     // session receipts for days" - the frozen CI fixtures can never catch a
@@ -1264,7 +1264,7 @@ fn sum_matching_files(dir: &Path, pred: impl Fn(&str) -> bool) -> u64 {
         .sum()
 }
 
-/// Telegram doctor section. Was missing pre-Phase 5 despite Telegram being
+/// Telegram doctor section. Was missing once despite Telegram being
 /// borg's daily driver; shipped alongside the Signal section so both
 /// transports report config + auth + host parity.
 fn telegram_findings() -> Vec<Finding> {
@@ -1330,7 +1330,7 @@ fn telegram_findings_for(tg: &TelegramConfig) -> Vec<Finding> {
             "set the env var (or file path) referenced by telegram.bot-token",
         )),
     }
-    // Empty allowlist is fail-closed (deny-all) as of the 2026-06-09
+    // Empty allowlist is fail-closed (deny-all) as of the allowlist
     // remediation. Warn so the operator knows ingest will reject every chat
     // rather than silently accepting everyone (the old fail-open behavior).
     if tg.allowed_chat_ids.is_empty() {

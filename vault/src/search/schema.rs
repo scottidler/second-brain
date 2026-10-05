@@ -118,8 +118,8 @@ impl super::SearchIndex {
     /// loss.
     #[cfg(feature = "vec")]
     fn ensure_vec_schema(&self) -> Result<()> {
-        // Fresh DBs get the widened CHECK immediately (`'claim'` included,
-        // Phase 9). Existing DBs created before Phase 9 keep the old
+        // Fresh DBs get the widened CHECK immediately (`'claim'` included).
+        // Existing DBs created before the claim kind keep the old
         // two-value CHECK here (CREATE TABLE IF NOT EXISTS is a no-op) and
         // are widened by `migrate_note_embeddings_add_claim_kind` below.
         self.conn.execute_batch(
@@ -139,7 +139,7 @@ impl super::SearchIndex {
             );",
         )?;
 
-        // SQLite cannot ALTER a CHECK constraint, so a pre-Phase-9 DB needs a
+        // SQLite cannot ALTER a CHECK constraint, so a DB created before the claim kind needs a
         // table rebuild to permit the `'claim'` kind. Run it before the index
         // creation below so the rebuilt table's indexes are (re)created here.
         self.migrate_note_embeddings_add_claim_kind()?;
@@ -155,7 +155,7 @@ impl super::SearchIndex {
             CREATE INDEX IF NOT EXISTS idx_note_embeddings_kind_model
                 ON note_embeddings(kind, model_version);
 
-            -- Phase 3 (docs/design/2026-07-05-cortex-daemon-oscillation-loop.md):
+            -- See docs/design/2026-07-05-cortex-daemon-oscillation-loop.md:
             -- the 'examined, nothing to embed' sentinel. A transcript-eligible
             -- note with no `## Transcript` section is scanned by cortex's embed
             -- loop, produces no `note_embeddings` row, and would therefore be
@@ -192,7 +192,7 @@ impl super::SearchIndex {
     }
 
     /// Widen the `note_embeddings.kind` CHECK constraint to include
-    /// `'claim'` (Phase 9 of
+    /// `'claim'` (see
     /// `docs/design/2026-07-05-distillation-knowledge-extraction.md`).
     ///
     /// SQLite cannot `ALTER` a CHECK, so this rebuilds the table preserving
@@ -324,7 +324,7 @@ impl super::SearchIndex {
 
         let distilled_columns = [
             ("claims", "TEXT DEFAULT ''"),
-            // Phase 9: the operator's capture annotation, populated by the
+            // The operator's capture annotation, populated by the
             // indexer from the `capture-note:` frontmatter, spliced into the
             // summary embedding text.
             ("capture_note", "TEXT DEFAULT ''"),
@@ -392,9 +392,9 @@ impl super::SearchIndex {
         Ok(())
     }
 
-    /// Add the `repo` column to existing DBs (harvest-clyde-sessions design,
-    /// Phase 9: the note's canonical `<org>/<repo>` anchor, feeding the repo
-    /// hub edge in Phase 10). Same idempotent `PRAGMA table_info` + single
+    /// Add the `repo` column to existing DBs (harvest-clyde-sessions design):
+    /// the note's canonical `<org>/<repo>` anchor, feeding the repo
+    /// hub edge. Same idempotent `PRAGMA table_info` + single
     /// `ALTER ADD COLUMN` pattern as `ensure_trace_columns`.
     fn ensure_repo_columns(&self) -> Result<()> {
         let mut stmt = self.conn.prepare("PRAGMA table_info(notes)")?;
@@ -411,9 +411,9 @@ impl super::SearchIndex {
         Ok(())
     }
 
-    /// Add the `repos_touched` column to existing DBs (harvest-completion design,
-    /// Phase 4: every repo a session touched, feeding the multi-repo-member hub
-    /// edge). Same idempotent `PRAGMA table_info` + single `ALTER ADD COLUMN`
+    /// Add the `repos_touched` column to existing DBs (harvest-completion design):
+    /// every repo a session touched, feeding the multi-repo-member hub
+    /// edge. Same idempotent `PRAGMA table_info` + single `ALTER ADD COLUMN`
     /// pattern as `ensure_repo_columns`.
     ///
     /// Deliberately NULLABLE with NO `DEFAULT`, unlike sibling `repo` (which
@@ -445,7 +445,7 @@ impl super::SearchIndex {
     }
 
     /// Add the `superseded_by` column to existing DBs (cortex association-sweep
-    /// design, Phase 3: the survivor-stem a soft-retired tombstone points at).
+    /// design: the survivor-stem a soft-retired tombstone points at).
     /// A non-empty value marks the row as a merge tombstone, which
     /// [`stale_embedding_targets`](super::SearchIndex::stale_embedding_targets)
     /// excludes from every embedding kind so a tombstone never lands an

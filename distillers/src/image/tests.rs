@@ -44,7 +44,7 @@ links:
     assert_eq!(distilled.links.len(), 1);
     assert_eq!(distilled.links[0].url, "https://example.com/post/1");
 
-    // Phase 9c-image: the raw Vision+OCR concat must round-trip verbatim into
+    // The raw Vision+OCR concat must round-trip verbatim into
     // `transcript` so the published note is a searchable archive.
     assert_eq!(distilled.transcript.as_deref(), Some(transcript));
 }
@@ -52,8 +52,8 @@ links:
 #[tokio::test]
 async fn fenced_yaml_response_is_stripped_and_parsed() {
     // Consumer-level fence-strip regression: the LLM wraps its YAML in a
-    // ```yaml fence despite the prompt. The shared `strip_fences` (Phase 9
-    // consolidation) must run inside the image distiller so the body still
+    // ```yaml fence despite the prompt. The shared `strip_fences`
+    // must run inside the image distiller so the body still
     // parses cleanly rather than landing in a yaml-parse-error fallback.
     let fake = FakeFabric::new();
     fake.set_response(
@@ -130,7 +130,7 @@ async fn malformed_yaml_falls_back_and_preserves_transcript() {
 
 #[tokio::test]
 async fn long_transcript_is_preserved_in_full() {
-    // 9c-image must not silently truncate Vision+OCR text. Phase 9c-hotfix's
+    // Image distilling must not silently truncate Vision+OCR text. The
     // contract: the transcript field is uncapped at the distiller level
     // even when the summary gets clipped by the global 2000-char cap.
     let fake = FakeFabric::new();

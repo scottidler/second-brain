@@ -1,6 +1,6 @@
-//! Phase 9 migration tests: the `note_embeddings` table rebuild that widens
+//! Migration tests: the `note_embeddings` table rebuild that widens
 //! the `kind` CHECK constraint to permit `'claim'`. The migration is the
-//! high-risk change in the phase (a deployed DB corruption is High impact),
+//! high-risk change in the claim-kind work (a deployed DB corruption is High impact),
 //! so these are hard gates: row-preservation is asserted byte-identical,
 //! idempotency is asserted, and the widened CHECK is proven by a `'claim'`
 //! insert succeeding after (and failing before) the rebuild.
@@ -25,7 +25,7 @@ struct Row {
     source_modified_at: i64,
 }
 
-/// The pre-Phase-9 `note_embeddings` schema: the CHECK permits only
+/// The older `note_embeddings` schema: the CHECK permits only
 /// `'summary'` and `'transcript-chunk'`. Deliberately hand-written (not the
 /// current `ensure_vec_schema`) so this test pins the exact legacy shape the
 /// migration must upgrade. A minimal `notes` parent table is created because
@@ -111,7 +111,7 @@ fn index_names(index: &SearchIndex) -> Vec<String> {
         .collect()
 }
 
-/// The full Phase-9 migration contract in one test: build a pre-Phase-9 DB
+/// The full claim-kind migration contract in one test: build a DB that predates it
 /// with existing summary + transcript rows, then assert every panel
 /// condition.
 #[test]
@@ -247,7 +247,7 @@ fn migration_no_ops_on_fresh_schema() {
     assert_eq!(index.count_embeddings(Some(EmbeddingKind::Claim)).expect("count"), 1);
 }
 
-/// Phase 3 (docs/design/2026-07-05-cortex-daemon-oscillation-loop.md): the
+/// (docs/design/2026-07-05-cortex-daemon-oscillation-loop.md): the
 /// `embedding_examined` sentinel side table is created by `ensure_vec_schema`
 /// on a fresh DB, and re-running the idempotent schema-ensure path over an
 /// existing DB is a no-op (the `CREATE TABLE IF NOT EXISTS` cannot half-apply,
@@ -278,7 +278,7 @@ fn embedding_examined_table_created_and_schema_ensure_is_idempotent() {
     assert_eq!(still, 1, "re-ensure must leave exactly one embedding_examined table");
 }
 
-/// Phase 4 (harvest-completion): the `repos_touched` column migration. A DB
+/// (harvest-completion): the `repos_touched` column migration. A DB
 /// whose `notes` table predates the column gains it via `ensure_schema` without
 /// losing rows, existing rows read back as SQL NULL (== `None` == "touched set
 /// unknowable", NOT `'[]'`), and re-ensuring is a no-op. Mirrors the crate's
@@ -286,7 +286,7 @@ fn embedding_examined_table_created_and_schema_ensure_is_idempotent() {
 #[test]
 fn repos_touched_column_migration_adds_column_preserves_rows_and_is_idempotent() {
     let conn = Connection::open_in_memory().expect("open");
-    // A pre-Phase-4 `notes` table: no `repos_touched` column, one existing row.
+    // A older `notes` table: no `repos_touched` column, one existing row.
     conn.execute_batch(
         "CREATE TABLE notes (path TEXT PRIMARY KEY, title TEXT, repo TEXT DEFAULT '');
          INSERT INTO notes (path, title, repo) VALUES ('notes/old.md', 'legacy', 'scottidler/loopr');",

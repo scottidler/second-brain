@@ -604,7 +604,7 @@ impl OracleMcpServer {
     /// Query the borg receipts log for failure history.
     ///
     /// Counterpart to `ingest_history`: that tool reads `borg-ledger.md`
-    /// (success-only after Phase 4 of the receipts-log refactor); this tool
+    /// (success-only since the receipts-log refactor); this tool
     /// reads the SQLite receipts DB and surfaces failures with their
     /// `failure_stage` taxonomy. Opens the DB read-only.
     #[tool(

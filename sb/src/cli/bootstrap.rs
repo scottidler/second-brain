@@ -390,8 +390,8 @@ async fn register_systemd_units() -> Result<()> {
         println!("{line}");
     }
 
-    // The nightly harvest timer (design doc 2026-07-20 harvest-completion,
-    // Phase 5): unit-writing is scoped to `sb bootstrap` ONLY, never
+    // The nightly harvest timer (design doc 2026-07-20 harvest-completion):
+    // unit-writing is scoped to `sb bootstrap` ONLY, never
     // `otto deploy` (which stays restart-only). Re-loaded rather than reused
     // because `borg_config` above was already consumed by-value by
     // `borg::daemon(borg_config, ...)`.

@@ -170,14 +170,14 @@ impl super::SearchIndex {
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Phase 9: the operator's capture annotation (rendered as
-        // `capture-note:` frontmatter by Phase 8). Not a known Frontmatter
+        // The operator's capture annotation (rendered as
+        // `capture-note:` frontmatter by cortex). Not a known Frontmatter
         // field, so it lands in `extra`; persisted here so the summary embed
         // path can splice it into the embed text (title + capture-note +
         // summary) without any file I/O.
         let capture_note = extract_cortex_string(&fm.extra, "capture-note");
 
-        // The merge tombstone marker (cortex association-sweep Phase 3): the
+        // The merge tombstone marker (cortex association-sweep): the
         // survivor-stem a soft-retired note redirects to. Non-empty => this row
         // is a tombstone and `stale_embedding_targets` excludes it from every
         // embedding kind. Vault-derived (cortex writes it in frontmatter), so it
@@ -240,17 +240,17 @@ impl super::SearchIndex {
         let trace = fm.trace.as_deref().unwrap_or("");
         let ingested = fm.ingested.as_deref().unwrap_or("");
         let trace_expires = fm.trace_expires.as_deref().unwrap_or("");
-        // Canonical `<org>/<repo>` anchor (harvest-clyde-sessions Phase 9);
+        // Canonical `<org>/<repo>` anchor (harvest-clyde-sessions);
         // present-null/absent -> "" (no repo hub edge). Stored verbatim.
         let repo = fm.repo.as_deref().unwrap_or("");
-        // Every repo the session touched (harvest-completion Phase 4). The
+        // Every repo the session touched (harvest-completion). The
         // frontmatter field is THREE-STATE and the distinction is load-bearing,
         // so it is NOT flattened here: `None` -> SQL NULL (touched set
         // unknowable); `Some(vec![])` -> `'[]'` (definitively touched nothing);
         // `Some(xs)` -> the JSON array. The multi-repo-member edge is driven off
         // the populated case; NULL and `'[]'` both mean "no bridge", but they
         // are stored distinctly so the semantic three-state survives the round
-        // trip (Phase 7 backfill and future consumers depend on it).
+        // trip (the bridge backfill and future consumers depend on it).
         let repos_touched: Option<String> = fm
             .repos_touched
             .as_ref()

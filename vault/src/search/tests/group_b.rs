@@ -871,7 +871,7 @@ fn vec_schema_kind_check_constraint_rejects_unknown_kind() {
 #[test]
 fn vec_schema_unique_constraint_replaces_on_upsert_intent() {
     // The UNIQUE (note_path, kind, chunk_index, model_version) is the
-    // upsert key used by Phase A5's re-embed loop. Direct INSERT must
+    // upsert key used by the re-embed loop. Direct INSERT must
     // fail on the second attempt, and INSERT OR REPLACE must succeed.
     let index = SearchIndex::open_memory().expect("open");
     index
@@ -1152,7 +1152,7 @@ fn cortex_upsert_after_stale_flag_replaces_old_row_atomically() {
     );
 }
 
-// --- Phase 8: tags siblings in stats.rs -------------------------------------
+// --- tags siblings in stats.rs -------------------------------------
 
 /// Build a fully-populated `Note` for the P8 tags-sibling tests below:
 /// creator, source, tags, and (when `classified`) the `cortex-*` extra keys

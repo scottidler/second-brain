@@ -93,7 +93,7 @@ fn link_scan_defaults_to_all() {
     assert_eq!(parsed.link.scan, cortex::opts::ScanScope::All);
 }
 
-// --- entity-hub-two-vector-synthesis Phase 3: --asymmetry CLI wiring ------
+// --- entity-hub-two-vector-synthesis: --asymmetry CLI wiring ------
 
 #[test]
 fn hub_args_default_to_no_flags() {

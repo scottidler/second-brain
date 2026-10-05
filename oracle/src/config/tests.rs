@@ -1,6 +1,6 @@
 //! Config-load tests for the `retrieval:` pipeline section.
 //!
-//! Covers the three Phase 1 cases from
+//! Covers the three cases from
 //! `docs/design/2026-06-06-configurable-retrieval-pipeline.md`:
 //! an empty config loads to the eval-best default; a fully specified
 //! `retrieval:` block round-trips; unknown keys error.

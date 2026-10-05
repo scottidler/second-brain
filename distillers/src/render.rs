@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use vault::distilled::{Claim, ClaimKind, Distilled, Enumeration, KindPayload, SessionPayload};
 
 /// Caller policy for [`render`]. Transcript emission is the caller's decision,
-/// not a global kind rule (2026-07-07 distillation-output-restore): borg
+/// not a global kind rule (distillation-output-restore): borg
 /// publish suppresses `## Transcript` for Video/Article/Repo (the staged
 /// `distilled.yml` keeps the verbatim text and cortex embeds it from staging),
 /// while the verbatim-preservation kinds (VoiceNote/Idea/Vocabulary/Image/
@@ -80,7 +80,7 @@ pub fn render(distilled: &Distilled, options: RenderOptions) -> RenderedDistille
     push_key_ideas(&mut body, &distilled.key_ideas);
     push_claims(&mut body, &distilled.claims);
     push_links(&mut body, &distilled.links);
-    // Session body footer (harvest-clyde-sessions Phase 4): list the member
+    // Session body footer (harvest-clyde-sessions): list the member
     // sessions as `clyde://` back-pointers so `clyde session resume` recovers
     // full fidelity (the conductor-validated back-pointer, vault-native).
     if let Some(KindPayload::Session(p)) = &distilled.kind_specific {
@@ -171,9 +171,9 @@ pub fn render(distilled: &Distilled, options: RenderOptions) -> RenderedDistille
                 );
             }
         }
-        // Bare schema seam for Phase 1 (harvest-clyde-sessions); the
+        // Bare schema seam (harvest-clyde-sessions); the
         // session-specific body footer (member sessions, thread membership)
-        // is Phase 4's `render()` extension, not this frontmatter tagging arm.
+        // is the `render()` extension, not this frontmatter tagging arm.
         Some(KindPayload::Session(p)) => {
             if p.msg_count > 0 {
                 fm.insert(
@@ -294,7 +294,7 @@ fn push_claims(body: &mut String, claims: &[Claim]) {
         body.push_str("- ");
         // Decoration prefix: `**kind**` (omitted for `fact`, the default, so a
         // legacy fact claim with no who/quote renders byte-identically to the
-        // pre-Phase-3 shape) and `(who)` (omitted when absent), joined by a
+        // legacy shape) and `(who)` (omitted when absent), joined by a
         // space and terminated by `: ` before the claim text.
         let kind_part = (claim.kind != ClaimKind::Fact).then(|| format!("**{}**", claim.kind.as_str()));
         let who_part = claim
@@ -357,7 +357,7 @@ fn push_transcript(body: &mut String, transcript: Option<&str>) {
 /// Render the `## Sessions` footer for a harvested session note: a lead line
 /// carrying the repo anchor + message count + date range, then one `clyde://`
 /// back-pointer per member session. Per-session title/duration are NOT in the
-/// frozen `SessionPayload` (Phase 1) - borg's publish layer, which holds the
+/// frozen `SessionPayload` - borg's publish layer, which holds the
 /// full clustered `SessionRecord`s, is the seam for a richer footer; this keeps
 /// the renderer faithful to the typed payload it is handed. Omitted entirely
 /// when the payload carries no session ids (nothing to link).

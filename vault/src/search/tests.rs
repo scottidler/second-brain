@@ -151,8 +151,8 @@ fn make_typed_dated_note(path: &str, date: &str, note_type: &str, body: &str) ->
     }
 }
 
-/// Test-local encoder. The production encoder/decoder land in Phase A3
-/// alongside `search_vector` which calls them on every row.
+/// Test-local encoder. The production encoder/decoder live in
+/// `search_vector`, which calls them on every row.
 #[cfg(feature = "vec")]
 fn encode_le_f32(vector: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(vector.len() * 4);
@@ -162,7 +162,7 @@ fn encode_le_f32(vector: &[f32]) -> Vec<u8> {
     out
 }
 
-/// Test-local validator. Phase A3's `search_vector` will run the same
+/// Test-local validator. `search_vector` runs the same
 /// check (length == dim * 4) before its inner dot-product loop.
 #[cfg(feature = "vec")]
 fn validate_le_f32_len(bytes: &[u8], dim: usize) -> eyre::Result<()> {
@@ -179,7 +179,7 @@ fn validate_le_f32_len(bytes: &[u8], dim: usize) -> eyre::Result<()> {
 
 #[test]
 fn repo_round_trips_through_index_to_graph_note_row() {
-    // Phase 9 end-to-end: repo: frontmatter -> upsert bind -> notes.repo
+    // End-to-end: repo: frontmatter -> upsert bind -> notes.repo
     // column -> GraphNoteRow.repo, verbatim.
     use crate::frontmatter::Frontmatter;
     use std::path::PathBuf;
@@ -205,7 +205,7 @@ fn repo_round_trips_through_index_to_graph_note_row() {
     );
 }
 
-/// Phase 4: `repos-touched` frontmatter -> upsert bind -> `notes.repos_touched`
+/// `repos-touched` frontmatter -> upsert bind -> `notes.repos_touched`
 /// column -> `GraphNoteRow.repos_touched`, exercising the THREE-STATE
 /// distinction byte-for-byte. The DB column stores `None` as SQL NULL,
 /// `Some(vec![])` as `'[]'`, and `Some(xs)` as the JSON array; the edge-facing
@@ -280,7 +280,7 @@ fn repos_touched_round_trips_through_index_to_graph_note_row_three_state() {
     );
 }
 
-// ---- Phase 5: the tags facet ----
+// ---- the tags facet ----
 
 fn tagged_note(path: &str, tags: &[&str]) -> Note {
     use crate::frontmatter::Frontmatter;

@@ -287,10 +287,10 @@ meta:
     assert_eq!(decoded.meta.model, "timeout");
 }
 
-// ---- Phase 3: Claim schema back/forward compatibility ---------------------
+// ---- Claim schema back/forward compatibility ---------------------
 
 /// Old-shape claim: no `kind` / `who` / `quote` field, exactly as every
-/// pre-Phase-3 staged `distilled.yml` and `cortex summarize --backfill` input
+/// older staged `distilled.yml` and `cortex summarize --backfill` input
 /// looks. Must deserialize to `kind=fact, who=None, quote=None`.
 const FIXTURE_OLD_SHAPE: &str = r#"
 summary: "A pre-Phase-3 article."
@@ -304,7 +304,7 @@ meta:
   produced-at: "2026-05-16T14:03:22Z"
 "#;
 
-/// New-shape claim: all Phase 3 fields present.
+/// New-shape claim: all claim-kind fields present.
 const FIXTURE_NEW_SHAPE: &str = r#"
 summary: "A Phase-3 article with rich claims."
 claims:

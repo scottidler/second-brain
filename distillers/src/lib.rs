@@ -65,7 +65,7 @@ pub struct DistillInputs<'a> {
     /// (`duration_seconds`) and `Distilled.kind_specific`; other distillers
     /// ignore it.
     pub video_metadata: Option<&'a VideoMetadata>,
-    /// Operator capture note (Phase 8): the user's own annotation about why
+    /// Operator capture note: the user's own annotation about why
     /// they captured this source. Made available to the single-call pattern as
     /// a LABELED block (see `compose_capture_input`) so it can serve as context.
     /// It is the operator's trusted text - rendered verbatim in-note by borg -

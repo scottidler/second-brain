@@ -11,7 +11,7 @@
 //! reduced via a single `distill-voicenote-reduce` call into the final
 //! summary.
 //!
-//! Phase 9c-voicenote contract: `Distilled.transcript` always carries the
+//! Contract: `Distilled.transcript` always carries the
 //! full raw Groq output so the published vault note is a verbatim archive
 //! even after the LLM-distilled summary collapses the original. This is the
 //! sole structural difference vs. URL kinds (which leave transcript as None).
@@ -93,7 +93,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for VoiceNoteDistiller<F> {
             inputs.title_hint
         );
 
-        // The chunk count drives the size-aware claim budget (Phase 5). The
+        // The chunk count drives the size-aware claim budget. The
         // single-call path is chunk_count = 1 (cap 10); the map-reduce path
         // computes the chunks once here and hands them to distill_long so the
         // real count scales the budget instead of the flat max_claims(1).
@@ -110,7 +110,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for VoiceNoteDistiller<F> {
         // Distilled with transcript = None and we override here.
         distilled.transcript = Some(transcript.to_string());
 
-        // Phase 5: the real chunk count scales the claim budget so a long
+        // The real chunk count scales the claim budget so a long
         // voice note keeps proportionally more selected claims (single-call
         // path passes chunk_count = 1, holding the cap at 10 as before).
         let mut bounded = enforce_bounds(distilled, max_claims(chunk_count));
@@ -271,7 +271,7 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
             ));
         }
 
-        // Reduce step (Phase 5): the reduce pattern re-synthesizes the summary
+        // Reduce step: the reduce pattern re-synthesizes the summary
         // AND SELECTS the final claims from the pooled chunk claims, spanning
         // the whole recording. `combined_claims` is both the selection pool
         // and the chronological fallback used when selection fails — that
@@ -326,7 +326,7 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
 
         let mut validation = ValidationMeta::default();
         // reduce-selection-failed takes precedence over partial-chunk-failure:
-        // reintroduced head-bias is the signal this phase exists to surface.
+        // reintroduced head-bias is the signal this check exists to surface.
         if reduce_selection_failed {
             validation.fallback_reason = Some("reduce-selection-failed".to_string());
         } else if any_chunk_failed {

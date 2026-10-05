@@ -21,14 +21,14 @@ Per-kind Stage-2 processors that take a Stage-1 transcript (markitdown / VTT / t
 - **links** — outbound URLs discovered in source (distinct from the source URL).
 - **kind_specific** — `Option<KindPayload>`: `RepoPayload` (stars/language/last_commit/topics/install), `VideoPayload` (channel/duration/published_at), `ThreadPayload` (author/post_count/platform).
 - **meta** — `DistilledMeta` (extractor id, model, tokens, produced_at, validation).
-- **transcript** — `Option<String>`; set for Image/VoiceNote/Idea/Vocabulary (the note is the only persistent source) AND, as of Phase B2, for Video/Thread (the transcript powers chunked semantic recall — regression-guarded, do NOT revert). Article/Repo leave it `None` (the fetched markdown / origin URL is the archive).
+- **transcript** — `Option<String>`; set for Image/VoiceNote/Idea/Vocabulary (the note is the only persistent source) AND, for Video/Thread (the transcript powers chunked semantic recall — regression-guarded, do NOT revert). Article/Repo leave it `None` (the fetched markdown / origin URL is the archive).
 
 ## Contracts & Invariants
 
 - **`Dispatch` is object-safe** (`dyn Dispatch`) so test setups can hold `&dyn Dispatch`.
 - **Extractor ids are stable + versioned** (e.g. `distill-idea-v2`) for forensics/replay.
 - **Bounds enforced post-distill:** `validate::enforce_bounds` caps `MAX_SUMMARY_CHARS` (2000); records truncations in validation meta.
-- **Transcript: set for Image/VoiceNote/Idea/Vocabulary + Video/Thread (Phase B2); `None` for Article/Repo.**
+- **Transcript: set for Image/VoiceNote/Idea/Vocabulary + Video/Thread; `None` for Article/Repo.**
 - **Fabric calls respect `max_chars` + `timeout_secs`**, falling back to passthrough on timeout/error.
 
 ## Rendering
@@ -45,7 +45,7 @@ Per-kind Stage-2 processors that take a Stage-1 transcript (markitdown / VTT / t
 
 - Don't serialize `Distilled` straight to the vault — go through `render()`.
 - Don't drop validation meta (`fallback_reason`, bounds truncations) — it's load-bearing for forensics.
-- Don't set `transcript` for Article/Repo (their fetched source is the archive). Video/Thread DO set it (Phase B2, chunked recall).
+- Don't set `transcript` for Article/Repo (their fetched source is the archive). Video/Thread DO set it (chunked recall).
 
 ## Module Map
 

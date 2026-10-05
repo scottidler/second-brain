@@ -201,7 +201,7 @@ fn test_filter_rejected_tags_excluded() {
     assert_eq!(result, vec!["rust"]);
 }
 
-// ---- no-segment-match guard (Phase 1) ----
+// ---- no-segment-match guard ----
 
 #[test]
 fn segment_match_skips_no_segment_tags_in_both_matchers() {

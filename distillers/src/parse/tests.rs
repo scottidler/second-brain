@@ -321,7 +321,7 @@ fn resolve_reduce_enumeration_keeps_candidate_matching_anchor() {
 
 #[test]
 fn resolve_reduce_enumeration_strips_anchor_absent_from_candidates() {
-    // The Phase 0 concern: a description-lifted timestamp not present in any
+    // The concern: a description-lifted timestamp not present in any
     // chunk candidate is dishonest — stripped and counted, item text retained.
     let candidates = vec![enum_candidate("A", "a", Some("00:01:00"), Some(1))];
     let parsed = PatternEnumeration {
@@ -397,7 +397,7 @@ fn pattern_enumeration_into_enumeration_filters_empty_named_items() {
 
 #[test]
 fn pattern_yaml_without_new_phase4_keys_still_parses() {
-    // Fallback safety: pre-Phase-4 pattern output (no tldr/enumeration/
+    // Fallback safety: older pattern output (no tldr/enumeration/
     // key-ideas/declared-count/enumeration-candidates keys) must still
     // deserialize, with the new fields defaulting to None.
     let raw = "summary: \"A summary.\"\nclaims:\n  - text: \"A claim.\"\ntags: [rust]\nlinks: []\n";
@@ -412,7 +412,7 @@ fn pattern_yaml_without_new_phase4_keys_still_parses() {
 
 #[test]
 fn reduce_yaml_without_new_phase4_keys_still_parses() {
-    // Fallback safety for the reduce leaf: a pre-Phase-4 reduce output
+    // Fallback safety for the reduce leaf: an older reduce output
     // (summary + claims only) parses with the new fields defaulted.
     let raw = "summary: \"Reduced.\"\nclaims:\n  - text: \"A claim.\"\n    anchor: \"00:00:05\"\n";
     let parsed: ReduceYaml = serde_yaml::from_str(raw).expect("legacy reduce output parses");
@@ -454,7 +454,7 @@ fn input_truncation_tag_fires_only_over_limit() {
 }
 
 // ---------------------------------------------------------------------------
-// Tolerant parse (harvest distill-parsing robustness, 2026-07-24)
+// Tolerant parse (harvest distill-parsing robustness)
 // ---------------------------------------------------------------------------
 
 /// Verbatim staged model output whose first claim carries `quote: "<real>"`

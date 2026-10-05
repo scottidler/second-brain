@@ -1,4 +1,4 @@
-//! Claude Code session distiller (harvest-clyde-sessions design, Phase 4).
+//! Claude Code session distiller (harvest-clyde-sessions design).
 //!
 //! Input is the concatenated, role-labeled transcript of a harvested thread
 //! (1+ clyde sessions sharing a `(cwd, git-branch)` cluster). Unlike the
@@ -63,7 +63,7 @@ const PATTERN_CHUNK: &str = "distill-session-chunk";
 const PATTERN_REDUCE: &str = "distill-session-reduce";
 
 /// The explicit marker the assembled prompt carries when the transcript the
-/// model sees is not the whole thing (design doc Phase 4: "truncation is never
+/// model sees is not the whole thing (design doc: "truncation is never
 /// silent to the model").
 pub const TRUNCATION_MARKER: &str = "[TRANSCRIPT TRUNCATED]";
 
@@ -102,7 +102,7 @@ pub struct SessionMetadata {
 
 /// Tunables for the session distiller. `token_cap` is the head+tail windowing
 /// budget (design doc: `harvest.token-cap`); `model` inherits `llm.model` when
-/// empty, resolved by borg at construction (Phase 5).
+/// empty, resolved by borg at construction.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     pub model: String,
@@ -112,7 +112,7 @@ pub struct SessionConfig {
     /// `harvest.token-cap`, default 12000).
     pub token_cap: usize,
     /// Bounded per-chunk retries on the map-reduce path (harvest
-    /// distill-parsing robustness, 2026-07-24). A sub-chunk whose fabric call
+    /// distill-parsing robustness). A sub-chunk whose fabric call
     /// errors OR whose YAML fails to parse is retried up to this many times
     /// before it counts toward `partial-chunk-failure`. `distillers` is
     /// config-free: borg populates this from `DistillConfig.chunk_retries` via
@@ -465,7 +465,7 @@ enum ChunkOutcome {
 }
 
 /// Distill ONE sub-chunk with a bounded retry (harvest distill-parsing
-/// robustness, 2026-07-24). A chunk whose fabric call errors OR whose YAML
+/// robustness). A chunk whose fabric call errors OR whose YAML
 /// fails `parse_pattern_yaml` is retried up to `chunk_retries` times
 /// (`chunk_retries + 1` total attempts). The retry re-issues ONLY after the
 /// prior attempt's awaited `fabric.call` has fully returned — this loop is

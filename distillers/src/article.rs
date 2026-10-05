@@ -5,7 +5,7 @@
 //! into ~8K-token chunks via the shared `chunk_transcript`/`find_boundary`;
 //! each chunk runs through `distill-article-chunk` in parallel, and a single
 //! `distill-article-reduce` call synthesizes the final summary AND SELECTS the
-//! final claims from the pooled chunk claims (Phase 5's reduce mechanics,
+//! final claims from the pooled chunk claims (the reduce mechanics
 //! reused). Articles carry no timestamp anchors, so the claim pool is
 //! anchorless and the anchor-honesty rule degrades to "accept every selected
 //! claim as a synthesis" (no invention gate to trip). The pattern is the
@@ -114,7 +114,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
 
         let mut bounded = enforce_bounds(distilled, max_claims(chunk_count));
         debug_assert!(bounded.summary.chars().count() <= MAX_SUMMARY_CHARS);
-        // Enumeration shortfall (Resolved Decision 2026-07-07): publishes
+        // Enumeration shortfall (distillation-output-restore Resolved Decision): publishes
         // degraded, never blocks. Flagged post-enforce_bounds so the item-count
         // cap cannot fabricate a false shortfall.
         mark_enumeration_shortfall(&mut bounded);
@@ -220,7 +220,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
         let input_tokens = approx_tokens(transcript.len()) as u32;
         let output_tokens = approx_tokens(raw.len()) as u32;
 
-        // Phase 4: single-call enumeration/tldr/key-ideas off the parsed output.
+        // Single-call enumeration/tldr/key-ideas off the parsed output.
         // Articles carry no timestamps, so any anchor the model emits on an item
         // is not a real position; strip it (the article prompt sets it null).
         let tldr = parsed.tldr.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
@@ -258,7 +258,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
                 produced_at: Utc::now().to_rfc3339(),
                 validation: ValidationMeta::default(),
             },
-            // Phase 7: articles are the lossiest kind past the 60-day staging
+            // Articles are the lossiest kind past the 60-day staging
             // retention (an 8K-word essay collapsing to a ≤2000-char summary +
             // a URL that may rot). Keep the fetched markdown verbatim in-note
             // under `## Transcript`, mirroring video/voicenote/thread; this
@@ -322,7 +322,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
         let mut combined_claims: Vec<Claim> = Vec::new();
         let mut combined_links: Vec<Link> = Vec::new();
         let mut combined_tags: Vec<String> = Vec::new();
-        // Phase 4: pool enumeration candidates for the reduce step (an
+        // Pool enumeration candidates for the reduce step (an
         // awesome-list article is a listicle too). Articles carry no anchors, so
         // candidate anchors are null.
         let mut combined_candidates: Vec<EnumCandidate> = Vec::new();
@@ -375,7 +375,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty()),
             );
-            // Phase 4: pool enumeration candidates + adopt the first declared count.
+            // Pool enumeration candidates + adopt the first declared count.
             if declared_count.is_none() {
                 declared_count = parsed.declared_count;
             }
@@ -463,7 +463,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
 
         let mut validation = ValidationMeta::default();
         // reduce-selection-failed takes precedence over partial-chunk-failure:
-        // reintroduced head-bias is the signal this phase exists to surface.
+        // reintroduced head-bias is the signal this check exists to surface.
         if reduce_selection_failed {
             validation.fallback_reason = Some("reduce-selection-failed".to_string());
         } else if any_chunk_failed {
@@ -494,7 +494,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
                 produced_at: Utc::now().to_rfc3339(),
                 validation,
             },
-            // Phase 7: long articles keep their full fetched markdown in-note
+            // Long articles keep their full fetched markdown in-note
             // too (both paths share this behavior), so a chunked essay is just
             // as durable as a short one past staging retention.
             transcript: article_transcript(transcript),
@@ -528,7 +528,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
 }
 
 /// The verbatim fetched article markdown to persist in-note under
-/// `## Transcript` (Phase 7). Mirrors `thread::thread_transcript`: `None` for
+/// `## Transcript`. Mirrors `thread::thread_transcript`: `None` for
 /// an empty/whitespace-only input so the renderer emits no empty section;
 /// otherwise the full fetched markdown. `render::push_transcript` demotes any
 /// embedded headings so nav junk / H1s in the fetched markdown stay
@@ -537,7 +537,7 @@ fn article_transcript(transcript: &str) -> Option<String> {
     if transcript.trim().is_empty() { None } else { Some(transcript.to_string()) }
 }
 
-/// Strip every enumerated-item anchor (Phase 4 anchor-honesty rule for the
+/// Strip every enumerated-item anchor (anchor-honesty rule for the
 /// single-call article path). Articles carry no timestamps or positional
 /// anchors, so any anchor the model attaches to an item is not a real source
 /// position; drop it rather than render a fabricated `[anchor]`. The long path

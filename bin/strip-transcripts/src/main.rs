@@ -7,7 +7,7 @@ use eyre::{Context, Result};
 use strip_transcripts::{Disposition, ensure_clean_worktree, run};
 
 /// One-shot backfill: strip `## Transcript`-to-EOF from Video/Article notes
-/// ingested on or after 2026-06-28. Phase 6 of
+/// ingested on or after 2026-06-28. See
 /// docs/design/2026-07-07-distillation-output-restore.md. NOT a permanent
 /// `sb` subcommand -- one-shot surgery does not earn a forever spot on the
 /// CLI surface. Run this ONCE, on the daemon host, with the borg daemon

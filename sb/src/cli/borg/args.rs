@@ -146,7 +146,7 @@ pub enum Command {
     /// publishes to the inbox through the normal borg pipeline.
     Harvest(HarvestCliArgs),
     /// Retire the surplus harvest-session-note forks a trace produced before
-    /// the trace-keyed-replace fix (design 2026-08-15, Phase 6). Groups by
+    /// the trace-keyed-replace fix (design 2026-08-15). Groups by
     /// `trace:`, tombstones every loser (never deletes), and backfills
     /// `harvest-body-hash:` where staging survives. Dry-run by default.
     DedupeSessions {

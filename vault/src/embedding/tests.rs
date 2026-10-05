@@ -76,7 +76,7 @@ fn embed_query_rejects_unknown_model_version() {
     );
 }
 
-// --- Phase B1: chunker ------------------------------------------------
+// --- chunker ------------------------------------------------
 
 #[test]
 fn chunk_transcript_returns_empty_for_empty_input() {

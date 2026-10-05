@@ -1,7 +1,7 @@
 use super::*;
 use vault::distilled::{Claim, EnumeratedItem, Enumeration, Link};
 
-/// Build a minimal Distilled carrying an enumeration for the Phase 4 bounds /
+/// Build a minimal Distilled carrying an enumeration for the enumeration bounds /
 /// shortfall tests.
 fn with_enumeration(declared_count: Option<u32>, item_count: usize) -> Distilled {
     let items = (0..item_count)
