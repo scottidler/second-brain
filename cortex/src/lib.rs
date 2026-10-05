@@ -35,6 +35,7 @@ pub mod stopwords;
 pub mod summarize;
 pub mod sweep;
 pub mod tags;
+#[cfg(test)]
 pub mod testutil;
 pub mod unlink;
 pub mod vault;

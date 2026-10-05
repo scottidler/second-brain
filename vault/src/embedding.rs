@@ -296,6 +296,7 @@ pub fn chunk_transcript(text: &str, max_tokens: usize, overlap_tokens: usize) ->
     chunks
 }
 
+#[cfg(any(test, feature = "test-util"))]
 /// Deterministic test embedder.
 ///
 /// Produces vectors derived from a 64-bit hash of the input text. The
@@ -311,6 +312,7 @@ pub struct MockEmbedder {
     model_version: String,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl MockEmbedder {
     /// Build a mock embedder with the given dimension and version label.
     pub fn new(dim: usize, model_version: impl Into<String>) -> Self {
@@ -326,6 +328,7 @@ impl MockEmbedder {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl EmbeddingModel for MockEmbedder {
     fn dim(&self) -> usize {
         self.dim
@@ -352,6 +355,7 @@ impl EmbeddingModel for MockEmbedder {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 /// 64-bit FNV-1a hash. Stable across releases of Rust because it has no
 /// dependency on the standard library's hashing implementation. Used by
 /// [`MockEmbedder`] to derive deterministic seeds from input text.
@@ -364,6 +368,7 @@ fn hash64(text: &str) -> u64 {
     h
 }
 
+#[cfg(any(test, feature = "test-util"))]
 /// L2-normalize a vector in place. Zero-length vectors are left unchanged
 /// (their cosine similarity to anything is undefined anyway).
 fn l2_normalize(v: &mut [f32]) {

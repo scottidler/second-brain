@@ -587,39 +587,3 @@ impl NoteBuilder {
         }
     }
 }
-
-/// Process-wide WARN-and-above capture so a test can assert on the WARN a code path
-/// emits. Lines carry a path, so a test filters to its own.
-struct WarnCapture(Mutex<Vec<String>>);
-
-impl log::Log for WarnCapture {
-    fn enabled(&self, meta: &log::Metadata) -> bool {
-        meta.level() <= log::Level::Warn
-    }
-    fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) {
-            self.0.lock().expect("warn capture").push(format!("{}", record.args()));
-        }
-    }
-    fn flush(&self) {}
-}
-
-static WARNS: WarnCapture = WarnCapture(Mutex::new(Vec::new()));
-
-pub fn install_warn_capture() {
-    // set_logger fails only when a logger is already installed: ours, from an
-    // earlier test in this process.
-    let _ = log::set_logger(&WARNS);
-    log::set_max_level(log::LevelFilter::Warn);
-}
-
-pub fn warns_containing(needle: &str) -> Vec<String> {
-    WARNS
-        .0
-        .lock()
-        .expect("warn capture")
-        .iter()
-        .filter(|l| l.contains(needle))
-        .cloned()
-        .collect()
-}

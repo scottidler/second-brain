@@ -2,6 +2,8 @@
 #![deny(unused_variables)]
 
 pub mod canonical;
+#[cfg(any(test, feature = "test-util"))]
+pub mod capture;
 pub mod config;
 pub mod daemon;
 pub mod detail;

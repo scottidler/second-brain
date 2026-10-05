@@ -765,6 +765,7 @@ impl TagClassifier for ClassifierDev {
 
 // ------------------------------------------------------------ test double
 
+#[cfg(test)]
 /// Returns canned tags, post-filtered through the vocabulary like the real
 /// impls, so a test double can never produce a non-canonical tag either.
 pub struct FakeTagClassifier {
@@ -774,6 +775,7 @@ pub struct FakeTagClassifier {
     fail: bool,
 }
 
+#[cfg(test)]
 impl FakeTagClassifier {
     pub fn new(canon: CanonicalSet, mapping: TagMapping, canned: Vec<String>) -> Self {
         Self {
@@ -795,6 +797,7 @@ impl FakeTagClassifier {
     }
 }
 
+#[cfg(test)]
 impl TagClassifier for FakeTagClassifier {
     fn classify(&self, input: &TagInput) -> Result<TagOutput> {
         if self.fail {

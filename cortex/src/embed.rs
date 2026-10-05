@@ -40,9 +40,7 @@ use std::time::Duration;
 use eyre::{Context, Result};
 use fs2::FileExt;
 use vault::distilled::Distilled;
-use vault::embedding::{
-    ACTIVE_MODEL_VERSION, EmbeddingModel, MockEmbedder, load_model_version, prefetch_model_version,
-};
+use vault::embedding::{ACTIVE_MODEL_VERSION, EmbeddingModel, load_model_version, prefetch_model_version};
 use vault::schema::NoteType;
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
@@ -207,10 +205,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
     let lock = acquire_lock()?;
     log::debug!("cortex::embed: acquired file lock");
 
-    let model: Box<dyn EmbeddingModel> = if opts.use_mock {
-        log::warn!("cortex::embed: using MockEmbedder (test-only)");
-        Box::new(MockEmbedder::default_384())
-    } else {
+    let model: Box<dyn EmbeddingModel> = {
         let rss_pre = vault::rss::read_self_rss();
         log::info!(
             "cortex::embed: loading embedding model {model_version} workers={} rss_pre_load={}",

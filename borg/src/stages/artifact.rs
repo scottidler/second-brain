@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use eyre::{Context, Result, bail};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::Mutex;
 
 /// Filesystem layout of a single trace. Stage 0 writes envelope + body +
@@ -412,6 +413,7 @@ pub fn new_envelope(trace_id: &str, kind: IngestKind, method: IngestMethod) -> E
     }
 }
 
+#[cfg(test)]
 /// In-memory `ArtifactStore`. Used by tests and by the `NoNetworkFetcher` stub
 /// to exercise extractor logic without touching the filesystem.
 #[derive(Debug, Default)]
@@ -419,11 +421,13 @@ pub struct MemArtifactStore {
     inner: Mutex<MemInner>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct MemInner {
     traces: HashMap<String, MemTrace>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct MemTrace {
     envelope: Option<Envelope>,
@@ -435,16 +439,19 @@ struct MemTrace {
     rejection: Option<RejectionRecord>,
 }
 
+#[cfg(test)]
 impl MemArtifactStore {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
+#[cfg(test)]
 fn missing(kind: &str, trace_id: &str) -> eyre::Report {
     eyre::eyre!("no {kind} recorded for trace {trace_id}")
 }
 
+#[cfg(test)]
 impl ArtifactStore for MemArtifactStore {
     fn write_envelope(&self, trace_id: &str, envelope: &Envelope) -> Result<()> {
         let mut inner = self.inner.lock().expect("mem artifact store poisoned");

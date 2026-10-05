@@ -30,7 +30,9 @@ use vault::distilled::Distilled;
 pub use article::{ArticleConfig, ArticleDistiller};
 pub use dispatcher::{Dispatch, Dispatcher, DistillKind};
 pub mod parse;
-pub use fabric::{FabricCaller, FabricRequest, FabricShell, FakeFabric};
+#[cfg(any(test, feature = "test-util"))]
+pub use fabric::FakeFabric;
+pub use fabric::{FabricCaller, FabricRequest, FabricShell};
 pub use idea::IdeaDistiller;
 pub use image::{ImageConfig, ImageDistiller};
 pub use render::{RenderOptions, RenderedDistilled, render};

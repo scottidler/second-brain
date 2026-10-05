@@ -6,7 +6,7 @@ use serde_yaml::Value;
 
 use super::{
     AssociationOutcome, AssociationReport, AtomicWriter, DecideCtx, EmbeddingCosine, NoteWriter, append_bullets, apply,
-    decide, execute_cross_link, execute_merge, group_by_session_identity, group_by_slug,
+    decide, execute_cross_link, execute_merge, group_by_session_identity,
 };
 use crate::config::{AssociationConfig, SimilaritySource};
 use crate::testutil::NoteBuilder;
@@ -15,79 +15,6 @@ use crate::vault::{Note, parse_note};
 // Phase 5's group_by_session_identity tests live in their own submodule
 // (BLOAT_MAX_LINES) - see tests/session_identity.rs.
 mod session_identity;
-
-fn session_note(path: &str, slug: &str) -> Note {
-    NoteBuilder::new(path)
-        .note_type("session")
-        .extra("slug", Value::String(slug.to_string()))
-        .build()
-}
-
-#[test]
-fn groups_same_slug_session_notes_and_excludes_the_rest() {
-    let notes = vec![
-        // The one real group: two session notes sharing slug "foo".
-        session_note("a.md", "foo"),
-        session_note("b.md", "foo"),
-        // Legacy pre-slug session note: slug == None, never groups.
-        NoteBuilder::new("legacy.md").note_type("session").build(),
-        // Tombstone: carries a matching slug AND superseded-by - already
-        // absorbed, must never re-group even though the slug matches.
-        NoteBuilder::new("tombstone.md")
-            .note_type("session")
-            .extra("slug", Value::String("foo".to_string()))
-            .extra("superseded-by", Value::String("a".to_string()))
-            .build(),
-        // Non-session note sharing the same slug - out of scope entirely
-        // (cross-slug/cross-type dedup is cortex::duplicates' job).
-        NoteBuilder::new("article.md")
-            .note_type("article")
-            .extra("slug", Value::String("foo".to_string()))
-            .build(),
-    ];
-
-    let groups = group_by_slug(&notes);
-
-    assert_eq!(
-        groups.len(),
-        1,
-        "only the foo-slug session pair forms a group: {groups:?}"
-    );
-    assert_eq!(groups[0], vec![0, 1]);
-}
-
-#[test]
-fn drops_singleton_groups() {
-    let notes = vec![session_note("solo.md", "unique-slug")];
-    let groups = group_by_slug(&notes);
-    assert!(groups.is_empty(), "a lone slug member has nothing to associate with");
-}
-
-#[test]
-fn groups_are_btreemap_ordered_by_slug() {
-    // Two distinct multi-member groups; the returned order must be
-    // deterministic (sorted by slug), not scan/insertion order.
-    let notes = vec![
-        session_note("z1.md", "zzz"),
-        session_note("z2.md", "zzz"),
-        session_note("a1.md", "aaa"),
-        session_note("a2.md", "aaa"),
-    ];
-
-    let groups = group_by_slug(&notes);
-
-    assert_eq!(groups.len(), 2);
-    // "aaa" sorts before "zzz", so its group (indices 2,3) comes first
-    // regardless of the notes slice's scan order.
-    assert_eq!(groups[0], vec![2, 3]);
-    assert_eq!(groups[1], vec![0, 1]);
-}
-
-#[test]
-fn empty_input_yields_no_groups() {
-    let notes: Vec<Note> = Vec::new();
-    assert!(group_by_slug(&notes).is_empty());
-}
 
 #[test]
 fn promoted_sim_fns_are_callable_from_association() {
@@ -600,17 +527,12 @@ fn scan_dir(root: &std::path::Path) -> Vec<Note> {
 /// One faithful association run over the on-disk vault: scan -> group -> decide
 /// -> `execute_merge` per Merge outcome. Returns the changed paths. Similarity
 /// is claim-based (empty embeddings fall through to the TF fallback under
-/// `Both`). Deliberately still uses `group_by_slug`, not the harvest-note-
-/// identity design's `group_by_session_identity`: this helper exercises
-/// `execute_merge`/`execute_cross_link` against slug-based fixtures that
-/// predate that design and carry no `trace:`, so re-pointing it at the
-/// trace-keyed grouping would only add legacy-fallback (session-id-overlap)
-/// coverage this file already gets elsewhere - `apply`'s own test coverage is
-/// what actually proves the production grouping function.
+/// `Both`). Groups with `group_by_session_identity`, the production grouping
+/// function, so fixtures must share a `trace:` (see `write_session_file_with_trace`).
 fn associate_run<W: NoteWriter>(root: &std::path::Path, threshold: f64, writer: &W) -> Vec<String> {
     let embed = FakeEmbeddings::default();
     let notes = scan_dir(root);
-    let groups = group_by_slug(&notes);
+    let groups = group_by_session_identity(&notes);
     let mut changed = Vec::new();
     for group in groups {
         let members: Vec<&Note> = group.iter().map(|&i| &notes[i]).collect();
@@ -714,19 +636,21 @@ fn execute_merge_unions_claims_session_details_and_ids_and_tombstones_absorbed()
 fn second_run_is_byte_level_no_op() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write_session_file(
+    write_session_file_with_trace(
         root,
         "a.md",
         "2026-07-01",
         "aaa",
+        "hv-assoc-run",
         &["alpha beta gamma", "delta only-a"],
         &["clyde://aaa - A - `repo` - 5m"],
     );
-    write_session_file(
+    write_session_file_with_trace(
         root,
         "b.md",
         "2026-07-10",
         "bbb",
+        "hv-assoc-run",
         &["alpha beta gamma", "epsilon only-b"],
         &["clyde://bbb - B - `repo` - 3m"],
     );
@@ -756,19 +680,21 @@ fn second_run_is_byte_level_no_op() {
 fn tombstone_write_failure_self_heals_next_run_with_no_duplication() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write_session_file(
+    write_session_file_with_trace(
         root,
         "a.md",
         "2026-07-01",
         "aaa",
+        "hv-assoc-run",
         &["alpha beta gamma", "delta only-a"],
         &["clyde://aaa - A - `repo` - 5m"],
     );
-    write_session_file(
+    write_session_file_with_trace(
         root,
         "b.md",
         "2026-07-10",
         "bbb",
+        "hv-assoc-run",
         &["alpha beta gamma", "epsilon only-b"],
         &["clyde://bbb - B - `repo` - 3m"],
     );

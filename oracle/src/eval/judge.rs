@@ -6,6 +6,7 @@
 //! judge receives ONLY the query plus the note's title and text — never the
 //! search mode, score, tags, embeddings, or graph edges.
 
+#[cfg(test)]
 use std::collections::HashMap;
 
 use eyre::{Result, bail};
@@ -23,6 +24,7 @@ pub trait RelevanceJudge {
     fn judge(&self, query: &str, note_title: &str, note_text: &str) -> Result<u8>;
 }
 
+#[cfg(test)]
 /// Deterministic, fixture-driven judge for tests (and dry runs). Looks up a
 /// score by `(query, note_title)`; unknown pairs return `default`.
 #[derive(Debug, Clone, Default)]
@@ -31,6 +33,7 @@ pub struct MockJudge {
     default: u8,
 }
 
+#[cfg(test)]
 impl MockJudge {
     /// A judge that returns `default` for every pair unless overridden.
     pub fn new(default: u8) -> Self {
@@ -48,6 +51,7 @@ impl MockJudge {
     }
 }
 
+#[cfg(test)]
 impl RelevanceJudge for MockJudge {
     fn judge(&self, query: &str, note_title: &str, _note_text: &str) -> Result<u8> {
         let score = self

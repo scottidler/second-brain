@@ -208,7 +208,7 @@ mod reingest_failed_daemon {
 
 #[test]
 fn a_note_with_unparseable_frontmatter_is_skipped_with_a_warn_naming_the_path() {
-    crate::logcapture::install();
+    vault::capture::install();
     let dir = tempfile::tempdir().unwrap();
     let note = dir.path().join("migrate-warn-bad-frontmatter.md");
     std::fs::write(&note, "---\ntitle: [unclosed\ntype: link\n---\n\nbody\n").unwrap();
@@ -216,6 +216,6 @@ fn a_note_with_unparseable_frontmatter_is_skipped_with_a_warn_naming_the_path() 
     let outcome = migrate_one_note(&note, dir.path(), false, &Config::default()).unwrap();
 
     assert!(outcome.is_none(), "an unparseable note is skipped, not an error");
-    let warns = crate::logcapture::warns_containing("migrate-warn-bad-frontmatter.md");
+    let warns = vault::capture::warns_containing("migrate-warn-bad-frontmatter.md");
     assert_eq!(warns.len(), 1, "exactly one WARN naming the note: {warns:?}");
 }

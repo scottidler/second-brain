@@ -254,12 +254,9 @@ fn known_slugs_warns_with_the_path_when_the_canonical_tags_file_is_unreadable() 
     std::fs::write(&canonical, "tags: [not: a map\n").unwrap();
     let mut config = Config::default();
     config.sweep.canonical_path = canonical;
-    crate::testutil::install_warn_capture();
+    vault::capture::install();
 
     let _ = known_slugs(&config);
 
-    assert_eq!(
-        crate::testutil::warns_containing("entities-warn-canonical.yml").len(),
-        1
-    );
+    assert_eq!(vault::capture::warns_containing("entities-warn-canonical.yml").len(), 1);
 }

@@ -469,7 +469,7 @@ fn note_has_type_matches_the_type_line_in_notes_or_inbox() {
 
 #[test]
 fn note_has_type_warns_with_the_path_when_the_note_is_unreadable() {
-    logcapture::install();
+    vault::capture::install();
     let vault = tempfile::tempdir().unwrap();
     // A directory where the note belongs: it exists, but reading it as text fails.
     std::fs::create_dir_all(vault.path().join("notes/reingest-unreadable.md")).unwrap();
@@ -480,5 +480,5 @@ fn note_has_type_warns_with_the_path_when_the_note_is_unreadable() {
         "video"
     ));
 
-    assert_eq!(logcapture::warns_containing("reingest-unreadable.md").len(), 1);
+    assert_eq!(vault::capture::warns_containing("reingest-unreadable.md").len(), 1);
 }

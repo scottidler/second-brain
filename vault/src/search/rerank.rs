@@ -77,6 +77,7 @@ pub fn project_batch_ms(per_pair_ms: f64, n: usize) -> f64 {
     per_pair_ms * n as f64
 }
 
+#[cfg(any(test, feature = "test-util"))]
 /// Deterministic test reranker: scores by lexical token overlap between query
 /// and doc (count of query whitespace-tokens present in the doc). No model
 /// load, stable across runs - mirrors `MockEmbedder`'s role for embeddings.
@@ -84,6 +85,7 @@ pub struct MockReranker {
     model_id: String,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl MockReranker {
     pub fn new() -> Self {
         Self {
@@ -92,12 +94,14 @@ impl MockReranker {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl Default for MockReranker {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl Reranker for MockReranker {
     fn model_id(&self) -> &str {
         &self.model_id

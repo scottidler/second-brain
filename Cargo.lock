@@ -1974,6 +1974,7 @@ version = "0.15.14"
 dependencies = [
  "async-trait",
  "chrono",
+ "distillers",
  "eyre",
  "futures",
  "log",
@@ -8490,6 +8491,7 @@ dependencies = [
  "tokenizers 0.23.1",
  "tokio",
  "unicode-normalization",
+ "vault",
  "walkdir",
 ]
 
