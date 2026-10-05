@@ -616,6 +616,7 @@ where
     let _guard = crate::harvest::TEST_XDG_LOCK.lock().await;
     let prior = std::env::var("XDG_DATA_HOME").ok();
     unsafe { std::env::set_var("XDG_DATA_HOME", data_home) };
+    let _xdg_sandbox = crate::receipts::sandbox::enter();
     body().await;
     match prior {
         Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },

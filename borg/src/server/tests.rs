@@ -63,15 +63,21 @@ async fn write_route_rejects_wrong_token() {
 
 #[tokio::test]
 async fn write_route_accepts_correct_token() {
-    let app = test_router_with_auth(Config::default(), Some("secret".to_string()));
-    let resp = app
-        .oneshot(post("/ingest", serde_json::json!({"url": "https://x"}), Some("secret")))
-        .await
-        .expect("response");
-    // Passes the gate (handler runs and returns HTTP 200; intake body may
-    // be Failed because the default config has no vault root, which is
-    // irrelevant here - the point is the request was NOT rejected at 401).
-    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+    // The handler records the receipt (`receipts::open_default`) before the
+    // vault-root check, so the receipts DB is opened: sandbox it.
+    let data_home = tempfile::tempdir().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let app = test_router_with_auth(Config::default(), Some("secret".to_string()));
+        let resp = app
+            .oneshot(post("/ingest", serde_json::json!({"url": "https://x"}), Some("secret")))
+            .await
+            .expect("response");
+        // Passes the gate (handler runs and returns HTTP 200; intake body may
+        // be Failed because the default config has no vault root, which is
+        // irrelevant here - the point is the request was NOT rejected at 401).
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -114,16 +120,21 @@ async fn test_health_endpoint() {
 
 #[tokio::test]
 async fn test_ingest_endpoint() {
-    let app = test_router();
-    let body = serde_json::json!({"url": "https://youtube.com/watch?v=test"});
-    let req = Request::builder()
-        .method("POST")
-        .uri("/ingest")
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_string(&body).expect("json")))
-        .expect("request");
-    let resp = app.oneshot(req).await.expect("response");
-    assert_eq!(resp.status(), StatusCode::OK);
+    // `/ingest` opens the receipts DB before the vault-root check: sandbox it.
+    let data_home = tempfile::tempdir().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let app = test_router();
+        let body = serde_json::json!({"url": "https://youtube.com/watch?v=test"});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ingest")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).expect("json")))
+            .expect("request");
+        let resp = app.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+    })
+    .await;
 }
 
 #[tokio::test]

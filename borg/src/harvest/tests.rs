@@ -513,6 +513,7 @@ async fn live_run_writes_parse_skip_receipt_before_cursor_advances() {
     let data_home = TempDir::new().unwrap();
     let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
     unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+    let _xdg_sandbox = crate::receipts::sandbox::enter();
 
     let staging_dir = TempDir::new().unwrap();
     let mut config = crate::config::Config::default();

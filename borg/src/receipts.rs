@@ -104,11 +104,50 @@ impl r2d2::CustomizeConnection<Connection, rusqlite::Error> for PragmaSetter {
 }
 
 fn apply_pragmas(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
-    conn.pragma_update(None, "journal_mode", "WAL")?;
+    set_wal_mode(conn)?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "busy_timeout", 5000_i64)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
+}
+
+/// Pause between WAL-conversion attempts, and the attempt cap: together they
+/// match the 5 s `busy_timeout` the rest of the DB access waits under.
+const WAL_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
+const WAL_RETRY_ATTEMPTS: u32 = 500;
+
+/// `PRAGMA journal_mode=WAL`, retried on `SQLITE_BUSY`.
+///
+/// Converting a fresh (rollback-journal) DB to WAL takes a SHARED lock and
+/// then escalates to EXCLUSIVE. When two connections open the same fresh file
+/// at once (daemon + harvest + cortex on a first run, or two tests), both hold
+/// SHARED and want EXCLUSIVE; SQLite's deadlock avoidance returns
+/// "database is locked" IMMEDIATELY to one of them without calling the busy
+/// handler, so `busy_timeout` (rusqlite already sets 5 s at open) never
+/// waits. The winner's conversion persists in the file, so a retry finds WAL
+/// already set and returns at once. A DB that is already WAL never hits this.
+fn set_wal_mode(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
+    let mut attempt = 0;
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => {
+                if attempt > 0 {
+                    log::debug!("receipts::set_wal_mode: converted after {attempt} busy retries");
+                }
+                return Ok(());
+            }
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy && attempt < WAL_RETRY_ATTEMPTS =>
+            {
+                attempt += 1;
+                std::thread::sleep(WAL_RETRY_PAUSE);
+            }
+            Err(e) => {
+                log::warn!("receipts::set_wal_mode: failed after {attempt} busy retries: {e}");
+                return Err(e);
+            }
+        }
+    }
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -123,6 +162,8 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
 /// returned by [`vault::receipts::receipts_db_path`]. Applies the four
 /// mandatory PRAGMAs and runs the schema migration idempotently.
 pub fn open_default() -> Result<Connection> {
+    #[cfg(test)]
+    sandbox::assert_active("receipts::open_default");
     let path = receipts_db_path()?;
     let dir = receipts_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create receipts directory {}", dir.display()))?;
@@ -152,6 +193,8 @@ pub fn open_memory() -> Result<Connection> {
 /// daemon. Each pooled connection has the four PRAGMAs applied via
 /// `PragmaSetter`.
 pub fn build_pool() -> Result<Pool<SqliteConnectionManager>> {
+    #[cfg(test)]
+    sandbox::assert_active("receipts::build_pool");
     let path = receipts_db_path()?;
     build_pool_at(&path)
 }
@@ -792,6 +835,8 @@ pub struct PragmaSnapshot {
 /// Used by callers (front doors, CLI verbs) that want to open the DB without
 /// knowing the schema migration details.
 pub fn default_path() -> Result<PathBuf> {
+    #[cfg(test)]
+    sandbox::assert_active("receipts::default_path");
     let path = receipts_db_path()?;
     ensure_parent_dir(&path)?;
     Ok(path)
@@ -810,6 +855,8 @@ pub fn path_for_error(conn: &Connection) -> String {
 /// path. Used by `sb borg log` and friends that want to print the path in
 /// the human header.
 pub fn open_default_with_path() -> Result<(Connection, PathBuf)> {
+    #[cfg(test)]
+    sandbox::assert_active("receipts::open_default_with_path");
     let path = receipts_db_path()?;
     let conn = open_at(&path)?;
     Ok((conn, path))
@@ -943,6 +990,16 @@ pub fn hours_ago_iso(hours: i64) -> String {
         .format(TIMESTAMP_FMT)
         .to_string()
 }
+
+/// Test-only guard: a default-path receipts open resolves the DB from
+/// `XDG_DATA_HOME` at call time, so a test that reaches one outside an XDG
+/// sandbox either opens the operator's LIVE `~/.local/share/sb/borg/receipts.db`
+/// or races another test's sandboxed tempdir DB ("database is locked"). Every
+/// helper that holds `harvest::TEST_XDG_LOCK` and redirects `XDG_DATA_HOME`
+/// holds a [`sandbox::Entered`] for the same window; the default-path
+/// openers panic without one.
+#[cfg(test)]
+pub(crate) mod sandbox;
 
 #[cfg(test)]
 mod tests;

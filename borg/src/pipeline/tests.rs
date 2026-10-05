@@ -1236,6 +1236,7 @@ async fn corrupt_blocklist_fails_the_capture_as_intake_rejected_in_receipts() {
     let data_home = tempfile::TempDir::new().unwrap();
     let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
     unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+    let _xdg_sandbox = crate::receipts::sandbox::enter();
 
     let mut config = crate::config::Config::default();
     config.staging.enabled = true;

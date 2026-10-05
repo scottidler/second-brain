@@ -127,6 +127,7 @@ async fn publish_plan_publishes_and_rerun_is_idempotent() {
     let data_home = TempDir::new().unwrap();
     let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
     unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+    let _xdg_sandbox = crate::receipts::sandbox::enter();
 
     let vault_dir = TempDir::new().unwrap();
     let staging_dir = TempDir::new().unwrap();
@@ -263,6 +264,7 @@ async fn per_thread_save_is_durable_and_the_cursor_stays_unadvanced_until_end_of
     let data_home = TempDir::new().unwrap();
     let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
     unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+    let _xdg_sandbox = crate::receipts::sandbox::enter();
 
     let vault_dir = TempDir::new().unwrap();
     let staging_dir = TempDir::new().unwrap();
