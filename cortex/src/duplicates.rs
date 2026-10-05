@@ -46,7 +46,7 @@ pub fn lint_duplicates(notes: &[Note], config: &DuplicatesConfig) -> Report {
         .map(|(i, _)| i)
         .collect();
 
-    // Phase 1: exact content hash duplicates
+    // exact content hash duplicates
     let mut hash_groups: HashMap<u64, Vec<usize>> = HashMap::new();
     for &i in &eligible {
         let note = &notes[i];
@@ -107,7 +107,7 @@ pub fn lint_duplicates(notes: &[Note], config: &DuplicatesConfig) -> Report {
         });
     }
 
-    // Phase 2: fuzzy similarity (TF-IDF based)
+    // fuzzy similarity (TF-IDF based)
     // Build a sub-slice of eligible notes for TF-IDF comparison
     let eligible_notes: Vec<Note> = eligible.iter().map(|&i| notes[i].clone()).collect();
     if eligible_notes.len() > 1 && config.threshold < 1.0 {
@@ -333,7 +333,7 @@ fn find_similar_notes(notes: &[Note], threshold: f64, same_type_only: bool) -> V
 
 /// Tokenize text into word frequency map.
 ///
-/// `pub(crate)` (2026-07-24 cortex-association-sweep design, Phase 1):
+/// `pub(crate)` (cortex-association-sweep design):
 /// `cortex::association`'s claim-similarity fallback reuses this TF-IDF
 /// primitive rather than reimplementing it.
 pub(crate) fn tokenize(text: &str) -> HashMap<&str, usize> {

@@ -210,7 +210,7 @@ fn candidate_members_selects_pre_files_touched_harvest_notes_only() {
     let notes = vec![
         // Eligible: clyde source, valid repo, no repos-touched.
         harvest_note("notes/a.md", Some("clyde://s1"), Some("scottidler/loopr"), None),
-        // Skipped: has repos-touched (Phase 4 owns it).
+        // Skipped: has repos-touched (forward bridging owns it).
         harvest_note(
             "notes/b.md",
             Some("clyde://s2"),

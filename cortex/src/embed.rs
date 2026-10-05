@@ -1,6 +1,6 @@
 //! Cortex's embed loop. The only writer to `note_embeddings`.
 //!
-//! Phase A5 of the hybrid retrieval design
+//! Hybrid retrieval design
 //! (`docs/design/2026-05-16-hybrid-retrieval-fts5-vector-rrf.md`).
 //!
 //! ## Transaction discipline (load-bearing)
@@ -30,7 +30,7 @@
 //! This file's `process_batch` makes the three phases visible as three
 //! named function calls so a reviewer can point at the `BEGIN
 //! IMMEDIATE` line and confirm `embed_batch` is *not* called between
-//! it and the matching `COMMIT`. Phase A5's regression test asserts
+//! it and the matching `COMMIT`. The regression test asserts
 //! the write transaction wall-clock stays under 200 ms for batch = 64.
 
 use std::path::{Path, PathBuf};
@@ -47,7 +47,7 @@ use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 use crate::config::{Config, EmbedKindsConfig};
 use crate::opts::EmbedOpts;
 
-/// Default batch size for the embed loop. Phase A5's transaction
+/// Default batch size for the embed loop. The transaction
 /// discipline test asserts the write transaction wall-clock stays under
 /// 200 ms at this batch.
 pub const DEFAULT_BATCH_SIZE: usize = 64;
@@ -298,7 +298,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
     Ok(total)
 }
 
-/// Phase 7b: load the embedding model once at daemon startup. The daemon
+/// load the embedding model once at daemon startup. The daemon
 /// holds the returned handle and passes it (by reference) to every tick
 /// via `daemon_tick_with_model`, so the model's per-instance scratch
 /// state is reused across ticks instead of allocated + dropped per tick.
@@ -368,7 +368,7 @@ pub fn daemon_tick_with_model(vault_root: &Path, config: &Config, model: &dyn Em
 
     // The daemon tick has no per-invocation CLI surface, so the kinds it
     // generates are gated by config only. With defaults that is summary +
-    // transcript-chunk (claim is default-OFF after the 2026-07-05 retrieval
+    // transcript-chunk (claim is default-OFF after the retrieval
     // gate failure); enabling `embed.kinds.claim` re-adds it here.
     let kinds = enabled_default_kinds(&config.embed.kinds);
     let mut total = EmbedStats::default();
@@ -518,8 +518,8 @@ fn parse_kind(s: &str) -> Result<EmbeddingKind> {
     }
 }
 
-/// First-class rollback verb behind `sb cortex embed --drop-kind <kind>`
-/// (Phase 9). Deletes every embedding row of `kind` and returns the count.
+/// First-class rollback verb behind `sb cortex embed --drop-kind <kind>`.
+/// Deletes every embedding row of `kind` and returns the count.
 ///
 /// Reverting cortex code does NOT stop oracle reading, e.g., claim rows -
 /// `search_vector` scans all kinds - so deleting the rows is the only real
@@ -540,8 +540,8 @@ pub fn drop_kind(config: &Config, kind: &str) -> Result<usize> {
 /// The title carries strong topical signal; the capture note ("why I captured
 /// this") makes the operator's own words semantically searchable.
 ///
-/// BYTE-IDENTICAL INVARIANT (Phase 9): a note WITHOUT a capture note must
-/// produce the exact pre-Phase-9 text (`title\n\nsummary`, or the bare summary
+/// BYTE-IDENTICAL INVARIANT: a note WITHOUT a capture note must
+/// produce the same text as before capture notes (`title\n\nsummary`, or the bare summary
 /// when the title is empty) or the staleness watermark treats every existing
 /// note as changed and re-embeds the whole vault. Empty segments are dropped
 /// before the join, so an empty capture note contributes nothing.
@@ -564,7 +564,7 @@ pub fn summary_embed_text(title: &str, capture_note: &str, summary: &str) -> Str
     segments.join("\n\n")
 }
 
-/// Phase A5: one batch of summary embeddings. Read auto-commit, embed
+/// one batch of summary embeddings. Read auto-commit, embed
 /// outside any transaction, flush in one short upsert.
 fn process_summary_batch(
     index: &mut SearchIndex,
@@ -593,7 +593,7 @@ fn process_summary_batch(
     // "skipped without writing" loop on notes that lack a ## Summary
     // heading in the markdown body.
     let mut work: Vec<EmbedWork> = Vec::with_capacity(targets.len());
-    // Defensive examined-sentinel accumulator (Phase 3): the SQL filter already
+    // Defensive examined-sentinel accumulator: the SQL filter already
     // excludes empty-summary notes, so this is normally empty, but recording a
     // skip here keeps the "examined, nothing to embed" mechanism coherent
     // across every kind should a future schema drift reintroduce the skip path.
@@ -610,14 +610,14 @@ fn process_summary_batch(
             examined.push((t.note_path.clone(), t.modified_at));
             continue;
         }
-        // Phase 7a + Phase 9: assemble the embed text as
+        // Assemble the embed text as
         // `title` + `capture_note` + `summary`, each non-empty segment joined
         // by a blank line. The title carries strong topical signal; the
         // capture note ("why I captured this") makes the operator's own words
         // semantically searchable.
         //
-        // BYTE-IDENTICAL INVARIANT (Phase 9): a note WITHOUT a capture note
-        // must produce the exact pre-Phase-9 text (`title\n\nsummary`, or the
+        // BYTE-IDENTICAL INVARIANT: a note WITHOUT a capture note
+        // must produce the same text as before capture notes (`title\n\nsummary`, or the
         // bare summary when the title is empty) so the staleness watermark
         // does not treat every existing note as changed and re-embed the whole
         // vault. Because empty segments are dropped before the join, an empty
@@ -683,13 +683,13 @@ fn process_summary_batch(
     Ok(stats)
 }
 
-/// Phase B2: one batch of transcript chunks. Each transcript-eligible
+/// one batch of transcript chunks. Each transcript-eligible
 /// note expands into N chunks via `vault::embedding::chunk_transcript`;
 /// the chunks are embedded in one batch and flushed via
 /// `swap_transcript_chunks`, which DELETE/INSERTs atomically per note
 /// to avoid leaving a half-replaced chunk set visible to hybrid search.
 ///
-/// Phase B2's batch_size bounds the number of *notes* processed, not
+/// `batch_size` bounds the number of *notes* processed, not
 /// the number of chunks. A pathologically long transcript will still
 /// be flushed in one short transaction (delete + N inserts); the
 /// per-note CPU is dominated by chunk_count * inference latency, which
@@ -727,15 +727,15 @@ fn process_transcript_batch(
     // Notes scanned but found unembeddable (no `## Transcript` section, or a
     // section that chunks to nothing). Recording their indexed modified_at in
     // the examined sentinel is what stops the ~127-note transcript re-scan
-    // every tick (Phase 3): without it, `e.id` stays NULL and the note is
+    // every tick: without it, `e.id` stays NULL and the note is
     // re-selected forever.
     let mut examined: Vec<(String, i64)> = Vec::new();
     for t in &targets {
         stats.scanned += 1;
         // Video/Youtube/Article transcripts live in the staged distilled.yml
         // (resolved via notes.trace), NOT the note body — those notes no longer
-        // render a `## Transcript` section (2026-07-07-distillation-output-restore
-        // Phase 5). The verbatim-preservation kinds (Image/Audio/Note/Vocab) and
+        // render a `## Transcript` section (2026-07-07-distillation-output-restore).
+        // The verbatim-preservation kinds (Image/Audio/Note/Vocab) and
         // threads (Social/Reddit) keep their in-note `## Transcript` section.
         let from_staging = NoteType::from_str(&t.note_type)
             .map(|nt| nt.transcript_from_staging())
@@ -842,7 +842,7 @@ fn process_transcript_batch(
     Ok(stats)
 }
 
-/// Phase 9: one batch of claim embeddings. Reads `notes.claims` from the
+/// one batch of claim embeddings. Reads `notes.claims` from the
 /// column (carried in `StaleTarget.summary` by the Claim arm of
 /// `stale_embedding_targets` - NO file I/O, same discipline as the summary
 /// path), groups the newline-joined claims into token-window-sized chunks,
@@ -873,7 +873,7 @@ fn process_claim_batch(
     log::debug!("cortex::embed::process_claim_batch: scanned={}", targets.len());
 
     let mut work: Vec<TranscriptWork> = Vec::with_capacity(targets.len());
-    // Defensive examined-sentinel accumulator (Phase 3), symmetric with the
+    // Defensive examined-sentinel accumulator, symmetric with the
     // summary and transcript arms; normally empty because the SQL filter
     // already excludes empty-claims notes.
     let mut examined: Vec<(String, i64)> = Vec::new();
@@ -963,7 +963,7 @@ fn process_claim_batch(
 /// A single claim that alone exceeds the budget becomes its own chunk: the
 /// model truncates that one pathological claim, but no *later* claim is
 /// silently dropped - which is the whole point (dropping tail claims is the
-/// Phase 9 defect; truncating one overlong sentence is acceptable and rare).
+/// claim-embedding defect; truncating one overlong sentence is acceptable and rare).
 /// Returns an empty Vec when the input is blank.
 fn group_claims(claims_text: &str, max_words: usize) -> Vec<String> {
     let claims: Vec<&str> = claims_text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();

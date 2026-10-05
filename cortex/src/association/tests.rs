@@ -12,15 +12,15 @@ use crate::config::{AssociationConfig, SimilaritySource};
 use crate::testutil::NoteBuilder;
 use crate::vault::{Note, parse_note};
 
-// Phase 5's group_by_session_identity tests live in their own submodule
+// The group_by_session_identity tests live in their own submodule
 // (BLOAT_MAX_LINES) - see tests/session_identity.rs.
 mod session_identity;
 
 #[test]
 fn promoted_sim_fns_are_callable_from_association() {
-    // Phase 1 promotes duplicates::{tokenize, cosine_similarity} from
+    // duplicates::{tokenize, cosine_similarity} are promoted from
     // private `fn` to `pub(crate)` specifically so association's future
-    // claim-text similarity fallback (Phase 2) can call them cross-module.
+    // claim-text similarity fallback can call them cross-module.
     // This test is the compile-time + behavioral proof that promotion
     // actually landed and the primitives still behave correctly.
     let a = crate::duplicates::tokenize("durable execution temporal workflow");
@@ -40,7 +40,7 @@ fn promoted_sim_fns_are_callable_from_association() {
     assert_eq!(uncomputable, 0.0, "an empty vector cosines to 0.0, never NaN/panic");
 }
 
-// -- Phase 2: decision core (transitive clustering) ------------------------
+// -- decision core (transitive clustering) ------------------------
 
 /// Deterministic embedding-cosine fake. Keyed on an order-independent pair of
 /// paths; an unset pair returns `Ok(None)` (uncomputable via the embedding
@@ -443,10 +443,10 @@ fn embedding_db_error_propagates_not_swallowed() {
     );
 }
 
-// -- Phase 3: merge executor -----------------------------------------------
+// -- merge executor -----------------------------------------------
 
 /// Like [`write_session_file`], but also stamps `trace: <trace>` into the
-/// frontmatter - Phase 5's `group_by_session_identity` groups on `trace:`
+/// frontmatter - `group_by_session_identity` groups on `trace:`
 /// alone, so any `apply()`-composition test that needs its fixture notes to
 /// actually FORM a group (to exercise decide/execute/quiescence/exclude
 /// against a real candidate) must share a trace, not just a slug. Models the
@@ -863,7 +863,7 @@ fn append_bullets_is_idempotent_when_all_present() {
     assert_eq!(out, content, "re-adding present bullets is a byte-level no-op");
 }
 
-// -- Phase 4: cross-link executor -------------------------------------------
+// -- cross-link executor -------------------------------------------
 
 /// A minimal note (frontmatter + body) for cross-link fixtures - the executor
 /// only touches the body's `## Related` section, so these don't need the full
@@ -1064,7 +1064,7 @@ fn related_key_treats_heading_and_path_forms_as_the_same_link() {
     assert_eq!(super::related_key("- plain text"), "plain text");
 }
 
-// -- Phase 5: apply orchestrator (CLI + daemon wiring) ----------------------
+// -- apply orchestrator (CLI + daemon wiring) ----------------------
 
 /// `min_quiescence_secs: 0` never treats a just-written test fixture (mtime
 /// ~now) as quiescing: `elapsed < Duration::ZERO` is never true. Used by every
@@ -1082,7 +1082,7 @@ fn no_quiescence_config(threshold: f64) -> AssociationConfig {
 fn dry_run_reports_the_plan_and_writes_zero_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    // Phase 5: apply()'s grouping is trace-keyed, so a/b must share a trace to
+    // apply()'s grouping is trace-keyed, so a/b must share a trace to
     // form a group at all - see write_session_file_with_trace.
     write_session_file_with_trace(
         root,
@@ -1131,7 +1131,7 @@ fn dry_run_reports_the_plan_and_writes_zero_bytes() {
 fn apply_executes_the_plan_and_writes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    // Phase 5: apply()'s grouping is trace-keyed, so a/b must share a trace to
+    // apply()'s grouping is trace-keyed, so a/b must share a trace to
     // form a group at all - see write_session_file_with_trace.
     write_session_file_with_trace(
         root,
@@ -1185,7 +1185,7 @@ fn apply_executes_the_plan_and_writes() {
 fn whole_group_is_skipped_when_any_member_is_within_quiescence_window() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    // Phase 5: apply()'s grouping is trace-keyed, so a/b must share a trace to
+    // apply()'s grouping is trace-keyed, so a/b must share a trace to
     // form a group at all - see write_session_file_with_trace.
     write_session_file_with_trace(
         root,
@@ -1234,7 +1234,7 @@ fn whole_group_is_skipped_when_any_member_is_within_quiescence_window() {
 
 #[test]
 fn quiescence_skip_is_whole_group_never_half_merged() {
-    // Three same-trace members (Phase 5: apply()'s grouping is trace-keyed)
+    // Three same-trace members (apply()'s grouping is trace-keyed)
     // where the pairwise similarities would otherwise cluster {a,b} and
     // cross-link {c}; quiescence must drop the ENTIRE group, not just the one
     // member technically within the window.
@@ -1300,7 +1300,7 @@ fn excluded_path_never_groups() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("journal")).unwrap();
-    // Phase 5: apply()'s grouping is trace-keyed, so a/b must share a trace
+    // apply()'s grouping is trace-keyed, so a/b must share a trace
     // for a.md's group to ever reach two members in the first place.
     write_session_file_with_trace(
         root,

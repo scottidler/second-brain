@@ -132,7 +132,7 @@ fn test_resolve_collision_no_conflict() {
     assert_eq!(resolve_collision(&path, None), path);
 }
 
-/// Phase 5 fix, `2026-08-15-harvest-note-identity-trace-keyed-replace.md`
+/// Regression, `2026-08-15-harvest-note-identity-trace-keyed-replace.md`
 /// prior attempt 4: a base-path collision with a DIFFERENT source correctly
 /// mints `-2`, but the bug walked past every SAME-source numeric candidate
 /// (`-5`, `-7` .. `-14` in the real `hv-e5d240` cohort) because
@@ -412,7 +412,7 @@ fn unclassified_filter_skips_tags_exempt_paths() {
     assert!(picked[0].path.ends_with("genuinely-unclassified.md"));
 }
 
-// ---- Phase 7: promotion gates on the classifier's confidence ----
+// ---- promotion gates on the classifier's confidence ----
 
 /// Build a one-note inbox vault carrying `tags`, run one apply, and report
 /// `(promoted, held)` where `held` means the note stayed in `inbox/` with

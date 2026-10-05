@@ -4,8 +4,8 @@ use super::*;
 // this crate's test binary that mutates `XDG_CONFIG_HOME`, or resolves it
 // indirectly via `validate_canonical_assets`, acquires the SAME
 // `crate::testutil::ENV_LOCK` before touching the env var. See that static's
-// doc comment for the race this closes (2026-07-05
-// cortex-daemon-oscillation-loop design doc, Phase 7).
+// doc comment for the race this closes
+// (cortex-daemon-oscillation-loop design doc).
 use crate::testutil::EnvGuard;
 
 fn write_minimal_canonical_assets(root: &std::path::Path) {

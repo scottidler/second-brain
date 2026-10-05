@@ -25,9 +25,8 @@ use std::sync::Mutex;
 /// *private* `static ENV_LOCK` that nothing outside that file could acquire,
 /// so any other test resolving the same env var mid-mutation raced it: a
 /// transient `validate_canonical_assets` failure with no relation to the
-/// code under test (2026-07-05 cortex-daemon-oscillation-loop design doc,
-/// Phase 1/7). Every affected test - in `startup/tests.rs`, `sweep/tests.rs`,
-/// and `daemon/tests.rs` - now acquires THIS shared lock instead of a
+/// code under test (cortex-daemon-oscillation-loop design doc). Every affected test - in
+/// `startup/tests.rs`, `sweep/tests.rs`, and `daemon/tests.rs` - now acquires THIS shared lock instead of a
 /// per-file private one, closing the race suite-wide.
 pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 

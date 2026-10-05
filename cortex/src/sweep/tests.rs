@@ -409,7 +409,7 @@ fn test_scan_proposals_mapped_tags_not_proposed() {
     assert!(proposals.is_empty());
 }
 
-/// Design doc `2026-09-21-staged-tag-proposals.md`, Phase 1: a `null`-mapped
+/// Design doc `2026-09-21-staged-tag-proposals.md`: a `null`-mapped
 /// (human-rejected) tag must never be re-proposed. Before this guard,
 /// `match_to_canonical` returns `vec![]` for a rejection exactly like it does
 /// for "no match at all", so `scan_proposals` treated the two identically and
@@ -438,7 +438,7 @@ fn test_scan_proposals_rejected_tags_not_proposed() {
     assert!(proposals.is_empty());
 }
 
-/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`, Phase 1: the
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`: the
 /// sweep arm's fingerprint may only include paths `rewrite_note_tags`
 /// actually wrote, never every `new_tags != tags` diff (sweep.rs:174 in the
 /// pre-fix code). This note's IN-MEMORY frontmatter carries a non-canonical
@@ -590,7 +590,7 @@ fn migrate_does_not_drop_a_protected_tag_when_capping() {
 }
 
 // ---------------------------------------------------------------------------
-// Design doc `2026-09-21-staged-tag-proposals.md`, Phase 2: the proposals file
+// Design doc `2026-09-21-staged-tag-proposals.md`: the proposals file
 // is a rendered view of ONE scan window, written atomically, and a corrupt
 // queue fails loudly instead of being silently replaced.
 // ---------------------------------------------------------------------------
@@ -672,11 +672,11 @@ fn test_write_proposals_overwrites_including_empty_scan() {
     let parsed: ProposalsFile = serde_yaml::from_str(&after_second).expect("empty scan must parse back");
     assert!(parsed.proposals.is_empty());
     assert!(parsed.scanned_at.is_some(), "scan header must survive the round trip");
-    assert!(parsed.staged_window.is_none(), "no staged arm until Phase 6");
+    assert!(parsed.staged_window.is_none(), "no staged arm was written");
 }
 
 /// The shipped `proposals: []` seed must still parse under the new attributes:
-/// both header fields default, so the deployed file is untouched by this phase.
+/// both header fields default, so the deployed file is untouched by the new attributes.
 #[test]
 fn test_shipped_empty_proposals_still_parses() {
     let parsed: ProposalsFile = serde_yaml::from_str("proposals: []\n").expect("shipped seed must parse");
@@ -686,7 +686,7 @@ fn test_shipped_empty_proposals_still_parses() {
 }
 
 // ---------------------------------------------------------------------------
-// Design doc `2026-09-21-staged-tag-proposals.md`, Phase 6: the staged arm is
+// Design doc `2026-09-21-staged-tag-proposals.md`: the staged arm is
 // wired into `scan_proposals` and reaches both call sites with no new flag.
 // Counted assertions live on a FIXTURE tree; the live corpus is mutable and
 // keeps only a `>=` smoke check at rollout.
@@ -807,7 +807,7 @@ fn test_staged_window_is_written_to_the_queue() {
 }
 
 /// A staging root that cannot be stat'ed is an Err, and the prior queue is
-/// left byte-identical. Phase 2 made the write unconditional, so a reader that
+/// left byte-identical. The write is unconditional, so a reader that
 /// could not distinguish "could not look" from "nothing found" would be a
 /// queue-wipe path. The precondition is a regular file used as a directory
 /// (ENOTDIR), which holds as root, so the CI container runs this for real.

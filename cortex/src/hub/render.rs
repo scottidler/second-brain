@@ -1,5 +1,5 @@
 //! Deterministic hub-body assembly
-//! (`docs/design/2026-08-15-entity-hub-two-vector-synthesis.md`, Phase 2).
+//! (`docs/design/2026-08-15-entity-hub-two-vector-synthesis.md`).
 //!
 //! A hub body is its members' already-distilled claims, grouped by ingestion
 //! vector, quoted and wikilinked. No LLM: the claims exist because the L2

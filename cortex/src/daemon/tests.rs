@@ -30,7 +30,7 @@ fn test_is_enabled_explicit_false() {
     assert!(!config.is_enabled("lint"));
 }
 
-/// Phase 5 (2026-07-24 cortex-association-sweep design): `is_enabled` is a
+/// cortex-association-sweep design: `is_enabled` is a
 /// generic lookup over `daemon.actions`, so "association" needs no dedicated
 /// gate function - it defaults off exactly like every other action, because
 /// `DaemonConfig::default()`'s action map never registers it.
@@ -181,12 +181,12 @@ fn test_sweep_fingerprint_empty_files_ignored() {
     assert!(fp.is_empty());
 }
 
-/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`, Phase 1,
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`,
 /// success criterion (a) exercised through the real daemon seam: a note
 /// whose ONLY lint violation is `frontmatter.date-format` (Severity::Warning,
 /// `fix: None` - a regex check, independent of canonical-tag config) must
 /// produce an empty `configured_actions` fingerprint for the `lint` action,
-/// and the note's bytes must be untouched on disk. Before Phase 1 this arm
+/// and the note's bytes must be untouched on disk. Previously this arm
 /// fingerprinted `report.violations` paths directly, so this exact case
 /// (a real violation, zero real writes) would have latched oscillation
 /// detection on phantom churn.
@@ -322,9 +322,9 @@ fn test_daemon_config_default_no_schedule() {
     assert!(config.weekly_at.is_none());
 }
 
-// Phase 0 smoke test: scan_vault wrapped in tokio::task::block_in_place runs to completion
+// Smoke test: scan_vault wrapped in tokio::task::block_in_place runs to completion
 // from a multi-thread tokio runtime without panicking. This is the guardrail for the design
-// doc's Phase 0 wrapping pattern.
+// doc's wrapping pattern.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scan_vault_inside_block_in_place_does_not_panic() {
     use crate::config::VaultConfig;
@@ -366,10 +366,10 @@ fn sweep_config_without_digest(assets_dir: &Path) -> crate::config::SweepConfig 
     }
 }
 
-/// Phase 2 (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`):
-/// the inversion of the Phase 0 repro. Phase 0 pinned the intel<->sweep
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`:
+/// the inversion of the original repro, which pinned the intel<->sweep
 /// two-writer fight - intel stamped `tags: [digest]`, `sweep::migrate` stripped
-/// it, forever. Phase 2 ends the fight at its source: intel emits NO tag on the
+/// it, forever. The fix ends the fight at its source: intel emits NO tag on the
 /// digest (`digest` is a `NoteType`, not a canonical tag) and is input-side
 /// idempotent. This test asserts the fight NO LONGER reproduces: the digest is
 /// tagless, `sweep::migrate` never touches it (criterion b: 0 for digest notes
@@ -381,8 +381,8 @@ fn intel_sweep_two_writer_fight_no_longer_reproduces() {
     // `XDG_CONFIG_HOME`-relative canonical-tags/tag-mapping files (not this
     // test's own `sweep_config_without_digest` assets) - acquire the
     // suite-wide lock so this can't race `startup/tests.rs`'s env mutation
-    // under parallel `cargo test` (2026-07-05 cortex-daemon-oscillation-loop
-    // design doc, Phase 1/7).
+    // under parallel `cargo test` (cortex-daemon-oscillation-loop
+    // design doc).
     let _lock = crate::testutil::lock_env();
     // Provision a private XDG_CONFIG_HOME: `intel::run` and `sweep::*`
     // call `validate_canonical_assets`, which would otherwise resolve the
@@ -457,24 +457,24 @@ fn intel_sweep_two_writer_fight_no_longer_reproduces() {
     );
 }
 
-/// Phase 0/7 regression guard (design doc, "structural invariant"): two
+/// Regression guard (design doc, "structural invariant"): two
 /// consecutive periodic sweeps over an unchanged, steady-state vault must
 /// eventually produce an EMPTY `SweepFingerprint`.
 ///
 /// This fixture enables ONLY `intel` + `sweep` - the exact two writers whose
-/// fight Phase 2 ends. Before Phase 2 it never converged (intel re-stamped
+/// fight is over. It used to never converge (intel re-stamped
 /// `tags: [digest]`, sweep re-stripped it, so cycle-2's fingerprint was always
-/// non-empty). As of Phase 2 the digest is tagless and intel is input-side
+/// non-empty). Now the digest is tagless and intel is input-side
 /// idempotent, so the fight is gone and both cycles converge to an EMPTY
 /// fingerprint.
 ///
-/// NOTE: the doc's Phase 7 plan schedules this inversion (`!fp2.is_empty()` ->
-/// `fp2.is_empty()`) after Phases 1-4, on the reasoning that the FULL
-/// action-set fixture (lint/link/etc.) only converges once Phase 4 reconciles
-/// the link matchers. This narrow intel+sweep-only fixture, however, converges
-/// as soon as Phase 2 removes the digest-tag fight - the mandated tag removal
-/// leaves nothing for cycle-2's fingerprint. So the inversion is forced here in
-/// Phase 2. Phase 7 still owns the full-action-set empty-fingerprint invariant.
+/// NOTE: the design doc schedules the `!fp2.is_empty()` -> `fp2.is_empty()`
+/// inversion for the FULL action-set fixture (lint/link/etc.), which only
+/// converges once the link matchers are reconciled. This narrow
+/// intel+sweep-only fixture converges as soon as the digest-tag fight is
+/// removed - the mandated tag removal leaves nothing for cycle-2's
+/// fingerprint. The full-action-set invariant is owned by
+/// `full_action_set_periodic_sweep_fingerprint_converges_after_all_phases`.
 #[test]
 fn periodic_sweep_fingerprint_converges_after_phase2() {
     // See the lock comment on `intel_sweep_two_writer_fight_no_longer_reproduces` -
@@ -513,22 +513,21 @@ fn periodic_sweep_fingerprint_converges_after_phase2() {
 
     assert!(
         fp2.is_empty(),
-        "expected the intel<->sweep steady state to converge to an EMPTY fingerprint after Phase 2 \
+        "expected the intel<->sweep steady state to converge to an EMPTY fingerprint \
          (fp1={fp1:?} fp2={fp2:?})"
     );
 }
 
-/// Phase 7 (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`), the
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`: the
 /// structural guard the whole doc exists to enforce: two consecutive
 /// periodic sweeps with the FULL default action set enabled - classify,
 /// link, duplicates, intel, sweep, broken-links, lint, state,
 /// quality - must produce an EMPTY `SweepFingerprint` on the second sweep.
 ///
 /// `periodic_sweep_fingerprint_converges_after_phase2` (above) only proves
-/// this for the narrow intel+sweep fixture; that test's own doc comment
-/// explains why the FULL action-set invariant needed Phase 4 (link
-/// detection/mutation reconciliation) before it could converge too, and
-/// defers ownership of that broader claim to Phase 7. This is that test.
+/// this for the narrow intel+sweep fixture; the FULL action-set invariant
+/// also needed link detection/mutation reconciliation before it could
+/// converge. This is the test that owns that broader claim.
 ///
 /// The fixture deliberately exercises a REAL fixable violation per action
 /// where the action can produce one (classify promotes an inbox note; lint's
@@ -542,30 +541,29 @@ fn periodic_sweep_fingerprint_converges_after_phase2() {
 /// and the design doc's Background section for the full list.
 ///
 /// BITES (documented per the task's explicit ask, since `cargo test` has no
-/// mechanism to assert "this test used to fail"): reverting Phases 1-4 makes
-/// this test fail. Concretely, on pre-Phase-1 `main`, verified directly
-/// against commit `803255e` (the Phase 0 repro commit, immediately before
-/// Phase 1's fix): this exact fixture and assertion, run against that
+/// mechanism to assert "this test used to fail"): reverting the oscillation fixes makes
+/// this test fail. Concretely, verified directly against commit `803255e`
+/// (the repro commit, immediately before the lint-fingerprint fix): this exact fixture and assertion, run against that
 /// commit's `configured_actions`, panics with a non-empty `fp2` - the
 /// `lint` arm still fingerprints permanently-unfixable violation paths (a
 /// literal `"(vault-wide)"` phantom entry plus `k8s-notes.md`,
 /// `no-title-note.md`, `notes/thing.md`) and the `sweep` arm re-migrates the
 /// daily digest note every cycle (`notes/ai/daily/<date>.md`, predating
-/// Phase 2's tagless-digest fix). Two defects drive this:
+/// the tagless-digest fix). Two defects drive this:
 ///
 /// 1. The `lint` arm fingerprinted `report.violations` paths (every
 ///    `tags.non-canonical`/`frontmatter.date-format`/etc. violation,
 ///    including permanently-unfixable ones), so `lint` alone kept both
 ///    fingerprints non-empty forever -
 ///    `configured_actions_lint_fingerprint_excludes_unfixable_violations`
-///    (Phase 1) pins exactly this defect on a single-rule fixture.
+///    pins exactly this defect on a single-rule fixture.
 /// 2. The `link` arm fingerprinted `lint_linking`'s pre-apply suggestion
 ///    paths rather than `apply_linking`'s real applied paths - before
-///    Phase 4's matcher reconciliation, `find_mention` (detection) and
+///    the matcher reconciliation, `find_mention` (detection) and
 ///    `insert_first_wikilink` (mutation) could disagree, so a reported
 ///    suggestion was not guaranteed appliable.
 ///
-/// Both defects are independently pinned by their own Phase 1/4 regression
+/// Both defects are independently pinned by their own regression
 /// tests (`configured_actions_lint_fingerprint_excludes_unfixable_violations`,
 /// `linking::tests::two_consecutive_link_passes_converge_to_zero_writes`,
 /// `linking::tests::every_lint_linking_suggestion_is_appliable`); this
@@ -664,11 +662,11 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     )
     .expect("write inbox note");
 
-    // -- classify (mark_needs_review path, Phase 8 audit finding #1): a
+    // -- classify (mark_needs_review path, audit finding #1): a
     // NO-SIGNAL inbox note - no tags, no source, Tier-2 disabled via the bogus
     // fabric binary above. classify returns None, so cycle 1 stamps
     // `cortex-needs-review: true`. It is NEVER marked `cortex-classified`, so
-    // `filter_inbox_notes` re-selects it every cycle; the pre-Phase-8 code
+    // `filter_inbox_notes` re-selects it every cycle; the old code
     // rewrote it (byte-identically, new mtime) on EVERY cycle - the perpetual
     // self-write the zero-writes assertion below now catches. `origin: authored`
     // keeps quality/link/duplicates off it, so classify is the ONLY
@@ -679,7 +677,7 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     )
     .expect("write no-signal inbox note");
 
-    // -- classify (catch-up path, Phase 8 audit finding #2): a tag-less note
+    // -- classify (catch-up path, audit finding #2): a tag-less note
     // already in notes/ (orphaned by a reingest that dropped its tags), but
     // its `author-tags` (the publisher's own hashtag) survived so the
     // deterministic classifier has a candidate to confirm. Cycle 1 enriches
@@ -774,7 +772,7 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     let fp1 = configured_actions(vault_root, &config, &daemon_config, &[]);
 
     // Snapshot the on-disk state of every note file AFTER cycle 1 has fully
-    // settled. This is the Phase 8 strengthening (audit finding #2: the old
+    // settled. This is the strengthening (audit finding #2: the old
     // `fp2.is_empty()` assertion never observed the filesystem, so a
     // write-without-fingerprint - exactly what `mark_needs_review` and catch-up
     // did - passed silently). We capture bytes AND mtime: the no-signal inbox
@@ -791,7 +789,7 @@ fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
     let after = snapshot_note_files(vault_root);
 
     // ZERO note files may be added, removed, or touched in cycle 2 - not merely
-    // an empty fingerprint. This assertion BITES on the pre-Phase-8 classify
+    // an empty fingerprint. This assertion BITES on the old classify
     // code: `mark_needs_review` rewrote `inbox/mystery.md` every cycle
     // (byte-identical, new mtime), tripping this exact check.
     assert_eq!(
@@ -846,7 +844,7 @@ fn snapshot_note_files(root: &Path) -> std::collections::BTreeMap<PathBuf, (Vec<
     map
 }
 
-/// Phase 2 success criterion (c) (design doc
+/// Success criterion (c) (design doc
 /// `2026-07-05-cortex-daemon-oscillation-loop.md`): a scheduled-intel write
 /// performed under the `applying` guard (as the daemon's daily/weekly arms now
 /// do) must NOT clear a latched `oscillating` state. The guard makes the
@@ -922,14 +920,14 @@ async fn scheduled_intel_write_under_applying_guard_does_not_clear_latch() {
     drop(watcher);
 }
 
-/// Phase 5 (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`), success
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`, success
 /// criterion (a): a cycle in which no action mutates the vault performs
 /// exactly ONE `scan_vault` call. Injects a counting fake through
-/// `configured_actions_with_scanner` (the Phase 5 seam) in place of the real
+/// `configured_actions_with_scanner` (the shared-scan seam) in place of the real
 /// scanner, over an empty vault with every scan-consuming action enabled in
 /// report-only mode (`enable: false` -> `is_enabled` false -> `apply`/`auto`
 /// false in every arm that checks it), which guarantees zero writes
-/// regardless of what a scan would find. Before Phase 5 this cycle issued one
+/// regardless of what a scan would find. Previously this cycle issued one
 /// independent `scan_vault` call per scanning action (classify, lint, link,
 /// duplicates, quality, sweep - broken-links included) every time it
 /// ran; the shared cache collapses that to exactly one call.
@@ -984,7 +982,7 @@ fn configured_actions_no_mutation_scans_vault_exactly_once() {
     );
 }
 
-/// Phase 5 (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`), success
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`, success
 /// criterion (b): a cycle with a mutation rescans exactly at the defined
 /// boundary - right before the next action that reads the shared note list,
 /// never before an action that does not need fresher state. `classify` runs
@@ -1208,7 +1206,7 @@ fn test_sb_data_dir_contains_oracle_db() {
     assert!(vault::paths::oracle_db_path().starts_with(&data_dir));
 }
 
-/// PATH hygiene (Phase 5, 2026-07-20 harvest-completion): fabric is
+/// PATH hygiene (harvest-completion): fabric is
 /// mise-managed, so its shim dir must be on PATH and FIRST (mise-managed
 /// tools win over any stale duplicate); the retired `~/go/bin` hand-built
 /// fabric entry must be gone.
@@ -1242,7 +1240,7 @@ fn test_render_systemd_unit_path_includes_mise_shims_and_excludes_go_bin() {
     );
 }
 
-// Byte-exact goldens (2026-10-05 quality-review-fixes). `render_systemd_unit`
+// Byte-exact goldens (quality-review-fixes). `render_systemd_unit`
 // is pure, so the inputs are just the args. The config-present case passes
 // the literal path `<XDG_CONFIG_HOME>/sb/cortex.yml`, the placeholder the
 // golden carries.

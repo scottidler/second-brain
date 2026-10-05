@@ -1,7 +1,7 @@
 //! `cortex graph`: build the materialized deterministic `edges` table that
 //! oracle's graph-expansion retrieval reads.
 //!
-//! Phase 1 of the graph-augmented-memory design
+//! The graph-augmented-memory design
 //! (`docs/design/2026-06-05-graph-augmented-memory.md`). cortex is the writer;
 //! oracle only reads. The pass runs AFTER `cortex embed` (so semantic edges
 //! see fresh vectors) and serializes against any concurrent embed write via
@@ -42,11 +42,11 @@ const KIND_WIKILINK: &str = "wikilink";
 const KIND_SHARED_TAG: &str = "shared-tag";
 const KIND_SHARED_CREATOR: &str = "shared-creator";
 const KIND_SHARED_SOURCE: &str = "shared-source";
-/// Note -> repo hub membership (harvest-clyde-sessions design, Phase 10).
+/// Note -> repo hub membership (harvest-clyde-sessions design).
 const KIND_REPO_MEMBER: &str = "repo-member";
-/// Note -> creator hub membership (entity-hub-two-vector-synthesis, Phase 1).
+/// Note -> creator hub membership (entity-hub-two-vector-synthesis).
 const KIND_CREATOR_MEMBER: &str = "creator-member";
-/// Note -> source-host hub membership (entity-hub-two-vector-synthesis, Phase 1).
+/// Note -> source-host hub membership (entity-hub-two-vector-synthesis).
 const KIND_SOURCE_MEMBER: &str = "source-member";
 /// Hub membership is a strong deterministic signal (unlike a rarity-weighted
 /// shared tag), so every `*-member` kind rides at full weight.
@@ -120,7 +120,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<Graph
         build(&mut index, &config.graph, opts.backfill)?
     };
 
-    // Phase 5: --backfill also extracts typed `fact` edges (bounded, LLM) and
+    // --backfill also extracts typed `fact` edges (bounded, LLM) and
     // runs the consolidation agents. Deterministic edges above stand alone; the
     // factual layer is layered on top only on an explicit backfill. The embed
     // lock is already held, so call the lock-agnostic helper directly.
@@ -402,7 +402,7 @@ fn build_edges_for(
         // df) contributes ~nothing; a rare shared tag is discriminating.
         let contrib = 1.0_f32 / (1.0 + df as f32).ln();
         if df > cfg.fanout_cap {
-            // Over-cap blanket tag: route through the tag's hub note (Phase 3)
+            // Over-cap blanket tag: route through the tag's hub note
             // if one exists, instead of emitting df-1 pairwise edges. One edge
             // per note to the hub keeps the dense bucket from exploding.
             let hub_path = format!("{}/{}.md", crate::hub::HUB_DIR, tag);
@@ -446,12 +446,12 @@ fn build_edges_for(
         cfg.fanout_cap,
     );
 
-    // --- repo-member (Phase 10 single-repo + Phase 4 multi-repo): note -> repo
+    // --- repo-member (single-repo + multi-repo): note -> repo
     // hub edges. Unlike the shared-* buckets above (note<->note within a bucket,
     // fan-out capped), this is genuinely new routing: EVERY well-formed repo the
     // note anchors to joins that repo's hub via the shared `repo_hub_path`. The
-    // set is the note's `repo:` (harvest-clyde Phase 9) UNION every element of
-    // `repos-touched` (harvest-completion Phase 4). A malformed slug is skipped +
+    // set is the note's `repo:` (harvest-clyde) UNION every element of
+    // `repos-touched` (harvest-completion). A malformed slug is skipped +
     // logged (the note is still indexed). Each edge resolves once the hub pass
     // has stubbed `entities/repos/<org>/<repo>.md`; until then insert_edges skips
     // it (resolve-endpoint-or-skip) and the next sweep re-adds it - monotonic.
@@ -484,8 +484,8 @@ fn build_edges_for(
         ));
     }
 
-    // --- creator-member: note -> creator hub (entity-hub-two-vector-synthesis,
-    // Phase 1). Same shape as repo-member: linear note->hub routing, NOT a
+    // --- creator-member: note -> creator hub (entity-hub-two-vector-synthesis).
+    // Same shape as repo-member: linear note->hub routing, NOT a
     // note<->note bucket, so `fanout_cap` deliberately does NOT apply. The cap
     // exists to stop quadratic pairwise blow-up in `metadata_edges`; copying it
     // here would emit NOTHING for exactly the largest creator hubs, which is the
@@ -513,7 +513,7 @@ fn build_edges_for(
         }
     }
 
-    // --- source-member: note -> source-host hub (same phase, same no-cap
+    // --- source-member: note -> source-host hub (same routing, same no-cap
     // reasoning; `www.youtube.com` alone holds >1000 notes and is the single
     // host over the cap, so a copied cap would zero the largest source hub).
     //
@@ -618,7 +618,7 @@ fn tally(stats: &mut GraphStats, edges: &[Edge]) {
             KIND_SHARED_TAG => stats.shared_tag += 1,
             KIND_SHARED_CREATOR | KIND_SHARED_SOURCE => stats.metadata += 1,
             // Explicit arms, not the catch-all: the `_ => {}` below hid
-            // `repo-member` from every run report since Phase 10 shipped.
+            // `repo-member` from every run report since repo hubs shipped.
             KIND_REPO_MEMBER => stats.repo_member += 1,
             KIND_CREATOR_MEMBER => stats.creator_member += 1,
             KIND_SOURCE_MEMBER => stats.source_member += 1,

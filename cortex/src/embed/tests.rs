@@ -87,7 +87,7 @@ fn process_batch_embeds_stale_summary_rows() {
 
 #[test]
 fn process_batch_prefixes_title_to_summary() {
-    // Phase 7a: the embedded text is `"{title}\n\n{summary}"`, not the bare
+    // the embedded text is `"{title}\n\n{summary}"`, not the bare
     // summary. insert_test_note_row seeds title "T" and summary "summary".
     let mut index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-batch-test");
@@ -121,7 +121,7 @@ fn process_batch_prefixes_title_to_summary() {
     );
 }
 
-/// Write a note file carrying a `## Transcript` section (Phase 7). `body_head`
+/// Write a note file carrying a `## Transcript` section. `body_head`
 /// is any markdown that precedes it (e.g. slide sections for a slide-path
 /// youtube note); pass `""` for a plain article.
 fn write_note_with_transcript(vault: &std::path::Path, rel: &str, note_type: &str, body_head: &str, transcript: &str) {
@@ -137,7 +137,7 @@ fn write_note_with_transcript(vault: &std::path::Path, rel: &str, note_type: &st
 
 /// Stage a `distilled.yml` under `<staging_root>/<trace>/distilled.yml` carrying
 /// the given transcript, mirroring what borg's `write_distilled_yml` produces.
-/// The 2026-07-07 distillation-output-restore re-points cortex's transcript
+/// The distillation-output-restore re-points cortex's transcript
 /// embedding at this staged file (via `notes.trace`) for Video/Article notes.
 fn stage_distilled_transcript(staging_root: &std::path::Path, trace: &str, transcript: &str) {
     let dir = staging_root.join(trace);
@@ -152,7 +152,7 @@ fn stage_distilled_transcript(staging_root: &std::path::Path, trace: &str, trans
 
 #[test]
 fn process_transcript_batch_embeds_video_article_from_staging_ignoring_in_note_section() {
-    // 2026-07-07 distillation-output-restore Phase 5. Video/Youtube/Article
+    // distillation-output-restore. Video/Youtube/Article
     // transcripts now come from the staged distilled.yml (resolved via
     // notes.trace), NOT the note body. This test proves both halves: a video
     // note with a STAGED transcript embeds even though its body has no
@@ -388,7 +388,7 @@ fn process_transcript_batch_verbatim_kind_still_reads_in_note_section() {
 
 #[test]
 fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
-    // Phase 3 (docs/design/2026-07-05-cortex-daemon-oscillation-loop.md): a
+    // docs/design/2026-07-05-cortex-daemon-oscillation-loop.md: a
     // transcript-eligible note with no `## Transcript` section is scanned,
     // skipped (no row written), and MUST be marked examined so the next tick
     // does not re-scan it. Without the sentinel, `e.id` stays NULL and the note
@@ -434,7 +434,7 @@ fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
     );
 
     // Tick 2 on the unchanged vault: the sentinel excludes the note, so it is
-    // no longer even scanned. This is the convergence Phase 3 exists for.
+    // no longer even scanned. This is the convergence the sentinel exists for.
     let t2 = process_batch(
         &mut index,
         &m,
@@ -490,7 +490,7 @@ fn process_batch_skips_notes_with_empty_summary() {
 
 #[test]
 fn write_transaction_for_batch_64_stays_under_200ms() {
-    // This is the load-bearing invariant of Phase A5. If a future
+    // This is the load-bearing invariant of the transaction discipline. If a future
     // change moves `embed_batch` between BEGIN IMMEDIATE and COMMIT
     // (or holds any other CPU-bound work inside the write transaction),
     // the wall-clock blows past 200 ms because real fastembed inference
@@ -635,12 +635,12 @@ fn embed_in_sub_batches_treats_zero_cap_as_no_cap() {
     assert_eq!(calls, vec![30], "cap=0 means one call with the full input");
 }
 
-// ---- Phase 9: capture-note embed text + claim embeddings ----
+// ---- capture-note embed text + claim embeddings ----
 
 #[test]
 fn summary_embed_text_is_byte_identical_when_no_capture_note() {
     // BYTE-IDENTICAL INVARIANT: a note without a capture note must embed the
-    // exact pre-Phase-9 text (title + blank line + summary), so the staleness
+    // same text as before capture notes (title + blank line + summary), so the staleness
     // watermark does not treat the whole vault as changed and re-embed it.
     let mut index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-batch-test");
@@ -670,7 +670,7 @@ fn summary_embed_text_is_byte_identical_when_no_capture_note() {
         .expect("row");
     assert_eq!(
         text, "T\n\nsummary",
-        "no capture note must yield the pre-Phase-9 title+summary text byte-identical"
+        "no capture note must yield the pre-capture-note title+summary text byte-identical"
     );
 }
 
@@ -810,7 +810,7 @@ fn group_claims_splits_by_word_budget() {
     assert_eq!(overlong, vec!["one two three four five".to_string(), "six".to_string()]);
 }
 
-// ---- Config-gated embed kinds (2026-07-05 retrieval-gate remediation) ----
+// ---- Config-gated embed kinds (retrieval-gate remediation) ----
 
 #[test]
 fn enabled_default_kinds_excludes_claim_by_default() {
@@ -863,7 +863,7 @@ fn resolve_kinds_no_override_uses_config_defaults() {
     assert_eq!(kinds, vec![EmbeddingKind::Summary, EmbeddingKind::TranscriptChunk]);
 }
 
-// --- entity-hub-two-vector-synthesis Phase 2 -------------------------------
+// --- entity-hub-two-vector-synthesis: hub chunk embedding --------------------
 
 #[test]
 fn summary_embed_text_keeps_the_pre_capture_note_shape_byte_identical() {
@@ -879,7 +879,7 @@ fn summary_embed_text_keeps_the_pre_capture_note_shape_byte_identical() {
     );
 }
 
-// --- per-tick chunk ceiling (2026-08-18 governance-starvation fix) ----------
+// --- per-tick chunk ceiling (governance-starvation fix) ----------
 //
 // The incident: `batch_size` bounds NOTES, so a tick's real work was
 // `64 notes x unbounded chunks`. One tick ran two days on an AVX-only host,

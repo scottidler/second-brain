@@ -243,8 +243,8 @@ pub(crate) struct Relinked {
 /// Update wikilinks in all vault files for a batch of renames.
 /// Single pass through all files. THE shared wikilink-rewrite for renames —
 /// case-insensitive, handles `[[link]]` and `[[link|alias]]`, skips renamed
-/// files, writes atomically. classify and migrate both delegate here (Phase 9
-/// consolidation; replaced two weaker copies).
+/// files, writes atomically. classify and migrate both delegate here (a consolidation
+/// that replaced two weaker copies).
 ///
 /// Returns the paths of the notes it actually rewrote (real byte changes
 /// only) and the notes it could not read. Each unreadable note WARNs and is

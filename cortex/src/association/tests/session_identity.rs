@@ -1,6 +1,6 @@
 use super::*;
 
-// -- Phase 5: group_by_session_identity --------------------------------
+// -- group_by_session_identity --------------------------------
 // docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md
 
 /// Build one note of the real `hv-e5d240` cohort: 15 notes, one `trace:`, one

@@ -1,4 +1,4 @@
-//! Phase-7 `cortex summarize --backfill` subcommand.
+//! `cortex summarize --backfill` subcommand.
 //!
 //! Walks the vault, infers an `IngestKind` from each note's frontmatter +
 //! source URL, invokes the shared `distillers` crate, and rewrites the
@@ -337,8 +337,8 @@ pub fn rewrite_note_file(path: &Path, base_frontmatter: &Frontmatter, distilled:
     // transcript input) back out. It MUST always emit the `## Transcript`
     // section — dropping it here would destroy the legacy body it just read,
     // including the April baseline this design exists to protect. This is the
-    // load-bearing reason RenderOptions exists (2026-07-07
-    // distillation-output-restore).
+    // load-bearing reason RenderOptions exists
+    // (distillation-output-restore).
     let rendered = render(
         distilled,
         RenderOptions {
@@ -380,7 +380,7 @@ fn clone_frontmatter(fm: &Frontmatter) -> Frontmatter {
         trace: fm.trace.clone(),
         ingested: fm.ingested.clone(),
         trace_expires: fm.trace_expires.clone(),
-        // Repo anchors (Phase 9) are join keys too - carry them through the
+        // Repo anchors are join keys too - carry them through the
         // backfill rewrite or it would strip repo:/repos-touched: from every
         // note it touches.
         repo: fm.repo.clone(),
@@ -400,7 +400,7 @@ fn absolute_note_path(vault_root: &Path, relative: &Path) -> PathBuf {
     }
 }
 
-/// Returns true when the note already carries the Phase-7 skip marker.
+/// Returns true when the note already carries the skip marker.
 pub fn is_already_distilled(fm: &Frontmatter) -> bool {
     fm.extra.get("distilled").and_then(|v| v.as_bool()).unwrap_or(false)
 }

@@ -136,7 +136,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let weekly = tokio::time::sleep(weekly_dur);
     tokio::pin!(weekly);
 
-    // Phase A5 / B2: periodic embed tick. Most ticks find zero stale
+    // Periodic embed tick. Most ticks find zero stale
     // rows and return in <1 ms; the load only spikes when borg has
     // just ingested new content. The cadence is decoupled from the
     // sweep cadence because embed is a CPU-bound batch operation and
@@ -144,7 +144,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut embed_interval = tokio::time::interval(crate::embed::daemon_cadence(config));
     embed_interval.tick().await; // consume the immediate first tick
 
-    // Phase 7b: load the embedding model once at daemon startup and
+    // load the embedding model once at daemon startup and
     // hand it to every tick by reference. The previous per-tick
     // load-and-drop pattern leaked ~30 MB/tick of allocator scratch
     // (shakedown: 1.2 -> 2.8 GB over 50 min); the long-lived model
@@ -182,7 +182,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut graph_interval = tokio::time::interval(Duration::from_secs(config.graph.graph_interval_secs));
     graph_interval.tick().await; // consume the immediate first tick
 
-    // Typed-`fact` backfill pass (Phase 5/6). The graph tick above is
+    // Typed-`fact` backfill pass. The graph tick above is
     // deterministic-only by design; this is the in-process schedule on which the
     // LLM fact layer (triple extraction + consolidation) refreshes. In-process
     // so it serializes against the embed/graph ticks on the shared embed lock
@@ -191,8 +191,8 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut fact_interval = tokio::time::interval(Duration::from_secs(config.graph.fact_interval_secs));
     fact_interval.tick().await; // consume the immediate first tick
 
-    // Association-sweep tick (2026-07-24 cortex-association-sweep design,
-    // Phase 5): a NEW periodic interval arm, deliberately NOT folded into the
+    // Association-sweep tick (cortex-association-sweep design):
+    // a NEW periodic interval arm, deliberately NOT folded into the
     // on-change `configured_actions` loop - a merge is soft-retiring
     // (destructive-ish), so it must run on its own slow cadence, never on
     // every debounced watcher event. Gated by `is_enabled("association")`,
@@ -202,14 +202,14 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut association_interval = tokio::time::interval(Duration::from_secs(config.actions.association.interval_secs));
     association_interval.tick().await; // consume the immediate first tick
 
-    // LLM entity-discovery pass (Phase 4). Daily by default; LLM-bound and
+    // LLM entity-discovery pass. Daily by default; LLM-bound and
     // bounded by `entities.max_per_run`, so it never fans unbounded calls.
     let mut entities_interval = tokio::time::interval(Duration::from_secs(config.entities.discover_interval_secs));
     entities_interval.tick().await; // consume the immediate first tick
 
     // Run a full sweep on startup.
     // block_in_place isolates the blocking CPU+I/O sweep from the tokio worker thread, letting
-    // the watcher and timers continue to run; once Phase 1 rayon lands inside scan_vault, this
+    // the watcher and timers continue to run; once rayon lands inside scan_vault, this
     // wrap is the boundary between the async runtime and the rayon worker pool.
     log::info!("running initial full sweep");
     applying.store(true, Ordering::Relaxed);
@@ -320,7 +320,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 }
             }
             _ = embed_interval.tick() => {
-                // Phase A5 / B2 embed tick. block_in_place because the
+                // Embed tick. block_in_place because the
                 // embed loop runs SQLite IO + fastembed CPU inference
                 // (when there are stale rows); we don't want to starve
                 // the watcher or the scheduled-intel timers if the
@@ -361,7 +361,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 }
             }
             _ = fact_interval.tick() => {
-                // Scheduled typed-`fact` backfill (Phase 5/6). block_in_place
+                // Scheduled typed-`fact` backfill. block_in_place
                 // because it runs blocking Fabric subprocess calls (triple
                 // extraction) + SQLite IO; bounded by graph.fact_max_per_run.
                 // Takes the embed lock in-process so it cannot collide with the
@@ -375,8 +375,8 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 }
             }
             _ = association_interval.tick() => {
-                // Association-sweep tick (2026-07-24 cortex-association-sweep
-                // design, Phase 5). Disabled by default; the tick still fires
+                // Association-sweep tick (cortex-association-sweep
+                // design). Disabled by default; the tick still fires
                 // on cadence but is a no-op unless explicitly enabled, so
                 // flipping the config on takes effect within one cadence
                 // window with no daemon restart required.
@@ -406,7 +406,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 }
             }
             _ = entities_interval.tick() => {
-                // Entity-discovery tick (Phase 4). block_in_place because the
+                // Entity-discovery tick. block_in_place because the
                 // pass runs blocking Fabric subprocess calls; bounded by
                 // entities.max_per_run.
                 match tokio::task::block_in_place(|| crate::entities::daemon_tick(vault_root, config)) {
@@ -518,7 +518,7 @@ fn configured_actions(
 
 /// Run the configured on-change actions, returning a fingerprint of what was applied.
 ///
-/// Phase 5 (design doc `2026-07-05-cortex-daemon-oscillation-loop.md`): scan the
+/// Design doc `2026-07-05-cortex-daemon-oscillation-loop.md`: scan the
 /// vault ONCE at the top of the cycle via the injected `scan` and share the
 /// resulting `&[Note]` across every action that reads vault-wide state, instead
 /// of each action independently re-scanning (previously up to 6+ redundant
@@ -528,7 +528,7 @@ fn configured_actions(
 /// tracks whether any action run so far in THIS cycle actually wrote to disk.
 /// Before any subsequent action consumes the shared note list, if `dirty` is
 /// set the list is rescanned and the flag cleared; if not, the cached list is
-/// reused. This reproduces the pre-Phase-5 behavior exactly - every action
+/// reused. This reproduces the unshared-scan behavior exactly - every action
 /// always saw the freshest on-disk state, because every action always
 /// re-scanned unconditionally - while skipping the rescan whenever nothing
 /// changed. `classify` runs first by design (it MOVES notes to their final
@@ -540,7 +540,7 @@ fn configured_actions(
 /// classify, lint, link, broken-links, duplicates, quality, sweep.
 /// `intel` and `state` are deliberately NOT wired into the shared cache here -
 /// `intel` keeps its own independent scan (its idempotency/skip-regeneration
-/// logic is Phase 2's concern, not this phase's, and folding it in risks a
+/// logic is intel's own concern, and folding it in risks a
 /// regression there); `state` never calls `scan_vault` at all. If `intel`
 /// writes during a cycle that also runs a cache-consuming action, the cache is
 /// conservatively marked dirty (see the `"intel"` arm) so a later reader in
@@ -567,7 +567,7 @@ where
     );
     let mut fingerprint = SweepFingerprint::default();
 
-    // Single scan at the top of the cycle - the Phase 5 seam.
+    // Single scan at the top of the cycle - the shared-scan seam.
     let mut notes: Vec<Note> = match scan(vault_root, &config.vault) {
         Ok(n) => n,
         Err(e) => {
@@ -604,7 +604,7 @@ where
                 match crate::classify::run_with_notes(&notes, vault_root, config, &opts) {
                     Ok((_report, written)) => {
                         // Fingerprint the paths classify ACTUALLY wrote - the
-                        // Phase 1 lint/sweep shape - never a `"promoted"`
+                        // lint/sweep shape - never a `"promoted"`
                         // substring sniff of violation messages. That old sniff
                         // ignored the two other write paths (`mark_needs_review`
                         // for no-signal/low-confidence inbox notes and catch-up
@@ -814,7 +814,7 @@ where
                     }
                 }
                 // Always scan for proposals (even if not auto-applying). Matches
-                // pre-Phase-5 behavior: proposals are scanned from the SAME
+                // unshared-scan behavior: proposals are scanned from the SAME
                 // pre-migrate note list migrate() just read (migrate() does not
                 // mutate `notes` in place - only the on-disk bytes), not a
                 // freshly rescanned one.
@@ -843,8 +843,8 @@ where
                 // is read by the SEPARATE `association_interval` tick above via
                 // `is_enabled("association")`, never by this on-change loop - a
                 // merge/cross-link pass must run on its own slow cadence, not on
-                // startup or every debounced watcher event (2026-07-24
-                // cortex-association-sweep design, Phase 5). This arm exists
+                // startup or every debounced watcher event
+                // (cortex-association-sweep design). This arm exists
                 // solely so registering the action in `daemon.actions` does not
                 // fall through to the `unknown daemon action` warning below.
             }
@@ -868,8 +868,8 @@ where
 /// resolves both.
 ///
 /// Emits the secret-bootstrap `ExecStartPre` + `EnvironmentFile` and the
-/// rayon cap from `config.daemon` when configured (2026-07-05
-/// cortex-daemon-oscillation-loop design doc: the live unit had drifted to
+/// rayon cap from `config.daemon` when configured
+/// (cortex-daemon-oscillation-loop design doc: the live unit had drifted to
 /// carry both by hand because this template omitted them). Both are optional
 /// - a host with neither still gets a valid, complete unit.
 fn render_systemd_unit(

@@ -111,7 +111,7 @@ fn test_extract_existing_links() {
     assert!(links.contains("note-b"));
 }
 
-// --- Phase 2: glossary concepts + piped alias links ---
+// --- glossary concepts + piped alias links ---
 
 #[test]
 fn insert_first_wikilink_pipes_alias_to_slug() {
@@ -591,9 +591,9 @@ fn guard_blocks_a_mention_inside_an_embed() {
     assert_blocked("![[rust-diagram]]", "rust", "rust");
 }
 
-// --- Phase 4: detection <-> mutation matcher convergence ---
+// --- detection <-> mutation matcher convergence ---
 //
-// Before this phase, `find_mention` (detection, ASCII-only boundary) and
+// Previously, `find_mention` (detection, ASCII-only boundary) and
 // `insert_first_wikilink` (mutation, regex `\b` + an independently-sliced
 // body) could disagree on whether a mention was clean/appliable. A
 // suggestion the daemon reported but could never apply left
@@ -746,7 +746,7 @@ fn guard_links_clean_prose_occurrence_after_one_inside_a_wikilink() {
 
 #[test]
 fn apply_linking_is_add_only_never_removes_or_alters_content() {
-    // Phase 13 acceptance (apply_linking add-only): the linker only ADDS
+    // Acceptance (apply_linking add-only): the linker only ADDS
     // wikilinks; the original prose AND any pre-existing wikilink survive
     // around the insertion.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -790,7 +790,7 @@ fn apply_linking_is_add_only_never_removes_or_alters_content() {
 
 #[test]
 fn apply_linking_across_growing_sweeps_never_removes_prior_links() {
-    // Phase 6 (harvest-completion): extends the Phase 13 add-only guarantee
+    // harvest-completion: extends the add-only guarantee
     // (single-call) and the two-pass convergence test (identical vault) to a
     // THIRD sweep where the vault GROWS - the exact shape every real nightly
     // daemon tick takes. A prior sweep's inserted wikilink must survive
@@ -852,7 +852,7 @@ fn apply_linking_across_growing_sweeps_never_removes_prior_links() {
 
 #[test]
 fn concept_recall_every_glossary_concept_mentioned_gets_linked() {
-    // Phase 13 acceptance (concept recall): over a small labeled corpus, the
+    // Acceptance (concept recall): over a small labeled corpus, the
     // fraction of known-concept mentions that actually land a wikilink bounds
     // the glossary/alias coverage gap. A concept IN the glossary must reach
     // recall 1.0; an out-of-glossary term is the coverage gap (not linked).

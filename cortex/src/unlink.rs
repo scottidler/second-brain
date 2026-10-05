@@ -4,8 +4,8 @@
 //! The stopword gate in `crate::linking` stops the NEXT false link; the
 //! graph stopword stops the edge. Neither retracts markup that already
 //! landed - `graph::tests::stoplisted_wikilink_leaves_the_note_body_byte_identical`
-//! pins that as the graph phase's binding rule. This module is the one
-//! explicit, operator-invoked phase that edits the landed bytes, which is
+//! pins that as the graph pass's binding rule. This module is the one
+//! explicit, operator-invoked pass that edits the landed bytes, which is
 //! why it is a separate verb (`sb cortex unlink`) and reports before it
 //! writes rather than running on the daemon tick.
 //!
