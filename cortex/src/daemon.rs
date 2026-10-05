@@ -175,8 +175,9 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     // Graph-augmented-memory edge pass. Runs on its own cadence, ordered
     // AFTER the embed tick so semantic edges see fresh vectors. The pass takes
     // the same embed file lock, so it cannot interleave with an embed write;
-    // its first run after a restart is a full rebuild (no persisted
-    // last_run_at), incremental thereafter.
+    // `last_run_at` persists in SQLite
+    // (`cortex/src/graph.rs`), so a restart resumes incrementally; only a
+    // never-run index gets a full rebuild.
     let mut graph_interval = tokio::time::interval(Duration::from_secs(config.graph.graph_interval_secs));
     graph_interval.tick().await; // consume the immediate first tick
 

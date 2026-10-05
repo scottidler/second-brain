@@ -274,7 +274,7 @@ impl Default for GraphConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct EmbedConfig {
-    /// Size of the DEDICATED inference thread pool (`embed::inference_pool`).
+    /// Size of the DEDICATED inference thread pool (`embed::in_inference_pool`).
     ///
     /// 0 used to mean "let the backend pick", which is
     /// `min(8, available_parallelism)`: 8 replicas on a 32-core box, all

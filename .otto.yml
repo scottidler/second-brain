@@ -75,6 +75,11 @@ tasks:
     bash: |
       cargo test --workspace --features vec
 
+  perf:
+    help: "Time search_vector at 21K x 384 against its regression ceiling (release; not in ci)"
+    bash: |
+      cargo test --release -p vault --features vec --test perf -- --ignored --nocapture
+
   cov:
     help: "Run tests with coverage via llvm-cov"
     after: [cov-report]

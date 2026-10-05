@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Per-note migration outcome produced by the parallel phase. The sequential drain afterward
-/// uses these to update `changed_count`, emit deterministic per-file `println!`s, and
-/// accumulate `ledger_entries` for the post-loop seeding step.
+/// collects each `rel_path` into `MigrateReport::changed` and accumulates the `ledger_entry`
+/// values for the post-loop seeding step.
 struct MigrateOutcome {
     rel_path: String,
     ledger_entry: Option<LedgerEntry>,
