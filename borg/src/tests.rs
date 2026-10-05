@@ -264,7 +264,10 @@ async fn queue_route_returns_snapshot() {
         .expect("record");
         drop(conn);
 
-        let resp = test_router().oneshot(get_queue("/queue", None)).await.expect("response");
+        let resp = test_router()
+            .oneshot(get_queue("/queue", None))
+            .await
+            .expect("response");
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
         let snap: vault::queue::QueueSnapshot = serde_json::from_slice(&bytes).expect("parseable QueueSnapshot");
@@ -293,7 +296,10 @@ async fn queue_route_returns_snapshot() {
 async fn queue_route_idle_is_exactly_idle() {
     let data_home = tempfile::TempDir::new().expect("tempdir");
     with_xdg_data_home(data_home.path(), || async {
-        let resp = test_router().oneshot(get_queue("/queue", None)).await.expect("response");
+        let resp = test_router()
+            .oneshot(get_queue("/queue", None))
+            .await
+            .expect("response");
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await, serde_json::json!({"state": "idle"}));
     })
@@ -329,11 +335,17 @@ async fn queue_route_db_error_is_500_not_idle() {
     let blocker = scratch.path().join("not-a-dir");
     std::fs::write(&blocker, "x").expect("write blocker");
     with_xdg_data_home(&blocker, || async {
-        let resp = test_router().oneshot(get_queue("/queue", None)).await.expect("response");
+        let resp = test_router()
+            .oneshot(get_queue("/queue", None))
+            .await
+            .expect("response");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let json = body_json(resp).await;
         assert!(json["error"].is_string(), "500 body must carry an error: {json}");
-        assert!(json.get("state").is_none(), "a DB error must never look like a snapshot");
+        assert!(
+            json.get("state").is_none(),
+            "a DB error must never look like a snapshot"
+        );
     })
     .await;
 }

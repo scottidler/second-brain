@@ -412,5 +412,105 @@ pub fn load(
     Ok(snapshot(&rows, now, cfg, batch))
 }
 
+/// Why [`fetch`] could not return a snapshot. Typed so callers (`sb borg wait`)
+/// can tell an unknown batch from an old daemon from an unreachable one.
+#[derive(Debug, thiserror::Error)]
+pub enum FetchError {
+    #[error("daemon at {addr} predates /queue; run otto deploy there")]
+    PredatesQueue { addr: String },
+    #[error("unknown batch {batch}")]
+    UnknownBatch { batch: String },
+    #[error("hotkey.host/hotkey.port form no valid address ({addr}): {reason}")]
+    BadAddress { addr: String, reason: String },
+    #[error("daemon at {addr} refused the credentials (HTTP 401); check server.auth-token")]
+    Unauthorized { addr: String },
+    #[error("cannot reach daemon at {addr} for GET {path}: {source}")]
+    Unreachable {
+        addr: String,
+        path: String,
+        source: reqwest::Error,
+    },
+    #[error("daemon at {addr} answered GET {path} with HTTP {status}: {body}")]
+    Http {
+        addr: String,
+        path: String,
+        status: u16,
+        body: String,
+    },
+    #[error("daemon at {addr} sent an unparseable /queue body: {source}")]
+    Parse { addr: String, source: reqwest::Error },
+}
+
+/// `GET /queue[?batch=<id>]` on the daemon at `hotkey.host:hotkey.port`.
+///
+/// `timeout` bounds the whole request (connect, headers, body); callers own the
+/// overall deadline. A 404 on plain `/queue` means an old daemon; a 404 with
+/// `?batch=` means that batch is unknown.
+pub async fn fetch(
+    config: &crate::config::Config,
+    batch: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<QueueSnapshot, FetchError> {
+    let addr = format!("{}:{}", config.hotkey.host, config.hotkey.port);
+    let path = match batch {
+        Some(_) => "/queue?batch=<id>".to_string(),
+        None => "/queue".to_string(),
+    };
+    log::debug!("queue::fetch: addr={addr} batch={batch:?} timeout={timeout:?}");
+    let result = fetch_inner(config, &addr, &path, batch, timeout).await;
+    match &result {
+        Ok(snap) => log::debug!("queue::fetch: addr={addr} ok state={:?}", snap.state),
+        Err(e) => log::warn!("queue::fetch: addr={addr} batch={batch:?} failed: {e}"),
+    }
+    result
+}
+
+async fn fetch_inner(
+    config: &crate::config::Config,
+    addr: &str,
+    path: &str,
+    batch: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<QueueSnapshot, FetchError> {
+    let mut url = reqwest::Url::parse(&format!("http://{addr}/queue")).map_err(|e| FetchError::BadAddress {
+        addr: addr.to_string(),
+        reason: e.to_string(),
+    })?;
+    if let Some(id) = batch {
+        url.query_pairs_mut().append_pair("batch", id);
+    }
+    let unreachable = |source| FetchError::Unreachable {
+        addr: addr.to_string(),
+        path: path.to_string(),
+        source,
+    };
+    let mut req = reqwest::Client::new().get(url).timeout(timeout);
+    if let Some(token) = crate::config::client_auth_token(config.server.auth_token.as_deref()) {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await.map_err(unreachable)?;
+    let status = resp.status();
+    if status.is_success() {
+        return resp.json::<QueueSnapshot>().await.map_err(|source| FetchError::Parse {
+            addr: addr.to_string(),
+            source,
+        });
+    }
+    match (status.as_u16(), batch) {
+        (404, Some(id)) => Err(FetchError::UnknownBatch { batch: id.to_string() }),
+        (404, None) => Err(FetchError::PredatesQueue { addr: addr.to_string() }),
+        (401, _) => Err(FetchError::Unauthorized { addr: addr.to_string() }),
+        (code, _) => {
+            let body = resp.text().await.map_err(unreachable)?;
+            Err(FetchError::Http {
+                addr: addr.to_string(),
+                path: path.to_string(),
+                status: code,
+                body: vault::text::truncate(&body, FIELD_MAX_CHARS).to_string(),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

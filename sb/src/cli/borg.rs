@@ -12,6 +12,9 @@ pub mod extension;
 #[cfg(test)]
 mod tests;
 
+/// Per-request ceiling for `sb borg queue`; the daemon answers from one indexed read.
+const QUEUE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 static HELP_TEXT: LazyLock<String> = LazyLock::new(get_tool_validation_help);
 
 #[derive(Args)]
@@ -82,6 +85,14 @@ pub enum Command {
     },
     /// Query the receipts log (durable record of every input borg ever saw)
     Log(LogCliArgs),
+    /// Show the daemon's ingest queue: `state: idle`, or the current batch
+    /// (done, remaining, elapsed, wedged and failed items). Asks the daemon at
+    /// `hotkey.host:hotkey.port`, so it answers the same from any machine
+    Queue {
+        /// yaml or json (default: yaml on a terminal, json when piped)
+        #[arg(long, value_enum, ignore_case = true)]
+        format: Option<crate::cli::output::Format>,
+    },
     /// Reingest existing entries through the current pipeline
     Reingest {
         /// Reingest every ledger entry rather than a filtered subset
@@ -507,6 +518,10 @@ impl BorgCli {
                     print_receipt_rows(&rows);
                 }
                 Ok(())
+            }
+            Some(Command::Queue { format }) => {
+                let snapshot = borg::queue::fetch(&config, None, QUEUE_REQUEST_TIMEOUT).await?;
+                crate::cli::output::emit(&snapshot, format)
             }
             Some(Command::Reingest {
                 all,

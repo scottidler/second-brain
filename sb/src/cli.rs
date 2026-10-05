@@ -7,6 +7,7 @@ pub mod checks;
 pub mod cortex;
 pub mod doctor;
 pub mod oracle;
+pub mod output;
 pub mod status;
 
 #[derive(Parser)]

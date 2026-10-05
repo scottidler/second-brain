@@ -351,3 +351,161 @@ fn load_errors_on_unparseable_timestamp_instead_of_reporting_idle() {
     let err = load(&conn, now(), &cfg(), None).expect_err("bad timestamp must error");
     assert!(format!("{err:#}").contains("received_at"), "{err:#}");
 }
+
+// ---- fetch: HTTP client against a stub daemon ----
+
+mod fetch_stub {
+    use super::*;
+    use crate::config::Config;
+    use axum::Router;
+    use axum::extract::Query;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    const T: Duration = Duration::from_secs(5);
+
+    /// Serve `handler` at GET /queue on an ephemeral port; return a Config
+    /// whose `hotkey` points at it.
+    async fn stub<H, Fut>(handler: H) -> Config
+    where
+        H: Fn(HashMap<String, String>, HeaderMap) -> Fut + Clone + Send + Sync + 'static,
+        Fut: std::future::Future<Output = axum::response::Response> + Send,
+    {
+        let app = Router::new().route(
+            "/queue",
+            get(move |Query(q): Query<HashMap<String, String>>, h: HeaderMap| {
+                let handler = handler.clone();
+                async move { handler(q, h).await }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        let mut config = Config::default();
+        config.hotkey.host = "127.0.0.1".to_string();
+        config.hotkey.port = port;
+        config
+    }
+
+    fn json(status: StatusCode, body: &str) -> axum::response::Response {
+        (status, [("content-type", "application/json")], body.to_string()).into_response()
+    }
+
+    const DRAINING: &str = r#"{"state":"draining","batch":{"id":"b1","started":"2026-10-04T21:59:43Z","elapsed-secs":192,"total":6,"done":3,"remaining":3,"succeeded":3,"failed":0,"queued":1,"processing":2,"wedged":0},"items":[]}"#;
+
+    #[tokio::test]
+    async fn fetch_returns_idle() {
+        let config = stub(|_, _| async { json(StatusCode::OK, r#"{"state":"idle"}"#) }).await;
+        let snap = fetch(&config, None, T).await.expect("fetch");
+        assert_eq!(snap.state, QueueState::Idle);
+        assert!(snap.batch.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_returns_draining_and_sends_batch_param() {
+        let config = stub(|q, _| async move {
+            assert_eq!(q.get("batch").map(String::as_str), Some("b1"));
+            json(StatusCode::OK, DRAINING)
+        })
+        .await;
+        let snap = fetch(&config, Some("b1"), T).await.expect("fetch");
+        assert_eq!(snap.state, QueueState::Draining);
+        assert_eq!(batch(&snap).total, 6);
+        assert_eq!(batch(&snap).remaining, 3);
+    }
+
+    #[tokio::test]
+    async fn fetch_plain_404_means_daemon_predates_queue() {
+        let config = stub(|_, _| async { StatusCode::NOT_FOUND.into_response() }).await;
+        let err = fetch(&config, None, T).await.expect_err("404");
+        assert!(matches!(err, FetchError::PredatesQueue { .. }), "{err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("daemon at 127.0.0.1:{}", config.hotkey.port)),
+            "{msg}"
+        );
+        assert!(msg.contains("predates /queue; run otto deploy there"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn fetch_batch_404_is_unknown_batch_not_predates() {
+        let config = stub(|_, _| async { json(StatusCode::NOT_FOUND, r#"{"error":"unknown batch nope"}"#) }).await;
+        let err = fetch(&config, Some("nope"), T).await.expect_err("404");
+        assert!(
+            matches!(err, FetchError::UnknownBatch { ref batch } if batch == "nope"),
+            "{err:?}"
+        );
+        assert!(!err.to_string().contains("predates"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_401_without_valid_token_is_unauthorized() {
+        let config = stub(|_, h| async move {
+            if h.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer s3cret") {
+                json(StatusCode::OK, r#"{"state":"idle"}"#)
+            } else {
+                json(StatusCode::UNAUTHORIZED, r#"{"error":"unauthorized"}"#)
+            }
+        })
+        .await;
+        let err = fetch(&config, None, T).await.expect_err("401");
+        assert!(matches!(err, FetchError::Unauthorized { .. }), "{err:?}");
+
+        // `server.auth-token` is a secret REFERENCE (file path or env-var name).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_file = dir.path().join("token");
+        std::fs::write(&token_file, "s3cret\n").expect("write token");
+        let mut with_token = config;
+        with_token.server.auth_token = Some(token_file.display().to_string());
+        let snap = fetch(&with_token, None, T).await.expect("bearer sent");
+        assert_eq!(snap.state, QueueState::Idle);
+    }
+
+    #[tokio::test]
+    async fn fetch_500_carries_status_and_body() {
+        let config = stub(|_, _| async { json(StatusCode::INTERNAL_SERVER_ERROR, r#"{"error":"db down"}"#) }).await;
+        let err = fetch(&config, None, T).await.expect_err("500");
+        assert!(matches!(err, FetchError::Http { status: 500, .. }), "{err:?}");
+        assert!(err.to_string().contains("db down"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_connect_refused_names_the_address() {
+        // Bind then drop to get a port nothing listens on.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            l.local_addr().expect("addr").port()
+        };
+        let mut config = Config::default();
+        config.hotkey.host = "127.0.0.1".to_string();
+        config.hotkey.port = port;
+        let err = fetch(&config, None, T).await.expect_err("refused");
+        assert!(matches!(err, FetchError::Unreachable { .. }), "{err:?}");
+        assert!(err.to_string().contains(&format!("127.0.0.1:{port}")), "{err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_honours_the_explicit_request_timeout() {
+        let config = stub(|_, _| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            json(StatusCode::OK, r#"{"state":"idle"}"#)
+        })
+        .await;
+        let started = std::time::Instant::now();
+        let err = fetch(&config, None, Duration::from_millis(300))
+            .await
+            .expect_err("timeout");
+        assert!(matches!(err, FetchError::Unreachable { .. }), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "must not hang");
+    }
+
+    #[tokio::test]
+    async fn fetch_garbage_body_is_parse_error() {
+        let config = stub(|_, _| async { json(StatusCode::OK, "not json") }).await;
+        let err = fetch(&config, None, T).await.expect_err("parse");
+        assert!(matches!(err, FetchError::Parse { .. }), "{err:?}");
+    }
+}

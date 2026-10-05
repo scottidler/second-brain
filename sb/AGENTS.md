@@ -14,7 +14,7 @@
 
 ## Command Modules (`src/cli/`)
 
-- `borg.rs` (+`cli/borg/`) — Daemon, Ingest, Note, Hotkey, Extension, Migrate, Audit, Log, Reingest, … → borg lib.
+- `borg.rs` (+`cli/borg/`) — Daemon, Ingest, Note, Hotkey, Extension, Migrate, Audit, Log, Queue (`sb borg queue`: `borg::queue::fetch` -> `output::emit`), Reingest, … → borg lib.
 - `cortex.rs` — Classify, Lint, Link, Intel, State, Daemon, Migrate, Sweep, Summarize, Embed, … → cortex lib (after-help checks `fabric` availability).
 - `oracle.rs`: Serve, Index, Stats (prints "By tag (top 20)" plus the true "Distinct tags" count; the old "By domain" block is gone with the facet), Call (`--list`, `--json`); width-aware tool-list formatting; exit codes via `outcome_is_failure`.
 - `bootstrap.rs`, `status.rs`, `doctor.rs`, `checks.rs` — setup + health.
@@ -32,4 +32,4 @@
 ## Module Map
 
 - `main.rs`, `lib.rs`, `cli.rs`, `error.rs` (+`error/`), `logger.rs`, `build.rs`.
-- `cli/`: `borg.rs`, `cortex.rs`, `oracle.rs`, `bootstrap.rs`, `status.rs`, `doctor.rs`, `checks.rs`.
+- `cli/`: `borg.rs`, `cortex.rs`, `oracle.rs`, `bootstrap.rs`, `status.rs`, `doctor.rs`, `checks.rs`, `output.rs` (+`output/`: `emit(&T, Option<Format>)`, yaml on a TTY, json piped, `--format` override).
