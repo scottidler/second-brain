@@ -39,7 +39,7 @@ pub const POOL_SIZE: u32 = 8;
 
 /// Schema version recorded in the `schema_version` table. Bump when the
 /// schema changes.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 const SCHEMA_SQL: &str = include_str!("receipts/schema.sql");
 
@@ -47,7 +47,7 @@ const SCHEMA_SQL: &str = include_str!("receipts/schema.sql");
 /// `terminal_at` value. Because the column is compared lexicographically in
 /// SQL (`received_at >= ?`), any value bound against it MUST be produced with
 /// this exact format or string ordering diverges from chronological ordering.
-const TIMESTAMP_FMT: &str = "%Y-%m-%dT%H:%M:%SZ";
+pub const TIMESTAMP_FMT: &str = "%Y-%m-%dT%H:%M:%SZ";
 
 /// `failure_reason` recorded by [`promote_single_to_crashed`] when the row it
 /// reaped carried a lease that had expired (as opposed to a row that never
@@ -276,6 +276,15 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         log::debug!("receipts::run_migrations: adding lease_until column (v4)");
         conn.execute("ALTER TABLE receipts ADD COLUMN lease_until TEXT DEFAULT NULL", [])
             .context("add lease_until column")?;
+    }
+    // v5 (ingest-queue-status design, Phase 1): `started_at` records when a
+    // trace got its general permit, so the queue snapshot can tell queued from
+    // processing. Same placement rule as v4: AFTER the v3 rebuild, whose fixed
+    // 12-column INSERT...SELECT would drop it on a pre-v3 DB.
+    if !has_column(conn, "receipts", "started_at")? {
+        log::debug!("receipts::run_migrations: adding started_at column (v5)");
+        conn.execute("ALTER TABLE receipts ADD COLUMN started_at TEXT DEFAULT NULL", [])
+            .context("add started_at column")?;
     }
     // MAX() over an empty table returns one row whose value is NULL, which
     // rusqlite cannot decode straight into i64; bind through Option to read
@@ -549,13 +558,16 @@ pub fn write_lease(conn: &Connection, trace_id: &str, pid: u32, lease_until: &st
 
 /// Re-stamp `lease_until` on an already-leased row (renew at permit grant, so
 /// the actual-processing window is measured from when work truly starts).
-/// Same `status='received'` guard as [`write_lease`].
-pub fn renew_lease(conn: &Connection, trace_id: &str, lease_until: &str) -> Result<()> {
-    log::debug!("receipts::renew_lease: trace={trace_id} lease_until={lease_until}");
+/// Also stamps `started_at` (first renew wins; later renews keep it). Same
+/// `status='received'` guard as [`write_lease`], so a terminal row is never
+/// stamped.
+pub fn renew_lease(conn: &Connection, trace_id: &str, lease_until: &str, started_at: &str) -> Result<()> {
+    log::debug!("receipts::renew_lease: trace={trace_id} lease_until={lease_until} started_at={started_at}");
     let rows = conn
         .execute(
-            "UPDATE receipts SET lease_until=? WHERE trace_id=? AND status='received'",
-            params![lease_until, trace_id],
+            "UPDATE receipts SET lease_until=?, started_at=COALESCE(started_at, ?) \
+             WHERE trace_id=? AND status='received'",
+            params![lease_until, started_at, trace_id],
         )
         .with_context(|| format!("Failed to renew lease trace_id={trace_id}"))?;
     if rows == 0 {

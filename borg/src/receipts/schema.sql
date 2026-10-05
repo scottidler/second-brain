@@ -46,7 +46,10 @@ CREATE TABLE IF NOT EXISTS receipts (
   -- lease; a non-NULL value in the past means the owning process stopped
   -- renewing (fail closed, reap-eligible past the received_at deadline).
   lease_owner_pid INTEGER DEFAULT NULL,
-  lease_until     TEXT DEFAULT NULL
+  lease_until     TEXT DEFAULT NULL,
+  -- When the trace got its general permit (TIMESTAMP_FMT); NULL = never
+  -- granted. History, not liveness: never cleared at terminal time.
+  started_at      TEXT DEFAULT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_receipts_status ON receipts(status);

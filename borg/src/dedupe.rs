@@ -328,7 +328,7 @@ fn effective_timestamp(vault_root: &Path, abs_path: &Path, receipt: Option<&Rece
         && let Some(recorded) = r.note_path.as_deref()
         && let Some(terminal_at) = r.terminal_at.as_deref()
         && normalize_receipt_path(vault_root, recorded) == abs_path
-        && let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(terminal_at, "%Y-%m-%dT%H:%M:%SZ")
+        && let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(terminal_at, crate::receipts::TIMESTAMP_FMT)
     {
         return Some(parsed.and_utc().timestamp());
     }

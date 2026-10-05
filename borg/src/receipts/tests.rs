@@ -874,7 +874,7 @@ fn renew_lease_updates_expiry_only() {
     let now = Utc::now();
     write_lease(&conn, "tr-renew", 111, &lease_at(now, 1800)).expect("write_lease");
     let renewed_until = lease_at(now, 3600);
-    renew_lease(&conn, "tr-renew", &renewed_until).expect("renew_lease");
+    renew_lease(&conn, "tr-renew", &renewed_until, &lease_at(now, 0)).expect("renew_lease");
     let owner_pid: i64 = conn
         .query_row(
             "SELECT lease_owner_pid FROM receipts WHERE trace_id='tr-renew'",
@@ -889,6 +889,84 @@ fn renew_lease_updates_expiry_only() {
         .expect("read lease_until");
     assert_eq!(owner_pid, 111, "renew never touches lease_owner_pid");
     assert_eq!(lease_until, renewed_until, "renew re-stamps lease_until");
+}
+
+#[test]
+fn renew_lease_stamps_started_at_once() {
+    let conn = fresh();
+    let now = Utc::now();
+    record_received(&conn, "tr-start", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    write_lease(&conn, "tr-start", 1, &lease_at(now, 1800)).expect("write_lease");
+    let started = |id: &str| -> Option<String> {
+        conn.query_row("SELECT started_at FROM receipts WHERE trace_id=?", [id], |r| r.get(0))
+            .expect("read started_at")
+    };
+    assert_eq!(started("tr-start"), None, "never stamped before the permit grant");
+    let first = lease_at(now, 5);
+    renew_lease(&conn, "tr-start", &lease_at(now, 1800), &first).expect("renew 1");
+    assert_eq!(started("tr-start").as_deref(), Some(first.as_str()));
+    renew_lease(&conn, "tr-start", &lease_at(now, 1900), &lease_at(now, 60)).expect("renew 2");
+    assert_eq!(
+        started("tr-start").as_deref(),
+        Some(first.as_str()),
+        "second renew keeps the first"
+    );
+
+    record_received(&conn, "tr-term", Method::Http, ReceiptKind::Url, "u").expect("ins");
+    mark_succeeded(&conn, "tr-term", "n.md", false).expect("mark_succeeded");
+    renew_lease(&conn, "tr-term", &lease_at(now, 1800), &first).expect("renew terminal");
+    assert_eq!(started("tr-term"), None, "terminal row is never stamped");
+}
+
+#[test]
+fn v5_migration_adds_started_at_surviving_v3_rebuild_from_pre_v3_db() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("receipts.db");
+    {
+        let conn = Connection::open(&path).expect("open raw v1 db");
+        apply_pragmas(&conn).expect("pragmas");
+        conn.execute_batch(
+            "CREATE TABLE receipts (
+               trace_id        TEXT NOT NULL PRIMARY KEY,
+               received_at     TEXT NOT NULL,
+               method          TEXT NOT NULL,
+               kind            TEXT NOT NULL CHECK (kind IN ('url', 'text', 'binary')),
+               raw_input       TEXT NOT NULL,
+               status          TEXT NOT NULL CHECK (status IN ('received', 'succeeded', 'failed')),
+               terminal_at     TEXT,
+               note_path       TEXT,
+               failure_stage   TEXT,
+               failure_reason  TEXT,
+               replay_of       TEXT
+             );
+             CREATE TABLE schema_version (version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_version (version, applied_at) VALUES (1, '2026-01-01T00:00:00Z');
+             INSERT INTO receipts (trace_id, received_at, method, kind, raw_input, status)
+               VALUES ('legacy-1', '2026-01-01T00:00:00Z', 'http', 'url', 'https://x.com', 'succeeded');",
+        )
+        .expect("seed pre-v3 (v1) schema");
+    }
+    {
+        let conn = open_at(&path).expect("first open migrates v1 to v5");
+        assert!(
+            has_column(&conn, "receipts", "started_at").expect("probe"),
+            "started_at must survive the v3 rebuild"
+        );
+        let v: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .expect("max version");
+        assert_eq!(v, 5);
+        assert_eq!(get(&conn, "legacy-1").expect("get").expect("row").status, "succeeded");
+    }
+    {
+        let conn = open_at(&path).expect("second open is idempotent");
+        assert!(has_column(&conn, "receipts", "started_at").expect("probe"));
+    }
+}
+
+#[test]
+fn fresh_db_has_started_at_column() {
+    assert!(has_column(&fresh(), "receipts", "started_at").expect("probe"));
 }
 
 #[test]
@@ -1056,7 +1134,7 @@ fn renew_races_scan_between_select_and_promotion_is_not_reaped() {
 
     // Step 2: the owning cross-process worker renews the lease AFTER the scan's
     // SELECT but BEFORE the watchdog's promotion UPDATE - the race window.
-    renew_lease(&conn, "racer", &lease_at(now, 1800)).expect("renew_lease");
+    renew_lease(&conn, "racer", &lease_at(now, 1800), &lease_at(now, 0)).expect("renew_lease");
 
     // Step 3: the watchdog's promotion UPDATE fires with the SAME `now`. Its
     // own lease predicate re-checks atomically and matches 0 rows, so the live

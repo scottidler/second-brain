@@ -106,7 +106,7 @@ pub static HEAVY_PERMITS: PermitPool = PermitPool::new("heavy");
 /// alive" and "dead" only diverge AFTER the handler's own hard timeout fires.
 fn lease_until(now: chrono::DateTime<Utc>, deadline_secs: u64) -> String {
     (now + chrono::Duration::seconds(deadline_secs as i64))
-        .format("%Y-%m-%dT%H:%M:%SZ")
+        .format(receipts::TIMESTAMP_FMT)
         .to_string()
 }
 
@@ -172,9 +172,14 @@ impl TraceLeaseGuard {
     /// is logged but does not abort the trace - the lease still expires on its
     /// own and the watchdog reaps only after that (fail-closed).
     pub fn renew(&self) {
-        let until = lease_until(Utc::now(), self.deadline_secs);
-        log::debug!("TraceLeaseGuard::renew: trace={} lease_until={until}", self.trace_id);
-        if let Err(e) = receipts::renew_lease(&self.conn, &self.trace_id, &until) {
+        let now = Utc::now();
+        let until = lease_until(now, self.deadline_secs);
+        let started_at = now.format(receipts::TIMESTAMP_FMT).to_string();
+        log::debug!(
+            "TraceLeaseGuard::renew: trace={} lease_until={until} started_at={started_at}",
+            self.trace_id
+        );
+        if let Err(e) = receipts::renew_lease(&self.conn, &self.trace_id, &until, &started_at) {
             log::warn!(
                 "TraceLeaseGuard::renew: trace={} renew_lease failed: {e:#}",
                 self.trace_id
