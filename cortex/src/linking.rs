@@ -2,7 +2,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::LazyLock;
 
 use crate::config::{LinkingConfig, LinkingFilter};
 use crate::report::{Fix, Report, Severity, Violation};
@@ -78,10 +77,6 @@ fn is_path_filtered(path: &Path, filter: &LinkingFilter) -> bool {
     }
     true
 }
-
-/// Regex to find existing wikilinks (to avoid double-linking).
-static EXISTING_LINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]").expect("valid wikilink regex"));
 
 /// Run wikilink inference on all notes.
 ///
@@ -354,11 +349,13 @@ pub fn apply_linking(
     Ok(written)
 }
 
-/// Extract all existing wikilink targets from body (lowercased).
+/// The stems of every existing wikilink in `body` (lowercased), so
+/// `[[dir/stem]]` and `[[stem#h]]` both count as already linked. Links inside
+/// code are not links.
 fn extract_existing_links(body: &str) -> HashSet<String> {
-    EXISTING_LINK_RE
-        .captures_iter(body)
-        .filter_map(|cap| cap.get(1).map(|m| m.as_str().trim().to_lowercase()))
+    vault::wikilink::parse(body)
+        .filter(|l| !l.target.is_empty())
+        .map(|l| l.stem())
         .collect()
 }
 

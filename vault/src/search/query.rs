@@ -255,14 +255,19 @@ impl super::SearchIndex {
             None => return Ok(vec![]),
         };
 
-        let targets = extract_wikilinks(&body);
+        let mut paths_stmt = self.conn.prepare("SELECT path FROM notes ORDER BY path")?;
+        let all_paths: Vec<String> = paths_stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let resolver = crate::wikilink::Resolver::new(all_paths);
         let mut links = Vec::new();
 
-        for target in targets {
+        // A same-note link (`[[#h]]`, empty target) points nowhere to resolve.
+        for link in crate::wikilink::parse(&body).filter(|l| !l.target.is_empty()) {
             // Try to resolve the target to an actual note path
-            let resolved = self.resolve_wikilink(&target)?;
+            let resolved = resolver.resolve(link.target).next().map(str::to_string);
             links.push(OutboundLink {
-                target: target.clone(),
+                target: link.target.to_string(),
                 resolved_path: resolved.clone(),
                 exists: resolved.is_some(),
             });
@@ -281,54 +286,17 @@ impl super::SearchIndex {
              FROM notes WHERE body LIKE ?1",
         )?;
 
-        let pattern = format!("%[[{stem}%");
+        // Not `%[[{stem}%`: that misses `[[dir/{stem}]]`. The prefilter only
+        // narrows the scan; `Resolver` below decides what is really a link.
+        let pattern = format!("%{stem}%");
+        let resolver = crate::wikilink::Resolver::new([path]);
         let rows: Vec<NoteRow> = stmt
             .query_map(params![pattern], NoteRow::from_row)?
             .filter_map(warn_row)
-            .filter(|note| {
-                // Verify with exact wikilink parsing
-                let links = extract_wikilinks(&note.body);
-                links.iter().any(|l| l.eq_ignore_ascii_case(stem))
-            })
+            .filter(|note| crate::wikilink::parse(&note.body).any(|l| resolver.resolve(l.target).next().is_some()))
             .collect();
 
         Ok(rows)
-    }
-
-    /// Find notes with no inbound links (orphans)
-    pub fn orphan_notes(&self, limit: Option<u32>) -> Result<Vec<NoteRow>> {
-        let limit = limit.unwrap_or(50);
-
-        // Get all notes
-        let mut stmt = self.conn.prepare(
-            "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
-             FROM notes ORDER BY date DESC",
-        )?;
-        let all_notes: Vec<NoteRow> = stmt.query_map([], NoteRow::from_row)?.filter_map(warn_row).collect();
-
-        // Collect all wikilink targets across the vault
-        let mut linked_stems: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for note in &all_notes {
-            for link in extract_wikilinks(&note.body) {
-                linked_stems.insert(link.to_lowercase());
-            }
-        }
-
-        // Notes whose stem is never referenced
-        let orphans: Vec<NoteRow> = all_notes
-            .into_iter()
-            .filter(|note| {
-                let stem = Path::new(&note.path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                !linked_stems.contains(&stem)
-            })
-            .take(limit as usize)
-            .collect();
-
-        Ok(orphans)
     }
 
     /// Try to resolve a wikilink target to an actual note path in the index

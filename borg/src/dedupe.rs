@@ -18,23 +18,22 @@
 //! workspace's one-way capture/governance layering, so the shape is
 //! reproduced here rather than imported). Because the filename never
 //! changes, every inbound `[[wikilink]]` - piped, path-qualified, or
-//! embedded (the single regex below matches all three; a `.base` view is a
+//! embedded (`vault::wikilink::parse` matches all three; a `.base` view is a
 //! property-filter query, not a literal wikilink, so it needs no rewrite
 //! either) - keeps resolving through the tombstone's redirect. There is
 //! deliberately no link-rewrite pass; see the design doc's Alternative 3.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::time::UNIX_EPOCH;
 
 use eyre::{Context, Result};
-use regex::Regex;
 use rusqlite::Connection;
 
 use vault::config::ScanConfig;
 use vault::note::{self, Note};
 use vault::schema::NoteType;
+use vault::wikilink::Resolver;
 
 use crate::config::{Config, StagingConfig};
 use crate::receipts::{self, Receipt};
@@ -60,13 +59,6 @@ const DISTILLED_KEY: &str = "distilled";
 /// "this distill degraded", only these two literal tags plus
 /// `cortex-needs-review` (an independent, cortex-side signal).
 const DEGRADATION_MARKERS: &[&str] = &["[missing-summary]", "[yaml-parse-error]"];
-
-/// Wikilink target extractor. Matches `[[target]]` and `[[target|alias]]`; an
-/// `![[target]]` embed also matches because the `!` sits outside the capture
-/// group. Deliberately re-derived here rather than imported from
-/// `cortex::links` (borg does not depend on cortex).
-static WIKILINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]").expect("valid wikilink regex"));
 
 /// `sb borg dedupe-sessions` flags.
 #[derive(Debug, Clone, Copy, Default)]
@@ -483,8 +475,7 @@ fn run_purge(vault_root: &Path, notes: &[Note], groups: &[DedupeGroup], apply: b
     let mut report = PurgeReport::default();
     let mut to_archive_abs: Vec<PathBuf> = Vec::new();
     for tombstone in candidates {
-        let stem = stem_of(&tombstone);
-        let inbound = inbound_links(&index, &tombstone, &stem);
+        let inbound = inbound_links(&index, &tombstone);
         if inbound.is_empty() {
             to_archive_abs.push(vault_root.join(&tombstone));
             report.archived.push(tombstone);
@@ -502,66 +493,44 @@ fn run_purge(vault_root: &Path, notes: &[Note], groups: &[DedupeGroup], apply: b
     Ok(report)
 }
 
-/// (source note path) -> every wikilink target it contains, lowercased and
-/// forward-slash-normalized. Built once per purge pass over the WHOLE vault
-/// (a maintenance command, not a hot path).
-fn build_link_index(notes: &[Note]) -> Vec<(PathBuf, Vec<String>)> {
-    notes
-        .iter()
-        .map(|n| (n.path.clone(), extract_targets(&strip_fenced_code_blocks(&n.body))))
-        .collect()
+/// Resolved note path (`/`-separated) -> the notes that link to it.
+type LinkIndex = HashMap<String, BTreeSet<PathBuf>>;
+
+fn link_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
-fn extract_targets(body: &str) -> Vec<String> {
-    WIKILINK_RE
-        .captures_iter(body)
-        .filter_map(|c| c.get(1))
-        .map(|m| m.as_str().trim().to_lowercase().replace('\\', "/"))
-        .collect()
-}
-
-/// Strip fenced code blocks so a literal `[[...]]` inside a quoted diff/
-/// transcript is never mistaken for a real wikilink. Line-based, mirrors
-/// `cortex::links::strip_fenced_code_blocks` (re-derived, not imported - see
-/// the module doc).
-fn strip_fenced_code_blocks(body: &str) -> String {
-    let mut out = String::with_capacity(body.len());
-    let mut in_fence = false;
-    for line in body.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            out.push('\n');
-            continue;
-        }
-        if in_fence {
-            out.push('\n');
-        } else {
-            out.push_str(line);
-            out.push('\n');
+/// Resolve every link in the WHOLE vault once, through one `Resolver`, into
+/// the notes each link points at (a maintenance command, not a hot path).
+/// `[[tomb#h]]` and `[[dir/tomb]]` both count as links to `dir/tomb.md`; a
+/// link inside code does not.
+fn build_link_index(notes: &[Note]) -> LinkIndex {
+    let resolver = Resolver::new(notes.iter().map(|n| link_key(&n.path)));
+    let mut index = LinkIndex::new();
+    for note in notes {
+        for link in vault::wikilink::parse(&note.body) {
+            for resolved in resolver.resolve(link.target) {
+                index.entry(resolved.to_string()).or_default().insert(note.path.clone());
+            }
         }
     }
-    out
+    index
 }
 
-/// Every OTHER note's path whose body links to `tombstone` (by stem or by
-/// full vault-relative path, case-insensitively) - sorted. A tombstone's own
-/// outbound redirect (`Merged into [[survivor]].`) is never counted as
-/// inbound to ITSELF.
-fn inbound_links(index: &[(PathBuf, Vec<String>)], tombstone: &Path, stem: &str) -> Vec<PathBuf> {
-    let stem_lower = stem.to_lowercase();
-    let path_lower = tombstone
-        .with_extension("")
-        .to_string_lossy()
-        .to_lowercase()
-        .replace('\\', "/");
-    let mut sources: Vec<PathBuf> = index
-        .iter()
-        .filter(|(src, _)| src != tombstone)
-        .filter(|(_, targets)| targets.iter().any(|t| *t == stem_lower || *t == path_lower))
-        .map(|(src, _)| src.clone())
-        .collect();
-    sources.sort();
-    sources
+/// Every OTHER note's path whose body links to `tombstone` - sorted. A
+/// tombstone's own outbound redirect (`Merged into [[survivor]].`) is never
+/// counted as inbound to ITSELF.
+fn inbound_links(index: &LinkIndex, tombstone: &Path) -> Vec<PathBuf> {
+    index
+        .get(&link_key(tombstone))
+        .map(|sources| {
+            sources
+                .iter()
+                .filter(|src| src.as_path() != tombstone)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

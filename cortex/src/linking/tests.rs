@@ -938,3 +938,33 @@ fn session_note_is_never_a_link_target() {
         report.violations
     );
 }
+
+#[test]
+fn glossary_path_and_heading_links_count_as_already_linked() {
+    let cfg = glossary_config(&["langchain"], &[]);
+    for body in [
+        "We use [[tools/langchain]] here. LangChain is great.",
+        "We use [[langchain#setup]] here. LangChain is great.",
+    ] {
+        let notes = vec![note_with_body("notes/x.md", body)];
+        let report = lint_linking(&notes, &cfg, &Stopwords::default());
+        assert!(
+            !report.violations.iter().any(|v| v.rule == "linking.glossary"),
+            "{body:?} already links the concept"
+        );
+    }
+}
+
+#[test]
+fn glossary_link_inside_inline_code_is_not_an_existing_link() {
+    let cfg = glossary_config(&["langchain"], &[]);
+    let notes = vec![note_with_body(
+        "notes/x.md",
+        "The syntax `[[langchain]]` is literal. We use LangChain in production.",
+    )];
+    let report = lint_linking(&notes, &cfg, &Stopwords::default());
+    assert!(
+        report.violations.iter().any(|v| v.rule == "linking.glossary"),
+        "a link inside code is not a link, so the prose mention is still flagged"
+    );
+}

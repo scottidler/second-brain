@@ -15,7 +15,7 @@ SQLite-backed search for vault notes: BM25 via FTS5, brute-force cosine vector s
 - `search_vector(query_vec, limit, …) -> Vec<VectorHit>` (cosine; feature `vec`).
 - `reciprocal_rank_fusion(bm25_paths, vec_paths, k=60, limit) -> Vec<FusedHit>`.
 - `vector::{stale_embedding_targets, upsert_embedding, upsert_embeddings_batch}` (cortex re-embed loop).
-- Graph/browse: `tag_search`, `cold_notes`, `orphan_notes`, `inbound_links`, `outbound_links`.
+- Graph/browse: `tag_search`, `cold_notes`, `inbound_links`, `outbound_links`.
 - Parsing: `parse_body_summary` (`## Summary`), `parse_body_claims` (`## Claims` bullets).
 
 ## Three Modes

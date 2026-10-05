@@ -2,13 +2,6 @@ use super::*;
 use crate::testutil::TestVault;
 
 #[test]
-fn test_extract_wikilinks() {
-    let body = "See [[note-a]] and [[note-b|display]]. Also [[folder/note-c]].";
-    let links = extract_wikilinks(body);
-    assert_eq!(links, vec!["note-a", "note-b", "folder/note-c"]);
-}
-
-#[test]
 fn test_broken_link_detected_on_vault() {
     let v = TestVault::new();
     let notes = v.scan();
@@ -133,29 +126,6 @@ fn test_excluded_files_still_resolve_as_targets() {
 }
 
 #[test]
-fn test_strip_fenced_code_blocks() {
-    let body = "Before code\n```\n[[inside-code]]\n```\nAfter code [[outside-code]]";
-    let stripped = strip_fenced_code_blocks(body);
-    assert!(!stripped.contains("inside-code"));
-    assert!(stripped.contains("outside-code"));
-}
-
-#[test]
-fn test_strip_fenced_code_blocks_with_language() {
-    let body = "Text\n```rust\nlet x = \"[[in-rust-block]]\";\n```\n[[real-link]]";
-    let stripped = strip_fenced_code_blocks(body);
-    assert!(!stripped.contains("in-rust-block"));
-    assert!(stripped.contains("real-link"));
-}
-
-#[test]
-fn test_strip_fenced_code_blocks_preserves_no_fence() {
-    let body = "No code blocks here. See [[some-link]].";
-    let stripped = strip_fenced_code_blocks(body);
-    assert!(stripped.contains("some-link"));
-}
-
-#[test]
 fn test_is_asset_reference() {
     assert!(is_asset_reference("pasted-image-20240617.png"));
     assert!(is_asset_reference("document.pdf"));
@@ -270,4 +240,50 @@ fn test_code_block_wikilinks_skipped() {
             .any(|vi| vi.message.contains("nonexistent-note")),
         "wikilinks outside code blocks should be detected"
     );
+}
+
+#[test]
+fn test_heading_link_is_not_broken() {
+    let v = TestVault::new();
+    v.add_note(
+        "target.md",
+        "---\ntitle: Target\ndate: 2026-03-18\ntype: note\norigin: authored\ntags: []\n---\nContent.\n",
+    );
+    v.add_note(
+        "src.md",
+        "---\ntitle: Src\ndate: 2026-03-18\ntype: note\norigin: authored\ntags: []\n---\nSee [[target#some-heading]], [[target#^blk]] and [[#own-heading]].\n",
+    );
+    let notes = v.scan();
+    let config = v.config().actions.broken_links;
+
+    let report = lint_broken_links(&notes, &notes, &config);
+    assert!(
+        !report.violations.iter().any(|vi| vi.path.to_string_lossy() == "src.md"),
+        "heading, block and same-note links are not broken: {:?}",
+        report.violations
+    );
+}
+
+#[test]
+fn test_path_link_does_not_resolve_to_another_directory() {
+    let v = TestVault::new();
+    v.add_note(
+        "otherdir/x.md",
+        "---\ntitle: Other X\ndate: 2026-03-18\ntype: note\norigin: authored\ntags: []\n---\nContent.\n",
+    );
+    v.add_note(
+        "src.md",
+        "---\ntitle: Src\ndate: 2026-03-18\ntype: note\norigin: authored\ntags: []\n---\nSee [[dir/x]] and [[otherdir/x]].\n",
+    );
+    let notes = v.scan();
+    let config = v.config().actions.broken_links;
+
+    let report = lint_broken_links(&notes, &notes, &config);
+    let src: Vec<_> = report
+        .violations
+        .iter()
+        .filter(|vi| vi.path.to_string_lossy() == "src.md")
+        .collect();
+    assert_eq!(src.len(), 1, "only [[dir/x]] is broken: {src:?}");
+    assert!(src[0].message.contains("dir/x"));
 }

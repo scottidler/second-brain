@@ -98,34 +98,6 @@ fn test_tag_cooccurrence() {
 }
 
 #[test]
-fn test_extract_wikilinks_simple() {
-    let body = "See [[some-note]] and [[another-note]] for details.";
-    let links = extract_wikilinks(body);
-    assert_eq!(links, vec!["some-note", "another-note"]);
-}
-
-#[test]
-fn test_extract_wikilinks_with_alias() {
-    let body = "Check [[some-note|display text]] here.";
-    let links = extract_wikilinks(body);
-    assert_eq!(links, vec!["some-note"]);
-}
-
-#[test]
-fn test_extract_wikilinks_with_heading() {
-    let body = "See [[some-note#heading]] for the section.";
-    let links = extract_wikilinks(body);
-    assert_eq!(links, vec!["some-note"]);
-}
-
-#[test]
-fn test_extract_wikilinks_skips_code_blocks() {
-    let body = "Before\n```\n[[code-link]]\n```\nAfter [[real-link]]";
-    let links = extract_wikilinks(body);
-    assert_eq!(links, vec!["real-link"]);
-}
-
-#[test]
 fn test_extract_host() {
     assert_eq!(
         extract_host("https://www.youtube.com/watch?v=abc"),

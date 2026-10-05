@@ -1,16 +1,11 @@
 use rayon::prelude::*;
-use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::LazyLock;
 
 use crate::config::QualityConfig;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::vault::Note;
-
-/// Regex to match wikilink targets in note bodies.
-static WIKILINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]").expect("valid wikilink regex"));
+use vault::wikilink::Resolver;
 
 /// Patterns (case-insensitive) that indicate the note content is a Fabric
 /// paraphrase of a block/error page rather than the intended article. These
@@ -87,7 +82,7 @@ pub fn lint_quality(notes: &[Note], config: &QualityConfig) -> Report {
     let mut report = Report::default();
 
     // Build inbound link index
-    let inbound_targets = build_inbound_index(notes);
+    let linked_paths = build_inbound_index(notes);
 
     let violations: Vec<Violation> = notes
         .par_iter()
@@ -104,7 +99,7 @@ pub fn lint_quality(notes: &[Note], config: &QualityConfig) -> Report {
                 return None;
             }
 
-            let issues = assess_note(note, &inbound_targets, config);
+            let issues = assess_note(note, &linked_paths, config);
             if issues.is_empty() {
                 return None;
             }
@@ -234,21 +229,28 @@ pub fn apply_quality(vault_root: &Path, notes: &[Note], config: &QualityConfig) 
     Ok(changed)
 }
 
-/// Build a set of note stems/paths that are referenced by at least one wikilink.
+/// The vault-relative path (`/`-separated) the link `Resolver` is keyed on.
+fn resolver_path(note: &Note) -> String {
+    note.path.to_string_lossy().replace('\\', "/")
+}
+
+/// The paths of every note referenced by at least one wikilink. Each link is
+/// resolved through one `Resolver` built from the whole note set, so
+/// `[[dir/x]]` and `[[x#h]]` credit `dir/x.md` (and never `otherdir/x.md`),
+/// and a link inside code credits nothing.
 fn build_inbound_index(notes: &[Note]) -> HashSet<String> {
-    let mut targets = HashSet::new();
+    let resolver = Resolver::new(notes.iter().map(resolver_path));
+    let mut linked = HashSet::new();
     for note in notes {
-        for cap in WIKILINK_RE.captures_iter(&note.body) {
-            if let Some(m) = cap.get(1) {
-                targets.insert(m.as_str().trim().to_lowercase());
-            }
+        for link in vault::wikilink::parse(&note.body) {
+            linked.extend(resolver.resolve(link.target).map(str::to_string));
         }
     }
-    targets
+    linked
 }
 
 /// Assess a single note for quality issues.
-fn assess_note(note: &Note, inbound_targets: &HashSet<String>, config: &QualityConfig) -> Vec<QualityIssue> {
+fn assess_note(note: &Note, linked_paths: &HashSet<String>, config: &QualityConfig) -> Vec<QualityIssue> {
     let mut issues = Vec::new();
     let body = &note.body;
 
@@ -279,13 +281,7 @@ fn assess_note(note: &Note, inbound_targets: &HashSet<String>, config: &QualityC
     }
 
     // No inbound links (not referenced by any other note)
-    let stem = note
-        .path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if !stem.is_empty() && !inbound_targets.contains(&stem) {
+    if !linked_paths.contains(&resolver_path(note)) {
         issues.push(QualityIssue {
             name: "no-inbound-links".to_string(),
             severity: IssueSeverity::Warning,
@@ -293,7 +289,7 @@ fn assess_note(note: &Note, inbound_targets: &HashSet<String>, config: &QualityC
     }
 
     // No outbound links
-    if !WIKILINK_RE.is_match(body) {
+    if vault::wikilink::parse(body).next().is_none() {
         issues.push(QualityIssue {
             name: "no-outbound-links".to_string(),
             severity: IssueSeverity::Info,

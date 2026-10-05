@@ -1325,3 +1325,134 @@ fn schema_gaps_reports_a_tags_gap_via_the_note_tags_facet() {
     let gaps: std::collections::HashMap<&str, u64> = stats.schema_gaps.iter().map(|(f, c)| (f.as_str(), *c)).collect();
     assert_eq!(gaps.get("tags"), Some(&1), "exactly one note has no note_tags rows");
 }
+
+#[test]
+fn recompute_inbound_link_counts_path_link_credits_only_the_matching_directory() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    for path in ["dir/x.md", "otherdir/x.md"] {
+        index
+            .index_one(&make_test_note(path, "## Summary\n\nX.\n"), 100)
+            .expect(path);
+    }
+    index
+        .index_one(&make_test_note("notes/src.md", "See [[dir/x]]."), 100)
+        .expect("src");
+
+    index.recompute_inbound_link_counts().expect("recompute");
+    assert_eq!(signal_row(&index, "dir/x.md").2, 1, "[[dir/x]] credits dir/x.md");
+    assert_eq!(
+        signal_row(&index, "otherdir/x.md").2,
+        0,
+        "[[dir/x]] does not credit otherdir/x.md"
+    );
+}
+
+#[test]
+fn recompute_inbound_link_counts_heading_link_and_code_link() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&make_test_note("notes/t.md", "## Summary\n\nT.\n"), 100)
+        .expect("t");
+    index
+        .index_one(&make_test_note("notes/h.md", "See [[t#intro]]."), 100)
+        .expect("h");
+    index
+        .index_one(&make_test_note("notes/c.md", "Literal `[[t]]` in code."), 100)
+        .expect("c");
+
+    index.recompute_inbound_link_counts().expect("recompute");
+    assert_eq!(
+        signal_row(&index, "notes/t.md").2,
+        1,
+        "the heading link counts, the inline-code link does not"
+    );
+}
+
+#[test]
+fn find_inbound_links_counts_a_path_link_and_not_another_directory() {
+    let index = SearchIndex::open_memory().expect("open");
+    for path in ["dir/x.md", "otherdir/x.md"] {
+        index
+            .index_one(&make_test_note(path, "## Summary\n\nX.\n"), 100)
+            .expect(path);
+    }
+    index
+        .index_one(&make_test_note("notes/src.md", "See [[dir/x]]."), 100)
+        .expect("src");
+
+    let to_dir = index.find_inbound_links("dir/x.md").expect("inbound");
+    assert_eq!(
+        to_dir.iter().map(|n| n.path.as_str()).collect::<Vec<_>>(),
+        ["notes/src.md"]
+    );
+    let to_other = index.find_inbound_links("otherdir/x.md").expect("inbound");
+    assert!(to_other.is_empty(), "[[dir/x]] is not a link to otherdir/x.md");
+}
+
+#[test]
+fn find_outbound_links_keeps_the_target_without_its_heading_and_skips_same_note_links() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&make_test_note("notes/a.md", "## Summary\n\nA.\n"), 100)
+        .expect("a");
+    index
+        .index_one(&make_test_note("notes/src.md", "See [[a#h]] and [[#top]]."), 100)
+        .expect("src");
+
+    let links = index.find_outbound_links("notes/src.md").expect("outbound");
+    assert_eq!(links.len(), 1, "the same-note link is not an outbound link");
+    assert_eq!(links[0].target, "a");
+    assert_eq!(links[0].resolved_path.as_deref(), Some("notes/a.md"));
+}
+
+#[test]
+fn find_outbound_links_resolves_a_path_link_to_the_matching_directory_only() {
+    let index = SearchIndex::open_memory().expect("open");
+    for path in ["dir/x.md", "otherdir/x.md"] {
+        index
+            .index_one(&make_test_note(path, "## Summary\n\nX.\n"), 100)
+            .expect(path);
+    }
+    index
+        .index_one(&make_test_note("notes/src.md", "See [[otherdir/x]]."), 100)
+        .expect("src");
+
+    let links = index.find_outbound_links("notes/src.md").expect("outbound");
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].resolved_path.as_deref(), Some("otherdir/x.md"));
+    assert!(links[0].exists);
+}
+
+#[test]
+fn find_outbound_links_does_not_fuzzy_match_a_substring() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&make_test_note("notes/notebook.md", "## Summary\n\nN.\n"), 100)
+        .expect("notebook");
+    index
+        .index_one(&make_test_note("notes/src.md", "See [[note]]."), 100)
+        .expect("src");
+
+    let links = index.find_outbound_links("notes/src.md").expect("outbound");
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].resolved_path, None, "[[note]] is not [[notebook]]");
+    assert!(!links[0].exists);
+}
+
+#[test]
+fn recompute_inbound_link_counts_skips_a_link_sharing_the_source_stem() {
+    // Pre-existing rule: a link whose stem equals the source note's stem is a
+    // self-link and credits nobody, even when another note shares that stem.
+    let mut index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&make_test_note("a/dup.md", "A links [[dup]]."), 100)
+        .expect("a");
+    index.index_one(&make_test_note("b/dup.md", "B."), 100).expect("b");
+    index
+        .index_one(&make_test_note("notes/y.md", "[[dup]]"), 100)
+        .expect("y");
+
+    index.recompute_inbound_link_counts().expect("recompute");
+    assert_eq!(signal_row(&index, "a/dup.md").2, 1, "only y's link");
+    assert_eq!(signal_row(&index, "b/dup.md").2, 1, "a's same-stem link credits nobody");
+}
