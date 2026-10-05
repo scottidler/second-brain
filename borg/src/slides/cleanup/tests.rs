@@ -122,13 +122,16 @@ fn test_rkvr_remove_empty_is_noop() {
     rkvr_remove(&[]).unwrap();
 }
 
+/// Integration test against the real `rkvr` binary, which has no CI install
+/// path: ignored by default, run by `otto ignored`. When run, a missing rkvr
+/// fails the test rather than letting it pass without running.
 #[test]
+#[ignore = "needs rkvr on PATH"]
 fn test_cleanup_orphans_end_to_end() {
-    // Skip if rkvr binary is unavailable - this is an integration test.
-    if std::process::Command::new("rkvr").arg("--version").output().is_err() {
-        eprintln!("rkvr not found; skipping test_cleanup_orphans_end_to_end");
-        return;
-    }
+    std::process::Command::new("rkvr")
+        .arg("--version")
+        .output()
+        .expect("rkvr must be on PATH for this test");
     let tmp = std::env::temp_dir().join("borg-test-cleanup-e2e");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();

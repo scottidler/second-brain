@@ -281,15 +281,16 @@ async fn test_extract_frames_disabled_returns_empty() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// Synthesize a small test mp4 with `ffmpeg -f lavfi` and run frame extraction.
-/// Skipped if ffmpeg is not on PATH; serves as a smoke test that the filter
-/// chain is well-formed and the sidecar gets written.
+/// Synthesize a small test mp4 with `ffmpeg -f lavfi` and run frame extraction:
+/// a smoke test that the filter chain is well-formed and the sidecar gets
+/// written. ffmpeg is a hard requirement (CI installs it); a missing binary
+/// fails the test rather than letting it pass without running.
 #[tokio::test]
 async fn test_extract_frames_synthetic_video() {
-    if Command::new("ffmpeg").arg("-version").output().is_err() {
-        eprintln!("ffmpeg not found; skipping test_extract_frames_synthetic_video");
-        return;
-    }
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .expect("ffmpeg must be on PATH for this test (CI installs it via apt)");
     let tmp = std::env::temp_dir().join("borg-test-frames-synth");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("create tmp");

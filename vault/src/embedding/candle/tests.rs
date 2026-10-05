@@ -1,10 +1,10 @@
 //! Unit tests for the Candle pool path.
 //!
-//! Network-touching tests (real model load via hf-hub) are gated behind
-//! `CANDLE_TESTS_REAL=1` so the default `otto ci` run stays offline. The
-//! Phase 3 numerical-parity regression test in `vault/tests/regression/`
-//! covers the on-disk load+forward path end-to-end against
-//! sentence-transformers reference vectors.
+//! Network-touching tests (real model load via hf-hub) are `#[ignore]`d so
+//! the default `otto ci` run stays offline; `otto ignored` runs them. The
+//! numerical-parity regression test in `vault/tests/regression/` covers the
+//! on-disk load+forward path end-to-end against sentence-transformers
+//! reference vectors.
 
 #![allow(clippy::unwrap_used)]
 
@@ -29,19 +29,12 @@ fn l2_normalize_produces_unit_vectors() {
     }
 }
 
-/// Optional real-model test: load BAAI/bge-small-en-v1.5 with 4
-/// replicas and confirm that batch == per-item embeddings (within fp32
-/// tolerance). Skipped unless `CANDLE_TESTS_REAL=1` is set; the network
-/// + ~133 MB download keeps this off the default CI path.
+/// Real-model test: load BAAI/bge-small-en-v1.5 with 4 replicas and confirm
+/// that batch == per-item embeddings (within fp32 tolerance). The network +
+/// ~133 MB download keeps this off the default CI path; `otto ignored` runs it.
 #[test]
+#[ignore = "downloads bge-small (~133 MB)"]
 fn pool_batch_matches_one_at_a_time_real_model() {
-    if std::env::var("CANDLE_TESTS_REAL").unwrap_or_default() != "1" {
-        eprintln!(
-            "skipping pool_batch_matches_one_at_a_time_real_model; set \
-             CANDLE_TESTS_REAL=1 to run (downloads ~133 MB)"
-        );
-        return;
-    }
     let model = CandleBertModel::load_with_workers(4).expect("load");
     let inputs = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
     let batched = model.embed_batch(&inputs).expect("batch");

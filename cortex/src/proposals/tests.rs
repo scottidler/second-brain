@@ -640,34 +640,31 @@ fn several_tags_promote_in_one_call() {
 /// exited 0, and let Phase 2's unconditional write replace a 112-entry queue
 /// with `proposals: []`. Only NotFound may be a skip.
 ///
-/// Distinct from the Phase 6 test that chmod-000s the staging dir ITSELF:
-/// `stat` on that path only needs execute on its parent, so `exists()` is
-/// true there and `read_dir` produces the Err. This is the case that slipped.
+/// The precondition is a regular file standing where a parent directory
+/// should be: `stat` on `<file>/stages` fails with ENOTDIR. Unlike chmod 000,
+/// ENOTDIR holds as root, so this runs (and bites) in the root CI container
+/// instead of skipping itself there.
 #[test]
-#[cfg(unix)]
-fn an_unreadable_parent_is_an_error_not_a_skip() {
-    use std::os::unix::fs::PermissionsExt;
-
+fn a_parent_that_is_a_file_is_an_error_not_a_skip() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let parent = dir.path().join("parent");
+    std::fs::write(&parent, "a regular file, not a directory").expect("write");
     let staging = parent.join("stages");
-    std::fs::create_dir_all(staging.join("hv-1")).expect("tree");
-    std::fs::write(staging.join("hv-1").join("distilled.yml"), "tags:\n  - ci-cd\n").expect("write");
 
-    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
-    // ROOT BYPASSES PERMISSION BITS, and CI runs as root, so chmod 000 denies
-    // nothing there. Probe whether the denial is real before asserting on it:
-    // a test that silently passes because it could not create its own
-    // precondition is worse than one that says it was skipped.
-    let denial_is_real = std::fs::read_dir(&staging).is_err();
-    let result = read_staged_candidates(&staging);
-    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).expect("restore");
+    let err = read_staged_candidates(&staging).expect_err("ENOTDIR on a parent must not read as 'no staging root'");
+    assert!(format!("{err:?}").contains("staging root"), "{err:?}");
+}
 
-    if !denial_is_real {
-        eprintln!("skipping: this environment (probably root) ignores the chmod, so EACCES cannot be produced");
-        return;
-    }
-    let err = result.expect_err("EACCES on a parent must not read as 'no staging root'");
+/// A staging root that stats fine but cannot be enumerated (it is a regular
+/// file, so `read_dir` fails with ENOTDIR) is an error too, never an empty
+/// scan. Root-proof for the same reason as the test above.
+#[test]
+fn a_staging_root_that_is_a_file_is_an_error_not_an_empty_scan() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let staging = dir.path().join("stages");
+    std::fs::write(&staging, "a regular file, not a directory").expect("write");
+
+    let err = read_staged_candidates(&staging).expect_err("an unenumerable root must not read as an empty scan");
     assert!(format!("{err:?}").contains("staging root"), "{err:?}");
 }
 
