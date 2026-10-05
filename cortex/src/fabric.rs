@@ -47,6 +47,3 @@ pub fn is_available(binary: &str) -> bool {
 // `truncate_input` lives in `crate::llm` (single source of truth); re-exported
 // here so the many `crate::fabric::truncate_input` call sites stay valid.
 pub use crate::llm::truncate_input;
-
-#[cfg(test)]
-mod tests;

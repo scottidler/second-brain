@@ -83,6 +83,17 @@ tasks:
     bash: |
       cargo test --release -p vault --features vec --test perf -- --ignored --nocapture
 
+  ignored:
+    help: "Run the local-only #[ignore]d tests by exact name (model download, rkvr; not in ci)"
+    bash: |
+      # The one entry point for tests CI cannot run: two download bge-small
+      # (~133 MB) and one needs Scott's rkvr binary. Named exactly, so the
+      # other #[ignore]d tests (perf, etc.) stay out; expect `3 passed`.
+      cargo test $CARGO_SCOPE -- --ignored --exact \
+        embedding::candle::tests::pool_batch_matches_one_at_a_time_real_model \
+        candle::parity::candle_bert_matches_sentence_transformers_reference \
+        slides::cleanup::tests::test_cleanup_orphans_end_to_end
+
   cov:
     help: "Run tests with coverage via llvm-cov"
     after: [cov-report]

@@ -806,15 +806,13 @@ fn test_staged_window_is_written_to_the_queue() {
     assert!(!parsed.proposals.is_empty());
 }
 
-/// A staging root that EXISTS but cannot be enumerated is an Err, and the
-/// prior queue is left byte-identical. Phase 2 made the write unconditional,
-/// so a reader that could not distinguish "could not look" from "nothing
-/// found" would be a queue-wipe path.
+/// A staging root that cannot be stat'ed is an Err, and the prior queue is
+/// left byte-identical. Phase 2 made the write unconditional, so a reader that
+/// could not distinguish "could not look" from "nothing found" would be a
+/// queue-wipe path. The precondition is a regular file used as a directory
+/// (ENOTDIR), which holds as root, so the CI container runs this for real.
 #[test]
-#[cfg(unix)]
 fn test_unreadable_staging_root_errors_and_preserves_the_queue() {
-    use std::os::unix::fs::PermissionsExt;
-
     let _lock = crate::testutil::lock_env();
     let _cfg = crate::testutil::hermetic_config_home();
     let dir = tempfile::tempdir().expect("tmpdir");
@@ -834,22 +832,12 @@ fn test_unreadable_staging_root_errors_and_preserves_the_queue() {
     .expect("seed the queue");
     let before = std::fs::read(&config.proposals_path).expect("read before");
 
-    let staging = dir.path().join("locked");
-    std::fs::create_dir_all(&staging).expect("mkdir");
-    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    let not_a_dir = dir.path().join("locked");
+    std::fs::write(&not_a_dir, "a regular file, not a directory").expect("write");
+    let staging = not_a_dir.join("stages");
 
-    // Root bypasses permission bits and CI runs as root, so probe whether the
-    // chmod actually denies anything before asserting that it does.
-    let denial_is_real = std::fs::read_dir(&staging).is_err();
-    let result = scan_proposals(dir.path(), &[], &config, &staging);
-    // Restore before asserting so the tempdir can always be cleaned up.
-    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).expect("restore");
-
-    if !denial_is_real {
-        eprintln!("skipping: this environment (probably root) ignores the chmod, so EACCES cannot be produced");
-        return;
-    }
-    let err = result.expect_err("an unreadable staging root must not read as an empty scan");
+    let err = scan_proposals(dir.path(), &[], &config, &staging)
+        .expect_err("an unreadable staging root must not read as an empty scan");
     assert!(format!("{err:?}").contains("staging root"), "{err:?}");
 
     let after = std::fs::read(&config.proposals_path).expect("read after");
