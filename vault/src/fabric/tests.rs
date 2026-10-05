@@ -1,4 +1,7 @@
 use super::*;
+use serial_test::serial;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Serializes every env-var-mutating test in this file so they can't race
@@ -28,49 +31,7 @@ fn fabric_error_timeout_is_downcastable_through_eyre() {
 }
 
 #[test]
-fn wait_with_timeout_drains_large_stdout_without_deadlock() {
-    // Regression: emit far more than the ~64KB OS pipe buffer. The old
-    // poll-without-reading loop deadlocked the child against an unread
-    // pipe until the timeout killed it. The drain threads must collect
-    // all of it and return successfully well inside the timeout.
-    use std::process::{Command, Stdio};
-    let big = 500_000usize;
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(format!("head -c {big} /dev/zero | tr '\\0' 'a'"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let Ok(child) = child else {
-        eprintln!("sh not available; skipping deadlock test");
-        return;
-    };
-    let out = wait_with_timeout(child, Vec::new(), Duration::from_secs(30)).expect("wait");
-    let (status, stdout, _stderr) = out.expect("must not time out on large output");
-    assert!(status.success());
-    assert_eq!(stdout.len(), big, "all stdout bytes must be drained");
-}
-
-#[test]
-fn wait_with_timeout_kills_on_timeout() {
-    use std::process::{Command, Stdio};
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg("sleep 30")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let Ok(child) = child else {
-        eprintln!("sh not available; skipping timeout test");
-        return;
-    };
-    let out = wait_with_timeout(child, Vec::new(), Duration::from_millis(300)).expect("wait");
-    assert!(out.is_none(), "a child exceeding the timeout returns None (killed)");
-}
-
-#[test]
+#[serial(process)]
 fn build_fabric_command_sets_anthropic_key_from_named_env_var() {
     // Hold ENV_LOCK for the whole env-mutation window so no parallel test
     // observes our var override.
@@ -97,6 +58,7 @@ fn build_fabric_command_sets_anthropic_key_from_named_env_var() {
 }
 
 #[test]
+#[serial(process)]
 fn build_fabric_command_leaves_anthropic_key_unset_when_env_name_empty() {
     // No api_key_env => the child must carry no explicit ANTHROPIC_API_KEY
     // override (fabric falls back to its own .env). get_envs() reports only
@@ -182,6 +144,7 @@ fn test_resolve_pattern_canonical_path_for_present_file() {
 /// `--maxTokens` must be ABSENT when the ceiling is 0, so an unpatched fabric
 /// on PATH (which has no such flag) is not handed an argument it will reject.
 #[test]
+#[serial(process)]
 fn build_fabric_command_omits_max_tokens_flag_when_zero() {
     let cmd = build_fabric_command("fabric", "summarize", "", "", 0);
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
@@ -192,6 +155,7 @@ fn build_fabric_command_omits_max_tokens_flag_when_zero() {
 }
 
 #[test]
+#[serial(process)]
 fn build_fabric_command_passes_max_tokens_flag_when_set() {
     let cmd = build_fabric_command("fabric", "summarize", "", "", 16384);
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
@@ -204,6 +168,7 @@ fn build_fabric_command_passes_max_tokens_flag_when_set() {
 /// The flag rides alongside `-m`, not instead of it: a regression here would
 /// silently drop the model and fall back to fabric's DEFAULT_MODEL.
 #[test]
+#[serial(process)]
 fn build_fabric_command_keeps_model_alongside_max_tokens() {
     let cmd = build_fabric_command("fabric", "summarize", "claude-sonnet-5", "", 8192);
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
@@ -215,4 +180,71 @@ fn build_fabric_command_keeps_model_alongside_max_tokens() {
         args.iter().any(|a| a == "--maxTokens=8192"),
         "max-tokens missing from {args:?}"
     );
+}
+
+/// Writes an executable `#!/bin/sh` script standing in for the fabric binary.
+fn fake_fabric(dir: &Path, body: &str) -> PathBuf {
+    let path = dir.join("fabric");
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake fabric");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod fake fabric");
+    path
+}
+
+#[test]
+#[serial(process)]
+fn run_pattern_returns_the_whole_stdout_of_a_large_reply() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fabric = fake_fabric(dir.path(), "cat");
+    let input = "x".repeat(512 * 1024);
+    let out = run_pattern("summarize", &input, &fabric.to_string_lossy(), "", "", 0, 30).expect("run_pattern");
+    assert_eq!(out.len(), input.len(), "every byte past the pipe buffer must come back");
+}
+
+#[test]
+#[serial(process)]
+fn run_pattern_past_its_timeout_is_a_typed_fabric_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fabric = fake_fabric(dir.path(), "sleep 30");
+    let start = std::time::Instant::now();
+    let err = run_pattern("summarize", "in", &fabric.to_string_lossy(), "", "", 0, 1).expect_err("must time out");
+    assert!(FabricError::is_timeout(&err), "got {err:#}");
+    assert!(start.elapsed() < Duration::from_secs(5), "took {:?}", start.elapsed());
+}
+
+#[test]
+#[serial(process)]
+fn run_pattern_nonzero_exit_is_failed_with_the_stderr() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fabric = fake_fabric(dir.path(), "cat >/dev/null; echo 'model not found' >&2; exit 1");
+    let err = run_pattern("summarize", "in", &fabric.to_string_lossy(), "", "", 0, 30).expect_err("must fail");
+    match err.downcast_ref::<FabricError>() {
+        Some(FabricError::Failed { pattern, stderr }) => {
+            assert_eq!(pattern, "summarize");
+            assert_eq!(stderr, "model not found");
+        }
+        other => panic!("expected FabricError::Failed, got {other:?}"),
+    }
+}
+
+/// `fabric --version` once ran with the parent's stdin and hung for 37 minutes
+/// when that stdin was a pipe that never closed. Reproduced here: fd 0 is such
+/// a pipe, and the fake reads its stdin to end-of-file before answering.
+#[test]
+#[serial(process)]
+fn is_available_does_not_hang_on_a_parent_stdin_that_never_closes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fabric = fake_fabric(dir.path(), "cat >/dev/null");
+    let _stdin = crate::process::tests::ParentStdinIsAnOpenPipe::install();
+    let start = std::time::Instant::now();
+    assert!(is_available(&fabric.to_string_lossy()));
+    assert!(start.elapsed() < Duration::from_secs(5), "took {:?}", start.elapsed());
+}
+
+#[test]
+#[serial(process)]
+fn is_available_is_false_for_a_missing_or_failing_binary() {
+    assert!(!is_available("/nonexistent/vault-fabric-test-binary"));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fabric = fake_fabric(dir.path(), "exit 1");
+    assert!(!is_available(&fabric.to_string_lossy()));
 }

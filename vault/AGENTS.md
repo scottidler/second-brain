@@ -16,6 +16,7 @@ The single source of truth for the Obsidian-vault note schema (NoteType / Origin
 - `vault::embedding::{EmbeddingModel, load_active_model, embed_query}` (Candle / fastembed, feature-gated).
 - `vault::distilled::Distilled { summary, tldr, slug, enumeration, key_ideas, claims, tags, links, kind_specific, meta, transcript }`.
 - `vault::watcher::VaultWatcher::start(vault_root, config, applying_flag)` — debounced change stream.
+- `vault::process::run(cmd, stdin, timeout, label) -> Outcome { Exited | TimedOut }`: the one subprocess primitive. Owns all three pipes (stdin `/dev/null` when `None`, never inherited), drains on threads, spawns in its own process group and SIGKILLs the group at the deadline. `kill_registered()` / `install_interrupt_handler()` cover Ctrl-C for interactive sb commands.
 - `vault::canonical::CanonicalSet { all, no_segment, max_per_note }`: the one loaded vocabulary snapshot, built by `CanonicalTagsFile::canonical_set()` and taken by `match_to_canonical` / `filter_and_cap`. Absorbed borg's private `CanonicalState` shape.
 
 ## Contracts & Invariants
@@ -39,6 +40,7 @@ The single source of truth for the Obsidian-vault note schema (NoteType / Origin
 
 - **Literal `~` directory bug:** `fs::create_dir_all("~/vault")` creates a literal `~` dir in CWD — always `expand_tilde` first.
 - **Fabricated fallback path:** `dirs::*_dir().unwrap_or_else(|| PathBuf::from("~/.local/share"))` creates a literal `~`. Use `.expect("… set HOME/XDG_*")` — panic is correct when both are unset.
+- **Spawning with `Command::output()` / `spawn()` + `try_wait` polling:** a child that writes more than the pipe buffer, or a grandchild holding the pipe, hangs the caller; an inherited stdin can hang a child that reads it. Go through `vault::process::run`.
 - **Schema duplication / hardcoded model string** in consumer crates — import the enum; read `active_model` from `embedding_config`.
 
 ## Module Map
@@ -50,4 +52,4 @@ The single source of truth for the Obsidian-vault note schema (NoteType / Origin
 - **Search:** `search.rs` (+`search/`) — see `src/search/AGENTS.md`.
 - **Tags/hygiene:** `canonical.rs`, `hygiene.rs`.
 - **Daemon client / ingest queue:** `daemon.rs` (+`daemon/`: `HotkeyConfig`, the client-side borg daemon address, and `client_auth_token`, the first-party bearer resolver; shared by borg and oracle), `queue.rs` (+`queue/`: the `QueueSnapshot` wire contract for `GET /queue`).
-- **Misc:** `watcher.rs`, `rss.rs` (+`rss/`), `logging.rs`, `config.rs` (incl. `load_config` + `Normalize`, the one borg.yml loading chain), `fabric.rs`, `text.rs` (char-accurate, panic-free string truncation), `tombstone.rs` (the shared soft-retire tombstone shape written by `cortex::association` and `borg::dedupe`), `identity.rs` (+`identity/`: `NoteIndex`, the note `trace:` back-edge and the `superseded-by` convergence that resolves a staged trace to the ONE note it produced; owned here because the `trace:` map is one-way and independent copies of this drift, and because cortex must not gain a borg dependency to reach `borg::harvest::identity`).
+- **Misc:** `watcher.rs`, `rss.rs` (+`rss/`), `logging.rs`, `config.rs` (incl. `load_config` + `Normalize`, the one borg.yml loading chain), `fabric.rs` (runs fabric through `process.rs`), `process.rs` (+`process/`), `text.rs` (char-accurate, panic-free string truncation), `tombstone.rs` (the shared soft-retire tombstone shape written by `cortex::association` and `borg::dedupe`), `identity.rs` (+`identity/`: `NoteIndex`, the note `trace:` back-edge and the `superseded-by` convergence that resolves a staged trace to the ONE note it produced; owned here because the `trace:` map is one-way and independent copies of this drift, and because cortex must not gain a borg dependency to reach `borg::harvest::identity`).

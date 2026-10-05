@@ -47,6 +47,22 @@ pub enum Cmd {
 }
 
 impl Cmd {
+    /// True for the two long-running daemons: `borg daemon --start`, and
+    /// `cortex daemon` in its foreground mode (`--start`, or no mode flag,
+    /// matching `cortex::daemon::run`'s dispatch). They keep their own
+    /// graceful-shutdown signal handling; systemd's control-group kill covers
+    /// their children.
+    pub fn is_long_running_daemon(&self) -> bool {
+        match self {
+            Cmd::Borg(c) => matches!(c.command.as_ref(), Some(borg::Command::Daemon(d)) if d.start),
+            Cmd::Cortex(c) => matches!(
+                &c.command,
+                cortex::Command::Daemon(d) if !(d.install || d.uninstall || d.status || d.stop)
+            ),
+            Cmd::Oracle(_) | Cmd::Status(_) | Cmd::Doctor(_) | Cmd::Bootstrap(_) => false,
+        }
+    }
+
     pub async fn run(self) -> Result<()> {
         match self {
             Cmd::Borg(c) => c.run().await,
@@ -58,3 +74,6 @@ impl Cmd {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

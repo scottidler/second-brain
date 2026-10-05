@@ -40,14 +40,9 @@ echo "=== source-lint ==="
 
 # 1. Self-skipping tests. Test files only: user-facing "skipped" status lines in
 # production code (sb/src/cli/borg.rs) are legitimate.
-# TEMPORARY allowlist: vault/src/fabric/tests.rs skips when `sh` is missing.
-# Phase 7 of docs/design/2026-10-05-quality-review-fixes.md moves those tests to
-# vault::process, where a missing `sh` panics. Phase 7 MUST delete the `-g '!...'`
-# line below; with the file gone the allowlist entry is a dead exemption.
 hits "test skips itself with eprintln instead of failing or #[ignore]" \
   -n -U -i --no-heading 'eprintln!\(\s*"[^"]*skip' \
   -g '*tests*' -g '**/tests/**' \
-  -g '!vault/src/fabric/tests.rs' \
   "${CRATES[@]}"
 
 # 2. Inline test modules.

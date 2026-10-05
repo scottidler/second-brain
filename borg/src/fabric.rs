@@ -11,7 +11,7 @@ use crate::config::{FabricConfig, PipelineConfig};
 ///
 /// This is the URL-fetch variant (own-the-`Child`, drain via
 /// `wait_with_output`); the deadlock-safe stdin/stdout-draining primitive for
-/// pattern invocations is `vault::fabric::wait_with_timeout`.
+/// pattern invocations is `vault::process::run`.
 fn wait_with_timeout(child: &mut Child, timeout_secs: u64, label: &str) -> Result<()> {
     let timeout = Duration::from_secs(timeout_secs);
     let start = Instant::now();
