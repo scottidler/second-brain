@@ -10,12 +10,15 @@ authors = ["Scott Idler <scott.a.idler@gmail.com>"]
 
 # Centralized lint policy. Mirrors the rust denies the crates already apply at
 # their roots (`#![deny(dead_code)]`, `#![deny(unused_variables)]`), now in one
-# place via `lints.workspace = true`. clippy::unwrap_used stays a per-crate
-# `#![deny]` (with `#[allow]` on test modules) because a workspace-level deny
-# would also fire in tests, where unwrap is permitted.
+# place via `lints.workspace = true`. clippy::unwrap_used is a workspace deny
+# too: clippy.toml sets `allow-unwrap-in-tests = true`, so #[test] fns and
+# #[cfg(test)] modules are exempt without a per-crate attribute.
 [workspace.lints.rust]
 dead_code = "deny"
 unused_variables = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
 
 # Deliberate profile tuning for the candle / libsignal / aws-lc build weight.
 # Dev builds compile dependencies at opt-level 2 (the ML/crypto crates are
