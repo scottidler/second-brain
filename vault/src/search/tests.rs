@@ -1,5 +1,6 @@
 use super::*;
 
+mod filters;
 mod group_a;
 mod group_b;
 mod legacy_oracle_guard;

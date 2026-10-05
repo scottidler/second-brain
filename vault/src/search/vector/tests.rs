@@ -178,7 +178,7 @@ fn search_vector_respects_limit() {
 fn search_vector_filters_by_tags() {
     // `insert_note` writes the bare `notes` row directly (this module tests
     // below the `index_one` facet-sync seam), so the `note_tags` facet rows
-    // `push_tags_filter` reads have to be inserted here too.
+    // `Filter::and_tags` reads have to be inserted here too.
     let index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-test-v1");
     insert_note(&index, "notes/privacy.md", "article", 100);

@@ -582,7 +582,7 @@ impl OracleMcpServer {
 
     /// True when the note at `path` matches the (optional) schema filters.
     /// A missing note fails the check (it cannot be a valid result). `tags`
-    /// is OR semantics (any one tag matches), matching the `push_tags_filter`
+    /// is OR semantics (any one tag matches), matching the `Filter::and_tags`
     /// mode the caller asked for (`tags_all`) - checked
     /// against the resolved `NoteRow`'s JSON `tags` column rather than the
     /// `note_tags` facet, since the row is already loaded here.
