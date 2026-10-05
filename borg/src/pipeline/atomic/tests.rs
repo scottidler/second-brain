@@ -221,7 +221,7 @@ fn reingest_keeps_cortex_added_tag() {
 #[test]
 fn reingest_merges_an_inline_fresh_list_into_block_form() {
     // `render_note` writes block form, but a note written by cortex before
-    // P4 is inline. Either way the merged result is one block list.
+    // the block-form migration is inline. Either way the merged result is one block list.
     let rendered = "---\ntitle: T\ntags: [rust]\n---\nBody.\n";
     let preserved = vec![("tags".to_string(), FieldValue::List(vec!["ai".to_string()]))];
     let out = apply_cortex_fields(rendered, &preserved, Some(&canon(8, &[])));

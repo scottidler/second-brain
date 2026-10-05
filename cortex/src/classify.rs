@@ -775,7 +775,7 @@ fn filter_unclassified_notes<'a>(notes: &'a [Note], frontmatter: &FrontmatterCon
 
 /// Build the frontmatter fields an enrichment (promotion or catch-up) writes.
 ///
-/// `tags` is the P3 union - the note's existing tags first, then the fresh
+/// `tags` is the tag union - the note's existing tags first, then the fresh
 /// ones, capped - so a classification never removes a tag a reingest would
 /// have preserved. `--retag` is the one operation with replace semantics and
 /// it does not come through here.

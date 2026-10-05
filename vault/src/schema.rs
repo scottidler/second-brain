@@ -14,7 +14,7 @@ pub const TAGS_KEY: &str = "tags";
 /// reingest unions the preserved list with the freshly derived one, preserved
 /// first, capped at `max-per-note`. Every other key here is carried forward
 /// verbatim. Without it a refetch would strip tags cortex or a migration
-/// added, which is the failure the tags-only design doc's P3 exists to close.
+/// added, which is the failure the tags-only design doc's reingest-union rule exists to close.
 pub const CORTEX_PRESERVE_KEYS: &[&str] = &[
     TAGS_KEY,
     "status",

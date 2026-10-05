@@ -555,8 +555,8 @@ fn apply_value_transforms(vault_root: &Path, notes: &[Note], migration: &Migrati
 }
 
 /// True when the note's frontmatter carries a NON-EMPTY inline `tags: [a, b]`
-/// list, the form P4 normalizes away. `pub(crate)` so `tags::lint_tags` /
-/// `tags::apply_tags` (P9) share the same on-disk-form detector rather than
+/// list, the form the block-form migration normalizes away. `pub(crate)` so `tags::lint_tags` /
+/// `tags::apply_tags` share the same on-disk-form detector rather than
 /// growing a second copy of this parse.
 pub(crate) fn has_inline_tag_list(content: &str) -> bool {
     let Some((fm, _body)) = vault::frontmatter::split_raw(content) else {
@@ -706,7 +706,7 @@ fn lint_tag_transforms(notes: &[Note], migration: &MigrationConfig, canon: Optio
 ///
 /// Idempotent: a value already present as a tag is not appended twice, so a
 /// second `--apply` writes zero files. Every visited note's tag block is
-/// rewritten in canonical block form, which is also how a pre-P4 inline list
+/// rewritten in canonical block form, which is also how a legacy inline list
 /// gets normalized.
 fn apply_tag_transforms(
     vault_root: &Path,

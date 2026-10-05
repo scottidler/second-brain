@@ -293,7 +293,7 @@ meta:
 /// older staged `distilled.yml` and `cortex summarize --backfill` input
 /// looks. Must deserialize to `kind=fact, who=None, quote=None`.
 const FIXTURE_OLD_SHAPE: &str = r#"
-summary: "A pre-Phase-3 article."
+summary: "A legacy-shape article."
 claims:
   - text: "The first claim."
   - text: "The second claim."
@@ -306,7 +306,7 @@ meta:
 
 /// New-shape claim: all claim-kind fields present.
 const FIXTURE_NEW_SHAPE: &str = r#"
-summary: "A Phase-3 article with rich claims."
+summary: "An article with rich claims."
 claims:
   - text: "Orchestration beats autonomy for coding agents."
     anchor: "00:14:30"

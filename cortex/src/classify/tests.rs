@@ -195,7 +195,7 @@ fn test_resolve_collision_mints_next_free_slot_when_no_candidate_matches_source(
     assert_eq!(resolved, dir.path().join("note-3.md"));
 }
 
-/// Enrichment writes the P3 union (preserved first, then fresh) and the three
+/// Enrichment writes the tag union (preserved first, then fresh) and the three
 /// provenance keys.
 #[test]
 fn test_build_enrichment_fields_unions_tags() {

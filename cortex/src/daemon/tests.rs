@@ -474,9 +474,9 @@ fn intel_sweep_two_writer_fight_no_longer_reproduces() {
 /// intel+sweep-only fixture converges as soon as the digest-tag fight is
 /// removed - the mandated tag removal leaves nothing for cycle-2's
 /// fingerprint. The full-action-set invariant is owned by
-/// `full_action_set_periodic_sweep_fingerprint_converges_after_all_phases`.
+/// `full_action_set_periodic_sweep_fingerprint_converges`.
 #[test]
-fn periodic_sweep_fingerprint_converges_after_phase2() {
+fn intel_sweep_fingerprint_converges_without_digest_tag_fight() {
     // See the lock comment on `intel_sweep_two_writer_fight_no_longer_reproduces` -
     // this fixture's "intel" and "sweep" arms both hit
     // `validate_canonical_assets()` against the REAL env.
@@ -524,7 +524,7 @@ fn periodic_sweep_fingerprint_converges_after_phase2() {
 /// link, duplicates, intel, sweep, broken-links, lint, state,
 /// quality - must produce an EMPTY `SweepFingerprint` on the second sweep.
 ///
-/// `periodic_sweep_fingerprint_converges_after_phase2` (above) only proves
+/// `intel_sweep_fingerprint_converges_without_digest_tag_fight` (above) only proves
 /// this for the narrow intel+sweep fixture; the FULL action-set invariant
 /// also needed link detection/mutation reconciliation before it could
 /// converge. This is the test that owns that broader claim.
@@ -570,7 +570,7 @@ fn periodic_sweep_fingerprint_converges_after_phase2() {
 /// test's job is to prove the FULL action set converges together, not to
 /// re-litigate each fix in isolation.
 #[test]
-fn full_action_set_periodic_sweep_fingerprint_converges_after_all_phases() {
+fn full_action_set_periodic_sweep_fingerprint_converges() {
     // The "sweep" arm calls `validate_canonical_assets()` against the REAL
     // env - see the lock comment on
     // `intel_sweep_two_writer_fight_no_longer_reproduces`.

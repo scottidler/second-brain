@@ -9,7 +9,7 @@ use crate::vault::Note;
 
 /// Run tag normalization lint on all notes.
 ///
-/// `canon` is the loaded `canonical-tags.yml` vocabulary (P9): membership
+/// `canon` is the loaded `canonical-tags.yml` vocabulary: membership
 /// (`tags.non-canonical`) and the per-note cap (`tags.cap`) are schema
 /// properties of that shared file, not of the legacy `actions.tags.canonical`
 /// list `config` still carries (alias resolution and character-format checks
@@ -250,7 +250,7 @@ fn normalize_tag(tag: &str) -> String {
 /// ```
 ///
 /// Block form, not the inline `[a, b]` this used to write, is the single
-/// on-disk form the tags-only design doc pins (P4). Two of the three writers
+/// on-disk form the tags-only design doc pins. Two of the three writers
 /// already wrote block (`borg::markdown::render_note`,
 /// `vault::frontmatter::to_yaml`) and Obsidian's property editor writes block,
 /// so an inline writer here meant the vault carried both spellings forever.

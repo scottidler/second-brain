@@ -595,7 +595,7 @@ async fn long_article_builds_two_section_reduce_input() {
     );
     // Measurement for the impl notes (lost-in-the-middle budget check).
     eprintln!(
-        "PHASE6-MEASURE article reduce-input: {} chars (~{} tokens), {} chunks",
+        "MEASURE article reduce-input: {} chars (~{} tokens), {} chunks",
         reduce_call.input.chars().count(),
         approx_tokens(reduce_call.input.len()),
         chunk_transcript(&transcript, CHUNK_TOKEN_TARGET).len(),

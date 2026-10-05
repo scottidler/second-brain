@@ -855,7 +855,7 @@ fn seed_tagged_article(db: &SearchIndex, path: &str, title: &str, body: &str, ta
     db.index_one(&note, 100).expect("seed note");
 }
 
-/// P8 success criterion, live-check counterpart: a `knowledge_search` call
+/// Tags-sibling success criterion, live-check counterpart: a `knowledge_search` call
 /// carrying both a text query and a `tags` filter must return the note that
 /// matches both, and exclude a same-text note that doesn't carry the tag.
 /// `mode: bm25` keeps this hermetic (no embedding model).

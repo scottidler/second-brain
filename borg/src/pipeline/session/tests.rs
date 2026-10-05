@@ -217,7 +217,7 @@ async fn process_session_inner_publishes_note_with_trace_and_source() {
     assert!(contents.contains("status: unread"), "{contents}");
     assert!(contents.contains("repo:"), "{contents}");
     assert!(contents.contains("tatari-tv/marquee"), "{contents}");
-    // tags-only-classification P6: scope is a frontmatter KEY, not a tag
+    // tags-only-classification: scope is a frontmatter KEY, not a tag
     // pushed after canonicalization - see `session_governance_is_keys_not_tags`
     // for the dedicated positive/negative assertion.
     assert!(contents.contains("scope: work"), "{contents}");
@@ -256,14 +256,14 @@ async fn process_session_inner_writes_redacted_key_when_any_member_redacted() {
     .expect("process_session_inner should succeed");
 
     let contents = std::fs::read_to_string(result.note_path.expect("note_path")).expect("read note");
-    // tags-only-classification P6: redaction is a frontmatter KEY, not a tag.
+    // tags-only-classification: redaction is a frontmatter KEY, not a tag.
     assert!(contents.contains("redacted: true"), "{contents}");
     assert!(!contents.contains("redacted-source"), "{contents}");
     // A single-member thread gets no member-details footer.
     assert!(!contents.contains("## Session Details"), "{contents}");
 }
 
-/// Design doc AC3 / P6 success criterion `session_governance_is_keys_not_tags`:
+/// Design doc AC3 success criterion `session_governance_is_keys_not_tags`:
 /// a session note carries `scope:`/`redacted:` frontmatter KEYS, never the
 /// old `scope-work`/`scope-personal`/`redacted-source` TAGS, and neither
 /// governance key pollutes the `tags:` list.
@@ -622,7 +622,7 @@ fn set_tags_on_disk(path: &std::path::Path, tags: &[&str]) {
     std::fs::write(path, format!("---\n{fm}---\n{body}")).unwrap();
 }
 
-/// Design doc P3, session half: a replace UNIONS the prior `tags:` list with
+/// Design doc reingest union, session half: a replace UNIONS the prior `tags:` list with
 /// the fresh one instead of overwriting it, so a replay never strips a tag
 /// cortex or a migration added.
 ///
@@ -1276,7 +1276,7 @@ fn borg_owned_key_policy_matches_the_declaration() {
     // (design doc: "a deliberate ownership change"), so it must be in the
     // owned set AND excluded explicitly at merge time.
     assert!(owned.contains(STATUS_KEY));
-    // `tags` is the second such key, added by the tags-only design doc's P3:
+    // `tags` is the second such key, added by the tags-only design doc's reingest union:
     // owned and rewritten by `render_note`, but MERGED rather than replaced on
     // a session replace, so a replay cannot strip a tag cortex or a prior
     // migration added. Same shape as `status`: in the owned set, handled
@@ -1316,7 +1316,7 @@ fn session_replace_captures_prior_tags_instead_of_carrying_them() {
 
 #[test]
 fn session_preserve_read_failure_aborts_the_replace() {
-    // The session path has always failed closed; P3 makes the URL path agree.
+    // The session path has always failed closed; the tags-only reingest union makes the URL path agree.
     // Both are asserted so the two cannot drift apart again.
     let dir = tempfile::tempdir().expect("tempdir");
     let missing = dir.path().join("gone.md");

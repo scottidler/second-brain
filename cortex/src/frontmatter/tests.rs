@@ -77,7 +77,7 @@ fn test_missing_required_fields() {
     assert_eq!(partial_violations.len(), 3);
 }
 
-/// P9 Data Model: `frontmatter.required.tags` treats `[]` and a bare `tags:`
+/// Data Model: `frontmatter.required.tags` treats `[]` and a bare `tags:`
 /// (no items) as missing, the same as an absent key - both parse to
 /// `Some(vec![])`/`None` respectively, and neither means "classified".
 #[test]
@@ -260,7 +260,7 @@ fn test_deprecated_field_detection() {
 
     let report = lint_frontmatter(&notes, &config, &schema);
     // legacy-note.md has url, author, duration_min (the legacy folder-rename
-    // target was retired in P11; a bare `folder:` key is no longer a
+    // target was retired; a bare `folder:` key is no longer a
     // recognized deprecated-rename target).
     let legacy_deprecated: Vec<_> = report
         .violations

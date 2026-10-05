@@ -1154,7 +1154,7 @@ fn cortex_upsert_after_stale_flag_replaces_old_row_atomically() {
 
 // --- tags siblings in stats.rs -------------------------------------
 
-/// Build a fully-populated `Note` for the P8 tags-sibling tests below:
+/// Build a fully-populated `Note` for the tags-sibling tests below:
 /// creator, source, tags, and (when `classified`) the `cortex-*` extra keys
 /// `index_one` reads into the `classified`/`classified_by` columns
 /// (`index.rs:167-170`).

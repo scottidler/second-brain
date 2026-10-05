@@ -207,7 +207,7 @@ impl super::SearchIndex {
         }
 
         // `tags` is a facet, not a scalar TEXT column: index time normalizes
-        // `tags = ''` to `'[]'` (P5), so the empty-string check above cannot
+        // `tags = ''` to `'[]'`, so the empty-string check above cannot
         // see it. "No tags" means no `note_tags` row for the path at all.
         let tags_gap: u64 = self.conn.query_row(
             "SELECT COUNT(*) FROM notes WHERE NOT EXISTS (SELECT 1 FROM note_tags WHERE note_tags.path = notes.path)",

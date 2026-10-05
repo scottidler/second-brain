@@ -195,7 +195,7 @@ fn render_all_creates_missing_files() {
     );
 }
 
-/// P9 success criterion: `system/schemas/tag-values.md` exists after
+/// Tag-values success criterion: `system/schemas/tag-values.md` exists after
 /// `--render` and lists every canonical tag; a vocabulary change is drift.
 #[test]
 fn tag_values_doc_lists_every_canonical_tag() {
