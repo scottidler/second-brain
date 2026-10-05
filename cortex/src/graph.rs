@@ -54,6 +54,19 @@ const MEMBER_WEIGHT: f32 = 1.0;
 
 const WIKILINK_WEIGHT: f32 = 1.0;
 
+/// Every kind this pass derives. `--rebuild` replaces exactly these and never
+/// touches the fact layer (`fact`, `bridge`), which only `--backfill` writes.
+const DETERMINISTIC_KINDS: [&str; 8] = [
+    KIND_SEMANTIC,
+    KIND_WIKILINK,
+    KIND_SHARED_TAG,
+    KIND_SHARED_CREATOR,
+    KIND_SHARED_SOURCE,
+    KIND_REPO_MEMBER,
+    KIND_CREATOR_MEMBER,
+    KIND_SOURCE_MEMBER,
+];
+
 /// Outcome of one graph pass.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct GraphStats {
@@ -85,7 +98,12 @@ pub struct FactLayerStats {
 /// (cortex commands do not share oracle's `Mutex<SearchIndex>`), takes the
 /// shared embed lock, and writes edges in per-note bounded transactions.
 pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<GraphStats> {
-    log::debug!("cortex::graph::run: backfill={}", opts.backfill);
+    log::debug!(
+        "cortex::graph::run: backfill={} rebuild={}",
+        opts.backfill,
+        opts.rebuild
+    );
+    check_exclusive(opts)?;
 
     let db_path = config.oracle_db_path();
     let mut index = SearchIndex::open(&db_path)
@@ -96,7 +114,11 @@ pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<Graph
     let lock = crate::embed::acquire_lock()?;
     log::debug!("cortex::graph: acquired embed file lock");
 
-    let stats = build(&mut index, &config.graph, opts.backfill)?;
+    let stats = if opts.rebuild {
+        rebuild(&mut index, &config.graph)?
+    } else {
+        build(&mut index, &config.graph, opts.backfill)?
+    };
 
     // Phase 5: --backfill also extracts typed `fact` edges (bounded, LLM) and
     // runs the consolidation agents. Deterministic edges above stand alone; the
@@ -121,6 +143,15 @@ pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<Graph
         stats.skipped,
     );
     Ok(stats)
+}
+
+/// `--backfill` and `--rebuild` are exclusive: a backfill already clears and
+/// rebuilds every edge. Checked before the index is opened.
+fn check_exclusive(opts: &GraphOpts) -> Result<()> {
+    if opts.backfill && opts.rebuild {
+        eyre::bail!("graph: --backfill and --rebuild are exclusive (--backfill already rebuilds every edge)");
+    }
+    Ok(())
 }
 
 /// Extract typed `fact` edges (bounded LLM triple extraction) and run the
@@ -186,19 +217,7 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
     let full_rebuild = force_full || index.graph_state_get(KEY_LAST_RUN_AT)?.is_none();
     log::debug!("cortex::graph::build: full_rebuild={full_rebuild}");
 
-    let rows = index.graph_note_rows()?;
-    let by_path: HashMap<String, GraphNoteRow> = rows.iter().map(|r| (r.path.clone(), r.clone())).collect();
-
-    // The shared vocabulary, built once per pass. Same list the auto-linker
-    // is gated on (`crate::stopwords`), so a target that can never be
-    // written can never mint an edge either.
-    let stopwords = crate::stopwords::Stopwords::new(&cfg.wikilink_stopwords);
-
-    // Inverted indexes over the whole corpus (cheap; needed even for
-    // incremental targets to find their pair partners).
-    let tag_buckets = invert(&rows, |r| r.tags.clone());
-    let creator_buckets = invert(&rows, |r| single(&r.creator));
-    let source_buckets = invert(&rows, |r| single(&source_bucket_key(&r.source)));
+    let pass = Pass::new(index, cfg)?;
 
     // Determine which notes' edges to rebuild. Per-note staleness (mirroring
     // `stale_embedding_targets`) so an incremental pass touches only notes that
@@ -206,7 +225,7 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
     // keyed on embedding `produced_at` (never stranded).
     let targets: Vec<String> = if full_rebuild {
         index.clear_edges()?;
-        rows.iter().map(|r| r.path.clone()).collect()
+        pass.rows.iter().map(|r| r.path.clone()).collect()
     } else {
         let mut set: std::collections::HashSet<String> = index.content_edge_targets()?.into_iter().collect();
         for p in index.semantic_edge_targets()? {
@@ -215,32 +234,19 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
         set.into_iter().collect()
     };
 
-    // One Resolver per pass over every note path, so wikilink resolution is a
-    // lookup per link (Obsidian's path/stem rules, no fuzzy substring match).
-    let resolver = vault::wikilink::Resolver::new(rows.iter().map(|r| r.path.as_str()));
-
     let mut stats = GraphStats {
         full_rebuild,
         ..Default::default()
     };
 
     for src in &targets {
-        let Some(row) = by_path.get(src) else {
+        let Some(row) = pass.by_path.get(src) else {
             continue;
         };
         if !full_rebuild {
             index.delete_edges_by_src(src)?;
         }
-        let edges = build_edges_for(
-            index,
-            row,
-            cfg,
-            &stopwords,
-            &resolver,
-            &tag_buckets,
-            &creator_buckets,
-            &source_buckets,
-        )?;
+        let edges = pass.edges_for(index, row)?;
         let (_inserted, skipped) = index.insert_edges(&edges)?;
         tally(&mut stats, &edges);
         stats.skipped += skipped;
@@ -255,6 +261,91 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
     index.graph_state_set(KEY_LAST_RUN_AT, &now_ts().to_string())?;
 
     Ok(stats)
+}
+
+/// `sb cortex graph --rebuild`: re-derive every deterministic edge for every
+/// note and swap them in with ONE transaction (`replace_edges_of_kinds`).
+/// Unlike a full `build`, which clears the whole table, the fact layer
+/// (`fact`, `bridge`) survives untouched, and any error rolls the swap back so
+/// the previous edges stay intact. Watermarks and `last_run_at` are written
+/// only after the swap commits.
+pub fn rebuild(index: &mut SearchIndex, cfg: &crate::config::GraphConfig) -> Result<GraphStats> {
+    log::debug!("cortex::graph::rebuild: kinds={DETERMINISTIC_KINDS:?}");
+    let pass = Pass::new(index, cfg)?;
+
+    let mut stats = GraphStats {
+        full_rebuild: true,
+        ..Default::default()
+    };
+    let mut edges: Vec<Edge> = Vec::new();
+    for row in &pass.rows {
+        let note_edges = pass.edges_for(index, row)?;
+        tally(&mut stats, &note_edges);
+        edges.extend(note_edges);
+        stats.notes_processed += 1;
+    }
+
+    let (deleted, inserted, skipped) = index
+        .replace_edges_of_kinds(&DETERMINISTIC_KINDS, &edges)
+        .wrap_err("graph --rebuild: edge swap rolled back; the previous edges are intact")?;
+    stats.skipped = skipped;
+    log::info!("graph --rebuild: replaced {deleted} deterministic edges with {inserted} (skipped {skipped})");
+
+    for row in &pass.rows {
+        let semantic_built_at = index.note_summary_produced_at(&row.path).unwrap_or(0);
+        index.record_edge_build(&row.path, row.modified_at, semantic_built_at)?;
+    }
+    index.graph_state_set(KEY_LAST_RUN_AT, &now_ts().to_string())?;
+    Ok(stats)
+}
+
+/// The per-pass inputs every note's edges are derived from, built once.
+struct Pass<'c> {
+    cfg: &'c crate::config::GraphConfig,
+    rows: Vec<GraphNoteRow>,
+    by_path: HashMap<String, GraphNoteRow>,
+    /// The shared vocabulary. Same list the auto-linker is gated on
+    /// (`crate::stopwords`), so a target that can never be written can never
+    /// mint an edge either.
+    stopwords: crate::stopwords::Stopwords,
+    /// Inverted indexes over the whole corpus (cheap; needed even for
+    /// incremental targets to find their pair partners).
+    tag_buckets: HashMap<String, Vec<String>>,
+    creator_buckets: HashMap<String, Vec<String>>,
+    source_buckets: HashMap<String, Vec<String>>,
+    /// One Resolver over every note path, so wikilink resolution is a lookup
+    /// per link (Obsidian's path/stem rules, no fuzzy substring match).
+    resolver: vault::wikilink::Resolver,
+}
+
+impl<'c> Pass<'c> {
+    fn new(index: &SearchIndex, cfg: &'c crate::config::GraphConfig) -> Result<Self> {
+        let rows = index.graph_note_rows()?;
+        log::debug!("cortex::graph::Pass::new: rows={}", rows.len());
+        Ok(Self {
+            cfg,
+            by_path: rows.iter().map(|r| (r.path.clone(), r.clone())).collect(),
+            stopwords: crate::stopwords::Stopwords::new(&cfg.wikilink_stopwords),
+            tag_buckets: invert(&rows, |r| r.tags.clone()),
+            creator_buckets: invert(&rows, |r| single(&r.creator)),
+            source_buckets: invert(&rows, |r| single(&source_bucket_key(&r.source))),
+            resolver: vault::wikilink::Resolver::new(rows.iter().map(|r| r.path.as_str())),
+            rows,
+        })
+    }
+
+    fn edges_for(&self, index: &SearchIndex, row: &GraphNoteRow) -> Result<Vec<Edge>> {
+        build_edges_for(
+            index,
+            row,
+            self.cfg,
+            &self.stopwords,
+            &self.resolver,
+            &self.tag_buckets,
+            &self.creator_buckets,
+            &self.source_buckets,
+        )
+    }
 }
 
 /// Build every deterministic edge owned by `row.path`.
@@ -543,7 +634,14 @@ fn now_ts() -> i64 {
 /// Daemon tick: run an incremental graph pass. Mirrors the embed tick shape;
 /// the daemon wraps it in `block_in_place`.
 pub fn daemon_tick(vault_root: &Path, config: &Config) -> Result<GraphStats> {
-    run(vault_root, config, &GraphOpts { backfill: false })
+    run(
+        vault_root,
+        config,
+        &GraphOpts {
+            backfill: false,
+            rebuild: false,
+        },
+    )
 }
 
 #[cfg(test)]

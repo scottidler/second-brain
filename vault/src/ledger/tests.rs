@@ -271,3 +271,13 @@ fn test_append_newest_first_multiple_entries() {
 
     cleanup(&path);
 }
+
+#[test]
+fn parse_note_slug_reads_the_file_stem_of_heading_and_path_links() {
+    assert_eq!(parse_note_slug("[[my-note]]"), "my-note");
+    assert_eq!(parse_note_slug("[[my-note|My Note]]"), "my-note");
+    assert_eq!(parse_note_slug("[[my-note#Summary]]"), "my-note");
+    assert_eq!(parse_note_slug("[[notes/my-note]]"), "my-note");
+    assert_eq!(parse_note_slug("[[notes/my-note.md#^b|x]]"), "my-note");
+    assert_eq!(parse_note_slug("-"), "-", "a cell with no link is returned as is");
+}

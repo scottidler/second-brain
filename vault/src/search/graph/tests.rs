@@ -207,3 +207,117 @@ fn cascade_clears_edges_when_note_deleted() {
         "ON DELETE CASCADE cleared the incident edge"
     );
 }
+
+/// Every edge row, every column, in primary-key order: equal dumps mean an
+/// identical table.
+fn dump_edges(index: &SearchIndex) -> Vec<(String, String, String, f64, String, String)> {
+    let mut stmt = index
+        .conn
+        .prepare(
+            "SELECT src, dst, kind, weight, predicate, src_note FROM edges
+             ORDER BY src, dst, kind, predicate",
+        )
+        .expect("prepare dump");
+    stmt.query_map([], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+    })
+    .expect("dump")
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .expect("rows")
+}
+
+#[test]
+fn replace_edges_of_kinds_keeps_every_other_kind() {
+    let mut index = index_with_notes(3);
+    index
+        .insert_edges(&[
+            det("notes/0.md", "notes/1.md", "wikilink", 1.0),
+            Edge::fact("notes/1.md", "notes/2.md", "uses", 0.5, "notes/0.md"),
+            det("notes/2.md", "notes/0.md", "bridge", 0.4),
+        ])
+        .expect("seed");
+
+    let (deleted, inserted, skipped) = index
+        .replace_edges_of_kinds(&["wikilink"], &[det("notes/0.md", "notes/2.md", "wikilink", 1.0)])
+        .expect("replace");
+
+    assert_eq!((deleted, inserted, skipped), (1, 1, 0));
+    assert_eq!(
+        dump_edges(&index),
+        vec![
+            (
+                "notes/0.md".into(),
+                "notes/2.md".into(),
+                "wikilink".into(),
+                1.0,
+                String::new(),
+                String::new()
+            ),
+            (
+                "notes/1.md".into(),
+                "notes/2.md".into(),
+                "fact".into(),
+                0.5,
+                "uses".into(),
+                "notes/0.md".into()
+            ),
+            (
+                "notes/2.md".into(),
+                "notes/0.md".into(),
+                "bridge".into(),
+                f64::from(0.4_f32),
+                String::new(),
+                String::new()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn replace_edges_of_kinds_refuses_an_edge_of_another_kind_before_writing() {
+    let mut index = index_with_notes(2);
+    index
+        .insert_edges(&[det("notes/0.md", "notes/1.md", "wikilink", 1.0)])
+        .expect("seed");
+    let before = dump_edges(&index);
+
+    let err = index
+        .replace_edges_of_kinds(&["wikilink"], &[det("notes/1.md", "notes/0.md", "semantic", 0.9)])
+        .expect_err("a stray kind is an error");
+
+    assert!(err.to_string().contains("semantic"), "error names the kind: {err}");
+    assert_eq!(dump_edges(&index), before);
+}
+
+#[test]
+fn replace_edges_of_kinds_rolls_back_when_an_insert_fails() {
+    let mut index = index_with_notes(3);
+    index
+        .insert_edges(&[
+            det("notes/0.md", "notes/1.md", "wikilink", 1.0),
+            Edge::fact("notes/1.md", "notes/2.md", "uses", 0.5, "notes/0.md"),
+        ])
+        .expect("seed");
+    let before = dump_edges(&index);
+    // The delete has already run inside the transaction when this fires.
+    index
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER fail_insert BEFORE INSERT ON edges WHEN NEW.dst = 'notes/2.md'
+             BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END;",
+        )
+        .expect("trigger");
+
+    let err = index
+        .replace_edges_of_kinds(
+            &["wikilink"],
+            &[
+                det("notes/1.md", "notes/0.md", "wikilink", 1.0),
+                det("notes/0.md", "notes/2.md", "wikilink", 1.0),
+            ],
+        )
+        .expect_err("the injected failure propagates");
+
+    assert!(format!("{err:#}").contains("injected"), "{err:#}");
+    assert_eq!(dump_edges(&index), before, "the edge table is unchanged");
+}

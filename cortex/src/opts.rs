@@ -254,6 +254,10 @@ pub struct GraphOpts {
     /// index has never run (no `last_run_at` row in SQLite); a daemon restart
     /// keeps it and resumes incrementally.
     pub backfill: bool,
+    /// Re-derive every deterministic edge kind and swap them in with one
+    /// transaction, leaving `fact` and `bridge` edges untouched. The rollout
+    /// step after a change to how deterministic edges are derived.
+    pub rebuild: bool,
 }
 
 #[derive(Debug, Clone)]

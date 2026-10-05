@@ -287,3 +287,39 @@ fn parsed_link_resolves_through_its_target() {
     let link = one("see [[Dir/X#Heading|alias]]");
     assert_eq!(resolved(&resolver, link.target), ["a/dir/x.md", "dir/x.md"]);
 }
+
+#[test]
+fn file_stem_keeps_case_and_drops_the_dir_and_md() {
+    assert_eq!(file_stem("Dir/My Note.md"), "My Note");
+    assert_eq!(file_stem("plain"), "plain");
+    assert_eq!(stem("Dir/My Note.md"), "my note");
+}
+
+/// Byte offset of the first `needle` in `body`.
+fn at(body: &str, needle: &str) -> usize {
+    body.find(needle).expect("needle in body")
+}
+
+#[test]
+fn in_code_matches_what_parse_skips() {
+    let body = "prose word\n```\nfenced word\n```\n~~~~\ntilde word\n~~~~\n    indented word\nan `inline word` here\n";
+    assert!(!in_code(body, at(body, "prose")));
+    assert!(in_code(body, at(body, "fenced")));
+    assert!(in_code(body, at(body, "```")), "the fence line itself is code");
+    assert!(in_code(body, at(body, "tilde")));
+    assert!(in_code(body, at(body, "indented")));
+    assert!(in_code(body, at(body, "inline")));
+    assert!(!in_code(body, at(body, "here")));
+}
+
+#[test]
+fn in_code_treats_an_unmatched_backtick_as_literal() {
+    let body = "a lone ` tick then word\n";
+    assert!(!in_code(body, at(body, "word")));
+}
+
+#[test]
+fn in_code_after_a_closed_fence_is_prose_again() {
+    let body = "```rust\nlet x = 1;\n```\nafter word\n";
+    assert!(!in_code(body, at(body, "after")));
+}

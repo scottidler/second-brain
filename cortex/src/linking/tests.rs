@@ -462,6 +462,21 @@ fn guard_blocks_fenced_code() {
 }
 
 #[test]
+fn guard_blocks_tilde_fenced_code() {
+    assert_blocked("~~~\nyoutube.com\n~~~", "youtube-com", "youtube.com");
+}
+
+#[test]
+fn guard_allows_a_mention_after_an_unmatched_backtick() {
+    // A lone backtick opens no code span (`vault::wikilink::in_code`), so
+    // the mention after it is prose.
+    assert_eq!(
+        insert_first_wikilink("a lone ` tick then rust here", "rust", "rust").as_deref(),
+        Some("a lone ` tick then [[rust]] here")
+    );
+}
+
+#[test]
 fn guard_blocks_indented_code() {
     assert_blocked("    github.com is here", "github-com", "github.com");
 }
@@ -543,6 +558,37 @@ fn guard_blocks_match_inside_existing_wikilink_target() {
 fn guard_blocks_nested_inside_piped_display() {
     // The real regression form: linking "claude" inside an existing piped link.
     assert_blocked("Using [[claude-code|Claude Code]] daily", "claude", "claude");
+}
+
+#[test]
+fn guard_ignores_brackets_inside_inline_code_before_the_mention() {
+    // The `[[` in a code span is literal text, not an open link, so the
+    // prose mention after it is linkable.
+    assert_eq!(
+        insert_first_wikilink("type `[[` then rust here", "rust", "rust").as_deref(),
+        Some("type `[[` then [[rust]] here")
+    );
+}
+
+#[test]
+fn guard_a_stray_open_bracket_does_not_block_later_lines() {
+    // An unclosed `[[` is not a link; it used to block every mention after
+    // it for the rest of the note.
+    assert_eq!(
+        insert_first_wikilink("a stray [[ here\n\nI use rust daily", "rust", "rust").as_deref(),
+        Some("a stray [[ here\n\nI use [[rust]] daily")
+    );
+}
+
+#[test]
+fn guard_blocks_a_mention_inside_a_later_link_after_a_closed_one() {
+    // `]]` ordering: the first link is closed, the mention sits inside the second.
+    assert_blocked("[[a]] then [[the-rust-book|Rust Book]]", "rust", "rust");
+}
+
+#[test]
+fn guard_blocks_a_mention_inside_an_embed() {
+    assert_blocked("![[rust-diagram]]", "rust", "rust");
 }
 
 // --- Phase 4: detection <-> mutation matcher convergence ---
@@ -966,5 +1012,20 @@ fn glossary_link_inside_inline_code_is_not_an_existing_link() {
     assert!(
         report.violations.iter().any(|v| v.rule == "linking.glossary"),
         "a link inside code is not a link, so the prose mention is still flagged"
+    );
+}
+
+// --- title_text: a wikilink-shaped title reads as its display text ---
+
+#[test]
+fn title_text_reads_a_link_title_as_its_alias_or_file_stem() {
+    assert_eq!(title_text("[[foo]]"), "foo");
+    assert_eq!(title_text("[[foo|Foo Bar]]"), "Foo Bar");
+    assert_eq!(title_text("[[notes/Foo#Heading]]"), "Foo");
+    assert_eq!(title_text("Plain Title"), "Plain Title");
+    assert_eq!(
+        title_text("[[foo]] and more"),
+        "[[foo]] and more",
+        "not a whole-title link"
     );
 }

@@ -333,43 +333,45 @@ impl SearchIndex {
     /// skipped. Returns `(inserted, skipped)`.
     pub fn insert_edges(&mut self, edges: &[Edge]) -> Result<(usize, usize)> {
         let tx = self.conn.transaction()?;
-        let mut inserted = 0usize;
-        let mut skipped = 0usize;
+        let counts = insert_edges_in(&tx, edges)?;
+        tx.commit()?;
+        Ok(counts)
+    }
+
+    /// Replace every edge whose kind is in `kinds` with `edges`, in ONE
+    /// transaction: delete those kinds, then insert under the same
+    /// resolve-endpoint-or-skip rule as [`insert_edges`](Self::insert_edges).
+    /// Edges of any other kind (`fact`, `bridge`) are never touched. Any error
+    /// rolls the whole replace back, so the table keeps its previous edges.
+    ///
+    /// An edge whose kind is not in `kinds` is an error before anything is
+    /// written: it would otherwise survive the next replace of `kinds`.
+    /// Returns `(deleted, inserted, skipped)`.
+    pub fn replace_edges_of_kinds(&mut self, kinds: &[&str], edges: &[Edge]) -> Result<(usize, usize, usize)> {
+        log::debug!(
+            "SearchIndex::replace_edges_of_kinds: kinds={kinds:?} edges={}",
+            edges.len()
+        );
+        if let Some(stray) = edges.iter().find(|e| !kinds.contains(&e.kind.as_str())) {
+            eyre::bail!(
+                "replace_edges_of_kinds: edge {} -> {} has kind {:?}, not one of {kinds:?}",
+                stray.src,
+                stray.dst,
+                stray.kind
+            );
+        }
+        let tx = self.conn.transaction()?;
+        let mut deleted = 0usize;
         {
-            let mut exists = tx.prepare("SELECT 1 FROM notes WHERE path = ?1")?;
-            let mut ins = tx.prepare(
-                "INSERT OR REPLACE INTO edges (src, dst, kind, weight, predicate, src_note)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )?;
-            for edge in edges {
-                if edge.src == edge.dst {
-                    skipped += 1;
-                    continue;
-                }
-                let endpoints_present = exists.exists(params![edge.src])? && exists.exists(params![edge.dst])?;
-                if !endpoints_present {
-                    log::debug!(
-                        "insert_edges: skipping edge with absent endpoint src={} dst={} kind={}",
-                        edge.src,
-                        edge.dst,
-                        edge.kind
-                    );
-                    skipped += 1;
-                    continue;
-                }
-                ins.execute(params![
-                    edge.src,
-                    edge.dst,
-                    edge.kind,
-                    edge.weight,
-                    edge.predicate,
-                    edge.src_note,
-                ])?;
-                inserted += 1;
+            let mut del = tx.prepare("DELETE FROM edges WHERE kind = ?1")?;
+            for kind in kinds {
+                deleted += del.execute(params![kind])?;
             }
         }
+        let (inserted, skipped) = insert_edges_in(&tx, edges)?;
         tx.commit()?;
-        Ok((inserted, skipped))
+        log::debug!("SearchIndex::replace_edges_of_kinds: deleted={deleted} inserted={inserted} skipped={skipped}");
+        Ok((deleted, inserted, skipped))
     }
 
     /// Read every note's graph-relevant columns from the `notes` table.
@@ -699,6 +701,45 @@ impl SearchIndex {
         }
         Ok(out)
     }
+}
+
+/// The insert loop shared by [`SearchIndex::insert_edges`] and
+/// [`SearchIndex::replace_edges_of_kinds`]; the caller owns the transaction.
+fn insert_edges_in(tx: &rusqlite::Transaction<'_>, edges: &[Edge]) -> Result<(usize, usize)> {
+    let mut inserted = 0usize;
+    let mut skipped = 0usize;
+    let mut exists = tx.prepare("SELECT 1 FROM notes WHERE path = ?1")?;
+    let mut ins = tx.prepare(
+        "INSERT OR REPLACE INTO edges (src, dst, kind, weight, predicate, src_note)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+    for edge in edges {
+        if edge.src == edge.dst {
+            skipped += 1;
+            continue;
+        }
+        let endpoints_present = exists.exists(params![edge.src])? && exists.exists(params![edge.dst])?;
+        if !endpoints_present {
+            log::debug!(
+                "insert_edges: skipping edge with absent endpoint src={} dst={} kind={}",
+                edge.src,
+                edge.dst,
+                edge.kind
+            );
+            skipped += 1;
+            continue;
+        }
+        ins.execute(params![
+            edge.src,
+            edge.dst,
+            edge.kind,
+            edge.weight,
+            edge.predicate,
+            edge.src_note,
+        ])?;
+        inserted += 1;
+    }
+    Ok((inserted, skipped))
 }
 
 // Tests reuse the `insert_test_note_*` helpers, which live in the

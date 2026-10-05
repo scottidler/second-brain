@@ -78,6 +78,19 @@ fn is_path_filtered(path: &Path, filter: &LinkingFilter) -> bool {
     true
 }
 
+/// The prose a title reads as. Some notes carry `title: "[[foo]]"`; a title
+/// that is exactly one wikilink reads as its alias, else its target's file
+/// stem (`[[dir/foo#h]]` -> `foo`). Any other title is itself.
+fn title_text(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    match vault::wikilink::parse(trimmed).next() {
+        Some(link) if link.span == (0..trimmed.len()) => {
+            link.alias.unwrap_or_else(|| vault::wikilink::file_stem(link.target))
+        }
+        _ => raw,
+    }
+}
+
 /// Run wikilink inference on all notes.
 ///
 /// `stopwords` is the shared vocabulary (`crate::stopwords`) of targets this
@@ -118,8 +131,7 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig, stopwords: &Stopword
                 return None;
             }
             let raw_title = n.frontmatter.title.clone().unwrap_or_else(|| stem.clone());
-            // Strip wikilink brackets from titles (some notes have title: "[[foo]]")
-            let title = raw_title.trim_start_matches("[[").trim_end_matches("]]").to_string();
+            let title = title_text(&raw_title).to_string();
             if title.is_empty() {
                 return None;
             }
@@ -504,26 +516,6 @@ fn in_link_destination(text: &str, pos: usize) -> bool {
     }
 }
 
-/// True if `pos` sits inside code: a fenced block (odd count of ``` fences
-/// above), an indented (4-space / tab) code line, or an inline `` `code` ``
-/// span (odd backtick count before `pos` on the line).
-///
-/// `pub(crate)` for `crate::unlink`: the retraction sweep must refuse to
-/// rewrite the same regions this linker refuses to write into, or it would
-/// edit `[[…]]` that appears inside a code sample as source material.
-pub(crate) fn in_code_context(text: &str, pos: usize) -> bool {
-    let (ls, _) = line_bounds(text, pos);
-    let fences = text[..ls].lines().filter(|l| l.trim_start().starts_with("```")).count();
-    if fences % 2 == 1 {
-        return true;
-    }
-    let line = &text[ls..];
-    if line.starts_with("    ") || line.starts_with('\t') {
-        return true;
-    }
-    text[ls..pos].matches('`').count() % 2 == 1
-}
-
 /// True if `pos` sits inside math: a `$$` block (odd count of `$$`-only lines
 /// above) or an inline `$…$` span (odd `$` count before `pos` on the line).
 fn in_math(text: &str, pos: usize) -> bool {
@@ -551,17 +543,14 @@ fn in_html_tag_or_comment(text: &str, pos: usize) -> bool {
     }
 }
 
-/// True if `pos` sits inside an existing `[[wikilink]]`: the last `[[` before
-/// `pos` is not yet closed by a `]]`. Linking a term that appears inside another
-/// link's target OR its display text builds a broken NESTED wikilink, so this is
-/// off-limits. The `]]`-is-None case (no prior close, e.g. a match in the very
-/// first link's display) is the hole the old `(Some, Some)` guard missed.
+/// True if `pos` sits inside an existing `[[wikilink]]` as `vault::wikilink`
+/// parses it: some link's span (target, heading, or display text) contains
+/// it. Linking a term there builds a broken NESTED wikilink, so it is
+/// off-limits. A stray `[[` that never closes on its line is not a link and
+/// guards nothing; a mention right before a literal `]]` is caught separately
+/// by `is_clean_mention`.
 fn in_wikilink(text: &str, pos: usize) -> bool {
-    let before = &text[..pos];
-    match (before.rfind("[["), before.rfind("]]")) {
-        (Some(o), c) => c.is_none_or(|c| o > c),
-        (None, _) => false,
-    }
+    vault::wikilink::parse(text).any(|link| link.span.contains(&pos))
 }
 
 /// True if the byte range `[start, end)` in `text` sits inside a Markdown/HTML
@@ -571,7 +560,7 @@ fn in_wikilink(text: &str, pos: usize) -> bool {
 /// pass matching slice+offsets so the two never disagree.
 fn inside_structure(text: &str, start: usize, end: usize) -> bool {
     in_wikilink(text, start)
-        || in_code_context(text, start)
+        || vault::wikilink::in_code(text, start)
         || in_html_tag_or_comment(text, start)
         || in_math(text, start)
         || in_url_token(text, start, end)

@@ -190,20 +190,16 @@ pub struct CompletedEntry {
     pub line_number: usize,
 }
 
-/// Extract the wikilink target (the slug) from a `Note` cell. Accepts `[[stem]]`
-/// or `[[stem|alias]]` and returns the stem; returns the raw cell otherwise so
-/// pre-migration rows still surface something useful.
+/// Extract the note's filename stem (the slug) from a `Note` cell: the first
+/// wikilink's target file stem, case kept, so `[[stem]]`, `[[stem|alias]]`,
+/// `[[stem#heading]]`, and `[[dir/stem]]` all yield `stem`. Returns the raw
+/// cell when it holds no wikilink, so pre-migration rows still surface
+/// something useful.
 fn parse_note_slug(cell: &str) -> String {
-    let inner = cell
-        .strip_prefix("[[")
-        .and_then(|s| s.strip_suffix("]]"))
-        .unwrap_or(cell);
-    inner
-        .split_once('|')
-        .map(|(stem, _)| stem)
-        .unwrap_or(inner)
-        .trim()
-        .to_string()
+    match crate::wikilink::parse(cell).next() {
+        Some(link) => crate::wikilink::file_stem(link.target).trim().to_string(),
+        None => cell.trim().to_string(),
+    }
 }
 
 /// Find the most recent completed entry for a content key (canonical URL or normalized text).

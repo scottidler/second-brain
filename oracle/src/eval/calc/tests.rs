@@ -9,6 +9,20 @@ fn flatten_wikilinks_renders_display_and_target() {
 }
 
 #[test]
+fn flatten_wikilinks_renders_heading_path_and_embed_links_as_obsidian_shows_them() {
+    assert_eq!(flatten_wikilinks("see [[claude#Setup]] now"), "see claude > Setup now");
+    assert_eq!(flatten_wikilinks("see [[claude#Setup|the setup]]"), "see the setup");
+    assert_eq!(flatten_wikilinks("jump to [[#Usage]]"), "jump to Usage");
+    assert_eq!(flatten_wikilinks("in [[tools/mcp]] dir"), "in tools/mcp dir");
+    assert_eq!(flatten_wikilinks("![[diagram]]"), "diagram");
+}
+
+#[test]
+fn flatten_wikilinks_leaves_links_in_code_literal() {
+    assert_eq!(flatten_wikilinks("type `[[mcp]]` or [[mcp]]"), "type `[[mcp]]` or mcp");
+}
+
+#[test]
 fn flatten_wikilinks_handles_unclosed_brackets() {
     assert_eq!(flatten_wikilinks("[[oops unclosed"), "[[oops unclosed");
 }
