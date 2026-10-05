@@ -345,3 +345,34 @@ fn drift_finding_errors_when_the_unit_cannot_be_read() {
     let finding = drift_finding("borg.service", &path, "x", "sb borg daemon --install").expect("read error");
     assert_eq!(finding.severity, Severity::Error);
 }
+
+#[test]
+fn installed_vault_arg_reads_the_vault_flag_from_exec_start() {
+    let unit = "[Service]\nExecStart=/bin/sb cortex --vault /srv/vault --log-level info daemon --start\n";
+    assert_eq!(installed_vault_arg(unit), Some(PathBuf::from("/srv/vault")));
+    assert_eq!(installed_vault_arg("[Service]\nExecStart=/bin/sb cortex daemon\n"), None);
+}
+
+/// A unit installed with `--vault` is current even when the config names a
+/// different root: the flag, not the config, was install's input.
+#[test]
+fn cortex_drift_uses_the_vault_the_unit_was_installed_with() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let flag_vault = tmp.path().join("flag-vault");
+    let config_vault = tmp.path().join("config-vault");
+    std::fs::create_dir_all(&flag_vault).unwrap();
+    std::fs::create_dir_all(&config_vault).unwrap();
+    let mut cfg = cortex::config::Config::default();
+    cfg.vault.root_path = Some(config_vault.display().to_string());
+
+    let installed = tmp.path().join("cortex.service");
+    let rendered = cortex::daemon::desired_systemd_unit(&flag_vault, &cfg).unwrap();
+    std::fs::write(&installed, &rendered).unwrap();
+    assert!(
+        cortex_drift_finding(&installed, &cfg).is_none(),
+        "a --vault install is not drift"
+    );
+
+    std::fs::write(&installed, rendered.replace("--log-level", "--log-levels")).unwrap();
+    assert!(cortex_drift_finding(&installed, &cfg).is_some(), "a changed unit still drifts");
+}

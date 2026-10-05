@@ -1,7 +1,7 @@
 //! Shared health checks consumed by `sb status` (informational rendering)
 //! and `sb doctor` (severity-tagged findings).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use borg::config::{SignalConfig, TelegramConfig};
@@ -179,6 +179,46 @@ fn drift_finding(unit: &str, installed: &Path, rendered: &str, fix: &str) -> Opt
     }
 }
 
+/// The `--vault` an installed cortex unit was written with. `sb cortex daemon
+/// --install --vault <root>` bakes the flag into ExecStart, and that choice
+/// is not recoverable from the config, so the drift check reads it back from
+/// the unit rather than flagging every `--vault` install as drifted.
+fn installed_vault_arg(unit: &str) -> Option<PathBuf> {
+    let exec_start = unit.lines().find_map(|l| l.strip_prefix("ExecStart="))?;
+    let mut args = exec_start.split_whitespace();
+    args.find(|a| *a == "--vault")?;
+    args.next().map(PathBuf::from)
+}
+
+fn cortex_drift_finding(installed: &Path, cfg: &cortex::config::Config) -> Option<Finding> {
+    log::debug!("cortex_drift_finding: installed={}", installed.display());
+    let unit = match std::fs::read_to_string(installed) {
+        Ok(u) => u,
+        Err(e) => {
+            return Some(Finding::error(
+                format!("cortex.service: cannot read installed unit ({e})"),
+                format!("check permissions on {}", installed.display()),
+            ));
+        }
+    };
+    let vault = installed_vault_arg(&unit);
+    match cfg
+        .vault_root(vault.as_ref())
+        .and_then(|root| cortex::daemon::desired_systemd_unit(&root, cfg))
+    {
+        Ok(rendered) => drift_finding(
+            "cortex.service",
+            installed,
+            &rendered,
+            "sb cortex daemon --install, then systemctl --user daemon-reload && systemctl --user restart cortex",
+        ),
+        Err(e) => Some(Finding::error(
+            format!("cortex.service: cannot render the current unit ({e:#})"),
+            "fix the cortex config, then sb cortex daemon --install",
+        )),
+    }
+}
+
 /// Compare every installed unit with what `--install` would write now, using
 /// the same render fns and the same inputs the install verbs use. A config
 /// that does not load is reported by the config section; its units are skipped
@@ -247,23 +287,7 @@ fn unit_drift_findings() -> Vec<Finding> {
     if let Ok(cfg) = cortex::config::Config::load(None) {
         let installed = unit_dir.join("cortex.service");
         if installed.exists() {
-            match cfg
-                .vault_root(None)
-                .and_then(|root| cortex::daemon::desired_systemd_unit(&root, &cfg))
-            {
-                Ok(rendered) => {
-                    findings.extend(drift_finding(
-                        "cortex.service",
-                        &installed,
-                        &rendered,
-                        "sb cortex daemon --install, then systemctl --user daemon-reload && systemctl --user restart cortex",
-                    ));
-                }
-                Err(e) => findings.push(Finding::error(
-                    format!("cortex.service: cannot render the current unit ({e:#})"),
-                    "fix the cortex config, then sb cortex daemon --install",
-                )),
-            }
+            findings.extend(cortex_drift_finding(&installed, &cfg));
         }
     }
     findings
