@@ -607,7 +607,8 @@ pub fn apply_classify(
     // Update wikilinks across vault for moved files
     if !moves.is_empty() {
         let all_notes = crate::vault::scan_vault(vault_root, &crate::config::VaultConfig::default())?;
-        crate::naming::update_wikilinks_batch(vault_root, &all_notes, &moves)?;
+        let relinked = crate::naming::update_wikilinks_batch(vault_root, &all_notes, &moves)?;
+        report.add_unreadable_after_rename("classify", &relinked.unreadable);
     }
 
     written.sort();

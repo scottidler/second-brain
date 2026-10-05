@@ -353,3 +353,30 @@ fn proposals_file_serde_roundtrips_with_kebab_keys() {
     let back: BridgeProposalsFile = serde_yaml::from_str(&yaml).expect("de");
     assert_eq!(back.proposals, file.proposals);
 }
+
+#[test]
+fn write_bridge_proposals_refuses_a_corrupt_file_and_leaves_its_bytes() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("bridge-proposals.yml");
+    let corrupt = b"proposals: [this is not: a list of maps\n";
+    std::fs::write(&path, corrupt).expect("seed corrupt");
+
+    let err = write_bridge_proposals(
+        &path,
+        vec![BridgeProposal {
+            member: "notes/a.md".into(),
+            repo: "scottidler/otto".into(),
+            hub_path: repo_hub_path("scottidler/otto"),
+            wikilink: member_wikilink("notes/a.md"),
+            sessions: vec!["s1".into()],
+        }],
+    )
+    .expect_err("a corrupt bridge file must not be written back");
+
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("bridge-proposals.yml"),
+        "error names the path: {rendered}"
+    );
+    assert_eq!(std::fs::read(&path).expect("read"), corrupt, "bytes unchanged");
+}

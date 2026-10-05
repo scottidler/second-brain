@@ -111,6 +111,20 @@ impl Report {
         self.violations.push(violation);
     }
 
+    /// Name every note a rename could not relink because it was unreadable.
+    /// A warning per note, so the report says which notes now hold stale links.
+    pub fn add_unreadable_after_rename(&mut self, rule: &str, unreadable: &[PathBuf]) {
+        for path in unreadable {
+            self.add(Violation {
+                path: path.clone(),
+                rule: rule.to_string(),
+                severity: Severity::Warning,
+                message: "unreadable: wikilinks to renamed notes were not updated in this note".to_string(),
+                fix: None,
+            });
+        }
+    }
+
     pub fn merge(&mut self, other: Report) {
         self.violations.extend(other.violations);
     }

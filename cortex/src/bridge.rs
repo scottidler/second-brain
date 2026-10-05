@@ -304,8 +304,11 @@ pub fn write_bridge_proposals(path: &Path, fresh: Vec<BridgeProposal>) -> Result
         fresh.len()
     );
     let mut existing: BridgeProposalsFile = if path.exists() {
-        let content = std::fs::read_to_string(path)?;
-        serde_yaml::from_str(&content).unwrap_or_default()
+        let content = std::fs::read_to_string(path).wrap_err_with(|| format!("read {}", path.display()))?;
+        // A file that does not parse is NEVER treated as empty: the write
+        // below would replace it, destroying a human's review in progress.
+        serde_yaml::from_str(&content)
+            .wrap_err_with(|| format!("parse {} (left untouched; fix or remove it)", path.display()))?
     } else {
         BridgeProposalsFile::default()
     };

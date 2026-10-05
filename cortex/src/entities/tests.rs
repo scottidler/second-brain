@@ -220,3 +220,29 @@ fn promote_concept_is_a_reviewable_diff_not_a_silent_write() {
     // Unknown slug errors - a promotion must trace to a pending proposal.
     assert!(promote_concept(&proposals, &glossary, "nonexistent", false).is_err());
 }
+
+#[test]
+fn write_proposals_refuses_a_corrupt_file_and_leaves_its_bytes() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("entity-proposals.yml");
+    let corrupt = b"proposals: [this is not: a list of maps\n";
+    std::fs::write(&path, corrupt).expect("seed corrupt");
+
+    let err = super::write_proposals(
+        &path,
+        vec![EntityProposal {
+            slug: "cognee".into(),
+            surface: "Cognee".into(),
+            frequency: 2,
+            notes: vec![],
+        }],
+    )
+    .expect_err("a corrupt proposals file must not be written back");
+
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("entity-proposals.yml"),
+        "error names the path: {rendered}"
+    );
+    assert_eq!(std::fs::read(&path).expect("read"), corrupt, "bytes unchanged");
+}

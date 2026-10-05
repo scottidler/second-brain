@@ -100,7 +100,31 @@ pub fn emit_gate_alert(
     }
     let message = format_gate_alert(trace_id, stage, gate, domain, reason, retriable_after);
     log::warn!("{message}");
+    #[cfg(test)]
+    fired_log()
+        .lock()
+        .expect("fired alert log poisoned")
+        .push(trace_id.to_string());
     true
+}
+
+/// Trace ids of every alert that actually fired (not cooldown-suppressed), so
+/// a test can assert "exactly one alert fired for this trace".
+#[cfg(test)]
+fn fired_log() -> &'static Mutex<Vec<String>> {
+    static LOG: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    LOG.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// How many alerts fired for `trace_id`. Exposed for tests only.
+#[cfg(test)]
+pub fn fired_count(trace_id: &str) -> usize {
+    fired_log()
+        .lock()
+        .expect("fired alert log poisoned")
+        .iter()
+        .filter(|t| t.as_str() == trace_id)
+        .count()
 }
 
 /// Reset the cooldown map. Exposed for tests only.

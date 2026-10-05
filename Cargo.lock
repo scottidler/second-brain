@@ -1395,6 +1395,7 @@ dependencies = [
 name = "cortex"
 version = "0.15.14"
 dependencies = [
+ "async-trait",
  "chrono",
  "clap",
  "colored",
