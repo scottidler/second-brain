@@ -1,6 +1,7 @@
-use super::query::push_tags_filter;
+use super::filter::Filter;
 use super::*;
 use rusqlite::OptionalExtension;
+use rusqlite::types::Value;
 
 impl super::SearchIndex {
     /// Walk every note's body, count wikilink targets, materialize the
@@ -290,27 +291,15 @@ impl super::SearchIndex {
         let limit = limit.unwrap_or(20);
 
         // Tags are stored as JSON arrays, use Rust-side filtering
-        let mut sql = String::from(
-            "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
-             FROM notes WHERE tags != ''",
-        );
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
-        let mut param_idx = 1;
-
-        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
-        let _ = param_idx;
-
-        sql.push_str(" ORDER BY date DESC");
-
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql)?;
+        let f = tag_search_filter(tags, tags_all).then(" ORDER BY date DESC");
+        let mut stmt = self.conn.prepare(&f.sql)?;
 
         let tag_lower = tag.to_lowercase();
         let is_prefix = tag_lower.ends_with('*');
         let prefix = if is_prefix { &tag_lower[..tag_lower.len() - 1] } else { &tag_lower };
 
         let rows: Vec<NoteRow> = stmt
-            .query_map(params_refs.as_slice(), NoteRow::from_row)?
+            .query_map(rusqlite::params_from_iter(&f.params), NoteRow::from_row)?
             .filter_map(warn_row)
             .filter(|note| {
                 if let Ok(tags) = serde_json::from_str::<Vec<String>>(&note.tags) {
@@ -403,23 +392,10 @@ impl super::SearchIndex {
     ) -> Result<Vec<NoteRow>> {
         log::debug!("search::notes_by_creator: creator={creator} tags={tags:?} tags_all={tags_all} limit={limit:?}");
         let limit = limit.unwrap_or(20);
-        let mut sql = String::from(
-            "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
-             FROM notes WHERE LOWER(creator) LIKE ?1",
-        );
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(format!("%{}%", creator.to_lowercase()))];
-        let mut param_idx = 2;
-
-        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
-        let _ = param_idx;
-
-        sql.push_str(&format!(" ORDER BY date DESC LIMIT {limit}"));
-
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql)?;
+        let f = notes_by_creator_filter(creator, tags, tags_all).then(&format!(" ORDER BY date DESC LIMIT {limit}"));
+        let mut stmt = self.conn.prepare(&f.sql)?;
         let rows = stmt
-            .query_map(params_refs.as_slice(), NoteRow::from_row)?
+            .query_map(rusqlite::params_from_iter(&f.params), NoteRow::from_row)?
             .filter_map(warn_row)
             .collect();
         Ok(rows)
@@ -453,23 +429,10 @@ impl super::SearchIndex {
     ) -> Result<Vec<NoteRow>> {
         log::debug!("search::notes_by_source_domain: host={host} tags={tags:?} tags_all={tags_all} limit={limit:?}");
         let limit = limit.unwrap_or(20);
-        let mut sql = String::from(
-            "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
-             FROM notes WHERE source LIKE ?1",
-        );
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(format!("%{}%", host.to_lowercase()))];
-        let mut param_idx = 2;
-
-        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
-        let _ = param_idx;
-
-        sql.push_str(&format!(" ORDER BY date DESC LIMIT {limit}"));
-
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql)?;
+        let f = notes_by_source_domain_filter(host, tags, tags_all).then(&format!(" ORDER BY date DESC LIMIT {limit}"));
+        let mut stmt = self.conn.prepare(&f.sql)?;
         let rows = stmt
-            .query_map(params_refs.as_slice(), NoteRow::from_row)?
+            .query_map(rusqlite::params_from_iter(&f.params), NoteRow::from_row)?
             .filter_map(warn_row)
             .collect();
         Ok(rows)
@@ -592,29 +555,6 @@ impl super::SearchIndex {
         Ok(result)
     }
 
-    /// `classify_stats`'s shared filter builder: `base_where` AND an optional
-    /// `tags` facet filter (`push_tags_filter`). Returns the finished SQL plus
-    /// its bound parameters, ready for `query_row` (a `COUNT(*)`) or
-    /// `query_map` (a `GROUP BY`) callers.
-    fn classify_filtered_sql(
-        &self,
-        select: &str,
-        base_where: &str,
-        tags: Option<&[String]>,
-        tags_all: bool,
-        group_by: Option<&str>,
-    ) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
-        let mut sql = format!("SELECT {select} FROM notes WHERE {base_where}");
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
-        let mut param_idx = 1;
-        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
-        let _ = param_idx;
-        if let Some(g) = group_by {
-            sql.push_str(&format!(" GROUP BY {g} ORDER BY COUNT(*) DESC"));
-        }
-        (sql, param_values)
-    }
-
     /// Get classification pipeline statistics. `tags` narrows
     /// `total_classified`, `by_method`, and `by_confidence` -
     /// `pending_review`, `inbox_count`, and `unclassified` stay unfiltered
@@ -622,21 +562,21 @@ impl super::SearchIndex {
     /// tags-only "not yet classified" signal), excluding daily/system notes.
     pub fn classify_stats(&self, tags: Option<&[String]>, tags_all: bool) -> Result<ClassifyStats> {
         log::debug!("search::classify_stats: tags={tags:?} tags_all={tags_all}");
-        let (sql, params) = self.classify_filtered_sql("COUNT(*)", "classified = 1", tags, tags_all, None);
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let total_classified: u64 = self.conn.query_row(&sql, params_refs.as_slice(), |row| row.get(0))?;
+        let f = classify_filter("COUNT(*)", "classified = 1", tags, tags_all, None);
+        let total_classified: u64 = self
+            .conn
+            .query_row(&f.sql, rusqlite::params_from_iter(&f.params), |row| row.get(0))?;
 
         let by_method = {
-            let (sql, params) = self.classify_filtered_sql(
+            let f = classify_filter(
                 "classified_by, COUNT(*)",
                 "classified = 1 AND classified_by != ''",
                 tags,
                 tags_all,
                 Some("classified_by"),
             );
-            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            let mut stmt = self.conn.prepare(&sql)?;
-            stmt.query_map(params_refs.as_slice(), |row| {
+            let mut stmt = self.conn.prepare(&f.sql)?;
+            stmt.query_map(rusqlite::params_from_iter(&f.params), |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
             .filter_map(warn_row)
@@ -644,25 +584,25 @@ impl super::SearchIndex {
         };
 
         let by_confidence = {
-            let (sql, params) = self.classify_filtered_sql(
+            let f = classify_filter(
                 "confidence, COUNT(*)",
                 "classified = 1 AND confidence != ''",
                 tags,
                 tags_all,
                 Some("confidence"),
             );
-            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            let mut stmt = self.conn.prepare(&sql)?;
-            stmt.query_map(params_refs.as_slice(), |row| {
+            let mut stmt = self.conn.prepare(&f.sql)?;
+            stmt.query_map(rusqlite::params_from_iter(&f.params), |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
             .filter_map(warn_row)
             .collect()
         };
 
-        let (sql, params) = self.classify_filtered_sql("COUNT(*)", "needs_review = 1", tags, tags_all, None);
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let pending_review: u64 = self.conn.query_row(&sql, params_refs.as_slice(), |row| row.get(0))?;
+        let f = classify_filter("COUNT(*)", "needs_review = 1", tags, tags_all, None);
+        let pending_review: u64 = self
+            .conn
+            .query_row(&f.sql, rusqlite::params_from_iter(&f.params), |row| row.get(0))?;
 
         let inbox_count: u64 =
             self.conn
@@ -688,5 +628,51 @@ impl super::SearchIndex {
             inbox_count,
             unclassified,
         })
+    }
+}
+
+const NOTE_COLUMNS: &str = "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires";
+
+/// `tag_search`'s statement up to (not including) `ORDER BY`.
+pub(super) fn tag_search_filter(tags: Option<&[String]>, tags_all: bool) -> Filter {
+    Filter::new(
+        &format!("{NOTE_COLUMNS}\n             FROM notes WHERE tags != ''"),
+        vec![],
+    )
+    .and_tags("notes", tags, tags_all)
+}
+
+/// `notes_by_creator`'s statement up to (not including) `ORDER BY`/`LIMIT`.
+pub(super) fn notes_by_creator_filter(creator: &str, tags: Option<&[String]>, tags_all: bool) -> Filter {
+    Filter::new(
+        &format!("{NOTE_COLUMNS}\n             FROM notes WHERE LOWER(creator) LIKE ?"),
+        vec![Value::Text(format!("%{}%", creator.to_lowercase()))],
+    )
+    .and_tags("notes", tags, tags_all)
+}
+
+/// `notes_by_source_domain`'s statement up to (not including) `ORDER BY`/`LIMIT`.
+pub(super) fn notes_by_source_domain_filter(host: &str, tags: Option<&[String]>, tags_all: bool) -> Filter {
+    Filter::new(
+        &format!("{NOTE_COLUMNS}\n             FROM notes WHERE source LIKE ?"),
+        vec![Value::Text(format!("%{}%", host.to_lowercase()))],
+    )
+    .and_tags("notes", tags, tags_all)
+}
+
+/// `classify_stats`'s shared builder: `base_where` AND an optional `tags` facet
+/// filter, plus an optional `GROUP BY`.
+pub(super) fn classify_filter(
+    select: &str,
+    base_where: &str,
+    tags: Option<&[String]>,
+    tags_all: bool,
+    group_by: Option<&str>,
+) -> Filter {
+    let f = Filter::new(&format!("SELECT {select} FROM notes WHERE {base_where}"), vec![])
+        .and_tags("notes", tags, tags_all);
+    match group_by {
+        Some(g) => f.then(&format!(" GROUP BY {g} ORDER BY COUNT(*) DESC")),
+        None => f,
     }
 }

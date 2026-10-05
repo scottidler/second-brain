@@ -348,6 +348,7 @@ mod graph;
 pub use graph::{Edge, EntityRow, FactEdge, GraphNoteRow, GraphReach};
 
 mod cold;
+mod filter;
 mod index;
 mod query;
 mod rerank;

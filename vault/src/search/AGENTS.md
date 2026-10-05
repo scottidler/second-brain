@@ -11,7 +11,7 @@ SQLite-backed search for vault notes: BM25 via FTS5, brute-force cosine vector s
 - `SearchIndex::open(db_path)` / `open_memory()`; `index_vault(vault_root)`.
 - `search(query, tags, tags_all, note_type, status, limit) -> Vec<NoteRow>` (BM25).
   `tags_all` picks the facet combinator: `false` = OR (any), `true` = AND (all).
-  Every browse/stats query here takes the same pair (`push_tags_filter`).
+  Every browse/stats query here takes the same pair (`Filter::and_tags`). All dynamic WHERE clauses are built by `search/filter.rs` `Filter` (bare `?` only, never numbered `?N`).
 - `search_vector(query_vec, limit, …) -> Vec<VectorHit>` (cosine; feature `vec`).
 - `reciprocal_rank_fusion(bm25_paths, vec_paths, k=60, limit) -> Vec<FusedHit>`.
 - `vector::{stale_embedding_targets, upsert_embedding, upsert_embeddings_batch}` (cortex re-embed loop).
@@ -39,9 +39,9 @@ SQLite-backed search for vault notes: BM25 via FTS5, brute-force cosine vector s
 - **BLOB validation:** `validate_embedding_bytes(bytes, dim)` checks `len == dim*4` before the dot loop (no OOB reads).
 - **Atomic embedding writes:** `upsert_embeddings_batch` is a single `BEGIN IMMEDIATE … COMMIT` so hybrid search never sees half-replaced vectors.
 - **Atomic per-note indexing:** `index_one` wraps the `notes` upsert and its `note_tags` maintenance in one SAVEPOINT. `index_changed` has no enclosing transaction, so a failed facet write must roll the note row back with it or the two tables disagree.
-- **`note_tags` is the tags facet, `notes.tags` is the JSON for FTS.** Both are written by `index_one` from the same list; a tag filter goes through the facet (`push_tags_filter`, an indexed `EXISTS` subquery) rather than `json_each`, which is a full scan plus parse. The facet rows are deleted with the note in both stale-removal paths.
+- **`note_tags` is the tags facet, `notes.tags` is the JSON for FTS.** Both are written by `index_one` from the same list; a tag filter goes through the facet (`Filter::and_tags`, an indexed `EXISTS` subquery) rather than `json_each`, which is a full scan plus parse. The facet rows are deleted with the note in both stale-removal paths.
 - **Every indexed row's `tags` is valid JSON.** A note with no `tags` key stores `[]`, never `''`; the empty string is not valid JSON and made `json_each` error on 303 rows.
-- **An empty tag list is not a filter.** `push_tags_filter` treats `Some(&[])` as no filter, so a caller threading an unset list never silently gets zero rows.
+- **An empty tag list is not a filter.** `Filter::and_tags` treats `Some(&[])` as no filter, so a caller threading an unset list never silently gets zero rows.
 
 ## Patterns
 

@@ -1,47 +1,6 @@
+use super::filter::Filter;
 use super::*;
-
-/// Append a `tags` filter to a WHERE clause being built, against the
-/// `note_tags` facet so it is an index lookup rather than a JSON scan.
-///
-/// `tags_all = false` (the default) is OR across the list: the note carries at
-/// least one of them. `tags_all = true` is AND: it carries all of them. An
-/// empty list is treated as no filter, so a caller passing `Some(&[])` does
-/// not silently get zero rows.
-///
-/// `alias` is the `notes` alias in the caller's query (`n` or `notes`), since
-/// the correlated subquery has to join back to it.
-pub(crate) fn push_tags_filter(
-    sql: &mut String,
-    param_values: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
-    param_idx: &mut usize,
-    alias: &str,
-    tags: Option<&[String]>,
-    tags_all: bool,
-) {
-    let Some(tags) = tags.filter(|t| !t.is_empty()) else {
-        return;
-    };
-    // Dedup before both the placeholder list and the AND-mode `= N` count:
-    // `note_tags` holds one row per (path, tag), so `["rust", "rust"]` with
-    // `tags_all` would demand two distinct matches and never return a row.
-    let tags = dedup_tags(tags);
-    let placeholders: Vec<String> = (0..tags.len()).map(|i| format!("?{}", *param_idx + i)).collect();
-    let list = placeholders.join(", ");
-    if tags_all {
-        sql.push_str(&format!(
-            " AND (SELECT count(DISTINCT t.tag) FROM note_tags t WHERE t.path = {alias}.path AND t.tag IN ({list})) = {}",
-            tags.len()
-        ));
-    } else {
-        sql.push_str(&format!(
-            " AND EXISTS (SELECT 1 FROM note_tags t WHERE t.path = {alias}.path AND t.tag IN ({list}))"
-        ));
-    }
-    for tag in &tags {
-        param_values.push(Box::new((*tag).clone()));
-    }
-    *param_idx += tags.len();
-}
+use rusqlite::types::Value;
 
 /// First-occurrence dedup of a tag list, order preserved. Shared by the
 /// filter builder and `index_one` so the facet rows, the JSON column, and
@@ -67,39 +26,16 @@ impl super::SearchIndex {
         );
         let limit = limit.unwrap_or(20);
 
-        let mut sql = String::from(
-            "SELECT n.path, n.title, n.note_type, n.origin, n.status, n.date, n.tags, n.source, n.creator, n.body, n.summary, n.trace, n.ingested, n.trace_expires
-             FROM notes n
-             JOIN notes_fts f ON n.rowid = f.rowid
-             WHERE notes_fts MATCH ?1",
-        );
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(query.to_string())];
-        let mut param_idx = 2;
+        let f = search_filter(query, tags, tags_all, note_type, status).then(&format!(" ORDER BY rank LIMIT {limit}"));
 
-        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "n", tags, tags_all);
-        if let Some(t) = note_type {
-            sql.push_str(&format!(" AND n.note_type = ?{param_idx}"));
-            param_values.push(Box::new(t.to_string()));
-            param_idx += 1;
-        }
-        if let Some(s) = status {
-            sql.push_str(&format!(" AND n.status = ?{param_idx}"));
-            param_values.push(Box::new(s.to_string()));
-            param_idx += 1;
-        }
-        let _ = param_idx;
-
-        sql.push_str(&format!(" ORDER BY rank LIMIT {limit}"));
-
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare(&f.sql)?;
         // Collect with propagation, NOT `filter_map(warn_row)`: sqlite reports a
         // malformed MATCH expression on the first step, so swallowing per row
         // turns "your query is invalid" into "there are no results" - a
         // fail-open search. Callers that can tolerate no results (classify's
         // similarity lookup) decide that for themselves.
         let rows = stmt
-            .query_map(params_refs.as_slice(), NoteRow::from_row)?
+            .query_map(rusqlite::params_from_iter(&f.params), NoteRow::from_row)?
             .collect::<rusqlite::Result<Vec<NoteRow>>>()
             .wrap_err_with(|| format!("fts5 search failed for query {query:?}"))?;
 
@@ -151,42 +87,12 @@ impl super::SearchIndex {
             "search::list_notes: tags={tags:?} tags_all={tags_all} note_type={note_type:?} status={status:?} after={after:?} before={before:?} limit={limit:?}"
         );
         let limit = limit.unwrap_or(50);
-        let mut sql = String::from(
-            "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
-             FROM notes WHERE 1=1",
-        );
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
-        let mut param_idx = 1;
+        let f = list_notes_filter(tags, tags_all, note_type, status, after, before)
+            .then(&format!(" ORDER BY date DESC LIMIT {limit}"));
 
-        push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "notes", tags, tags_all);
-        if let Some(t) = note_type {
-            sql.push_str(&format!(" AND note_type = ?{param_idx}"));
-            param_values.push(Box::new(t.to_string()));
-            param_idx += 1;
-        }
-        if let Some(s) = status {
-            sql.push_str(&format!(" AND status = ?{param_idx}"));
-            param_values.push(Box::new(s.to_string()));
-            param_idx += 1;
-        }
-        if let Some(a) = after {
-            sql.push_str(&format!(" AND date >= ?{param_idx}"));
-            param_values.push(Box::new(a.to_string()));
-            param_idx += 1;
-        }
-        if let Some(b) = before {
-            sql.push_str(&format!(" AND date <= ?{param_idx}"));
-            param_values.push(Box::new(b.to_string()));
-            param_idx += 1;
-        }
-        let _ = param_idx;
-
-        sql.push_str(&format!(" ORDER BY date DESC LIMIT {limit}"));
-
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare(&f.sql)?;
         let rows = stmt
-            .query_map(params_refs.as_slice(), NoteRow::from_row)?
+            .query_map(rusqlite::params_from_iter(&f.params), NoteRow::from_row)?
             .filter_map(warn_row)
             .collect();
 
@@ -329,4 +235,43 @@ impl super::SearchIndex {
             |row| row.get(0),
         ))
     }
+}
+
+const SEARCH_SELECT: &str = "SELECT n.path, n.title, n.note_type, n.origin, n.status, n.date, n.tags, n.source, n.creator, n.body, n.summary, n.trace, n.ingested, n.trace_expires
+             FROM notes n
+             JOIN notes_fts f ON n.rowid = f.rowid
+             WHERE notes_fts MATCH ?";
+
+const LIST_SELECT: &str = "SELECT path, title, note_type, origin, status, date, tags, source, creator, body, summary, trace, ingested, trace_expires
+             FROM notes WHERE 1=1";
+
+/// `search`'s statement up to (not including) `ORDER BY`/`LIMIT`.
+pub(super) fn search_filter(
+    query: &str,
+    tags: Option<&[String]>,
+    tags_all: bool,
+    note_type: Option<&str>,
+    status: Option<&str>,
+) -> Filter {
+    Filter::new(SEARCH_SELECT, vec![Value::Text(query.to_string())])
+        .and_tags("n", tags, tags_all)
+        .and_eq("n.note_type", note_type)
+        .and_eq("n.status", status)
+}
+
+/// `list_notes`'s statement up to (not including) `ORDER BY`/`LIMIT`.
+pub(super) fn list_notes_filter(
+    tags: Option<&[String]>,
+    tags_all: bool,
+    note_type: Option<&str>,
+    status: Option<&str>,
+    after: Option<&str>,
+    before: Option<&str>,
+) -> Filter {
+    Filter::new(LIST_SELECT, vec![])
+        .and_tags("notes", tags, tags_all)
+        .and_eq("note_type", note_type)
+        .and_eq("status", status)
+        .and_cmp("date", ">=", after)
+        .and_cmp("date", "<=", before)
 }

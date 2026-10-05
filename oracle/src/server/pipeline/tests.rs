@@ -157,7 +157,7 @@ fn run_pipeline_drops_a_fully_demoted_zero_weight_method() {
 
 /// `tags` narrows the configured (bm25-only, hermetic) pipeline, threaded
 /// through `run_pipeline` -> `bm25_paths` -> `SearchIndex::search`'s
-/// `push_tags_filter`.
+/// `Filter::and_tags`.
 #[test]
 fn run_configured_pipeline_filters_by_tags() {
     let db = SearchIndex::open_memory().expect("db");

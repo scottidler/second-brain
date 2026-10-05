@@ -22,6 +22,7 @@ use eyre::Result;
 use rusqlite::{TransactionBehavior, params};
 
 use super::SearchIndex;
+use super::filter::Filter;
 use crate::schema::NoteType;
 
 /// One row of the `note_embeddings` scan. `search_vector` returns these
@@ -166,6 +167,27 @@ fn dot_product_from_bytes(query_vec: &[f32], stored: &[u8]) -> f32 {
     dot
 }
 
+/// `search_vector`'s candidate scan: rows for the active model, narrowed by the
+/// note-side filters.
+pub(super) fn vector_filter(
+    active_model: String,
+    tags: Option<&[String]>,
+    tags_all: bool,
+    note_type: Option<&str>,
+    status: Option<&str>,
+) -> Filter {
+    Filter::new(
+        "SELECT e.note_path, e.embedding, e.dim
+             FROM note_embeddings e
+             JOIN notes n ON n.path = e.note_path
+             WHERE e.model_version = ?",
+        vec![rusqlite::types::Value::Text(active_model)],
+    )
+    .and_tags("n", tags, tags_all)
+    .and_eq("n.note_type", note_type)
+    .and_eq("n.status", status)
+}
+
 impl SearchIndex {
     /// Brute-force cosine-similarity search over `note_embeddings`.
     ///
@@ -192,7 +214,7 @@ impl SearchIndex {
     /// pushed into SQL so the scan only visits rows that pass them;
     /// the dot-product loop then ranks the survivors. `tags` is an
     /// `EXISTS`/count subquery against the `note_tags` facet via the shared
-    /// `push_tags_filter` helper (`query.rs`) - same OR/AND semantics as
+    /// `Filter::and_tags` (`filter.rs`) - same OR/AND semantics as
     /// `search`/`list_notes`/`recent_notes`.
     ///
     /// Performance: the design target (hybrid-retrieval design doc) is a
@@ -221,36 +243,15 @@ impl SearchIndex {
             );
         }
 
-        let mut sql = String::from(
-            "SELECT e.note_path, e.embedding, e.dim
-             FROM note_embeddings e
-             JOIN notes n ON n.path = e.note_path
-             WHERE e.model_version = ?1",
-        );
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(active_model)];
-        let mut param_idx = 2;
-        super::query::push_tags_filter(&mut sql, &mut param_values, &mut param_idx, "n", tags, tags_all);
-        if let Some(t) = note_type {
-            sql.push_str(&format!(" AND n.note_type = ?{param_idx}"));
-            param_values.push(Box::new(t.to_string()));
-            param_idx += 1;
-        }
-        if let Some(s) = status {
-            sql.push_str(&format!(" AND n.status = ?{param_idx}"));
-            param_values.push(Box::new(s.to_string()));
-            param_idx += 1;
-        }
-        let _ = param_idx;
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let f = vector_filter(active_model, tags, tags_all, note_type, status);
+        let mut stmt = self.conn.prepare(&f.sql)?;
 
         // Walk every row, compute distance, and reduce-by-note via min.
         // A HashMap is faster than a Vec<(path,best)> linear scan once
         // candidate counts cross ~500.
         use std::collections::HashMap;
         let mut best: HashMap<String, f32> = HashMap::new();
-        let mut rows = stmt.query(params_refs.as_slice())?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(&f.params))?;
         while let Some(row) = rows.next()? {
             let note_path: String = row.get(0)?;
             let bytes: Vec<u8> = row.get(1)?;
