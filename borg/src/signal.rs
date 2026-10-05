@@ -6,7 +6,7 @@
 //! privacy-load-bearing - see `docs/design/2026-05-24-signal-as-borg-transport.md`
 //! and the negative-direction tests in `tests.rs`.
 //!
-//! Hostname gating happens upstream in `lib.rs::serve_init` via
+//! Hostname gating happens upstream in `server::transports::start_signal` via
 //! `config::is_local_host`. By the time `run` is called the supervisor has
 //! already decided this is the right machine.
 

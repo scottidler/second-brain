@@ -1,8 +1,9 @@
 //! Daemon lifecycle + OS service management (systemd / launchd) and the GNOME
 //! hotkey keybinding install/uninstall. Extracted from `lib.rs` (Phase 8 bloat
-//! decomposition) along the daemon-vs-cli seam; `lib.rs` keeps the HTTP server
-//! (`serve_init`) and the ingest entry points, and re-exports `daemon` /
-//! `DaemonOutcome` from here so the public API (`borg::daemon`) is unchanged.
+//! decomposition) along the daemon-vs-cli seam; the HTTP server (`serve_init`)
+//! lives in `server.rs` and the ingest entry points in `client.rs`. `lib.rs`
+//! re-exports `daemon` / `DaemonOutcome` from here so the public API
+//! (`borg::daemon`) is unchanged.
 
 use crate::config::Config;
 use crate::opts;

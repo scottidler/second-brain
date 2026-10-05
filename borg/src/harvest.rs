@@ -604,5 +604,24 @@ pub async fn run_with<R: ExportReader>(
 #[cfg(test)]
 pub(crate) static TEST_XDG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Run `body` with `XDG_DATA_HOME` pointed at `data_home`, restoring it after.
+/// Serialized on the shared XDG test lock because the receipts DB path is
+/// resolved from the process environment.
+#[cfg(test)]
+pub(crate) async fn with_xdg_data_home<F, Fut>(data_home: &std::path::Path, body: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let _guard = crate::harvest::TEST_XDG_LOCK.lock().await;
+    let prior = std::env::var("XDG_DATA_HOME").ok();
+    unsafe { std::env::set_var("XDG_DATA_HOME", data_home) };
+    body().await;
+    match prior {
+        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
+}
+
 #[cfg(test)]
 mod tests;
