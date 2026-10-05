@@ -165,4 +165,29 @@ mod stream {
         .await;
         assert_eq!(n, 1, "a stream with keepalives must not reconnect");
     }
+
+    fn backoff_at_attempt_three() -> ExponentialBackoff {
+        let mut backoff = ExponentialBackoff::reconnect();
+        for _ in 0..3 {
+            backoff.next_delay(None);
+        }
+        backoff
+    }
+
+    #[test]
+    fn a_message_on_a_fresh_connection_does_not_reset_the_backoff() {
+        let mut backoff = backoff_at_attempt_three();
+        settle_backoff(&mut backoff, Instant::now());
+        assert_eq!(backoff.attempts(), 3, "a flapping server must keep the backoff growing");
+    }
+
+    #[test]
+    fn a_message_on_a_healthy_connection_resets_the_backoff() {
+        let mut backoff = backoff_at_attempt_three();
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(crate::backoff::HEALTHY_RUN_SECS + 1))
+            .expect("instant in range");
+        settle_backoff(&mut backoff, long_ago);
+        assert_eq!(backoff.attempts(), 0);
+    }
 }

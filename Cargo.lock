@@ -803,6 +803,7 @@ dependencies = [
  "fs2",
  "hostname",
  "htmd",
+ "httpdate",
  "humantime",
  "image",
  "image_hasher",

@@ -1,6 +1,7 @@
+use crate::backoff::{ExponentialBackoff, retry_after_header};
 use crate::types::{AudioFormat, TranscriptionRequest, TranscriptionResponse};
 use eyre::{Context, Result};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// Browser-shaped User-Agent applied to Groq requests. The default reqwest
 /// UA is plain `reqwest/0.13` which Cloudflare's bot heuristic flags on
@@ -12,9 +13,10 @@ const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/201001
 /// One initial attempt + this many retries.
 const GROQ_MAX_RETRIES: u32 = 2;
 
-/// Cap on the back-off between attempts. Used when Retry-After is missing
-/// or the server reports a value larger than we're willing to wait.
-const GROQ_BACKOFF_CAP: Duration = Duration::from_secs(20);
+/// First delay and cap of the back-off between Groq attempts (1 s, 2 s, 4 s;
+/// cap 20 s). A server `Retry-After` is honoured up to the cap.
+const GROQ_RETRY_BASE: Duration = Duration::from_secs(1);
+const GROQ_RETRY_CAP: Duration = Duration::from_secs(20);
 
 pub struct TranscriptionClient {
     transcriber_url: String,
@@ -177,6 +179,7 @@ impl TranscriptionClient {
         };
 
         let mut last_err: Option<eyre::Report> = None;
+        let mut backoff = ExponentialBackoff::new(GROQ_RETRY_BASE, GROQ_RETRY_CAP);
         for attempt in 0..=GROQ_MAX_RETRIES {
             let form = build_form()?;
             let result = self
@@ -193,7 +196,7 @@ impl TranscriptionClient {
                     log::warn!("Groq attempt {attempt}: network error: {e:#}");
                     last_err = Some(e.into());
                     if attempt < GROQ_MAX_RETRIES {
-                        tokio::time::sleep(retry_backoff(attempt, None)).await;
+                        tokio::time::sleep(backoff.next_delay(None)).await;
                         continue;
                     }
                     break;
@@ -215,8 +218,7 @@ impl TranscriptionClient {
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(Duration::from_secs);
+                .and_then(|s| retry_after_header(s, SystemTime::now()));
 
             let body = response.text().await.unwrap_or_default();
             let retriable = matches!(status.as_u16(), 429 | 502 | 503 | 504);
@@ -224,7 +226,7 @@ impl TranscriptionClient {
             last_err = Some(eyre::eyre!("Groq API status {status}: {body}"));
 
             if retriable && attempt < GROQ_MAX_RETRIES {
-                tokio::time::sleep(retry_backoff(attempt, retry_after)).await;
+                tokio::time::sleep(backoff.next_delay(retry_after)).await;
                 continue;
             }
             break;
@@ -232,19 +234,6 @@ impl TranscriptionClient {
 
         Err(last_err.unwrap_or_else(|| eyre::eyre!("Groq failed without recording an error")))
     }
-}
-
-/// Compute a backoff delay: prefer the server-provided Retry-After, capped
-/// at `GROQ_BACKOFF_CAP`; fall back to exponential 1s * 2^attempt.
-fn retry_backoff(attempt: u32, retry_after: Option<Duration>) -> Duration {
-    if let Some(server) = retry_after {
-        return server.min(GROQ_BACKOFF_CAP);
-    }
-    let secs = 1u64
-        .checked_shl(attempt)
-        .unwrap_or(u64::MAX)
-        .min(GROQ_BACKOFF_CAP.as_secs());
-    Duration::from_secs(secs)
 }
 
 #[cfg(test)]
