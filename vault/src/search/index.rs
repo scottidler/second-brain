@@ -414,7 +414,17 @@ impl super::SearchIndex {
         let mut skipped = 0u64;
 
         for abs_path in changed_paths {
-            if !abs_path.exists() {
+            // Only NotFound removes the row: a stat error (EACCES, ENOTDIR) says
+            // nothing about whether the note exists, so the row is kept.
+            let present = match abs_path.try_exists() {
+                Ok(present) => present,
+                Err(e) => {
+                    log::warn!("index_changed: keeping {}: stat failed: {e}", abs_path.display());
+                    skipped += 1;
+                    continue;
+                }
+            };
+            if !present {
                 let relative = abs_path.strip_prefix(vault_root).unwrap_or(abs_path);
                 let path_str = relative.to_string_lossy();
                 removed += self.remove_note(&path_str)?;

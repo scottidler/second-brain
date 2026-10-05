@@ -166,3 +166,22 @@ fn index_changed_removal_rolls_back_the_note_when_the_facet_delete_fails() {
     assert_eq!(facet_rows(&index, "notes/gone.md"), 1);
     assert!(index.conn.is_autocommit(), "no savepoint left open on the connection");
 }
+
+/// A stat error says nothing about whether the note exists: the row stays. A
+/// regular file where the `notes/` directory should be makes the stat fail
+/// with ENOTDIR instead of NotFound.
+#[test]
+fn index_changed_keeps_the_row_when_the_stat_fails() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let vault_root = tmp.path();
+    std::fs::write(vault_root.join("notes"), b"not a directory").expect("plant file");
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&tagged_note("notes/kept.md", &["rust"]), 1)
+        .expect("index");
+
+    let unstatable = vault_root.join("notes/kept.md");
+    let stats = index.index_changed(vault_root, &[unstatable]).expect("index_changed");
+    assert_eq!(stats.removed, 0);
+    assert_eq!(notes_rows(&index, "notes/kept.md"), 1, "the row survives a stat error");
+}

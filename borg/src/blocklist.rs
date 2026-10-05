@@ -57,7 +57,12 @@ impl Blocklist {
     }
 
     pub fn from_file(path: &Path) -> Result<Self> {
-        if !path.exists() {
+        // `try_exists`, not `exists`: only NotFound is an empty blocklist; a
+        // stat error (EACCES, ENOTDIR) must fail Gate-0 closed, not open it.
+        if !path
+            .try_exists()
+            .with_context(|| format!("stat blocklist {}", path.display()))?
+        {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(path).with_context(|| format!("read blocklist {}", path.display()))?;
