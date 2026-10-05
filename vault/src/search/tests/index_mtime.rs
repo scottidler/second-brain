@@ -69,3 +69,28 @@ fn real_pass_reports_zero_skipped() {
     let stats = index.index_vault(dir.path()).expect("pass");
     assert_eq!((stats.inserted, stats.skipped), (1, 0));
 }
+
+/// Every metadata read happens before `BEGIN IMMEDIATE`, so the write lock is
+/// never held across one syscall per note.
+#[test]
+fn metadata_is_read_outside_the_write_transaction() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path();
+    std::fs::write(vault.join("a.md"), "---\ntitle: A\n---\nbody").expect("write a");
+    std::fs::write(vault.join("b.md"), "---\ntitle: B\n---\nbody").expect("write b");
+
+    let index = SearchIndex::open_memory().expect("open");
+    let in_transaction = std::cell::RefCell::new(Vec::new());
+    index
+        .index_vault_with_stat(vault, false, |_| {
+            in_transaction.borrow_mut().push(!index.conn.is_autocommit());
+            Ok(1_000)
+        })
+        .expect("pass");
+
+    assert_eq!(in_transaction.borrow().len(), 2, "one read per note");
+    assert!(
+        in_transaction.borrow().iter().all(|open| !open),
+        "a stat ran inside the write transaction"
+    );
+}
