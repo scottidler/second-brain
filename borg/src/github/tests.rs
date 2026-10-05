@@ -317,3 +317,42 @@ fn extract_repo_slugs_matches_at_start_of_line() {
     let text = "Description:\ngithub.com/owner/repo\nmore text";
     assert_eq!(extract_repo_slugs(text), vec!["owner/repo".to_string()]);
 }
+
+mod timeout {
+    use super::*;
+    use crate::stub::{Behavior, serve};
+    use std::time::Instant;
+
+    const T: Duration = Duration::from_millis(400);
+
+    async fn fetch_against(behavior: Behavior) -> (Result<RepoFetch>, Duration) {
+        let (port, _) = serve(behavior).await;
+        let fetcher = GitHubFetcher::new(T)
+            .expect("client")
+            .with_api_base(&format!("http://127.0.0.1:{port}"));
+        let started = Instant::now();
+        let result = fetcher.fetch_repo("o", "r").await;
+        (result, started.elapsed())
+    }
+
+    #[tokio::test]
+    async fn a_silent_api_hits_the_configured_timeout() {
+        let (result, elapsed) = fetch_against(Behavior::Silent).await;
+        assert!(result.is_err(), "a silent API must be an error");
+        assert!(elapsed < 2 * T, "took {elapsed:?}, timeout {T:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_body_hits_the_configured_timeout() {
+        let (result, elapsed) = fetch_against(Behavior::HeadersThenStall).await;
+        assert!(result.is_err(), "a stalled body must be an error");
+        assert!(elapsed < 2 * T, "took {elapsed:?}, timeout {T:?}");
+    }
+
+    #[tokio::test]
+    async fn the_stub_api_answers_through_the_seam() {
+        let (result, _) = fetch_against(Behavior::Json(r#"{"stargazers_count": 7}"#.to_string())).await;
+        let fetched = result.expect("a 200 /repos answer is a fetch");
+        assert_eq!(fetched.metadata.stars, Some(7));
+    }
+}

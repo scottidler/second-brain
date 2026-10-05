@@ -23,7 +23,8 @@ pub async fn fetch_article_markdown(
         Ok(text) => Ok((text, None)),
         Err(e) => {
             log::warn!("jina: failed for {url} ({e:#}); falling back to browser-UA");
-            let browser = BrowserUaFetcher::new(browser_ua_timeout);
+            let browser =
+                BrowserUaFetcher::new(browser_ua_timeout).with_context(|| format!("browser-UA fallback for {url}"))?;
             let result = browser
                 .fetch(url)
                 .await
@@ -35,10 +36,8 @@ pub async fn fetch_article_markdown(
 }
 
 async fn jina_fetch(url: &str, timeout_secs: u64) -> Result<String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()
-        .context("Failed to build Jina reqwest client")?;
+    let client =
+        vault::http::client(Duration::from_secs(timeout_secs)).context("Failed to build Jina reqwest client")?;
     let jina_url = format!("https://r.jina.ai/{url}");
 
     let response = client

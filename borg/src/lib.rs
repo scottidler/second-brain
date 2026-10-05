@@ -386,7 +386,8 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
             let tg = telegram.clone();
             let desk = desktop.clone();
             let topic_for_status = ntfy_config.topic.clone();
-            tasks.spawn(async move { ntfy::run(server, topic, token, cfg, tg, desk).await });
+            let read_timeout = ntfy_config.read_timeout;
+            tasks.spawn(async move { ntfy::run(server, topic, token, read_timeout, cfg, tg, desk).await });
             ntfy_status = SubsystemStatus::ActiveWithDetail(format!("topic: {topic_for_status}"));
         }
     }

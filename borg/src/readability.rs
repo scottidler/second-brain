@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use thiserror::Error;
+use vault::http::Timeouts;
 
 /// A realistic desktop Firefox UA. Some sites gate plain/library UAs but serve
 /// browser-looking clients; mirrors `stages::fetcher::BROWSER_UA`.
@@ -40,10 +41,9 @@ pub enum ReadableError {
 pub async fn fetch_article_readable(url: &str, timeout_secs: u64) -> Result<String, ReadableError> {
     log::debug!("fetch_article_readable: url={url} timeout_secs={timeout_secs}");
 
-    let client = reqwest::Client::builder()
+    let client = vault::http::builder(Timeouts::total(Duration::from_secs(timeout_secs)))
         .user_agent(BROWSER_UA)
         .redirect(reqwest::redirect::Policy::limited(5))
-        .timeout(Duration::from_secs(timeout_secs))
         .build()
         .map_err(|source| ReadableError::Fetch {
             url: url.to_string(),

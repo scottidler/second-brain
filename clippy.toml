@@ -1,2 +1,9 @@
 too-many-arguments-threshold = 12
 allow-unwrap-in-tests = true
+# Every reqwest client is built by `vault::http` (timeouts are not optional);
+# its `builder` is the only `#[allow]`. Tests have no exemption.
+disallowed-methods = [
+    { path = "reqwest::Client::new", reason = "build clients with vault::http::client or vault::http::builder" },
+    { path = "reqwest::Client::builder", reason = "build clients with vault::http::client or vault::http::builder" },
+    { path = "reqwest::ClientBuilder::new", reason = "build clients with vault::http::client or vault::http::builder" },
+]

@@ -793,6 +793,7 @@ async fn process_url_inner(
             crate::stages::distill::distill_for_publish_repo(
                 &config.fabric,
                 &config.staging,
+                config.pipeline.github_timeout,
                 trace_id,
                 &url_match.url,
                 &article_md,

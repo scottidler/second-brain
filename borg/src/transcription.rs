@@ -26,18 +26,26 @@ pub struct TranscriptionClient {
 }
 
 impl TranscriptionClient {
-    pub fn new(transcriber_url: &str, groq_api_key: Option<String>, groq_model: &str, timeout_secs: u64) -> Self {
-        Self {
+    /// `timeout_secs` bounds every request; a failed client build is an error.
+    pub fn new(
+        transcriber_url: &str,
+        groq_api_key: Option<String>,
+        groq_model: &str,
+        timeout_secs: u64,
+    ) -> Result<Self> {
+        let timeout = Duration::from_secs(timeout_secs);
+        let http = vault::http::builder(vault::http::Timeouts::total(timeout))
+            .user_agent(BROWSER_UA)
+            .build()
+            .context("transcription: cannot build the HTTP client")?;
+        Ok(Self {
             transcriber_url: transcriber_url.to_string(),
             groq_url: "https://api.groq.com/openai/v1/audio/transcriptions".to_string(),
             groq_api_key,
             groq_model: groq_model.to_string(),
-            timeout: Duration::from_secs(timeout_secs),
-            http: reqwest::Client::builder()
-                .user_agent(BROWSER_UA)
-                .build()
-                .expect("reqwest client should build"),
-        }
+            timeout,
+            http,
+        })
     }
 
     /// Construct a client pointing at a custom Groq URL (used by tests to
@@ -49,10 +57,10 @@ impl TranscriptionClient {
         groq_api_key: Option<String>,
         groq_model: &str,
         timeout_secs: u64,
-    ) -> Self {
-        let mut client = Self::new(transcriber_url, groq_api_key, groq_model, timeout_secs);
+    ) -> Result<Self> {
+        let mut client = Self::new(transcriber_url, groq_api_key, groq_model, timeout_secs)?;
         client.groq_url = groq_url.to_string();
-        client
+        Ok(client)
     }
 
     pub async fn transcribe(

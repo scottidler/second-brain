@@ -163,3 +163,33 @@ fn browser_ua_markitdown_missing_binary_is_err() {
     .expect_err("spawn failure");
     assert!(format!("{err:#}").contains("markitdown"), "{err:#}");
 }
+
+mod http_timeout {
+    use super::*;
+    use crate::stub::{Behavior, serve};
+    use std::time::Instant;
+
+    const T: Duration = Duration::from_millis(400);
+
+    async fn fetch_against(behavior: Behavior) -> (Result<FetchResult>, Duration) {
+        let (port, _) = serve(behavior).await;
+        let fetcher = BrowserUaFetcher::new(T).expect("client");
+        let started = Instant::now();
+        let result = fetcher.fetch(&format!("http://127.0.0.1:{port}/a")).await;
+        (result, started.elapsed())
+    }
+
+    #[tokio::test]
+    async fn a_silent_origin_hits_browser_ua_timeout() {
+        let (result, elapsed) = fetch_against(Behavior::Silent).await;
+        assert!(result.is_err(), "a silent origin must be an error");
+        assert!(elapsed < 2 * T, "took {elapsed:?}, timeout {T:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_body_hits_browser_ua_timeout() {
+        let (result, elapsed) = fetch_against(Behavior::HeadersThenStall).await;
+        assert!(result.is_err(), "a stalled body must be an error");
+        assert!(elapsed < 2 * T, "took {elapsed:?}, timeout {T:?}");
+    }
+}

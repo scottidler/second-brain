@@ -1073,3 +1073,44 @@ fn browser_ua_timeout_rejects_a_bad_duration_naming_the_key() {
     let msg = err.to_string();
     assert!(msg.contains("browser-ua-timeout") && msg.contains("soonish"), "{msg}");
 }
+
+#[test]
+fn github_timeout_defaults_to_30s_and_parses_humantime() {
+    assert_eq!(
+        PipelineConfig::default().github_timeout,
+        std::time::Duration::from_secs(30)
+    );
+    let p: PipelineConfig = serde_yaml::from_str("github-timeout: 5s\n").expect("parse");
+    assert_eq!(p.github_timeout, std::time::Duration::from_secs(5));
+    let yaml = serde_yaml::to_string(&p).expect("serialize");
+    let back: PipelineConfig = serde_yaml::from_str(&yaml).expect("round trip");
+    assert_eq!(back.github_timeout, p.github_timeout);
+}
+
+#[test]
+fn github_timeout_rejects_a_bad_duration_naming_the_key() {
+    let err = serde_yaml::from_str::<PipelineConfig>("github-timeout: whenever\n").expect_err("bad duration");
+    let msg = err.to_string();
+    assert!(msg.contains("github-timeout") && msg.contains("whenever"), "{msg}");
+}
+
+#[test]
+fn ntfy_read_timeout_defaults_to_135s_and_parses_humantime() {
+    let config: Config = serde_yaml::from_str("ntfy:\n  topic: t\n").expect("parse");
+    let ntfy = config.ntfy.expect("ntfy");
+    assert_eq!(ntfy.read_timeout, std::time::Duration::from_secs(135));
+    let config: Config = serde_yaml::from_str("ntfy:\n  topic: t\n  read-timeout: 3m\n").expect("parse");
+    let ntfy = config.ntfy.expect("ntfy");
+    assert_eq!(ntfy.read_timeout, std::time::Duration::from_secs(180));
+    let yaml = serde_yaml::to_string(&ntfy).expect("serialize");
+    let back: NtfyConfig = serde_yaml::from_str(&yaml).expect("round trip");
+    assert_eq!(back.read_timeout, ntfy.read_timeout);
+}
+
+#[test]
+fn ntfy_read_timeout_rejects_a_bad_duration_naming_the_key() {
+    let err =
+        serde_yaml::from_str::<Config>("ntfy:\n  topic: t\n  read-timeout: eventually\n").expect_err("bad duration");
+    let msg = err.to_string();
+    assert!(msg.contains("read-timeout") && msg.contains("eventually"), "{msg}");
+}

@@ -146,7 +146,7 @@ pub(crate) async fn process_youtube(
                     groq_key,
                     &config.groq.model,
                     config.transcriber.timeout_secs,
-                );
+                )?;
                 let response = client.transcribe(audio_bytes, AudioFormat::Mp3, None).await?;
                 response.text
             }
@@ -914,13 +914,16 @@ pub(crate) async fn process_audio_inner(
     // Attempt transcription (graceful degradation if keys unavailable)
     let groq_key = crate::config::resolve_secret(&config.groq.api_key).ok();
     let transcription = if groq_key.is_some() || !config.transcriber.url.is_empty() {
-        let client = TranscriptionClient::new(
+        let transcribed = match TranscriptionClient::new(
             &config.transcriber.url,
             groq_key,
             &config.groq.model,
             config.transcriber.timeout_secs,
-        );
-        match client.transcribe(data.to_vec(), audio_format, None).await {
+        ) {
+            Ok(client) => client.transcribe(data.to_vec(), audio_format, None).await,
+            Err(e) => Err(e),
+        };
+        match transcribed {
             Ok(response) => {
                 log::info!(
                     "Transcription succeeded: {} chars, {:.1}s duration",

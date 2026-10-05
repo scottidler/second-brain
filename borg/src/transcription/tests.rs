@@ -11,7 +11,8 @@ fn test_client_construction() {
         Some("test-key".to_string()),
         "whisper-large-v3",
         120,
-    );
+    )
+    .expect("client");
     assert_eq!(client.transcriber_url, "http://localhost:8090");
     assert_eq!(client.groq_model, "whisper-large-v3");
     assert_eq!(client.timeout, Duration::from_secs(120));
@@ -20,7 +21,7 @@ fn test_client_construction() {
 
 #[test]
 fn test_client_without_groq_key() {
-    let client = TranscriptionClient::new("http://localhost:8090", None, "whisper-large-v3", 120);
+    let client = TranscriptionClient::new("http://localhost:8090", None, "whisper-large-v3", 120).expect("client");
     assert!(client.groq_api_key.is_none());
 }
 
@@ -142,7 +143,8 @@ fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 async fn test_try_groq_retries_on_429_and_eventually_succeeds() {
     // First attempt: 429 with Retry-After: 1; second attempt: 200 OK.
     let (url, count) = spawn_mock_groq(vec![(429, Some(1)), (200, None)]).await;
-    let client = TranscriptionClient::with_groq_url("http://unused", &url, Some("k".to_string()), "m", 30);
+    let client =
+        TranscriptionClient::with_groq_url("http://unused", &url, Some("k".to_string()), "m", 30).expect("client");
     let resp = client
         .try_groq(b"audio bytes", &AudioFormat::Mp3, &None)
         .await
@@ -155,7 +157,8 @@ async fn test_try_groq_retries_on_429_and_eventually_succeeds() {
 async fn test_try_groq_gives_up_after_max_retries() {
     // Always 503; we should exhaust GROQ_MAX_RETRIES + 1 attempts then error.
     let (url, count) = spawn_mock_groq(vec![(503, None)]).await;
-    let client = TranscriptionClient::with_groq_url("http://unused", &url, Some("k".to_string()), "m", 30);
+    let client =
+        TranscriptionClient::with_groq_url("http://unused", &url, Some("k".to_string()), "m", 30).expect("client");
     let result = client.try_groq(b"audio bytes", &AudioFormat::Mp3, &None).await;
     assert!(result.is_err());
     assert_eq!(count.load(Ordering::SeqCst), GROQ_MAX_RETRIES + 1);
@@ -165,7 +168,8 @@ async fn test_try_groq_gives_up_after_max_retries() {
 async fn test_try_groq_does_not_retry_on_4xx_other_than_429() {
     // 400 Bad Request - not retriable, should fail on first attempt.
     let (url, count) = spawn_mock_groq(vec![(400, None)]).await;
-    let client = TranscriptionClient::with_groq_url("http://unused", &url, Some("k".to_string()), "m", 30);
+    let client =
+        TranscriptionClient::with_groq_url("http://unused", &url, Some("k".to_string()), "m", 30).expect("client");
     let result = client.try_groq(b"audio bytes", &AudioFormat::Mp3, &None).await;
     assert!(result.is_err());
     assert_eq!(count.load(Ordering::SeqCst), 1);

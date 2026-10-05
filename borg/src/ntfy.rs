@@ -5,11 +5,13 @@ use crate::notify::{Desktop, Telegram};
 use crate::router::{extract_capture_note, extract_url_from_text};
 use crate::trace;
 use crate::types::{ContentKind, IngestMethod};
-use eyre::Result;
+use eyre::{Context, Result};
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 use tokio_stream::StreamExt;
+use vault::http::Timeouts;
 use vault::receipts::FailureStage;
 
 #[derive(Debug, Deserialize)]
@@ -81,14 +83,27 @@ fn parse_message(message: &str) -> Option<ParsedMessage> {
     }
 }
 
+/// Subscribe to `{server}/{topic}/json` forever. The client is built once:
+/// connect and each read are bounded by `read_timeout` (`ntfy.read-timeout`),
+/// with no total, so a healthy stream lives as long as the server keeps
+/// sending keepalives and a silent one is dropped and reconnected through
+/// backoff. Only a client that cannot be built ends the subscriber.
 pub async fn run(
     server: String,
     topic: String,
     token: Option<String>,
+    read_timeout: Duration,
     config: Arc<Config>,
     telegram: Option<Telegram>,
     desktop: Option<Desktop>,
 ) -> Result<()> {
+    log::debug!("ntfy::run: server={server} topic={topic} read_timeout={read_timeout:?}");
+    let client = vault::http::builder(Timeouts::Stream {
+        connect: read_timeout,
+        read: read_timeout,
+    })
+    .build()
+    .context("ntfy: cannot build the HTTP client")?;
     let mut last_event_id: Option<String> = None;
     let mut backoff = ExponentialBackoff::new();
 
@@ -100,7 +115,7 @@ pub async fn run(
 
         log::info!("ntfy: connecting to {url}");
 
-        let mut req = reqwest::Client::new().get(&url);
+        let mut req = client.get(&url);
         if let Some(ref token) = token {
             req = req.bearer_auth(token);
         }
@@ -125,7 +140,18 @@ pub async fn run(
         let reader = tokio_util::io::StreamReader::new(stream.map(|r| r.map_err(std::io::Error::other)));
         let mut lines = tokio::io::BufReader::new(reader).lines();
 
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            let line = match lines.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => {
+                    log::warn!("ntfy: stream ended, will reconnect");
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("ntfy: read failed ({e}), will reconnect");
+                    break;
+                }
+            };
             if line.trim().is_empty() {
                 continue;
             }
@@ -234,7 +260,6 @@ pub async fn run(
             }
         }
 
-        log::warn!("ntfy: stream ended, will reconnect");
         backoff.wait().await;
     }
 }
