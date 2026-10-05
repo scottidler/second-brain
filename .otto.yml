@@ -12,6 +12,11 @@ otto:
     # Every .rs file is now under 1500; if one exceeds it, decompose - do not
     # raise this number.
     BLOAT_MAX_LINES: "1500"
+    # What check, test, and cov all build. `default-members = ["sb"]` makes a
+    # bare cargo command see only sb; --workspace widens it to every crate.
+    # `--features vec` (resolves to Candle) rather than `--all-features`:
+    # vault's `vec-candle` + `vec-fastembed` are mutually exclusive.
+    CARGO_SCOPE: "--workspace --features vec"
 
 tasks:
   lint:
@@ -55,15 +60,13 @@ tasks:
   check:
     help: "Run all quality checks (compile, clippy, format)"
     bash: |
-      # vault's `vec-candle` + `vec-fastembed` features are mutually
-      # exclusive at compile time (compile_error! guard). Drive CI with
-      # `--features vec` (the public flag that resolves to Candle today)
-      # rather than `--all-features`, which would trip the guard.
+      # Scope comes from CARGO_SCOPE (see envs): `--all-features` would trip
+      # vault's mutually-exclusive vec-candle/vec-fastembed compile_error! guard.
       echo "=== Checking compilation ==="
-      cargo check --workspace --all-targets --features vec
+      cargo check $CARGO_SCOPE --all-targets
       echo ""
       echo "=== Running Clippy ==="
-      cargo clippy --workspace --all-targets --features vec -- -D warnings
+      cargo clippy $CARGO_SCOPE --all-targets -- -D warnings
       echo ""
       echo "=== Checking format ==="
       cargo fmt --all --check
@@ -73,7 +76,7 @@ tasks:
   test:
     help: "Run all tests"
     bash: |
-      cargo test --workspace --features vec
+      cargo test $CARGO_SCOPE
 
   perf:
     help: "Time search_vector at 21K x 384 against its regression ceiling (release; not in ci)"
@@ -89,7 +92,7 @@ tasks:
       JSON_FILE="$OTTO_TASK_DIR/coverage.json"
 
       TEST_FAILED=0
-      if ! cargo llvm-cov --all-features --json --output-path "$JSON_FILE" 2>&1; then
+      if ! cargo llvm-cov $CARGO_SCOPE --json --output-path "$JSON_FILE" 2>&1; then
         TEST_FAILED=1
       fi
 
