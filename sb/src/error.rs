@@ -30,6 +30,30 @@ impl fmt::Display for SilentFailure {
 
 impl Error for SilentFailure {}
 
+/// A typed process exit code (e.g. `sb borg wait`'s 3/4/5). The command has
+/// already printed everything it means to; `main` exits with this code without
+/// the eyre handler printing anything. Exit codes are decided in `main`'s one
+/// match, never by `std::process::exit` in a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExitWith(pub u8);
+
+impl fmt::Display for ExitWith {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "command exited with code {}", self.0)
+    }
+}
+
+impl Error for ExitWith {}
+
+/// The process exit code `main` uses for a command's error: `ExitWith(n)` is
+/// `n`, `SilentFailure` is 1, anything else is `None` (eyre prints it, exit 1).
+pub fn exit_code(err: &eyre::Report) -> Option<u8> {
+    if let Some(ExitWith(code)) = err.downcast_ref::<ExitWith>() {
+        return Some(*code);
+    }
+    err.downcast_ref::<SilentFailure>().map(|_| 1)
+}
+
 /// Install our custom handler. Call once, before any `eyre::Report` is constructed
 /// (so before `Cli::parse()` results are unwrapped).
 ///

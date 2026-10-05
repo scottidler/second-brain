@@ -136,3 +136,17 @@ fn track_caller_method_stores_location() {
     handler.track_caller(location);
     assert!(handler.location.is_some());
 }
+
+#[test]
+fn exit_code_maps_exit_with_to_its_code() {
+    for code in [0u8, 3, 4, 5] {
+        let err = eyre::Report::new(ExitWith(code));
+        assert_eq!(exit_code(&err), Some(code));
+    }
+}
+
+#[test]
+fn exit_code_maps_silent_failure_to_one_and_other_errors_to_none() {
+    assert_eq!(exit_code(&eyre::Report::new(SilentFailure)), Some(1));
+    assert_eq!(exit_code(&eyre::eyre!("daemon unreachable")), None);
+}

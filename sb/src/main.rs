@@ -22,16 +22,20 @@ async fn main() -> Result<()> {
     // flushes it. Bound here, in the only frame that outlives both the command
     // and its shutdown log line. `None` on every other path.
     let _log_guard = logger::init_for(&cli)?;
-    // A command that already printed its own failure returns `SilentFailure`;
-    // map it to exit code 1 here (the one place exit codes are decided) instead
-    // of `std::process::exit` deep in a print helper.
+    // A command that already printed its own output returns `SilentFailure`
+    // (exit 1) or `ExitWith(n)` (exit n, e.g. `sb borg wait`'s 3/4/5); map it
+    // here (the one place exit codes are decided) instead of
+    // `std::process::exit` deep in a print helper. Clap's own exit 2 for a
+    // usage error happens in `Cli::parse()` above and never reaches this.
     match cli.cmd.run().await {
         Ok(()) => Ok(()),
-        Err(e) if e.downcast_ref::<error::SilentFailure>().is_some() => {
-            // `process::exit` runs no destructors, so flush the log writer by hand.
-            drop(_log_guard);
-            std::process::exit(1)
-        }
-        Err(e) => Err(e),
+        Err(e) => match error::exit_code(&e) {
+            Some(code) => {
+                // `process::exit` runs no destructors, so flush the log writer by hand.
+                drop(_log_guard);
+                std::process::exit(i32::from(code))
+            }
+            None => Err(e),
+        },
     }
 }

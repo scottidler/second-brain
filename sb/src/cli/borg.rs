@@ -8,6 +8,7 @@ use std::sync::LazyLock;
 use borg::opts;
 
 pub mod extension;
+pub mod wait;
 
 #[cfg(test)]
 mod tests;
@@ -89,6 +90,18 @@ pub enum Command {
     /// (done, remaining, elapsed, wedged and failed items). Asks the daemon at
     /// `hotkey.host:hotkey.port`, so it answers the same from any machine
     Queue {
+        /// yaml or json (default: yaml on a terminal, json when piped)
+        #[arg(long, value_enum, ignore_case = true)]
+        format: Option<crate::cli::output::Format>,
+    },
+    /// Block until the ingest batch in flight drains. Exit 0: nothing in
+    /// flight, or the batch drained clean. 3: it drained with failures.
+    /// 4: an item is wedged. 5: --timeout reached. 1: no answer from the
+    /// daemon. Prints only the final snapshot; call it after the last submit
+    Wait {
+        /// Give up after this long (humantime: 90s, 15m, 1h)
+        #[arg(long, default_value = "60m", value_parser = humantime::parse_duration)]
+        timeout: std::time::Duration,
         /// yaml or json (default: yaml on a terminal, json when piped)
         #[arg(long, value_enum, ignore_case = true)]
         format: Option<crate::cli::output::Format>,
@@ -522,6 +535,22 @@ impl BorgCli {
             Some(Command::Queue { format }) => {
                 let snapshot = borg::queue::fetch(&config, None, QUEUE_REQUEST_TIMEOUT).await?;
                 crate::cli::output::emit(&snapshot, format)
+            }
+            Some(Command::Wait { timeout, format }) => {
+                let outcome = wait::run(&config, timeout).await?;
+                match &outcome.snapshot {
+                    Some(snapshot) => crate::cli::output::emit(snapshot, format)?,
+                    None => eprintln!(
+                        "timeout {} reached before the daemon at {}:{} answered",
+                        humantime::format_duration(timeout),
+                        config.hotkey.host,
+                        config.hotkey.port
+                    ),
+                }
+                match outcome.code {
+                    0 => Ok(()),
+                    code => Err(crate::error::ExitWith(code).into()),
+                }
             }
             Some(Command::Reingest {
                 all,

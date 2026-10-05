@@ -122,6 +122,8 @@ fn verb_logs_to_file(cli: &Cli, cli_cfg: &CliConfig) -> VerbLogging {
             Some(borg::Command::Retention(_)) => inspect(&["borg", "retention"]),
             Some(borg::Command::Extension(_)) => inspect(&["borg", "extension"]),
             Some(borg::Command::Hotkey(_)) => inspect(&["borg", "hotkey"]),
+            Some(borg::Command::Queue { .. }) => inspect(&["borg", "queue"]),
+            Some(borg::Command::Wait { .. }) => inspect(&["borg", "wait"]),
             _ => VerbLogging::AlwaysFile,
         },
         Cmd::Cortex(c) => match &c.command {

@@ -14,7 +14,7 @@
 
 ## Command Modules (`src/cli/`)
 
-- `borg.rs` (+`cli/borg/`) — Daemon, Ingest, Note, Hotkey, Extension, Migrate, Audit, Log, Queue (`sb borg queue`: `borg::queue::fetch` -> `output::emit`), Reingest, … → borg lib.
+- `borg.rs` (+`cli/borg/`) — Daemon, Ingest, Note, Hotkey, Extension, Migrate, Audit, Log, Queue (`sb borg queue`: `borg::queue::fetch` -> `output::emit`), Wait (`sb borg wait`, `cli/borg/wait.rs`: pins the plain-`/queue` batch id, polls `?batch=<id>` every 2s under one monotonic `--timeout` deadline; pure `decide(snapshot, deadline_reached)` is the exit table 0/3/4/5, returned as `ExitWith`; prints only the final snapshot), Reingest, … → borg lib.
 - `cortex.rs` — Classify, Lint, Link, Intel, State, Daemon, Migrate, Sweep, Summarize, Embed, … → cortex lib (after-help checks `fabric` availability).
 - `oracle.rs`: Serve, Index, Stats (prints "By tag (top 20)" plus the true "Distinct tags" count; the old "By domain" block is gone with the facet), Call (`--list`, `--json`); width-aware tool-list formatting; exit codes via `outcome_is_failure`.
 - `bootstrap.rs`, `status.rs`, `doctor.rs`, `checks.rs` — setup + health.
@@ -23,6 +23,7 @@
 
 - **Version threading:** `env!("GIT_DESCRIBE")` / `env!("CARGO_PKG_VERSION")` are passed into libs at init (e.g. `borg::serve_init(config, env!("GIT_DESCRIBE"))`, `extension::stage(…, env!("CARGO_PKG_VERSION"), …)`). Libraries never call `env!` for these.
 - **Errors:** eyre hook installed before parse; libs return `eyre::Result`; `sb` formats.
+- **Exit codes:** decided only in `main.rs`'s one match via `error::exit_code`: `ExitWith(n)` -> n, `SilentFailure` -> 1, other errors -> eyre print + 1. Clap's usage-error exit 2 happens in `Cli::parse()` before that match. Never `std::process::exit` in a command.
 - **Stdio belongs to `sb`** — libs must not print directly.
 
 ## Patterns

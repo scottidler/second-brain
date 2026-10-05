@@ -30,6 +30,7 @@ serde.workspace = true
 terminal_size = "0.4.4"
 chrono.workspace = true
 unicode-width = { workspace = true }
+humantime = "2.4.0"
 
 [dev-dependencies]
 serial_test = { workspace = true }
