@@ -249,3 +249,171 @@ fn run_gate_1_block_body_when_enabled_persists_blocklist_and_rejection() {
         }
     }
 }
+
+// ---- blocklist read-modify-write fails closed ----
+
+/// Captures WARN-and-above log lines process-wide so a test can assert on the
+/// WARN a code path emits. Lines carry the trace id, so a test filters to its own.
+struct WarnCapture(std::sync::Mutex<Vec<String>>);
+
+impl log::Log for WarnCapture {
+    fn enabled(&self, meta: &log::Metadata) -> bool {
+        meta.level() <= log::Level::Warn
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            self.0.lock().unwrap().push(format!("{}", record.args()));
+        }
+    }
+    fn flush(&self) {}
+}
+
+static WARNS: WarnCapture = WarnCapture(std::sync::Mutex::new(Vec::new()));
+
+fn install_warn_capture() {
+    // set_logger fails only when a logger is already installed: ours, from an
+    // earlier test in this process. Any other logger would make the WARN
+    // assertions below fail loudly rather than pass vacuously.
+    let _ = log::set_logger(&WARNS);
+    log::set_max_level(log::LevelFilter::Warn);
+}
+
+fn warns_containing(needle: &str) -> Vec<String> {
+    WARNS
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.contains(needle))
+        .cloned()
+        .collect()
+}
+
+const CORRUPT_BLOCKLIST: &[u8] = b"domains: [this is not: a map\n";
+
+/// Run `body` with XDG_DATA_HOME at `data_home` under the shared XDG lock.
+fn with_xdg<R>(data_home: &std::path::Path, body: impl FnOnce() -> R) -> R {
+    let _guard = crate::harvest::TEST_XDG_LOCK.blocking_lock();
+    let prior = std::env::var("XDG_DATA_HOME").ok();
+    unsafe { std::env::set_var("XDG_DATA_HOME", data_home) };
+    let out = body();
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+    }
+    out
+}
+
+fn staging_config(root: &std::path::Path) -> crate::config::Config {
+    let mut config = crate::config::Config::default();
+    config.staging.enabled = true;
+    config.staging.root = root.join("stages");
+    config
+}
+
+/// Seed a corrupt blocklist at the path `blocklist::default_path()` resolves to
+/// under the current XDG_DATA_HOME. Must be called inside `with_xdg`.
+fn seed_corrupt_blocklist() -> std::path::PathBuf {
+    let path = crate::blocklist::default_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, CORRUPT_BLOCKLIST).unwrap();
+    path
+}
+
+#[test]
+fn gate_1_with_a_corrupt_blocklist_still_rejects_and_leaves_the_file_alone() {
+    install_warn_capture();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = staging_config(tmp.path());
+    let store = FsArtifactStore::from_config(&config.staging);
+    let trace = "tg-gate1-corrupt-blocklist";
+    let env = crate::stages::artifact::new_envelope(trace, IngestKind::ArticleUrl, IngestMethod::Telegram);
+    store.write_envelope(&env.trace, &env).unwrap();
+
+    let (err, bl_path) = with_xdg(tmp.path(), || {
+        let bl_path = seed_corrupt_blocklist();
+        let err = run_gate_1(
+            &config,
+            trace,
+            "https://www.xda-developers.com/7-docker-containers/",
+            b"anonymous access to domain blocked until 2099-01-01T00:00:00Z",
+            200,
+        )
+        .expect_err("gate-1 still rejects the capture");
+        (err, bl_path)
+    });
+
+    assert!(format!("{err:#}").contains("gate-1"));
+    assert_eq!(
+        std::fs::read(&bl_path).unwrap(),
+        CORRUPT_BLOCKLIST,
+        "the corrupt blocklist's bytes are unchanged"
+    );
+    let rec = store.read_rejection(trace).unwrap().expect("rejection record written");
+    assert!(!rec.blocklist_updated, "no write-back happened");
+    let warns = warns_containing(trace);
+    assert!(
+        warns
+            .iter()
+            .any(|w| w.contains(&bl_path.display().to_string()) && w.contains("update skipped")),
+        "a WARN names the blocklist path, got {warns:?}"
+    );
+}
+
+#[test]
+fn gate_0_with_a_corrupt_blocklist_rejects_the_url_capture_and_fires_one_alert() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = staging_config(tmp.path());
+    let store = FsArtifactStore::from_config(&config.staging);
+    let trace = "tg-gate0-corrupt-blocklist";
+    let content = ContentKind::Url {
+        url: "https://gate0-corrupt.example/post".to_string(),
+        note: None,
+    };
+
+    let (err, bl_path) = with_xdg(tmp.path(), || {
+        let bl_path = seed_corrupt_blocklist();
+        let err = stage_0_init(&config, &content, IngestMethod::Telegram, trace)
+            .expect_err("an unloadable blocklist fails closed");
+        (err, bl_path)
+    });
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains(&bl_path.display().to_string()),
+        "the error names the blocklist path: {msg}"
+    );
+    assert_eq!(std::fs::read(&bl_path).unwrap(), CORRUPT_BLOCKLIST, "bytes unchanged");
+    assert_eq!(crate::stages::alert::fired_count(trace), 1, "exactly one gate alert");
+    assert!(
+        store.read_envelope(trace).is_err(),
+        "a rejected capture writes no staged artifacts"
+    );
+}
+
+#[test]
+fn gate_0_with_a_missing_blocklist_lets_the_url_capture_through() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = staging_config(tmp.path());
+    let store = FsArtifactStore::from_config(&config.staging);
+    let trace = "tg-gate0-missing-blocklist";
+    let content = ContentKind::Url {
+        url: "https://gate0-missing.example/post".to_string(),
+        note: None,
+    };
+
+    let bl_path = with_xdg(tmp.path(), || {
+        assert!(
+            !crate::blocklist::default_path().exists(),
+            "precondition: no blocklist file"
+        );
+        stage_0_init(&config, &content, IngestMethod::Telegram, trace).expect("a missing blocklist is empty");
+        crate::blocklist::default_path()
+    });
+
+    assert!(!bl_path.exists(), "a missing blocklist stays missing");
+    assert!(store.read_envelope(trace).is_ok(), "the capture was staged");
+    assert_eq!(crate::stages::alert::fired_count(trace), 0, "no alert fired");
+}

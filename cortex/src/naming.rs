@@ -148,7 +148,7 @@ pub fn lint_naming(notes: &[Note], config: &NamingConfig) -> Report {
 /// oscillation fingerprint (`LintApplyReport.written_paths`) draws from -
 /// callers must never substitute the lint report's violation paths, which
 /// include renames skipped as would-clobber.
-pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) -> eyre::Result<Vec<String>> {
+pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) -> eyre::Result<NamingApplied> {
     log::debug!(
         "naming::apply_naming: vault_root={} notes={}",
         vault_root.display(),
@@ -165,7 +165,7 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
     }
 
     if renames.is_empty() {
-        return Ok(Vec::new());
+        return Ok(NamingApplied::default());
     }
 
     // Execute renames. Skip (never clobber) when the destination already
@@ -209,13 +209,34 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
     let relinked = update_wikilinks_batch(vault_root, notes, &applied)?;
 
     let mut written: Vec<String> = applied.iter().map(|(_, to)| to.to_string_lossy().to_string()).collect();
-    written.extend(relinked);
+    written.extend(relinked.rewritten);
     log::debug!(
-        "naming::apply_naming: renamed={} relinked={}",
+        "naming::apply_naming: renamed={} written={} unreadable={}",
         applied.len(),
-        written.len()
+        written.len(),
+        relinked.unreadable.len()
     );
-    Ok(written)
+    Ok(NamingApplied {
+        written,
+        unreadable: relinked.unreadable,
+    })
+}
+
+/// What `apply_naming` did: the paths it wrote, and the notes it could not
+/// read to relink (their wikilinks to the renamed files are now stale).
+#[derive(Debug, Default)]
+pub struct NamingApplied {
+    pub written: Vec<String>,
+    pub unreadable: Vec<PathBuf>,
+}
+
+/// Result of a batch wikilink rewrite. `unreadable` notes were skipped, not
+/// failed: erroring mid-loop would leave the rewrite half done after the
+/// renames already landed, so the caller reports them instead.
+#[derive(Debug, Default)]
+pub(crate) struct Relinked {
+    pub rewritten: Vec<String>,
+    pub unreadable: Vec<PathBuf>,
 }
 
 /// Update wikilinks in all vault files for a batch of renames.
@@ -225,14 +246,15 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
 /// consolidation; replaced two weaker copies).
 ///
 /// Returns the paths of the notes it actually rewrote (real byte changes
-/// only) - the caller folds this into its own written-paths return.
+/// only) and the notes it could not read. Each unreadable note WARNs and is
+/// collected for the caller to report.
 pub(crate) fn update_wikilinks_batch(
     vault_root: &Path,
     notes: &[Note],
     renames: &[(PathBuf, PathBuf)],
-) -> eyre::Result<Vec<String>> {
+) -> eyre::Result<Relinked> {
     if renames.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Relinked::default());
     }
 
     // Build a map of old stem -> new stem (case-insensitive matching)
@@ -245,7 +267,7 @@ pub(crate) fn update_wikilinks_batch(
         })
         .collect();
 
-    let mut written = Vec::new();
+    let mut out = Relinked::default();
     for note in notes {
         let abs_path = vault_root.join(&note.path);
         // Skip files that were renamed (they no longer exist at old path)
@@ -255,7 +277,14 @@ pub(crate) fn update_wikilinks_batch(
 
         let content = match std::fs::read_to_string(&abs_path) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) => {
+                log::warn!(
+                    "naming: cannot read {} to update wikilinks after a rename: {e}",
+                    abs_path.display()
+                );
+                out.unreadable.push(note.path.clone());
+                continue;
+            }
         };
 
         let mut new_content = content.clone();
@@ -285,11 +314,11 @@ pub(crate) fn update_wikilinks_batch(
         if new_content != content {
             vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
             log::info!("updated wikilinks: {}", note.path.display());
-            written.push(note.path.to_string_lossy().to_string());
+            out.rewritten.push(note.path.to_string_lossy().to_string());
         }
     }
 
-    Ok(written)
+    Ok(out)
 }
 
 #[cfg(test)]

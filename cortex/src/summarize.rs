@@ -131,10 +131,7 @@ pub async fn backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 's
         config.backfill.max_concurrent.max(1) as usize
     ));
     let dispatcher = Arc::new(dispatcher);
-    let attempted = Arc::new(AtomicU64::new(0));
-    let distilled_count = Arc::new(AtomicU64::new(0));
-    let skipped = Arc::new(AtomicU64::new(0));
-    let failed = Arc::new(AtomicU64::new(0));
+    let counters = Counters::default();
     let total = candidates.len();
 
     // Per-note tasks run concurrently up to `max_concurrent`. Checkpoint
@@ -142,53 +139,32 @@ pub async fn backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 's
     // where it stopped.
     let mut handles = Vec::with_capacity(candidates.len());
     for note in candidates {
-        let permit_owner = semaphore.clone();
-        let dispatcher = dispatcher.clone();
-        let vault_root = vault_root.to_path_buf();
-        let checkpoint_path = checkpoint_path.clone();
-        let attempted = attempted.clone();
-        let distilled_count = distilled_count.clone();
-        let skipped = skipped.clone();
-        let failed = failed.clone();
-        let extractor_override = opts.extractor.clone();
-        let handle = tokio::spawn(async move {
-            let _permit = match permit_owner.acquire_owned().await {
-                Ok(p) => p,
-                Err(e) => {
-                    log::warn!("summarize::backfill: semaphore closed mid-flight: {e}");
-                    return;
-                }
-            };
-            let path = note.path.clone();
-            attempted.fetch_add(1, Ordering::Relaxed);
-            match process_one(&vault_root, &note, dispatcher.as_ref(), extractor_override.as_deref()).await {
-                Ok(ProcessOutcome::Distilled) => {
-                    let _ = save_checkpoint(&checkpoint_path, &path);
-                    let done = distilled_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    if done.is_multiple_of(PROGRESS_LOG_EVERY) {
-                        log::info!(
-                            "summarize::backfill: progress {}/{} distilled (failed={})",
-                            done,
-                            total,
-                            failed.load(Ordering::Relaxed),
-                        );
-                    }
-                }
-                Ok(ProcessOutcome::Skipped(reason)) => {
-                    skipped.fetch_add(1, Ordering::Relaxed);
-                    log::debug!("summarize::backfill: skip {}: {reason}", path.display());
-                }
-                Err(e) => {
-                    failed.fetch_add(1, Ordering::Relaxed);
-                    log::warn!("summarize::backfill: failed {}: {e:#}", path.display());
-                }
-            }
-        });
-        handles.push(handle);
+        let task = BackfillTask {
+            semaphore: semaphore.clone(),
+            dispatcher: dispatcher.clone(),
+            vault_root: vault_root.to_path_buf(),
+            checkpoint_path: checkpoint_path.clone(),
+            extractor_override: opts.extractor.clone(),
+            counters: counters.clone(),
+            total,
+        };
+        handles.push(tokio::spawn(task.run(note)));
     }
     for h in handles {
-        let _ = h.await;
+        if let Err(e) = h.await {
+            // A panicked (or cancelled) task never reached its own counter
+            // update; it had already been counted as attempted, so count it
+            // failed to keep attempted == distilled + skipped + failed.
+            counters.failed.fetch_add(1, Ordering::Relaxed);
+            log::warn!("summarize::backfill: task did not complete: {e}");
+        }
     }
+    let (attempted, distilled_count, skipped, failed) = (
+        counters.attempted,
+        counters.distilled,
+        counters.skipped,
+        counters.failed,
+    );
 
     let summary = BackfillSummary {
         attempted: attempted.load(Ordering::Relaxed),
@@ -205,6 +181,83 @@ pub async fn backfill_with_dispatcher<F: FabricCaller + Clone + Send + Sync + 's
         summary.failed,
     );
     Ok(summary)
+}
+
+#[derive(Default, Clone)]
+struct Counters {
+    attempted: Arc<AtomicU64>,
+    distilled: Arc<AtomicU64>,
+    skipped: Arc<AtomicU64>,
+    failed: Arc<AtomicU64>,
+}
+
+/// Everything one per-note backfill task needs. A struct, not a closure, so
+/// a test can drive a single task (e.g. against a closed semaphore).
+struct BackfillTask<F: FabricCaller + Clone> {
+    semaphore: Arc<tokio::sync::Semaphore>,
+    dispatcher: Arc<Dispatcher<F>>,
+    vault_root: PathBuf,
+    checkpoint_path: PathBuf,
+    extractor_override: Option<String>,
+    counters: Counters,
+    total: usize,
+}
+
+impl<F: FabricCaller + Clone> BackfillTask<F> {
+    async fn run(self, note: Note) {
+        let c = &self.counters;
+        let _permit = match self.semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(e) => {
+                // Counted as attempted AND failed: this note was a candidate
+                // and did not distill, so the summary must not lose it.
+                c.attempted.fetch_add(1, Ordering::Relaxed);
+                c.failed.fetch_add(1, Ordering::Relaxed);
+                log::warn!(
+                    "summarize::backfill: semaphore closed mid-flight, {} not processed: {e}",
+                    note.path.display()
+                );
+                return;
+            }
+        };
+        let path = note.path.clone();
+        c.attempted.fetch_add(1, Ordering::Relaxed);
+        match process_one(
+            &self.vault_root,
+            &note,
+            self.dispatcher.as_ref(),
+            self.extractor_override.as_deref(),
+        )
+        .await
+        {
+            Ok(ProcessOutcome::Distilled) => {
+                if let Err(e) = save_checkpoint(&self.checkpoint_path, &path) {
+                    log::warn!(
+                        "summarize::backfill: checkpoint write failed for {} at {}: {e:#}",
+                        path.display(),
+                        self.checkpoint_path.display()
+                    );
+                }
+                let done = c.distilled.fetch_add(1, Ordering::Relaxed) + 1;
+                if done.is_multiple_of(PROGRESS_LOG_EVERY) {
+                    log::info!(
+                        "summarize::backfill: progress {}/{} distilled (failed={})",
+                        done,
+                        self.total,
+                        c.failed.load(Ordering::Relaxed),
+                    );
+                }
+            }
+            Ok(ProcessOutcome::Skipped(reason)) => {
+                c.skipped.fetch_add(1, Ordering::Relaxed);
+                log::debug!("summarize::backfill: skip {}: {reason}", path.display());
+            }
+            Err(e) => {
+                c.failed.fetch_add(1, Ordering::Relaxed);
+                log::warn!("summarize::backfill: failed {}: {e:#}", path.display());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

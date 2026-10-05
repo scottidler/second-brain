@@ -351,7 +351,12 @@ pub(crate) async fn try_extract_slides(
             config.pipeline.ocr_timeout_secs,
         )?
     };
-    let _ = slides::write_manifest(&manifest, &work_dir);
+    if let Err(e) = slides::write_manifest(&manifest, &work_dir) {
+        log::warn!(
+            "[{video_id}] slides manifest write failed in {}: {e:#}",
+            work_dir.display()
+        );
+    }
 
     if matches!(manifest.extraction.proposed_note_shape, NoteShape::TextOnly) {
         log::info!(

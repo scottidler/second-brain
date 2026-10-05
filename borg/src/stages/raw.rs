@@ -151,10 +151,32 @@ pub fn stage_0_init(config: &Config, content: &ContentKind, method: IngestMethod
 
     if let ContentKind::Url { url, .. } = content {
         let blocklist_path = blocklist::default_path();
-        let blocklist = Blocklist::from_file(&blocklist_path).unwrap_or_else(|e| {
-            log::warn!("stage_0_init: blocklist load failed, treating as empty: {e:#}");
-            Blocklist::default()
-        });
+        // Fail closed: an unloadable blocklist rejects the capture instead of
+        // letting every domain through. A MISSING file is an empty blocklist
+        // (`Blocklist::from_file`); only a file that exists and cannot be
+        // read or parsed lands here. The capture is durable at the door, so
+        // `sb borg replay` recovers it once the file is repaired.
+        let blocklist = match Blocklist::from_file(&blocklist_path) {
+            Ok(bl) => bl,
+            Err(e) => {
+                let domain = blocklist::domain_for(url);
+                let reason = format!(
+                    "gate-0: blocklist {} could not be loaded ({e:#}); rejecting {domain} until it is repaired",
+                    blocklist_path.display()
+                );
+                log::warn!("[{trace_id}] {reason}");
+                alert::emit_gate_alert(
+                    trace_id,
+                    0,
+                    GateId::DomainBlocklist,
+                    Some(&domain),
+                    &reason,
+                    None,
+                    alert::DEFAULT_COOLDOWN_MINUTES,
+                );
+                bail!("{reason}");
+            }
+        };
         let now = Utc::now();
         if let Err(err) = blocklist::gate_0(&blocklist, url, now, ()) {
             let domain = blocklist::domain_for(url);
@@ -233,11 +255,29 @@ pub fn run_gate_1(config: &Config, trace_id: &str, url: &str, bytes: &[u8], stat
         retry = matched.retriable_after.to_rfc3339(),
     );
     let blocklist_path = blocklist::default_path();
-    let mut bl = Blocklist::from_file(&blocklist_path).unwrap_or_default();
-    bl.add_or_refresh(&domain, &matched.reason, matched.retriable_after);
-    if let Err(e) = bl.save_to(&blocklist_path) {
-        log::warn!("[{trace_id}] Gate-1: blocklist save failed: {e:#}");
-    }
+    // The capture is rejected either way; only the write-back is conditional.
+    // A blocklist that exists but does not load is never overwritten: Gate-0
+    // fails closed on it, and rewriting it here would destroy the operator's
+    // entries.
+    let blocklist_updated = match Blocklist::from_file(&blocklist_path) {
+        Ok(mut bl) => {
+            bl.add_or_refresh(&domain, &matched.reason, matched.retriable_after);
+            match bl.save_to(&blocklist_path) {
+                Ok(()) => true,
+                Err(e) => {
+                    log::warn!("[{trace_id}] Gate-1: blocklist save failed: {e:#}");
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "[{trace_id}] Gate-1: blocklist {} unloadable, update skipped and file left untouched: {e:#}",
+                blocklist_path.display()
+            );
+            false
+        }
+    };
     let store = FsArtifactStore::from_config(&config.staging);
     let rec = RejectionRecord {
         trace: trace_id.to_string(),
@@ -248,7 +288,7 @@ pub fn run_gate_1(config: &Config, trace_id: &str, url: &str, bytes: &[u8], stat
         raw_artifact: Some(format!("{trace_id}/fetched.html")),
         source: Some(url.to_string()),
         domain: Some(domain.clone()),
-        blocklist_updated: true,
+        blocklist_updated,
         retriable_after: Some(matched.retriable_after.to_rfc3339()),
     };
     if let Err(e) = store.write_rejection(trace_id, &rec) {

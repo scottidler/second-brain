@@ -159,11 +159,9 @@ pub fn lint_with_notes(
     if rules.contains(&"naming") {
         report.merge(naming::lint_naming(&lintable_notes, &config.actions.naming));
         if opts.apply {
-            written_paths.extend(naming::apply_naming(
-                vault_root,
-                &lintable_notes,
-                &config.actions.naming,
-            )?);
+            let applied = naming::apply_naming(vault_root, &lintable_notes, &config.actions.naming)?;
+            written_paths.extend(applied.written);
+            report.add_unreadable_after_rename("naming", &applied.unreadable);
         }
     }
 

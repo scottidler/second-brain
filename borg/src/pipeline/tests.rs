@@ -1224,3 +1224,78 @@ fn readable_gated_to_plain_articles_only() {
         "an ordinary article IS a plain article"
     );
 }
+
+/// Gate-0 fails closed through the real entry point: a URL capture against an
+/// unloadable blocklist ends `failed` / `intake-rejected` in the receipts DB,
+/// the reason names the blocklist path, and exactly one gate alert fires.
+#[tokio::test]
+async fn corrupt_blocklist_fails_the_capture_as_intake_rejected_in_receipts() {
+    let _xdg = crate::harvest::TEST_XDG_LOCK.lock().await;
+    crate::pipeline::permits::GENERAL_PERMITS.init(4);
+    crate::pipeline::permits::HEAVY_PERMITS.init(2);
+    let data_home = tempfile::TempDir::new().unwrap();
+    let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
+    unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+    let mut config = crate::config::Config::default();
+    config.staging.enabled = true;
+    config.staging.root = data_home.path().join("stages");
+    let bl_path = crate::blocklist::default_path();
+    std::fs::create_dir_all(bl_path.parent().unwrap()).unwrap();
+    let corrupt = b"domains: [this is not: a map\n".to_vec();
+    std::fs::write(&bl_path, &corrupt).unwrap();
+
+    let trace = "20261005-120000-g0cb".to_string();
+    let url = "https://pipeline-gate0-corrupt.example/post";
+    {
+        let conn = receipts::open_default().unwrap();
+        receipts::record_received(
+            &conn,
+            &trace,
+            vault::schema::Method::Http,
+            vault::receipts::ReceiptKind::Url,
+            url,
+        )
+        .unwrap();
+    }
+
+    let result = process_content(
+        ContentKind::Url {
+            url: url.to_string(),
+            note: None,
+        },
+        Vec::new(),
+        IngestMethod::Http,
+        false,
+        &config,
+        Some(trace.clone()),
+        None,
+    )
+    .await;
+
+    let row = {
+        let conn = receipts::open_default().unwrap();
+        receipts::get(&conn, &trace).unwrap().expect("receipt row")
+    };
+    unsafe {
+        match prior_xdg {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+    }
+
+    assert!(
+        matches!(result.status, IngestStatus::Failed { .. }),
+        "{:?}",
+        result.status
+    );
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.failure_stage.as_deref(), Some("intake-rejected"));
+    let reason = row.failure_reason.expect("failure reason recorded");
+    assert!(
+        reason.contains(&bl_path.display().to_string()),
+        "the receipt reason names the blocklist path: {reason}"
+    );
+    assert_eq!(std::fs::read(&bl_path).unwrap(), corrupt, "blocklist bytes unchanged");
+    assert_eq!(crate::stages::alert::fired_count(&trace), 1, "exactly one gate alert");
+}

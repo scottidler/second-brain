@@ -649,3 +649,88 @@ fn backfill_render_keeps_transcript_section() {
     );
     assert!(raw.contains("The legacy note body being re-rendered as the transcript."));
 }
+
+/// Panics inside the fabric call whenever the input carries the marker, so one
+/// note's task dies while its siblings distill.
+#[derive(Clone)]
+struct PanicOnMarker {
+    inner: Arc<FakeFabric>,
+}
+
+#[async_trait::async_trait]
+impl FabricCaller for PanicOnMarker {
+    async fn call(&self, request: distillers::FabricRequest) -> Result<String> {
+        if request.input.contains("PANIC-MARKER") {
+            panic!("simulated distiller panic");
+        }
+        self.inner.call(request).await
+    }
+}
+
+#[tokio::test]
+async fn backfill_counts_a_panicking_task_as_failed() {
+    let v = MiniVault::new();
+    v.add(
+        "ok.md",
+        &note(
+            "title: ok\ntype: article\nsource: https://example.com/ok\n",
+            "fine prose.\n",
+        ),
+    );
+    v.add(
+        "boom.md",
+        &note(
+            "title: boom\ntype: article\nsource: https://example.com/boom\n",
+            "PANIC-MARKER prose.\n",
+        ),
+    );
+    let caller = PanicOnMarker {
+        inner: fake_with_response("distill-article", "summary: \"S\"\nclaims: []\ntags: []\nlinks: []\n"),
+    };
+    let dispatcher = Dispatcher::new(caller, ArticleConfig::default());
+
+    let summary = backfill_with_dispatcher(v.root(), &v.config(), &opts_default(), dispatcher)
+        .await
+        .expect("run survives a panicked task");
+
+    assert_eq!(summary.failed, 1, "the panic is a failure: {summary:?}");
+    assert_eq!(summary.distilled, 1);
+    assert_eq!(
+        summary.attempted,
+        summary.distilled + summary.skipped + summary.failed,
+        "{summary:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_task_on_a_closed_semaphore_counts_attempted_and_failed() {
+    let v = MiniVault::new();
+    v.add(
+        "one.md",
+        &note("title: one\ntype: article\nsource: https://example.com/1\n", "prose.\n"),
+    );
+    let cfg = v.config();
+    let notes = scan_vault(v.root(), &cfg.vault).expect("scan");
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+    semaphore.close();
+    let counters = Counters::default();
+    let task = BackfillTask {
+        semaphore,
+        dispatcher: Arc::new(dispatcher_for(Arc::new(FakeFabric::new()))),
+        vault_root: v.root().to_path_buf(),
+        checkpoint_path: checkpoint_path(v.root(), &cfg),
+        extractor_override: None,
+        counters: counters.clone(),
+        total: 1,
+    };
+
+    task.run(notes.into_iter().next().expect("one note")).await;
+
+    let get = |c: &Arc<AtomicU64>| c.load(Ordering::Relaxed);
+    assert_eq!(get(&counters.attempted), 1);
+    assert_eq!(get(&counters.failed), 1);
+    assert_eq!(
+        get(&counters.attempted),
+        get(&counters.distilled) + get(&counters.skipped) + get(&counters.failed)
+    );
+}

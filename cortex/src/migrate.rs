@@ -62,11 +62,13 @@ pub fn run(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Result<Rep
     };
 
     if opts.apply {
-        let count = apply_migrate_selected(vault_root, &notes, &selected, canon.as_ref())?;
-        Ok(Report {
-            applied: count,
+        let applied = apply_migrate_selected(vault_root, &notes, &selected, canon.as_ref())?;
+        let mut report = Report {
+            applied: applied.count,
             ..Default::default()
-        })
+        };
+        report.add_unreadable_after_rename("migrate", &applied.unreadable);
+        Ok(report)
     } else {
         Ok(lint_migrate_selected(&notes, &selected, canon.as_ref()))
     }
@@ -97,7 +99,15 @@ pub fn lint_migrate(notes: &[Note], migrations: &[MigrationConfig]) -> Report {
 
 /// Apply migrations: field transforms first, then file moves.
 pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationConfig]) -> Result<usize> {
-    apply_migrate_selected(vault_root, notes, &migrations.iter().collect::<Vec<_>>(), None)
+    apply_migrate_selected(vault_root, notes, &migrations.iter().collect::<Vec<_>>(), None).map(|a| a.count)
+}
+
+/// What a migrate apply did: the count of writes and moves, and the notes it
+/// could not read to relink after the moves.
+#[derive(Debug, Default)]
+pub struct MigrateApplied {
+    pub count: usize,
+    pub unreadable: Vec<PathBuf>,
 }
 
 /// `lint_migrate` over an already-narrowed selection (`--only`). `canon` is
@@ -142,7 +152,7 @@ pub fn apply_migrate_selected(
     notes: &[Note],
     migrations: &[&MigrationConfig],
     canon: Option<&CanonicalSet>,
-) -> Result<usize> {
+) -> Result<MigrateApplied> {
     let mut total_count = 0;
 
     // Phase 0: tag transforms. They run FIRST so a later field-drop in the
@@ -176,7 +186,10 @@ pub fn apply_migrate_selected(
     }
 
     if all_moves.is_empty() {
-        return Ok(total_count);
+        return Ok(MigrateApplied {
+            count: total_count,
+            unreadable: Vec::new(),
+        });
     }
 
     let mut move_count = 0;
@@ -222,9 +235,12 @@ pub fn apply_migrate_selected(
     }
 
     // Batch update wikilinks for the moves that actually landed.
-    crate::naming::update_wikilinks_batch(vault_root, notes, &applied)?;
+    let relinked = crate::naming::update_wikilinks_batch(vault_root, notes, &applied)?;
 
-    Ok(total_count + move_count)
+    Ok(MigrateApplied {
+        count: total_count + move_count,
+        unreadable: relinked.unreadable,
+    })
 }
 
 /// Plan all moves for a single migration config.

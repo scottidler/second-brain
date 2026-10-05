@@ -97,7 +97,7 @@ fn test_apply_naming_renames_files() {
     let notes = v.scan();
     let config = v.config().actions.naming;
 
-    let renames = apply_naming(v.root(), &notes, &config).expect("apply");
+    let renames = apply_naming(v.root(), &notes, &config).expect("apply").written;
     assert!(!renames.is_empty());
     // "My Awesome Note.md" should be renamed to "my-awesome-note.md"
     assert!(v.exists("my-awesome-note.md"));
@@ -207,4 +207,44 @@ fn relink_leaves_unrelated_targets_alone() {
         relink("[[old-name-extended]] and [[other]]", "old-name", "new-name"),
         "[[old-name-extended]] and [[other]]"
     );
+}
+
+#[test]
+fn relink_returns_the_unreadable_note_and_still_rewrites_the_rest() {
+    let v = crate::testutil::TestVault::new();
+    let fm = "---\ntitle: T\ndate: 2026-08-19\ntype: note\norigin: authored\ntags: []\n---\n\n";
+    v.add_note("good.md", &format!("{fm}see [[old-name]]\n"));
+    v.add_note("broken.md", &format!("{fm}see [[old-name]]\n"));
+    let notes = v.scan();
+    // Scanned fine, then becomes unreadable (invalid UTF-8) before the relink.
+    std::fs::write(v.root().join("broken.md"), [0xff, 0xfe, 0x00]).expect("corrupt");
+    let renames = vec![(PathBuf::from("notes/old-name.md"), PathBuf::from("notes/new-name.md"))];
+
+    let out = update_wikilinks_batch(v.root(), &notes, &renames).expect("relink continues");
+
+    assert_eq!(out.unreadable, vec![PathBuf::from("broken.md")]);
+    assert_eq!(out.rewritten, vec!["good.md".to_string()]);
+    assert!(v.read("good.md").contains("[[new-name]]"));
+}
+
+#[test]
+fn apply_naming_reports_the_unreadable_note_and_the_lint_report_names_it() {
+    let v = crate::testutil::TestVault::new();
+    let fm = "---\ntitle: T\ndate: 2026-08-19\ntype: note\norigin: authored\ntags: []\n---\n\n";
+    v.add_note("My Renamed Note.md", &format!("{fm}x\n"));
+    v.add_note("linker.md", &format!("{fm}see [[My Renamed Note]]\n"));
+    let notes = v.scan();
+    std::fs::write(v.root().join("linker.md"), [0xff, 0xfe, 0x00]).expect("corrupt");
+    let config = v.config().actions.naming;
+
+    let applied = apply_naming(v.root(), &notes, &config).expect("apply");
+
+    assert!(v.exists("my-renamed-note.md"), "the rename itself still landed");
+    assert_eq!(applied.unreadable, vec![PathBuf::from("linker.md")]);
+
+    let mut report = crate::report::Report::default();
+    report.add_unreadable_after_rename("naming", &applied.unreadable);
+    assert_eq!(report.violations.len(), 1);
+    assert_eq!(report.violations[0].path, PathBuf::from("linker.md"));
+    assert_eq!(report.violations[0].severity, crate::report::Severity::Warning);
 }
