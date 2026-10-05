@@ -198,10 +198,12 @@ async fn query_pairs_are_encoded_into_the_url() {
 
 #[tokio::test]
 async fn connection_refused_reports_is_connect_and_the_address() {
-    let client = DaemonClient::new(&hotkey(1, Duration::from_secs(2)), None).expect("client");
+    let closed = crate::testnet::closed_port();
+    let port = closed.port();
+    let client = DaemonClient::new(&hotkey(port, Duration::from_secs(2)), None).expect("client");
     let err = client.get("/queue", &[], None).await.expect_err("refused");
     assert!(err.is_connect(), "{err}");
-    assert!(err.to_string().contains("127.0.0.1:1"), "{err}");
+    assert!(err.to_string().contains(&format!("127.0.0.1:{port}")), "{err}");
 }
 
 #[test]

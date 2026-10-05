@@ -61,10 +61,8 @@ async fn fetch_sends_bearer_when_token_configured() {
 
 #[tokio::test]
 async fn closed_port_is_an_error_naming_the_address_not_idle() {
-    let port = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
-    };
+    let closed = vault::testnet::closed_port();
+    let port = closed.port();
     let err = fetch(&view_for(port)).await.expect_err("must fail");
     let msg = err.to_string();
     assert!(msg.contains(&format!("127.0.0.1:{port}")), "{msg}");

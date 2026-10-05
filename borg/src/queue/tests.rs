@@ -474,11 +474,8 @@ mod fetch_stub {
 
     #[tokio::test]
     async fn fetch_connect_refused_names_the_address() {
-        // Bind then drop to get a port nothing listens on.
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            l.local_addr().expect("addr").port()
-        };
+        let closed = vault::testnet::closed_port();
+        let port = closed.port();
         let mut config = Config::default();
         config.hotkey.host = "127.0.0.1".to_string();
         config.hotkey.port = port;
