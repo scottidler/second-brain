@@ -3,6 +3,7 @@ use super::*;
 mod filters;
 mod group_a;
 mod group_b;
+mod index_mtime;
 mod legacy_oracle_guard;
 mod tags_facet;
 mod trace;
