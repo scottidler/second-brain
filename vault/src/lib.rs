@@ -31,3 +31,4 @@ pub mod tombstone;
 pub mod trace;
 #[cfg(feature = "watcher")]
 pub mod watcher;
+pub mod wikilink;
