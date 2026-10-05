@@ -1,6 +1,6 @@
 //! Client for the borg daemon's `GET /queue`, backing the `ingest_queue` tool.
 //!
-//! The daemon address and bearer token come from `borg.yml` through the same
+//! The daemon address, bearer token and vocabulary path come from `borg.yml` through the same
 //! loader borg uses (`vault::config::load_config`), read into a view struct
 //! that holds only what a client needs. Every failure is an error naming the
 //! daemon address; nothing here can turn a failed read into an idle answer.
@@ -12,13 +12,22 @@ use vault::config::{Normalize, load_config};
 use vault::daemon::HotkeyConfig;
 use vault::daemon::client::{DaemonClient, DaemonError};
 
-/// The slice of `borg.yml` a daemon client reads. Not `deny_unknown_fields`:
+/// The slice of `borg.yml` oracle reads. Not `deny_unknown_fields`:
 /// the rest of the file belongs to borg.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct BorgView {
     pub hotkey: HotkeyConfig,
     pub server: ServerView,
+    pub tags: TagsView,
+}
+
+/// `tags.canonical-path`, the one vocabulary key oracle shares with borg.
+/// Kept raw: `vocab` tilde-expands it at the point of use.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct TagsView {
+    pub canonical_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

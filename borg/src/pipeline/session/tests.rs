@@ -150,7 +150,7 @@ fn test_config(vault_root: &std::path::Path, staging_root: &std::path::Path) -> 
     // absent paths instead: the load fails, `finalize_tags` no-ops for this
     // call, and the shared cache is never touched (see
     // `pipeline::tags::get_or_init_canonical`).
-    config.tags.canonical_path = staging_root.join("no-such-canonical-tags.yml").display().to_string();
+    config.tags.canonical_path = staging_root.join("no-such-canonical-tags.yml");
     config.tags.mapping_path = staging_root.join("no-such-tag-mapping.yml").display().to_string();
     config
 }

@@ -794,14 +794,17 @@ fn human_bytes(bytes: u64) -> String {
 fn borg_findings() -> Vec<Finding> {
     // Config load is itself a health signal; receipts health comes from the
     // DB (the same computation behind GET /health/audit).
-    if let Err(e) = borg::config::load_config::<borg::config::Config>(None) {
-        return vec![Finding::error(
-            format!("could not load borg config: {e}"),
-            format!("ensure {} exists (sb bootstrap)", vault::paths::borg_config().display()),
-        )];
-    }
+    let borg_cfg = match borg::config::load_config::<borg::config::Config>(None) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return vec![Finding::error(
+                format!("could not load borg config: {e}"),
+                format!("ensure {} exists (sb bootstrap)", vault::paths::borg_config().display()),
+            )];
+        }
+    };
 
-    let mut findings = Vec::new();
+    let mut findings = vocab::path_mismatch_findings(&borg_cfg);
     // The actionable silent-drop signal: crashes the watchdog declared in the
     // last 24h. Lifetime counts are in the receipts_summary line below.
     match borg::triage::audit_health_stats() {
@@ -1470,6 +1473,8 @@ fn state_dir_findings(state_dir: &Path) -> Vec<Finding> {
 fn current_hostname() -> String {
     borg::config::current_hostname().unwrap_or_default()
 }
+
+mod vocab;
 
 #[cfg(test)]
 mod tests;

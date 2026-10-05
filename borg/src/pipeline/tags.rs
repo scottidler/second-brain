@@ -11,7 +11,7 @@ pub(crate) async fn get_or_init_canonical(config: &Config) -> Option<std::sync::
         return Some(Arc::clone(cached));
     }
 
-    let canonical_path = Path::new(&config.tags.canonical_path);
+    let canonical_path = config.tags.canonical_path.as_path();
     let mapping_path = Path::new(&config.tags.mapping_path);
 
     // Borg's startup precondition (`borg::startup::validate_canonical_assets`)

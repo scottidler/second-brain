@@ -17,6 +17,10 @@ pub mod queue;
 pub mod server;
 pub mod tools;
 pub mod transform;
+pub mod vocab;
+
+#[cfg(test)]
+mod testutil;
 
 pub use config::Config;
 

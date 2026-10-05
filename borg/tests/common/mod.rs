@@ -128,7 +128,7 @@ pub fn test_config(vault_root: &std::path::Path, staging_root: &std::path::Path)
     config.staging.enabled = true;
     config.staging.root = staging_root.to_path_buf();
     config.fabric.binary = "borg-test-fabric-binary-does-not-exist".to_string();
-    config.tags.canonical_path = staging_root.join("no-such-canonical-tags.yml").display().to_string();
+    config.tags.canonical_path = staging_root.join("no-such-canonical-tags.yml");
     config.tags.mapping_path = staging_root.join("no-such-tag-mapping.yml").display().to_string();
     config
 }

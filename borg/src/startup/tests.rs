@@ -71,7 +71,7 @@ mod canonical_assets {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
 
-        let err = validate_canonical_assets().expect_err("should error");
+        let err = validate_canonical_assets(&vault::paths::canonical_tags()).expect_err("should error");
         let msg = format!("{err:#}");
         assert!(msg.contains("sb bootstrap"), "should mention sb bootstrap: {msg}");
         assert!(msg.contains("canonical-tags"), "should mention canonical-tags: {msg}");
@@ -90,7 +90,7 @@ mod canonical_assets {
         std::fs::write(sb_root.join("tag-mapping.yml"), "{}\n").expect("write tag-mapping");
         // Note: NOT creating patterns dir.
 
-        let err = validate_canonical_assets().expect_err("should error");
+        let err = validate_canonical_assets(&vault::paths::canonical_tags()).expect_err("should error");
         let msg = format!("{err:#}");
         assert!(msg.contains("sb bootstrap"), "should mention sb bootstrap: {msg}");
         assert!(msg.contains("patterns"), "should mention patterns: {msg}");
@@ -108,7 +108,7 @@ mod canonical_assets {
         std::fs::write(sb_root.join("tag-mapping.yml"), "{}\n").expect("tag-mapping");
         std::fs::create_dir_all(sb_root.join("patterns")).expect("patterns");
 
-        let err = validate_canonical_assets().expect_err("parse error must fail");
+        let err = validate_canonical_assets(&vault::paths::canonical_tags()).expect_err("parse error must fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("--force"), "parse error should suggest --force: {msg}");
     }
@@ -122,6 +122,27 @@ mod canonical_assets {
         let sb_root = tmp.path().join("sb");
         write_minimal_assets(&sb_root);
 
-        validate_canonical_assets().expect("should succeed");
+        validate_canonical_assets(&vault::paths::canonical_tags()).expect("should succeed");
+    }
+
+    #[test]
+    fn validates_the_configured_path_not_the_default() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+
+        // Default location is fully provisioned; the configured file is absent.
+        write_minimal_assets(&tmp.path().join("sb"));
+        let configured = tmp.path().join("elsewhere").join("tags.yml");
+
+        let err = validate_canonical_assets(&configured).expect_err("configured path is what is checked");
+        assert!(
+            format!("{err:#}").contains(&configured.display().to_string()),
+            "{err:#}"
+        );
+
+        std::fs::create_dir_all(configured.parent().unwrap()).expect("mkdir");
+        std::fs::write(&configured, "max-per-note: 7\ntags: {}\n").expect("write");
+        validate_canonical_assets(&configured).expect("configured path present");
     }
 }
