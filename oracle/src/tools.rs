@@ -96,7 +96,9 @@ pub struct KnowledgeSearchRequest {
     pub detail: Option<DetailLevel>,
 
     /// Maximum number of results
-    #[schemars(description = "Maximum number of results to return (default: 10)")]
+    #[schemars(
+        description = "Upper bound on results returned (default: 10); may return fewer when the exclude filters drop stub or short notes. A value above the configured per-method top-k deepens retrieval to match."
+    )]
     pub limit: Option<u32>,
 
     /// Retrieval mode. Explicit single-path override; omit to run the
