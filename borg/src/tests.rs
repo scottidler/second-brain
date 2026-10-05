@@ -443,3 +443,42 @@ async fn reingest_against_a_silent_daemon_reports_the_item_error_within_twice_th
     })
     .await;
 }
+
+fn queried(filename: &str) -> ledger::QueriedEntry {
+    ledger::QueriedEntry {
+        date: "2026-10-05".to_string(),
+        method: "cli".to_string(),
+        slug: "slug".to_string(),
+        filename: filename.to_string(),
+        source: "https://example.com".to_string(),
+        line_number: 1,
+    }
+}
+
+#[test]
+fn note_has_type_matches_the_type_line_in_notes_or_inbox() {
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(vault.path().join("inbox")).unwrap();
+    std::fs::write(vault.path().join("inbox/a.md"), "---\ntype: video\n---\n").unwrap();
+
+    assert!(note_has_type(vault.path(), &queried("a.md"), "video"));
+    assert!(!note_has_type(vault.path(), &queried("a.md"), "article"));
+    assert!(!note_has_type(vault.path(), &queried("missing.md"), "video"));
+    assert!(!note_has_type(vault.path(), &queried("-"), "video"));
+}
+
+#[test]
+fn note_has_type_warns_with_the_path_when_the_note_is_unreadable() {
+    logcapture::install();
+    let vault = tempfile::tempdir().unwrap();
+    // A directory where the note belongs: it exists, but reading it as text fails.
+    std::fs::create_dir_all(vault.path().join("notes/reingest-unreadable.md")).unwrap();
+
+    assert!(!note_has_type(
+        vault.path(),
+        &queried("reingest-unreadable.md"),
+        "video"
+    ));
+
+    assert_eq!(logcapture::warns_containing("reingest-unreadable.md").len(), 1);
+}

@@ -227,7 +227,17 @@ impl ArtifactStore for FsArtifactStore {
 
     fn read_raw(&self, trace_id: &str) -> Result<RawCapture> {
         let envelope = self.read_envelope(trace_id)?;
-        let body = self.read_body(trace_id).unwrap_or_default();
+        let body = match self.read_body(trace_id) {
+            Ok(body) => body,
+            Err(e) => {
+                // Image/PDF/audio captures have no body file: that absence is normal.
+                // A body that exists but cannot be read is not.
+                if self.body_path(trace_id).exists() {
+                    log::warn!("artifact: body for trace {trace_id} exists but is unreadable, using empty: {e:#}");
+                }
+                Vec::new()
+            }
+        };
         let mut attachments = HashMap::new();
         let att_dir = self.trace_dir(trace_id).join("attachments");
         if att_dir.is_dir() {
@@ -336,7 +346,10 @@ impl ArtifactStore for FsArtifactStore {
 fn trace_matches(store: &FsArtifactStore, trace_id: &str, filter: &TraceFilter) -> Result<bool> {
     let envelope = match store.read_envelope(trace_id) {
         Ok(e) => e,
-        Err(_) => return Ok(false),
+        Err(e) => {
+            log::warn!("artifact: trace {trace_id} excluded from listing, envelope unreadable: {e:#}");
+            return Ok(false);
+        }
     };
     if let Some(kind) = filter.kind
         && envelope.kind != kind

@@ -161,18 +161,31 @@ pub fn discover<E: EntityExtractor>(
 /// glossary concepts, glossary alias targets, and canonical tags.
 fn known_slugs(config: &Config) -> HashSet<String> {
     let mut known: HashSet<String> = HashSet::new();
-    if let Ok(g) = crate::linking::load_glossary(&::vault::paths::glossary()) {
-        for c in g.concepts {
-            known.insert(slugify(&c));
+    let glossary_path = ::vault::paths::glossary();
+    match crate::linking::load_glossary(&glossary_path) {
+        Ok(g) => {
+            for c in g.concepts {
+                known.insert(slugify(&c));
+            }
+            for t in g.aliases.values() {
+                known.insert(slugify(t));
+            }
         }
-        for t in g.aliases.values() {
-            known.insert(slugify(t));
-        }
+        Err(e) => log::warn!(
+            "entities: glossary {} unreadable, its concepts will be proposed again: {e:#}",
+            glossary_path.display()
+        ),
     }
-    if let Ok(canon) = vault::canonical::CanonicalTagsFile::load(Path::new(&config.sweep.canonical_path)) {
-        for t in canon.all_tags() {
-            known.insert(slugify(&t));
+    match vault::canonical::CanonicalTagsFile::load(Path::new(&config.sweep.canonical_path)) {
+        Ok(canon) => {
+            for t in canon.all_tags() {
+                known.insert(slugify(&t));
+            }
         }
+        Err(e) => log::warn!(
+            "entities: canonical tags {} unreadable, tags will be proposed as entities: {e:#}",
+            config.sweep.canonical_path.display()
+        ),
     }
     known
 }

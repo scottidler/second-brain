@@ -116,12 +116,22 @@ pub fn migrate_legacy_layout() -> Result<Report> {
         }
         let marker = dir.join(MARKER);
         if !marker.exists() {
-            // best-effort; if we can't write the marker, the next run just retries
-            let _ = std::fs::write(&marker, b"sb bootstrap migrated this directory\n");
+            write_marker(&marker);
         }
     }
 
     Ok(report)
+}
+
+/// Best-effort: a marker that cannot be written only means the next run retries the
+/// migration, but the operator should see why it keeps retrying.
+fn write_marker(marker: &Path) {
+    if let Err(e) = std::fs::write(marker, b"sb bootstrap migrated this directory\n") {
+        log::warn!(
+            "bootstrap: could not write migration marker {} (the next run will retry): {e}",
+            marker.display()
+        );
+    }
 }
 
 /// Basenames `migrate_legacy_layout`'s `plans` array copies out of a legacy

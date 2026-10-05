@@ -203,3 +203,53 @@ fn prune_legacy_is_silent_when_dir_absent() {
     assert!(!report.had_conflicts);
     assert!(report.lines.is_empty(), "unexpected lines: {:?}", report.lines);
 }
+
+/// Process-wide WARN-and-above capture so the test can assert on the logged WARN.
+struct WarnCapture(std::sync::Mutex<Vec<String>>);
+
+impl log::Log for WarnCapture {
+    fn enabled(&self, meta: &log::Metadata) -> bool {
+        meta.level() <= log::Level::Warn
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            self.0.lock().unwrap().push(format!("{}", record.args()));
+        }
+    }
+    fn flush(&self) {}
+}
+
+static WARNS: WarnCapture = WarnCapture(std::sync::Mutex::new(Vec::new()));
+
+#[test]
+fn an_unwritable_marker_warns_with_the_marker_path() {
+    // set_logger fails only when a logger is already installed: ours, from an
+    // earlier test in this process.
+    let _ = log::set_logger(&WARNS);
+    log::set_max_level(log::LevelFilter::Warn);
+    let tmp = TempDir::new().unwrap();
+    // The marker's parent does not exist, so the write fails.
+    let marker = tmp.path().join("no-such-legacy-dir").join(MARKER);
+
+    write_marker(&marker);
+
+    let warns: Vec<String> = WARNS
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.contains("no-such-legacy-dir"))
+        .cloned()
+        .collect();
+    assert_eq!(warns.len(), 1, "{warns:?}");
+}
+
+#[test]
+fn a_writable_marker_is_written_without_a_warn() {
+    let tmp = TempDir::new().unwrap();
+    let marker = tmp.path().join(MARKER);
+
+    write_marker(&marker);
+
+    assert!(marker.exists());
+}

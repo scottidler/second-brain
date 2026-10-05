@@ -246,3 +246,20 @@ fn write_proposals_refuses_a_corrupt_file_and_leaves_its_bytes() {
     );
     assert_eq!(std::fs::read(&path).expect("read"), corrupt, "bytes unchanged");
 }
+
+#[test]
+fn known_slugs_warns_with_the_path_when_the_canonical_tags_file_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = dir.path().join("entities-warn-canonical.yml");
+    std::fs::write(&canonical, "tags: [not: a map\n").unwrap();
+    let mut config = Config::default();
+    config.sweep.canonical_path = canonical;
+    crate::testutil::install_warn_capture();
+
+    let _ = known_slugs(&config);
+
+    assert_eq!(
+        crate::testutil::warns_containing("entities-warn-canonical.yml").len(),
+        1
+    );
+}

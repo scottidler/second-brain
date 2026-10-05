@@ -32,6 +32,8 @@ pub mod hygiene;
 pub mod intake;
 pub mod jina;
 pub mod ledger;
+#[cfg(test)]
+pub(crate) mod logcapture;
 pub mod markdown;
 pub mod migrate;
 pub mod notify;
@@ -721,6 +723,35 @@ pub enum ReingestEntryStatus {
     Error(String),
 }
 
+/// Whether the ledger entry's note (in `notes/` or `inbox/`) carries a `type:` line
+/// containing `type_filter`. An unreadable note is excluded with a WARN naming it.
+fn note_has_type(vault_root: &std::path::Path, entry: &ledger::QueriedEntry, type_filter: &str) -> bool {
+    if entry.filename == "-" {
+        return false;
+    }
+    let note_path = [
+        vault_root.join("notes").join(&entry.filename),
+        vault_root.join("inbox").join(&entry.filename),
+    ]
+    .into_iter()
+    .find(|p| p.exists());
+    let Some(note_path) = note_path else {
+        return false;
+    };
+    match std::fs::read_to_string(&note_path) {
+        Ok(content) => content
+            .lines()
+            .any(|l| l.trim().starts_with("type:") && l.contains(type_filter)),
+        Err(e) => {
+            log::warn!(
+                "reingest: excluding {} from --type {type_filter}, note unreadable: {e}",
+                note_path.display()
+            );
+            false
+        }
+    }
+}
+
 /// Reingest existing ledger entries via the daemon's ingest endpoint.
 ///
 /// Emits a streaming `ReingestEvent` per matched entry through the caller-
@@ -760,26 +791,7 @@ pub async fn reingest(
         let vault_root = config.vault_root()?;
         entries
             .into_iter()
-            .filter(|e| {
-                if e.filename == "-" {
-                    return false;
-                }
-                let note_path = [
-                    vault_root.join("notes").join(&e.filename),
-                    vault_root.join("inbox").join(&e.filename),
-                ]
-                .into_iter()
-                .find(|p| p.exists());
-                let Some(note_path) = note_path else {
-                    return false;
-                };
-                match std::fs::read_to_string(&note_path) {
-                    Ok(content) => content
-                        .lines()
-                        .any(|l| l.trim().starts_with("type:") && l.contains(type_filter)),
-                    Err(_) => false,
-                }
-            })
+            .filter(|e| note_has_type(&vault_root, e, type_filter))
             .collect()
     } else {
         entries

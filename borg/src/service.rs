@@ -59,7 +59,9 @@ pub async fn daemon(config: Config, opts: opts::DaemonOpts) -> Result<DaemonOutc
             }
         }
         DaemonOpts { reinstall: true, .. } => {
-            let _ = uninstall_service().await;
+            if let Err(e) = uninstall_service().await {
+                log::warn!("service: reinstall could not remove the existing service, installing over it: {e:#}");
+            }
             Ok(DaemonOutcome::Reinstalled {
                 unit_path: install_service(&config).await?,
             })
@@ -313,6 +315,16 @@ pub(crate) async fn install_launchd(exe_path: &str) -> Result<PathBuf> {
     Ok(plist_path)
 }
 
+/// Run a service-manager command whose failure must not stop an uninstall (the unit
+/// may already be stopped or unloaded), but must be visible when it happens.
+fn best_effort(program: &str, args: &[&str]) {
+    match std::process::Command::new(program).args(args).status() {
+        Ok(status) if status.success() => {}
+        Ok(status) => log::warn!("service: `{program} {}` exited with {status}", args.join(" ")),
+        Err(e) => log::warn!("service: could not run `{program} {}`: {e}", args.join(" ")),
+    }
+}
+
 pub(crate) async fn uninstall_systemd() -> Result<UninstallOutcome> {
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let unit_path = home.join(".config/systemd/user/borg.service");
@@ -324,15 +336,11 @@ pub(crate) async fn uninstall_systemd() -> Result<UninstallOutcome> {
         });
     }
 
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "disable", "--now", "borg"])
-        .status();
+    best_effort("systemctl", &["--user", "disable", "--now", "borg"]);
 
     std::fs::remove_file(&unit_path).context("Failed to remove unit file")?;
 
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status();
+    best_effort("systemctl", &["--user", "daemon-reload"]);
 
     Ok(UninstallOutcome {
         unit_path,
@@ -351,9 +359,7 @@ pub(crate) async fn uninstall_launchd() -> Result<UninstallOutcome> {
         });
     }
 
-    let _ = std::process::Command::new("launchctl")
-        .args(["unload", &plist_path.to_string_lossy()])
-        .status();
+    best_effort("launchctl", &["unload", &plist_path.to_string_lossy()]);
 
     std::fs::remove_file(&plist_path).context("Failed to remove plist file")?;
     Ok(UninstallOutcome {

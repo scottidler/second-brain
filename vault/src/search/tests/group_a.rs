@@ -348,6 +348,17 @@ fn test_note_quality() {
 }
 
 #[test]
+fn test_note_quality_query_failure_is_an_error_not_none() {
+    let index = SearchIndex::open_memory().expect("open");
+    index.conn.execute_batch("DROP TABLE notes").expect("drop");
+
+    assert!(
+        index.note_quality("a.md").is_err(),
+        "a failed query must propagate, not read as an unscored note"
+    );
+}
+
+#[test]
 fn test_classify_stats() {
     let index = SearchIndex::open_memory().expect("open");
     index

@@ -116,13 +116,18 @@ async fn claim_polling_session(bot: &Bot) {
     {
         Ok(updates) => {
             // If we got an update, confirm it so it's not re-delivered
-            if let Some(last) = updates.last() {
-                let _ = bot
+            if let Some(last) = updates.last()
+                && let Err(e) = bot
                     .get_updates()
                     .offset(last.id.as_offset())
                     .timeout(0)
                     .allowed_updates(vec![AllowedUpdate::Message])
-                    .await;
+                    .await
+            {
+                log::warn!(
+                    "telegram: failed to confirm update {} (it may be re-delivered): {e}",
+                    last.id.0
+                );
             }
             log::info!("telegram: claimed polling session");
         }
