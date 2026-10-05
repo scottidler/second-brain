@@ -1,10 +1,10 @@
-pub use vault::config::resolve_secret;
+pub use vault::config::{Normalize, load_config, resolve_secret};
+pub use vault::daemon::{HotkeyConfig, client_auth_token};
 
-use eyre::{Context, Result};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::{Path, PathBuf};
+use eyre::Result;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::path::PathBuf;
+use std::time::Duration;
 
 pub(crate) const APP_NAME: &str = "borg";
 
@@ -22,60 +22,6 @@ pub use ntfy::NtfyConfig;
 pub use signal::SignalConfig;
 pub use telegram::TelegramConfig;
 
-/// Post-deserialization normalization hook run by [`load_config`] on every
-/// loaded config, regardless of which path in the fallback chain produced it.
-/// Lets a config type derive fields from others so the two can never drift
-/// (borg mirrors `llm.api-key` into `fabric.api-key` here). The default impl is
-/// a no-op so a type that needs no normalization can `impl Normalize for T {}`.
-pub trait Normalize {
-    fn normalize(&mut self) {}
-}
-
-/// Load configuration with fallback chain:
-/// 1. Explicit path (if provided)
-/// 2. ~/.config/sb/borg.yml
-/// 3. ./borg.yml
-/// 4. Default
-///
-/// After loading, [`Normalize::normalize`] runs on every path so derived
-/// fields (e.g. `fabric.api-key` mirroring `llm.api-key`) can never be missed.
-pub fn load_config<T: DeserializeOwned + Default + Normalize>(config_path: Option<&PathBuf>) -> Result<T> {
-    let mut config = load_config_inner::<T>(config_path)?;
-    // Applied to EVERY load path (explicit --config, primary, fallback,
-    // defaults) so a derived field can never be left un-normalized.
-    config.normalize();
-    Ok(config)
-}
-
-fn load_config_inner<T: DeserializeOwned + Default>(config_path: Option<&PathBuf>) -> Result<T> {
-    if let Some(path) = config_path {
-        return load_from_file(path).context(format!("Failed to load config from {}", path.display()));
-    }
-
-    let primary_config = vault::paths::borg_config();
-    if primary_config.exists() {
-        match load_from_file(&primary_config) {
-            Ok(config) => return Ok(config),
-            Err(e) => {
-                log::warn!("Failed to load config from {}: {}", primary_config.display(), e);
-            }
-        }
-    }
-
-    let fallback_config = PathBuf::from(format!("{APP_NAME}.yml"));
-    if fallback_config.exists() {
-        match load_from_file(&fallback_config) {
-            Ok(config) => return Ok(config),
-            Err(e) => {
-                log::warn!("Failed to load config from {}: {}", fallback_config.display(), e);
-            }
-        }
-    }
-
-    log::info!("No config file found, using defaults");
-    Ok(T::default())
-}
-
 impl Normalize for Config {
     /// Fabric (the third-party Go binary) reads its credential from the env var
     /// named literally `ANTHROPIC_API_KEY`. `llm.api-key` is the single source
@@ -86,13 +32,6 @@ impl Normalize for Config {
     fn normalize(&mut self) {
         self.fabric.api_key = self.llm.api_key.clone();
     }
-}
-
-fn load_from_file<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> Result<T> {
-    let content = fs::read_to_string(&path).context("Failed to read config file")?;
-    let config: T = serde_yaml::from_str(&content).context("Failed to parse config file")?;
-    log::info!("Loaded config from: {}", path.as_ref().display());
-    Ok(config)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -221,7 +160,75 @@ pub struct Config {
     pub harvest: HarvestConfig,
     #[serde(default)]
     pub intake: IntakeConfig,
+    #[serde(default)]
+    pub queue: QueueConfig,
     pub log_level: Option<String>,
+}
+
+/// Default `queue.wedged-after`: in flight longer than this is reported
+/// wedged. Measured worst single item (receipt -> terminal, incl. permit
+/// wait), last 60 days: 537s; the watchdog reaps at 1860s.
+pub const DEFAULT_QUEUE_WEDGED_AFTER: Duration = Duration::from_secs(15 * 60);
+
+/// Default `queue.batch-gap`: receipts whose `[received, finished]` spans are
+/// this close join one batch.
+pub const DEFAULT_QUEUE_BATCH_GAP: Duration = Duration::from_secs(2 * 60);
+
+/// The `queue:` block of `borg.yml`: thresholds for the ingest-queue snapshot
+/// (`borg::queue`, `GET /queue`). Durations are humantime strings (`15m`,
+/// `2m`) typed at deserialize time, so a bad value fails the YAML load itself
+/// with the key named and nothing downstream re-parses a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct QueueConfig {
+    /// In flight longer than this (since permit grant, or since receipt if
+    /// never granted) is reported wedged.
+    #[serde(
+        deserialize_with = "deserialize_wedged_after",
+        serialize_with = "serialize_humantime"
+    )]
+    pub wedged_after: Duration,
+    /// Receipts whose `[received, finished]` spans are this close join one
+    /// batch.
+    #[serde(deserialize_with = "deserialize_batch_gap", serialize_with = "serialize_humantime")]
+    pub batch_gap: Duration,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            wedged_after: DEFAULT_QUEUE_WEDGED_AFTER,
+            batch_gap: DEFAULT_QUEUE_BATCH_GAP,
+        }
+    }
+}
+
+/// Deserialize a humantime string (`15m`, `90s`, `1h 30m`) straight into a
+/// `Duration`. An unparseable value is a deserialize error naming `key` and
+/// the bad value, so the YAML load itself fails. `key` is explicit because
+/// serde_yaml's error path stops at the enclosing map for a field-level
+/// `deserialize_with` error (observed: `queue: invalid duration ...`).
+pub fn deserialize_humantime<'de, D: Deserializer<'de>>(
+    deserializer: D,
+    key: &str,
+) -> std::result::Result<Duration, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    humantime::parse_duration(raw.trim())
+        .map_err(|e| serde::de::Error::custom(format!("{key}: invalid duration {raw:?} (humantime, e.g. 15m): {e}")))
+}
+
+fn deserialize_wedged_after<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Duration, D::Error> {
+    deserialize_humantime(deserializer, "wedged-after")
+}
+
+fn deserialize_batch_gap<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Duration, D::Error> {
+    deserialize_humantime(deserializer, "batch-gap")
+}
+
+/// Serialize a `Duration` back to the humantime form [`deserialize_humantime`]
+/// reads, so a round-tripped config keeps its shape.
+pub fn serialize_humantime<S: Serializer>(value: &Duration, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(&humantime::format_duration(*value).to_string())
 }
 
 /// Systemd-unit-install settings for the borg daemon. Currently just the
@@ -1055,28 +1062,6 @@ impl FrontmatterConfig {
     }
 }
 
-/// Resolve the write-route auth token for a FIRST-PARTY client (reingest /
-/// replay / hotkey ingest) to send as a `Bearer` header, mirroring how the
-/// server resolves `server.auth-token`. Returns `None` when no token is
-/// configured; logs a warning and returns `None` if a reference is set but
-/// unresolvable (the request then 401s, surfacing the misconfiguration loudly
-/// instead of silently). Without this, enabling `server.auth-token` 401s the
-/// CLI hot path.
-pub fn resolve_client_auth_token(server: &ServerConfig) -> Option<String> {
-    let reference = server.auth_token.as_ref()?;
-    match resolve_secret(reference) {
-        Ok(t) if !t.is_empty() => Some(t),
-        Ok(_) => {
-            log::warn!("server.auth-token {reference:?} resolved empty; client will send no token");
-            None
-        }
-        Err(e) => {
-            log::warn!("server.auth-token {reference:?} not resolvable for client auth: {e}");
-            None
-        }
-    }
-}
-
 /// Resolve this machine's hostname, or `None` when it cannot be read.
 /// The single hostname-reading site in borg: `is_local_host` host-gating and
 /// the `sb doctor` host-parity messages both go through here so no consumer
@@ -1166,24 +1151,6 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(alias = "api_key_env", alias = "api_key")]
     pub api_key: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, rename_all = "kebab-case")]
-pub struct HotkeyConfig {
-    pub host: String,
-    pub port: u16,
-    pub key: String,
-}
-
-impl Default for HotkeyConfig {
-    fn default() -> Self {
-        Self {
-            host: "localhost".to_string(),
-            port: 8181,
-            key: "<Ctrl><Shift>b".to_string(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

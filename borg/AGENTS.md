@@ -38,7 +38,7 @@ borg owns durable capture, multi-channel ingest, and the staged pipeline that pu
 
 **Sources (transports):** `telegram.rs`, `discord.rs`, `ntfy.rs`, `github.rs` (+`github/`), `youtube.rs`, `slides.rs`, `jina.rs`, `signal.rs` (+`signal/`).
 
-**Core pipeline:** `pipeline.rs` (+`pipeline/`), `stages.rs` (+`stages/`), `intake.rs` (+`intake/`), `receipts.rs` (+`receipts/`), `router.rs`, `routes.rs`, `dispatch.rs` (per-transport pipeline-run + notify boilerplate shared by telegram/ntfy/routes), `triage.rs`, `replay.rs` (+`replay/`), `backfill.rs` (+`backfill/`), `harvest.rs` (+`harvest/`, `sb borg harvest`: pull-based ingestion from clyde session exports).
+**Core pipeline:** `pipeline.rs` (+`pipeline/`), `stages.rs` (+`stages/`), `intake.rs` (+`intake/`), `receipts.rs` (+`receipts/`), `queue.rs` (+`queue/`: pure ingest-queue batch/partition `snapshot` + SQL `load`), `router.rs`, `routes.rs`, `dispatch.rs` (per-transport pipeline-run + notify boilerplate shared by telegram/ntfy/routes), `triage.rs`, `replay.rs` (+`replay/`), `backfill.rs` (+`backfill/`), `harvest.rs` (+`harvest/`, `sb borg harvest`: pull-based ingestion from clyde session exports).
 
 **Infrastructure:** `notify.rs` (+`notify/`), `watchdog.rs` (+`watchdog/`), `migrate.rs`, `config.rs`, `health.rs`, `startup.rs`, `retention.rs` (+`retention/`), `blocklist.rs` (+`blocklist/`), `rkvr.rs` (+`rkvr/`), `service.rs` (systemd unit install/uninstall + render, `install_systemd`/`render_systemd_unit`), `backoff.rs` (`ExponentialBackoff` for transport reconnect).
 

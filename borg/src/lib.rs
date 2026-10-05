@@ -41,6 +41,7 @@ pub mod ocr;
 pub mod opts;
 pub mod pipeline;
 pub mod quality;
+pub mod queue;
 pub mod readability;
 pub mod receipts;
 pub mod replay;
@@ -823,7 +824,7 @@ pub async fn reingest(
 
         let client = reqwest::Client::new();
         let mut req = client.post(&endpoint).json(&body);
-        if let Some(token) = config::resolve_client_auth_token(&config.server) {
+        if let Some(token) = config::client_auth_token(config.server.auth_token.as_deref()) {
             req = req.bearer_auth(token);
         }
         let status = match req.send().await {
@@ -899,7 +900,7 @@ pub async fn ingest(
     // Send the write-route Bearer token when one is configured, so enabling
     // server.auth-token doesn't 401 this first-party CLI path.
     let mut req = client.post(&endpoint).json(&body);
-    if let Some(token) = config::resolve_client_auth_token(&config.server) {
+    if let Some(token) = config::client_auth_token(config.server.auth_token.as_deref()) {
         req = req.bearer_auth(token);
     }
     // The Error toast here is unconditional and load-bearing: when the HTTP

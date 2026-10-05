@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 #[derive(Debug, Deserialize, Default, PartialEq)]
 struct TestConfig {
@@ -1020,4 +1021,34 @@ harvest:
     let path = config.harvest.clyde_binary.to_string_lossy();
     assert!(!path.starts_with('~'), "tilde must be expanded, got {path:?}");
     assert!(path.ends_with("repos/scottidler/clyde/target/release/clyde"));
+}
+
+#[test]
+fn queue_config_defaults_and_humantime_parse() {
+    let config = Config::default();
+    assert_eq!(config.queue.wedged_after, DEFAULT_QUEUE_WEDGED_AFTER);
+    assert_eq!(config.queue.batch_gap, DEFAULT_QUEUE_BATCH_GAP);
+    let config: Config = serde_yaml::from_str("queue:\n  wedged-after: 20m\n  batch-gap: 90s\n").expect("parse");
+    assert_eq!(config.queue.wedged_after, std::time::Duration::from_secs(20 * 60));
+    assert_eq!(config.queue.batch_gap, std::time::Duration::from_secs(90));
+    let yaml = serde_yaml::to_string(&config.queue).expect("serialize");
+    let back: QueueConfig = serde_yaml::from_str(&yaml).expect("round trip");
+    assert_eq!(back, config.queue);
+}
+
+#[test]
+fn queue_config_rejects_bad_duration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("borg.yml");
+    std::fs::write(&path, "queue:\n  wedged-after: soonish\n").expect("write");
+    let err = load_config::<Config>(Some(&path)).expect_err("bad duration must fail the load");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("wedged-after"), "error must name the key: {msg}");
+    assert!(msg.contains("soonish"), "error must show the bad value: {msg}");
+}
+
+#[test]
+fn queue_config_rejects_bad_batch_gap_naming_it() {
+    let err = serde_yaml::from_str::<Config>("queue:\n  batch-gap: 2 fortnights-ish\n").expect_err("bad gap");
+    assert!(err.to_string().contains("batch-gap"), "{err}");
 }

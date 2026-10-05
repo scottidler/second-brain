@@ -258,7 +258,7 @@ async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result
     });
     let client = reqwest::Client::new();
     let mut req = client.post(&endpoint).json(&body);
-    if let Some(token) = crate::config::resolve_client_auth_token(&config.server) {
+    if let Some(token) = crate::config::client_auth_token(config.server.auth_token.as_deref()) {
         req = req.bearer_auth(token);
     }
     let response = req
@@ -291,7 +291,7 @@ pub(crate) async fn poll_trace_terminal(
     let client = reqwest::Client::new();
     let ceiling = std::time::Duration::from_secs(config.pipeline.hard_timeout_secs + POLL_GRACE_SECS);
     let interval = std::time::Duration::from_secs(POLL_INTERVAL_SECS);
-    let auth = crate::config::resolve_client_auth_token(&config.server);
+    let auth = crate::config::client_auth_token(config.server.auth_token.as_deref());
     let start = std::time::Instant::now();
     loop {
         let mut req = client.get(&endpoint);

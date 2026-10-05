@@ -4,6 +4,7 @@
 
 pub mod canonical;
 pub mod config;
+pub mod daemon;
 pub mod detail;
 pub mod distilled;
 pub mod embedding;
@@ -16,6 +17,7 @@ pub mod ledger;
 pub mod logging;
 pub mod note;
 pub mod paths;
+pub mod queue;
 pub mod receipts;
 pub mod rss;
 pub mod schema;
