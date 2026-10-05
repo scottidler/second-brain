@@ -6,8 +6,10 @@ use std::sync::{Mutex, MutexGuard};
 static HOME_LOCK: Mutex<()> = Mutex::new(());
 
 /// Points `$HOME` at a fixture directory for the life of the guard, holding
-/// the crate-wide lock so no other test sees the change. `~/...` in a config
-/// then resolves under the fixture, never under the real home.
+/// the crate-wide lock. `~/...` in a config then resolves under the fixture,
+/// never under the real home. The lock only isolates tests that take it: a
+/// test that reads a `$HOME`-derived path without swapping it holds
+/// [`HomeGuard::hold`].
 pub(crate) struct HomeGuard {
     original: Option<std::ffi::OsString>,
     _lock: MutexGuard<'static, ()>,
@@ -20,6 +22,16 @@ impl HomeGuard {
         // SAFETY: serialized by HOME_LOCK; restored in Drop.
         unsafe { std::env::set_var("HOME", home) };
         Self { original, _lock: lock }
+    }
+
+    /// Hold the lock without changing `$HOME`, for a test that reads a
+    /// `$HOME`-derived path and must not see another test's swap.
+    pub(crate) fn hold() -> Self {
+        let lock = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        Self {
+            original: std::env::var_os("HOME"),
+            _lock: lock,
+        }
     }
 }
 

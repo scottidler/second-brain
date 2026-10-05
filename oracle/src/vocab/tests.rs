@@ -3,6 +3,7 @@ use crate::testutil::{HomeGuard, write_borg_yml, write_vocab};
 
 #[test]
 fn an_absent_borg_yml_resolves_to_the_default_path() {
+    let _home = HomeGuard::hold();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = vocabulary_path(&dir.path().join("borg.yml")).expect("absent is not an error");
     assert_eq!(path, vault::paths::canonical_tags());
@@ -10,6 +11,7 @@ fn an_absent_borg_yml_resolves_to_the_default_path() {
 
 #[test]
 fn a_borg_yml_without_the_key_resolves_to_the_default_path() {
+    let _home = HomeGuard::hold();
     let dir = tempfile::tempdir().expect("tempdir");
     let yml = write_borg_yml(dir.path(), "hotkey:\n  port: 9999\n");
     assert_eq!(vocabulary_path(&yml).expect("resolve"), vault::paths::canonical_tags());
