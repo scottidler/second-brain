@@ -1130,6 +1130,14 @@ fn related_key_extracts_target_before_pipe_case_insensitively() {
     assert_eq!(super::related_key("* [[bar|Alias]]"), "bar");
 }
 
+#[test]
+fn related_key_treats_heading_and_path_forms_as_the_same_link() {
+    assert_eq!(super::related_key("- [[Foo#Summary]]"), "foo");
+    assert_eq!(super::related_key("- [[notes/foo|Foo]]"), "foo");
+    assert_eq!(super::related_key("- [[foo#^block]]"), "foo");
+    assert_eq!(super::related_key("- plain text"), "plain text");
+}
+
 // -- Phase 5: apply orchestrator (CLI + daemon wiring) ----------------------
 
 /// `min_quiescence_secs: 0` never treats a just-written test fixture (mtime

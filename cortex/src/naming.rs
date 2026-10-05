@@ -1,4 +1,5 @@
 use regex::Regex;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
@@ -257,14 +258,18 @@ pub(crate) fn update_wikilinks_batch(
         return Ok(Relinked::default());
     }
 
-    // Build a map of old stem -> new stem (case-insensitive matching)
-    let rename_map: Vec<(String, String)> = renames
+    // One Resolver over the OLD paths: a link is rewritten only when it
+    // resolves to a renamed note by Obsidian's rules, so `[[otherdir/x]]`
+    // is left alone when `notes/x.md` is renamed.
+    let from_paths: Vec<String> = renames
         .iter()
-        .filter_map(|(from, to)| {
-            let old_stem = from.file_stem()?.to_str()?.to_string();
-            let new_stem = to.file_stem()?.to_str()?.to_string();
-            Some((old_stem, new_stem))
-        })
+        .map(|(from, _)| from.to_string_lossy().into_owned())
+        .collect();
+    let resolver = vault::wikilink::Resolver::new(from_paths.iter().cloned());
+    let new_stems: HashMap<&str, String> = from_paths
+        .iter()
+        .zip(renames)
+        .filter_map(|(from, (_, to))| Some((from.as_str(), to.file_stem()?.to_str()?.to_string())))
         .collect();
 
     let mut out = Relinked::default();
@@ -287,29 +292,7 @@ pub(crate) fn update_wikilinks_batch(
             }
         };
 
-        let mut new_content = content.clone();
-
-        for (old_stem, new_stem) in &rename_map {
-            // One pattern for every shape a link to this note can take, because
-            // matching only the bare stem is what left the entity hubs pointing
-            // at `[[notes/michael-labbé-…|…]]` after the ASCII-fold renames:
-            //
-            //   1: an optional folder prefix (`notes/`) - hub bodies use
-            //      path-form targets, so it must be preserved, not dropped,
-            //   2: an optional `#heading` / `^block-id` suffix,
-            //   3: an optional `|display text`.
-            //
-            // Wikilinks are case-insensitive in Obsidian, hence `(?i)`.
-            let pattern = format!(
-                r"(?i)\[\[((?:[^\[\]|#^]*/)?){}((?:[#^][^\[\]|]*)?)((?:\|[^\[\]]*)?)\]\]",
-                regex::escape(old_stem)
-            );
-            if let Ok(re) = Regex::new(&pattern) {
-                new_content = re
-                    .replace_all(&new_content, format!("[[${{1}}{new_stem}${{2}}${{3}}]]"))
-                    .to_string();
-            }
-        }
+        let new_content = relink(&content, &resolver, &new_stems);
 
         if new_content != content {
             vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
@@ -319,6 +302,47 @@ pub(crate) fn update_wikilinks_batch(
     }
 
     Ok(out)
+}
+
+/// Every wikilink in a note file: the frontmatter's (hub-style
+/// `related: "[[x]]"` values) and the body's. Frontmatter lines are parsed one
+/// at a time with their YAML indent stripped, so an indented YAML value is
+/// not mistaken for an indented code line.
+fn file_links(content: &str) -> Vec<vault::wikilink::WikiLink<'_>> {
+    match vault::frontmatter::split_raw(content) {
+        Some((yaml, body)) => yaml
+            .lines()
+            .flat_map(|line| vault::wikilink::parse(line.trim_start()))
+            .chain(vault::wikilink::parse(body))
+            .collect(),
+        None => vault::wikilink::parse(content).collect(),
+    }
+}
+
+/// Byte offset of `inner` within `outer`; `inner` must be a subslice of it.
+fn offset_in(outer: &str, inner: &str) -> usize {
+    inner.as_ptr() as usize - outer.as_ptr() as usize
+}
+
+/// Rewrite every link that resolves to a renamed note by replacing only the
+/// file stem inside its target, so the folder prefix, `.md`, `#heading`,
+/// `#^block`, `|alias`, and `!` embed all survive byte for byte. Links in
+/// code are not links and are left alone.
+fn relink(content: &str, resolver: &vault::wikilink::Resolver, new_stems: &HashMap<&str, String>) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut last = 0;
+    for link in file_links(content) {
+        let Some(new_stem) = resolver.resolve(link.target).find_map(|from| new_stems.get(from)) else {
+            continue;
+        };
+        let old_stem = vault::wikilink::file_stem(link.target);
+        let start = offset_in(content, old_stem);
+        out.push_str(&content[last..start]);
+        out.push_str(new_stem);
+        last = start + old_stem.len();
+    }
+    out.push_str(&content[last..]);
+    out
 }
 
 #[cfg(test)]

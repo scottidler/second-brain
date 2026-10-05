@@ -440,10 +440,18 @@ pub struct GraphArgs {
     /// bypassing the incremental per-note watermarks.
     #[arg(long)]
     pub backfill: bool,
+    /// Rebuild only the deterministic edge kinds (semantic, wikilink,
+    /// shared-*, *-member) in one transaction; `fact` and `bridge` edges are
+    /// kept, and a failure leaves every previous edge in place.
+    #[arg(long, conflicts_with = "backfill")]
+    pub rebuild: bool,
 }
 impl From<GraphArgs> for opts::GraphOpts {
     fn from(a: GraphArgs) -> Self {
-        Self { backfill: a.backfill }
+        Self {
+            backfill: a.backfill,
+            rebuild: a.rebuild,
+        }
     }
 }
 

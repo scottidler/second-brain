@@ -203,6 +203,45 @@ fn leaves_links_inside_code_alone() {
 }
 
 #[test]
+fn leaves_links_in_a_tilde_fence_and_an_indented_line_alone() {
+    // Code detection is `vault::wikilink`'s: a tilde fence and an indented
+    // line are code too, not only backtick fences.
+    let raw = concat!(
+        "---\ntitle: A\n---\n",
+        "prose [[every]] here\n",
+        "\n~~~\ntilde [[every]] sample\n~~~\n",
+        "\n    indented [[every]] sample\n",
+    );
+    let dir = vault_with(&[("notes/a.md", raw)]);
+
+    let stats = sweep(&dir, &stopwords(&["every"]), true);
+
+    let after = read(&dir, "notes/a.md");
+    assert_eq!(stats.occurrences, 1, "only the prose occurrence retracts");
+    assert!(after.contains("tilde [[every]] sample"), "tilde fence untouched");
+    assert!(
+        after.contains("    indented [[every]] sample"),
+        "indented code untouched"
+    );
+}
+
+#[test]
+fn retracts_a_table_escaped_piped_link_to_its_display_text() {
+    let dir = vault_with(&[(
+        "notes/a.md",
+        "---\ntitle: A\n---\n| col |\n|---|\n| [[every\\|Every]] |\n",
+    )]);
+
+    let stats = sweep(&dir, &stopwords(&["every"]), true);
+
+    assert_eq!(stats.occurrences, 1);
+    assert_eq!(
+        read(&dir, "notes/a.md"),
+        "---\ntitle: A\n---\n| col |\n|---|\n| Every |\n"
+    );
+}
+
+#[test]
 fn leaves_transclusions_alone() {
     // `![[every]]` embeds the note; unwrapping it changes what RENDERS, not
     // just how it links - and the auto-linker never writes an embed.
@@ -217,9 +256,10 @@ fn leaves_transclusions_alone() {
 
 #[test]
 fn leaves_heading_and_block_refs_alone() {
-    // `[[every#section]]` is a different target than `every`; the graph layer
-    // does not stoplist it either, so neither does the sweep.
-    let raw = "---\ntitle: A\n---\nsee [[every#section]] and [[every^abc]]\n";
+    // The linker only writes `[[target]]` / `[[target|surface]]`, so a
+    // heading or block ref is somebody's deliberate reference, not linker
+    // output. `[[every^abc]]` (no `#`) names a note `every^abc`, not `every`.
+    let raw = "---\ntitle: A\n---\nsee [[every#section]] and [[every#^abc]] and [[every^abc]]\n";
     let dir = vault_with(&[("notes/a.md", raw)]);
 
     let stats = sweep(&dir, &stopwords(&["every"]), true);

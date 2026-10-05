@@ -130,3 +130,21 @@ fn hub_args_asymmetry_combines_with_apply_and_synthesize_at_parse_time() {
     assert!(parsed.hub.synthesize);
     assert!(parsed.hub.asymmetry);
 }
+
+#[derive(Parser)]
+struct GraphHarness {
+    #[command(flatten)]
+    graph: GraphArgs,
+}
+
+#[test]
+fn graph_rebuild_parses_into_opts_and_conflicts_with_backfill() {
+    let parsed = GraphHarness::try_parse_from(["sb", "--rebuild"]).expect("--rebuild parses");
+    let opts: opts::GraphOpts = parsed.graph.into();
+    assert!(opts.rebuild && !opts.backfill);
+
+    let Err(err) = GraphHarness::try_parse_from(["sb", "--rebuild", "--backfill"]) else {
+        panic!("clap must reject --rebuild with --backfill");
+    };
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}

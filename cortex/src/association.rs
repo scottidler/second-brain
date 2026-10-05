@@ -1177,19 +1177,18 @@ pub fn execute_cross_link<W: NoteWriter>(vault_root: &Path, notes: &[PathBuf], w
     Ok(changed)
 }
 
-/// Dedup key for a `## Related` bullet: the wikilink TARGET (the text before
-/// any `|` alias, inside `[[...]]`), lowercased - so `[[Foo]]` and
-/// `[[foo|Foo Title]]` are treated as the same link and a second run never
-/// re-adds a link already present regardless of its exact piped form. Falls
-/// back to the trimmed bullet text when the bullet carries no `[[...]]`
-/// wikilink (defensive; every bullet this executor emits is always one).
+/// Dedup key for a `## Related` bullet: the lowercased file stem of the
+/// bullet's first wikilink, so `[[Foo]]`, `[[foo|Foo Title]]`, `[[foo#h]]`,
+/// and `[[notes/foo]]` are one link and a second run never re-adds a link
+/// already present in another written form. Falls back to the trimmed,
+/// lowercased bullet text when the bullet carries no wikilink (defensive;
+/// every bullet this executor emits is one).
 fn related_key(bullet_line: &str) -> String {
     let text = strip_bullet(bullet_line.trim_start()).trim();
-    let inner = text
-        .strip_prefix("[[")
-        .and_then(|s| s.strip_suffix("]]"))
-        .unwrap_or(text);
-    inner.split('|').next().unwrap_or(inner).trim().to_lowercase()
+    match vault::wikilink::parse(text).next() {
+        Some(link) => link.stem(),
+        None => text.to_lowercase(),
+    }
 }
 
 #[cfg(test)]

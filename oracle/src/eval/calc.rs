@@ -4,30 +4,29 @@
 
 use crate::eval::judge::MAX_SCORE;
 
-/// Render Obsidian wikilink markup to plain display text so the judge reads
-/// prose, not link syntax: `[[target|Display]]` -> `Display`, `[[target]]` ->
-/// `target`. Non-link text passes through untouched.
+/// Render Obsidian wikilink markup to the text a reader sees, so the judge
+/// reads prose, not link syntax: the alias when there is one, else the target
+/// (`[[a#h]]` -> `a > h`, as Obsidian shows it; `[[#h]]` -> `h`). Links inside
+/// code stay literal, as Obsidian renders them; other text passes through.
 pub fn flatten_wikilinks(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < s.len() {
-        if bytes[i] == b'['
-            && i + 1 < s.len()
-            && bytes[i + 1] == b'['
-            && let Some(close) = s[i + 2..].find("]]")
-        {
-            let inner = &s[i + 2..i + 2 + close];
-            let display = inner.split('|').next_back().unwrap_or(inner);
-            out.push_str(display);
-            i = i + 2 + close + 2;
-            continue;
+    let mut last = 0;
+    for link in vault::wikilink::parse(s) {
+        out.push_str(&s[last..link.span.start]);
+        let fragment = link.heading.or(link.block);
+        match (link.alias, fragment) {
+            (Some(alias), _) => out.push_str(alias),
+            (None, Some(fragment)) if link.target.is_empty() => out.push_str(fragment),
+            (None, Some(fragment)) => {
+                out.push_str(link.target);
+                out.push_str(" > ");
+                out.push_str(fragment);
+            }
+            (None, None) => out.push_str(link.target),
         }
-        // push one char (handle UTF-8 boundaries)
-        let ch = s[i..].chars().next().expect("char boundary");
-        out.push(ch);
-        i += ch.len_utf8();
+        last = link.span.end;
     }
+    out.push_str(&s[last..]);
     out
 }
 

@@ -16,18 +16,10 @@
 //! written keeps the sweep a true inverse rather than a vault-wide edit.
 
 use eyre::Result;
-use regex::Regex;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 use crate::stopwords::Stopwords;
 use crate::vault::Note;
-
-/// A wikilink with its raw target and optional display text. The target
-/// class excludes `#`/`^` so heading and block refs (`[[note#heading]]`)
-/// never match a bare stopword and never get rewritten.
-static LINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[\[([^\[\]|#^]+)(?:\|([^\[\]]+))?\]\]").expect("valid wikilink regex"));
 
 /// One note's retractions for one target.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,41 +145,39 @@ fn retract(body: &str, stopwords: &Stopwords) -> (String, Vec<(String, usize)>) 
     let mut hits: Vec<(String, usize)> = Vec::new();
     let mut last = 0;
 
-    for cap in LINK_RE.captures_iter(body) {
-        let whole = cap.get(0).expect("group 0 always matches");
-        let target = cap.get(1).expect("target group is not optional").as_str();
-
-        if !stopwords.contains(target) {
+    // `parse` never yields a link inside code: the linker refuses to write
+    // into code, so anything there is source material a reader is meant to
+    // see verbatim.
+    for link in ::vault::wikilink::parse(body) {
+        if !stopwords.contains(link.target) {
+            continue;
+        }
+        // The linker only writes `[[target]]` / `[[target|surface]]`, so a
+        // heading or block ref (`[[every#section]]`, `[[every#^b]]`) is a
+        // deliberate reference, not linker output to retract.
+        if link.heading.is_some() || link.block.is_some() {
+            log::trace!("unlink: leaving heading/block ref to [[{}]] alone", link.target);
             continue;
         }
         // `![[embed]]` transcludes a note; the auto-linker never writes one,
         // and unwrapping it would change what renders, not just how it links.
-        if body[..whole.start()].ends_with('!') {
-            log::trace!("unlink: leaving transclusion ![[{target}]] alone");
-            continue;
-        }
-        // The linker refuses to write into code, so anything here is source
-        // material a reader is meant to see verbatim.
-        if crate::linking::in_code_context(body, whole.start()) {
-            log::trace!("unlink: leaving [[{target}]] inside code alone");
+        if link.embed {
+            log::trace!("unlink: leaving transclusion ![[{}]] alone", link.target);
             continue;
         }
 
         // Piped links keep their display text; a bare link falls back to the
         // target as written, so `[[Every]]` retracts to `Every` (case intact).
-        let replacement = match cap.get(2) {
-            Some(display) => display.as_str(),
-            None => target.trim(),
-        };
+        let replacement = link.alias.unwrap_or(link.target);
 
-        out.push_str(&body[last..whole.start()]);
+        out.push_str(&body[last..link.span.start]);
         out.push_str(replacement);
-        last = whole.end();
+        last = link.span.end;
 
         // Group the way the stopword MATCHES - case-insensitively - or a note
         // carrying both `[[Every]]` and `[[every|Every]]` reports two rows for
         // what is one stoplisted target. The first spelling seen is the label.
-        let key = target.trim();
+        let key = link.target;
         match hits.iter_mut().find(|(t, _)| t.eq_ignore_ascii_case(key)) {
             Some((_, count)) => *count += 1,
             None => hits.push((key.to_string(), 1)),

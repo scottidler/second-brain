@@ -747,3 +747,139 @@ fn fuzzy_substring_wikilink_mints_no_edge() {
     assert_eq!(stats.wikilink, 0);
     assert!(index.hub_members("notes/notebook.md").expect("members").is_empty());
 }
+
+// --- `graph --rebuild`: deterministic kinds only, one transaction ----------
+
+/// Every edge row, every column, in primary-key order, read through a second
+/// connection: equal dumps mean a byte-identical edge table.
+fn edge_dump(db: &std::path::Path) -> Vec<(String, String, String, f64, String, String)> {
+    let conn = rusqlite::Connection::open(db).expect("open dump connection");
+    let mut stmt = conn
+        .prepare(
+            "SELECT src, dst, kind, weight, predicate, src_note FROM edges
+             ORDER BY src, dst, kind, predicate",
+        )
+        .expect("prepare dump");
+    stmt.query_map([], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+    })
+    .expect("dump")
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .expect("rows")
+}
+
+/// A temp-file index: `notes/a.md` links `[[b]]` and `[[dir/c]]`; two hubs
+/// carry a `fact` edge and `notes/b.md` a `bridge`; plus one stale wikilink
+/// edge (`b -> a`) that no body backs.
+fn seeded_rebuild_index(dir: &tempfile::TempDir) -> (SearchIndex, std::path::PathBuf) {
+    let db = dir.path().join("oracle.db");
+    let mut index = SearchIndex::open(&db).expect("open temp index");
+    for (path, body) in [
+        ("notes/a.md", "see [[b]] and [[dir/c]]"),
+        ("notes/b.md", "no links"),
+        ("dir/c.md", "no links"),
+        ("entities/x.md", "hub x"),
+        ("entities/y.md", "hub y"),
+    ] {
+        index
+            .insert_test_note_graph(path, &[], "", "", body, 100)
+            .expect("note");
+    }
+    index
+        .insert_edges(&[
+            Edge::fact("entities/x.md", "entities/y.md", "uses", 0.7, "notes/a.md"),
+            Edge::fact("entities/y.md", "entities/x.md", "used-by", 0.6, "notes/b.md"),
+            Edge::deterministic("notes/b.md", "entities/x.md", "bridge", 0.3),
+            Edge::deterministic("notes/b.md", "notes/a.md", KIND_WIKILINK, 1.0),
+        ])
+        .expect("seed edges");
+    (index, db)
+}
+
+fn wikilink_edges(db: &std::path::Path) -> Vec<(String, String)> {
+    edge_dump(db)
+        .into_iter()
+        .filter(|e| e.2 == KIND_WIKILINK)
+        .map(|e| (e.0, e.1))
+        .collect()
+}
+
+#[test]
+fn rebuild_keeps_fact_and_bridge_edges_and_rebuilds_wikilinks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut index, db) = seeded_rebuild_index(&dir);
+    let facts_before = index.fact_edges().expect("facts");
+    assert_eq!(facts_before.len(), 2);
+
+    let stats = rebuild(&mut index, &cfg()).expect("rebuild");
+
+    assert_eq!(index.fact_edges().expect("facts"), facts_before, "fact edges unchanged");
+    assert_eq!(index.count_edges(Some("fact")).expect("count"), 2);
+    assert_eq!(index.count_edges(Some("bridge")).expect("count"), 1);
+    assert_eq!(
+        wikilink_edges(&db),
+        vec![
+            ("notes/a.md".to_string(), "dir/c.md".to_string()),
+            ("notes/a.md".to_string(), "notes/b.md".to_string()),
+        ],
+        "the stale b -> a edge is gone and a's two links are rebuilt"
+    );
+    assert_eq!(stats.wikilink, 2);
+    assert_eq!(stats.notes_processed, 5);
+    assert!(
+        index.graph_state_get(KEY_LAST_RUN_AT).expect("state").is_some(),
+        "a rebuild leaves the next pass incremental"
+    );
+}
+
+#[test]
+fn a_full_build_still_clears_the_fact_layer_which_is_why_rebuild_exists() {
+    // Control: `--backfill` keeps its behavior (it regenerates facts itself).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut index, _db) = seeded_rebuild_index(&dir);
+
+    build(&mut index, &cfg(), true).expect("full build");
+
+    assert_eq!(index.count_edges(Some("fact")).expect("count"), 0);
+}
+
+#[test]
+fn rebuild_with_an_injected_insert_failure_leaves_the_edge_table_byte_identical() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut index, db) = seeded_rebuild_index(&dir);
+    // Fails the second wikilink insert, after the delete already ran inside
+    // the transaction.
+    rusqlite::Connection::open(&db)
+        .expect("open trigger connection")
+        .execute_batch(
+            "CREATE TRIGGER fail_insert BEFORE INSERT ON edges
+             WHEN NEW.kind = 'wikilink' AND NEW.dst = 'notes/b.md'
+             BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END;",
+        )
+        .expect("trigger");
+    let before = edge_dump(&db);
+    assert_eq!(before.len(), 4);
+
+    let err = rebuild(&mut index, &cfg()).expect_err("the injected failure propagates");
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("rolled back") && msg.contains("injected"), "{msg}");
+    assert_eq!(edge_dump(&db), before, "edge table byte-identical to before");
+    assert!(
+        index.graph_state_get(KEY_LAST_RUN_AT).expect("state").is_none(),
+        "a failed rebuild records no run"
+    );
+}
+
+#[test]
+fn rebuild_and_backfill_together_are_refused() {
+    let both = GraphOpts {
+        backfill: true,
+        rebuild: true,
+    };
+    let err = check_exclusive(&both).expect_err("exclusive");
+    assert!(err.to_string().contains("exclusive"), "{err}");
+    for (backfill, rebuild) in [(false, false), (true, false), (false, true)] {
+        check_exclusive(&GraphOpts { backfill, rebuild }).expect("one flag at most is fine");
+    }
+}

@@ -195,10 +195,65 @@ fn relink_preserves_heading_block_and_embed_syntax() {
         "[[new-name#Summary]]"
     );
     assert_eq!(
-        relink("[[old-name^abc123|quote]]", "old-name", "new-name"),
-        "[[new-name^abc123|quote]]"
+        relink("[[old-name#^abc123|quote]]", "old-name", "new-name"),
+        "[[new-name#^abc123|quote]]"
     );
     assert_eq!(relink("![[old-name]]", "old-name", "new-name"), "![[new-name]]");
+    assert_eq!(
+        relink("[[notes/Old-Name.md|x]]", "old-name", "new-name"),
+        "[[notes/new-name.md|x]]",
+        "case-insensitive match; the .md suffix and folder survive"
+    );
+}
+
+#[test]
+fn relink_leaves_a_caret_without_hash_alone_because_it_names_another_note() {
+    // Obsidian's block ref is `#^id`; `[[old-name^abc]]` targets a note named
+    // `old-name^abc`, which this rename does not touch.
+    assert_eq!(
+        relink("[[old-name^abc123|quote]]", "old-name", "new-name"),
+        "[[old-name^abc123|quote]]"
+    );
+}
+
+#[test]
+fn relink_leaves_a_path_link_to_another_directory_alone() {
+    // `notes/old-name.md` is renamed; `[[archive/old-name]]` is a different note.
+    assert_eq!(
+        relink("[[archive/old-name]] and [[notes/old-name]]", "old-name", "new-name"),
+        "[[archive/old-name]] and [[notes/new-name]]"
+    );
+}
+
+#[test]
+fn relink_leaves_links_inside_code_alone() {
+    assert_eq!(
+        relink(
+            "`[[old-name]]` and [[old-name]]\n\n```\n[[old-name]]\n```",
+            "old-name",
+            "new-name"
+        ),
+        "`[[old-name]]` and [[new-name]]\n\n```\n[[old-name]]\n```"
+    );
+}
+
+#[test]
+fn relink_rewrites_frontmatter_links_including_indented_yaml() {
+    let v = crate::testutil::TestVault::new();
+    v.add_note(
+        "hub.md",
+        "---\ntitle: Hub\nrelated: \"[[old-name]]\"\nmembers:\n    - \"[[notes/old-name|Old]]\"\n---\n\nbody [[old-name]]\n",
+    );
+    let notes = v.scan();
+    let renames = vec![(
+        std::path::PathBuf::from("notes/old-name.md"),
+        std::path::PathBuf::from("notes/new-name.md"),
+    )];
+    update_wikilinks_batch(v.root(), &notes, &renames).expect("relink");
+    assert_eq!(
+        v.read("hub.md"),
+        "---\ntitle: Hub\nrelated: \"[[new-name]]\"\nmembers:\n    - \"[[notes/new-name|Old]]\"\n---\n\nbody [[new-name]]\n"
+    );
 }
 
 #[test]

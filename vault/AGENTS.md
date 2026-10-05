@@ -17,7 +17,7 @@ The single source of truth for the Obsidian-vault note schema (NoteType / Origin
 - `vault::distilled::Distilled { summary, tldr, slug, enumeration, key_ideas, claims, tags, links, kind_specific, meta, transcript }`.
 - `vault::watcher::VaultWatcher::start(vault_root, config, applying_flag)` — debounced change stream.
 - `vault::process::run(cmd, stdin, timeout, label) -> Outcome { Exited | TimedOut }`: the one subprocess primitive. Owns all three pipes (stdin `/dev/null` when `None`, never inherited), drains on threads, spawns in its own process group and SIGKILLs the group at the deadline. `kill_registered()` / `install_interrupt_handler()` cover Ctrl-C for interactive sb commands.
-- `vault::wikilink::{parse, stem, WikiLink, Resolver}`: the one wikilink parser. `parse(body)` yields `WikiLink { target, heading, block, alias, embed, span }` for every link Obsidian renders, skipping code (backtick/tilde fences, inline backtick spans, 4-space/tab-indented lines). `Resolver::new(paths)` indexes every component-boundary path suffix once, so `resolve(target)` is a hash lookup: `dir/x` matches `dir/x.md` and `a/dir/x.md`, never `otherdir/x.md`; a bare target matches every note with that stem. Ungated (borg does not enable `search`).
+- `vault::wikilink::{parse, stem, file_stem, in_code, WikiLink, Resolver}`: the one wikilink parser. `parse(body)` yields `WikiLink { target, heading, block, alias, embed, span }` for every link Obsidian renders, skipping code (backtick/tilde fences, inline backtick spans, 4-space/tab-indented lines); `in_code(body, pos)` answers the same question for a byte offset (the linker's writer guard). Writers rewrite by `span`, never by a regex. `Resolver::new(paths)` indexes every component-boundary path suffix once, so `resolve(target)` is a hash lookup: `dir/x` matches `dir/x.md` and `a/dir/x.md`, never `otherdir/x.md`; a bare target matches every note with that stem. Ungated (borg does not enable `search`).
 - `vault::canonical::CanonicalSet { all, no_segment, max_per_note }`: the one loaded vocabulary snapshot, built by `CanonicalTagsFile::canonical_set()` and taken by `match_to_canonical` / `filter_and_cap`. Absorbed borg's private `CanonicalState` shape.
 
 ## Contracts & Invariants
@@ -42,7 +42,7 @@ The single source of truth for the Obsidian-vault note schema (NoteType / Origin
 - **Literal `~` directory bug:** `fs::create_dir_all("~/vault")` creates a literal `~` dir in CWD — always `expand_tilde` first.
 - **Fabricated fallback path:** `dirs::*_dir().unwrap_or_else(|| PathBuf::from("~/.local/share"))` creates a literal `~`. Use `.expect("… set HOME/XDG_*")` — panic is correct when both are unset.
 - **Spawning with `Command::output()` / `spawn()` + `try_wait` polling:** a child that writes more than the pipe buffer, or a grandchild holding the pipe, hangs the caller; an inherited stdin can hang a child that reads it. Go through `vault::process::run`.
-- **A private wikilink regex:** hand-rolled `[[...]]` patterns drifted into three variants (missing `#heading`, `dir/x`, code). Parse with `vault::wikilink::parse` and compare through `Resolver`.
+- **A private wikilink regex:** hand-rolled `[[...]]` patterns and `strip_prefix("[[")` string parsers drifted into three variants (missing `#heading`, `dir/x`, code). Parse with `vault::wikilink::parse` and compare through `Resolver`.
 - **Schema duplication / hardcoded model string** in consumer crates — import the enum; read `active_model` from `embedding_config`.
 
 ## Module Map

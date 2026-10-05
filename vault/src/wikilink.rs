@@ -35,13 +35,26 @@ impl WikiLink<'_> {
 
 /// Last path segment of `target`, `.md` stripped, lowercased: `Dir/A.md` -> `a`.
 pub fn stem(target: &str) -> String {
-    let last = target.rsplit('/').next().unwrap_or(target);
-    strip_md(last).to_lowercase()
+    file_stem(target).to_lowercase()
+}
+
+/// Last path segment of `target` with `.md` stripped, case kept: `Dir/A.md` -> `A`.
+pub fn file_stem(target: &str) -> &str {
+    strip_md(target.rsplit('/').next().unwrap_or(target))
 }
 
 /// Every wikilink in `body` outside code, in body order.
 pub fn parse(body: &str) -> impl Iterator<Item = WikiLink<'_>> {
     prose_lines(body).flat_map(move |(start, end)| links_in_line(body, start, end))
+}
+
+/// True when byte `pos` of `body` sits in code by the same rules `parse`
+/// skips: a fence line or fenced line, an indented line, or an inline span.
+pub fn in_code(body: &str, pos: usize) -> bool {
+    match prose_lines(body).find(|&(start, end)| start <= pos && pos <= end) {
+        Some((start, end)) => inline_code_spans(body, start, end).iter().any(|c| c.contains(&pos)),
+        None => true,
+    }
 }
 
 fn strip_md(s: &str) -> &str {
