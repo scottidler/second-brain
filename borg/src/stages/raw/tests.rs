@@ -373,7 +373,9 @@ fn gate_0_rejection_is_recoverable_by_replay() {
 
     with_xdg(tmp.path(), || {
         seed_corrupt_blocklist();
-        stage_0_init(&config, &content, IngestMethod::Telegram, trace).expect_err("an unloadable blocklist fails closed");
+        let err = stage_0_init(&config, &content, IngestMethod::Telegram, trace)
+            .expect_err("an unloadable blocklist fails closed");
+        assert!(format!("{err:#}").contains("gate-0"), "rejected by Gate-0: {err:#}");
     });
 
     let opts = crate::replay::ReplayOptions {
