@@ -246,5 +246,18 @@ intake:
   # `sb borg retention sweep [--sidecars-only] [--dry-run]`.
   retention-days: 21
 
+# Ingest queue - what `GET /queue`, `sb borg queue`, `sb borg wait` and the
+# oracle `ingest_queue` tool report. Durations are humantime strings (15m, 90s);
+# a bad value fails the config load naming the key.
+queue:
+  # In flight longer than this (since permit grant, or since receipt if never
+  # granted) is reported wedged. Measured worst single item (receipt ->
+  # terminal, incl. permit wait), last 60 days: 537s (cli youtube). The
+  # watchdog reaps at hard-timeout-secs + 60 = 1860s.
+  wedged-after: 15m
+  # Receipts whose [received, finished] spans are this close join one batch.
+  # Covers clicks that arrive after an earlier fast item already finished.
+  batch-gap: 2m
+
 # Log level: trace | debug | info | warn | error
 log-level: info

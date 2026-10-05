@@ -616,6 +616,7 @@ fn note_returning_tools_advertise_trace_block() {
         "reindex",
         "duplicate_groups",
         "classify_status",
+        "ingest_queue",
     ];
 
     let tools = OracleMcpServer::list_tools();
@@ -1094,4 +1095,31 @@ fn every_tags_parameter_has_a_tags_mode_sibling() {
             );
         }
     }
+}
+
+#[test]
+fn ingest_queue_is_registered_and_points_at_sb_borg_wait() {
+    let tools = OracleMcpServer::list_tools();
+    let tool = tools
+        .iter()
+        .find(|t| t.name.as_ref() == "ingest_queue")
+        .expect("ingest_queue advertised");
+    let desc = tool.description.as_deref().unwrap_or("");
+    assert!(
+        desc.contains(
+            "for blocking until a batch drains, run `sb borg wait` in the background instead of polling this"
+        ),
+        "{desc}"
+    );
+}
+
+#[tokio::test]
+async fn ingest_queue_rejects_unknown_arguments() {
+    let db = SearchIndex::open_memory().expect("open db");
+    let server = OracleMcpServer::new(Config::default(), db);
+    let err = server
+        .dispatch("ingest_queue", json!({"batch": "x"}))
+        .await
+        .expect_err("unknown field must fail loudly");
+    assert!(err.message.contains("unknown field"), "{}", err.message);
 }

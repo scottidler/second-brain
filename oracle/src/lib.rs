@@ -13,6 +13,7 @@
 
 pub mod config;
 pub mod eval;
+pub mod queue;
 pub mod server;
 pub mod tools;
 pub mod transform;

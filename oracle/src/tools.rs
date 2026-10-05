@@ -455,6 +455,11 @@ pub struct InboxStatusRequest {
     pub limit: Option<u32>,
 }
 
+/// Ingest-queue snapshot from the borg daemon. Takes no parameters.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IngestQueueRequest {}
+
 /// Cortex quality level for `quality_report`. A schema enum so a typo fails
 /// deserialization with the valid options rather than silently matching no
 /// rows in `notes_by_quality`.

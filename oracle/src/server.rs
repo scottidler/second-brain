@@ -132,6 +132,10 @@ impl OracleMcpServer {
                 let req: InboxStatusRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
                 self.inbox_status(Parameters(req)).await
             }
+            "ingest_queue" => {
+                let req: IngestQueueRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.ingest_queue(Parameters(req)).await
+            }
             "quality_report" => {
                 let req: QualityReportRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
                 self.quality_report(Parameters(req)).await
@@ -1017,6 +1021,20 @@ impl OracleMcpServer {
             "results": inbox_results,
             "review_candidates": review_results,
         }))?]))
+    }
+
+    /// Live ingest-queue snapshot from the borg daemon
+    #[tool(
+        description = "Is borg still ingesting? Returns the current ingest batch from the borg daemon's GET /queue: `{\"state\":\"idle\"}` when nothing is in flight, else state draining with batch id, elapsed, done/remaining counts, and the queued | processing | wedged | failed items. Answers the same from any host (it asks the daemon, not a local DB). Any failure to reach the daemon is an error naming its address, never an idle-looking result; for blocking until a batch drains, run `sb borg wait` in the background instead of polling this."
+    )]
+    async fn ingest_queue(&self, params: Parameters<IngestQueueRequest>) -> Result<CallToolResult, McpError> {
+        let IngestQueueRequest {} = params.0;
+        debug!("ingest_queue: entry");
+        let view = crate::queue::load_view(None).map_err(Self::err)?;
+        let snapshot = crate::queue::fetch(&view, crate::queue::REQUEST_TIMEOUT)
+            .await
+            .map_err(Self::err)?;
+        Ok(CallToolResult::success(vec![Content::json(snapshot)?]))
     }
 
     /// Notes by quality score and common issues
