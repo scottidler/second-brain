@@ -702,12 +702,8 @@ pub struct IntelConfig {
     pub daily_note: bool,
     #[serde(rename = "weekly-review")]
     pub weekly_review: bool,
-    #[serde(rename = "fabric-patterns")]
-    pub fabric_patterns: Vec<String>,
     #[serde(rename = "output-path")]
     pub output_path: String,
-    #[serde(rename = "on-new-note")]
-    pub on_new_note: Option<String>,
     #[serde(rename = "batch-weekly")]
     pub batch_weekly: Option<String>,
     #[serde(rename = "max-input-tokens")]
@@ -727,9 +723,7 @@ impl Default for IntelConfig {
         Self {
             daily_note: true,
             weekly_review: true,
-            fabric_patterns: vec!["extract_wisdom".to_string(), "summarize".to_string()],
             output_path: "notes/ai".to_string(),
-            on_new_note: Some("extract_wisdom".to_string()),
             batch_weekly: Some("weekly_digest".to_string()),
             max_input_tokens: 50000,
             fabric_timeout_secs: 120,

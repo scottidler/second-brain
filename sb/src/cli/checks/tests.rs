@@ -251,3 +251,49 @@ mod drift {
         assert_eq!(warns[0].suggested_fix.as_deref(), Some("sb bootstrap --force"));
     }
 }
+
+#[test]
+fn fabric_patterns_present_yields_two_ok() {
+    let findings = fabric_pattern_findings("summarize\nweekly_digest\nclean_text\n", Some("weekly_digest"));
+    assert_eq!(findings.len(), 2);
+    assert!(findings.iter().all(|f| f.severity == Severity::Ok), "{findings:?}");
+}
+
+#[test]
+fn fabric_patterns_missing_summarize_is_error() {
+    let findings = fabric_pattern_findings("weekly_digest\n", Some("weekly_digest"));
+    assert_eq!(findings[0].severity, Severity::Error);
+    assert!(findings[0].message.contains("summarize"));
+    assert_eq!(findings[1].severity, Severity::Ok);
+}
+
+#[test]
+fn fabric_patterns_missing_weekly_is_warn_naming_it() {
+    let findings = fabric_pattern_findings("summarize\n", Some("weekly_digest"));
+    assert_eq!(findings[0].severity, Severity::Ok);
+    assert_eq!(findings[1].severity, Severity::Warn);
+    assert!(findings[1].message.contains("weekly_digest"));
+}
+
+#[test]
+fn fabric_patterns_checks_the_configured_weekly_value() {
+    let list = "summarize\nweekly_digest\n";
+    let findings = fabric_pattern_findings(list, Some("my_weekly"));
+    assert_eq!(findings[1].severity, Severity::Warn);
+    assert!(findings[1].message.contains("my_weekly"));
+    let findings = fabric_pattern_findings("summarize\nmy_weekly\n", Some("my_weekly"));
+    assert!(findings.iter().all(|f| f.severity == Severity::Ok));
+}
+
+#[test]
+fn fabric_patterns_no_weekly_configured_checks_only_summarize() {
+    let findings = fabric_pattern_findings("summarize\n", None);
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].severity, Severity::Ok);
+}
+
+#[test]
+fn fabric_patterns_match_whole_lines_not_substrings() {
+    let findings = fabric_pattern_findings("summarize_paper\n", None);
+    assert_eq!(findings[0].severity, Severity::Error);
+}
