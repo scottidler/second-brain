@@ -111,10 +111,11 @@ fn apply_pragmas(conn: &Connection) -> std::result::Result<(), rusqlite::Error> 
     Ok(())
 }
 
-/// Pause between WAL-conversion attempts, and the attempt cap: together they
-/// match the 5 s `busy_timeout` the rest of the DB access waits under.
+/// Pause between WAL-conversion attempts, and the wall-clock budget for the
+/// whole conversion: the same 5 s `busy_timeout` the rest of the DB access
+/// waits under.
 const WAL_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
-const WAL_RETRY_ATTEMPTS: u32 = 500;
+const WAL_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// `PRAGMA journal_mode=WAL`, retried on `SQLITE_BUSY`.
 ///
@@ -123,10 +124,21 @@ const WAL_RETRY_ATTEMPTS: u32 = 500;
 /// at once (daemon + harvest + cortex on a first run, or two tests), both hold
 /// SHARED and want EXCLUSIVE; SQLite's deadlock avoidance returns
 /// "database is locked" IMMEDIATELY to one of them without calling the busy
-/// handler, so `busy_timeout` (rusqlite already sets 5 s at open) never
-/// waits. The winner's conversion persists in the file, so a retry finds WAL
-/// already set and returns at once. A DB that is already WAL never hits this.
+/// handler, so `busy_timeout` never waits. The winner's conversion persists in
+/// the file, so a retry finds WAL already set and returns at once. A DB that
+/// is already WAL never hits this.
 fn set_wal_mode(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
+    set_wal_mode_within(conn, WAL_RETRY_BUDGET)
+}
+
+/// The retry loop, bounded by `budget` of wall clock. `busy_timeout` is zeroed
+/// for the loop (`apply_pragmas` sets it back) because under a held lock each
+/// attempt would otherwise sleep the full busy timeout, and the attempts would
+/// multiply it.
+fn set_wal_mode_within(conn: &Connection, budget: std::time::Duration) -> std::result::Result<(), rusqlite::Error> {
+    log::debug!("receipts::set_wal_mode_within: budget={budget:?}");
+    conn.busy_timeout(std::time::Duration::ZERO)?;
+    let deadline = std::time::Instant::now() + budget;
     let mut attempt = 0;
     loop {
         match conn.pragma_update(None, "journal_mode", "WAL") {
@@ -137,7 +149,7 @@ fn set_wal_mode(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
                 return Ok(());
             }
             Err(rusqlite::Error::SqliteFailure(e, _))
-                if e.code == rusqlite::ErrorCode::DatabaseBusy && attempt < WAL_RETRY_ATTEMPTS =>
+                if e.code == rusqlite::ErrorCode::DatabaseBusy && std::time::Instant::now() < deadline =>
             {
                 attempt += 1;
                 std::thread::sleep(WAL_RETRY_PAUSE);
