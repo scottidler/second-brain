@@ -60,11 +60,17 @@ hf-hub = { version = "0.5.0", optional = true, default-features = false, feature
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 file-rotate = "0.8.0"
+libc = "0.2.186"
 
 [dev-dependencies]
 criterion = "0.8.2"
 serial_test = { workspace = true }
 tempfile = { workspace = true }
+
+# Re-executes itself as the signalled harness process, so it owns main().
+[[test]]
+name = "interrupt"
+harness = false
 
 [[bench]]
 name = "hybrid"

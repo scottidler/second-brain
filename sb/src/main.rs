@@ -21,6 +21,11 @@ async fn main() -> Result<()> {
     // flushes it. Bound here, in the only frame that outlives both the command
     // and its shutdown log line. `None` on every other path.
     let _log_guard = logger::init_for(&cli)?;
+    // `vault::process` children run in their own process groups, out of reach
+    // of the terminal's Ctrl-C; this handler kills them and exits 130.
+    if !cli.cmd.is_long_running_daemon() {
+        vault::process::install_interrupt_handler()?;
+    }
     // A command that already printed its own output returns `SilentFailure`
     // (exit 1) or `ExitWith(n)` (exit n, e.g. `sb borg wait`'s 3/4/5); map it
     // here (the one place exit codes are decided) instead of

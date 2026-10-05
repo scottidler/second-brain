@@ -16,6 +16,7 @@ pub mod ledger;
 pub mod logging;
 pub mod note;
 pub mod paths;
+pub mod process;
 pub mod queue;
 pub mod receipts;
 pub mod rss;

@@ -1,9 +1,11 @@
-use eyre::{Context, Result, bail};
+use crate::process::{self, Outcome};
+use eyre::Result;
 use std::process::Command;
 use std::time::Duration;
 
-/// Captured output of a finished subprocess: `(exit status, stdout, stderr)`.
-pub type ProcessOutput = (std::process::ExitStatus, Vec<u8>, Vec<u8>);
+/// Bound on the local probes (`which`, `fabric --version`): neither does
+/// network work, so a probe still running after this is wedged.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Typed Fabric failure so callers can branch on a timeout WITHOUT matching the
 /// error message string. `run_pattern` surfaces these through `eyre::Report`
@@ -49,8 +51,7 @@ pub fn resolve_pattern(name: &str) -> String {
     name.to_string()
 }
 
-/// Build the `fabric -p <pattern>` child `Command`, wiring stdio to pipes and
-/// -- crucially -- setting `ANTHROPIC_API_KEY` on the CHILD's environment ONLY.
+/// Build the `fabric -p <pattern>` child `Command`, setting `ANTHROPIC_API_KEY` on the CHILD's environment ONLY.
 ///
 /// `api_key_env` is the NAME of the configured credential var (e.g.
 /// `ESCOTE_ANTHROPIC_API_KEY`) or a file path, resolved via
@@ -98,9 +99,6 @@ fn build_fabric_command(binary: &str, pattern: &str, model: &str, api_key_env: &
             ),
         }
     }
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
     cmd
 }
 
@@ -145,18 +143,16 @@ pub fn run_pattern_with_max_tokens(
         "fabric::run_pattern: pattern={pattern} binary={binary} api_key_env={api_key_env} model={model} max_chars={max_chars} timeout_secs={timeout_secs} max_tokens={max_tokens} input_len={}",
         input.len()
     );
-    let mut cmd = build_fabric_command(binary, pattern, model, api_key_env, max_tokens);
-
-    let child = cmd.spawn().context("Failed to spawn fabric binary")?;
-
+    let cmd = build_fabric_command(binary, pattern, model, api_key_env, max_tokens);
     let input_bytes = truncate_input(input, max_chars).into_bytes();
-    match wait_with_timeout(child, input_bytes, Duration::from_secs(timeout_secs))? {
-        None => Err(FabricError::Timeout {
+    let label = format!("fabric -p {pattern}");
+    match process::run(cmd, Some(input_bytes), Duration::from_secs(timeout_secs), &label)? {
+        Outcome::TimedOut { .. } => Err(FabricError::Timeout {
             pattern: pattern.to_string(),
             timeout_secs,
         }
         .into()),
-        Some((status, stdout, stderr)) => {
+        Outcome::Exited { status, stdout, stderr } => {
             if !status.success() {
                 let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
                 return Err(FabricError::Failed {
@@ -170,107 +166,44 @@ pub fn run_pattern_with_max_tokens(
     }
 }
 
-/// Drive a spawned child to completion with a wall-clock timeout, writing
-/// `input` to its stdin and fully draining stdout+stderr - each on its own
-/// thread.
-///
-/// This is the deadlock-safe subprocess primitive. A child that writes more
-/// than the OS pipe buffer (~64KB) to stdout BLOCKS until the parent reads;
-/// the previous `run_pattern` wrote all of stdin up front, then polled
-/// `try_wait` without reading stdout, so any pattern emitting more than a
-/// pipe-buffer of output deadlocked until the timeout killed it - misreported
-/// as a fabric timeout. Writing stdin from a thread also removes the
-/// unbounded blocking write on large inputs.
-///
-/// Returns `Ok(None)` when the timeout fired (the child has been killed and
-/// reaped); `Ok(Some((status, stdout, stderr)))` otherwise.
-pub fn wait_with_timeout(
-    mut child: std::process::Child,
-    input: Vec<u8>,
-    timeout: Duration,
-) -> Result<Option<ProcessOutput>> {
-    use std::io::{Read, Write};
-
-    // Feed stdin from a dedicated thread; dropping the handle closes the pipe
-    // (EOF for the child). A broken pipe (child died early) is non-fatal here.
-    let stdin_handle = child.stdin.take().map(|mut stdin| {
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(&input);
-        })
-    });
-
-    // Drain stdout and stderr concurrently so neither can fill its pipe and
-    // wedge the child.
-    let stdout_handle = child.stdout.take().map(|mut out| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = out.read_to_end(&mut buf);
-            buf
-        })
-    });
-    let stderr_handle = child.stderr.take().map(|mut err| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = err.read_to_end(&mut buf);
-            buf
-        })
-    });
-
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Ok(None);
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => bail!("Failed to wait for subprocess: {e}"),
-        }
-    };
-
-    let stdout = stdout_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-    let stderr = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-    if let Some(h) = stdin_handle {
-        let _ = h.join();
-    }
-
-    Ok(Some((status, stdout, stderr)))
-}
-
 /// Resolve the fabric binary path - if not absolute, try `which` to find it.
+/// Falls back to the bare name (the spawn then searches PATH itself).
 pub fn resolve_binary(binary: &str) -> String {
     if binary.starts_with('/') || binary.starts_with("./") {
         return binary.to_string();
     }
-    if let Ok(output) = Command::new("which")
-        .arg(binary)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        && output.status.success()
-    {
-        let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !resolved.is_empty() {
-            log::debug!("Resolved fabric binary: {binary} -> {resolved}");
-            return resolved;
+    let mut which = Command::new("which");
+    which.arg(binary);
+    match process::run(which, None, PROBE_TIMEOUT, &format!("which {binary}")) {
+        Ok(Outcome::Exited { status, stdout, .. }) if status.success() => {
+            let resolved = String::from_utf8_lossy(&stdout).trim().to_string();
+            if !resolved.is_empty() {
+                log::debug!("Resolved fabric binary: {binary} -> {resolved}");
+                return resolved;
+            }
         }
+        Ok(Outcome::Exited { .. }) => log::debug!("resolve_binary: {binary} not on PATH"),
+        Ok(Outcome::TimedOut { .. }) => {}
+        Err(e) => log::warn!("resolve_binary: {e:#}"),
     }
     binary.to_string()
 }
 
-/// Check if fabric is available on the system.
+/// Check if fabric is available on the system: `<binary> --version` exits 0
+/// within [`PROBE_TIMEOUT`]. Its stdin is /dev/null, so a fabric that reads
+/// stdin cannot hang on a parent stdin that never closes.
 pub fn is_available(binary: &str) -> bool {
     let resolved = resolve_binary(binary);
-    Command::new(&resolved)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    let mut cmd = Command::new(&resolved);
+    cmd.arg("--version");
+    match process::run(cmd, None, PROBE_TIMEOUT, &format!("{resolved} --version")) {
+        Ok(Outcome::Exited { status, .. }) => status.success(),
+        Ok(Outcome::TimedOut { .. }) => false,
+        Err(e) => {
+            log::debug!("is_available: {e:#}");
+            false
+        }
+    }
 }
 
 /// Extract JSON from text that may be wrapped in markdown code blocks.

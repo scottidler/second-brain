@@ -8468,6 +8468,7 @@ dependencies = [
  "file-rotate",
  "fs2",
  "hf-hub",
+ "libc",
  "log",
  "notify",
  "rayon",
