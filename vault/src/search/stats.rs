@@ -1,5 +1,6 @@
 use super::query::push_tags_filter;
 use super::*;
+use rusqlite::OptionalExtension;
 
 impl super::SearchIndex {
     /// Walk every note's body, count wikilink targets, materialize the
@@ -555,13 +556,13 @@ impl super::SearchIndex {
     /// `[stub-body]` marker) is not a column here. Oracle's exclude filter uses
     /// `quality = low` as its stub proxy.
     pub fn note_quality(&self, path: &str) -> Result<Option<String>> {
-        let q: Option<String> = self
+        let q: Option<Option<String>> = self
             .conn
             .query_row("SELECT quality FROM notes WHERE path = ?1", params![path], |row| {
                 row.get(0)
             })
-            .ok();
-        Ok(q)
+            .optional()?;
+        Ok(q.flatten())
     }
 
     /// Get duplicate note groups

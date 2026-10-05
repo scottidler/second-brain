@@ -241,9 +241,12 @@ impl EventHandler for Handler {
                             None,
                         )
                         .await;
-                        let _ = channel_id
+                        if let Err(e) = channel_id
                             .say(&http, format_discord_reply(&result, &display_source))
-                            .await;
+                            .await
+                        {
+                            log::warn!("Discord: reply to channel {channel_id} failed (trace {trace_id}): {e}");
+                        }
                         if let Some(d) = &desktop {
                             d.result(&result, &display_source, prior).await;
                         }
@@ -318,9 +321,12 @@ impl EventHandler for Handler {
                 None,
             )
             .await;
-            let _ = channel_id
+            if let Err(e) = channel_id
                 .say(&http, format_discord_reply(&result, &display_source))
-                .await;
+                .await
+            {
+                log::warn!("Discord: reply to channel {channel_id} failed (trace {trace_id}): {e}");
+            }
             if let Some(d) = &desktop {
                 d.result(&result, &display_source, prior).await;
             }

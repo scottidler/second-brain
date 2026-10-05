@@ -28,7 +28,13 @@ fn migrate_one_note(path: &Path, vault_root: &Path, apply: bool, config: &Config
 
     let mut fm: HashMap<String, serde_yaml::Value> = match serde_yaml::from_str(&frontmatter) {
         Ok(map) => map,
-        Err(_) => return Ok(None),
+        Err(e) => {
+            log::warn!(
+                "migrate: skipping {} (frontmatter is not valid YAML: {e})",
+                path.display()
+            );
+            return Ok(None);
+        }
     };
 
     let mut changed = false;

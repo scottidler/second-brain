@@ -311,3 +311,59 @@ fn retention_window_clamps() {
     assert_eq!(retention_window(60), chrono::Duration::days(60));
     assert_eq!(retention_window(99999), chrono::Duration::days(3650));
 }
+
+#[test]
+fn an_unreadable_body_warns_with_the_trace_id_and_reads_as_empty() {
+    crate::logcapture::install();
+    let tmp = TempDir::new().unwrap();
+    let store = FsArtifactStore::new(tmp.path(), StagingLayout::PerTrace);
+    let env = Envelope {
+        trace: "tg-bodywarn".to_string(),
+        ..make_envelope()
+    };
+    store.write_envelope(&env.trace, &env).unwrap();
+    // A directory where the body file belongs: it exists, but reading it fails.
+    std::fs::create_dir_all(store.body_path("tg-bodywarn")).unwrap();
+
+    let raw = store.read_raw("tg-bodywarn").unwrap();
+
+    assert!(raw.body.is_empty());
+    assert_eq!(crate::logcapture::warns_containing("tg-bodywarn").len(), 1);
+}
+
+#[test]
+fn an_absent_body_is_normal_and_does_not_warn() {
+    crate::logcapture::install();
+    let tmp = TempDir::new().unwrap();
+    let store = FsArtifactStore::new(tmp.path(), StagingLayout::PerTrace);
+    let env = Envelope {
+        trace: "tg-nobodyfile".to_string(),
+        ..make_envelope()
+    };
+    store.write_envelope(&env.trace, &env).unwrap();
+
+    let raw = store.read_raw("tg-nobodyfile").unwrap();
+
+    assert!(raw.body.is_empty());
+    assert!(crate::logcapture::warns_containing("tg-nobodyfile").is_empty());
+}
+
+#[test]
+fn a_trace_with_an_unreadable_envelope_is_excluded_with_a_warn_naming_it() {
+    crate::logcapture::install();
+    let tmp = TempDir::new().unwrap();
+    let store = FsArtifactStore::new(tmp.path(), StagingLayout::PerTrace);
+    let env = Envelope {
+        trace: "tg-goodlisted".to_string(),
+        ..make_envelope()
+    };
+    store.write_envelope(&env.trace, &env).unwrap();
+    let broken = store.trace_dir("tg-brokenenv");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(store.envelope_path("tg-brokenenv"), "kind: [not an envelope").unwrap();
+
+    let listed = store.list_traces(&TraceFilter::default()).unwrap();
+
+    assert_eq!(listed, vec!["tg-goodlisted".to_string()]);
+    assert_eq!(crate::logcapture::warns_containing("tg-brokenenv").len(), 1);
+}
