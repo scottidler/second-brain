@@ -141,7 +141,7 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
     let telegram = state.telegram.clone();
     let desktop = state.desktop.clone();
     let force = request.force;
-    // Phase 8: the HTTP transport's capture note is the `IngestRequest.note`
+    // The HTTP transport's capture note is the `IngestRequest.note`
     // field (optional). Trimmed empty -> None so a bare-URL POST renders no
     // `## Why Captured`.
     let note = request

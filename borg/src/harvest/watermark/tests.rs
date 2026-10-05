@@ -36,7 +36,7 @@ fn save_then_load_round_trips() {
 
 #[test]
 fn save_uses_atomic_write_with_no_leftover_temp_files() {
-    // Phase 2: `save` now goes through `vault::note::write_atomic` (fsync temp
+    // `save` now goes through `vault::note::write_atomic` (fsync temp
     // + parent, then rename into place) instead of the prior unfsynced
     // `fs::write` + `fs::rename`. Same observable proof `vault::note::tests`
     // uses for `write_atomic` itself: no temp file of EITHER naming scheme
@@ -264,8 +264,8 @@ fn classify_skip_advances_snapshot_when_hash_unchanged_but_msgs_grew() {
     }
 }
 
-// ---- harvest-completion Phase 6: gap-fill. `BodyMessage.role`/`text` are the
-// one defensive Option Phase 0/1 never exercised through the identity-hash
+// ---- harvest-completion: gap-fill. `BodyMessage.role`/`text` are the
+// one defensive Option never exercised through the identity-hash
 // path - a body element with a null role/text (a future-malformed element on
 // the `--with-body` path) must degrade to an empty string in the canonical
 // body render, never panic the hash.

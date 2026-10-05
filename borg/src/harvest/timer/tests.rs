@@ -56,7 +56,7 @@ fn timer_bakes_only_oncalendar_from_config() {
     }
 }
 
-/// Phase 5 (2026-07-20 harvest-completion): with no `harvest.env_bootstrap`
+/// With no `harvest.env_bootstrap`
 /// configured, `sb-harvest.service` must omit BOTH the `ExecStartPre` decrypt
 /// AND the `EnvironmentFile` directive - a host with nothing to bootstrap
 /// still gets a valid, complete unit, never a fabricated one.
@@ -75,7 +75,7 @@ fn service_omits_env_bootstrap_when_unconfigured() {
     );
 }
 
-/// The critical Phase 5 fix: a configured `harvest.env_bootstrap` MUST reach
+/// A configured `harvest.env_bootstrap` MUST reach
 /// the generated `sb-harvest.service` as the same `ExecStartPre` decrypt +
 /// `EnvironmentFile` pair the borg/cortex daemon units already emit. Without
 /// this, the nightly timer fires with no decrypted secrets -> no
@@ -130,7 +130,7 @@ fn service_env_bootstrap_uses_distinct_env_file_from_daemon() {
     );
 }
 
-/// PATH hygiene (Phase 5): fabric is mise-managed, so its shim dir must be on
+/// PATH hygiene: fabric is mise-managed, so its shim dir must be on
 /// PATH and FIRST (mise-managed tools win over stale duplicates); the retired
 /// `~/go/bin` hand-built-fabric entry must be gone.
 #[test]
@@ -210,7 +210,7 @@ fn no_config_path_omits_config_flag() {
     assert!(!service.contains("--config"), "{service}");
 }
 
-// Byte-exact goldens (2026-10-05 quality-review-fixes). `render_units` is
+// Byte-exact goldens (quality-review-fixes). `render_units` is
 // pure, so the inputs are just the args. The config-present case passes the
 // literal path `<XDG_CONFIG_HOME>/sb/borg.yml`, the placeholder the golden
 // carries, so no real path is consulted or substituted.

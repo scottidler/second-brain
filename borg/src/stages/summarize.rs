@@ -8,7 +8,7 @@
 //! the ingestion before it lands in the vault.
 //!
 //! The `Summarizer` trait that previously lived here was retired by the
-//! post-Phase-6 cutover - `pipeline.rs` now calls the structured
+//! structured-distillation cutover - `pipeline.rs` now calls the structured
 //! `distill_for_publish_*` functions directly and there is no longer a
 //! pluggable summariser abstraction.
 

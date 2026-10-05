@@ -164,7 +164,7 @@ pub fn evaluate(
     let mut fallback_fixtures = 0usize;
     let mut calib_pairs: Vec<(u8, u8)> = Vec::new();
     let mut sheet: Vec<CalibrationRow> = Vec::new();
-    // Deterministic metrics (zero judge calls, Phase 7b): computed once per
+    // Deterministic metrics: computed once per
     // fixture alongside the judge axes, never gated by cache/judge failure.
     let mut listicle: Vec<report::ListicleMetric> = Vec::new();
     let mut note_size: Vec<report::NoteSizeMetric> = Vec::new();

@@ -37,7 +37,7 @@ pub struct PublishedEntry {
     pub n_msgs: i64,
     pub body_hash: String,
     /// The trace that produced this snapshot (design doc
-    /// `2026-08-15-harvest-note-identity-trace-keyed-replace.md`, Phase 2/4):
+    /// `2026-08-15-harvest-note-identity-trace-keyed-replace.md`):
     /// lets a follow-up resolve its prior note through
     /// `identity::resolve_prior_note` instead of trusting a stale
     /// `note_path`. `serde(default)` so on-disk state written before this
@@ -92,7 +92,7 @@ impl WatermarkState {
     /// parent directory fsynced). The prior `fs::write` + `fs::rename` pair
     /// fsynced neither the temp file nor the parent dir, so the note could
     /// survive a power loss while the record that it exists did not
-    /// (durability inverted) - Phase 2 of the trace-keyed-replace design.
+    /// (durability inverted) - found in the trace-keyed-replace design.
     pub fn save(&self, path: &Path) -> Result<()> {
         log::debug!(
             "harvest::WatermarkState::save: path={} cursor={:?} published={}",
@@ -171,7 +171,7 @@ fn lock_path_for(state_path: &Path) -> PathBuf {
 }
 
 /// Canonical role-labeled rendering of one session's body. This is the SINGLE
-/// SOURCE OF TRUTH for what the input body hash covers and what Phase 4/5 feed
+/// SOURCE OF TRUTH for what the input body hash covers and what `publish` feeds
 /// the distiller, so the hash a re-appearance compares against is exactly the
 /// bytes the note was built from. A sub-agent turn is marked so a resume that
 /// only re-runs a sub-agent still changes the hash.
@@ -219,15 +219,15 @@ pub fn body_hash(text: &str) -> String {
 /// The re-appearance decision for one thread, keyed by its primary session id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reappearance {
-    /// Never-published id: an ordinary new note (Phase 5 publishes + records
+    /// Never-published id: an ordinary new note (`publish` publishes + records
     /// the first snapshot).
     NewNote,
     /// Published id that gained real content (hash changed) or `--force`: a
-    /// follow-up note linking `prior`. Phase 5 publishes + records a new
+    /// follow-up note linking `prior`. `publish` publishes + records a new
     /// snapshot.
     FollowUp { prior: PublishedEntry },
     /// Published id with no material change. `snapshot_update` is `Some` when
-    /// `n-msgs` grew but the body hash was unchanged: Phase 3 advances the
+    /// `n-msgs` grew but the body hash was unchanged: planning advances the
     /// stored `n-msgs` in place (note_path unchanged) so the deep check never
     /// re-runs. `None` when the cheap filter already matched (nothing to do).
     Skip { snapshot_update: Option<PublishedEntry> },

@@ -1,6 +1,6 @@
 //! Drop-safe in-memory dedup guard for concurrent ingestion attempts.
 //!
-//! Phase 2 of the borg-pipeline-resilience design doc. Replaces the explicit
+//! From the borg-pipeline-resilience design doc. Replaces the explicit
 //! `INFLIGHT.lock().await.remove(...)` cleanup at every termination site with
 //! an RAII handle whose `Drop` impl releases the entry automatically. This
 //! closes the leak observed during the 2026-05-08 incident: when the inner

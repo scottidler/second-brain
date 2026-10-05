@@ -110,8 +110,8 @@ pub struct BodyMessage {
 ///   omitted/unknowable (key absent, transcript reaped), `Some(vec![])` =
 ///   parsed but no repo path resolved, `Some(xs)` = the touched set. A
 ///   default-empty `Vec` would collapse the first two and fabricate a
-///   definitive "touched nothing" from missing data - WRONG. Phase 3 only
-///   carries this faithfully; the bridge consumer is Phases 9-13.
+///   definitive "touched nothing" from missing data - WRONG. The contract only
+///   carries this faithfully; the bridge consumer is downstream.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SessionRecord {
@@ -170,8 +170,8 @@ pub struct SessionRecord {
     /// THREE-STATE (see type docs). Omitted -> `None`.
     #[serde(default)]
     pub repos_touched: Option<Vec<String>>,
-    /// Tolerated additive field (clyde's files-touched branch); Phase 3 does
-    /// not consume it, but modeling it keeps the record honest.
+    /// Tolerated additive field (clyde's files-touched branch); nothing here
+    /// consumes it, but modeling it keeps the record honest.
     #[serde(default)]
     pub files_touched: Option<Vec<String>>,
     /// Present only with `--with-body`.

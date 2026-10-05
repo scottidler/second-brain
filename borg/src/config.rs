@@ -265,8 +265,8 @@ pub struct DaemonConfig {
 /// partial one land the unspecified flags TRUE. `test_distill_config_*` pins
 /// this.
 ///
-/// `article-transcript` was removed in the 2026-07-07
-/// distillation-output-restore design (Phase 3): once `## Transcript` is no
+/// `article-transcript` was removed in the
+/// distillation-output-restore design: once `## Transcript` is no
 /// longer rendered for ANY video/article note (the section is gone from
 /// `render.rs` for those kinds regardless of any toggle), there was nothing
 /// left for the flag to configure. `deny_unknown_fields` below turns a stale
@@ -276,18 +276,18 @@ pub struct DaemonConfig {
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct DistillConfig {
     /// Append the distilled sections below the slide body on slide-published
-    /// videos (Phase 7). When false, the slide body stands alone.
+    /// videos. When false, the slide body stands alone.
     pub slide_append: bool,
     /// Thread the operator capture note into `## Why Captured`, the
-    /// `capture-note:` frontmatter key, and the distiller context (Phase 8).
+    /// `capture-note:` frontmatter key, and the distiller context.
     /// When false, none of the three are produced.
     pub capture_note: bool,
-    /// Merge distiller-proposed candidate tags into the tag pipeline (Phase 2).
+    /// Merge distiller-proposed candidate tags into the tag pipeline.
     /// When false, only the proposed-tag merge is skipped; the canonical filter
     /// and every other tag source are unaffected.
     pub propose_tags: bool,
     /// Bounded per-chunk retries on the harvest session map-reduce path
-    /// (harvest distill-parsing robustness, 2026-07-24). A sub-chunk whose
+    /// (harvest distill-parsing robustness). A sub-chunk whose
     /// fabric call errors OR whose YAML fails to parse is retried up to this
     /// many times before it counts toward `partial-chunk-failure`; the retry
     /// re-issues only after the prior attempt has fully returned (never
@@ -344,8 +344,8 @@ const DEFAULT_MARKITDOWN_TIMEOUT_SECS: u64 = 60;
 
 /// Hard ceiling on the FINAL composed note body, checked at
 /// `pipeline.rs`'s atomic-write chokepoint just before publish
-/// (2026-07-07 distillation-output-restore, Phase 3). With `## Transcript`
-/// gone from video/article/repo notes (Phase 2), an oversize note is a bug -
+/// (distillation-output-restore). With `## Transcript`
+/// gone from video/article/repo notes, an oversize note is a bug -
 /// a verbatim leak the render/gate seams above this should have already
 /// caught - so this is a hard fail (`FailureStage::QualityBlocked`), not a
 /// WARN+degraded publish: a degraded-but-published fat note would still land
@@ -357,13 +357,13 @@ const DEFAULT_MARKITDOWN_TIMEOUT_SECS: u64 = 60;
 /// bytes (`mcp-vs-api-why-traditional-apis-are-failing-ai-agents.md`) - every
 /// other candidate lands under 10 KB once its transcript section is removed.
 /// The design's floor of 65_536 already sits ~7x above that measured max,
-/// comfortably absorbing the not-yet-landed Phase 4 sections (tldr,
+/// comfortably absorbing the not-yet-landed sections (tldr,
 /// `## Enumerated Points`, `## Key Ideas`) and denser map-reduce claim output
 /// on long chunked videos, so the floor IS the chosen ceiling - no further
 /// headroom needed above it. A false positive is recoverable: visible in
 /// receipts, bump `pipeline.max-note-bytes`, `sb borg replay <trace>`.
 ///
-/// `pub(crate)` (not private) so `eval::calc`'s Phase 7 note-size metric
+/// `pub(crate)` (not private) so `eval::calc`'s note-size metric
 /// reuses this exact ceiling rather than redefining it.
 pub(crate) const MAX_NOTE_BYTES: usize = 65_536;
 
@@ -706,7 +706,7 @@ fn default_min_confidence() -> f32 {
 /// `min-confidence`) are embedded in the published note. When `enabled` is
 /// false the old structural shape heuristic runs unchanged.
 ///
-/// See docs/design/2026-06-28-content-aware-slide-filtering.md, Phase 1.
+/// See docs/design/2026-06-28-content-aware-slide-filtering.md.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct ContentFilterConfig {
@@ -846,8 +846,8 @@ impl Default for IntakeConfig {
 #[serde(default, rename_all = "kebab-case")]
 pub struct StagingConfig {
     /// Master switch. When `false` the staged pipeline is dormant (no stage
-    /// artifacts are written, no gates fire). Flipped `true` in Phase 2 rollout
-    /// once the artifact store + Stage 0 plumbing is live.
+    /// artifacts are written, no gates fire). Flipped `true` once the artifact
+    /// store + Stage 0 plumbing went live.
     pub enabled: bool,
     /// Root directory for staging artifacts. Per-trace directories hang off this.
     #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]

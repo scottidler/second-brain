@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use vault::systemd::EnvBootstrap;
 
 /// Absolute, tilde-expanded default location for the clyde binary. The
-/// harvest systemd timer (Phase 8) runs with a stripped PATH, so a bare
+/// harvest systemd timer runs with a stripped PATH, so a bare
 /// `"clyde"` would not resolve there - only an absolute path survives that
 /// environment. Expanded here directly (not through serde) because
 /// `Default::default()` never runs the deserializer; mirrors
@@ -16,7 +16,7 @@ const DEFAULT_CLYDE_BINARY: &str = "~/.cargo/bin/clyde";
 /// watermark cursor exists yet, `sb borg harvest` scans back this far via
 /// `clyde session export --since <this>` instead of inhaling the whole
 /// catalog unasked on a fresh install. A human-time span in the same shape
-/// `borg::receipts::parse_since` already accepts (`7d`, `24h`, `2w`); Phase 3's
+/// `borg::receipts::parse_since` already accepts (`7d`, `24h`, `2w`); the
 /// export reader owns parsing it.
 const DEFAULT_INITIAL_SINCE: &str = "7d";
 
@@ -37,10 +37,10 @@ const DEFAULT_DORMANT_AFTER: &str = "7d";
 
 /// Selection floor on `n-msgs` (design doc: Selection signals): a session
 /// with fewer messages than this is a one-shot, not substantive enough to
-/// earn a note. Tuned (Phase 3) against the real 2026-07-02 catalog slice:
+/// earn a note. Tuned against the real 2026-07-02 catalog slice:
 /// one-shots cluster at <=3 messages (the canonical `"what"` reject is 3),
 /// while every substantive engineering thread is >=29, so a floor of 6 sits
-/// well inside that empty gap with margin. (Phase 2's starter value of 4 also
+/// well inside that empty gap with margin. (The earlier starter value of 4 also
 /// separated the fixtures, but left less headroom against 4-5 message
 /// near-one-shots the "not a one-shot" intent excludes.)
 const DEFAULT_MIN_MSGS: usize = 6;
@@ -87,7 +87,7 @@ impl HarvestMode {
 
 /// Config for `sb borg harvest`
 /// (design doc: `docs/design/2026-07-17-harvest-clyde-sessions.md`). Every
-/// tunable the harvest loop needs lives here so the timer unit (Phase 8)
+/// tunable the harvest loop needs lives here so the timer unit
 /// bakes in nothing but `OnCalendar` - the one value that IS the timer.
 ///
 /// Omitting the whole `harvest:` section (or any individual key within it)
@@ -99,7 +99,7 @@ impl HarvestMode {
 pub struct HarvestConfig {
     /// Absolute path to the clyde binary. Tilde-expanded at load
     /// (`vault::paths::deserialize_tilde_pathbuf`) because the timer's
-    /// stripped PATH (Phase 8) means a bare `"clyde"` cannot resolve.
+    /// stripped PATH means a bare `"clyde"` cannot resolve.
     #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
     pub clyde_binary: PathBuf,
     /// First-run backfill bound: how far back to scan when no watermark
@@ -135,15 +135,15 @@ pub struct HarvestConfig {
     /// default) inherits `llm.model`, mirroring `vision.model` and
     /// `youtube.slides.content_filter.model`.
     pub model: String,
-    /// systemd `OnCalendar` expression for the nightly timer (Phase 8). This
+    /// systemd `OnCalendar` expression for the nightly timer. This
     /// is the ONE value baked into the `.timer` unit - every behavioral
     /// tunable stays in this config, read by the service's `sb borg harvest`
     /// ExecStart at fire time. A standard systemd calendar spec (`daily`,
     /// `*-*-* 03:00:00`, `Mon *-*-* 06:00:00`).
     pub schedule: String,
     /// Optional secret/environment bootstrap for the installed
-    /// `sb-harvest.service` unit (design doc: 2026-07-20 harvest-completion,
-    /// Phase 5 "Secret bootstrap on the timer's `.service`"). `None` (the
+    /// `sb-harvest.service` unit (design doc: harvest-completion,
+    /// "Secret bootstrap on the timer's `.service`"). `None` (the
     /// default) omits both the `ExecStartPre` and `EnvironmentFile`
     /// directives, exactly like `daemon.env-bootstrap`
     /// (`crate::config::DaemonConfig`) - a host with no secrets to bootstrap

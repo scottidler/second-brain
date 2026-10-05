@@ -1,6 +1,6 @@
 //! Pure judge-vs-human calibration math, plus the deterministic (zero-judge)
-//! distillation-quality metrics (2026-07-07 distillation-output-restore,
-//! Phase 7). All functions here are pure: no I/O, no LLM calls, no cache -
+//! distillation-quality metrics (distillation-output-restore
+//! design). All functions here are pure: no I/O, no LLM calls, no cache -
 //! unit-testable in isolation, unlike the judge axes in `judge.rs` which need
 //! a live (or mocked) `DistillationJudge`. Mirrors the oracle eval's
 //! calibration statistics (`oracle/src/eval/calc.rs`), operating on graded
@@ -85,7 +85,7 @@ pub fn listicle_survival(enumeration: Option<&Enumeration>) -> f64 {
 }
 
 /// Note-size: does the fixture's rendered body stay within the publish-path
-/// hard ceiling (`config::MAX_NOTE_BYTES`, Phase 3)? Deterministic - the
+/// hard ceiling (`config::MAX_NOTE_BYTES`)? Deterministic - the
 /// caller renders the fixture's `Distilled` via `distillers::render` and
 /// passes the resulting `body_markdown` byte length. Delegates to the shared
 /// `config::within_note_size_ceiling` predicate that `pipeline::note_size_gate`
@@ -95,7 +95,7 @@ pub fn note_size_within_ceiling(rendered_bytes: usize) -> bool {
     crate::config::within_note_size_ceiling(rendered_bytes, MAX_NOTE_BYTES)
 }
 
-/// Mean of the applicable per-fixture listicle-survival scores (Phase 7b, the
+/// Mean of the applicable per-fixture listicle-survival scores (the
 /// `sb borg eval` report wiring). `None` when no fixture is applicable -
 /// distinct from `Some(0.0)`, which means every applicable fixture scored a
 /// genuine failure. "Applicable" is decided by the caller (report.rs): a

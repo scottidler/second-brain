@@ -19,8 +19,7 @@ fn populated_allowlist_admits_only_listed() {
 
 #[test]
 fn telegram_prose_and_url_captures_note() {
-    // Phase 8 (telegram transport capture-note fixture): the telegram text
-    // handler builds its URL content via `router::url_content_from_text`, so a
+    // The telegram text handler builds its URL content via `router::url_content_from_text`, so a
     // prose+URL message lands the prose as the capture note.
     let (content, display) =
         crate::router::url_content_from_text("fixes borg's linker: https://example.com/post").expect("url present");

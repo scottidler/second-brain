@@ -105,7 +105,7 @@ fn listicle_survival_clamps_an_over_count_to_full_marks() {
     assert_eq!(listicle_survival(Some(&enumeration)), 1.0);
 }
 
-/// Break-the-code check (design doc Phase 7 success criterion): pointing the
+/// Break-the-code check (design doc success criterion): pointing the
 /// metric at a currently-shipped video fixture - harvested from a published
 /// note under the pre-restore pipeline, so it carries no `enumeration:` key
 /// at all - must score 0. This proves the metric actually bites the
@@ -124,7 +124,7 @@ fn listicle_survival_scores_zero_against_current_shipped_video_fixture() {
     assert_eq!(listicle_survival(fx.distilled.enumeration.as_ref()), 0.0);
 }
 
-/// Positive counterpart: the April-shape fixture (Phase 7) declares 10 items
+/// Positive counterpart: the April-shape fixture declares 10 items
 /// and carries all 10 - full marks.
 #[test]
 fn listicle_survival_full_marks_against_april_shape_fixture() {
@@ -204,7 +204,7 @@ fn note_size_within_ceiling_passes_on_april_shape_fixture_render() {
     );
 }
 
-// --- listicle-aggregate (Phase 7b: sb borg eval report wiring) -------------
+// --- listicle-aggregate (sb borg eval report wiring) -------------
 
 #[test]
 fn listicle_aggregate_is_none_when_no_fixture_is_applicable() {

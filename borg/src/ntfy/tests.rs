@@ -16,7 +16,7 @@ fn test_parse_plain_url() {
 
 #[test]
 fn test_parse_url_with_surrounding_text() {
-    // Phase 8 (ntfy transport capture-note fixture): the prose around the URL
+    // The prose around the URL
     // becomes the capture note (first-URL token removed, whitespace-collapsed).
     let result = parse_message("Check out this video: https://youtube.com/watch?v=abc123");
     assert_eq!(
@@ -62,7 +62,7 @@ fn test_parse_json_body() {
 
 #[test]
 fn test_parse_json_body_with_note() {
-    // Phase 8: a JSON ntfy body may carry an explicit `note` capture annotation.
+    // A JSON ntfy body may carry an explicit `note` capture annotation.
     let result = parse_message(r#"{"url": "https://example.com", "note": "fixes borg's linker"}"#);
     assert_eq!(
         result,

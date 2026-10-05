@@ -87,8 +87,8 @@ pub fn calibration_panel(pairs: &[(u8, u8)]) -> Option<CalibrationPanel> {
     })
 }
 
-/// Per-fixture listicle-survival result (2026-07-07 distillation-output-restore,
-/// Phase 7b). Scored ONLY for fixtures whose EXPECTED `distilled.yml` declares
+/// Per-fixture listicle-survival result (distillation-output-restore
+/// design). Scored ONLY for fixtures whose EXPECTED `distilled.yml` declares
 /// a `declared_count` - that declared count IS the authored assertion "this
 /// fixture is a listicle and must survive". Fixtures without one are N/A for
 /// this axis and never appear here (excluded from the aggregate, not folded
@@ -100,7 +100,7 @@ pub struct ListicleMetric {
 }
 
 /// Per-fixture note-size gate result: does the fixture's rendered body stay
-/// under the Phase 3 publish-path ceiling (`crate::config::MAX_NOTE_BYTES`).
+/// under the publish-path ceiling (`crate::config::MAX_NOTE_BYTES`).
 /// Enforced across every fixture, regardless of kind.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NoteSizeMetric {
@@ -126,7 +126,7 @@ pub struct EvalReport {
     pub kinds: Vec<KindReport>,
     pub overall: KindReport,
     pub calibration: Option<CalibrationPanel>,
-    /// Per-applicable-fixture listicle-survival scores (Phase 7b). Empty when
+    /// Per-applicable-fixture listicle-survival scores. Empty when
     /// no fixture in the set declares a `declared_count`.
     pub listicle: Vec<ListicleMetric>,
     /// Mean of `listicle` scores. `None` when `listicle` is empty (nothing

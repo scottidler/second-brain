@@ -92,7 +92,7 @@ fn test_detect_text_pattern_url_with_short_context() {
 
 #[test]
 fn test_detect_text_pattern_prose_and_url_is_annotated_url() {
-    // Phase 8 (CLI transport capture-note fixture): long prose + URL now ALWAYS
+    // Long prose + URL now ALWAYS
     // becomes an annotated URL ingest (the old <10-char heuristic is gone). The
     // prose is the capture note (first-URL token removed, whitespace collapsed).
     match detect_text_pattern("This is how we should fix borg's linker: https://example.com/post") {
@@ -106,7 +106,7 @@ fn test_detect_text_pattern_prose_and_url_is_annotated_url() {
 
 #[test]
 fn test_detect_text_pattern_idea_prefix_forces_idea_even_with_url() {
-    // Phase 8: the `idea:` prefix is the escape hatch - it forces an Idea note
+    // The `idea:` prefix is the escape hatch - it forces an Idea note
     // (General path) even when the text carries a URL.
     assert_eq!(
         detect_text_pattern("idea: a thought inspired by https://example.com/post"),
@@ -839,12 +839,12 @@ fn read_cortex_fields_round_trips_block_inline_and_quoted_lists() {
     assert_eq!(fields, vec![("tags".to_string(), FieldValue::List(Vec::new()))]);
 }
 
-// Phase 3 of borg-pipeline-resilience: the previous patch_cortex_fields
+// borg-pipeline-resilience: the previous patch_cortex_fields
 // tests have moved to pipeline/atomic.rs alongside the apply_cortex_fields
 // and apply_original_date helpers that replaced the patch_* functions.
 
 // ---------------------------------------------------------------------------
-// Phase 7 (distillation overhaul): slide-body-then-append splice + FTS reach.
+// Slide-body-then-append splice + FTS reach.
 // ---------------------------------------------------------------------------
 
 /// A distilled payload with a summary, two claims, and a transcript - the
@@ -884,8 +884,8 @@ fn append_distilled_below_slides_keeps_both_slide_and_distilled_sections() {
     // carry the slide sections AND the distilled `## Claims` (previously lost
     // wholesale on the slide path).
     let slide_body = phase7_slide_body();
-    // Slide notes are video (URL) publishes: transcript-free per the 2026-07-07
-    // policy (`for_url_publish`), so the appended distilled body carries the
+    // Slide notes are video (URL) publishes: transcript-free per the
+    // distillation-output-restore policy (`for_url_publish`), so the appended distilled body carries the
     // knowledge sections minus `## Transcript`.
     let d = phase7_distilled();
     let distilled_body = distillers::render(&d, distillers::RenderOptions::for_url_publish(&d)).body_markdown;
@@ -934,7 +934,7 @@ fn slide_path_composed_body_yields_claims_fts_text() {
     // FTS-parsing code path (vault::search::parse_body_claims, the same parse
     // `index_vault`/`index_one` runs to populate `notes.claims`). The
     // slide-path composed body must yield the distilled claims as FTS text -
-    // exactly what the pre-Phase-7 replace behavior destroyed.
+    // exactly what the old replace behavior destroyed.
     let d = phase7_distilled();
     let composed = append_distilled_below_slides(
         phase7_slide_body(),
@@ -948,7 +948,7 @@ fn slide_path_composed_body_yields_claims_fts_text() {
 
 #[test]
 fn article_published_body_omits_transcript_but_yields_claims_fts_text() {
-    // 2026-07-07 distillation-output-restore: the article PUBLISH body must NOT
+    // distillation-output-restore: the article PUBLISH body must NOT
     // carry `## Transcript` (the verbatim text lives in the staged distilled.yml
     // and is embedded from there), while its claims still expose to the same FTS
     // parse the indexer runs. Article renders via `for_url_publish` (no payload
@@ -991,7 +991,7 @@ fn article_transcript_gate_is_article_only_video_field_unaffected() {
     // distill_for_publish_article (borg/src/stages/distill.rs). A VIDEO
     // Distilled never passes through it, so its transcript FIELD survives
     // untouched (feeding staging + embeddings). The video PUBLISH render
-    // still omits the `## Transcript` section, per the 2026-07-07 policy
+    // still omits the `## Transcript` section, per the distillation-output-restore policy
     // (`for_url_publish` -> false for Video).
     let video = distilled_with_transcript(Some(vault::distilled::KindPayload::Video(
         vault::distilled::VideoPayload::default(),
@@ -1028,7 +1028,7 @@ fn compose_slide_body_off_omits_distilled_sections() {
 fn compose_slide_body_on_appends_distilled_sections() {
     let slide_body = "## Slides\n\n![](slide-1.jpg)\n".to_string();
     let distilled_body = "## Summary\n\nThe distilled summary.\n\n";
-    // slide-append ON: Phase-7 behavior — distilled sections appended below.
+    // slide-append ON: current behavior — distilled sections appended below.
     let composed = compose_slide_body(slide_body, distilled_body, true);
     assert!(composed.contains("## Slides"), "slide body preserved");
     assert!(composed.contains("## Summary"), "distilled sections appended when on");
@@ -1105,7 +1105,7 @@ fn merge_proposed_tags_off_skips_distiller_tags() {
 
 #[test]
 fn merge_proposed_tags_on_merges_distiller_tags() {
-    // propose-tags ON: the proposed tag is merged (Phase 2 behavior).
+    // propose-tags ON: the proposed tag is merged.
     let mut all_tags = vec!["rust".to_string()];
     merge_proposed_tags(&mut all_tags, &["llm".to_string()], true);
     assert!(
@@ -1114,7 +1114,7 @@ fn merge_proposed_tags_on_merges_distiller_tags() {
     );
 }
 
-// --- Note-size hard gate (2026-07-07 distillation-output-restore, Phase 3) -
+// --- Note-size hard gate (distillation-output-restore) -
 
 #[test]
 fn note_size_gate_passes_under_ceiling() {
@@ -1151,7 +1151,7 @@ fn note_size_gate_respects_configured_ceiling_not_just_the_default() {
     );
 }
 
-// --- Phase 3: readable preferred-fetch wiring -----------------------------
+// --- readable preferred-fetch wiring -----------------------------
 
 /// Criterion (a): clean article markdown (a real body carrying a known article
 /// sentence, no country-dropdown chrome) is ACCEPTED by the readable gate.

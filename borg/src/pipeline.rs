@@ -55,7 +55,7 @@ pub(crate) struct CanonicalState {
 pub(crate) struct YouTubeResult {
     title: String,
     /// Structured distillation produced by the video distiller. After the
-    /// post-Phase-6 cutover this replaces the legacy prose summary; the
+    /// structured-distillation cutover this replaces the legacy prose summary; the
     /// caller renders it via `distillers::render` into the published note.
     distilled: vault::distilled::Distilled,
     content_type: ContentType,
@@ -76,8 +76,8 @@ pub(crate) struct SlidePayload {
     slides_source_root: PathBuf,
 }
 
-/// Splice the distilled sections BELOW a slide-published body (Phase 7,
-/// defect #2). The slide body is the user-visible value of the slide pipeline
+/// Splice the distilled sections BELOW a slide-published body (fixes a
+/// defect where the distilled sections were lost). The slide body is the user-visible value of the slide pipeline
 /// and stays first; the distilled `## Summary` / `## Claims` / `## Links` /
 /// `## Transcript` sections (`rendered_distilled.body_markdown`) are APPENDED
 /// beneath it rather than replacing it, so slide-published videos regain
@@ -107,8 +107,8 @@ pub(crate) fn append_distilled_below_slides(mut slide_body: String, distilled_bo
 /// Compose the slide-published note body subject to the `distill.slide-append`
 /// toggle. When `append` is true the distilled `## Summary`/`## Claims`/
 /// `## Links`/`## Transcript` sections are spliced beneath the slide body
-/// (Phase 7 behavior); when false the slide body stands alone (pre-Phase-7
-/// slide-only shape).
+/// (the current behavior); when false the slide body stands alone (the
+/// legacy slide-only shape).
 pub(crate) fn compose_slide_body(slide_body: String, distilled_body: &str, append: bool) -> String {
     log::debug!(
         "compose_slide_body: append={append} distilled_len={}",
@@ -147,8 +147,8 @@ pub(crate) fn merge_proposed_tags(all_tags: &mut Vec<String>, proposed: &[String
     }
 }
 
-/// Hard ceiling on the final composed note body (2026-07-07
-/// distillation-output-restore, Phase 3: see `config::MAX_NOTE_BYTES` for the
+/// Hard ceiling on the final composed note body (distillation-output-restore
+/// design: see `config::MAX_NOTE_BYTES` for the
 /// measurement behind the default). Checked just before the atomic write, on
 /// the exact bytes about to hit disk. Returns the failure reason when
 /// `note_bytes` exceeds `max_bytes`; `None` otherwise. Pulled out as a pure
@@ -341,7 +341,7 @@ pub async fn process_content(
                 )
                 .await
             }
-            // Harvest-clyde-sessions design, Phase 5: the harvest publish
+            // Harvest-clyde-sessions design: the harvest publish
             // runner (`harvest::publish::publish_thread`) already
             // selected/clustered/fetched everything - this handler distills,
             // renders, and publishes.
@@ -494,7 +494,7 @@ pub async fn process_url(
 
     let make_failure = |reason: String, stage: FailureStage, elapsed: std::time::Duration| -> IngestResult {
         // Failures live in the receipts log only; the markdown ledger is
-        // success-only as of Phase 4. The receipts row is closed out in
+        // success-only. The receipts row is closed out in
         // process_content's terminal write at the chokepoint, reading the
         // typed `failure_stage` set here.
         let canonical = hygiene::normalize_url(url, &config.canonicalization.rules).unwrap_or_else(|_| url.to_string());
@@ -577,7 +577,7 @@ async fn process_url_inner(
     let mut original_date: Option<String> = None;
     let mut cortex_fields: Vec<(String, publish::FieldValue)> = Vec::new();
     let mut old_slides_frontmatter: Vec<String> = Vec::new();
-    // Phase 3: instead of deleting the old note up front (which would create
+    // Instead of deleting the old note up front (which would create
     // a window where the vault has no copy of the URL's note while the rest
     // of the pipeline runs), capture its path here and remove only after
     // the atomic write of the new note succeeds.
@@ -594,7 +594,7 @@ async fn process_url_inner(
             None => {
                 log::info!("[{trace_id}] Duplicate URL (inflight): {canonical}");
                 // Inflight duplicates do NOT get a ledger row (the ledger is
-                // success-only as of Phase 4 and an inflight collision is
+                // success-only and an inflight collision is
                 // not a successful ingestion). The outer process_content
                 // chokepoint closes out the receipts row to `succeeded`
                 // because the IngestStatus is Duplicate, which is the
@@ -650,13 +650,13 @@ async fn process_url_inner(
                 old_slides_frontmatter
             );
             log::debug!("[{trace_id}] Will overwrite in: {:?}", reingest_dest);
-            // Phase 3: do NOT delete the old note here. The pipeline below
+            // Do NOT delete the old note here. The pipeline below
             // produces the new note bytes; we delete the old path only after
             // the atomic write of the new file succeeds. Track the old path
             // for that final cleanup.
             old_path_to_delete = Some(old_path.clone());
         }
-        // Phase 4: the ledger is append-only and success-only. A reingest
+        // The ledger is append-only and success-only. A reingest
         // produces a new ledger row alongside the original; the original
         // row stays as the historical record. mark_replaced is gone.
         log::info!(
@@ -692,7 +692,7 @@ async fn process_url_inner(
         log::warn!("[{trace_id}] Fabric binary not available, transcript/summary will use fallbacks");
     }
 
-    // Post-Phase-6 cutover: every URL kind produces a structured `Distilled`
+    // Every URL kind produces a structured `Distilled`
     // which becomes the source of truth for the note body and for the
     // `cortex-*` frontmatter additions. The legacy prose-summary path is gone
     // for URL kinds; image/audio/text/vocab paths still flow through the
@@ -813,7 +813,7 @@ async fn process_url_inner(
         } else {
             // Source/quality gate (article-only) now runs INSIDE
             // distill_for_publish_article, before distilled.yml is persisted
-            // (2026-07-07 distillation-output-restore, Phase 3 re-scope) - so
+            // (distillation-output-restore design) - so
             // chrome junk from a non-clean fetch never reaches staging or
             // embeddings, not just the rendered note.
             crate::stages::distill::distill_for_publish_article(
@@ -832,7 +832,7 @@ async fn process_url_inner(
         // consumes below.
         crate::stages::raw::run_gate_2(config, trace_id, Some(&url_match.url), &distilled.summary)?;
         // Thread/social title override (design doc
-        // `docs/design/2026-07-08-thread-title-generation.md`, Phase 2). Threads
+        // `docs/design/2026-07-08-thread-title-generation.md`). Threads
         // NEVER consult the scraped page title (Strategy 3 degenerates to a bare
         // numeric post ID on the browser-UA fallback fetcher); the title is
         // rebuilt from the distilled author/tldr, with a generic
@@ -902,7 +902,7 @@ async fn process_url_inner(
     // additions (cortex-video-*, distilled flag) still apply.
     let filename_stub = hygiene::note_filename(&title, trace_id);
     let vault_root_resolved: PathBuf = config.vault_root()?;
-    // Transcript-emission policy (2026-07-07 distillation-output-restore). Every
+    // Transcript-emission policy (distillation-output-restore). Every
     // URL kind renders here: Video, Repo, and Article publish transcript-free
     // (the verbatim text lives in the staged `distilled.yml` and is embedded
     // from there), while Thread is a verbatim-preservation kind that keeps its
@@ -924,11 +924,11 @@ async fn process_url_inner(
                     result.shape,
                     result.slides.len(),
                 );
-                // Phase 7 (defect #2): APPEND the distilled sections below the
+                // APPEND the distilled sections below the
                 // slide body rather than REPLACING them. Frontmatter is
                 // untouched here - `rendered_distilled.frontmatter_additions` is
                 // consumed below. Gate: distill.slide-append — when off, the
-                // slide body stands alone (pre-Phase-7 slide-only shape).
+                // slide body stands alone (the legacy slide-only shape).
                 let body = compose_slide_body(
                     result.body,
                     &rendered_distilled.body_markdown,
@@ -1001,7 +1001,7 @@ async fn process_url_inner(
 
     let note_path = dest_path.join(&filename);
 
-    // Phase 3: compose the FINAL note bytes in memory before any disk write.
+    // Compose the FINAL note bytes in memory before any disk write.
     // The original three-write publish path (write rendered, patch date, patch
     // cortex) was non-atomic across the patches; a SIGKILL or panic between
     // them would desync the body from its date / cortex frontmatter. Now the
@@ -1030,7 +1030,7 @@ async fn process_url_inner(
     // formatted value over it is how the field came to have two spellings.
     // `date:` remains the original content date, restored above.
 
-    // Note-size hard gate (2026-07-07 distillation-output-restore, Phase 3):
+    // Note-size hard gate (distillation-output-restore):
     // with `## Transcript` gone from video/article/repo publish, an oversize
     // note is a bug - a verbatim leak the gates above should already have
     // caught - so this hard-fails rather than publishing degraded. Checked
@@ -1127,7 +1127,7 @@ async fn process_url_inner(
         obsidian_url,
         failure_stage: None,
         // Degraded when the L2 distiller fell back, an enumeration fell short
-        // of its declared count (Phase 4, Resolved Decision 2026-07-07), OR
+        // of its declared count (a resolved design decision), OR
         // the tag classifier errored and the receipt needs to say so (P6:
         // "the receipt is degraded=true, and the note is still published").
         degraded: distilled.meta.validation.is_degraded() || tags_degraded,
@@ -1181,7 +1181,7 @@ pub(crate) enum TextPattern {
         word_a: String,
         word_b: String,
     },
-    /// The text contains a URL: it becomes an annotated URL ingest (Phase 8).
+    /// The text contains a URL: it becomes an annotated URL ingest.
     /// `note` is the surrounding prose (first-URL token removed) - the capture
     /// annotation. An `idea:` prefix bypasses this (forces an Idea note).
     ContainsUrl {

@@ -186,7 +186,7 @@ fn test_audit_finding_display_orphaned_replacement() {
     assert!(display.contains("no replacement"));
 }
 
-/// Phase 3 determinism guard: parallel `build_note_index` must produce the same per-source
+/// Determinism guard: parallel `build_note_index` must produce the same per-source
 /// `Vec<PathBuf>` ordering as the previous sequential implementation. The contract: notes
 /// that share a source URL appear in the same order they would appear in the sorted
 /// `collect_md_files` output. Build a fixture where two notes point at the same source URL

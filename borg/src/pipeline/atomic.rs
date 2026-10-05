@@ -1,6 +1,6 @@
 //! Atomic publish + pure-string composition helpers.
 //!
-//! Phase 3 of the borg-pipeline-resilience design doc. The 2026-05-08 incident
+//! From the borg-pipeline-resilience design doc. The 2026-05-08 incident
 //! that took out a vault note had three causes (atomicity, timeout, dedup);
 //! this module owns the atomicity fix:
 //!

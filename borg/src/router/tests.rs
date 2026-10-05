@@ -326,7 +326,7 @@ fn test_format_reply_with_trace_id_failed() {
     );
 }
 
-// --- Phase 8: capture-note extraction (the one shared rule) ---
+// --- capture-note extraction (the one shared rule) ---
 
 #[test]
 fn extract_capture_note_removes_first_url_token_and_collapses_whitespace() {

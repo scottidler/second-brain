@@ -109,10 +109,10 @@ fn test_config(vault_root: &std::path::Path, staging_root: &std::path::Path) -> 
 }
 
 /// End-to-end (reusing the 2026-07-02 golden-fixture session ids/timestamps,
-/// Phase 3's checked-in slack-cli work pair): plan -> publish lands ONE
+/// the checked-in slack-cli work pair): plan -> publish lands ONE
 /// `inbox/` note for the clustered thread, the receipts row transitions
 /// `received -> succeeded`, and `record_published` writes a snapshot that
-/// makes an immediate rerun a no-op (Phase 3 watermark idempotency, tied in
+/// makes an immediate rerun a no-op (watermark idempotency, tied in
 /// end to end).
 #[tokio::test]
 async fn publish_plan_publishes_and_rerun_is_idempotent() {
@@ -220,7 +220,7 @@ async fn publish_plan_publishes_and_rerun_is_idempotent() {
         "an unchanged rerun must not re-select the already-published thread"
     );
 
-    // Phase 7: publish staged members.yml, and `replay --from-stage 2`
+    // Publish staged members.yml, and `replay --from-stage 2`
     // re-derives the note from the staged transcript + members WITHOUT
     // touching clyde. Structurally equivalent: the trace re-publishes
     // successfully (same source:/trace:, valid Distilled) - byte identity is
@@ -249,7 +249,7 @@ async fn publish_plan_publishes_and_rerun_is_idempotent() {
     }
 }
 
-/// Phase 2 (harvest-run integrity), acceptance: "Killing the process between
+/// Harvest-run integrity acceptance: "Killing the process between
 /// two threads leaves the first thread's `published` entry on disk AND the
 /// cursor unadvanced." Drives `publish_thread` (the per-thread durable-save
 /// seam) for the FIRST of two independently-clustered threads only, standing

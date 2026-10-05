@@ -13,7 +13,7 @@ pub struct NoteContent {
     pub tags: Vec<String>,
     pub summary: String,
     pub description: Option<String>,
-    /// Operator capture annotation (Phase 8): the prose that accompanied the
+    /// Operator capture annotation: the prose that accompanied the
     /// captured URL / the Signal attachment caption. Rendered verbatim as a
     /// `capture-note:` frontmatter key and a `## Why Captured` body section
     /// above `## Summary`. `None` for a bare capture (no annotation) so no
@@ -26,7 +26,7 @@ pub struct NoteContent {
     /// Vault-relative paths to slide JPEGs the note owns. Rendered into the
     /// `slides:` frontmatter list so cleanup on replay can find them.
     pub slides: Vec<String>,
-    /// Post-Phase-6 cutover: pre-rendered structured body produced by
+    /// Pre-rendered structured body produced by
     /// `distillers::render`. When `Some`, replaces the legacy
     /// `## Summary\n\n{summary}` block - the rendered Distilled already
     /// carries `## Summary` / `## Claims` / `## Links` headings of its own.
@@ -93,8 +93,8 @@ pub enum ContentType {
         language: String,
     },
     /// Distilled Claude Code session/thread note (harvest-clyde-sessions
-    /// design). Fields land in Phase 5's pipeline handler; Phase 1 wires the
-    /// `type:` frontmatter mapping only.
+    /// design). Fields land in the pipeline handler; the `type:`
+    /// frontmatter mapping is wired here.
     Session,
 }
 
@@ -205,7 +205,7 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         fm.push_str(&format!("trace: {tid}\n"));
     }
 
-    // Capture note (Phase 8): the operator's own annotation. Emitted only when
+    // Capture note: the operator's own annotation. Emitted only when
     // present and non-empty so a bare capture never writes an empty key.
     if let Some(capture) = note.capture_note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         fm.push_str(&format!("capture-note: {}\n", yaml_scalar(capture)));
@@ -249,7 +249,7 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         _ => {}
     }
 
-    // Post-Phase-6 cutover: merge any frontmatter additions produced by
+    // Merge any frontmatter additions produced by
     // `distillers::render` (distilled flag, extractor id, per-kind
     // `cortex-*` keys). Sorted alphabetically for stable diffs.
     for (key, value) in &note.frontmatter_additions {
@@ -290,7 +290,7 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         body.push('\n');
     }
 
-    // Why Captured (Phase 8): the operator's capture annotation, rendered
+    // Why Captured: the operator's capture annotation, rendered
     // verbatim ABOVE `## Summary`. Emitted only when present and non-empty so a
     // bare capture renders no empty section.
     if let Some(capture) = note.capture_note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -299,7 +299,7 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         body.push_str("\n\n");
     }
 
-    // Body: post-Phase-6 cutover prefers the pre-rendered structured body
+    // Body: prefers the pre-rendered structured body
     // produced by `distillers::render` (it already carries `## Summary` /
     // `## Claims` / `## Links` headings). The legacy `## Summary` wrapper
     // around `note.summary` is the fallback for non-URL kinds and for URL

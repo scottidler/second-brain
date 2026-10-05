@@ -33,7 +33,7 @@ fn test_ingest_request_roundtrip() {
 #[test]
 fn test_ingest_request_note_defaults_to_none_when_absent() {
     // The browser extension POST body omits `note`; it must deserialize to None
-    // (additive-optional field, Phase 8), keeping the extension compatible.
+    // (additive-optional field), keeping the extension compatible.
     let body = serde_json::json!({ "url": "https://example.com/" });
     let req: IngestRequest = serde_json::from_value(body).expect("deserialize");
     assert_eq!(req.note, None);

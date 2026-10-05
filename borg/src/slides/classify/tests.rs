@@ -112,7 +112,7 @@ fn test_preview_truncates_and_flattens() {
     assert!(p.chars().count() <= 80, "preview is bounded");
 }
 
-// ---- Phase 4: keep-filter + tally -------------------------------------------
+// ---- keep-filter + tally -------------------------------------------
 
 use crate::config::{ContentFilterConfig, SlideClass};
 

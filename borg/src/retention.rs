@@ -38,7 +38,7 @@ pub fn parse_ingested_date(ingested: &str) -> Option<NaiveDate> {
 /// Compute the absolute policy expiry date for a staged trace:
 /// `ingested_date + retention_days`, formatted back to `%Y-%m-%d`. This is the
 /// single source of the `trace-expires` value, stamped by borg at publish
-/// (Phase 3) and by `backfill-ingested` for legacy notes (Phase 4).
+/// and by `backfill-ingested` for legacy notes.
 pub fn trace_expires_for(ingested: NaiveDate, retention_days: u32) -> String {
     (ingested + Duration::days(i64::from(retention_days)))
         .format("%Y-%m-%d")

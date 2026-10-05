@@ -187,7 +187,7 @@ impl ExportReader for ClydeExportReader {
     }
 }
 
-/// Convenience for callers holding a config path (Phase 5/6 wiring).
+/// Convenience for callers holding a config path.
 pub fn reader_for(binary: &Path) -> ClydeExportReader {
     ClydeExportReader::new(binary)
 }

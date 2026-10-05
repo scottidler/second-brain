@@ -367,7 +367,7 @@ async fn replay_one(
     let envelope = store.read_envelope(trace_id)?;
 
     // Stage-2 replay (re-distill from staged artifacts, NO re-fetch) is wired
-    // for the session/harvest kind ONLY (design doc Phase 7): a `clyde://`
+    // for the session/harvest kind ONLY: a `clyde://`
     // source cannot be re-POSTed to the daemon the way a URL source can, so it
     // re-derives directly from the staged transcript + member records. Every
     // other kind's `--from-stage > 0` stays explicitly unsupported.
@@ -407,8 +407,8 @@ async fn replay_one(
 /// run holds for its whole run (`harvest::run_with`) - a session-trace replay
 /// touches the same durable harvest identity a live run owns, so a manual
 /// replay and a timer run must not race. A URL replay never calls this
-/// function and so never takes this lock (design doc Phase 2: "for SESSION
-/// traces only"). `acquire_lock` is `try_lock_exclusive` (never waits), so
+/// function and so never takes this lock (the lock is for SESSION
+/// traces only). `acquire_lock` is `try_lock_exclusive` (never waits), so
 /// this fails instantly and loudly with `HarvestLockHeld` naming the lock path
 /// rather than blocking or racing.
 async fn replay_session_stage2(
@@ -434,7 +434,7 @@ async fn replay_session_stage2(
         .read_attachment(trace_id, crate::harvest::SESSION_REPLAY_META_FILE)?
         .ok_or_else(|| {
             eyre::eyre!(
-                "replay: trace {trace_id} has no {} (staged before Phase 7, or not a harvest \
+                "replay: trace {trace_id} has no {} (staged before replay metadata was recorded, or not a harvest \
                  session note); cannot re-derive from stage 2",
                 crate::harvest::SESSION_REPLAY_META_FILE
             )
@@ -455,7 +455,7 @@ async fn replay_session_stage2(
     // entry to back-link. A note that was originally published as a
     // follow-up already carries its own `follows:` frontmatter; the handler
     // carries that forward from the note being replaced rather than dropping
-    // it (design doc Phase 4: "follows: survives a replace").
+    // it, so `follows:` survives a replace.
     let result = crate::pipeline::session::process_session(
         &body,
         &meta.members,

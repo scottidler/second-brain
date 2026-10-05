@@ -175,7 +175,7 @@ fn emit_calibration_writes_sheet_and_short_circuits() {
     assert!(written.contains("human-claim-coverage"));
 }
 
-// --- deterministic metrics wiring (Phase 7b) -------------------------------
+// --- deterministic metrics wiring -------------------------------
 
 /// Design-doc acceptance criterion #4 against the real committed fixture set:
 /// `sb borg eval` (here, its `evaluate()` core) reports listicle-survival =

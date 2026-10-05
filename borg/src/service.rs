@@ -1,5 +1,5 @@
 //! Daemon lifecycle + OS service management (systemd / launchd) and the GNOME
-//! hotkey keybinding install/uninstall. Extracted from `lib.rs` (Phase 8 bloat
+//! hotkey keybinding install/uninstall. Extracted from `lib.rs` (bloat
 //! decomposition) along the daemon-vs-cli seam; the HTTP server (`serve_init`)
 //! lives in `server.rs` and the ingest entry points in `client.rs`. `lib.rs`
 //! re-exports `daemon` / `DaemonOutcome` from here so the public API
@@ -17,7 +17,7 @@ use vault::systemd::{Hardening, Restart, RestartPolicy, ServiceUnit, StartLimit,
 /// crosses the lib boundary. `Status` carries the raw systemctl-status
 /// blob because systemd's output is not contract-stable across versions;
 /// parsing structured fields out of it would be brittle scope-creep
-/// (per 2026-05-20 architect consensus).
+/// (per architect consensus).
 #[derive(Debug)]
 pub enum DaemonOutcome {
     Installed { unit_path: PathBuf },

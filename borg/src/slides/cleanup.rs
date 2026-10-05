@@ -1,4 +1,4 @@
-//! Phase 2.2: replay/reingest cleanup.
+//! Replay/reingest cleanup.
 //!
 //! When a note that previously had embedded slides is re-published (replay
 //! or fresh-trace re-ingestion of the same URL), the old slide JPEGs become

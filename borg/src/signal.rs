@@ -630,7 +630,7 @@ async fn dispatch_envelope(env: Envelope, ctx: DispatchEnv) -> Result<()> {
 }
 
 /// Extract an attachment caption (the message body accompanying a Signal
-/// attachment) as a capture note (Phase 8). Replaces the legacy `caption:` tag
+/// attachment) as a capture note. Replaces the legacy `caption:` tag
 /// hack: the caption is the operator's annotation and now travels in the
 /// capture-note field (rendered under `## Why Captured`), not as a mangled tag.
 fn attachment_caption(body: Option<&str>) -> Option<String> {

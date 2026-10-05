@@ -3,7 +3,7 @@
 //! Extractors read `RawCapture` and produce a `Transcript`. Per the design
 //! doc, they MUST NOT perform network I/O - Stage-0 owns the fetcher chain,
 //! Stage-1 is pure bytes → text. Concrete extractors (Markitdown, Groq vision,
-//! Whisper, etc.) arrive in Phase 4+ as we migrate summarization off the
+//! Whisper, etc.) arrive later as we migrate summarization off the
 //! legacy pipeline.rs path. For now the trait declares the contract and ships
 //! a single trivial implementation so the module compiles and tests exist.
 

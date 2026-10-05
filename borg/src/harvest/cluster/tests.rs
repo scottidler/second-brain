@@ -224,7 +224,7 @@ fn unparseable_timestamp_is_a_loud_error() {
     assert!(format!("{err:#}").contains("unparseable"), "{err:#}");
 }
 
-// ---- harvest-completion Phase 6: created-guard bite, second layer. A null
+// ---- harvest-completion: created-guard bite, second layer. A null
 // `created` is normally rejected at the SELECTION stage (`select.rs`) so it
 // never reaches `cluster_threads`. This test proves the fail-loud backstop
 // still exists here too: if a null-`created` record ever bypassed selection

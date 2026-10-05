@@ -4,10 +4,10 @@
 //! identity that keeps the loop idempotent (design doc
 //! `docs/design/2026-07-17-harvest-clyde-sessions.md`).
 //!
-//! Phase 3 scope: export reader, selection gate, thread clustering, watermark +
+//! Scope: export reader, selection gate, thread clustering, watermark +
 //! re-appearance decisions, and the reject path (a `rejection.yml` + a
 //! `rejected` receipts row keyed by a selection-time trace). It does NOT
-//! distill or publish - that is Phases 4-5. Where a re-appearance decision
+//! distill or publish - that lives in `publish`. Where a re-appearance decision
 //! needs the input body hash, fetching the body IS in scope (it is the identity
 //! anchor); distillation is not.
 //!
@@ -17,7 +17,7 @@
 //! - [`select`] - the selection gate (`fn -> Result<(), RejectionRecord>`)
 //! - [`cluster`] - deterministic `(cwd, git-branch) + gap` thread clustering
 //! - [`watermark`] - the state file, exclusive lock, and re-appearance logic
-//! - [`publish`] - Phase 5: fetch bodies + door capture + pipeline dispatch
+//! - [`publish`] - fetch bodies + door capture + pipeline dispatch
 //!   for every publishable `ThreadDecision`, then the post-publish watermark
 //!   update
 //! - [`identity`] - trace-keyed prior-note resolution (design doc
@@ -89,7 +89,7 @@ impl HarvestOpts {
 }
 
 /// A per-thread decision: what harvest WOULD do with this thread this run.
-/// Phase 5 consumes it to fetch bodies, distill, and publish (for `NewNote` /
+/// `publish` consumes it to fetch bodies, distill, and publish (for `NewNote` /
 /// `FollowUp`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThreadDecision {
@@ -104,12 +104,12 @@ pub struct ThreadDecision {
     /// New note / follow-up / skip (with an optional in-place snapshot advance).
     pub decision: Reappearance,
     /// Full bulk-metadata records for every member (repo, scope, title,
-    /// duration, redaction-count, dates), in `created` order. Phase 5 needs
+    /// duration, redaction-count, dates), in `created` order. `publish` needs
     /// these for `SessionMetadata`, the note's frontmatter (`repo:`,
     /// `scope:`/`redacted:` keys - tags-only-classification P6 moved these
     /// off `scope-*`/`redacted-source` tags), and the thread footer, without
     /// re-deriving them from `member_ids`. Carries no `body` (bulk metadata
-    /// only) - Phase 5 fetches transcript bodies separately.
+    /// only) - `publish` fetches transcript bodies separately.
     pub members: Vec<SessionRecord>,
 }
 
@@ -410,10 +410,10 @@ pub fn apply_plan_to_state(mut state: WatermarkState, plan: &HarvestPlan) -> Wat
     state
 }
 
-/// Convenience: record a freshly published thread's snapshot (Phase 5 wiring
-/// seam). Kept here so the published-entry shape lives with the watermark
-/// logic rather than being reconstructed in the pipeline. `trace_id` (Phase 2
-/// of the trace-keyed-replace design) is the reader Phase 4's follow-up
+/// Convenience: record a freshly published thread's snapshot (the `publish`
+/// wiring seam). Kept here so the published-entry shape lives with the watermark
+/// logic rather than being reconstructed in the pipeline. `trace_id` (from the
+/// trace-keyed-replace design) is the reader the follow-up
 /// back-link resolves through instead of trusting a stale `note_path`.
 pub fn record_published(
     state: &mut WatermarkState,
@@ -440,8 +440,8 @@ pub fn record_published(
 /// Staged filename holding a session thread's member records, so
 /// `replay --from-stage 2` can re-derive the note from the staged transcript
 /// without re-fetching from clyde. This is the concrete "thread export
-/// metadata" staged artifact the Data Model calls for (Phase 5 staged only a
-/// generic envelope; Phase 7 adds the thread-specific records).
+/// metadata" staged artifact the Data Model calls for (the generic envelope
+/// is staged separately from these thread-specific records).
 pub const SESSION_REPLAY_META_FILE: &str = "members.yml";
 
 /// The thread-level metadata staged alongside `body.txt`, sufficient to
@@ -546,7 +546,7 @@ pub async fn run_with<R: ExportReader>(
     if dry_run {
         // Dry-run persists NOTHING and advances no watermark, so a WARN-only
         // parse skip is safe by construction (already logged in parse_export).
-        // No receipt is forced here (design doc Phase 1).
+        // No receipt is forced here.
         log::info!(
             "harvest::run: dry-run - {} publishable / {} rejected / {} unparseable (no writes)",
             plan.publishable().count(),

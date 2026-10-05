@@ -383,9 +383,9 @@ fn test_merge_description_links_all_duplicates_adds_nothing() {
     assert_eq!(links.len(), 1);
 }
 
-// ── merge_description_links -> distillers::render regression (Phase 3) ──
+// ── merge_description_links -> distillers::render regression ──
 //
-// Phase 1/2's unit tests above prove `extract_urls`/`merge_description_links`
+// The unit tests above prove `extract_urls`/`merge_description_links`
 // in isolation. This exercises the seam's actual output shape: a mixed
 // github/non-github filtered description merges into the `Vec<Link>` a video
 // distill would carry, and that `Vec<Link>` renders `## Links` correctly via

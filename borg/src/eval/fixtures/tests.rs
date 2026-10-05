@@ -83,7 +83,7 @@ fn judge_note_text_renders_summary_and_anchored_claims() {
     assert!(!text.contains("bare claim ["));
 }
 
-// --- render_options_for_kind (Phase 7b: sb borg eval note-size wiring) -----
+// --- render_options_for_kind (sb borg eval note-size wiring) -----
 
 #[test]
 fn render_options_video_article_repo_are_transcript_free() {
@@ -116,7 +116,7 @@ fn render_options_verbatim_kinds_keep_their_transcript() {
 
 #[test]
 fn session_kind_loads_and_renders_transcript_free() {
-    // Phase 7: `sb borg eval` must score the session kind. The loader is
+    // `sb borg eval` must score the session kind. The loader is
     // kind-agnostic, so a session/<slug>/{source.md,distilled.yml} pair is
     // picked up; and session notes publish transcript-free, so the eval
     // note-size excludes the transcript (matching the harvest publish path).
@@ -144,7 +144,7 @@ fn session_kind_loads_and_renders_transcript_free() {
 
 #[test]
 fn real_repo_fixtures_load_and_include_session() {
-    // Guards the checked-in fixture tree (including the Phase 7 session
+    // Guards the checked-in fixture tree (including the session
     // fixture): every distilled.yml must parse as a valid Distilled, and the
     // session kind must be present so `sb borg eval` scores it.
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../config/eval/distill-fixtures");

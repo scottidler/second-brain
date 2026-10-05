@@ -1,4 +1,4 @@
-//! Phase 5: drive every publishable `ThreadDecision` from `plan_harvest`
+//! Drive every publishable `ThreadDecision` from `plan_harvest`
 //! through body fetch -> door capture -> pipeline dispatch -> watermark
 //! update. This is the harvest-side half of the publish path (per-house
 //! pattern: `trace::generate` already ran at selection time, so this module
@@ -24,7 +24,7 @@ use super::reader::ExportReader;
 use super::watermark::{self, Reappearance, WatermarkState};
 use super::{HarvestPlan, ThreadDecision};
 
-/// Outcome of driving one thread through publish. The caller (Phase 6's CLI)
+/// Outcome of driving one thread through publish. The caller (the CLI)
 /// uses this for reporting; the mutated `WatermarkState` returned alongside
 /// is the durable side effect the caller must persist.
 #[derive(Debug)]
@@ -40,7 +40,7 @@ pub struct PublishOutcome {
 /// continues so one bad session fetch does not silently drop the rest of the
 /// night's harvest (mirrors `write_rejections`'s per-item best-effort policy).
 /// `state_path` is where each thread's landed `published` snapshot is durably
-/// saved IMMEDIATELY, one thread at a time (Phase 2 of the trace-keyed-replace
+/// saved IMMEDIATELY, one thread at a time (trace-keyed-replace
 /// design) - the cursor advance stays out of this loop entirely and happens
 /// once, at end-of-run, in [`super::apply_plan_to_state`].
 pub async fn publish_plan<R: ExportReader>(
@@ -124,11 +124,11 @@ async fn publish_thread_inner<R: ExportReader>(
     state: &mut WatermarkState,
     state_path: &Path,
 ) -> Result<IngestResult> {
-    // Fetch every member's parsed body. Phase 3 only fetches a body for the
+    // Fetch every member's parsed body. Planning only fetches a body for the
     // deep re-appearance check (a `NewNote`/cheap-filter `Skip` decision has
     // none yet, and a `FollowUp`'s fetch result wasn't propagated onto
     // `ThreadDecision`), so this always re-fetches - deterministically, from
-    // the same reader/ids Phase 3 already validated.
+    // the same reader/ids planning already validated.
     let mut member_bodies: Vec<(String, Vec<BodyMessage>)> = Vec::with_capacity(thread.members.len());
     let mut body_truncated = false;
     for member in &thread.members {
@@ -158,7 +158,7 @@ async fn publish_thread_inner<R: ExportReader>(
     .with_context(|| format!("harvest publish: door capture for trace {}", thread.trace_id))?;
 
     // Publish intent, threaded from the planner's re-appearance decision
-    // (trace-keyed-replace design, Phase 3). `NewNote` gets the crash-recovery
+    // (trace-keyed-replace design). `NewNote` gets the crash-recovery
     // fallback; `FollowUp` - which is also what `--force` produces
     // (`classify_reappearance` returns it before consulting the body hash) -
     // never resolves a prior note, because a follow-up is a brand new note.
@@ -177,7 +177,7 @@ async fn publish_thread_inner<R: ExportReader>(
             ResolveIntent::FollowUp
         }
     };
-    // The follow-up back-link source (trace-keyed-replace design, Phase 4):
+    // The follow-up back-link source:
     // `ThreadDecision.decision` already carries the prior `PublishedEntry` for
     // exactly the `FollowUp` case - `None` for `NewNote`/the fail-closed `Skip`
     // arm above, since neither continues a prior note.
@@ -194,7 +194,7 @@ async fn publish_thread_inner<R: ExportReader>(
         follows_prior,
     };
     // `force` stays false here regardless of `--force`: `--force` (design
-    // doc API) means "re-distill this in-scope published id", which Phase 3
+    // doc API) means "re-distill this in-scope published id", which planning
     // already expresses as a `FollowUp` decision - a brand new note, never an
     // overwrite of the prior one (notes are immutable once published). The
     // pipeline's own `force` parameter means "overwrite a same-filename

@@ -175,7 +175,7 @@ pub(crate) async fn process_youtube(
         }
     }
 
-    // Post-Phase-6 cutover: replace the legacy `fabric::summarize` prose
+    // Replace the legacy `fabric::summarize` prose
     // path with the structured video distiller. The distiller re-fetches
     // raw VTT internally so claims carry real timestamp anchors; the
     // `transcript` we already have above is the fallback when VTT fetch
@@ -492,7 +492,7 @@ pub(crate) async fn process_article_fabric(
     }
 
     let title = extract_article_title(&article_md, url);
-    // Post-Phase-6 cutover: return the fetched markdown as the transcript;
+    // Return the fetched markdown as the transcript;
     // the caller (`process_url_inner`) dispatches to the appropriate
     // `distill_for_publish_*` based on URL kind. The legacy
     // `fabric::summarize` prose path is gone for URL kinds. Gate-2 runs
@@ -574,7 +574,7 @@ pub(crate) fn accept_readable_output(url: &str, article_md: String) -> Result<St
 
 /// Returns `(title, article_md, byline)` - same shape as
 /// `process_article_fabric` so callers can pipe either source into the
-/// post-Phase-6 distillation step uniformly. Gate-1 still runs against
+/// distillation step uniformly. Gate-1 still runs against
 /// the fetched bytes here. The byline is `None` on the Jina markdown path and
 /// carries the browser-UA fallback's `byline::extract` result otherwise.
 pub(crate) async fn process_article_jina(
@@ -731,7 +731,7 @@ pub(crate) async fn process_image_inner(
         .and_then(|v| (!v.extracted_text.is_empty()).then_some(v.extracted_text.clone()))
         .unwrap_or_else(|| ocr_text.clone());
 
-    // Phase 9c-image cutover: build the Vision+OCR concat that becomes the
+    // Build the Vision+OCR concat that becomes the
     // distiller's input AND the verbatim `## Transcript` archive in the
     // published note.
     let image_transcript = {
@@ -971,7 +971,7 @@ pub(crate) async fn process_audio_inner(
         title_from_filename(filename)
     };
 
-    // Phase 9c-voicenote cutover: route the Groq transcript through the
+    // Route the Groq transcript through the
     // VoiceNote distiller (short-path single call, long-path map-reduce).
     // The full Groq output lands verbatim in `distilled.transcript` so the
     // published note carries the exact words below the LLM summary.
