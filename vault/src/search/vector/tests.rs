@@ -265,10 +265,16 @@ fn search_vector_filters_by_note_type_and_status() {
     };
     assert_eq!(paths(Some("article"), None), vec!["notes/article.md"]);
     assert_eq!(paths(Some("video"), None), vec!["notes/video.md"]);
-    assert!(paths(Some("thread"), None).is_empty(), "an unmatched type selects nothing");
+    assert!(
+        paths(Some("thread"), None).is_empty(),
+        "an unmatched type selects nothing"
+    );
     assert_eq!(paths(None, Some("active")), vec!["notes/article.md"]);
     assert_eq!(paths(None, Some("archived")), vec!["notes/video.md"]);
-    assert!(paths(Some("article"), Some("archived")).is_empty(), "filters AND together");
+    assert!(
+        paths(Some("article"), Some("archived")).is_empty(),
+        "filters AND together"
+    );
 }
 
 #[test]
