@@ -237,6 +237,40 @@ fn search_vector_filters_by_tags() {
     assert_eq!(hits.len(), 2, "OR mode keeps both notes");
 }
 
+/// `note_type` and `status` each select exactly the matching note, in both
+/// directions, so neither filter is dropped or inverted.
+#[test]
+fn search_vector_filters_by_note_type_and_status() {
+    let index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-test-v1");
+    insert_note(&index, "notes/article.md", "article", 100);
+    insert_note(&index, "notes/video.md", "video", 100);
+    for (path, status) in [("notes/article.md", "active"), ("notes/video.md", "archived")] {
+        index
+            .conn
+            .execute("UPDATE notes SET status = ?1 WHERE path = ?2", params![status, path])
+            .expect("set status");
+    }
+    upsert_summary(&index, &m, "notes/article.md", "temporal", 100);
+    upsert_summary(&index, &m, "notes/video.md", "temporal", 100);
+    let q = m.embed_one("temporal").expect("q");
+
+    let paths = |note_type: Option<&str>, status: Option<&str>| -> Vec<String> {
+        index
+            .search_vector(&q, 10, None, false, note_type, status)
+            .expect("search")
+            .into_iter()
+            .map(|h| h.note_path)
+            .collect()
+    };
+    assert_eq!(paths(Some("article"), None), vec!["notes/article.md"]);
+    assert_eq!(paths(Some("video"), None), vec!["notes/video.md"]);
+    assert!(paths(Some("thread"), None).is_empty(), "an unmatched type selects nothing");
+    assert_eq!(paths(None, Some("active")), vec!["notes/article.md"]);
+    assert_eq!(paths(None, Some("archived")), vec!["notes/video.md"]);
+    assert!(paths(Some("article"), Some("archived")).is_empty(), "filters AND together");
+}
+
 #[test]
 fn search_vector_rejects_dim_mismatch_against_active_model() {
     let index = SearchIndex::open_memory().expect("open");
