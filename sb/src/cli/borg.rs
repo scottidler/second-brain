@@ -258,12 +258,6 @@ pub struct HotkeyArgs {
     /// Remove the installed hotkey
     #[arg(long)]
     pub uninstall: bool,
-    /// Daemon host the hotkey POSTs the captured URL to
-    #[arg(long, default_value = "localhost")]
-    pub host: String,
-    /// Daemon port the hotkey POSTs to
-    #[arg(long, default_value_t = 8181)]
-    pub port: u16,
     /// Key binding to register (desktop-environment syntax)
     #[arg(long, default_value = "<Ctrl><Shift>b")]
     pub key: String,
@@ -273,8 +267,6 @@ impl From<HotkeyArgs> for opts::HotkeyOpts {
         Self {
             install: a.install,
             uninstall: a.uninstall,
-            host: a.host,
-            port: a.port,
             key: a.key,
         }
     }
@@ -472,6 +464,7 @@ impl BorgCli {
                 match outcome {
                     borg::HotkeyOutcome::Installed {
                         key,
+                        command,
                         host,
                         port,
                         post_install,
@@ -479,8 +472,8 @@ impl BorgCli {
                         if let Some(msg) = post_install {
                             println!("{msg}");
                         } else {
-                            println!("Hotkey installed: {key} -> obsidian-borg ingest --clipboard");
-                            println!("Daemon target: http://{host}:{port}/ingest (from config)");
+                            println!("Hotkey installed: {key} -> {command}");
+                            println!("Daemon target: http://{host}:{port}/ingest (hotkey.host/port in borg.yml)");
                         }
                     }
                     borg::HotkeyOutcome::Uninstalled => {
@@ -801,8 +794,8 @@ fn print_daemon_outcome(outcome: &borg::DaemonOutcome) {
             println!("Wrote {}", unit_path.display());
             println!("Service reinstalled and started.");
         }
-        DaemonOutcome::Stopped => println!("Stopped obsidian-borg service"),
-        DaemonOutcome::Restarted => println!("Restarted obsidian-borg service"),
+        DaemonOutcome::Stopped => println!("Stopped borg service"),
+        DaemonOutcome::Restarted => println!("Restarted borg service"),
         DaemonOutcome::Status { raw_output } => print!("{raw_output}"),
         DaemonOutcome::NoAction => {
             println!("No daemon action specified. See: sb borg daemon --help");

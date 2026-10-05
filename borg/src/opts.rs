@@ -6,12 +6,6 @@ pub struct HotkeyOpts {
     /// Uninstall the keyboard shortcut
     pub uninstall: bool,
 
-    /// Daemon host to send URLs to (default: localhost)
-    pub host: String,
-
-    /// Daemon port (default: 8181)
-    pub port: u16,
-
     /// Key binding in GNOME format (default: <Ctrl><Shift>b)
     pub key: String,
 }

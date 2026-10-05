@@ -301,12 +301,11 @@ pub(crate) async fn install_systemd(exe_path: &str, config: &Config) -> Result<P
     Ok(unit_path)
 }
 
-pub(crate) async fn install_launchd(exe_path: &str) -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
-    let plist_dir = home.join("Library/LaunchAgents");
-    let plist_path = plist_dir.join("com.obsidian-borg.plist");
-
-    let plist_content = format!(
+/// The launchd plist for the borg daemon. The label and log paths keep the
+/// retired `obsidian-borg` name: renaming them would orphan an installed agent.
+pub fn render_launchd_plist(exe_path: &str) -> String {
+    log::debug!("service::render_launchd_plist: exe_path={exe_path}");
+    format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -316,6 +315,7 @@ pub(crate) async fn install_launchd(exe_path: &str) -> Result<PathBuf> {
     <key>ProgramArguments</key>
     <array>
         <string>{exe_path}</string>
+        <string>borg</string>
         <string>daemon</string>
         <string>--start</string>
     </array>
@@ -330,7 +330,20 @@ pub(crate) async fn install_launchd(exe_path: &str) -> Result<PathBuf> {
 </dict>
 </plist>
 "#
-    );
+    )
+}
+
+/// The command the desktop hotkey runs: ingest the clipboard URL.
+pub fn hotkey_command(exe_path: &Path) -> String {
+    format!("{} borg ingest --clipboard", exe_path.display())
+}
+
+pub(crate) async fn install_launchd(exe_path: &str) -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
+    let plist_dir = home.join("Library/LaunchAgents");
+    let plist_path = plist_dir.join("com.obsidian-borg.plist");
+
+    let plist_content = render_launchd_plist(exe_path);
 
     // Unload if already loaded (ignore errors - may not be loaded)
     launchctl(&["unload", &plist_path.to_string_lossy()]).await.ok();
@@ -400,23 +413,21 @@ const GNOME_KEYBINDING_PATH: &str = "/org/gnome/settings-daemon/plugins/media-ke
 /// Install (best-effort) the keyboard shortcut and return a non-Linux
 /// fallback message when applicable. On Linux, returns None - sb prints
 /// the standard installed banner.
-pub(crate) async fn install_hotkey(host: &str, port: u16, key: &str) -> Result<Option<String>> {
-    let _ = (host, port);
+pub(crate) async fn install_hotkey(key: &str) -> Result<(String, Option<String>)> {
+    log::debug!("service::install_hotkey: key={key}");
     let exe_path = std::env::current_exe().context("Failed to detect binary path")?;
-    let command = format!("{} ingest --clipboard", exe_path.display());
+    let command = hotkey_command(&exe_path);
 
     if cfg!(target_os = "linux") {
         install_gnome_keybinding(&command, key)?;
-        Ok(None)
+        Ok((command, None))
     } else {
-        Ok(Some(format!(
-            "Bind this command to {key} in your OS settings:\n  {command}"
-        )))
+        let message = format!("Bind this command to {key} in your OS settings:\n  {command}");
+        Ok((command, Some(message)))
     }
 }
 
 pub(crate) fn install_gnome_keybinding(command: &str, key: &str) -> Result<()> {
-    let _ = command;
     // Get current custom keybinding paths
     let output = std::process::Command::new("gsettings")
         .args(["get", GNOME_KEYBINDINGS_SCHEMA, "custom-keybindings"])

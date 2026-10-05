@@ -217,3 +217,21 @@ fn desired_systemd_unit_errors_when_vault_does_not_resolve() {
         "error names the cause: {err:#}"
     );
 }
+
+#[test]
+fn hotkey_command_runs_borg_ingest_clipboard() {
+    assert_eq!(
+        hotkey_command(Path::new("/home/tester/.cargo/bin/sb")),
+        "/home/tester/.cargo/bin/sb borg ingest --clipboard"
+    );
+}
+
+#[test]
+fn launchd_plist_runs_borg_daemon_start_under_the_installed_label() {
+    let plist = render_launchd_plist("/home/tester/.cargo/bin/sb");
+    assert!(plist.contains(
+        "<string>/home/tester/.cargo/bin/sb</string>\n        <string>borg</string>\n        <string>daemon</string>\n        <string>--start</string>"
+    ));
+    assert!(plist.contains("<string>com.obsidian-borg</string>"));
+    assert!(plist.contains("/tmp/obsidian-borg.stdout.log"));
+}
