@@ -163,9 +163,7 @@ async fn vision_call(
         }]
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(VISION_HTTP_TIMEOUT_SECS))
-        .build()
+    let client = vault::http::client(Duration::from_secs(VISION_HTTP_TIMEOUT_SECS))
         .context("Failed to build vision HTTP client")?;
 
     // Hold a process-wide vision permit across the HTTP call so total in-flight

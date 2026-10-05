@@ -27,6 +27,7 @@ use distillers::{
     SessionConfig, SessionMetadata, VideoMetadata,
 };
 use eyre::{Context, Result};
+use std::time::Duration;
 use vault::distilled::Distilled;
 
 /// Translate borg's GitHub fetcher metadata into the distillers-crate
@@ -587,15 +588,18 @@ pub async fn distill_for_publish_vocab(
 /// success. On any error (URL not a repo root, REST fetch failed, dispatch
 /// failure) returns a `fallback_distilled` so publish always has a payload
 /// to render - degraded distillation never blocks the note from landing.
+/// `github_timeout` (`pipeline.github-timeout`) bounds each REST request; a
+/// client that cannot be built takes the same fallback as a failed fetch.
 pub async fn distill_for_publish_repo(
     fabric: &FabricConfig,
     staging: &StagingConfig,
+    github_timeout: Duration,
     trace_id: &str,
     url: &str,
     article_md_fallback: &str,
     capture_note: Option<&str>,
 ) -> Distilled {
-    log::debug!("distill_for_publish_repo: trace={trace_id} url={url}");
+    log::debug!("distill_for_publish_repo: trace={trace_id} url={url} github_timeout={github_timeout:?}");
     let Some((owner, repo)) = crate::github::parse_repo_url(url) else {
         log::warn!("[{trace_id}] distill_for_publish_repo: url is not a github repo root: {url}; using fallback");
         return distillers::fallback_distilled(
@@ -607,7 +611,11 @@ pub async fn distill_for_publish_repo(
         );
     };
     let started = std::time::Instant::now();
-    let fetch_result: RepoFetch = match GitHubFetcher::new().fetch_repo(&owner, &repo).await {
+    let fetched = match GitHubFetcher::new(github_timeout) {
+        Ok(fetcher) => fetcher.fetch_repo(&owner, &repo).await,
+        Err(e) => Err(e),
+    };
+    let fetch_result: RepoFetch = match fetched {
         Ok(r) => r,
         Err(e) => {
             log::warn!(

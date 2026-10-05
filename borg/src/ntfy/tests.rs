@@ -109,3 +109,60 @@ fn test_parse_invalid_json_falls_through_to_text() {
     let result = parse_message(r#"{"not_valid_json": }"#);
     assert_eq!(result, Some(ParsedMessage::Text(r#"{"not_valid_json": }"#.to_string())));
 }
+
+mod stream {
+    use super::*;
+    use crate::stub::{Behavior, serve};
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    /// Run the subscriber against a stub for at most `window`, returning the
+    /// number of connections it opened once `want` is reached or the window
+    /// closes.
+    async fn connections_within(behavior: Behavior, read_timeout: Duration, window: Duration, want: usize) -> usize {
+        let (port, seen): (u16, Arc<Mutex<Vec<String>>>) = serve(behavior).await;
+        let subscriber = tokio::spawn(run(
+            format!("http://127.0.0.1:{port}"),
+            "topic".to_string(),
+            None,
+            read_timeout,
+            Arc::new(Config::default()),
+            None,
+            None,
+        ));
+        let started = Instant::now();
+        while started.elapsed() < window && seen.lock().expect("stub log").len() < want {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!subscriber.is_finished(), "the subscriber must never end on its own");
+        subscriber.abort();
+        seen.lock().expect("stub log").len()
+    }
+
+    #[tokio::test]
+    async fn a_stalled_stream_is_reconnected_through_backoff() {
+        let read_timeout = Duration::from_millis(300);
+        // 3x read-timeout plus the backoff delays (1 s, 2 s), and 500 ms slack.
+        let window = 3 * read_timeout + Duration::from_secs(3) + Duration::from_millis(500);
+        let n = connections_within(Behavior::HeadersThenStall, read_timeout, window, 3).await;
+        assert!(
+            n >= 3,
+            "expected the first connection plus 2 reconnects within {window:?}, saw {n}"
+        );
+    }
+
+    #[tokio::test]
+    async fn keepalives_inside_the_read_timeout_keep_one_connection() {
+        let read_timeout = Duration::from_millis(600);
+        let n = connections_within(
+            Behavior::NtfyKeepalives {
+                every: read_timeout / 3,
+            },
+            read_timeout,
+            3 * read_timeout,
+            2,
+        )
+        .await;
+        assert_eq!(n, 1, "a stream with keepalives must not reconnect");
+    }
+}

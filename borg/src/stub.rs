@@ -21,6 +21,9 @@ pub(crate) enum Behavior {
     RequireToken { token: String, body: String },
     /// Answers 401 with a non-JSON body.
     Unauthorized,
+    /// An ntfy subscription: chunked headers, an `open` event, then a
+    /// `keepalive` event every `every`, for 30 s.
+    NtfyKeepalives { every: Duration },
 }
 
 /// Starts the stub; returns its port and the raw text of every request seen.
@@ -67,6 +70,10 @@ pub(crate) async fn serve(behavior: Behavior) -> (u16, Arc<Mutex<Vec<String>>>) 
                                 .to_string()
                         }
                     }
+                    Behavior::NtfyKeepalives { every } => {
+                        stream_ntfy_keepalives(&mut sock, *every).await;
+                        return;
+                    }
                     Behavior::Unauthorized => {
                         "HTTP/1.1 401 Unauthorized\r\ncontent-length: 13\r\nconnection: close\r\n\r\nunauthorized\n"
                             .to_string()
@@ -77,6 +84,25 @@ pub(crate) async fn serve(behavior: Behavior) -> (u16, Arc<Mutex<Vec<String>>>) 
         }
     });
     (port, seen)
+}
+
+async fn stream_ntfy_keepalives(sock: &mut tokio::net::TcpStream, every: Duration) {
+    let headers = "HTTP/1.1 200 OK\r\ncontent-type: application/x-ndjson\r\ntransfer-encoding: chunked\r\n\r\n";
+    if sock.write_all(headers.as_bytes()).await.is_err() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let mut n = 0u32;
+    while started.elapsed() < Duration::from_secs(30) {
+        let event = if n == 0 { "open" } else { "keepalive" };
+        let line = format!("{{\"id\":\"k{n}\",\"event\":\"{event}\"}}\n");
+        let chunk = format!("{:x}\r\n{line}\r\n", line.len());
+        if sock.write_all(chunk.as_bytes()).await.is_err() {
+            return;
+        }
+        n += 1;
+        tokio::time::sleep(every).await;
+    }
 }
 
 fn json_reply(status: &str, body: &str) -> String {

@@ -22,25 +22,21 @@ pub trait Fetcher: Send + Sync {
 /// bot IPs (Jina) but not browser UAs (e.g. XDA Developers on 2026-04-19).
 pub struct BrowserUaFetcher {
     client: reqwest::Client,
-    /// Bound on the markitdown subprocess (`pipeline.browser-ua-timeout`).
-    markitdown_timeout: Duration,
+    /// `pipeline.browser-ua-timeout`: bounds the HTTP fetch and, separately,
+    /// the markitdown subprocess.
+    timeout: Duration,
 }
 
 impl BrowserUaFetcher {
-    pub fn new(markitdown_timeout: Duration) -> Self {
-        let client = reqwest::Client::builder()
+    /// A failed client build is an error, never a client without the timeout.
+    pub fn new(timeout: Duration) -> Result<Self> {
+        log::debug!("BrowserUaFetcher::new: timeout={timeout:?}");
+        let client = vault::http::builder(vault::http::Timeouts::total(timeout))
             .user_agent(BROWSER_UA)
             .redirect(reqwest::redirect::Policy::limited(5))
-            .timeout(std::time::Duration::from_secs(30))
             .build()
-            .unwrap_or_else(|e| {
-                log::warn!("browser-ua: falling back to default client: {e:#}");
-                reqwest::Client::new()
-            });
-        Self {
-            client,
-            markitdown_timeout,
-        }
+            .context("browser-ua: cannot build the HTTP client")?;
+        Ok(Self { client, timeout })
     }
 }
 
@@ -85,7 +81,7 @@ impl Fetcher for BrowserUaFetcher {
         // Pipe the raw HTML through markitdown-cli to get markdown.
         let md = tokio::task::spawn_blocking({
             let raw = raw.clone();
-            let timeout = self.markitdown_timeout;
+            let timeout = self.timeout;
             move || run_markitdown(markitdown_stdin_command(), raw, timeout)
         })
         .await

@@ -14,6 +14,7 @@
 //! callers get 5K req/h.
 
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use eyre::{Context, Result, bail};
@@ -280,36 +281,30 @@ struct ReadmeResponse {
 pub struct GitHubFetcher {
     client: reqwest::Client,
     token: Option<String>,
+    api_base: String,
 }
 
 impl GitHubFetcher {
-    pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .user_agent(USER_AGENT)
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|e| {
-                    log::warn!("GitHubFetcher: falling back to default client: {e:#}");
-                    reqwest::Client::new()
-                }),
+    /// `timeout` (`pipeline.github-timeout`) bounds each API request. A failed
+    /// client build is an error, never a client without the timeout.
+    pub fn new(timeout: Duration) -> Result<Self> {
+        log::debug!("GitHubFetcher::new: timeout={timeout:?}");
+        let client = vault::http::builder(vault::http::Timeouts::total(timeout))
+            .user_agent(USER_AGENT)
+            .build()
+            .context("GitHubFetcher: cannot build the HTTP client")?;
+        Ok(Self {
+            client,
             token: std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()),
-        }
+            api_base: API_BASE.to_string(),
+        })
     }
 
-    /// Build with an explicit token (for tests).
-    pub fn with_token(token: Option<String>) -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .user_agent(USER_AGENT)
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|e| {
-                    log::warn!("GitHubFetcher: falling back to default client: {e:#}");
-                    reqwest::Client::new()
-                }),
-            token,
-        }
+    /// Point the fetcher at a stub API instead of `api.github.com`.
+    #[cfg(test)]
+    pub(crate) fn with_api_base(mut self, api_base: &str) -> Self {
+        self.api_base = api_base.to_string();
+        self
     }
 
     /// Fetch repo metadata + README and render a transcript. Returns
@@ -366,7 +361,7 @@ impl GitHubFetcher {
     }
 
     async fn fetch_repo_meta_bytes(&self, owner: &str, repo: &str) -> Result<Vec<u8>> {
-        let url = format!("{API_BASE}/repos/{owner}/{repo}");
+        let url = format!("{}/repos/{owner}/{repo}", self.api_base);
         let mut req = self.client.get(&url).header("Accept", "application/vnd.github+json");
         if let Some(token) = &self.token {
             req = req.header("Authorization", format!("Bearer {token}"));
@@ -381,7 +376,7 @@ impl GitHubFetcher {
     }
 
     async fn fetch_readme_bytes(&self, owner: &str, repo: &str) -> Result<Vec<u8>> {
-        let url = format!("{API_BASE}/repos/{owner}/{repo}/readme");
+        let url = format!("{}/repos/{owner}/{repo}/readme", self.api_base);
         let mut req = self.client.get(&url).header("Accept", "application/vnd.github+json");
         if let Some(token) = &self.token {
             req = req.header("Authorization", format!("Bearer {token}"));
@@ -415,12 +410,6 @@ fn decode_base64_readme(content: &str) -> Result<String> {
     let cleaned: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     let bytes = STANDARD.decode(&cleaned).context("github: base64 decode failed")?;
     String::from_utf8(bytes).context("github: readme not utf-8")
-}
-
-impl Default for GitHubFetcher {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// `Fetcher` adapter. Returns a `FetchResult` whose bytes are the rendered

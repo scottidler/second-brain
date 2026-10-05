@@ -62,11 +62,15 @@ telegram:
 # force-overwrite must never be triggerable by someone who guesses the topic).
 # Use a long, RANDOM, reserved topic AND set ntfy.token (an access token for a
 # private/ACL-protected topic) - do NOT rely on the topic name alone.
+# `read-timeout` (humantime) is the longest silence tolerated before the
+# subscription is dropped and reconnected; keep it above the server's
+# keepalive interval (ntfy.sh sends one every 45s; default is 3x that).
 # ntfy:
 #   server: https://ntfy.sh
 #   topic: borg-<long-random-string>
 #   token: NTFY_TOKEN
 #   host: desk
+#   read-timeout: 135s
 
 # Signal transport — peer to Telegram with end-to-end-encrypted envelope
 # routing. Bootstrap is out-of-band: stop borg, run
@@ -125,11 +129,13 @@ youtube:
 #   port: 8181
 #   request-timeout: 10s
 
-# Pipeline subprocess bounds. `browser-ua-timeout` (humantime) bounds the
-# markitdown conversion in the browser-UA article fallback; the other
-# `*-timeout-secs` keys are plain seconds. Defaults shown.
+# Pipeline network and subprocess bounds. `browser-ua-timeout` (humantime)
+# bounds the browser-UA article fallback's HTTP fetch and, separately, its
+# markitdown conversion; `github-timeout` bounds each GitHub REST request for
+# a repo URL. The other `*-timeout-secs` keys are plain seconds. Defaults shown.
 # pipeline:
 #   browser-ua-timeout: 30s
+#   github-timeout: 30s
 
 # Tag pipeline. `canonical-path` / `mapping-path` default to the shared files
 # `sb bootstrap` drops into ~/.config/sb/; `reject-concatenated` refuses tags

@@ -7,15 +7,10 @@ use tokio::process::Command as TokioCommand;
 
 use crate::config::{PipelineConfig, YoutubeSlidesConfig};
 
-/// Shared HTTP client for ad-hoc YouTube subtitle URL downloads. Built lazily;
-/// the timeout below applies per-request (connect + body), so a hung CDN
-/// cannot leave the pipeline waiting forever.
-static SUBTITLE_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(60)) // hard ceiling; per-call timeout below tightens this
-        .build()
-        .expect("build subtitle reqwest client")
-});
+/// Total bound on one subtitle URL download (connect + body), so a hung CDN
+/// cannot leave the pipeline waiting forever. `pipeline.subtitle-fetch-timeout-secs`
+/// tightens the wait for the response headers below it.
+const SUBTITLE_HTTP_CEILING: Duration = Duration::from_secs(60);
 
 static VIDEO_ID_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
@@ -204,9 +199,10 @@ pub async fn fetch_subtitles_raw(url: &str, pipeline: &PipelineConfig) -> Result
         }
         if let Some(sub_url) = en_sub.get("url").and_then(|u| u.as_str()) {
             log::debug!("Downloading subtitles from URL: {sub_url}");
+            let client = vault::http::client(SUBTITLE_HTTP_CEILING).context("subtitle download client")?;
             let response = match tokio::time::timeout(
                 Duration::from_secs(pipeline.subtitle_fetch_timeout_secs),
-                SUBTITLE_HTTP_CLIENT.get(sub_url).send(),
+                client.get(sub_url).send(),
             )
             .await
             {
