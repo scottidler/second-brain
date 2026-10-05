@@ -259,8 +259,8 @@ async fn test_extract_frames_disabled_returns_empty() {
         enabled: false,
         ..YoutubeSlidesConfig::default()
     };
-    let tmp = std::env::temp_dir().join("borg-test-frames-disabled");
-    let _ = std::fs::remove_dir_all(&tmp);
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tmp_dir.path();
     let thread_args = [
         "-threads".to_string(),
         "2".to_string(),
@@ -278,7 +278,6 @@ async fn test_extract_frames_disabled_returns_empty() {
     .await
     .expect("disabled path should not error");
     assert!(frames.is_empty());
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// Synthesize a small test mp4 with `ffmpeg -f lavfi` and run frame extraction:
@@ -291,9 +290,11 @@ async fn test_extract_frames_synthetic_video() {
         .arg("-version")
         .output()
         .expect("ffmpeg must be on PATH for this test (CI installs it via apt)");
-    let tmp = std::env::temp_dir().join("borg-test-frames-synth");
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).expect("create tmp");
+    // A per-run tempdir, not a fixed `temp_dir()/borg-test-frames-synth`: two
+    // concurrent borg test processes (two worktrees' `otto ci`) shared that
+    // path and each `remove_dir_all`ed the other's frames mid-extraction.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tmp_dir.path();
     let video = tmp.join("synthetic.mp4");
 
     // 10s of testsrc at 5fps, 320x240. Plenty of motion so mpdecimate
@@ -358,8 +359,6 @@ async fn test_extract_frames_synthetic_video() {
     let sidecar: FramesSidecar = serde_yaml::from_str(&sidecar_yaml).expect("parse sidecar");
     assert_eq!(sidecar.frames_extracted as usize, frames.len());
     assert_eq!(sidecar.video_duration_secs, 10.0);
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
