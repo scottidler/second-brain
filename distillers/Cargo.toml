@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 description = "Per-kind Stage-2 distillers producing the vault::Distilled contract"
 
+[features]
+# Test doubles (`FakeFabric`); enabled by dev-dependencies, never in a release build.
+test-util = []
+
 [dependencies]
 vault = { path = "../vault" }
 async-trait = "0.1"
@@ -28,6 +32,7 @@ url = { workspace = true }
 # which are feature-gated behind `search`. Production builds of distillers do
 # NOT enable this feature, so rusqlite stays out of the borg dependency tree.
 vault = { path = "../vault", features = ["search"] }
+distillers = { path = ".", features = ["test-util"] }
 
 [lints]
 workspace = true

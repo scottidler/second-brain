@@ -314,7 +314,7 @@ fn retention_window_clamps() {
 
 #[test]
 fn an_unreadable_body_warns_with_the_trace_id_and_reads_as_empty() {
-    crate::logcapture::install();
+    vault::capture::install();
     let tmp = TempDir::new().unwrap();
     let store = FsArtifactStore::new(tmp.path(), StagingLayout::PerTrace);
     let env = Envelope {
@@ -328,12 +328,12 @@ fn an_unreadable_body_warns_with_the_trace_id_and_reads_as_empty() {
     let raw = store.read_raw("tg-bodywarn").unwrap();
 
     assert!(raw.body.is_empty());
-    assert_eq!(crate::logcapture::warns_containing("tg-bodywarn").len(), 1);
+    assert_eq!(vault::capture::warns_containing("tg-bodywarn").len(), 1);
 }
 
 #[test]
 fn an_absent_body_is_normal_and_does_not_warn() {
-    crate::logcapture::install();
+    vault::capture::install();
     let tmp = TempDir::new().unwrap();
     let store = FsArtifactStore::new(tmp.path(), StagingLayout::PerTrace);
     let env = Envelope {
@@ -345,12 +345,12 @@ fn an_absent_body_is_normal_and_does_not_warn() {
     let raw = store.read_raw("tg-nobodyfile").unwrap();
 
     assert!(raw.body.is_empty());
-    assert!(crate::logcapture::warns_containing("tg-nobodyfile").is_empty());
+    assert!(vault::capture::warns_containing("tg-nobodyfile").is_empty());
 }
 
 #[test]
 fn a_trace_with_an_unreadable_envelope_is_excluded_with_a_warn_naming_it() {
-    crate::logcapture::install();
+    vault::capture::install();
     let tmp = TempDir::new().unwrap();
     let store = FsArtifactStore::new(tmp.path(), StagingLayout::PerTrace);
     let env = Envelope {
@@ -365,5 +365,5 @@ fn a_trace_with_an_unreadable_envelope_is_excluded_with_a_warn_naming_it() {
     let listed = store.list_traces(&TraceFilter::default()).unwrap();
 
     assert_eq!(listed, vec!["tg-goodlisted".to_string()]);
-    assert_eq!(crate::logcapture::warns_containing("tg-brokenenv").len(), 1);
+    assert_eq!(vault::capture::warns_containing("tg-brokenenv").len(), 1);
 }

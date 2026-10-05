@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 use eyre::{Context, Result};
 
 pub use fixtures::{Fixture, judge_note_text, load, render_options_for_kind};
-pub use judge::{AxisScores, DistillationJudge, FabricJudge, MockJudge};
+#[cfg(test)]
+pub use judge::MockJudge;
+pub use judge::{AxisScores, DistillationJudge, FabricJudge};
 pub use report::{CalibrationPanel, EvalReport, KindReport, ListicleMetric, NoteSizeMetric};
 
 /// Char budget for the source text shown to the judge. Larger than the oracle

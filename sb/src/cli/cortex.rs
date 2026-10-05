@@ -417,8 +417,6 @@ pub struct EmbedArgs {
     /// on a fresh machine so the first real embed needs no network
     #[arg(long)]
     pub prefetch_model: bool,
-    #[arg(long, hide = true)]
-    pub use_mock: bool,
 }
 impl From<EmbedArgs> for opts::EmbedOpts {
     fn from(a: EmbedArgs) -> Self {
@@ -429,7 +427,6 @@ impl From<EmbedArgs> for opts::EmbedOpts {
             model: a.model,
             batch_size: a.batch_size,
             prefetch_model: a.prefetch_model,
-            use_mock: a.use_mock,
         }
     }
 }

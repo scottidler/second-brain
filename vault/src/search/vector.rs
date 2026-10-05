@@ -844,6 +844,7 @@ impl SearchIndex {
         ))
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     /// Insert a minimal `notes` row for tests in other crates. Only
     /// the columns required by the vector search path are populated;
     /// the rest get sensible defaults. The body and summary are also
@@ -852,6 +853,7 @@ impl SearchIndex {
         self.insert_test_note_full(path, note_type, "body", "summary", modified_at)
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     /// Same as [`insert_test_note_row`] but with explicit body and
     /// summary so the FTS5 path can be exercised by tests.
     pub fn insert_test_note_full(
@@ -873,6 +875,7 @@ impl SearchIndex {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     /// Set the `notes.capture_note` column for a test row (Phase 9). Lets
     /// tests in other crates exercise the title + capture-note + summary
     /// embed-text assembly without reaching into the private `conn`.
@@ -884,6 +887,7 @@ impl SearchIndex {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     /// Set the `notes.claims` column for a test row (Phase 9). Claims are
     /// stored as newline-joined text (the shape the indexer writes); lets
     /// tests in other crates drive the claim-embedding arm without reaching
@@ -894,6 +898,7 @@ impl SearchIndex {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     /// Set the `notes.trace` column for a test row (2026-07-07 distillation
     /// output restore). The trace is the per-trace staging directory name; lets
     /// tests in other crates drive the staged-transcript embedding arm without

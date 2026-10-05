@@ -56,6 +56,8 @@ default-features = false
 features = ["client", "gateway", "model", "rustls_backend"]
 
 [dev-dependencies]
+vault = { path = "../vault", features = ["schemars", "http", "test-util"] }
+distillers = { path = "../distillers", features = ["test-util"] }
 filetime = "0.2.27"
 
 [lints]

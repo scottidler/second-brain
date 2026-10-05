@@ -7,7 +7,9 @@
 //! text, and the distilled note — never the extractor, model, or any pipeline
 //! metadata — so the score reflects the artifact, not its provenance.
 
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use eyre::{Result, bail};
@@ -53,6 +55,7 @@ pub trait DistillationJudge {
     fn judge(&self, kind: &str, source: &str, note: &str) -> Result<AxisScores>;
 }
 
+#[cfg(test)]
 /// Deterministic, fixture-driven judge for tests. Returns per-kind scores with a
 /// fallback default, and counts calls so the cache-stability test can assert
 /// that a re-run makes zero judge calls.
@@ -63,6 +66,7 @@ pub struct MockJudge {
     calls: AtomicUsize,
 }
 
+#[cfg(test)]
 impl MockJudge {
     /// A judge returning `default` for every kind unless overridden.
     pub fn new(default: AxisScores) -> Self {
@@ -85,6 +89,7 @@ impl MockJudge {
     }
 }
 
+#[cfg(test)]
 impl DistillationJudge for MockJudge {
     fn judge(&self, kind: &str, _source: &str, _note: &str) -> Result<AxisScores> {
         self.calls.fetch_add(1, Ordering::SeqCst);

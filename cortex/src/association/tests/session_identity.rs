@@ -27,7 +27,7 @@ fn hv_e5d240_note(path: &str, slug: Option<&str>) -> Note {
 /// `hv-353663`/`hv-95813b`/`hv-efc530`/`hv-067d05`/`hv-e5c476`, each a
 /// DIFFERENT primary session and a DIFFERENT trace, that only collided with
 /// the `hv-e5d240` cohort because of the shared generic title-fallback slug -
-/// the mirror-image case `group_by_slug` was blind to).
+/// the mirror-image case slug-grouping was blind to).
 fn other_session_note(path: &str, trace: &str, primary_id: &str) -> Note {
     NoteBuilder::new(path)
         .note_type("session")
@@ -205,4 +205,40 @@ fn legacy_notes_group_by_transitive_session_id_overlap_when_trace_is_absent() {
     let mut group = groups[0].clone();
     group.sort_unstable();
     assert_eq!(group, vec![0, 1, 2]);
+}
+
+#[test]
+fn a_non_session_note_is_never_a_group_member() {
+    let trace_note =
+        |path: &str, note_type: &str| NoteBuilder::new(path).note_type(note_type).trace("hv-shared").build();
+    let notes = vec![
+        trace_note("a.md", "session"),
+        trace_note("b.md", "session"),
+        trace_note("article.md", "article"),
+    ];
+
+    let groups = group_by_session_identity(&notes);
+
+    assert_eq!(groups, vec![vec![0, 1]], "the article sharing the trace stays out");
+}
+
+#[test]
+fn empty_input_yields_no_groups() {
+    let notes: Vec<Note> = Vec::new();
+    assert!(group_by_session_identity(&notes).is_empty());
+}
+
+#[test]
+fn trace_groups_are_ordered_by_trace_not_scan_order() {
+    let session = |path: &str, trace: &str| NoteBuilder::new(path).note_type("session").trace(trace).build();
+    let notes = vec![
+        session("z1.md", "hv-zzz"),
+        session("z2.md", "hv-zzz"),
+        session("a1.md", "hv-aaa"),
+        session("a2.md", "hv-aaa"),
+    ];
+
+    let groups = group_by_session_identity(&notes);
+
+    assert_eq!(groups, vec![vec![2, 3], vec![0, 1]], "hv-aaa sorts before hv-zzz");
 }

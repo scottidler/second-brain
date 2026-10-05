@@ -39,7 +39,7 @@ borg owns durable capture, multi-channel ingest, and the staged pipeline that pu
 
 **Sources (transports):** `telegram.rs`, `discord.rs`, `ntfy.rs`, `github.rs` (+`github/`), `youtube.rs`, `slides.rs`, `jina.rs`, `signal.rs` (+`signal/`).
 
-**Test-only:** `logcapture.rs` (process-wide WARN capture for asserting on a logged warning), `stub.rs` (stub daemon on `127.0.0.1:0` with silent / stalled-body / 401 / token-required / ntfy-keepalive behaviors, shared by the daemon-client, fetcher, and ntfy-stream tests).
+**Test-only:** the process-wide WARN capture is `vault::capture` (behind vault's `test-util` feature, shared by borg, cortex, and sb tests), `stub.rs` (stub daemon on `127.0.0.1:0` with silent / stalled-body / 401 / token-required / ntfy-keepalive behaviors, shared by the daemon-client, fetcher, and ntfy-stream tests).
 
 **Core pipeline:** `pipeline.rs` (+`pipeline/`), `stages.rs` (+`stages/`), `intake.rs` (+`intake/`), `receipts.rs` (+`receipts/`), `queue.rs` (+`queue/`: pure ingest-queue batch/partition `snapshot`, SQL `load`, and the typed-error HTTP client `fetch` used by `sb borg queue`), `router.rs`, `routes.rs`, `dispatch.rs` (per-transport pipeline-run + notify boilerplate shared by telegram/ntfy/routes), `triage.rs`, `replay.rs` (+`replay/`), `backfill.rs` (+`backfill/`), `harvest.rs` (+`harvest/`, `sb borg harvest`: pull-based ingestion from clyde session exports).
 

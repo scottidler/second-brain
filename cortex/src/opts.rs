@@ -212,9 +212,6 @@ pub struct EmbedOpts {
     /// have network during install but may be offline at oracle's
     /// first-query time.
     pub prefetch_model: bool,
-
-    /// Use the deterministic MockEmbedder. Test-only.
-    pub use_mock: bool,
 }
 
 #[derive(Debug, Clone)]

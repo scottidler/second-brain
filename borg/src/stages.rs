@@ -7,7 +7,9 @@ pub mod fetcher;
 pub mod raw;
 pub mod summarize;
 
-pub use artifact::{ArtifactStore, FsArtifactStore, MemArtifactStore};
+#[cfg(test)]
+pub use artifact::MemArtifactStore;
+pub use artifact::{ArtifactStore, FsArtifactStore};
 pub use distill::{DistillStage, distill_kind_from_ingest};
 pub use extract::{Extractor, PassthroughExtractor};
 pub use fetcher::{BrowserUaFetcher, Fetcher, FsCachingFetcher};

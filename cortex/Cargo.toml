@@ -35,6 +35,8 @@ url = { workspace = true }
 sha2 = "0.11.0"
 
 [dev-dependencies]
+vault = { path = "../vault", features = ["search", "watcher", "vec", "test-util"] }
+distillers = { path = "../distillers", features = ["test-util"] }
 async-trait = "0.1.89"
 serial_test = { workspace = true }
 tempfile = { workspace = true }

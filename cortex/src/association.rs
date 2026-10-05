@@ -33,62 +33,11 @@ use crate::config::{AssociationConfig, Config, SimilaritySource};
 use crate::opts::AssociateOpts;
 use crate::vault::Note;
 
-/// Group session notes that share the same content-derived `slug:`
-/// frontmatter value (borg's harvest naming, v0.12.2 - a slug collision is
-/// an association signal, not a naming accident, per the design's Problem
-/// Statement).
-///
-/// Scoped to `content_type == Session`: this action never associates
-/// non-session notes (that is cross-slug work, `cortex::duplicates`' job).
-/// Skips notes with `slug == None` (legacy pre-slug notes; a separate
-/// harvest-slug migration re-slugs them, out of scope here) and notes
-/// carrying a `superseded-by:` tombstone - an already-absorbed note must
-/// never re-group, which is what makes the future merge executor's
-/// soft-retire idempotent.
-///
-/// Groups with fewer than two members are dropped: a lone note has nothing
-/// to associate with.
-///
-/// Returned as index groups into the input `notes` slice (not cloned
-/// `Note`s) so the caller controls ownership. BTreeMap-ordered by slug so
-/// the group order - and therefore any downstream deterministic tie-break -
-/// never depends on `notes`' scan order or hash-map iteration order.
-///
-/// Superseded by [`group_by_session_identity`] as `apply`'s grouping
-/// function (`docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md`
-/// Phase 5): the model-generated slug forks under replay, so a slug
-/// collision is no longer a reliable association signal. Kept (not deleted)
-/// because it has no other caller-visible defect and this design's Phase 5
-/// scope is "fix grouping and collision resolution", not "delete the prior
-/// mechanism" - flagged as having no production caller after this change.
-pub fn group_by_slug(notes: &[Note]) -> Vec<Vec<usize>> {
-    log::debug!("association::group_by_slug: notes={}", notes.len());
-    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (i, note) in notes.iter().enumerate() {
-        if note.frontmatter.note_type.as_deref() != Some(NoteType::Session.as_str()) {
-            continue;
-        }
-        if note.frontmatter.extra.contains_key(vault::tombstone::SUPERSEDED_BY_KEY) {
-            continue;
-        }
-        let Some(slug) = note.frontmatter.extra.get("slug").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        groups.entry(slug.to_string()).or_default().push(i);
-    }
-    let result: Vec<Vec<usize>> = groups.into_values().filter(|members| members.len() >= 2).collect();
-    log::debug!(
-        "association::group_by_slug: groups={} (singletons, legacy, and tombstoned notes dropped)",
-        result.len()
-    );
-    result
-}
-
 /// Group session notes by durable session identity: `trace:` frontmatter,
 /// falling back to `cortex-session-ids` overlap ONLY for legacy notes that
 /// carry no `trace:` at all
 /// (`docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md`
-/// Phase 5, `apply`'s new grouping function, replacing [`group_by_slug`]).
+/// Phase 5, `apply`'s grouping function).
 ///
 /// Two tracks, never mixed:
 ///
@@ -105,7 +54,7 @@ pub fn group_by_slug(notes: &[Note]) -> Vec<Vec<usize>> {
 ///   a trace-keyed group just because it shares a session id with one of that
 ///   group's members.
 ///
-/// Same two guards as `group_by_slug`, carried over verbatim: scoped to
+/// Two guards: scoped to
 /// `content_type == Session`, and a note carrying `superseded-by:` (already
 /// absorbed) is skipped so it never re-groups and re-merges on every daemon
 /// tick.

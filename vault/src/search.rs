@@ -356,7 +356,9 @@ mod schema;
 mod stats;
 
 // The reranker port, test fake, and pure helpers are backend-independent.
-pub use rerank::{MockReranker, Reranker, project_batch_ms, rerank_paths};
+#[cfg(any(test, feature = "test-util"))]
+pub use rerank::MockReranker;
+pub use rerank::{Reranker, project_batch_ms, rerank_paths};
 // The Candle cross-encoder is local model inference, so it lands here (like the
 // embedder); gated to the Candle backend the daemon host must run.
 #[cfg(feature = "vec-candle")]

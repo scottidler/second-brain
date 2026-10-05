@@ -252,7 +252,7 @@ fn run_gate_1_block_body_when_enabled_persists_blocklist_and_rejection() {
 
 // ---- blocklist read-modify-write fails closed ----
 
-use crate::logcapture::{install as install_warn_capture, warns_containing};
+use vault::capture::{install as install_warn_capture, warns_containing};
 
 const CORRUPT_BLOCKLIST: &[u8] = b"domains: [this is not: a map\n";
 

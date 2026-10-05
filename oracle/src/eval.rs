@@ -26,7 +26,9 @@ use crate::config::Config;
 use crate::server::OracleMcpServer;
 use crate::tools::SearchMode;
 
-pub use judge::{FabricJudge, MockJudge, RelevanceJudge};
+#[cfg(test)]
+pub use judge::MockJudge;
+pub use judge::{FabricJudge, RelevanceJudge};
 pub use queries::{EvalQuery, Queries};
 pub use report::{AblationReport, CalibrationPanel, EvalReport, ModeReport};
 

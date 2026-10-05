@@ -498,6 +498,7 @@ impl SearchIndex {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     /// Delete a `notes` row by path, for tests in other crates that need to
     /// simulate `index_vault` dropping a deleted note (and exercise the edge
     /// `ON DELETE CASCADE`). Production deletion goes through `index_vault`'s
