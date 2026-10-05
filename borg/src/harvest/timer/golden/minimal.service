@@ -1,0 +1,18 @@
+[Unit]
+Description=sb borg harvest - nightly Claude-session harvest into the vault (second-brain)
+After=default.target
+
+[Service]
+Type=oneshot
+# Timers run with a stripped PATH; set it explicitly and use the
+# absolute binary below so the run resolves with an empty inherited env.
+# mise shims come first so mise-managed tools (e.g. fabric) win over
+# any stale duplicate elsewhere on PATH.
+Environment="PATH=/home/tester/.local/share/mise/shims:/home/tester/.local/bin:/home/tester/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/home/tester/.cargo/bin/sb borg harvest
+WorkingDirectory=/home/tester
+
+# Hardening (harvest writes the vault + ~/.local/share/sb, so no
+# ProtectHome/ProtectSystem lockdown here).
+NoNewPrivileges=true
+PrivateTmp=true

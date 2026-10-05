@@ -1,0 +1,20 @@
+[Unit]
+Description=sb borg harvest - nightly Claude-session harvest into the vault (second-brain)
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sh -c 'manifest age decrypt ~/repos/scottidler/keep/.secrets -f env > /run/user/1000/sb-harvest.env'
+EnvironmentFile=-/run/user/1000/sb-harvest.env
+# Timers run with a stripped PATH; set it explicitly and use the
+# absolute binary below so the run resolves with an empty inherited env.
+# mise shims come first so mise-managed tools (e.g. fabric) win over
+# any stale duplicate elsewhere on PATH.
+Environment="PATH=/home/tester/.local/share/mise/shims:/home/tester/.local/bin:/home/tester/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/home/tester/.cargo/bin/sb borg --config <XDG_CONFIG_HOME>/sb/borg.yml harvest
+WorkingDirectory=/home/tester
+
+# Hardening (harvest writes the vault + ~/.local/share/sb, so no
+# ProtectHome/ProtectSystem lockdown here).
+NoNewPrivileges=true
+PrivateTmp=true

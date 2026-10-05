@@ -220,3 +220,67 @@ fn config_flag_goes_before_the_subcommand_not_after() {
     let harvest_at = exec.rfind(" harvest").expect("subcommand present");
     assert!(config_at < harvest_at, "--config must precede the subcommand:\n{exec}");
 }
+
+// Byte-exact goldens (2026-10-05 quality-review-fixes, Phase 18).
+//
+// `render_units` is not yet pure: it asks `vault::paths::borg_config().exists()`
+// (Phase 19 removes that). The seam pinned here is `XDG_CONFIG_HOME`, under
+// `ENV_LOCK`: an absent case points it at a fixed path that does not exist, a
+// present case at a tempdir holding `sb/borg.yml`, whose path is replaced by
+// `<XDG_CONFIG_HOME>` before comparing so the golden is machine-independent.
+// The real HOME and `~/.config/sb` are never consulted.
+
+const ABSENT_CONFIG_HOME: &str = "/golden-xdg-config-home-absent";
+
+/// Render with `XDG_CONFIG_HOME` pinned; `config_present` selects whether
+/// `borg.yml` exists under it.
+fn golden_render(config: &Config, config_present: bool) -> (String, String) {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let config_home: PathBuf = if config_present {
+        std::fs::create_dir_all(tmp.path().join("sb")).expect("mkdir sb");
+        std::fs::write(tmp.path().join("sb").join("borg.yml"), "").expect("write borg.yml");
+        tmp.path().to_path_buf()
+    } else {
+        PathBuf::from(ABSENT_CONFIG_HOME)
+    };
+
+    let prev = std::env::var_os("XDG_CONFIG_HOME");
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_home) };
+    let (service, timer) = render_units(
+        &PathBuf::from("/home/tester"),
+        &PathBuf::from("/home/tester/.cargo/bin/sb"),
+        config,
+    );
+    match prev {
+        Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+    }
+
+    let placeholder = "<XDG_CONFIG_HOME>";
+    let home = config_home.display().to_string();
+    (service.replace(&home, placeholder), timer.replace(&home, placeholder))
+}
+
+#[test]
+fn golden_harvest_service_minimal() {
+    let (service, _timer) = golden_render(&cfg("daily"), false);
+    assert_eq!(service, include_str!("golden/minimal.service"));
+}
+
+#[test]
+fn golden_harvest_service_full() {
+    let mut config = cfg("daily");
+    config.harvest.env_bootstrap = Some(EnvBootstrapConfig {
+        command: "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env".to_string(),
+        env_file: PathBuf::from("/run/user/1000/sb-harvest.env"),
+    });
+    let (service, _timer) = golden_render(&config, true);
+    assert_eq!(service, include_str!("golden/full.service"));
+}
+
+#[test]
+fn golden_harvest_timer_nightly() {
+    let (_service, timer) = golden_render(&cfg("*-*-* 04:30:00"), false);
+    assert_eq!(timer, include_str!("golden/nightly.timer"));
+}

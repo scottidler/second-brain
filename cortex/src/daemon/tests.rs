@@ -1246,3 +1246,63 @@ fn test_render_systemd_unit_path_includes_mise_shims_and_excludes_go_bin() {
         "mise shims must come before .local/bin so mise-managed tools win:\n{path_line}"
     );
 }
+
+// Byte-exact goldens (2026-10-05 quality-review-fixes, Phase 18).
+//
+// `render_systemd_unit` is not yet pure: it asks `cortex_config().exists()`
+// (-> `XDG_CONFIG_HOME`) and `xdg_data_dir()` (-> `XDG_DATA_HOME`); Phase 19
+// removes both. The seam pinned here is those two env vars, under
+// `testutil::lock_env()` plus the `xdg_data_home` serial key the existing
+// data-dir test uses. `XDG_DATA_HOME` is a fixed path (only joined, never
+// read). `XDG_CONFIG_HOME` is a fixed nonexistent path, or a tempdir holding
+// `sb/cortex.yml` whose path is replaced by `<XDG_CONFIG_HOME>` before
+// comparing. The real HOME and `~/.config/sb` are never consulted.
+
+fn golden_render(config: &Config, config_present: bool) -> String {
+    let _lock = crate::testutil::lock_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_home = if config_present {
+        std::fs::create_dir_all(tmp.path().join("sb")).expect("mkdir sb");
+        std::fs::write(tmp.path().join("sb").join("cortex.yml"), "").expect("write cortex.yml");
+        tmp.path().to_path_buf()
+    } else {
+        std::path::PathBuf::from("/golden-xdg-config-home-absent")
+    };
+    let _config_env = crate::testutil::EnvGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _data_env = crate::testutil::EnvGuard::set("XDG_DATA_HOME", std::path::Path::new("/golden-xdg-data-home"));
+
+    let unit = render_systemd_unit(
+        std::path::Path::new("/home/tester"),
+        std::path::Path::new("/home/tester/.cargo/bin/sb"),
+        std::path::Path::new("/home/tester/repos/scottidler/obsidian"),
+        config,
+    );
+    unit.replace(&config_home.display().to_string(), "<XDG_CONFIG_HOME>")
+}
+
+#[serial_test::serial(xdg_data_home)]
+#[test]
+fn golden_cortex_service_minimal() {
+    assert_eq!(
+        golden_render(&Config::default(), false),
+        include_str!("golden/minimal.service")
+    );
+}
+
+#[serial_test::serial(xdg_data_home)]
+#[test]
+fn golden_cortex_service_full() {
+    let config = Config {
+        log_level: "debug".to_string(),
+        daemon: DaemonConfig {
+            rayon_threads: 8,
+            env_bootstrap: Some(EnvBootstrapConfig {
+                command: "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env".to_string(),
+                env_file: std::path::PathBuf::from("/run/user/1000/cortex.env"),
+            }),
+            ..DaemonConfig::default()
+        },
+        ..Config::default()
+    };
+    assert_eq!(golden_render(&config, true), include_str!("golden/full.service"));
+}
