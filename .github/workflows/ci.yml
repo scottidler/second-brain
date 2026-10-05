@@ -47,7 +47,8 @@ jobs:
           prefix-key: "v1-rust"
           shared-key: ci
 
-      # Mirrors `otto check` (.otto.yml:55-71) + `otto test` (.otto.yml:73-76).
+      # Mirrors `otto check` + `otto test` (.otto.yml); the scope below is
+      # its CARGO_SCOPE env ("--workspace --features vec").
       # `otto lint` (whitespace -r) is skipped: Scott's own binary, not
       # installable in CI.
       - name: Check formatting
