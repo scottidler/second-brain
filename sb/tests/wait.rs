@@ -19,6 +19,10 @@ const BATCH: &str = "20261004-215943-9f01";
 /// Hard cap on one subprocess; a hang past this fails the test instead of the suite.
 const PROCESS_CAP: Duration = Duration::from_secs(30);
 
+/// A `--timeout 3s` run polls every 2 s, so it ends near 4-5 s unloaded and
+/// near 6.5 s under 64 busy loops. An uncapped request would hit PROCESS_CAP.
+const UNCAPPED_BOUND: Duration = Duration::from_secs(20);
+
 enum Behavior {
     /// Serve these in order (last one repeats): plain `/queue`, then `?batch=`.
     Script {
@@ -130,7 +134,14 @@ struct Run {
 
 fn write_config(dir: &Path, port: u16) -> std::path::PathBuf {
     let path = dir.join("borg.yml");
-    std::fs::write(&path, format!("hotkey:\n  host: 127.0.0.1\n  port: {port}\n")).unwrap();
+    // request-timeout far above any test's `--timeout`: a request that ignores
+    // the `min(request-timeout, time left)` cap runs into PROCESS_CAP, which the
+    // `UNCAPPED_BOUND` asserts catch with room to spare for a loaded host.
+    std::fs::write(
+        &path,
+        format!("hotkey:\n  host: 127.0.0.1\n  port: {port}\n  request-timeout: 60s\n"),
+    )
+    .unwrap();
     path
 }
 
@@ -252,7 +263,7 @@ fn wait_never_drains_exits_five_at_timeout_with_last_snapshot() {
     let run = run_wait(stub.port, &["--timeout", "3s"]);
     assert_eq!(run.code, Some(5), "stderr: {}", run.stderr);
     assert_eq!(final_snapshot(&run)["state"], "draining");
-    assert!(run.elapsed < Duration::from_secs(8), "took {:?}", run.elapsed);
+    assert!(run.elapsed < UNCAPPED_BOUND, "took {:?}", run.elapsed);
 }
 
 #[test]
@@ -262,7 +273,7 @@ fn wait_stub_never_responds_exits_five_not_a_hang() {
     assert_eq!(run.code, Some(5), "stderr: {}", run.stderr);
     assert_eq!(run.stdout, "", "no snapshot was ever received");
     assert!(run.stderr.contains("timeout"), "stderr: {}", run.stderr);
-    assert!(run.elapsed < Duration::from_secs(8), "took {:?}", run.elapsed);
+    assert!(run.elapsed < UNCAPPED_BOUND, "took {:?}", run.elapsed);
 }
 
 #[test]
