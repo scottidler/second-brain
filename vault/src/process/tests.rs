@@ -246,6 +246,26 @@ fn timeout_bounds_a_grandchild_holding_the_pipe_after_the_leader_exits() {
     );
 }
 
+/// A descendant that left the group (`setsid`) survives the group kill and
+/// keeps stdout open; the call still returns at the deadline instead of
+/// waiting for the descendant to exit.
+#[test]
+#[serial(process)]
+fn timeout_returns_while_a_setsid_descendant_holds_the_pipe() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pids = dir.path().join("pids");
+    let script = format!("setsid sleep 10 & echo $$ $! > {}; sleep 30", pids.display());
+    let start = Instant::now();
+    let outcome = run(sh(&script), None, Duration::from_secs(1), "setsid-descendant").expect("run");
+    let elapsed = start.elapsed();
+    let (pgid, escaped) = read_pids(&pids).expect("script wrote its pids");
+    let _reaper = GroupReaper(Some(pgid));
+    // SAFETY: kill(2) on a pid this test spawned; a stale pid is harmless here.
+    unsafe { libc::kill(escaped, libc::SIGKILL) };
+    assert!(matches!(outcome, Outcome::TimedOut { .. }), "got {outcome:?}");
+    assert!(elapsed < PROMPT, "took {elapsed:?}");
+}
+
 #[test]
 #[serial(process)]
 fn kill_registered_kills_a_grandchild_of_a_live_call() {
