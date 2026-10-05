@@ -3,11 +3,11 @@ use crate::harvest::with_xdg_data_home;
 
 #[tokio::test]
 async fn test_ingest_connection_refused() {
-    // Use a port that's almost certainly not listening
+    let closed = vault::testnet::closed_port();
     let config = Config {
         hotkey: config::HotkeyConfig {
             host: "127.0.0.1".to_string(),
-            port: 19999,
+            port: closed.port(),
             ..config::HotkeyConfig::default()
         },
         ..Config::default()

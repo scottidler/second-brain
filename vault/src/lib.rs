@@ -29,6 +29,8 @@ pub mod schema;
 pub mod search;
 pub mod systemd;
 pub mod table;
+#[cfg(any(test, feature = "test-util"))]
+pub mod testnet;
 pub mod text;
 pub mod tombstone;
 pub mod trace;

@@ -10,6 +10,10 @@
 #      `[lints]` + `workspace = true`, so a new crate cannot dodge unwrap_used (F9).
 #   4. `RUST_VERSION:` is the same in ci.yml and release.yml, so the compiler
 #      that tests is the compiler that ships (F20).
+#   5. no freed-port idiom in test code: binding `127.0.0.1:0`, reading the port,
+#      and dropping the listener (or a hardcoded `port: 1NNNN`) to get "a port
+#      nothing listens on". A parallel test's stub can be handed the freed port.
+#      Use `vault::testnet::closed_port()`, which holds the port.
 #
 # Exit: 0 clean | 1 violation | 2 `rg` missing or failed.
 # Every rg call names explicit paths: a bare `rg` reads stdin and hangs.
@@ -85,6 +89,21 @@ if [ -z "$ci_ver" ] || [ -z "$rel_ver" ] || [ "$ci_ver" != "$rel_ver" ]; then
   echo ".github/workflows/release.yml:${line:-1}: RUST_VERSION '${rel_ver:-unset}' differs from ci.yml '${ci_ver:-unset}'"
   FAILED=1
 fi
+
+# 5. Freed-port idiom. Test files only (same globs as check 1).
+CLOSED_PORT_FIX="hold the port with vault::testnet::closed_port() instead"
+hits "bind-and-drop port: a parallel test's stub can be handed the freed port; $CLOSED_PORT_FIX" \
+  -n -U --no-heading 'bind\("127\.0\.0\.1:0"\)[^;}]*;[^}]*\.port\(\)\s*\n\s*\}' \
+  -g '*tests*' -g '**/tests/**' \
+  "${CRATES[@]}"
+hits "listener dropped to free its port: $CLOSED_PORT_FIX" \
+  -n -U --no-heading 'bind\("127\.0\.0\.1:0"\)[^}]*\bdrop\(' \
+  -g '*tests*' -g '**/tests/**' \
+  "${CRATES[@]}"
+hits "hardcoded 'unused' port: nothing reserves it; $CLOSED_PORT_FIX" \
+  -n --no-heading 'port:\s*1\d{4}\b' \
+  -g '*tests*' -g '**/tests/**' \
+  "${CRATES[@]}"
 
 if [ "$FAILED" -eq 1 ]; then
   echo ""

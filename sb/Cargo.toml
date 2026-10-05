@@ -35,7 +35,6 @@ humantime = "2.4.0"
 [dev-dependencies]
 vault = { path = "../vault", features = ["search", "watcher", "vec", "test-util"] }
 serial_test = { workspace = true }
-socket2 = "0.6.3"
 tempfile = { workspace = true }
 
 [lints]

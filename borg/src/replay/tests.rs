@@ -195,14 +195,12 @@ async fn url_trace_replay_never_takes_the_harvest_lock() {
     let mut config = Config::default();
     config.staging.enabled = true;
     config.staging.root = staging_dir.path().to_path_buf();
-    // Point the daemon call at an ephemeral port nothing is listening on
-    // (bind then immediately drop) - `hotkey.port` otherwise defaults to
-    // 8181, which is the REAL borg daemon's port, and this test must never
-    // risk hitting a daemon that happens to be running on the test machine.
-    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    // Point the daemon call at a held closed port - `hotkey.port` otherwise
+    // defaults to 8181, which is the REAL borg daemon's port, and this test must
+    // never risk hitting a daemon that happens to be running on the test machine.
+    let closed = vault::testnet::closed_port();
     config.hotkey.host = "127.0.0.1".to_string();
-    config.hotkey.port = reserved.local_addr().unwrap().port();
-    drop(reserved);
+    config.hotkey.port = closed.port();
 
     let store = FsArtifactStore::from_config(&config.staging);
     let trace_id = "url-abc123";
