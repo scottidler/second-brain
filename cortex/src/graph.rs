@@ -252,8 +252,7 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
         stats.skipped += skipped;
         // Persist this note's build watermarks so it is not reprocessed until
         // its content or embedding changes again.
-        let semantic_built_at = index.note_summary_produced_at(src).unwrap_or(0);
-        index.record_edge_build(src, row.modified_at, semantic_built_at)?;
+        record_watermark(index, src, row.modified_at)?;
         stats.notes_processed += 1;
     }
 
@@ -261,6 +260,14 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
     index.graph_state_set(KEY_LAST_RUN_AT, &now_ts().to_string())?;
 
     Ok(stats)
+}
+
+/// Persist a note's build watermarks. A failed read of the summary watermark
+/// is an error, never "no summary embedding" (`COALESCE` already returns 0
+/// for that): a swallowed error would record 0 and skew the next pass.
+fn record_watermark(index: &SearchIndex, path: &str, content_built_at: i64) -> Result<()> {
+    let semantic_built_at = index.note_summary_produced_at(path)?;
+    index.record_edge_build(path, content_built_at, semantic_built_at)
 }
 
 /// `sb cortex graph --rebuild`: re-derive every deterministic edge for every
@@ -292,8 +299,7 @@ pub fn rebuild(index: &mut SearchIndex, cfg: &crate::config::GraphConfig) -> Res
     log::info!("graph --rebuild: replaced {deleted} deterministic edges with {inserted} (skipped {skipped})");
 
     for row in &pass.rows {
-        let semantic_built_at = index.note_summary_produced_at(&row.path).unwrap_or(0);
-        index.record_edge_build(&row.path, row.modified_at, semantic_built_at)?;
+        record_watermark(index, &row.path, row.modified_at)?;
     }
     index.graph_state_set(KEY_LAST_RUN_AT, &now_ts().to_string())?;
     Ok(stats)

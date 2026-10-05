@@ -883,3 +883,22 @@ fn rebuild_and_backfill_together_are_refused() {
         check_exclusive(&GraphOpts { backfill, rebuild }).expect("one flag at most is fine");
     }
 }
+
+/// A failed watermark read is an error, not "no summary embedding".
+#[test]
+fn record_watermark_propagates_a_read_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (index, db) = seeded_rebuild_index(&dir);
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("DELETE FROM embedding_config WHERE key = 'active_model'", [])
+        .expect("break the active model");
+
+    let err = record_watermark(&index, "notes/a.md", 100).expect_err("the watermark read fails");
+    assert!(format!("{err:#}").contains("no rows"), "got {err:#}");
+    let recorded: i64 = rusqlite::Connection::open(&db)
+        .expect("open")
+        .query_row("SELECT COUNT(*) FROM edge_build_state", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(recorded, 0, "no fabricated watermark is written");
+}
