@@ -77,3 +77,22 @@ fn stage_materialises_manifest_schema_and_static_assets() {
         ".amo-upload-uuid must be byte-equal to source - drift would orphan the AMO listing"
     );
 }
+
+/// F23 guard: `url.host` includes the port, so the permission origin became
+/// `http://desk.lan:8181/*` and Save refused a ported endpoint. The origin must be built
+/// from `url.hostname`. There is no JS harness for the extension, so this pins the staged
+/// source instead.
+#[test]
+fn staged_options_js_builds_the_origin_from_hostname_not_host() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    extension::stage(tempdir.path(), "0.0.0-test", &Config::default()).expect("stage extension into tempdir");
+    let options_js = std::fs::read_to_string(tempdir.path().join("options.js")).expect("read staged options.js");
+    assert!(
+        options_js.contains("${url.hostname}"),
+        "options.js must build the permission origin from url.hostname"
+    );
+    assert!(
+        !options_js.contains("${url.host}"),
+        "options.js uses url.host, which includes the port and makes Save refuse http://desk.lan:8181"
+    );
+}
