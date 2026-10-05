@@ -125,11 +125,11 @@ impl Blocklist {
 }
 
 /// Default filesystem path for the blocklist yaml.
-pub fn default_path() -> PathBuf {
-    vault::paths::xdg_data_dir()
-        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
+pub fn default_path() -> Result<PathBuf> {
+    Ok(vault::paths::xdg_data_dir()
+        .ok_or_else(|| eyre::eyre!("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)"))?
         .join("borg")
-        .join("blocked-domains.yml")
+        .join("blocked-domains.yml"))
 }
 
 /// Extract the registrable domain (host minus leading `www.`) from a URL. For
@@ -208,14 +208,14 @@ fn try_parse_date(s: &str) -> Result<DateTime<Utc>> {
 
 /// Load the blocklist and return its rows. Caller formats output.
 pub fn entries() -> Result<Vec<(String, BlockedDomain)>> {
-    let path = default_path();
+    let path = default_path()?;
     let bl = Blocklist::from_file(&path)?;
     Ok(bl.list().into_iter().map(|(d, e)| (d, e.clone())).collect())
 }
 
 /// Remove one domain. Returns true iff the domain was present.
 pub fn remove(domain: &str) -> Result<bool> {
-    let path = default_path();
+    let path = default_path()?;
     let mut bl = Blocklist::from_file(&path)?;
     let removed = bl.remove(domain).is_some();
     bl.save_to(&path)?;
@@ -224,7 +224,7 @@ pub fn remove(domain: &str) -> Result<bool> {
 
 /// Clear every entry. Always succeeds (writes an empty blocklist).
 pub fn clear() -> Result<()> {
-    let path = default_path();
+    let path = default_path()?;
     let bl = Blocklist::default();
     bl.save_to(&path)
 }

@@ -940,18 +940,11 @@ fn render_systemd_unit(
     render_service(&unit)
 }
 
-/// Install a systemd user service for the daemon. Returns the lines sb
-/// should print (paths written, follow-up systemctl commands).
-fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<String>> {
-    log::debug!("install_systemd_service: vault_root={}", vault_root.display());
-    let mut lines = Vec::new();
-    let service_dir = vault::paths::xdg_config_dir()
-        .expect("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
-        .join("systemd")
-        .join("user");
-
-    std::fs::create_dir_all(&service_dir).context("failed to create systemd user dir")?;
-
+/// The `cortex.service` text `--install` writes, resolved from ambient state
+/// (home, current binary, sb data dir, cortex.yml). `sb doctor` calls this
+/// too, so drift is measured against exactly what an install would write now.
+pub fn desired_systemd_unit(vault_root: &Path, config: &Config) -> Result<String> {
+    log::debug!("desired_systemd_unit: vault_root={}", vault_root.display());
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let binary = std::env::current_exe().context("failed to get current executable path")?;
     let data_dir = vault::paths::xdg_data_dir()
@@ -960,7 +953,26 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<Str
     let cortex_config = vault::paths::cortex_config();
     let config_path = cortex_config.exists().then_some(cortex_config.as_path());
 
-    let service = render_systemd_unit(&home, &binary, vault_root, &data_dir, config_path, config);
+    Ok(render_systemd_unit(
+        &home,
+        &binary,
+        vault_root,
+        &data_dir,
+        config_path,
+        config,
+    ))
+}
+
+/// Install a systemd user service for the daemon. Returns the lines sb
+/// should print (paths written, follow-up systemctl commands).
+fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<String>> {
+    log::debug!("install_systemd_service: vault_root={}", vault_root.display());
+    let mut lines = Vec::new();
+    let service_dir = vault::systemd::user_unit_dir()?;
+
+    std::fs::create_dir_all(&service_dir).context("failed to create systemd user dir")?;
+
+    let service = desired_systemd_unit(vault_root, config)?;
 
     let service_path = service_dir.join("cortex.service");
     std::fs::write(&service_path, &service)?;
@@ -986,10 +998,7 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<Str
 /// Uninstall the systemd user service and timer units. Returns the lines sb
 /// should print.
 fn uninstall_systemd_service() -> Result<Vec<String>> {
-    let service_dir = vault::paths::xdg_config_dir()
-        .expect("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
-        .join("systemd")
-        .join("user");
+    let service_dir = vault::systemd::user_unit_dir()?;
 
     let units = [
         "cortex.service",
@@ -1022,11 +1031,7 @@ fn uninstall_systemd_service() -> Result<Vec<String>> {
 /// Show daemon status by shelling out to `systemctl --user status cortex --no-pager`,
 /// mirroring borg's `--status` pattern. Returns the lines sb should print.
 fn show_status() -> Result<Vec<String>> {
-    let service_path = vault::paths::xdg_config_dir()
-        .expect("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)")
-        .join("systemd")
-        .join("user")
-        .join("cortex.service");
+    let service_path = vault::systemd::user_unit_dir()?.join("cortex.service");
 
     if !service_path.exists() {
         return Ok(vec![

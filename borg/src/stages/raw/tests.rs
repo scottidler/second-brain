@@ -236,7 +236,7 @@ fn run_gate_1_block_body_when_enabled_persists_blocklist_and_rejection() {
     assert!(rec.blocklist_updated);
 
     // Blocklist persisted and contains the domain.
-    let bl_path = crate::blocklist::default_path();
+    let bl_path = crate::blocklist::default_path().unwrap();
     let bl = crate::blocklist::Blocklist::from_file(&bl_path).unwrap();
     assert!(bl.is_blocked("xda-developers.com", chrono::Utc::now()));
 
@@ -281,7 +281,7 @@ fn staging_config(root: &std::path::Path) -> crate::config::Config {
 /// Seed a corrupt blocklist at the path `blocklist::default_path()` resolves to
 /// under the current XDG_DATA_HOME. Must be called inside `with_xdg`.
 fn seed_corrupt_blocklist() -> std::path::PathBuf {
-    let path = crate::blocklist::default_path();
+    let path = crate::blocklist::default_path().unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, CORRUPT_BLOCKLIST).unwrap();
     path
@@ -371,11 +371,11 @@ fn gate_0_with_a_missing_blocklist_lets_the_url_capture_through() {
 
     let bl_path = with_xdg(tmp.path(), || {
         assert!(
-            !crate::blocklist::default_path().exists(),
+            !crate::blocklist::default_path().unwrap().exists(),
             "precondition: no blocklist file"
         );
         stage_0_init(&config, &content, IngestMethod::Telegram, trace).expect("a missing blocklist is empty");
-        crate::blocklist::default_path()
+        crate::blocklist::default_path().unwrap()
     });
 
     assert!(!bl_path.exists(), "a missing blocklist stays missing");

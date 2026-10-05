@@ -1240,7 +1240,7 @@ async fn corrupt_blocklist_fails_the_capture_as_intake_rejected_in_receipts() {
     let mut config = crate::config::Config::default();
     config.staging.enabled = true;
     config.staging.root = data_home.path().join("stages");
-    let bl_path = crate::blocklist::default_path();
+    let bl_path = crate::blocklist::default_path().unwrap();
     std::fs::create_dir_all(bl_path.parent().unwrap()).unwrap();
     let corrupt = b"domains: [this is not: a map\n".to_vec();
     std::fs::write(&bl_path, &corrupt).unwrap();

@@ -141,6 +141,46 @@ pub fn unit_path(home: &Path) -> String {
     )
 }
 
+/// The directory user units are installed into: `<xdg config>/systemd/user`.
+/// Errors when neither `XDG_CONFIG_HOME` nor a home directory resolves, so a
+/// `Result` caller propagates instead of panicking.
+pub fn user_unit_dir() -> eyre::Result<PathBuf> {
+    let dir = unit_dir_under(crate::paths::xdg_config_dir())?;
+    log::debug!("systemd::user_unit_dir: {}", dir.display());
+    Ok(dir)
+}
+
+/// [`user_unit_dir`] with the XDG config dir already resolved (the pure half).
+fn unit_dir_under(xdg_config: Option<PathBuf>) -> eyre::Result<PathBuf> {
+    let base = xdg_config.ok_or_else(|| eyre::eyre!("xdg_config_dir() returned None (set HOME or XDG_CONFIG_HOME)"))?;
+    Ok(base.join("systemd").join("user"))
+}
+
+/// How an installed unit file compares with the unit the current code renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitState {
+    /// No file at the path: the unit is not installed on this host (not drift).
+    NotInstalled,
+    /// The file's bytes equal the render.
+    Current,
+    /// The file exists and its bytes differ from the render.
+    Drifted,
+}
+
+/// Compare the unit file at `installed` against `rendered`, byte for byte.
+/// A missing file is [`UnitState::NotInstalled`]; any other read error is an
+/// error, never a silent "current".
+pub fn compare_installed(installed: &Path, rendered: &str) -> eyre::Result<UnitState> {
+    let state = match std::fs::read(installed) {
+        Ok(bytes) if bytes == rendered.as_bytes() => UnitState::Current,
+        Ok(_) => UnitState::Drifted,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => UnitState::NotInstalled,
+        Err(e) => return Err(eyre::eyre!("read {}: {e}", installed.display())),
+    };
+    log::debug!("systemd::compare_installed: {} -> {state:?}", installed.display());
+    Ok(state)
+}
+
 fn push_comment(out: &mut String, text: &str) {
     for line in text.lines() {
         let _ = writeln!(out, "# {line}");

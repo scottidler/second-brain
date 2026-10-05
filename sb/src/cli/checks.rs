@@ -156,6 +156,116 @@ fn systemd_findings() -> Vec<Finding> {
             )),
         }
     }
+    findings.extend(unit_drift_findings());
+    findings
+}
+
+/// One drift finding for an installed unit file, or `None` when it is current
+/// or not installed (a host that runs no daemon is not drifted).
+fn drift_finding(unit: &str, installed: &Path, rendered: &str, fix: &str) -> Option<Finding> {
+    match vault::systemd::compare_installed(installed, rendered) {
+        Ok(vault::systemd::UnitState::Current | vault::systemd::UnitState::NotInstalled) => None,
+        Ok(vault::systemd::UnitState::Drifted) => Some(Finding::warn(
+            format!(
+                "{unit}: installed unit differs from the current render ({})",
+                installed.display()
+            ),
+            fix,
+        )),
+        Err(e) => Some(Finding::error(
+            format!("{unit}: cannot compare installed unit ({e:#})"),
+            format!("check permissions on {}", installed.display()),
+        )),
+    }
+}
+
+/// Compare every installed unit with what `--install` would write now, using
+/// the same render fns and the same inputs the install verbs use. A config
+/// that does not load is reported by the config section; its units are skipped
+/// here rather than reported twice.
+fn unit_drift_findings() -> Vec<Finding> {
+    let unit_dir = match vault::systemd::user_unit_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            return vec![Finding::error(
+                format!("systemd unit dir: {e:#}"),
+                "set HOME or XDG_CONFIG_HOME",
+            )];
+        }
+    };
+    let mut findings = Vec::new();
+
+    if let Ok(cfg) = borg::config::load_config::<borg::config::Config>(None) {
+        let installed = unit_dir.join("borg.service");
+        if installed.exists() {
+            let exe = std::env::current_exe().map(|p| p.display().to_string());
+            match exe
+                .map_err(eyre::Report::from)
+                .and_then(|exe| borg::service::desired_systemd_unit(&exe, &cfg))
+            {
+                Ok(rendered) => {
+                    findings.extend(drift_finding(
+                        "borg.service",
+                        &installed,
+                        &rendered,
+                        "sb borg daemon --install, then systemctl --user daemon-reload && systemctl --user restart borg",
+                    ));
+                }
+                Err(e) => findings.push(Finding::error(
+                    format!("borg.service: cannot render the current unit ({e:#})"),
+                    "fix the borg config, then sb borg daemon --install",
+                )),
+            }
+        }
+        let service = unit_dir.join(borg::harvest::timer::HARVEST_SERVICE);
+        let timer = unit_dir.join(borg::harvest::timer::HARVEST_TIMER);
+        if service.exists() || timer.exists() {
+            match borg::harvest::timer::desired_units(&cfg) {
+                Ok((rendered_service, rendered_timer)) => {
+                    let reinstall = "sb borg harvest --install, then systemctl --user daemon-reload";
+                    findings.extend(drift_finding(
+                        borg::harvest::timer::HARVEST_SERVICE,
+                        &service,
+                        &rendered_service,
+                        reinstall,
+                    ));
+                    findings.extend(drift_finding(
+                        borg::harvest::timer::HARVEST_TIMER,
+                        &timer,
+                        &rendered_timer,
+                        reinstall,
+                    ));
+                }
+                Err(e) => findings.push(Finding::error(
+                    format!("sb-harvest units: cannot render the current units ({e:#})"),
+                    "sb borg harvest --install",
+                )),
+            }
+        }
+    }
+
+    if let Ok(cfg) = cortex::config::Config::load(None) {
+        let installed = unit_dir.join("cortex.service");
+        if installed.exists() {
+            match cfg
+                .vault_root(None)
+                .and_then(|root| cortex::daemon::desired_systemd_unit(&root, &cfg))
+            {
+                Ok(rendered) => {
+                    findings.extend(drift_finding(
+                        "cortex.service",
+                        &installed,
+                        &rendered,
+                        "sb cortex daemon --install, then systemctl --user daemon-reload && systemctl --user restart cortex",
+                    ));
+                }
+                Err(e) => findings.push(Finding::error(
+                    format!("cortex.service: cannot render the current unit ({e:#})"),
+                    "fix the cortex config, then sb cortex daemon --install",
+                )),
+            }
+        }
+    }
     findings
 }
 

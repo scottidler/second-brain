@@ -186,3 +186,35 @@ fn env_bootstrap_rejects_snake_case_and_missing_fields() {
     assert!(serde_yaml::from_str::<EnvBootstrap>("command: x\nenv_file: /a\n").is_err());
     assert!(serde_yaml::from_str::<EnvBootstrap>("command: x\n").is_err());
 }
+
+#[test]
+fn unit_dir_under_joins_systemd_user() {
+    assert_eq!(
+        unit_dir_under(Some(PathBuf::from("/xdg"))).unwrap(),
+        PathBuf::from("/xdg/systemd/user")
+    );
+}
+
+#[test]
+fn unit_dir_under_errors_when_no_xdg_config() {
+    let err = unit_dir_under(None).expect_err("None must be an error, not a panic");
+    assert!(err.to_string().contains("HOME or XDG_CONFIG_HOME"), "{err}");
+}
+
+#[test]
+fn compare_installed_distinguishes_current_drifted_and_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.service");
+    assert_eq!(compare_installed(&path, "abc").unwrap(), UnitState::NotInstalled);
+    std::fs::write(&path, "abc").unwrap();
+    assert_eq!(compare_installed(&path, "abc").unwrap(), UnitState::Current);
+    assert_eq!(compare_installed(&path, "abd").unwrap(), UnitState::Drifted);
+    assert_eq!(compare_installed(&path, "abc\n").unwrap(), UnitState::Drifted);
+}
+
+#[test]
+fn compare_installed_errors_on_unreadable_path() {
+    let dir = tempfile::tempdir().unwrap();
+    // A directory is not a readable file: an error, never "current".
+    assert!(compare_installed(dir.path(), "abc").is_err());
+}
