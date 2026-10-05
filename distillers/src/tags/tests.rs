@@ -211,7 +211,7 @@ fn shards_are_sorted_and_merge_to_recorded_scores() {
 
     let mut vocabulary: Vec<String> = a.iter().chain(b.iter()).cloned().collect();
     vocabulary.sort();
-    assert_eq!(vocabulary.len(), 117, "the P1 vocabulary is 117 tags");
+    assert_eq!(vocabulary.len(), 117, "the canonical vocabulary is 117 tags");
 
     // 117 labels against a 100-label ceiling is two calls, split evenly.
     let shards = shard_labels(&vocabulary);
@@ -363,7 +363,7 @@ fn retag_never_writes_empty() {
 
 #[test]
 fn segment_guard_holds_through_the_classifier() {
-    // The P1 guard must survive the seam: `work-life-balance` never mints
+    // The segment guard must survive the seam: `work-life-balance` never mints
     // `work` or `life`, whichever impl consumes the candidate.
     let det = Deterministic::new(canon(), mapping());
     let guarded = [TagCandidate::new("work-life-balance", CandidateSource::Preserved)];

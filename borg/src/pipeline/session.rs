@@ -307,7 +307,7 @@ fn resolve_follows_stem(
 ) -> Option<String> {
     let Some(prior_trace) = prior.trace.as_deref() else {
         log::warn!(
-            "[{trace_id}] follow-up back-link: prior published entry has no trace (pre-Phase-2 watermark row) \
+            "[{trace_id}] follow-up back-link: prior published entry has no trace (watermark row predates trace recording) \
              - omitting follows:"
         );
         return None;

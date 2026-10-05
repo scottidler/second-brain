@@ -517,7 +517,7 @@ async fn long_thread_reduce_input_carries_thread_head() {
     assert!(reduce_call.input.contains("## Chunk Summaries"));
     assert!(reduce_call.input.contains("## Claim Pool"));
     eprintln!(
-        "PHASE6-MEASURE thread reduce-input: {} chars (~{} tokens), {} chunks",
+        "MEASURE thread reduce-input: {} chars (~{} tokens), {} chunks",
         reduce_call.input.chars().count(),
         approx_tokens(reduce_call.input.len()),
         chunk_transcript(&transcript, CHUNK_TOKEN_TARGET).len(),

@@ -5,11 +5,11 @@ const GOLDEN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../config/eval/harvest/golden-2026-07-02.json"
 );
-const PHASE0_BULK: &str = concat!(
+const BULK_ENVELOPE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../config/eval/distill-fixtures/session/bulk-envelope.json"
 );
-const PHASE0_BODY: &str = concat!(
+const BODY_ENVELOPE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../config/eval/distill-fixtures/session/with-body-envelope.json"
 );
@@ -39,8 +39,8 @@ fn parses_golden_fixture() {
 }
 
 #[test]
-fn parses_phase0_bulk_envelope() {
-    let export = parse_export(&read(PHASE0_BULK)).unwrap().export;
+fn parses_bulk_envelope() {
+    let export = parse_export(&read(BULK_ENVELOPE)).unwrap().export;
     assert_eq!(export.sessions.len(), 8);
     // present-null repo deserializes to None, not omitted-as-error.
     let personal = export
@@ -63,7 +63,7 @@ fn parses_phase0_bulk_envelope() {
 
 #[test]
 fn enrich_status_null_and_failed_round_trip() {
-    let export = parse_export(&read(PHASE0_BULK)).unwrap().export;
+    let export = parse_export(&read(BULK_ENVELOPE)).unwrap().export;
     // enrich-status: null -> None
     let null_status = export
         .sessions
@@ -84,7 +84,7 @@ fn enrich_status_null_and_failed_round_trip() {
 fn repos_touched_is_three_state_none_when_omitted() {
     // The golden fixtures predate files-touched, so repos-touched is OMITTED on
     // every session -> None (unknowable), NOT Some(vec![]) (touched nothing).
-    let export = parse_export(&read(PHASE0_BULK)).unwrap().export;
+    let export = parse_export(&read(BULK_ENVELOPE)).unwrap().export;
     for s in &export.sessions {
         assert_eq!(
             s.repos_touched, None,
@@ -142,7 +142,7 @@ fn git_branch_present_null_deserializes_to_none() {
 
 #[test]
 fn with_body_payload_parses_body_array() {
-    let rec = parse_export(&read(PHASE0_BODY)).unwrap().export.sessions.remove(0);
+    let rec = parse_export(&read(BODY_ENVELOPE)).unwrap().export.sessions.remove(0);
     let body = rec.body.expect("with-body payload has a body array");
     assert!(!body.is_empty());
     assert!(body.iter().any(|m| m.role.as_deref() == Some("user")));

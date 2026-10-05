@@ -1,5 +1,5 @@
 //! Render `system/schemas/{type,origin,status}-values.md` from
-//! `vault::schema`, plus `tag-values.md` from `canonical-tags.yml` (P9).
+//! `vault::schema`, plus `tag-values.md` from `canonical-tags.yml`.
 //!
 //! The three enum-backed docs were hand-written and drifted from the enums
 //! they describe (the vault's `type-values.md` listed 15 of `NoteType`'s 25
@@ -231,7 +231,7 @@ impl RenderReport {
 ///
 /// `tags` is the caller's already-loaded canonical vocabulary (sorted), used
 /// only for `tag-values.md` - this function stays filesystem-free for the
-/// vocabulary the same way `schema_info_payload` (oracle, P8) does, so it
+/// vocabulary the same way `schema_info_payload` (oracle) does, so it
 /// stays unit-testable with no config or `canonical-tags.yml` on disk.
 pub fn render_all(vault_root: &Path, apply: bool, tags: &[String]) -> Result<RenderReport> {
     let now = chrono::Utc::now();

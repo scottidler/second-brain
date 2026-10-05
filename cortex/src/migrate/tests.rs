@@ -545,7 +545,7 @@ fn lint_tag_transforms_flags_a_note_that_would_exceed_the_cap() {
 #[test]
 fn load_plan_reads_the_shipped_undo_file() {
     // The inverse must stay parseable and must NOT be a cortex.yml migration.
-    // This is the real shipped historical-undo artifact for the P4 migration
+    // This is the real shipped historical-undo artifact for the block-form tags migration
     // that already ran against the live vault (its name and content are
     // fixed history, not a demo field name, so this test does not rename it
     // alongside the synthetic `category_as_tag` fixtures above).
@@ -561,7 +561,7 @@ fn load_plan_reads_the_shipped_undo_file() {
 fn field_to_tags_normalizes_form_when_the_set_is_unchanged() {
     // The note already carries its own category value, so the tag SET does not
     // change, but its inline list is the wrong on-disk form. Without this the
-    // vault keeps two spellings and P4's own success criterion fails.
+    // vault keeps two spellings and the migration's own success criterion fails.
     let v = TestVault::new();
     std::fs::write(
         v.root().join("already.md"),

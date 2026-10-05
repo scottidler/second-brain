@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::*;
 use crate::testutil::{NoteBuilder, TestVault};
 
-/// The vocabulary `TestVault`'s fixtures were written against (P9: lint reads
+/// The vocabulary `TestVault`'s fixtures were written against (lint reads
 /// `canonical-tags.yml`, not `actions.tags.canonical`, so tests build the
 /// `CanonicalSet` shape directly rather than a `TagsConfig.canonical` list).
 /// `max_per_note` 7 is well above every fixture's tag count (max 2), so it
@@ -73,7 +73,7 @@ fn test_non_canonical_tag_on_vault() {
     );
 }
 
-/// P9 success criterion: on a three-note fixture, `sb cortex lint` reports
+/// Lint success criterion: on a three-note fixture, `sb cortex lint` reports
 /// exactly one `tags.non-canonical`, one `tags.cap`, one `tags.format`
 /// (the form variant - inline on disk). Each note is built to trip exactly
 /// one of the three rules and none of the others.
@@ -153,7 +153,7 @@ fn test_replace_tags_in_frontmatter() {
     let result = replace_tags_in_frontmatter(content, &new_tags);
     assert!(result.is_some());
     let result = result.expect("should have result");
-    // P4: block form is now the single on-disk spelling.
+    // Block form is now the single on-disk spelling.
     assert!(result.contains("tags:\n  - new-tag\n  - good"), "got:\n{result}");
     assert!(!result.contains("tags: ["), "inline form survived:\n{result}");
     assert!(result.contains("title: Test"));
@@ -206,8 +206,8 @@ fn replace_tags_on_indented_block_list_does_not_orphan_bullets() {
 
 #[test]
 fn alias_free_ai_survives_apply_tags() {
-    // P1 retires the `ai`/`ML`/`ml` -> `ai-llm` aliases in `cortex.yml` so the
-    // P4 migration can write `ai` as a tag and the next daemon tick leaves it
+    // Retiring the `ai`/`ML`/`ml` -> `ai-llm` aliases in `cortex.yml` so the
+    // block-form migration can write `ai` as a tag and the next daemon tick leaves it
     // alone. With the aliases gone, `apply_tags` must not rewrite `ai`.
     let v = TestVault::new();
     let notes = v.scan();

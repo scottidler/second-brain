@@ -635,7 +635,7 @@ async fn process_url_inner(
         });
         if let Some(ref old_path) = old_note_path {
             original_date = read_note_date(old_path);
-            // Fails the reingest CLOSED (design doc P3): publishing a note
+            // Fails the reingest CLOSED (tags-only design doc, reingest union): publishing a note
             // that silently lost its preserved fields is worse than not
             // publishing, and the old note is left untouched either way.
             cortex_fields = read_cortex_fields(old_path)?;
@@ -1128,7 +1128,7 @@ async fn process_url_inner(
         failure_stage: None,
         // Degraded when the L2 distiller fell back, an enumeration fell short
         // of its declared count (a resolved design decision), OR
-        // the tag classifier errored and the receipt needs to say so (P6:
+        // the tag classifier errored and the receipt needs to say so (tags-only design doc:
         // "the receipt is degraded=true, and the note is still published").
         degraded: distilled.meta.validation.is_degraded() || tags_degraded,
     })

@@ -777,7 +777,7 @@ fn test_read_cortex_fields_partial() {
 #[test]
 fn test_read_cortex_fields_reads_a_block_tag_list() {
     // Was `test_read_cortex_fields_none_present`: `tags` joined
-    // CORTEX_PRESERVE_KEYS in P3, so this note now yields exactly one field.
+    // CORTEX_PRESERVE_KEYS, so this note now yields exactly one field.
     let dir = tempfile::tempdir().unwrap();
     let note = dir.path().join("test.md");
     std::fs::write(
@@ -850,7 +850,7 @@ fn read_cortex_fields_round_trips_block_inline_and_quoted_lists() {
 /// A distilled payload with a summary, two claims, and a transcript - the
 /// shape `distillers::render` turns into `## Summary` / `## Claims` /
 /// `## Transcript` body sections.
-fn phase7_distilled() -> vault::distilled::Distilled {
+fn transcript_distilled() -> vault::distilled::Distilled {
     use vault::distilled::{Claim, Distilled};
     Distilled {
         summary: "The talk argues orchestration beats raw model capability.".to_string(),
@@ -872,7 +872,7 @@ fn phase7_distilled() -> vault::distilled::Distilled {
 /// A representative slide-published body: an LLM section body with a slide
 /// wikilink embedded under a `## <section>` heading (what `publish_slides`
 /// emits for the `slide-section` shape).
-fn phase7_slide_body() -> String {
+fn transcript_slide_body() -> String {
     "## Opening Thesis\n\n![[talk-slide-001.jpg]]\n\nThe speaker frames the core question.\n\n\
      ## Live Demo\n\n![[talk-slide-002.jpg]]\n\nA worked example follows.\n"
         .to_string()
@@ -883,11 +883,11 @@ fn append_distilled_below_slides_keeps_both_slide_and_distilled_sections() {
     // Defect #2: the splice must APPEND, not REPLACE. The composed body must
     // carry the slide sections AND the distilled `## Claims` (previously lost
     // wholesale on the slide path).
-    let slide_body = phase7_slide_body();
+    let slide_body = transcript_slide_body();
     // Slide notes are video (URL) publishes: transcript-free per the
     // distillation-output-restore policy (`for_url_publish`), so the appended distilled body carries the
     // knowledge sections minus `## Transcript`.
-    let d = phase7_distilled();
+    let d = transcript_distilled();
     let distilled_body = distillers::render(&d, distillers::RenderOptions::for_url_publish(&d)).body_markdown;
 
     let composed = append_distilled_below_slides(slide_body.clone(), &distilled_body);
@@ -903,7 +903,7 @@ fn append_distilled_below_slides_keeps_both_slide_and_distilled_sections() {
     assert!(composed.contains("## Summary"), "distilled ## Summary must be appended");
     assert!(
         !composed.contains("## Transcript"),
-        "slide/video publish must NOT append a ## Transcript section (2026-07-07 policy)"
+        "slide/video publish must NOT append a ## Transcript section"
     );
     // Ordering: the slide body comes first, distilled sections follow.
     let slide_pos = composed.find("## Opening Thesis").expect("slide heading");
@@ -921,7 +921,7 @@ fn append_distilled_below_slides_keeps_both_slide_and_distilled_sections() {
 
 #[test]
 fn append_distilled_below_slides_noop_on_empty_distilled_body() {
-    let slide_body = phase7_slide_body();
+    let slide_body = transcript_slide_body();
     let composed = append_distilled_below_slides(slide_body.clone(), "");
     assert_eq!(
         composed, slide_body,
@@ -935,9 +935,9 @@ fn slide_path_composed_body_yields_claims_fts_text() {
     // `index_vault`/`index_one` runs to populate `notes.claims`). The
     // slide-path composed body must yield the distilled claims as FTS text -
     // exactly what the old replace behavior destroyed.
-    let d = phase7_distilled();
+    let d = transcript_distilled();
     let composed = append_distilled_below_slides(
-        phase7_slide_body(),
+        transcript_slide_body(),
         &distillers::render(&d, distillers::RenderOptions::for_url_publish(&d)).body_markdown,
     );
     let claims = vault::search::parse_body_claims(&composed);
@@ -953,7 +953,7 @@ fn article_published_body_omits_transcript_but_yields_claims_fts_text() {
     // and is embedded from there), while its claims still expose to the same FTS
     // parse the indexer runs. Article renders via `for_url_publish` (no payload
     // -> transcript-free). The transcript FIELD stays populated for staging.
-    let d = phase7_distilled();
+    let d = transcript_distilled();
     assert!(
         d.transcript.is_some(),
         "the field stays populated for staging/embeddings"
@@ -1003,7 +1003,7 @@ fn article_transcript_gate_is_article_only_video_field_unaffected() {
     let rendered = distillers::render(&video, distillers::RenderOptions::for_url_publish(&video));
     assert!(
         !rendered.body_markdown.contains("## Transcript"),
-        "video publish body omits ## Transcript (2026-07-07 policy):\n{}",
+        "video publish body omits ## Transcript:\n{}",
         rendered.body_markdown
     );
 }

@@ -19,7 +19,7 @@ pub struct CanonicalTagsFile {
     #[serde(default)]
     pub no_segment_match: Vec<String>,
     /// Tags no capping path may drop: the classifier recovers 0 of 17 of them
-    /// from note text (design doc P0b). Reaches every consumer through
+    /// from note text (tags-only design doc). Reaches every consumer through
     /// `CanonicalSet::no_classifier`.
     #[serde(default)]
     pub no_classifier_tags: Vec<String>,

@@ -121,7 +121,7 @@ async fn empty_distiller_tags_yield_no_canonical_tags_from_that_source() {
 }
 
 /// Render just enough of a note to extract the byte-for-byte `tags:` block -
-/// the AC3/P6 criterion is on the rendered YAML, not on `Vec<String>` equality.
+/// the AC3 criterion is on the rendered YAML, not on `Vec<String>` equality.
 fn tags_block(tags: &[String]) -> String {
     let note = crate::markdown::NoteContent {
         title: "T".to_string(),
@@ -136,7 +136,7 @@ fn tags_block(tags: &[String]) -> String {
     rest[..end].to_string()
 }
 
-/// Design doc P6 success criterion / AC3: two ingests of one fixture URL (same
+/// Design doc success criterion / AC3: two ingests of one fixture URL (same
 /// title, same text, same distiller output) produce byte-identical `tags:`
 /// blocks. `Deterministic` (the config default) is a pure function of its
 /// candidates, so this is the borg-level seam - `TagSources` built the way
@@ -145,7 +145,7 @@ fn tags_block(tags: &[String]) -> String {
 ///
 /// Break-the-code evidence (implementation notes): reverting `finalize_tags`
 /// to build a fresh `Deterministic` per call with a `HashMap`-backed mapping
-/// iterated in nondeterministic order would falsify this; reverting the P6
+/// iterated in nondeterministic order would falsify this; reverting the
 /// candidate-building to skip `hygiene::sanitize_tag` before matching, so a
 /// case difference between two "identical" ingests changed the raw candidate
 /// text, also falsifies it.
@@ -180,16 +180,16 @@ async fn ingest_tags_are_repeatable_under_deterministic() {
     );
 }
 
-/// Design doc P6 success criterion / AC3, panel r4 OQ7: two ingests of the
+/// Design doc success criterion / AC3, panel r4 OQ7: two ingests of the
 /// SAME URL where the distiller's own `tags` output DRIFTS between calls (the
 /// actual source of instability G5 restates around, `classifier-dev` at 23%
 /// in the baseline measurement) must not lose a canonical tag the first ingest produced. The
-/// P3 reingest union (`apply_cortex_fields`, preserved-first) is what
+/// reingest union (`apply_cortex_fields`, preserved-first) is what
 /// delivers that, not the classifier call alone - so this drives BOTH:
 /// `finalize_tags` twice with deliberately different `model` candidates, then
 /// the same `apply_cortex_fields` union a URL reingest runs.
 ///
-/// Break-the-code evidence (implementation notes): reverting P3's union to a
+/// Break-the-code evidence (implementation notes): reverting the reingest union to a
 /// plain replace (fresh tags overwrite preserved) falsifies this immediately
 /// - `python` would replace `rust` instead of joining it.
 #[tokio::test]
@@ -213,7 +213,7 @@ async fn ingest_tags_are_stable_under_distiller_drift() {
     let fresh_rendered = tags_block(&ingest_2.tags);
     let fresh_note = format!("---\ntitle: T\n{fresh_rendered}\n---\nBody.\n");
 
-    // The P3 reingest union: preserved (ingest 1's landed tags, read back off
+    // The reingest union: preserved (ingest 1's landed tags, read back off
     // the old note on disk) merged into the fresh render (ingest 2's tags).
     let preserved = vec![("tags".to_string(), FieldValue::List(ingest_1.tags.clone()))];
     let merged = apply_cortex_fields(&fresh_note, &preserved, Some(&canon(7, &[])));
@@ -237,7 +237,7 @@ async fn ingest_tags_are_stable_under_distiller_drift() {
     );
 }
 
-/// Design doc P6 success criterion: a classifier error runs the configured
+/// Design doc success criterion: a classifier error runs the configured
 /// `fallback`, and the outcome is marked `degraded` so the caller can flag the
 /// receipt (`degraded=true`) rather than publishing a silently-untagged note.
 ///
@@ -277,7 +277,7 @@ async fn classifier_failure_degrades_visibly() {
     );
 }
 
-/// Design doc P6 success criterion: publisher-supplied candidates (a creator's
+/// Design doc success criterion: publisher-supplied candidates (a creator's
 /// own hashtag, yt-dlp tags) that map to a canonical tag are recorded to
 /// `author-tags` so a later `--retag` can recover them even when the
 /// classifier fails to re-derive them from the text - and the key is

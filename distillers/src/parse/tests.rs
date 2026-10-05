@@ -396,7 +396,7 @@ fn pattern_enumeration_into_enumeration_filters_empty_named_items() {
 }
 
 #[test]
-fn pattern_yaml_without_new_phase4_keys_still_parses() {
+fn pattern_yaml_without_enrichment_keys_still_parses() {
     // Fallback safety: older pattern output (no tldr/enumeration/
     // key-ideas/declared-count/enumeration-candidates keys) must still
     // deserialize, with the new fields defaulting to None.
@@ -411,7 +411,7 @@ fn pattern_yaml_without_new_phase4_keys_still_parses() {
 }
 
 #[test]
-fn reduce_yaml_without_new_phase4_keys_still_parses() {
+fn reduce_yaml_without_enrichment_keys_still_parses() {
     // Fallback safety for the reduce leaf: an older reduce output
     // (summary + claims only) parses with the new fields defaulted.
     let raw = "summary: \"Reduced.\"\nclaims:\n  - text: \"A claim.\"\n    anchor: \"00:00:05\"\n";

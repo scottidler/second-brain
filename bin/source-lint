@@ -14,6 +14,13 @@
 #      and dropping the listener (or a hardcoded `port: 1NNNN`) to get "a port
 #      nothing listens on". A parallel test's stub can be handed the freed port.
 #      Use `vault::testnet::closed_port()`, which holds the port.
+#   6. no phase archaeology: `Phase N`, `Phase-N`, `pre-Phase-N`, `Phases N-M`, or a
+#      phase-numbered identifier (`phase7_x`, `PHASE0_X`) in any `.rs` (tests
+#      included), `CLAUDE.md`, or `AGENTS.md`. A comment or name says what the
+#      code does, not which plan phase wrote it (F19). `docs/design/` is
+#      point-in-time and not linted.
+#   7. every unprefixed `docs/design/*.md` cited in a `.rs` file exists. Cites
+#      carrying a repo prefix (`other-repo/docs/design/x.md`) are skipped (F19).
 #
 # Exit: 0 clean | 1 violation | 2 `rg` missing or failed.
 # Every rg call names explicit paths: a bare `rg` reads stdin and hangs.
@@ -104,6 +111,39 @@ hits "hardcoded 'unused' port: nothing reserves it; $CLOSED_PORT_FIX" \
   -n --no-heading 'port:\s*1\d{4}\b' \
   -g '*tests*' -g '**/tests/**' \
   "${CRATES[@]}"
+
+# 6. Phase archaeology. Explicit file args are searched regardless of -g, so
+# CLAUDE.md rides along with the crate directories.
+PHASE_FIX="name what the code does, not the plan phase that wrote it"
+hits "plan-phase tag in source or living doc: $PHASE_FIX" \
+  -n --no-heading '\bPhases? ?-?[0-9A-Z]' \
+  -g '*.rs' -g 'AGENTS.md' \
+  "${CRATES[@]}" CLAUDE.md
+hits "phase-numbered identifier: $PHASE_FIX" \
+  -n --no-heading -i '\bphase_?[0-9]\w*|\w*_phase_?[0-9]\w*' \
+  -g '*.rs' \
+  "${CRATES[@]}"
+
+# 7. Design-doc cites resolve. The leading class excludes a repo prefix
+# (`x/docs/design/..`), `~/`, and path-continuation characters.
+cites=""
+cstatus=0
+cites="$(rg -o -n --no-heading '(^|[^A-Za-z0-9_/.~-])docs/design/[A-Za-z0-9_.-]*[A-Za-z0-9_]\.md' \
+  -g '*.rs' "${CRATES[@]}")" || cstatus=$?
+case "$cstatus" in
+  0|1) ;;
+  *) echo "source-lint: rg failed (exit $cstatus) listing docs/design cites" >&2; exit 2 ;;
+esac
+while IFS= read -r cite; do
+  [ -n "$cite" ] || continue
+  loc="${cite%%:*}"; rest="${cite#*:}"
+  lineno="${rest%%:*}"; matched="${rest#*:}"
+  doc="docs/design/${matched#*docs/design/}"
+  if [ ! -f "$doc" ]; then
+    echo "$loc:$lineno: cites $doc, which does not exist (cite resolves or goes)"
+    FAILED=1
+  fi
+done <<< "$cites"
 
 if [ "$FAILED" -eq 1 ]; then
   echo ""

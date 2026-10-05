@@ -106,7 +106,7 @@ pub struct ThreadDecision {
     /// Full bulk-metadata records for every member (repo, scope, title,
     /// duration, redaction-count, dates), in `created` order. `publish` needs
     /// these for `SessionMetadata`, the note's frontmatter (`repo:`,
-    /// `scope:`/`redacted:` keys - tags-only-classification P6 moved these
+    /// `scope:`/`redacted:` keys - tags-only-classification moved these
     /// off `scope-*`/`redacted-source` tags), and the thread footer, without
     /// re-deriving them from `member_ids`. Carries no `body` (bulk metadata
     /// only) - `publish` fetches transcript bodies separately.
