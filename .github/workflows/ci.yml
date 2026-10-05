@@ -6,10 +6,10 @@ on:
   pull_request:
 
 env:
-  # Matches the toolchain the repo is developed on. release.yml can stay pinned
-  # lower because it only builds; this workflow runs clippy with -D warnings,
-  # and lint sets move between releases, so `otto ci` green only implies CI
-  # green when the two run the same compiler.
+  # The toolchain the repo is developed on. This workflow runs clippy with
+  # -D warnings and lint sets move between releases, so `otto ci` green only
+  # implies CI green when both run the same compiler. release.yml must carry the
+  # same value: bin/source-lint fails when the two differ.
   RUST_VERSION: 1.98.0
   CARGO_TERM_COLOR: always
   # See .otto.yml `bloat` task: keep this in sync with BLOAT_MAX_LINES.
@@ -24,7 +24,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y curl build-essential git pkg-config libssl-dev \
-            cmake protobuf-compiler clang libclang-dev ffmpeg
+            cmake protobuf-compiler clang libclang-dev ffmpeg ripgrep
 
       - uses: actions/checkout@v4
         with:
@@ -99,3 +99,7 @@ jobs:
       # same script, so there is one implementation.
       - name: Lint AGENTS.md module maps
         run: bin/agents-map
+
+      # Mirrors the `source-lint` task in .otto.yml: one script, two callers.
+      - name: Lint source rules
+        run: bin/source-lint
