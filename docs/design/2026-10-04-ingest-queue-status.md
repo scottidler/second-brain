@@ -83,7 +83,7 @@ Firefox / cli / telegram ──POST /ingest──> borg daemon (desk) ──> re
 | `started_at` column | `borg/src/receipts.rs`, `borg/src/receipts/schema.sql` | When the trace got its general permit |
 | `QueueSnapshot` + item types | `vault/src/queue.rs` (new) | Wire contract shared by borg (server + CLI client) and oracle |
 | `HotkeyConfig`, `client_auth_token` | move `borg/src/config.rs` -> `vault/src/daemon.rs` | One daemon-address type and one token resolver (on `vault::config::resolve_secret`, `vault/src/config.rs:57`) |
-| `load_config::<T>` + `Normalize` | move `borg/src/config.rs:30-76` -> `vault/src/config.rs` | One borg.yml loading chain (explicit -> `~/.config/sb/borg.yml` -> `./borg.yml` -> defaults) for borg and oracle |
+| `load_config::<T>` + `Normalize` | move `borg/src/config.rs:30-76` -> `vault/src/config.rs` | One borg.yml loading chain (explicit -> `~/.config/sb/borg.yml` -> defaults; the `./borg.yml` CWD fallback was dropped post-release, see implementation notes) for borg and oracle |
 | `queue::snapshot(rows, now, cfg, batch)` | `borg/src/queue.rs` (new) | Pure batch/partition logic |
 | `queue::load(conn, now, cfg, batch)` | `borg/src/queue.rs` | SQL read + `snapshot` |
 | `GET /queue` | `borg/src/routes.rs`, `borg/src/lib.rs` router (`protected` group) | `spawn_blocking` around `load` |
@@ -128,7 +128,7 @@ Firefox / cli / telegram ──POST /ingest──> borg daemon (desk) ──> re
 - `/queue?batch=<id>`: the batch containing trace `<id>`, whether in flight or finished. Matched by membership, not first member: timestamps are 1s and ties sort by trace id, so a later same-second arrival can become the earliest member (16 same-second pairs on desk in 60 days); the pinned id must still resolve (implementation audit round 1). `state` is `draining` if that batch has in-flight rows, else `idle`, and `batch` + `items` are always present. Unknown id (aged past the 24h bound or never existed) -> 404.
 - Why intervals and not "received_at >= earliest in-flight received_at": that anchor moves forward as early rows finish, so `done` would shrink and the first-finished videos of the burst would drop out.
 
-**Config** (`borg.yml`, new `queue:` block). Durations are humantime strings deserialized straight into `std::time::Duration` by a `deserialize_with = "deserialize_humantime"` helper in `borg/src/config.rs` (on the existing `humantime` dep, `borg/Cargo.toml:48`). A bad value fails the YAML load itself with the key named; nothing downstream re-parses a string. This holds on every load path: an existing `borg.yml` (primary or `./borg.yml`) that fails to parse is a loud error, not a warning plus defaults (`vault::config::load_first_existing`; implementation audit round 1, since the daemon's `ExecStart` passes no `--config`).
+**Config** (`borg.yml`, new `queue:` block). Durations are humantime strings deserialized straight into `std::time::Duration` by a `deserialize_with = "deserialize_humantime"` helper in `borg/src/config.rs` (on the existing `humantime` dep, `borg/Cargo.toml:48`). A bad value fails the YAML load itself with the key named; nothing downstream re-parses a string. This holds on every load path: an existing `~/.config/sb/borg.yml` that fails to parse is a loud error, not a warning plus defaults (`vault::config::load_first_existing`; implementation audit round 1, since the daemon's `ExecStart` passes no `--config`).
 
 ```yaml
 queue:

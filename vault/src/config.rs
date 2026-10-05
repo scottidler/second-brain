@@ -4,10 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The CWD-relative last-resort `borg.yml` consulted by [`load_config`] when
-/// neither an explicit path nor `~/.config/sb/borg.yml` exists.
-const BORG_FALLBACK_CONFIG: &str = "borg.yml";
-
 /// Post-deserialization normalization hook run by [`load_config`] on every
 /// loaded config, regardless of which path in the fallback chain produced it.
 /// Lets a config type derive fields from others so the two can never drift
@@ -17,11 +13,10 @@ pub trait Normalize {
     fn normalize(&mut self) {}
 }
 
-/// Load a `borg.yml`-shaped config with the fallback chain:
+/// Load a `borg.yml`-shaped config with the chain:
 /// 1. Explicit path (if provided)
 /// 2. ~/.config/sb/borg.yml
-/// 3. ./borg.yml
-/// 4. Default
+/// 3. Default
 ///
 /// The one borg.yml loading chain: borg's full `Config` and any narrower view
 /// struct (e.g. oracle reading just the daemon address) go through here so
@@ -31,7 +26,7 @@ pub trait Normalize {
 pub fn load_config<T: DeserializeOwned + Default + Normalize>(config_path: Option<&PathBuf>) -> Result<T> {
     log::debug!("config::load_config: explicit={:?}", config_path);
     let mut config = load_config_inner::<T>(config_path)?;
-    // Applied to EVERY load path (explicit --config, primary, fallback,
+    // Applied to EVERY load path (explicit --config, primary file,
     // defaults) so a derived field can never be left un-normalized.
     config.normalize();
     Ok(config)
@@ -41,7 +36,15 @@ fn load_config_inner<T: DeserializeOwned + Default>(config_path: Option<&PathBuf
     if let Some(path) = config_path {
         return load_from_file(path).context(format!("Failed to load config from {}", path.display()));
     }
-    load_first_existing(&[crate::paths::borg_config(), PathBuf::from(BORG_FALLBACK_CONFIG)])
+    load_first_existing(&implicit_candidates())
+}
+
+/// Config files consulted when no explicit path is given. Absolute only: a
+/// CWD-relative `./borg.yml` let any repo an agent ran in pick the daemon
+/// host AND the `server.auth-token` reference (an env var name or file path),
+/// which clients then sent as a bearer token to that host.
+fn implicit_candidates() -> Vec<PathBuf> {
+    vec![crate::paths::borg_config()]
 }
 
 /// The first candidate that exists is THE config: a parse error there is a

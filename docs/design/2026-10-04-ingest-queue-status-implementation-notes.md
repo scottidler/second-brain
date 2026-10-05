@@ -169,3 +169,17 @@ None.
 
 ### Open questions
 None.
+
+## Post-release: drop the `./borg.yml` CWD fallback (security review)
+
+### Design decisions
+- `vault/src/config.rs:implicit_candidates` is now `~/.config/sb/borg.yml` only. A background push security review flagged credential exfiltration through untrusted config: `client_auth_token` resolves `server.auth-token` as a file path or env var name (`vault::config::resolve_secret`) and every daemon client (`oracle::queue::fetch`, `borg::queue::fetch`, `replay`) sends it as a plain-HTTP bearer to `hotkey.host`. With no primary file, a `./borg.yml` in an untrusted repo could set both. Not exploitable on desk or lappy (both have the primary file), but `sb borg queue`/`wait` and oracle are run by agents from arbitrary directories. Scott chose option A (drop the fallback) over A plus a token-host allowlist. Test: `implicit_candidates_never_include_a_cwd_relative_path`. This supersedes the "then `./borg.yml`" wording in the audit round 1 entry above.
+
+### Deviations
+- Removes a pre-existing chain step that predates this design (it came over verbatim from `borg/src/config.rs` in Phase 2). The daemon runs with `WorkingDirectory=/home/saidler`, so for it this only drops `~/borg.yml`, which neither host has.
+
+### Tradeoffs
+- No token-host allowlist: the remaining sources (`--config`, the primary file) already require control of the user's account.
+
+### Open questions
+None.

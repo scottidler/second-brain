@@ -102,3 +102,12 @@ fn load_first_existing_skips_missing_and_defaults_when_none_exist() {
     let config: LoadTestConfig = load_first_existing(&[missing]).expect("defaults");
     assert_eq!(config, LoadTestConfig::default());
 }
+
+#[test]
+fn implicit_candidates_never_include_a_cwd_relative_path() {
+    let candidates = implicit_candidates();
+    assert!(!candidates.is_empty());
+    for c in &candidates {
+        assert!(c.is_absolute(), "untrusted CWD could supply {c:?}");
+    }
+}
