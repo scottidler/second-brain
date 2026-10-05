@@ -32,7 +32,7 @@ fn config_with_fixture_canonical(dir: &std::path::Path) -> Config {
 
     Config {
         tags: crate::config::TagsConfig {
-            canonical_path: canonical_path.display().to_string(),
+            canonical_path,
             mapping_path: mapping_path.display().to_string(),
             reject_concatenated: true,
             // Deterministic (the field's own default): a pure canonical

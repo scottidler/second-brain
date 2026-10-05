@@ -69,6 +69,9 @@ pub fn log_ffmpeg_thread_caps(cfg: &Config) {
     );
 }
 
+/// `canonical` is the configured `tags.canonical-path`, not the default: the
+/// daemon validates the file the pipeline will actually read.
+///
 /// Precondition: every consumer of canonical-tag filtering or the fabric
 /// patterns directory must call this before any work that can touch the
 /// vocabulary. Verifies presence AND parseability so a malformed file
@@ -76,8 +79,7 @@ pub fn log_ffmpeg_thread_caps(cfg: &Config) {
 ///
 /// Bails with an actionable error message naming `sb bootstrap`
 /// (write-if-missing) or `sb bootstrap --force` (refresh from binary).
-pub fn validate_canonical_assets() -> Result<()> {
-    let canonical = vault::paths::canonical_tags();
+pub fn validate_canonical_assets(canonical: &std::path::Path) -> Result<()> {
     if !canonical.exists() {
         bail!(
             "missing canonical-tags vocabulary at {}\n\
@@ -85,7 +87,7 @@ pub fn validate_canonical_assets() -> Result<()> {
             canonical.display()
         );
     }
-    vault::canonical::CanonicalTagsFile::load(&canonical).map_err(|e| {
+    vault::canonical::CanonicalTagsFile::load(canonical).map_err(|e| {
         eyre::eyre!(
             "canonical-tags vocabulary at {} failed to parse: {e}\n\
          run `sb bootstrap --force` to restore from the binary's embedded copy",

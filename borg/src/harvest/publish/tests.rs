@@ -103,7 +103,7 @@ fn test_config(vault_root: &std::path::Path, staging_root: &std::path::Path) -> 
     // `~/.config/sb/canonical-tags.yml` (would poison every other test in
     // this binary with this machine's real tag catalogue). Guaranteed-absent
     // paths make the load fail and no-op instead.
-    config.tags.canonical_path = staging_root.join("no-such-canonical-tags.yml").display().to_string();
+    config.tags.canonical_path = staging_root.join("no-such-canonical-tags.yml");
     config.tags.mapping_path = staging_root.join("no-such-tag-mapping.yml").display().to_string();
     config
 }

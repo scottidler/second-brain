@@ -30,6 +30,7 @@ fn view_for(port: u16) -> BorgView {
             ..HotkeyConfig::default()
         },
         server: ServerView::default(),
+        tags: TagsView::default(),
     }
 }
 

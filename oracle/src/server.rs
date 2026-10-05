@@ -35,6 +35,9 @@ const RERANK_TEXT_MAX_CHARS: usize = 2000;
 pub struct OracleMcpServer {
     config: Config,
     db: std::sync::Arc<Mutex<SearchIndex>>,
+    /// Test seam: the borg.yml the vocabulary is resolved from. `None` is the
+    /// shared `vault::paths::borg_config()`.
+    borg_config: Option<std::path::PathBuf>,
 }
 
 impl OracleMcpServer {
@@ -51,7 +54,24 @@ impl OracleMcpServer {
         Self {
             config,
             db: std::sync::Arc::new(Mutex::new(db)),
+            borg_config: None,
         }
+    }
+
+    /// Resolve the vocabulary from `borg_yml` instead of the shared location.
+    pub fn with_borg_config(mut self, borg_yml: std::path::PathBuf) -> Self {
+        self.borg_config = Some(borg_yml);
+        self
+    }
+
+    /// The canonical vocabulary, or the displayable reason it is unavailable.
+    fn vocabulary(&self) -> Result<Vec<String>, String> {
+        let borg_yml = self.borg_config.clone().unwrap_or_else(vault::paths::borg_config);
+        let result = crate::vocab::resolve(&borg_yml);
+        if let Err(e) = &result {
+            warn!("vocabulary unavailable: {e}");
+        }
+        result
     }
 
     /// Get a clone of the database handle for use in background tasks.
@@ -495,7 +515,17 @@ impl OracleMcpServer {
         // has used yet and an outright typo both return zeros, and the caller
         // cannot tell which it got. `known` separates them. The vocabulary is
         // read only on the zero path, so the common case stays one DB query.
-        let known = brief.total_notes > 0 || load_canonical_tags().contains(&req.tag);
+        // An unreadable vocabulary is `known: null` plus the error, never
+        // `false`: the tool cannot tell a typo from a canonical tag it failed
+        // to load.
+        let (known, vocabulary_error) = if brief.total_notes > 0 {
+            (Some(true), None)
+        } else {
+            match self.vocabulary() {
+                Ok(tags) => (Some(tags.contains(&req.tag)), None),
+                Err(e) => (None, Some(e)),
+            }
+        };
         let mut payload = json!({
             "tag": brief.tag,
             "known": known,
@@ -505,7 +535,9 @@ impl OracleMcpServer {
             "by_type": brief.by_type,
             "results": results,
         });
-        if !known {
+        if let Some(e) = vocabulary_error {
+            payload["vocabulary-error"] = json!(e);
+        } else if known == Some(false) {
             payload["message"] = json!(format!(
                 "no such tag: {:?} is neither in use nor in the canonical vocabulary (call tag_search with no tag, or schema_info, for the valid values)",
                 req.tag
@@ -650,9 +682,8 @@ impl OracleMcpServer {
         description = "List all valid schema values - tags, note types, origins, statuses, and ingest methods. Use this to understand what filter values are available."
     )]
     async fn schema_info(&self, _params: Parameters<SchemaInfoRequest>) -> Result<CallToolResult, McpError> {
-        let tags = load_canonical_tags();
         Ok(CallToolResult::success(vec![Content::json(schema_info_payload(
-            &tags,
+            &self.vocabulary(),
         ))?]))
     }
 
@@ -1152,33 +1183,18 @@ impl ServerHandler for OracleMcpServer {
 /// data-driven, not a Rust enum - the caller loads it from the canonical
 /// vocabulary and passes it in, so this function stays pure and testable
 /// with no filesystem access.
-pub fn schema_info_payload(tags: &[String]) -> serde_json::Value {
-    json!({
-        "tags": tags,
+pub fn schema_info_payload(vocabulary: &Result<Vec<String>, String>) -> serde_json::Value {
+    let mut payload = json!({
+        "tags": vocabulary.as_ref().ok(),
         "note_types": schema_values(NoteType::all(), NoteType::as_str, NoteType::description),
         "origins": schema_values(Origin::all(), Origin::as_str, Origin::description),
         "statuses": schema_values(Status::all(), Status::as_str, Status::description),
         "methods": schema_values(Method::all(), Method::as_str, Method::description),
-    })
-}
-
-/// Load the canonical tag vocabulary (`~/.config/sb/canonical-tags.yml`) for
-/// `schema_info`, sorted for a stable payload. Soft-fails to an empty list
-/// with a `warn!` rather than erroring the tool: `schema_info` is purely
-/// informational, and a host with no vocabulary deployed yet (or a hermetic
-/// test environment) must not turn every other schema value unreachable.
-fn load_canonical_tags() -> Vec<String> {
-    match vault::canonical::CanonicalTagsFile::load(&vault::paths::canonical_tags()) {
-        Ok(file) => {
-            let mut tags: Vec<String> = file.all_tags().into_iter().collect();
-            tags.sort();
-            tags
-        }
-        Err(e) => {
-            warn!("schema_info: failed to load canonical tags vocabulary: {e}");
-            Vec::new()
-        }
+    });
+    if let Err(e) = vocabulary {
+        payload["vocabulary-error"] = json!(e);
     }
+    payload
 }
 
 fn schema_values<T>(

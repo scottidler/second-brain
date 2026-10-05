@@ -6,6 +6,27 @@ use vault::frontmatter::Frontmatter;
 use vault::note::Note;
 use vault::search::SearchIndex;
 
+/// A server whose borg.yml (in the returned tempdir) is `body` with `{dir}`
+/// replaced by the tempdir path. Nothing reads `~/.config/sb/`.
+fn server_with_borg_yml(db: SearchIndex, body: &str) -> (tempfile::TempDir, OracleMcpServer) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yml = crate::testutil::write_borg_yml(dir.path(), &body.replace("{dir}", &dir.path().display().to_string()));
+    let server = OracleMcpServer::new(Config::default(), db).with_borg_config(yml);
+    (dir, server)
+}
+
+/// A server whose borg.yml points at a fixture vocabulary holding `tags`.
+fn server_with_vocabulary(db: SearchIndex, tags: &[&str]) -> (tempfile::TempDir, OracleMcpServer) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    crate::testutil::write_vocab(&dir.path().join("tags.yml"), tags);
+    let yml = crate::testutil::write_borg_yml(
+        dir.path(),
+        &format!("tags:\n  canonical-path: {}/tags.yml\n", dir.path().display()),
+    );
+    let server = OracleMcpServer::new(Config::default(), db).with_borg_config(yml);
+    (dir, server)
+}
+
 fn seed_one_article(db: &SearchIndex, path: &str, title: &str, body: &str) {
     let fm = Frontmatter {
         title: Some(title.to_string()),
@@ -747,7 +768,7 @@ fn trace_block_unparseable_expires_is_null_window() {
 #[tokio::test]
 async fn schema_info_includes_session_note_type() {
     let db = SearchIndex::open_memory().expect("open db");
-    let server = OracleMcpServer::new(Config::default(), db);
+    let (_fixture, server) = server_with_vocabulary(db, &["privacy"]);
     let result = server
         .dispatch("schema_info", json!({}))
         .await
@@ -786,7 +807,7 @@ fn format_note_carries_trace_block_at_every_level() {
 /// description is non-empty.
 #[test]
 fn schema_info_payload_emits_value_description_pairs() {
-    let payload = schema_info_payload(&[]);
+    let payload = schema_info_payload(&Ok(Vec::new()));
     for key in ["note_types", "origins", "statuses", "methods"] {
         let rows = payload[key]
             .as_array()
@@ -920,7 +941,7 @@ async fn tag_brief_dispatch_returns_expected_shape() {
 #[test]
 fn schema_info_includes_tags_from_the_vocabulary() {
     let tags = vec!["privacy".to_string(), "rust".to_string()];
-    let payload = schema_info_payload(&tags);
+    let payload = schema_info_payload(&Ok(tags));
     assert_eq!(payload["tags"], json!(["privacy", "rust"]));
 }
 
@@ -1016,7 +1037,7 @@ async fn knowledge_search_honors_tags_mode_all() {
 async fn tag_brief_flags_an_unknown_tag() {
     let db = SearchIndex::open_memory().expect("open db");
     seed_tagged_article(&db, "notes/a.md", "A", "body", &["privacy"]);
-    let server = OracleMcpServer::new(Config::default(), db);
+    let (_fixture, server) = server_with_vocabulary(db, &["privacy", "rust"]);
 
     let known = server
         .dispatch("tag_brief", json!({"tag": "privacy"}))
@@ -1035,6 +1056,87 @@ async fn tag_brief_flags_an_unknown_tag() {
         parsed["message"].as_str().is_some_and(|m| m.contains("no such tag")),
         "an unknown tag must say so: {parsed}"
     );
+}
+
+/// A canonical tag nobody has used yet is `known: true`, from the fixture
+/// vocabulary, not from `~/.config/sb/`.
+#[tokio::test]
+async fn tag_brief_knows_a_canonical_tag_with_no_notes() {
+    let db = SearchIndex::open_memory().expect("open db");
+    let (_fixture, server) = server_with_vocabulary(db, &["rust"]);
+    let result = server
+        .dispatch("tag_brief", json!({"tag": "rust"}))
+        .await
+        .expect("tag_brief dispatch");
+    assert_eq!(first_content_as_json(&result)["known"], json!(true));
+}
+
+/// A vocabulary that will not load must never read as "unknown tag".
+#[tokio::test]
+async fn tag_brief_reports_null_known_and_the_error_when_the_vocabulary_is_missing() {
+    let db = SearchIndex::open_memory().expect("open db");
+    let (fixture, server) = server_with_borg_yml(db, "tags:\n  canonical-path: {dir}/nonexistent-tags.yml\n");
+    let result = server
+        .dispatch("tag_brief", json!({"tag": "x"}))
+        .await
+        .expect("tag_brief dispatch");
+    let parsed = first_content_as_json(&result);
+    assert_eq!(parsed["known"], json!(null), "{parsed}");
+    let err = parsed["vocabulary-error"].as_str().expect("vocabulary-error");
+    assert!(
+        err.contains(&format!("{}/nonexistent-tags.yml", fixture.path().display())),
+        "{err}"
+    );
+    assert!(parsed.get("message").is_none(), "no 'no such tag' claim: {parsed}");
+}
+
+#[tokio::test]
+async fn schema_info_reports_null_tags_and_the_error_when_the_vocabulary_is_missing() {
+    let db = SearchIndex::open_memory().expect("open db");
+    let (fixture, server) = server_with_borg_yml(db, "tags:\n  canonical-path: {dir}/nonexistent-tags.yml\n");
+    let result = server
+        .dispatch("schema_info", json!({}))
+        .await
+        .expect("schema_info dispatch");
+    assert_ne!(result.is_error, Some(true), "other schema values stay reachable");
+    let parsed = first_content_as_json(&result);
+    assert_eq!(parsed["tags"], json!(null), "{parsed}");
+    assert!(
+        parsed["vocabulary-error"]
+            .as_str()
+            .is_some_and(|e| e.contains(&format!("{}/nonexistent-tags.yml", fixture.path().display()))),
+        "{parsed}"
+    );
+    assert!(parsed["note_types"].as_array().is_some_and(|a| !a.is_empty()));
+}
+
+#[tokio::test]
+async fn an_unparseable_borg_yml_fails_both_tools_naming_borg_yml() {
+    for (tool, args) in [("schema_info", json!({})), ("tag_brief", json!({"tag": "x"}))] {
+        let db = SearchIndex::open_memory().expect("open db");
+        let (_fixture, server) = server_with_borg_yml(db, "tags: [not: {a mapping\n");
+        let result = server.dispatch(tool, args).await.expect("dispatch");
+        let parsed = first_content_as_json(&result);
+        let err = parsed["vocabulary-error"].as_str().expect("vocabulary-error");
+        assert!(err.contains("borg.yml"), "{tool}: {err}");
+        assert_ne!(parsed["known"], json!(false), "{tool}: {parsed}");
+    }
+}
+
+/// The tilde form in borg.yml, resolved against a fixture HOME.
+#[tokio::test]
+async fn schema_info_lists_a_vocabulary_named_with_a_tilde_path() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let _guard = crate::testutil::HomeGuard::set(home.path());
+    crate::testutil::write_vocab(&home.path().join("tags.yml"), &["zz-fixture-only"]);
+    crate::testutil::write_borg_yml(home.path(), "tags:\n  canonical-path: ~/tags.yml\n");
+    let db = SearchIndex::open_memory().expect("open db");
+    let server = OracleMcpServer::new(Config::default(), db).with_borg_config(home.path().join("borg.yml"));
+    let result = server
+        .dispatch("schema_info", json!({}))
+        .await
+        .expect("schema_info dispatch");
+    assert_eq!(first_content_as_json(&result)["tags"], json!(["zz-fixture-only"]));
 }
 
 /// The aggregate `tag_search` branch pages at 50 by default, so `count`

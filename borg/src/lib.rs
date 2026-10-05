@@ -217,7 +217,7 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
     // alternative (silent-degrade ingest) lets junk tags accumulate in the
     // vault and breaks the canonical contract every other subsystem
     // depends on. Operator gets an actionable `sb bootstrap` pointer.
-    startup::validate_canonical_assets().context("borg::serve_init")?;
+    startup::validate_canonical_assets(&config.tags.canonical_path).context("borg::serve_init")?;
 
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
         .parse()

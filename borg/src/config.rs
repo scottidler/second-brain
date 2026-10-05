@@ -1155,7 +1155,8 @@ pub struct LlmConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct TagsConfig {
-    pub canonical_path: String,
+    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
+    pub canonical_path: PathBuf,
     pub mapping_path: String,
     pub reject_concatenated: bool,
     /// The closed-vocabulary classifier that assigns tags at ingest. Same
@@ -1167,7 +1168,7 @@ pub struct TagsConfig {
 impl Default for TagsConfig {
     fn default() -> Self {
         Self {
-            canonical_path: vault::paths::canonical_tags().display().to_string(),
+            canonical_path: vault::paths::canonical_tags(),
             mapping_path: vault::paths::tag_mapping().display().to_string(),
             reject_concatenated: true,
             classifier: distillers::tags::TagsClassifierConfig::default(),

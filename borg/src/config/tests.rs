@@ -1148,3 +1148,21 @@ fn ntfy_read_timeout_rejects_a_bad_duration_naming_the_key() {
     let msg = err.to_string();
     assert!(msg.contains("read-timeout") && msg.contains("eventually"), "{msg}");
 }
+
+#[test]
+fn tags_canonical_path_is_tilde_expanded_at_load() {
+    let cfg: Config = serde_yaml::from_str("tags:\n  canonical-path: ~/vocab/tags.yml\n").expect("parse");
+    let expected = vault::paths::expand_tilde("~/vocab/tags.yml");
+    assert_eq!(cfg.tags.canonical_path, expected);
+    assert!(
+        !cfg.tags.canonical_path.starts_with("~"),
+        "{:?}",
+        cfg.tags.canonical_path
+    );
+}
+
+#[test]
+fn tags_canonical_path_defaults_to_the_shared_location() {
+    let cfg: Config = serde_yaml::from_str("{}\n").expect("parse");
+    assert_eq!(cfg.tags.canonical_path, vault::paths::canonical_tags());
+}
