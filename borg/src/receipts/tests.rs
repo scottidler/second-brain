@@ -1322,3 +1322,23 @@ fn concurrent_first_opens_of_a_fresh_db_all_succeed() {
         failures.first()
     );
 }
+
+#[test]
+fn wal_conversion_under_a_held_lock_gives_up_within_its_budget() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("locked.db");
+    let holder = Connection::open(&path).unwrap();
+    holder.execute_batch("CREATE TABLE t (x); BEGIN EXCLUSIVE; INSERT INTO t VALUES (1);").unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    let budget = std::time::Duration::from_millis(200);
+    let started = std::time::Instant::now();
+    let err = set_wal_mode_within(&conn, budget).expect_err("the lock never clears");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(&err, rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::DatabaseBusy),
+        "gives up with SQLITE_BUSY, got {err}"
+    );
+    assert!(elapsed < std::time::Duration::from_secs(1), "bounded by the budget, took {elapsed:?}");
+}
