@@ -9,6 +9,8 @@ pub mod distilled;
 pub mod embedding;
 pub mod fabric;
 pub mod frontmatter;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod hygiene;
 pub mod identity;
 pub mod intake;

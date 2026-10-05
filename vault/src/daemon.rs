@@ -6,9 +6,18 @@
 //! `ingest_queue` tool all read the same `hotkey:` block and `server.auth-token`
 //! from `borg.yml`, so there is exactly one address type and one resolver.
 
-use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
-use crate::config::resolve_secret;
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::config::{deserialize_humantime, resolve_secret, serialize_humantime};
+
+#[cfg(feature = "http")]
+pub mod client;
+
+/// Per-request ceiling for a first-party daemon call when
+/// `hotkey.request-timeout` is not configured.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where first-party clients reach the borg daemon (`hotkey.host` /
 /// `hotkey.port` in `borg.yml`; live: `desk.lan:8181`). The `hotkey` name
@@ -19,6 +28,17 @@ pub struct HotkeyConfig {
     pub host: String,
     pub port: u16,
     pub key: String,
+    /// Ceiling on one daemon request: connect, headers and body together.
+    /// Humantime in `borg.yml` (`hotkey.request-timeout: 10s`).
+    #[serde(
+        deserialize_with = "deserialize_request_timeout",
+        serialize_with = "serialize_humantime"
+    )]
+    pub request_timeout: Duration,
+}
+
+fn deserialize_request_timeout<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+    deserialize_humantime(deserializer, "request-timeout")
 }
 
 impl Default for HotkeyConfig {
@@ -27,6 +47,7 @@ impl Default for HotkeyConfig {
             host: "localhost".to_string(),
             port: 8181,
             key: "<Ctrl><Shift>b".to_string(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
 }

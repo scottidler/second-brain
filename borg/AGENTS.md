@@ -39,6 +39,8 @@ borg owns durable capture, multi-channel ingest, and the staged pipeline that pu
 
 **Sources (transports):** `telegram.rs`, `discord.rs`, `ntfy.rs`, `github.rs` (+`github/`), `youtube.rs`, `slides.rs`, `jina.rs`, `signal.rs` (+`signal/`).
 
+**Test-only:** `stub.rs` (stub daemon on `127.0.0.1:0` with silent / stalled-body / 401 / token-required behaviors, shared by the daemon-client tests).
+
 **Core pipeline:** `pipeline.rs` (+`pipeline/`), `stages.rs` (+`stages/`), `intake.rs` (+`intake/`), `receipts.rs` (+`receipts/`), `queue.rs` (+`queue/`: pure ingest-queue batch/partition `snapshot`, SQL `load`, and the typed-error HTTP client `fetch` used by `sb borg queue`), `router.rs`, `routes.rs`, `dispatch.rs` (per-transport pipeline-run + notify boilerplate shared by telegram/ntfy/routes), `triage.rs`, `replay.rs` (+`replay/`), `backfill.rs` (+`backfill/`), `harvest.rs` (+`harvest/`, `sb borg harvest`: pull-based ingestion from clyde session exports).
 
 **Infrastructure:** `notify.rs` (+`notify/`), `watchdog.rs` (+`watchdog/`), `migrate.rs`, `config.rs`, `health.rs`, `startup.rs`, `retention.rs` (+`retention/`), `blocklist.rs` (+`blocklist/`), `rkvr.rs` (+`rkvr/`), `service.rs` (systemd unit install/uninstall + render, `install_systemd`/`render_systemd_unit`), `backoff.rs` (`ExponentialBackoff` for transport reconnect).

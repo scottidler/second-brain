@@ -1,8 +1,8 @@
-pub use vault::config::{Normalize, load_config, resolve_secret};
+pub use vault::config::{Normalize, deserialize_humantime, load_config, resolve_secret, serialize_humantime};
 pub use vault::daemon::{HotkeyConfig, client_auth_token};
 
 use eyre::Result;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -206,20 +206,6 @@ impl Default for QueueConfig {
     }
 }
 
-/// Deserialize a humantime string (`15m`, `90s`, `1h 30m`) straight into a
-/// `Duration`. An unparseable value is a deserialize error naming `key` and
-/// the bad value, so the YAML load itself fails. `key` is explicit because
-/// serde_yaml's error path stops at the enclosing map for a field-level
-/// `deserialize_with` error (observed: `queue: invalid duration ...`).
-pub fn deserialize_humantime<'de, D: Deserializer<'de>>(
-    deserializer: D,
-    key: &str,
-) -> std::result::Result<Duration, D::Error> {
-    let raw = String::deserialize(deserializer)?;
-    humantime::parse_duration(raw.trim())
-        .map_err(|e| serde::de::Error::custom(format!("{key}: invalid duration {raw:?} (humantime, e.g. 15m): {e}")))
-}
-
 fn deserialize_wedged_after<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Duration, D::Error> {
     deserialize_humantime(deserializer, "wedged-after")
 }
@@ -232,12 +218,6 @@ fn deserialize_browser_ua_timeout<'de, D: Deserializer<'de>>(
 
 fn deserialize_batch_gap<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Duration, D::Error> {
     deserialize_humantime(deserializer, "batch-gap")
-}
-
-/// Serialize a `Duration` back to the humantime form [`deserialize_humantime`]
-/// reads, so a round-tripped config keeps its shape.
-pub fn serialize_humantime<S: Serializer>(value: &Duration, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-    serializer.serialize_str(&humantime::format_duration(*value).to_string())
 }
 
 /// Systemd-unit-install settings for the borg daemon. Currently just the

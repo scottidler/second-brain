@@ -1,4 +1,5 @@
 use super::*;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -36,7 +37,7 @@ fn view_for(port: u16) -> BorgView {
 async fn fetch_returns_daemon_json_verbatim() {
     let body = r#"{"state":"draining","batch":{"id":"abc","total":2}}"#;
     let (port, req) = stub("200 OK", body).await;
-    let v = fetch(&view_for(port), Duration::from_secs(5)).await.expect("fetch");
+    let v = fetch(&view_for(port)).await.expect("fetch");
     assert_eq!(v, serde_json::from_str::<serde_json::Value>(body).unwrap());
     assert!(req.await.unwrap().starts_with("GET /queue "));
 }
@@ -48,7 +49,7 @@ async fn fetch_sends_bearer_when_token_configured() {
     let (port, req) = stub("200 OK", r#"{"state":"idle"}"#).await;
     let mut view = view_for(port);
     view.server.auth_token = Some("ORACLE_QUEUE_TEST_TOKEN".to_string());
-    fetch(&view, Duration::from_secs(5)).await.expect("fetch");
+    fetch(&view).await.expect("fetch");
     assert!(
         req.await
             .unwrap()
@@ -63,9 +64,7 @@ async fn closed_port_is_an_error_naming_the_address_not_idle() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
-    let err = fetch(&view_for(port), Duration::from_secs(5))
-        .await
-        .expect_err("must fail");
+    let err = fetch(&view_for(port)).await.expect_err("must fail");
     let msg = err.to_string();
     assert!(msg.contains(&format!("127.0.0.1:{port}")), "{msg}");
     assert!(!msg.contains("idle"), "{msg}");
@@ -74,10 +73,7 @@ async fn closed_port_is_an_error_naming_the_address_not_idle() {
 #[tokio::test]
 async fn http_500_is_an_error_naming_the_address() {
     let (port, _req) = stub("500 Internal Server Error", r#"{"error":"db down"}"#).await;
-    let msg = fetch(&view_for(port), Duration::from_secs(5))
-        .await
-        .unwrap_err()
-        .to_string();
+    let msg = fetch(&view_for(port)).await.unwrap_err().to_string();
     assert!(msg.contains(&format!("127.0.0.1:{port}")), "{msg}");
     assert!(msg.contains("500"), "{msg}");
     assert!(msg.contains("db down"), "{msg}");
@@ -86,10 +82,7 @@ async fn http_500_is_an_error_naming_the_address() {
 #[tokio::test]
 async fn http_404_says_daemon_predates_queue() {
     let (port, _req) = stub("404 Not Found", "").await;
-    let msg = fetch(&view_for(port), Duration::from_secs(5))
-        .await
-        .unwrap_err()
-        .to_string();
+    let msg = fetch(&view_for(port)).await.unwrap_err().to_string();
     assert!(msg.contains("predates /queue"), "{msg}");
     assert!(msg.contains(&format!("127.0.0.1:{port}")), "{msg}");
 }
@@ -97,10 +90,7 @@ async fn http_404_says_daemon_predates_queue() {
 #[tokio::test]
 async fn garbage_body_is_an_error_naming_the_address() {
     let (port, _req) = stub("200 OK", "not json").await;
-    let msg = fetch(&view_for(port), Duration::from_secs(5))
-        .await
-        .unwrap_err()
-        .to_string();
+    let msg = fetch(&view_for(port)).await.unwrap_err().to_string();
     assert!(msg.contains("unparseable"), "{msg}");
     assert!(msg.contains(&format!("127.0.0.1:{port}")), "{msg}");
 }
@@ -113,11 +103,49 @@ async fn silent_daemon_hits_the_request_timeout() {
         let (_sock, _) = listener.accept().await.unwrap();
         tokio::time::sleep(Duration::from_secs(30)).await;
     });
-    let msg = fetch(&view_for(port), Duration::from_millis(300))
-        .await
-        .unwrap_err()
-        .to_string();
+    let mut view = view_for(port);
+    view.hotkey.request_timeout = Duration::from_millis(300);
+    let started = Instant::now();
+    let msg = fetch(&view).await.unwrap_err().to_string();
+    assert!(
+        started.elapsed() < Duration::from_millis(600),
+        "took {:?}",
+        started.elapsed()
+    );
     assert!(msg.contains(&format!("127.0.0.1:{port}")), "{msg}");
+}
+
+#[tokio::test]
+async fn headers_then_a_stalled_body_hits_the_request_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _hold = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 2048];
+        let _ = sock.read(&mut buf).await;
+        let _ = sock
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{")
+            .await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    let mut view = view_for(port);
+    view.hotkey.request_timeout = Duration::from_millis(300);
+    let started = Instant::now();
+    let msg = fetch(&view).await.unwrap_err().to_string();
+    assert!(
+        started.elapsed() < Duration::from_millis(600),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert!(msg.contains(&format!("127.0.0.1:{port}")), "{msg}");
+}
+
+#[tokio::test]
+async fn a_401_with_a_non_json_body_names_the_401_not_a_parse_error() {
+    let (port, _req) = stub("401 Unauthorized", "unauthorized").await;
+    let msg = fetch(&view_for(port)).await.unwrap_err().to_string();
+    assert!(msg.contains("(401)"), "{msg}");
+    assert!(!msg.contains("unparseable"), "{msg}");
 }
 
 #[test]

@@ -117,6 +117,14 @@ youtube:
       max-vision-concurrency: 4
       min-confidence: 0.6
 
+# Where first-party clients (sb borg ingest/reingest/replay/queue/wait, the
+# oracle ingest_queue tool) reach the daemon. `request-timeout` (humantime)
+# bounds one request: connect, headers and body together. Defaults shown.
+# hotkey:
+#   host: localhost
+#   port: 8181
+#   request-timeout: 10s
+
 # Pipeline subprocess bounds. `browser-ua-timeout` (humantime) bounds the
 # markitdown conversion in the browser-UA article fallback; the other
 # `*-timeout-secs` keys are plain seconds. Defaults shown.

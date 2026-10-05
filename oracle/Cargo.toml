@@ -11,7 +11,7 @@ name = "oracle"
 path = "src/lib.rs"
 
 [dependencies]
-vault = { path = "../vault", features = ["schemars", "search", "watcher", "vec"] }
+vault = { path = "../vault", features = ["schemars", "search", "watcher", "vec", "http"] }
 rmcp = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

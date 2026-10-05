@@ -1031,9 +1031,7 @@ impl OracleMcpServer {
         let IngestQueueRequest {} = params.0;
         debug!("ingest_queue: entry");
         let view = crate::queue::load_view(None).map_err(Self::err)?;
-        let snapshot = crate::queue::fetch(&view, crate::queue::REQUEST_TIMEOUT)
-            .await
-            .map_err(Self::err)?;
+        let snapshot = crate::queue::fetch(&view).await.map_err(Self::err)?;
         Ok(CallToolResult::success(vec![Content::json(snapshot)?]))
     }
 

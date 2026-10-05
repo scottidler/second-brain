@@ -15,9 +15,6 @@ use vault::queue::{ItemState, QueueSnapshot, QueueState};
 /// Pause between polls (`borg::replay::POLL_INTERVAL_SECS` precedent).
 pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Per-request ceiling; each request gets `min(this, time left)`.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Exit code for "the pinned batch drained with `failed > 0`".
 pub const EXIT_FAILED: u8 = 3;
 /// Exit code for "an item in the pinned batch is wedged".
@@ -72,7 +69,7 @@ pub struct WaitOutcome {
 /// A request that fails before the deadline, or a draining answer with no
 /// batch to pin, is an `Err` (exit 1). A request
 /// that fails because the deadline cut it short is exit 5, never 1: its
-/// timeout was `min(REQUEST_TIMEOUT, time left)`, so it can only time out at
+/// timeout was `min(hotkey.request-timeout, time left)`, so it can only time out at
 /// or after the deadline.
 pub async fn run(config: &borg::config::Config, timeout: Duration) -> eyre::Result<WaitOutcome> {
     log::debug!(
@@ -92,7 +89,7 @@ pub async fn run(config: &borg::config::Config, timeout: Duration) -> eyre::Resu
                 snapshot: last,
             });
         }
-        let request_timeout = left.min(REQUEST_TIMEOUT);
+        let request_timeout = left.min(config.hotkey.request_timeout);
         let snapshot = match borg::queue::fetch(config, pinned.as_deref(), request_timeout).await {
             Ok(snapshot) => snapshot,
             Err(e) if Instant::now() >= deadline => {
