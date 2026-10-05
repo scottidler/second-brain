@@ -37,7 +37,7 @@ filesystem for content.
 cargo install --git https://github.com/scottidler/second-brain --bin sb
 
 # 2. Install Daniel Miessler's fabric (external dep; provides
-#    extract_wisdom, summarize, create_tags, etc.)
+#    summarize, weekly_digest, etc.)
 go install github.com/danielmiessler/fabric/cmd/fabric@latest
 fabric -y --update-patterns
 

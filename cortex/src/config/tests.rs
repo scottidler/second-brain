@@ -311,3 +311,10 @@ fn staging_root_defaults_to_borg_stages_dir() {
     let cfg: Config = serde_yaml::from_str("log-level: info\n").expect("deserialize");
     assert_eq!(cfg.staging_root, vault::paths::borg_stages_dir());
 }
+
+#[test]
+fn intel_config_tolerates_removed_fabric_patterns_and_on_new_note_keys() {
+    let yaml = "fabric-patterns: [summarize]\non-new-note: summarize\nbatch-weekly: my_weekly\n";
+    let cfg: IntelConfig = serde_yaml::from_str(yaml).expect("stale keys in a deployed cortex.yml must still parse");
+    assert_eq!(cfg.batch_weekly.as_deref(), Some("my_weekly"));
+}
