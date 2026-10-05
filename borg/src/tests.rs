@@ -217,3 +217,123 @@ fn constant_time_eq_matches_only_identical_bytes() {
     assert!(!constant_time_eq(b"short", b"longer-token"));
     assert!(constant_time_eq(b"", b""));
 }
+
+fn get_queue(uri: &str, bearer: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder().uri(uri);
+    if let Some(token) = bearer {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    builder.body(Body::empty()).expect("request")
+}
+
+/// Run `body` with `XDG_DATA_HOME` pointed at `data_home`, restoring it after.
+/// Serialized on the shared XDG test lock because the receipts DB path is
+/// resolved from the process environment.
+async fn with_xdg_data_home<F, Fut>(data_home: &std::path::Path, body: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let _guard = crate::harvest::TEST_XDG_LOCK.lock().await;
+    let prior = std::env::var("XDG_DATA_HOME").ok();
+    unsafe { std::env::set_var("XDG_DATA_HOME", data_home) };
+    body().await;
+    match prior {
+        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
+}
+
+async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+    serde_json::from_slice(&bytes).expect("json body")
+}
+
+#[tokio::test]
+async fn queue_route_returns_snapshot() {
+    let data_home = tempfile::TempDir::new().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let conn = crate::receipts::open_default().expect("open receipts");
+        crate::receipts::record_received(
+            &conn,
+            "20261004-215943-aaaa",
+            vault::schema::Method::Http,
+            vault::receipts::ReceiptKind::Url,
+            "https://www.youtube.com/watch?v=abc",
+        )
+        .expect("record");
+        drop(conn);
+
+        let resp = test_router().oneshot(get_queue("/queue", None)).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+        let snap: vault::queue::QueueSnapshot = serde_json::from_slice(&bytes).expect("parseable QueueSnapshot");
+        assert_eq!(snap.state, vault::queue::QueueState::Draining);
+        let batch = snap.batch.expect("batch");
+        assert_eq!(batch.id, "20261004-215943-aaaa");
+        assert_eq!((batch.total, batch.queued), (1, 1));
+
+        let by_id = test_router()
+            .oneshot(get_queue("/queue?batch=20261004-215943-aaaa", None))
+            .await
+            .expect("response");
+        assert_eq!(by_id.status(), StatusCode::OK);
+
+        let unknown = test_router()
+            .oneshot(get_queue("/queue?batch=nope", None))
+            .await
+            .expect("response");
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        assert!(body_json(unknown).await["error"].is_string());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn queue_route_idle_is_exactly_idle() {
+    let data_home = tempfile::TempDir::new().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let resp = test_router().oneshot(get_queue("/queue", None)).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await, serde_json::json!({"state": "idle"}));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn queue_route_requires_token_when_configured() {
+    let data_home = tempfile::TempDir::new().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let router = || test_router_with_auth(Config::default(), Some("secret".to_string()));
+        let no_token = router().oneshot(get_queue("/queue", None)).await.expect("response");
+        assert_eq!(no_token.status(), StatusCode::UNAUTHORIZED);
+        let wrong = router()
+            .oneshot(get_queue("/queue", Some("wrong")))
+            .await
+            .expect("response");
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        let ok = router()
+            .oneshot(get_queue("/queue", Some("secret")))
+            .await
+            .expect("response");
+        assert_eq!(ok.status(), StatusCode::OK);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn queue_route_db_error_is_500_not_idle() {
+    // XDG_DATA_HOME names a regular file, so the receipts directory cannot be
+    // created and the DB open fails.
+    let scratch = tempfile::TempDir::new().expect("tempdir");
+    let blocker = scratch.path().join("not-a-dir");
+    std::fs::write(&blocker, "x").expect("write blocker");
+    with_xdg_data_home(&blocker, || async {
+        let resp = test_router().oneshot(get_queue("/queue", None)).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = body_json(resp).await;
+        assert!(json["error"].is_string(), "500 body must carry an error: {json}");
+        assert!(json.get("state").is_none(), "a DB error must never look like a snapshot");
+    })
+    .await;
+}

@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{Multipart, Path, Request, State};
+use axum::extract::{Multipart, Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -236,6 +236,51 @@ pub async fn trace_state(State(_state): State<AppState>, Path(trace_id): Path<St
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("receipts lookup failed: {e}"),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueueParams {
+    pub batch: Option<String>,
+}
+
+/// `GET /queue[?batch=<id>]` - the ingest-queue snapshot. Auth-gated like
+/// `/trace`. A DB or query error is a 500 with `{"error": ...}`, never an
+/// idle-looking snapshot; an unknown `?batch=` id is a 404.
+pub async fn queue(State(state): State<AppState>, Query(params): Query<QueueParams>) -> Response {
+    log::debug!("queue: batch={:?}", params.batch);
+    let cfg = state.config.queue;
+    let batch = params.batch.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let conn = crate::receipts::open_default()?;
+        crate::queue::load(&conn, chrono::Utc::now(), &cfg, batch.as_deref())
+    })
+    .await;
+    let loaded = match joined {
+        Ok(result) => result,
+        Err(join_err) => Err(eyre::eyre!("queue task failed: {join_err}")),
+    };
+    match loaded {
+        Ok(Some(snapshot)) => {
+            log::debug!("queue: ok state={:?}", snapshot.state);
+            Json(snapshot).into_response()
+        }
+        Ok(None) => {
+            log::debug!("queue: unknown batch={:?} -> 404", params.batch);
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("unknown batch {}", params.batch.as_deref().unwrap_or_default())})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            log::error!("queue: load failed batch={:?}: {e:#}", params.batch);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("{e:#}")})),
             )
                 .into_response()
         }

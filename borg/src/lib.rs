@@ -122,6 +122,9 @@ pub fn build_router(state: AppState) -> Router {
         // DB is per-host on the daemon; client hosts can't read it directly).
         // Auth-gated alongside the write routes.
         .route("/trace/{trace_id}", get(routes::trace_state))
+        // Ingest-queue snapshot (batch progress, wedged items). Auth-gated:
+        // it carries source URLs and failure reasons.
+        .route("/queue", get(routes::queue))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             routes::require_auth,
