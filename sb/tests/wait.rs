@@ -279,10 +279,15 @@ fn wait_http_500_exits_one() {
 
 #[test]
 fn wait_closed_port_exits_one() {
-    let port = {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    };
+    // Bound but never listening: a connect is refused, and the port stays
+    // reserved for the whole test. Binding a listener and dropping it freed the
+    // port, and a parallel test's `start_stub` could be handed it and answer
+    // "drained" (exit 0).
+    let reserved = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    reserved
+        .bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into())
+        .unwrap();
+    let port = reserved.local_addr().unwrap().as_socket().unwrap().port();
     let run = run_wait(port, &[]);
     assert_eq!(run.code, Some(1), "stderr: {}", run.stderr);
     assert_eq!(run.stdout, "");

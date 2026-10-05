@@ -6451,6 +6451,7 @@ dependencies = [
  "serde_yaml",
  "serial_test",
  "shellexpand",
+ "socket2",
  "tempfile",
  "terminal_size",
  "tokio",
