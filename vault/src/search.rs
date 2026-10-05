@@ -10,18 +10,12 @@ use crate::note::{Note, scan_vault};
 use crate::schema::{NoteType, Origin, Status};
 use chrono;
 use eyre::{Result, WrapErr};
-use regex::Regex;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
-
-/// Wikilink extraction regex, compiled once (was recompiled ~2.3k times per
-/// reindex pass - once per note in `extract_wikilinks`).
-static WIKILINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[\[([^\]|#]+)(?:[|#][^\]]+)?\]\]").expect("wikilink regex"));
 
 /// English stop-word set for FTS5 term extraction, built once (was rebuilt on
 /// every `extract_search_terms` call).
@@ -454,38 +448,6 @@ fn extract_search_terms(content: &str, max_terms: usize) -> Vec<String> {
     terms.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     terms.into_iter().take(max_terms).map(|(word, _)| word).collect()
-}
-
-/// Extract wikilink targets from note body, skipping fenced code blocks.
-/// Handles [[simple]], [[with|alias]], [[with#heading]], [[path/to/note]].
-///
-/// `pub` so the cortex graph pass can derive `wikilink` edges from the same
-/// parser oracle's link tools use (single source of wikilink-extraction
-/// truth).
-pub fn extract_wikilinks(body: &str) -> Vec<String> {
-    let re = &*WIKILINK_RE;
-    let mut targets = Vec::new();
-    let mut in_code_block = false;
-
-    for line in body.lines() {
-        if line.trim_start().starts_with("```") {
-            in_code_block = !in_code_block;
-            continue;
-        }
-        if in_code_block {
-            continue;
-        }
-        for cap in re.captures_iter(line) {
-            if let Some(m) = cap.get(1) {
-                let target = m.as_str().trim();
-                if !target.is_empty() {
-                    targets.push(target.to_string());
-                }
-            }
-        }
-    }
-
-    targets
 }
 
 /// Extract hostname from a URL string: strip the scheme, drop path/query, drop

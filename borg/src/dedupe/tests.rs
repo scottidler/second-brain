@@ -398,7 +398,7 @@ fn run_with_apply_then_rerun_reports_zero_groups_and_the_inbound_link_still_reso
     let notes = note::scan_vault(root, &ScanConfig::default()).unwrap();
     let index = build_link_index(&notes);
     let rel_loser = loser.strip_prefix(root).unwrap().to_path_buf();
-    let inbound = inbound_links(&index, &rel_loser, &stem_of(&rel_loser));
+    let inbound = inbound_links(&index, &rel_loser);
     assert_eq!(inbound, vec![PathBuf::from("notes/other.md")]);
     assert!(root.join(&rel_loser).exists());
 }
@@ -548,4 +548,68 @@ fn run_purge_dry_run_never_archives() {
     let report = run_purge(root, &notes, &[], false).unwrap();
     assert_eq!(report.archived, vec![PathBuf::from("notes/tombstone.md")]);
     assert!(root.join("notes/tombstone.md").exists(), "dry-run must not archive");
+}
+
+#[test]
+fn run_purge_refuses_a_tombstone_linked_with_a_heading() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write_note(
+        root,
+        "notes/tombstone.md",
+        "trace: hv-aaaaaa\nsource: \"clyde://s1\"\ndistilled: true\nsuperseded-by: survivor\n",
+        "Merged into [[survivor]].\n",
+    );
+    write_note(
+        root,
+        "notes/linker.md",
+        "type: article\n",
+        "See [[tombstone#decisions]] and [[tombstone#^blk|the block]].\n",
+    );
+
+    let notes = note::scan_vault(root, &ScanConfig::default()).unwrap();
+    let report = run_purge(root, &notes, &[], true).unwrap();
+    assert!(report.archived.is_empty(), "a heading link is a live inbound link");
+    assert_eq!(report.refused[0].1, vec![PathBuf::from("notes/linker.md")]);
+    assert!(root.join("notes/tombstone.md").exists());
+}
+
+#[test]
+fn run_purge_path_link_to_another_directory_does_not_block_the_archive() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write_note(
+        root,
+        "notes/tombstone.md",
+        "trace: hv-aaaaaa\nsource: \"clyde://s1\"\ndistilled: true\nsuperseded-by: survivor\n",
+        "Merged into [[survivor]].\n",
+    );
+    write_note(root, "notes/linker.md", "type: article\n", "See [[other/tombstone]].\n");
+
+    let notes = note::scan_vault(root, &ScanConfig::default()).unwrap();
+    let report = run_purge(root, &notes, &[], false).unwrap();
+    assert_eq!(report.archived, vec![PathBuf::from("notes/tombstone.md")]);
+    assert!(report.refused.is_empty());
+}
+
+#[test]
+fn run_purge_ignores_a_link_inside_a_code_span() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write_note(
+        root,
+        "notes/tombstone.md",
+        "trace: hv-aaaaaa\nsource: \"clyde://s1\"\ndistilled: true\nsuperseded-by: survivor\n",
+        "Merged into [[survivor]].\n",
+    );
+    write_note(
+        root,
+        "notes/linker.md",
+        "type: article\n",
+        "Literal `[[tombstone]]` text.\n",
+    );
+
+    let notes = note::scan_vault(root, &ScanConfig::default()).unwrap();
+    let report = run_purge(root, &notes, &[], false).unwrap();
+    assert_eq!(report.archived, vec![PathBuf::from("notes/tombstone.md")]);
 }

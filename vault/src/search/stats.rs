@@ -7,16 +7,15 @@ impl super::SearchIndex {
     /// `inbound_link_count` column for every row. Idempotent, bounded by
     /// vault size, single pass.
     ///
-    /// **Key normalization is symmetric**: HashMap keys are
-    /// `target.to_ascii_lowercase()` (taking the last `/`-segment so that
-    /// `[[folder/note]]` matches a row whose path stem is `note`); the
-    /// per-row lookup key is `file_stem(path).to_ascii_lowercase()`. Both
-    /// sides are lowercased before the lookup, so any case parity is
-    /// automatic. Anything that compares stems without lowercasing first
-    /// is a bug.
+    /// Every link is resolved through one `wikilink::Resolver` built from the
+    /// note paths before the scan, so `[[dir/note]]` credits `dir/note.md`
+    /// and not `otherdir/note.md`, `[[note#h]]` credits `note`, and a bare
+    /// link to a stem several notes share credits each of them. The Resolver
+    /// is built once per pass (never per link): this runs under the
+    /// SearchIndex mutex.
     ///
     /// Self-links are NOT counted: a note whose body contains `[[self]]`
-    /// gets no structural credit for it.
+    /// gets no structural credit for it. Links inside code are not links.
     ///
     /// **Sole intended caller: oracle's 10-minute periodic background
     /// task.** Must NOT be called from `index_vault` / the watcher path:
@@ -40,25 +39,21 @@ impl super::SearchIndex {
             mapped.filter_map(warn_row).collect()
         };
 
-        let mut counts: HashMap<String, u64> = HashMap::new();
+        let resolver = crate::wikilink::Resolver::new(rows.iter().map(|(path, _, _)| path.as_str()));
+        let mut counts: HashMap<&str, u64> = HashMap::new();
         for (path, body, _stored) in &rows {
-            let source_stem = Path::new(path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            for raw_target in extract_wikilinks(body) {
-                // `[[folder/note]]` -> "note"; everything is lowercased so
-                // the per-row lookup key matches symmetrically.
-                let target_stem = raw_target.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
-                if target_stem.is_empty() {
+            let source_stem = crate::wikilink::stem(path);
+            // A same-note link (`[[#h]]`) has an empty target, which resolves
+            // to nothing.
+            for link in crate::wikilink::parse(body) {
+                if link.stem() == source_stem {
+                    // Self-link (same stem as the source): no structural
+                    // signal. Stem equality is the pre-Phase-15 rule, kept.
                     continue;
                 }
-                if target_stem == source_stem {
-                    // Self-link: no structural signal.
-                    continue;
+                for resolved in resolver.resolve(link.target) {
+                    *counts.entry(resolved).or_insert(0) += 1;
                 }
-                *counts.entry(target_stem).or_insert(0) += 1;
             }
         }
 
@@ -67,12 +62,7 @@ impl super::SearchIndex {
         {
             let mut stmt = tx.prepare("UPDATE notes SET inbound_link_count = ?1 WHERE path = ?2")?;
             for (path, _body, stored) in &rows {
-                let row_stem = Path::new(path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                let new_count = *counts.get(&row_stem).unwrap_or(&0) as i64;
+                let new_count = *counts.get(path.as_str()).unwrap_or(&0) as i64;
                 if new_count != *stored {
                     stmt.execute(params![new_count, path])?;
                     changed += 1;

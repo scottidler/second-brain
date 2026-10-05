@@ -316,3 +316,78 @@ fn lint_quality_violations_ordered_by_input_slice_under_par_iter() {
         "test fixture should produce at least one violation"
     );
 }
+
+fn linked_note_body() -> &'static str {
+    "A real note with enough words to pass. More words needed here to reach fifty words total. Let's keep adding until we have enough content to completely avoid the stub body threshold check."
+}
+
+fn has_issue(report: &Report, path: &str, issue: &str) -> bool {
+    report
+        .violations
+        .iter()
+        .any(|v| v.path.to_string_lossy() == path && v.message.contains(issue))
+}
+
+#[test]
+fn test_path_link_counts_as_inbound_for_the_matching_directory_only() {
+    let notes = vec![
+        NoteBuilder::new("dir/x.md")
+            .title("X")
+            .note_type("note")
+            .body(linked_note_body())
+            .build(),
+        NoteBuilder::new("otherdir/x.md")
+            .title("X")
+            .note_type("note")
+            .body(linked_note_body())
+            .build(),
+        NoteBuilder::new("src.md")
+            .title("Src")
+            .note_type("note")
+            .body("Points at [[dir/x]] only.")
+            .build(),
+    ];
+
+    let report = lint_quality(&notes, &default_config());
+    assert!(!has_issue(&report, "dir/x.md", "no-inbound-links"));
+    assert!(has_issue(&report, "otherdir/x.md", "no-inbound-links"));
+}
+
+#[test]
+fn test_heading_link_counts_as_inbound() {
+    let notes = vec![
+        NoteBuilder::new("t.md")
+            .title("T")
+            .note_type("note")
+            .body(linked_note_body())
+            .build(),
+        NoteBuilder::new("src.md")
+            .title("Src")
+            .note_type("note")
+            .body("See [[t#intro]].")
+            .build(),
+    ];
+
+    let report = lint_quality(&notes, &default_config());
+    assert!(!has_issue(&report, "t.md", "no-inbound-links"));
+}
+
+#[test]
+fn test_link_inside_inline_code_is_neither_inbound_nor_outbound() {
+    let notes = vec![
+        NoteBuilder::new("t.md")
+            .title("T")
+            .note_type("note")
+            .body(linked_note_body())
+            .build(),
+        NoteBuilder::new("src.md")
+            .title("Src")
+            .note_type("note")
+            .body("The syntax is `[[t]]` in Obsidian.")
+            .build(),
+    ];
+
+    let report = lint_quality(&notes, &default_config());
+    assert!(has_issue(&report, "t.md", "no-inbound-links"));
+    assert!(has_issue(&report, "src.md", "no-outbound-links"));
+}

@@ -215,6 +215,10 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
         set.into_iter().collect()
     };
 
+    // One Resolver per pass over every note path, so wikilink resolution is a
+    // lookup per link (Obsidian's path/stem rules, no fuzzy substring match).
+    let resolver = vault::wikilink::Resolver::new(rows.iter().map(|r| r.path.as_str()));
+
     let mut stats = GraphStats {
         full_rebuild,
         ..Default::default()
@@ -232,6 +236,7 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
             row,
             cfg,
             &stopwords,
+            &resolver,
             &tag_buckets,
             &creator_buckets,
             &source_buckets,
@@ -258,6 +263,7 @@ fn build_edges_for(
     row: &GraphNoteRow,
     cfg: &crate::config::GraphConfig,
     stopwords: &crate::stopwords::Stopwords,
+    resolver: &vault::wikilink::Resolver,
     tag_buckets: &HashMap<String, Vec<String>>,
     creator_buckets: &HashMap<String, Vec<String>>,
     source_buckets: &HashMap<String, Vec<String>>,
@@ -272,21 +278,22 @@ fn build_edges_for(
 
     // --- wikilink (resolved targets only, stopwords dropped) ---
     //
-    // The stopword is consulted HERE, on the RAW slug straight out of
-    // `extract_wikilinks`, BEFORE `resolve_note_path`. Checking after resolve
-    // would be wrong twice over: `resolve_wikilink`'s last fallback is a bare
-    // `LIKE '%target%'`, so a stoplisted word can resolve to an arbitrary note,
-    // and the resolved PATH no longer carries the word that has to be judged.
+    // The stopword is consulted HERE, on the RAW target straight out of
+    // `vault::wikilink::parse`, BEFORE resolving. Checking after resolve
+    // would be wrong: the resolved PATH no longer carries the word that has to
+    // be judged (and a bare link to a shared stem resolves to every note with it).
     // Case-insensitive so `[[Every]]` cannot slip past a lowercase entry.
-    for slug in vault::search::extract_wikilinks(&row.body) {
-        if stopwords.contains(&slug) {
+    // A same-note link (`[[#h]]`, empty target) mints no edge.
+    for link in vault::wikilink::parse(&row.body).filter(|l| !l.target.is_empty()) {
+        let slug = link.target;
+        if stopwords.contains(slug) {
             log::trace!("wikilink: dropping stoplisted target {slug:?} in {src}");
             continue;
         }
-        if let Some(resolved) = index.resolve_note_path(&slug)? {
+        for resolved in resolver.resolve(slug) {
             edges.push(Edge::deterministic(
                 src.clone(),
-                resolved,
+                resolved.to_string(),
                 KIND_WIKILINK,
                 WIKILINK_WEIGHT,
             ));

@@ -709,3 +709,41 @@ fn schemeless_sources_still_share_a_shared_source_bucket() {
         "case-folded schemeless sources still bucket together"
     );
 }
+
+/// `[[dir/x]]` resolves by Obsidian's path rule: `dir/x.md` gets the edge,
+/// `otherdir/x.md` does not.
+#[test]
+fn path_wikilink_edges_only_the_matching_directory() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    for path in ["dir/x.md", "otherdir/x.md"] {
+        index
+            .insert_test_note_graph(path, &[], "", "", "body", 100)
+            .expect(path);
+    }
+    index
+        .insert_test_note_graph("notes/src.md", &[], "", "", "see [[dir/x]]", 100)
+        .expect("src");
+
+    build(&mut index, &cfg(), true).expect("build");
+
+    assert_eq!(index.hub_members("dir/x.md").expect("members"), vec!["notes/src.md"]);
+    assert!(index.hub_members("otherdir/x.md").expect("members").is_empty());
+}
+
+/// A target that only substring-matches another note (`[[note]]` vs
+/// `notebook.md`) is a dangling link, not an edge.
+#[test]
+fn fuzzy_substring_wikilink_mints_no_edge() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    index
+        .insert_test_note_graph("notes/notebook.md", &[], "", "", "body", 100)
+        .expect("notebook");
+    index
+        .insert_test_note_graph("notes/src.md", &[], "", "", "see [[note]]", 100)
+        .expect("src");
+
+    let stats = build(&mut index, &cfg(), true).expect("build");
+
+    assert_eq!(stats.wikilink, 0);
+    assert!(index.hub_members("notes/notebook.md").expect("members").is_empty());
+}
