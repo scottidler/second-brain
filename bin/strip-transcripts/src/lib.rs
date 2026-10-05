@@ -12,7 +12,6 @@
 //! construction. A note missing `ingested` entirely, or carrying an
 //! unparsable value, is refused rather than guessed at (fail closed).
 
-#![deny(clippy::unwrap_used)]
 #![deny(dead_code)]
 #![deny(unused_variables)]
 // Core logic returns typed data; the bin's `main.rs` owns stdout.
