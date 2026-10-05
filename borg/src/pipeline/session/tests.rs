@@ -17,6 +17,8 @@ struct XdgSandbox {
     #[allow(dead_code)]
     data_home: TempDir,
     prior: Option<String>,
+    #[allow(dead_code)]
+    flag: crate::receipts::sandbox::Entered,
 }
 
 impl XdgSandbox {
@@ -25,7 +27,13 @@ impl XdgSandbox {
         let data_home = TempDir::new().unwrap();
         let prior = std::env::var("XDG_DATA_HOME").ok();
         unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
-        Self { lock, data_home, prior }
+        let flag = crate::receipts::sandbox::enter();
+        Self {
+            lock,
+            data_home,
+            prior,
+            flag,
+        }
     }
 }
 

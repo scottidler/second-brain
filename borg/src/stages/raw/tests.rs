@@ -217,6 +217,7 @@ fn run_gate_1_block_body_when_enabled_persists_blocklist_and_rejection() {
     unsafe {
         std::env::set_var("XDG_DATA_HOME", tmp.path());
     }
+    let _xdg_sandbox = crate::receipts::sandbox::enter();
 
     // Block until far in the future so the test is stable across actual wall-clock.
     let err = run_gate_1(
@@ -261,6 +262,7 @@ fn with_xdg<R>(data_home: &std::path::Path, body: impl FnOnce() -> R) -> R {
     let _guard = crate::harvest::TEST_XDG_LOCK.blocking_lock();
     let prior = std::env::var("XDG_DATA_HOME").ok();
     unsafe { std::env::set_var("XDG_DATA_HOME", data_home) };
+    let _xdg_sandbox = crate::receipts::sandbox::enter();
     let out = body();
     unsafe {
         match prior {

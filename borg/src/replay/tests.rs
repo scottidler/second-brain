@@ -137,6 +137,7 @@ async fn session_trace_replay_fails_loudly_when_harvest_lock_is_held() {
     let data_home = TempDir::new().unwrap();
     let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
     unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+    let _xdg_sandbox = crate::receipts::sandbox::enter();
 
     let staging_dir = TempDir::new().unwrap();
     let mut config = Config::default();
@@ -188,6 +189,7 @@ async fn url_trace_replay_never_takes_the_harvest_lock() {
     let data_home = TempDir::new().unwrap();
     let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
     unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+    let _xdg_sandbox = crate::receipts::sandbox::enter();
 
     let staging_dir = TempDir::new().unwrap();
     let mut config = Config::default();

@@ -1287,3 +1287,38 @@ fn update_note_path_returns_false_for_absent_trace() {
     let updated = update_note_path(&conn, "no-such-trace", "notes/whatever.md").expect("update_note_path");
     assert!(!updated, "an absent trace_id updates zero rows");
 }
+
+/// Concurrent first opens of one fresh DB file: every `open_at` succeeds.
+/// Without the WAL-conversion retry, SQLite's deadlock avoidance fails one
+/// opener at once with "database is locked" (busy_timeout is not consulted),
+/// which is the race behind the intermittent `receipts PRAGMAs` test failure.
+#[test]
+fn concurrent_first_opens_of_a_fresh_db_all_succeed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut failures = Vec::new();
+    for round in 0..100 {
+        let path = tmp.path().join(format!("receipts-{round}.db"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    open_at(&path).map(drop).map_err(|e| format!("{e:#}"))
+                })
+            })
+            .collect();
+        for h in handles {
+            if let Err(e) = h.join().expect("opener thread") {
+                failures.push(format!("round {round}: {e}"));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failed opens, first: {:?}",
+        failures.len(),
+        failures.first()
+    );
+}

@@ -254,7 +254,11 @@ pub async fn queue(State(state): State<AppState>, Query(params): Query<QueuePara
     log::debug!("queue: batch={:?}", params.batch);
     let cfg = state.config.queue;
     let batch = params.batch.clone();
+    #[cfg(test)]
+    let carried = crate::receipts::sandbox::carry();
     let joined = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _sandbox = carried.enter();
         let conn = crate::receipts::open_default()?;
         crate::queue::load(&conn, chrono::Utc::now(), &cfg, batch.as_deref())
     })
