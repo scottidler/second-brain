@@ -4,14 +4,16 @@
 # Checks (each prints `file:line: reason`; any hit exits 1):
 #   1. no self-skipping tests: `eprintln!("...skip...")` in test code. A test
 #      that prints and returns passes without testing (F16).
-#   2. no inline test modules: `#[cfg(test)]` followed by `mod x {`. Tests live
-#      in a sibling `x/tests.rs` (F20).
+#   2. no inline test modules: `#[cfg(test)]` followed (past any further
+#      attributes or `//` comments) by `mod x {`. Tests live in a sibling
+#      `x/tests.rs` (F20).
 #   3. every workspace member opts into the workspace lints via
 #      `[lints]` + `workspace = true`, so a new crate cannot dodge unwrap_used (F9).
 #   4. `RUST_VERSION:` is the same in ci.yml and release.yml, so the compiler
 #      that tests is the compiler that ships (F20).
 #   5. no freed-port idiom in test code: binding `127.0.0.1:0`, reading the port,
-#      and dropping the listener (or a hardcoded `port: 1NNNN`) to get "a port
+#      and dropping the listener (explicitly, at block end, or as a temporary
+#      in the same statement), or a hardcoded `port: 1NNNN`, to get "a port
 #      nothing listens on". A parallel test's stub can be handed the freed port.
 #      Use `vault::testnet::closed_port()`, which holds the port.
 #   6. no phase archaeology: `Phase N`, `Phase-N`, `pre-Phase-N`, `Phases N-M`, or a
@@ -58,7 +60,7 @@ hits "test skips itself with eprintln instead of failing or #[ignore]" \
 
 # 2. Inline test modules.
 hits "inline test module: move the body to a sibling tests.rs and write \`mod tests;\`" \
-  -n -U --no-heading --type rust '#\[cfg\(test\)\]\s*\n\s*(pub(\([a-z]+\))? )?mod \w+\s*\{' \
+  -n -U --no-heading --type rust '#\[cfg\(test\)\](\s*(#!?\[[^\n]*\]|//[^\n]*))*\s*(pub(\([a-z]+\))? )?mod \w+\s*\{' \
   "${CRATES[@]}"
 
 # 3. Workspace lints opt-in.
@@ -105,6 +107,10 @@ hits "bind-and-drop port: a parallel test's stub can be handed the freed port; $
   "${CRATES[@]}"
 hits "listener dropped to free its port: $CLOSED_PORT_FIX" \
   -n -U --no-heading 'bind\("127\.0\.0\.1:0"\)[^}]*\bdrop\(' \
+  -g '*tests*' -g '**/tests/**' \
+  "${CRATES[@]}"
+hits "listener is a temporary dropped at the end of the statement that reads its port: $CLOSED_PORT_FIX" \
+  -n -U --no-heading 'bind\("127\.0\.0\.1:0"\)[^;]*\.port\(\)\s*;' \
   -g '*tests*' -g '**/tests/**' \
   "${CRATES[@]}"
 hits "hardcoded 'unused' port: nothing reserves it; $CLOSED_PORT_FIX" \
