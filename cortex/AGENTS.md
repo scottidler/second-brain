@@ -52,7 +52,7 @@ Each command exposes `run(vault_root, config, opts)` returning typed reports/out
 
 ## Module Map
 
-- **Root/orchestration:** `lib.rs` (`lint`/`link` dispatch), `daemon.rs` (event loop, watcher, systemd, tick scheduling, cycle detection).
+- **Root/orchestration:** `lib.rs` (`lint`/`link` dispatch), `daemon.rs` (event loop, watcher, systemd, tick scheduling, cycle detection), `shutdown.rs` (`Shutdown`: SIGTERM/SIGINT listeners built ONCE before the daemon loop and polled by `&mut` in each `select!`; a per-iteration listener loses a signal delivered mid-tick, proven by the `tests/shutdown.rs` subprocess harness).
 - **Classification & linking:** `classify.rs`, `scope.rs`, `naming.rs`, `tags.rs`; `linking.rs`, `links.rs`, `unlink.rs`, `stopwords.rs`, `intel.rs`.
 - **Quality:** `quality.rs`, `duplicates.rs`, `frontmatter.rs`.
 - **Embeddings:** `embed.rs` (+`embed/`).

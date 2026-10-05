@@ -221,6 +221,11 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     // edit clears it so periodic sweeps resume.
     let mut oscillating = false;
 
+    // One listener set for the loop's whole life, polled by reference in every
+    // iteration. A per-iteration listener is dropped whenever a tick wins, and a
+    // SIGTERM delivered during that tick's work is lost (see `crate::shutdown`).
+    let mut shutdown = crate::shutdown::Shutdown::listen();
+
     loop {
         tokio::select! {
             Some(change) = watch_rx.recv() => {
@@ -435,7 +440,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     Err(e) => log::error!("daemon cold sweep failed: {e}"),
                 }
             }
-            _ = shutdown_signal() => {
+            () = shutdown.recv() => {
                 log::info!("received shutdown signal; shutting down daemon");
                 break;
             }
@@ -444,33 +449,6 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
 
     drop(watcher);
     Ok(())
-}
-
-/// Resolve when the daemon should shut down: Ctrl-C (SIGINT) or SIGTERM.
-/// systemd stops a unit with SIGTERM; the previous `ctrl_c()`-only arm
-/// ignored it, so the daemon was killed mid-write instead of breaking the
-/// loop and dropping the watcher cleanly.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut sigterm) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = sigterm.recv() => {}
-                }
-            }
-            Err(e) => {
-                log::warn!("daemon: failed to install SIGTERM handler: {e}; relying on Ctrl-C only");
-                let _ = tokio::signal::ctrl_c().await;
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
 }
 
 /// Run classify only - used during cycle detection since classify is inherently idempotent

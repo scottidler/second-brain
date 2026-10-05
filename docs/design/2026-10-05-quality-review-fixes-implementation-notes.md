@@ -1183,3 +1183,37 @@ Panel round 2 (run dir `/tmp/review-panel/NXcIoLGX/`, synthesis + `probes.md`); 
 - Riding, disclosed: Phase 9 per-entry-point timeout matrix partial; checkpoint/manifest WARNs guarded by the rg criterion only.
 - Carried, not fixed: ExecStart is `argv.join(" ")` (`vault/src/systemd.rs:236`), so a path with a space breaks the unit (pre-existing for exe/vault); source-lint check 7 still cannot see a cite wrapped across comment lines.
 
+## Orchestrator fix: cortex lost SIGTERM
+### Incident
+- desk, 2026-10-05: `otto deploy` of v0.15.14 restarted the units at 12:28:15. borg stopped in 20 ms. cortex got SIGTERM while an action cycle ran (its `block_in_place` work ended 12:28:34.87, "daemon action cycle complete"), never logged "received shutdown signal; shutting down daemon", sat idle 71 s, and systemd SIGKILLed it at 12:29:45 ("State 'stop-sigterm' timed out", "Failed with result 'timeout'"), firing the OnFailure ntfy alert. Evidence: `journalctl --user -u cortex --since "2026-10-05 12:28:10" --until "2026-10-05 12:29:46"`.
+
+### Cause
+- `cortex/src/daemon.rs` had `_ = shutdown_signal() => { ... break; }` as an arm INSIDE the loop's `tokio::select!`. Every iteration built a fresh `signal(SignalKind::terminate())` listener and a fresh `ctrl_c()`, and `select!` dropped them as soon as a tick arm won, before the tick's work ran. So during every tick's work no SIGTERM listener existed, but tokio had already replaced the default terminate action.
+- tokio 1.52.3 semantics (`~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.52.3/`):
+  - `src/signal/unix.rs:255-262` `action()`: the OS handler only sets a pending flag (`record_event`) and writes a wake byte to the driver pipe.
+  - `src/runtime/signal/mod.rs:126`: the driver, woken by that byte (on another worker while the tick sits in `block_in_place`), calls `globals().broadcast()`.
+  - `src/signal/registry.rs:89-104` `broadcast()`: `pending.swap(false)` clears the flag, then `tx.send(())`, ignoring the error when there are no listeners.
+  - `src/sync/watch.rs:1064-1068` `Sender::send`: with `receiver_count() == 0` it returns `Err` WITHOUT updating the value or version. The event is gone.
+  - `src/signal/registry.rs:70-75` `register_listener` -> `src/sync/watch.rs:1387-1393` `subscribe()`: a new receiver starts at the CURRENT version, i.e. marked seen. A listener created after the broadcast never fires for that signal.
+- Net: a SIGTERM during any tick's work is consumed with no receiver and the daemon runs on until SIGKILL.
+
+### Fix
+- New `cortex/src/shutdown.rs`: `Shutdown` owns long-lived `Signal` receivers for SIGTERM and SIGINT (`Shutdown::listen()`), and `recv(&mut self)` polls them. `Signal::recv` is cancel-safe and the receiver's watch version persists in the struct, so dropping the `recv` future when another arm wins loses nothing.
+- `daemon.rs`: `let mut shutdown = crate::shutdown::Shutdown::listen();` once, right before the loop (after the initial full sweep, so SIGTERM during startup keeps the default kill action, as before); the arm is `() = shutdown.recv() => { ... break; }`. The free `shutdown_signal()` fn is deleted, so the per-iteration shape has no helper left to call.
+- `cortex/AGENTS.md` lists `shutdown.rs` (the `agents-map` CI task requires it).
+
+### Sites
+- `rg -n 'ctrl_c\(\)|signal\(SignalKind' --type rust borg cortex oracle vault sb distillers` (plus a wider `tokio::signal|signal::unix|SignalKind` sweep): the only site was `cortex/src/daemon.rs` (`shutdown_signal()` called from the loop's `select!`, previously at :438, the fn at :453-474). borg, oracle, vault, sb and distillers construct no tokio signal listener. `vault::process::install_interrupt_handler` is a libc handler, not a tokio listener, and is unaffected.
+
+### Test
+- `cortex/tests/shutdown.rs`, `harness = false` (precedent `vault/tests/interrupt.rs`): re-executes itself as `--loop-child`, which runs the daemon loop's shape on a 2-worker multi-thread runtime: `select!` of `shutdown.recv()` vs a 10 ms interval whose arm prints `tick` and does 300 ms of `block_in_place` work. The parent waits for `tick`, sleeps 100 ms, `kill(2)`s the child with SIGTERM (then SIGINT in a second run), and asserts the child exits with code 0 within 2 s after the work ends. A lost signal shows as the child still running at the deadline (killed by the `Cleanup` guard), never as a dead test runner; death by the signal shows as code `None`.
+- `cortex/Cargo.toml`: `[[test]] shutdown harness = false`, dev-dep `libc` via `cargo add` (lock moved libc 0.2.186 -> 0.2.190, patch).
+
+### Break-it
+- Planted `*self = Self::listen();` at the top of `Shutdown::recv`, i.e. a fresh listener on every iteration, exactly the old `shutdown_signal()` behaviour. Result: `SIGTERM: loop still running 2s after the tick's work ended: the signal was lost`, 5/5 runs. Reverted; fixed version passed 10/10 consecutive runs plus the CI run.
+
+### Proof
+- `otto ci < /dev/null` exit 0, `✅ All CI checks passed!`: 3059 libtest tests passed, plus the harness binaries (`shutdown harness: SIGTERM ok`, `SIGINT ok`; `interrupt harness` both ok); `source-lint: clean`.
+
+### Open questions
+- None for this fix. Note, not changed here: SIGTERM is still only observed between ticks, so a tick longer than systemd's stop timeout (the LLM-bound fact or entities pass) would still be SIGKILLed mid-work. The incident's cycle ended 19 s after SIGTERM; it was the lost signal, not the tick length, that caused the kill.

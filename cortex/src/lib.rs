@@ -29,6 +29,7 @@ pub mod quality;
 pub mod report;
 pub mod schema_docs;
 pub mod scope;
+pub mod shutdown;
 pub mod startup;
 pub mod state;
 pub mod stopwords;

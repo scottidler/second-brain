@@ -46,6 +46,13 @@ tempfile = { workspace = true }
 # `otto ci`. Same version vault's Candle encoder loads; tokenization needs no
 # model weights.
 tokenizers = "0.23.1"
+# kill(2) for the shutdown harness: SIGTERM goes to a child, never the runner.
+libc = "0.2.190"
+
+# Re-executes itself as the signalled daemon-loop process, so it owns main().
+[[test]]
+name = "shutdown"
+harness = false
 
 [lints]
 workspace = true
