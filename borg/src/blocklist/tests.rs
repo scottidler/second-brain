@@ -117,3 +117,21 @@ fn parse_retry_after_picks_up_rfc3339() {
     let got = parse_retry_after("blocked until 2026-04-20T00:00:00Z", now);
     assert_eq!(got.format("%Y-%m-%d").to_string(), "2026-04-20");
 }
+
+/// Only a missing file is an empty blocklist. A stat error (here ENOTDIR: a
+/// regular file where the parent directory should be) fails the load, so
+/// Gate-0 fails closed instead of letting every domain through.
+#[test]
+fn from_file_fails_on_a_stat_error_instead_of_reading_empty() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("borg"), b"not a directory").unwrap();
+    let err = Blocklist::from_file(&tmp.path().join("borg/blocked-domains.yml")).expect_err("stat error");
+    assert!(format!("{err:#}").contains("stat blocklist"), "got {err:#}");
+}
+
+#[test]
+fn from_file_reads_a_missing_file_as_empty() {
+    let tmp = TempDir::new().unwrap();
+    let bl = Blocklist::from_file(&tmp.path().join("absent.yml")).unwrap();
+    assert!(bl.domains.is_empty());
+}
