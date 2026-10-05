@@ -15,7 +15,7 @@
 //! harvest-completion, Phase 5). When `harvest.env_bootstrap` is configured,
 //! `sb-harvest.service` carries the same `ExecStartPre` decrypt +
 //! `EnvironmentFile` directives the borg/cortex daemon units already emit
-//! (`crate::service::install_systemd`, `cortex::daemon::render_systemd_unit`),
+//! (all three render through `vault::systemd::render_service`),
 //! written to its OWN env-file so a one-shot harvest run never clobbers the
 //! long-running daemon's captured environment. `None` (the default) omits
 //! both directives - a host with nothing to bootstrap still gets a valid unit.
@@ -25,94 +25,79 @@ use std::path::Path;
 use eyre::{Context, Result};
 
 use crate::config::Config;
+use vault::systemd::{Hardening, ServiceUnit, TimerUnit, UnitType, render_service, render_timer};
 
 /// The oneshot service unit filename.
 pub const HARVEST_SERVICE: &str = "sb-harvest.service";
 /// The timer unit filename.
 pub const HARVEST_TIMER: &str = "sb-harvest.timer";
 
-/// Render the `(service, timer)` unit contents. Pure - no filesystem or
-/// environment access beyond the args - so `install` and the tests share one
-/// seam (tests assert on the returned strings instead of touching the real
-/// `~/.config/systemd/user/`).
-pub fn render_units(home: &Path, binary: &Path, config: &Config) -> (String, String) {
+/// Describe the `(service, timer)` units and render them through
+/// `vault::systemd`. Pure - no filesystem or environment access beyond the
+/// args - so `install` and the tests share one seam (tests assert on the
+/// returned strings instead of touching the real `~/.config/systemd/user/`).
+///
+/// `config_path` is the borg.yml to pin with `--config`, or `None` to omit
+/// the flag; the caller decides (it passes the file when it exists) so the
+/// timer's stripped environment can't resolve a different one.
+pub fn render_units(home: &Path, binary: &Path, config_path: Option<&Path>, config: &Config) -> (String, String) {
     log::debug!(
-        "harvest::timer::render_units: binary={} schedule={:?}",
+        "harvest::timer::render_units: binary={} config_path={:?} schedule={:?}",
         binary.display(),
+        config_path,
         config.harvest.schedule
     );
 
-    // Pin the config path explicitly when present so the timer's stripped
-    // environment can't resolve a different one.
-    //
     // `--config` is a flag on `sb borg`, NOT on the `harvest` subcommand, so it
-    // is interpolated BEFORE `harvest` in the ExecStart below. Emitting
+    // goes BEFORE `harvest` in the ExecStart. Emitting
     // `borg harvest --config <path>` made every scheduled run die instantly with
     // `error: unexpected argument '--config' found` (exit 2), which nothing
     // noticed because the timer had never actually fired on this host.
-    let config_flag = {
-        let path = vault::paths::borg_config();
-        if path.exists() {
-            format!(" --config {}", path.display())
-        } else {
-            String::new()
-        }
+    let mut exec_start = vec![binary.display().to_string(), "borg".to_string()];
+    if let Some(path) = config_path {
+        exec_start.push("--config".to_string());
+        exec_start.push(path.display().to_string());
+    }
+    exec_start.push("harvest".to_string());
+
+    // `env_bootstrap: None` omits both bootstrap directives so a host with
+    // nothing to bootstrap still gets a valid, complete unit - never
+    // fabricated.
+    let service = ServiceUnit {
+        description: "sb borg harvest - nightly Claude-session harvest into the vault (second-brain)".to_string(),
+        after: vec!["default.target".to_string()],
+        wants: Vec::new(),
+        start_limit: None,
+        unit_type: UnitType::Oneshot,
+        env_bootstrap: config.harvest.env_bootstrap.clone(),
+        home: home.to_path_buf(),
+        path_comment: Some(
+            "Timers run with a stripped PATH; set it explicitly and use the\n\
+             absolute binary below so the run resolves with an empty inherited env.\n\
+             mise shims come first so mise-managed tools (e.g. fabric) win over\n\
+             any stale duplicate elsewhere on PATH."
+                .to_string(),
+        ),
+        extra_env: Vec::new(),
+        exec_start,
+        restart: None,
+        hardening: Hardening::Minimal {
+            why: "harvest writes the vault + ~/.local/share/sb, so no\nProtectHome/ProtectSystem lockdown here"
+                .to_string(),
+        },
+        // Installed through the timer, so the service has no [Install].
+        wanted_by: None,
     };
 
-    let mut service = String::from(
-        "[Unit]\n\
-         Description=sb borg harvest - nightly Claude-session harvest into the vault (second-brain)\n\
-         After=default.target\n\
-         \n\
-         [Service]\n\
-         Type=oneshot\n",
-    );
-
-    // Same secret/env bootstrap the borg/cortex daemon units emit
-    // (`borg::service::install_systemd`, `cortex::daemon::render_systemd_unit`).
-    // `None` omits both directives so a host with nothing to bootstrap still
-    // gets a valid, complete unit - never fabricated.
-    if let Some(bootstrap) = &config.harvest.env_bootstrap {
-        service.push_str(&format!(
-            "ExecStartPre=/bin/sh -c '{command} > {env_file}'\n",
-            command = bootstrap.command,
-            env_file = bootstrap.env_file.display(),
-        ));
-        service.push_str(&format!("EnvironmentFile=-{}\n", bootstrap.env_file.display()));
-    }
-
-    service.push_str(&format!(
-        "# Timers run with a stripped PATH; set it explicitly and use the\n\
-         # absolute binary below so the run resolves with an empty inherited env.\n\
-         # mise shims come first so mise-managed tools (e.g. fabric) win over\n\
-         # any stale duplicate elsewhere on PATH.\n\
-         Environment=\"PATH={home}/.local/share/mise/shims:{home}/.local/bin:{home}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n\
-         ExecStart={binary} borg{config_flag} harvest\n\
-         WorkingDirectory={home}\n\
-         \n\
-         # Hardening (harvest writes the vault + ~/.local/share/sb, so no\n\
-         # ProtectHome/ProtectSystem lockdown here).\n\
-         NoNewPrivileges=true\n\
-         PrivateTmp=true\n",
-        home = home.display(),
-        binary = binary.display(),
-    ));
-
     // The ONE value that IS the timer. Everything else lives in borg.yml.
-    let timer = format!(
-        "[Unit]\n\
-         Description=Nightly sb borg harvest timer (second-brain)\n\
-         \n\
-         [Timer]\n\
-         OnCalendar={schedule}\n\
-         Persistent=true\n\
-         \n\
-         [Install]\n\
-         WantedBy=timers.target\n",
-        schedule = config.harvest.schedule,
-    );
+    let timer = TimerUnit {
+        description: "Nightly sb borg harvest timer (second-brain)".to_string(),
+        on_calendar: config.harvest.schedule.clone(),
+        persistent: true,
+        wanted_by: "timers.target".to_string(),
+    };
 
-    (service, timer)
+    (render_service(&service), render_timer(&timer))
 }
 
 /// Install the harvest service + timer into `~/.config/systemd/user/`.
@@ -127,7 +112,9 @@ pub fn install(config: &Config) -> Result<Vec<String>> {
 
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let binary = std::env::current_exe().context("failed to get current executable path")?;
-    let (service, timer) = render_units(&home, &binary, config);
+    let borg_config = vault::paths::borg_config();
+    let config_path = borg_config.exists().then_some(borg_config.as_path());
+    let (service, timer) = render_units(&home, &binary, config_path, config);
 
     let service_path = service_dir.join(HARVEST_SERVICE);
     let timer_path = service_dir.join(HARVEST_TIMER);

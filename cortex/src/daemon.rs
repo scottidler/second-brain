@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
+use vault::systemd::{EnvVar, Hardening, Restart, RestartPolicy, ServiceUnit, UnitType, render_service};
 use vault::watcher::{VaultWatcher, WatcherConfig};
 
 use crate::config::{Config, DaemonConfig, VaultConfig};
@@ -857,94 +858,86 @@ where
     fingerprint
 }
 
-/// Render the `cortex.service` unit content. Pure - no filesystem or
-/// environment access beyond the args given - so `install_systemd_service`
-/// and its tests share one seam: tests assert on the returned string instead
-/// of touching the real `~/.config/systemd/user/`.
+/// Describe `cortex.service` and render it through `vault::systemd`. Pure -
+/// no filesystem or environment access beyond the args - so
+/// `install_systemd_service` and its tests share one seam: tests assert on the
+/// returned string instead of touching the real `~/.config/systemd/user/`.
+///
+/// `data_dir` is the sb data namespace (`<xdg data>/sb`) and `config_path` the
+/// cortex.yml to pin with `--config` (`None` omits the flag); the caller
+/// resolves both.
 ///
 /// Emits the secret-bootstrap `ExecStartPre` + `EnvironmentFile` and the
 /// rayon cap from `config.daemon` when configured (2026-07-05
-/// cortex-daemon-oscillation-loop design doc, Phase 6: the live unit had
-/// drifted to carry both by hand because this template omitted them). Both
-/// are optional - a host with neither still gets a valid, complete unit.
-fn render_systemd_unit(home: &Path, binary: &Path, vault_root: &Path, config: &Config) -> String {
+/// cortex-daemon-oscillation-loop design doc: the live unit had drifted to
+/// carry both by hand because this template omitted them). Both are optional
+/// - a host with neither still gets a valid, complete unit.
+fn render_systemd_unit(
+    home: &Path,
+    binary: &Path,
+    vault_root: &Path,
+    data_dir: &Path,
+    config_path: Option<&Path>,
+    config: &Config,
+) -> String {
     log::debug!(
-        "render_systemd_unit: vault_root={} log_level={} rayon_threads={} env_bootstrap={}",
+        "render_systemd_unit: vault_root={} data_dir={} config_path={:?} log_level={} rayon_threads={} env_bootstrap={}",
         vault_root.display(),
+        data_dir.display(),
+        config_path,
         config.log_level,
         config.daemon.rayon_threads,
         config.daemon.env_bootstrap.is_some(),
     );
 
-    let vault = vault_root.display();
-    let log_level = &config.log_level;
-
-    // Cortex writes under the sb data namespace too (the oracle DB it is the
-    // sole embeddings writer for lives at `~/.local/share/sb/oracle/`), so the
-    // unit must name it alongside the vault or `ProtectHome=read-only` blocks
-    // every embed write. Matches borg's unit (`borg/src/service.rs`).
-    let data = vault::paths::xdg_data_dir()
-        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
-        .join("sb");
-
-    let mut config_flag = String::new();
-    let config_path = vault::paths::cortex_config();
-    if config_path.exists() {
-        config_flag = format!(" --config {}", config_path.display());
+    let mut exec_start = vec![binary.display().to_string(), "cortex".to_string()];
+    if let Some(path) = config_path {
+        exec_start.push("--config".to_string());
+        exec_start.push(path.display().to_string());
     }
+    exec_start.extend([
+        "--vault".to_string(),
+        vault_root.display().to_string(),
+        "--log-level".to_string(),
+        config.log_level.clone(),
+        "daemon".to_string(),
+        "--start".to_string(),
+    ]);
 
-    let mut service = String::from(
-        "[Unit]\n\
-         Description=cortex - Obsidian vault governance daemon (second-brain)\n\
-         After=default.target\n\
-         \n\
-         [Service]\n\
-         Type=simple\n",
-    );
-
-    if let Some(bootstrap) = &config.daemon.env_bootstrap {
-        service.push_str(&format!(
-            "ExecStartPre=/bin/sh -c '{command} > {env_file}'\n",
-            command = bootstrap.command,
-            env_file = bootstrap.env_file.display(),
-        ));
-        service.push_str(&format!("EnvironmentFile=-{}\n", bootstrap.env_file.display()));
-    }
-
-    service.push_str(&format!(
-        "Environment=\"PATH={home}/.local/share/mise/shims:{home}/.local/bin:{home}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n",
-        home = home.display(),
-    ));
-
+    let mut extra_env = Vec::new();
     if config.daemon.rayon_threads > 0 {
-        service.push_str("# Cap rayon's global thread pool (candle's gemm degree reads the same var)\n");
-        service.push_str(&format!(
-            "Environment=\"RAYON_NUM_THREADS={}\"\n",
-            config.daemon.rayon_threads
-        ));
+        extra_env.push(EnvVar {
+            comment: Some("Cap rayon's global thread pool (candle's gemm degree reads the same var)".to_string()),
+            name: "RAYON_NUM_THREADS".to_string(),
+            value: config.daemon.rayon_threads.to_string(),
+        });
     }
 
-    service.push_str(&format!(
-        "ExecStart={binary} cortex{config_flag} --vault {vault} --log-level {log_level} daemon --start\n\
-         Restart=on-failure\n\
-         RestartSec=5\n\
-         WorkingDirectory={home}\n\
-         \n\
-         # Hardening\n\
-         NoNewPrivileges=true\n\
-         ProtectSystem=strict\n\
-         ProtectHome=read-only\n\
-         ReadWritePaths={vault} {data}\n\
-         PrivateTmp=true\n\
-         \n\
-         [Install]\n\
-         WantedBy=default.target\n",
-        binary = binary.display(),
-        home = home.display(),
-        data = data.display(),
-    ));
-
-    service
+    let unit = ServiceUnit {
+        description: "cortex - Obsidian vault governance daemon (second-brain)".to_string(),
+        after: vec!["default.target".to_string()],
+        wants: Vec::new(),
+        start_limit: None,
+        unit_type: UnitType::Simple,
+        env_bootstrap: config.daemon.env_bootstrap.clone(),
+        home: home.to_path_buf(),
+        path_comment: None,
+        extra_env,
+        exec_start,
+        restart: Some(Restart {
+            policy: RestartPolicy::OnFailure,
+            sec: 5,
+        }),
+        // Cortex writes under the sb data namespace too (the oracle DB it is
+        // the sole embeddings writer for lives at `~/.local/share/sb/oracle/`),
+        // so the unit must name it alongside the vault or
+        // `ProtectHome=read-only` blocks every embed write.
+        hardening: Hardening::Strict {
+            rw_paths: vec![vault_root.to_path_buf(), data_dir.to_path_buf()],
+        },
+        wanted_by: Some("default.target".to_string()),
+    };
+    render_service(&unit)
 }
 
 /// Install a systemd user service for the daemon. Returns the lines sb
@@ -961,8 +954,13 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<Str
 
     let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("Cannot determine home directory"))?;
     let binary = std::env::current_exe().context("failed to get current executable path")?;
+    let data_dir = vault::paths::xdg_data_dir()
+        .ok_or_else(|| eyre::eyre!("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)"))?
+        .join("sb");
+    let cortex_config = vault::paths::cortex_config();
+    let config_path = cortex_config.exists().then_some(cortex_config.as_path());
 
-    let service = render_systemd_unit(&home, &binary, vault_root, config);
+    let service = render_systemd_unit(&home, &binary, vault_root, &data_dir, config_path, config);
 
     let service_path = service_dir.join("cortex.service");
     std::fs::write(&service_path, &service)?;

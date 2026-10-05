@@ -241,26 +241,10 @@ pub struct DaemonConfig {
     /// Optional secret/environment bootstrap for the installed systemd unit.
     /// `None` (the default) omits both the `ExecStartPre` and
     /// `EnvironmentFile` directives, so a host with no secret bootstrap still
-    /// gets a valid, complete unit. Mirrors cortex.yml's `daemon.env-bootstrap`
-    /// (`cortex/src/config.rs::EnvBootstrapConfig`) so the secrets path lives
-    /// in config, not baked into Rust source.
-    pub env_bootstrap: Option<EnvBootstrapConfig>,
-}
-
-/// Secret/environment bootstrap for the installed systemd unit: `command`'s
-/// stdout is captured into `env_file` via
-/// `ExecStartPre=/bin/sh -c '<command> > <env_file>'`, then the unit loads it
-/// with `EnvironmentFile=-<env_file>` (the leading `-` makes a missing file
-/// non-fatal).
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct EnvBootstrapConfig {
-    /// Shell command whose stdout is redirected into `env_file`.
-    pub command: String,
-    /// Destination path for the captured environment, e.g.
-    /// `/run/user/1000/borg.env`. Tilde-expanded at load time.
-    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
-    pub env_file: PathBuf,
+    /// gets a valid, complete unit. Same type as cortex.yml's
+    /// `daemon.env-bootstrap` (`vault::systemd::EnvBootstrap`) so the secrets
+    /// path lives in config, not baked into Rust source.
+    pub env_bootstrap: Option<vault::systemd::EnvBootstrap>,
 }
 
 /// Distillation feature toggles. Each flag turns off one distillation feature

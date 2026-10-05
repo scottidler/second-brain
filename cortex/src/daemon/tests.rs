@@ -1,8 +1,9 @@
 use super::*;
-use crate::config::{Config, DaemonConfig, EnvBootstrapConfig};
+use crate::config::{Config, DaemonConfig};
 use chrono::Datelike;
 use std::cell::Cell;
 use std::rc::Rc;
+use vault::systemd::EnvBootstrap;
 
 #[test]
 fn test_is_enabled_default_is_false() {
@@ -126,11 +127,14 @@ fn test_daemon_config_deserialize_rayon_and_bootstrap() {
                 env-file: /run/user/1000/cortex.env\n";
     let config: DaemonConfig = serde_yaml::from_str(yaml).expect("deserialize");
     assert_eq!(config.rayon_threads, 8);
-    let bootstrap = config.env_bootstrap.expect("env-bootstrap must deserialize");
-    assert_eq!(bootstrap.command, "manifest age decrypt /path/.secrets -f env");
+    // cortex.yml's block lands in the same shared type borg.yml's does.
+    let bootstrap: Option<EnvBootstrap> = config.env_bootstrap;
     assert_eq!(
-        bootstrap.env_file,
-        std::path::PathBuf::from("/run/user/1000/cortex.env")
+        bootstrap,
+        Some(EnvBootstrap {
+            command: "manifest age decrypt /path/.secrets -f env".to_string(),
+            env_file: std::path::PathBuf::from("/run/user/1000/cortex.env"),
+        })
     );
 }
 
@@ -1047,6 +1051,11 @@ fn configured_actions_rescans_once_after_classify_promotion() {
     );
 }
 
+/// The sb data dir the non-golden render tests pass.
+fn data_dir() -> &'static std::path::Path {
+    std::path::Path::new("/home/user/.local/share/sb")
+}
+
 /// Success criterion (a): a config with the secret bootstrap, rayon cap, and
 /// `log-level: info` set must render a unit string containing every one of
 /// those directives plus `--log-level info`.
@@ -1056,7 +1065,7 @@ fn test_render_systemd_unit_includes_bootstrap_rayon_and_log_level() {
         log_level: "info".to_string(),
         daemon: DaemonConfig {
             rayon_threads: 8,
-            env_bootstrap: Some(EnvBootstrapConfig {
+            env_bootstrap: Some(EnvBootstrap {
                 command: "manifest age decrypt /home/user/secrets/.secrets -f env".to_string(),
                 env_file: std::path::PathBuf::from("/run/user/1000/cortex.env"),
             }),
@@ -1069,7 +1078,7 @@ fn test_render_systemd_unit_includes_bootstrap_rayon_and_log_level() {
     let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
     let vault_root = std::path::Path::new("/home/user/vault");
 
-    let unit = render_systemd_unit(home, binary, vault_root, &config);
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
 
     assert!(
         unit.contains(
@@ -1102,7 +1111,7 @@ fn test_render_systemd_unit_excludes_debug_when_config_is_info() {
     let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
     let vault_root = std::path::Path::new("/home/user/vault");
 
-    let unit = render_systemd_unit(home, binary, vault_root, &config);
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
 
     assert!(
         !unit.contains("--log-level debug"),
@@ -1119,7 +1128,7 @@ fn test_render_systemd_unit_keeps_bootstrap_and_rayon_regardless_of_log_level() 
         log_level: "warn".to_string(),
         daemon: DaemonConfig {
             rayon_threads: 4,
-            env_bootstrap: Some(EnvBootstrapConfig {
+            env_bootstrap: Some(EnvBootstrap {
                 command: "manifest age decrypt /path/.secrets -f env".to_string(),
                 env_file: std::path::PathBuf::from("/run/user/1000/cortex.env"),
             }),
@@ -1132,7 +1141,7 @@ fn test_render_systemd_unit_keeps_bootstrap_and_rayon_regardless_of_log_level() 
     let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
     let vault_root = std::path::Path::new("/home/user/vault");
 
-    let unit = render_systemd_unit(home, binary, vault_root, &config);
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
 
     assert!(
         unit.contains(
@@ -1154,7 +1163,7 @@ fn test_render_systemd_unit_omits_bootstrap_and_rayon_when_unset() {
     let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
     let vault_root = std::path::Path::new("/home/user/vault");
 
-    let unit = render_systemd_unit(home, binary, vault_root, &config);
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
 
     assert!(!unit.contains("ExecStartPre"), "no bootstrap configured:\n{unit}");
     assert!(!unit.contains("EnvironmentFile"), "no bootstrap configured:\n{unit}");
@@ -1169,48 +1178,34 @@ fn test_render_systemd_unit_omits_bootstrap_and_rayon_when_unset() {
 /// X3: cortex writes the oracle DB under `~/.local/share/sb/`, so the unit's
 /// `ReadWritePaths` must name that data dir alongside the vault or
 /// `ProtectHome=read-only` blocks every embed write. Borg's unit already does.
-#[serial_test::serial(xdg_data_home)]
 #[test]
 fn test_render_systemd_unit_readwritepaths_covers_vault_and_data_dir() {
+    let config = Config::default();
+    let home = std::path::Path::new("/home/user");
+    let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
+    let vault_root = std::path::Path::new("/home/user/vault");
+
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
+
+    let line = unit
+        .lines()
+        .find(|l| l.starts_with("ReadWritePaths="))
+        .unwrap_or_else(|| panic!("no ReadWritePaths line:\n{unit}"));
+    assert_eq!(line, "ReadWritePaths=/home/user/vault /home/user/.local/share/sb");
+}
+
+/// The data dir `install_systemd_service` passes (`<xdg data>/sb`) must
+/// contain the oracle DB cortex writes, or `ProtectHome=read-only` blocks
+/// every embed write.
+#[serial_test::serial(xdg_data_home)]
+#[test]
+fn test_sb_data_dir_contains_oracle_db() {
+    let _lock = crate::testutil::lock_env();
     let xdg_tmp = tempfile::tempdir().expect("xdg tmpdir");
-    let prior = std::env::var_os("XDG_DATA_HOME");
-    // SAFETY: serialized by `serial_test::serial(xdg_data_home)`; no
-    // concurrent reader of the env exists while this runs.
-    unsafe { std::env::set_var("XDG_DATA_HOME", xdg_tmp.path()) };
-
-    let result = std::panic::catch_unwind(|| {
-        let config = Config::default();
-        let home = std::path::Path::new("/home/user");
-        let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
-        let vault_root = std::path::Path::new("/home/user/vault");
-
-        let unit = render_systemd_unit(home, binary, vault_root, &config);
-
-        let line = unit
-            .lines()
-            .find(|l| l.starts_with("ReadWritePaths="))
-            .unwrap_or_else(|| panic!("no ReadWritePaths line:\n{unit}"));
-        let data_dir = xdg_tmp.path().join("sb");
-        assert!(line.contains("/home/user/vault"), "vault missing from {line}");
-        assert!(
-            line.contains(&data_dir.display().to_string()),
-            "data dir {} missing from {line}",
-            data_dir.display()
-        );
-        // The oracle DB cortex writes must fall inside the granted path.
-        assert!(vault::paths::oracle_db_path().starts_with(&data_dir));
-    });
-
-    // SAFETY: same serialization as above.
-    unsafe {
-        match prior {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-    }
-    if let Err(payload) = result {
-        std::panic::resume_unwind(payload);
-    }
+    let _data_env = crate::testutil::EnvGuard::set("XDG_DATA_HOME", xdg_tmp.path());
+    let data_dir = vault::paths::xdg_data_dir().expect("xdg data dir").join("sb");
+    assert_eq!(data_dir, xdg_tmp.path().join("sb"));
+    assert!(vault::paths::oracle_db_path().starts_with(&data_dir));
 }
 
 /// PATH hygiene (Phase 5, 2026-07-20 harvest-completion): fabric is
@@ -1225,7 +1220,7 @@ fn test_render_systemd_unit_path_includes_mise_shims_and_excludes_go_bin() {
     let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
     let vault_root = std::path::Path::new("/home/user/vault");
 
-    let unit = render_systemd_unit(home, binary, vault_root, &config);
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
 
     assert!(
         unit.contains("/home/user/.local/share/mise/shims"),
@@ -1247,40 +1242,22 @@ fn test_render_systemd_unit_path_includes_mise_shims_and_excludes_go_bin() {
     );
 }
 
-// Byte-exact goldens (2026-10-05 quality-review-fixes, Phase 18).
-//
-// `render_systemd_unit` is not yet pure: it asks `cortex_config().exists()`
-// (-> `XDG_CONFIG_HOME`) and `xdg_data_dir()` (-> `XDG_DATA_HOME`); Phase 19
-// removes both. The seam pinned here is those two env vars, under
-// `testutil::lock_env()` plus the `xdg_data_home` serial key the existing
-// data-dir test uses. `XDG_DATA_HOME` is a fixed path (only joined, never
-// read). `XDG_CONFIG_HOME` is a fixed nonexistent path, or a tempdir holding
-// `sb/cortex.yml` whose path is replaced by `<XDG_CONFIG_HOME>` before
-// comparing. The real HOME and `~/.config/sb` are never consulted.
+// Byte-exact goldens (2026-10-05 quality-review-fixes). `render_systemd_unit`
+// is pure, so the inputs are just the args. The config-present case passes
+// the literal path `<XDG_CONFIG_HOME>/sb/cortex.yml`, the placeholder the
+// golden carries.
 
 fn golden_render(config: &Config, config_present: bool) -> String {
-    let _lock = crate::testutil::lock_env();
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let config_home = if config_present {
-        std::fs::create_dir_all(tmp.path().join("sb")).expect("mkdir sb");
-        std::fs::write(tmp.path().join("sb").join("cortex.yml"), "").expect("write cortex.yml");
-        tmp.path().to_path_buf()
-    } else {
-        std::path::PathBuf::from("/golden-xdg-config-home-absent")
-    };
-    let _config_env = crate::testutil::EnvGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _data_env = crate::testutil::EnvGuard::set("XDG_DATA_HOME", std::path::Path::new("/golden-xdg-data-home"));
-
-    let unit = render_systemd_unit(
+    render_systemd_unit(
         std::path::Path::new("/home/tester"),
         std::path::Path::new("/home/tester/.cargo/bin/sb"),
         std::path::Path::new("/home/tester/repos/scottidler/obsidian"),
+        std::path::Path::new("/golden-xdg-data-home/sb"),
+        config_present.then_some(std::path::Path::new("<XDG_CONFIG_HOME>/sb/cortex.yml")),
         config,
-    );
-    unit.replace(&config_home.display().to_string(), "<XDG_CONFIG_HOME>")
+    )
 }
 
-#[serial_test::serial(xdg_data_home)]
 #[test]
 fn golden_cortex_service_minimal() {
     assert_eq!(
@@ -1289,14 +1266,13 @@ fn golden_cortex_service_minimal() {
     );
 }
 
-#[serial_test::serial(xdg_data_home)]
 #[test]
 fn golden_cortex_service_full() {
     let config = Config {
         log_level: "debug".to_string(),
         daemon: DaemonConfig {
             rayon_threads: 8,
-            env_bootstrap: Some(EnvBootstrapConfig {
+            env_bootstrap: Some(EnvBootstrap {
                 command: "manifest age decrypt ~/repos/scottidler/keep/.secrets -f env".to_string(),
                 env_file: std::path::PathBuf::from("/run/user/1000/cortex.env"),
             }),
