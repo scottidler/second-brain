@@ -136,7 +136,7 @@ fn systemd_findings() -> Vec<Finding> {
                         "{unit}: active (PID {pid}, RSS {rss})",
                         unit = unit,
                         pid = state.main_pid,
-                        rss = human_bytes(state.memory_current),
+                        rss = vault::rss::human_bytes(state.memory_current),
                     )));
                 } else if state.active_state == "inactive" {
                     findings.push(Finding::warn(
@@ -780,17 +780,6 @@ fn systemctl_show(unit: &str) -> Result<SystemdState, String> {
     Ok(state)
 }
 
-fn human_bytes(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-    let mut v = bytes as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < UNITS.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    format!("{v:.1} {}", UNITS[i])
-}
-
 fn borg_findings() -> Vec<Finding> {
     // Config load is itself a health signal; receipts health comes from the
     // DB (the same computation behind GET /health/audit).
@@ -1167,7 +1156,7 @@ fn data_dir_findings() -> Vec<Finding> {
     total_bytes += stages_bytes;
     findings.push(Finding::info(format!(
         "stages: {} ({})",
-        human_bytes(stages_bytes),
+        vault::rss::human_bytes(stages_bytes),
         stages_dir.display()
     )));
 
@@ -1177,7 +1166,11 @@ fn data_dir_findings() -> Vec<Finding> {
     };
     total_bytes += receipts_bytes;
     findings.push(Finding::info(match &receipts_path {
-        Some(path) => format!("receipts.db: {} ({})", human_bytes(receipts_bytes), path.display()),
+        Some(path) => format!(
+            "receipts.db: {} ({})",
+            vault::rss::human_bytes(receipts_bytes),
+            path.display()
+        ),
         None => "receipts.db: could not resolve path (HOME/XDG_DATA_HOME unset)".to_string(),
     }));
 
@@ -1189,13 +1182,13 @@ fn data_dir_findings() -> Vec<Finding> {
         .map(|dir| sum_matching_files(dir, |name| name.contains(".log")))
         .unwrap_or(0);
     total_bytes += logs_bytes;
-    findings.push(Finding::info(format!("logs: {}", human_bytes(logs_bytes))));
+    findings.push(Finding::info(format!("logs: {}", vault::rss::human_bytes(logs_bytes))));
     if logs_bytes > DATA_DIR_LOGS_WARN_BYTES {
         findings.push(Finding::warn(
             format!(
                 "logs total {} exceeds {}",
-                human_bytes(logs_bytes),
-                human_bytes(DATA_DIR_LOGS_WARN_BYTES)
+                vault::rss::human_bytes(logs_bytes),
+                vault::rss::human_bytes(DATA_DIR_LOGS_WARN_BYTES)
             ),
             "prune or archive old *.log.N files under ~/.local/share/sb/".to_string(),
         ));
@@ -1205,7 +1198,10 @@ fn data_dir_findings() -> Vec<Finding> {
     let oracle_dir = vault::paths::oracle_db_path().parent().map(Path::to_path_buf);
     let oracle_bytes = oracle_dir.as_ref().map(|dir| vault::paths::dir_size(dir)).unwrap_or(0);
     total_bytes += oracle_bytes;
-    findings.push(Finding::info(format!("oracle: {}", human_bytes(oracle_bytes))));
+    findings.push(Finding::info(format!(
+        "oracle: {}",
+        vault::rss::human_bytes(oracle_bytes)
+    )));
 
     if let Some(dir) = &oracle_dir
         && let Ok(entries) = std::fs::read_dir(dir)
@@ -1232,7 +1228,7 @@ fn data_dir_findings() -> Vec<Finding> {
             format!(
                 "legacy oracle data dir present at {} ({}); see runbook R1",
                 legacy_dir.display(),
-                human_bytes(vault::paths::dir_size(&legacy_dir)),
+                vault::rss::human_bytes(vault::paths::dir_size(&legacy_dir)),
             ),
             LEGACY_ORACLE_REMEDY.to_string(),
         ));
@@ -1242,8 +1238,8 @@ fn data_dir_findings() -> Vec<Finding> {
         findings.push(Finding::warn(
             format!(
                 "sb data dir total {} exceeds {}",
-                human_bytes(total_bytes),
-                human_bytes(DATA_DIR_TOTAL_WARN_BYTES)
+                vault::rss::human_bytes(total_bytes),
+                vault::rss::human_bytes(DATA_DIR_TOTAL_WARN_BYTES)
             ),
             "review stages/receipts.db/logs/oracle sizes above".to_string(),
         ));

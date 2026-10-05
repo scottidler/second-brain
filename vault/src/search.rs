@@ -563,6 +563,9 @@ pub struct IndexStats {
     pub updated: u64,
     pub unchanged: u64,
     pub removed: u64,
+    /// Notes whose file metadata could not be read this pass. Their existing
+    /// rows are kept untouched; the next pass retries them.
+    pub skipped: u64,
 }
 
 /// Tag with note count

@@ -37,12 +37,13 @@ pub async fn serve(config: Config) -> Result<()> {
     tracing::info!("Indexing vault at {}", vault_root.display());
     let stats = db.index_vault(&vault_root).context("Failed to index vault")?;
     tracing::info!(
-        "Index complete: {} scanned, {} inserted, {} updated, {} unchanged, {} removed",
+        "Index complete: {} scanned, {} inserted, {} updated, {} unchanged, {} removed, {} skipped",
         stats.total_scanned,
         stats.inserted,
         stats.updated,
         stats.unchanged,
-        stats.removed
+        stats.removed,
+        stats.skipped
     );
 
     tracing::info!("Starting MCP server on stdio transport");
@@ -65,11 +66,12 @@ pub async fn serve(config: Config) -> Result<()> {
                         match db_handle.lock() {
                             Ok(db) => match db.index_changed(&vault_root, &change.changed_paths) {
                                 Ok(stats) => tracing::info!(
-                                    "reindex: {} updated, {} inserted, {} unchanged, {} removed",
+                                    "reindex: {} updated, {} inserted, {} unchanged, {} removed, {} skipped",
                                     stats.updated,
                                     stats.inserted,
                                     stats.unchanged,
-                                    stats.removed
+                                    stats.removed,
+                                    stats.skipped
                                 ),
                                 Err(e) => tracing::warn!("reindex failed: {e}"),
                             },

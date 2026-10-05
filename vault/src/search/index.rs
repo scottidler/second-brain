@@ -15,9 +15,40 @@ impl super::SearchIndex {
     /// default until each note's mtime happens to change. A forced pass fixes
     /// the whole back-catalogue in one run.
     pub fn index_vault_force(&self, vault_root: &Path, force: bool) -> Result<IndexStats> {
+        self.index_vault_with_stat(vault_root, force, file_mtime_secs)
+    }
+
+    /// `index_vault_force` with the mtime read injected, so a test can make one
+    /// note's metadata read fail deterministically.
+    pub(crate) fn index_vault_with_stat(
+        &self,
+        vault_root: &Path,
+        force: bool,
+        stat: impl Fn(&Path) -> std::io::Result<i64>,
+    ) -> Result<IndexStats> {
         log::debug!("search::index_vault: vault_root={} force={force}", vault_root.display());
         let scan_config = ScanConfig::default();
         let notes = scan_vault(vault_root, &scan_config)?;
+
+        // File metadata is read before the write transaction opens, so the
+        // IMMEDIATE lock is not held across one syscall per note. `None` is a
+        // failed read: that note is skipped this pass, never indexed as mtime 0.
+        let mtimes: Vec<Option<i64>> = notes
+            .iter()
+            .map(|note| {
+                let abs_path = vault_root.join(&note.path);
+                match stat(&abs_path) {
+                    Ok(mtime) => Some(mtime),
+                    Err(e) => {
+                        log::warn!(
+                            "search::index_vault: skipping {}: metadata read failed: {e}",
+                            abs_path.display()
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
 
         // Wrap the whole pass (all upserts + stale removal) in ONE transaction.
         // Previously each `index_one` autocommitted (~2.3k commits per reindex)
@@ -29,13 +60,13 @@ impl super::SearchIndex {
             let mut inserted = 0u64;
             let mut updated = 0u64;
             let mut unchanged = 0u64;
+            let mut skipped = 0u64;
 
-            for note in &notes {
-                let abs_path = vault_root.join(&note.path);
-                let mtime = std::fs::metadata(&abs_path)
-                    .and_then(|m| m.modified())
-                    .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
-                    .unwrap_or(0) as i64;
+            for (note, mtime) in notes.iter().zip(&mtimes) {
+                let Some(mtime) = *mtime else {
+                    skipped += 1;
+                    continue;
+                };
 
                 let path_str = note.path.to_string_lossy();
 
@@ -65,6 +96,7 @@ impl super::SearchIndex {
                 updated,
                 unchanged,
                 removed,
+                skipped,
             })
         })();
 
@@ -379,6 +411,7 @@ impl super::SearchIndex {
         let mut unchanged = 0u64;
         let mut removed = 0u64;
         let mut scanned = 0u64;
+        let mut skipped = 0u64;
 
         for abs_path in changed_paths {
             if !abs_path.exists() {
@@ -397,10 +430,17 @@ impl super::SearchIndex {
             };
             scanned += 1;
 
-            let mtime = std::fs::metadata(abs_path)
-                .and_then(|m| m.modified())
-                .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
-                .unwrap_or(0) as i64;
+            let mtime = match file_mtime_secs(abs_path) {
+                Ok(mtime) => mtime,
+                Err(e) => {
+                    log::warn!(
+                        "index_changed: skipping {}: metadata read failed: {e}",
+                        abs_path.display()
+                    );
+                    skipped += 1;
+                    continue;
+                }
+            };
 
             let path_str = note.path.to_string_lossy();
             let existing_mtime: Option<i64> = optional_row(self.conn.query_row(
@@ -425,6 +465,7 @@ impl super::SearchIndex {
             updated,
             unchanged,
             removed,
+            skipped,
         })
     }
 
@@ -470,4 +511,14 @@ impl super::SearchIndex {
         }
         Ok(removed)
     }
+}
+
+/// Seconds since the epoch of a file's mtime. The one place the index reads
+/// file metadata; an error is the caller's to handle, never folded into `0`.
+fn file_mtime_secs(path: &Path) -> std::io::Result<i64> {
+    let modified = std::fs::metadata(path)?.modified()?;
+    Ok(modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64)
 }

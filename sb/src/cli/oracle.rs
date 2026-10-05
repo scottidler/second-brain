@@ -108,6 +108,7 @@ impl OracleCli {
                 println!("Updated:   {}", stats.updated);
                 println!("Unchanged: {}", stats.unchanged);
                 println!("Removed:   {}", stats.removed);
+                println!("Skipped:   {}", stats.skipped);
                 Ok(())
             }
             Commands::Stats => {
