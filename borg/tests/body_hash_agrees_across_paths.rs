@@ -1,6 +1,6 @@
 //! Regression guard (required by
 //! `docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md`,
-//! Phase 3): the LIVE publish path hashes freshly-fetched member bodies
+//! "Body hash agrees across paths"): the LIVE publish path hashes freshly-fetched member bodies
 //! (`harvest::publish::publish_thread_inner` -> `watermark::thread_body_text`
 //! -> `watermark::body_hash`), while a stage-2 REPLAY hashes the staged
 //! `body.txt` (`pipeline::session::process_session_inner`, over the bytes
@@ -45,12 +45,12 @@ async fn the_live_and_staged_body_hashes_agree_byte_for_byte() {
     // green while silently invalidating the `harvest-body-hash:` on all 272
     // already-published notes. That is prior attempt 1's failure mode exactly -
     // an invariant that lives in one file and is falsified in another - and it
-    // is what the design doc's Phase 3 bullet says this guard exists to catch.
+    // is what this guard exists to catch.
     //
     // So pin the canonical format itself to a literal. If you are here because
     // this failed, you changed the canonical body format: that is a decision
     // about every stored hash in the vault, not a test to update. Either revert,
-    // or re-hash the existing notes (Phase 6's backfill) and update this literal
+    // or re-hash the existing notes (the backfill) and update this literal
     // in the same commit.
     const CANONICAL_TEXT: &str = "=== session 871f6428 ===\n\
                                   human: migrate ci.yml to the reusable workflow\n\

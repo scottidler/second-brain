@@ -1,7 +1,7 @@
 //! `sb borg dedupe-sessions`: retire the surplus harvest-session-note forks
 //! left behind by every `sb borg replay` before the trace-keyed-replace fix
-//! (design doc `docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md`,
-//! Phase 6). Dry-run by default; `--apply` writes; `--purge` is a separate,
+//! (design doc `docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md`).
+//! Dry-run by default; `--apply` writes; `--purge` is a separate,
 //! opt-in archival pass over already-tombstoned notes.
 //!
 //! **Not** the association merge executor (`cortex::association::decide`):
@@ -39,7 +39,7 @@ use crate::config::{Config, StagingConfig};
 use crate::receipts::{self, Receipt};
 use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
 
-/// New (Phase 1) frontmatter key holding the SHA-256 of the input transcript.
+/// New frontmatter key holding the SHA-256 of the input transcript.
 const HARVEST_BODY_HASH_KEY: &str = "harvest-body-hash";
 // The soft-retire marker and the stripped slug key are the SHARED tombstone
 // contract (`vault::tombstone`), not borg's to define: `cortex::association`

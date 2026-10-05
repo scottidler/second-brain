@@ -44,7 +44,7 @@ fn config_with_fixture_canonical(dir: &std::path::Path) -> Config {
     }
 }
 
-/// Phase 2 success criterion, carried into Phase 6's `TagSources`/`TagOutcome`
+/// Success criterion carried into the `TagSources`/`TagOutcome`
 /// seam: a distiller that proposes candidate tags (the new pattern
 /// instruction) has those tags reach the note through the exact
 /// candidates-then-classify code path `pipeline.rs` runs at publish time -
@@ -183,7 +183,7 @@ async fn ingest_tags_are_repeatable_under_deterministic() {
 /// Design doc P6 success criterion / AC3, panel r4 OQ7: two ingests of the
 /// SAME URL where the distiller's own `tags` output DRIFTS between calls (the
 /// actual source of instability G5 restates around, `classifier-dev` at 23%
-/// per Phase 0b) must not lose a canonical tag the first ingest produced. The
+/// in the baseline measurement) must not lose a canonical tag the first ingest produced. The
 /// P3 reingest union (`apply_cortex_fields`, preserved-first) is what
 /// delivers that, not the classifier call alone - so this drives BOTH:
 /// `finalize_tags` twice with deliberately different `model` candidates, then

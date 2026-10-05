@@ -47,8 +47,8 @@ impl SelectionConfig {
 }
 
 /// A well-formed `<org>/<repo>` is exactly one `/` splitting two non-empty
-/// components. Mirrors the Phase 9 validator's shape check (kept local so the
-/// gate has no cross-phase dependency).
+/// components. Mirrors the downstream validator's shape check (kept local so the
+/// gate has no dependency on it).
 fn is_repo_slug(repo: &str) -> bool {
     let mut parts = repo.split('/');
     match (parts.next(), parts.next(), parts.next()) {

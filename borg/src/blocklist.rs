@@ -1,5 +1,5 @@
 //! Domain blocklist. Persisted as YAML at `~/.local/share/borg/blocked-domains.yml`.
-//! Populated by Gate-1 rejections (Phase 3) and consulted by Gate-0 pre-fetch.
+//! Populated by Gate-1 rejections and consulted by Gate-0 pre-fetch.
 
 use chrono::{DateTime, Utc};
 use eyre::{Context, Result, bail};

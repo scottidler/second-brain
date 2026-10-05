@@ -1,4 +1,4 @@
-//! Tests for Phase 1 of the borg-pipeline-resilience design doc:
+//! Tests for the borg-pipeline-resilience design doc's timeout work:
 //! bounded waits and structured timeouts.
 //!
 //! These tests live in a sibling submodule rather than `pipeline.rs` itself

@@ -2,7 +2,7 @@
 //! cheap and reproducible. Keyed on everything that can change a judgment — the
 //! fixture id, the exact text shown to the judge (content hash), the judge
 //! model, and the rubric version — so any of those changing invalidates only
-//! the affected rows. A cache-hit re-run makes zero judge calls (a Phase 1
+//! the affected rows. A cache-hit re-run makes zero judge calls (a required
 //! success criterion), so a genuine SQLite error must never masquerade as a
 //! miss and re-buy the LLM judgment.
 

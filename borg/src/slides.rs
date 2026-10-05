@@ -70,7 +70,7 @@ pub struct Cluster {
 /// ink accumulates and fragments into several growth-stage clusters; a run
 /// re-unites those fragments into a single content span keyed on its
 /// most-complete (terminal) frame. Structural only - carries no category; the
-/// vision classifier (Phase 3) runs one call *per run*, bounding the call count
+/// vision classifier runs one call *per run*, bounding the call count
 /// to the number of distinct content spans rather than the number of growth
 /// fragments. See docs/design/2026-06-28-content-aware-slide-filtering.md.
 #[derive(Debug, Clone, PartialEq)]

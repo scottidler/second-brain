@@ -5,10 +5,10 @@
 //! note, because the filename stem is the model-generated distill slug and the
 //! model never reproduces the same slug twice. [`resolve_prior_note`] answers
 //! "does this trace already have a landed note, and if so where does it live
-//! right now" so the publish path (Phase 3) can write to that exact path
+//! right now" so the publish path can write to that exact path
 //! instead of minting a sibling.
 //!
-//! Resolution order (all four branches live here; Phase 3 wires the caller):
+//! Resolution order (all four branches live here; the publish path wires the caller):
 //! 1. **Receipts fast path** - the trace's recorded `note_path`.
 //! 2. **Vault index** - a `trace -> Vec<PathBuf>` scan of the live vault (for
 //!    when cortex moved the note and the receipts row is stale).
@@ -31,7 +31,7 @@
 //! Architecture section's "Index freshness" paragraph) because the vault is
 //! 3,141 files and EVERY nightly `NewNote` publish is a step-1 miss by
 //! construction, making any rebuild-on-miss policy ~140 full vault scans a
-//! night. [`note_published`] is the Phase 3 self-insert hook.
+//! night. [`note_published`] is the self-insert hook.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -47,7 +47,7 @@ use vault::note::{self, Note};
 use crate::receipts;
 
 /// Frontmatter key for the new input-transcript hash (Data Model). Read here;
-/// written by Phase 3.
+/// written by the publish path.
 const HARVEST_BODY_HASH_KEY: &str = "harvest-body-hash";
 
 /// Frontmatter key the tombstone writers (`cortex::association::tombstone_content`
@@ -186,7 +186,7 @@ pub fn resolve_prior_note(
     Ok(None)
 }
 
-/// Self-insert hook for the no-TTL index (Phase 3 calls this on every
+/// Self-insert hook for the no-TTL index (called on every
 /// successful publish, replay included). Inserts `(trace_id, absolute_path)`
 /// into the CURRENT process's memoized index for `vault_root`, if that index
 /// has already been built; a no-op if it has not (the next

@@ -522,7 +522,7 @@ fn test_pipeline_config_split_fetch_timeouts_independent_of_fabric_pattern_timeo
 
 #[test]
 fn test_pipeline_config_max_note_bytes_defaults_to_measured_ceiling() {
-    // 2026-07-07 distillation-output-restore, Phase 3: the ceiling defaults
+    // distillation-output-restore: the ceiling defaults
     // to MAX_NOTE_BYTES (65_536, the design's floor - the measured largest
     // transcript-free note in the live vault is 9,213 bytes, well under it).
     let p = PipelineConfig::default();
@@ -552,8 +552,7 @@ fn host_matches_fails_closed_when_hostname_unreadable() {
 }
 
 // ---------------------------------------------------------------------------
-// SlideCategory and ContentFilterConfig tests (Phase 1 of
-// docs/design/2026-06-28-content-aware-slide-filtering.md)
+// SlideCategory and ContentFilterConfig tests (docs/design/2026-06-28-content-aware-slide-filtering.md)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -750,7 +749,7 @@ fn test_distill_config_default_all_true() {
     assert!(d.slide_append);
     assert!(d.capture_note);
     assert!(d.propose_tags);
-    // harvest distill-parsing robustness (2026-07-24): one retry by default.
+    // harvest distill-parsing robustness: one retry by default.
     assert_eq!(d.chunk_retries, 1);
 }
 
@@ -831,7 +830,7 @@ distill:
 
 #[test]
 fn test_distill_config_stale_article_transcript_key_fails_loudly() {
-    // 2026-07-07 distillation-output-restore, Phase 3: `article-transcript`
+    // distillation-output-restore: `article-transcript`
     // was removed (nothing left to configure once `## Transcript` is gone
     // from render for every article/video note). `deny_unknown_fields` turns
     // a stale key left over in an existing borg.yml into a loud, named error
@@ -850,7 +849,7 @@ distill:
 
 #[test]
 fn youtube_slides_config_no_longer_has_vision_per_slide() {
-    // The dead `vision_per_slide` stub was removed in Phase 1.
+    // The dead `vision_per_slide` stub was removed.
     // This test would fail to compile if the field were reintroduced.
     let cfg = YoutubeSlidesConfig::default();
     // Verify the new content_filter field is present instead.
@@ -858,7 +857,7 @@ fn youtube_slides_config_no_longer_has_vision_per_slide() {
 }
 
 // ---------------------------------------------------------------------------
-// HarvestConfig (docs/design/2026-07-17-harvest-clyde-sessions.md, Phase 2)
+// HarvestConfig (docs/design/2026-07-17-harvest-clyde-sessions.md)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -867,7 +866,7 @@ fn test_harvest_config_default_values() {
     assert_eq!(h.mode, HarvestMode::DryRun);
     assert_eq!(h.initial_since, "7d");
     assert_eq!(h.thread_window, "2h");
-    // Retuned in Phase 3 against the real 2026-07-02 catalog (one-shots <=3,
+    // Tuned against the real 2026-07-02 catalog (one-shots <=3,
     // substantive threads >=29); 6 sits in that gap.
     assert_eq!(h.min_msgs, 6);
     // Matches clyde's own --dormant-after default, so an omitted key changes
@@ -882,7 +881,7 @@ fn test_harvest_config_default_values() {
     assert!(h.clyde_binary.is_absolute());
     assert!(!h.clyde_binary.to_string_lossy().starts_with('~'));
     assert!(h.clyde_binary.ends_with("clyde"));
-    // Phase 5 (2026-07-20 harvest-completion): no env-bootstrap out of the
+    // No env-bootstrap out of the
     // box - a fresh install with nothing to bootstrap still gets a valid,
     // complete timer service unit.
     assert!(h.env_bootstrap.is_none());
@@ -962,7 +961,7 @@ fn test_harvest_mode_resolve_dry_run() {
     // Config default Live, no CLI flags -> live.
     assert!(!HarvestMode::Live.resolve_dry_run(false, false));
 
-    // --live overrides a DryRun config default (Phase 2's on-demand live run
+    // --live overrides a DryRun config default (the on-demand live run
     // without flipping harvest.mode).
     assert!(!HarvestMode::DryRun.resolve_dry_run(false, true));
     // --dry-run overrides a Live config default.

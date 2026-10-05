@@ -56,7 +56,7 @@ fn classify_url(url: &str) -> IngestKind {
 }
 
 /// Predicate over the host list `classify_url` recognises as a thread
-/// (X / Reddit / Hacker News). Exposed so the Phase 6 shadow-distill site
+/// (X / Reddit / Hacker News). Exposed so the shadow-distill site
 /// in `pipeline.rs` can branch without re-parsing the URL through the full
 /// classifier.
 pub fn is_thread_url(url: &str) -> bool {
@@ -201,7 +201,7 @@ pub fn stage_0_init(config: &Config, content: &ContentKind, method: IngestMethod
 /// Persist the bytes of a successful URL fetch to the artifact store. Called
 /// from the existing URL processing paths (`process_article_fabric` /
 /// `process_article_jina`) immediately after the fetch succeeds, so Stage 1
-/// in Phase 3 can read the bytes offline and Gate-1 can pattern-match block
+/// can read the bytes offline and Gate-1 can pattern-match block
 /// pages on the raw response. No-op when staging is disabled.
 pub fn persist_fetched_if_staging(
     config: &Config,

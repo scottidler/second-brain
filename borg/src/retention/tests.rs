@@ -124,7 +124,7 @@ fn status_reports_counts_and_bytes() {
     assert!(report.total_bytes > 0);
 }
 
-// --- Phase 3/4: ingested-date parsing + trace-expires math -------------------
+// --- ingested-date parsing + trace-expires math -------------------
 
 #[test]
 fn parse_ingested_date_accepts_bare_date() {

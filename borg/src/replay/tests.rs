@@ -125,7 +125,7 @@ fn read_method_from_note_handles_quoted_value() {
     assert_eq!(method, Some("telegram".to_string()));
 }
 
-/// Phase 2 (harvest-run integrity), acceptance: "Replay during a held harvest
+/// Harvest-run integrity acceptance: "Replay during a held harvest
 /// lock fails with `HarvestLockHeld`, not a race." A session-trace
 /// (`--from-stage 2`) replay must take the SAME exclusive harvest state lock
 /// the nightly `sb borg harvest` run holds for its whole run - this test

@@ -2,7 +2,7 @@
 //! alert format (suitable for Telegram / ntfy) with per-domain cooldown so a
 //! domain-wide outage does not flood the alert channel.
 //!
-//! Phase 5 scope: format + per-domain cooldown + structured logging. Delivery
+//! Scope: format + per-domain cooldown + structured logging. Delivery
 //! to the actual Telegram notifier is done by callers that have an AppState
 //! handle (routes.rs / telegram.rs / daemon tasks); pipeline.rs emits the
 //! alert message at WARN so the operator can tail journalctl or a future

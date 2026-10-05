@@ -1,6 +1,6 @@
 //! Regression guard (required by
 //! `docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md`,
-//! Phase 3): publish a trace, re-publish the SAME trace with a deliberately
+//! "Replay lands on the same note"): publish a trace, re-publish the SAME trace with a deliberately
 //! different injected slug, and assert exactly one note exists for that trace.
 //!
 //! Why this file exists at all: the FIRST attempt to fix this bug encoded

@@ -331,7 +331,7 @@ fn query_filters_by_method_and_stage() {
 
 #[test]
 fn query_filters_by_signal_method() {
-    // Phase 4: confirm Method::Signal round-trips through the receipts schema
+    // Confirm Method::Signal round-trips through the receipts schema
     // and the --method query filter. Without this, `sb borg log --method signal`
     // would silently return zero rows even with Signal traffic in the DB.
     let conn = fresh();
@@ -1069,7 +1069,7 @@ fn expired_lease_is_stale_and_promoted_with_lease_expired_reason() {
 
 #[test]
 fn null_lease_is_stale_and_promoted_with_generic_reason() {
-    // A row that never held a lease (legacy pre-Phase-4 row, or a trace whose
+    // A row that never held a lease (legacy pre-lease row, or a trace whose
     // owning process died before ever writing one) keeps the pre-existing
     // generic "no terminal event within Ns" reason - only an EXPIRED (not
     // absent) lease gets the distinct lease-expired reason.
@@ -1101,10 +1101,10 @@ fn renew_races_scan_between_select_and_promotion_is_not_reaped() {
     // renew its lease - between the SELECT and the promotion UPDATE. Here the
     // SELECT alone cannot protect the row (it already returned it); only the
     // atomic lease predicate REPEATED in the promotion UPDATE saves the live
-    // trace. That is the distinct value of this test over the Phase 2 statics.
+    // trace. That is the distinct value of this test over the static checks.
     //
-    // BITE: this is a predicate/TOCTOU regression, live from Phase 2 - NOT a
-    // "fails before Phase 4" claim. Delete the trailing
+    // BITE: this is a predicate/TOCTOU regression, live since the lease
+    // predicate landed - NOT a "fails before a later change" claim. Delete the trailing
     // `AND (lease_until IS NULL OR lease_until < ?)` from
     // `promote_single_to_crashed`'s UPDATE `WHERE` clause and this test flips:
     // the UPDATE would then match on `trace_id=? AND status='received'` alone,
@@ -1224,9 +1224,9 @@ fn null_lease_orphan_not_renewed_is_reaped_fail_closed() {
 
 #[test]
 fn query_filters_by_harvest_method() {
-    // Phase 6 observability: `sb borg log --method harvest` maps to this
+    // Observability: `sb borg log --method harvest` maps to this
     // filter. A harvest session row and a non-harvest row coexist; the filter
-    // returns only the harvest one (proves Method::Harvest from Phase 1 flows
+    // returns only the harvest one (proves Method::Harvest flows
     // through the query end to end).
     let conn = fresh();
     record_received(&conn, "hv-1", Method::Harvest, ReceiptKind::Session, "clyde://abc").expect("ins harvest");
@@ -1249,7 +1249,7 @@ fn query_filters_by_harvest_method() {
 
 #[test]
 fn update_note_path_repairs_a_succeeded_row() {
-    // harvest note identity design (Phase 1): `mark_succeeded`'s
+    // harvest note identity design: `mark_succeeded`'s
     // `WHERE status='received'` guard cannot repair a row that already
     // reached `succeeded` (a replay, or a note cortex moved between
     // directories). `update_note_path` has NO status predicate for exactly

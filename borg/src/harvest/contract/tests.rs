@@ -82,7 +82,7 @@ fn enrich_status_null_and_failed_round_trip() {
 
 #[test]
 fn repos_touched_is_three_state_none_when_omitted() {
-    // Phase 0 fixtures predate files-touched, so repos-touched is OMITTED on
+    // The golden fixtures predate files-touched, so repos-touched is OMITTED on
     // every session -> None (unknowable), NOT Some(vec![]) (touched nothing).
     let export = parse_export(&read(PHASE0_BULK)).unwrap().export;
     for s in &export.sessions {
@@ -150,21 +150,21 @@ fn with_body_payload_parses_body_array() {
     assert_eq!(rec.body_error, None);
 }
 
-// ---- harvest-completion Phase 1 (docs/design/2026-07-20-harvest-completion.md):
-// the Phase 0 spike test, extended from RED to GREEN. Phase 0 asserted only on
+// ---- harvest-completion (docs/design/2026-07-20-harvest-completion.md):
+// the spike test, extended from RED to GREEN. It originally asserted only on
 // fields that were already `Option<...>` (so the file compiled against the
-// pre-Phase-1 non-Option `cwd`/`created`/`title`/`first_prompt` contract) and
-// panicked if the batch parse failed. Phase 1 relaxes those four fields to
-// present-null `Option<String>` and switches `parse_export` to per-record
-// deserialize, so this test now asserts all four deserialize to `None` (the
-// assertions Phase 0's note deferred). Reverting any of those four fields to a
+// old non-Option `cwd`/`created`/`title`/`first_prompt` contract) and
+// panicked if the batch parse failed. Those four fields are now
+// present-null `Option<String>` and `parse_export` deserializes per record,
+// so this test asserts all four deserialize to `None` (the
+// assertions the spike deferred). Reverting any of those four fields to a
 // plain `String` turns this test RED - the regression bite.
 #[test]
 fn parse_tolerates_null_string_fields() {
     // `9b17cdba-...` in this real export carries `cwd`, `created`, `title`,
     // and `first-prompt` all as JSON `null` (a genuinely empty/never-touched
     // session, `n-msgs: 0`), alongside real rows where only some of those
-    // fields are null. Post-Phase-1 all four are `Option<String>`, so the whole
+    // fields are null. Now all four are `Option<String>`, so the whole
     // batch parses cleanly instead of aborting on clyde's production error
     // ("invalid type: null, expected a string").
     let export = parse_export(&read(NULL_STRING_FIELDS))
@@ -186,7 +186,7 @@ fn parse_tolerates_null_string_fields() {
         .iter()
         .find(|s| s.session_id == "9b17cdba-7995-4be9-a1a4-65af5e7a3250")
         .expect("empty-bomb session present");
-    // The four newly-relaxed fields: all present-null -> None (the Phase 0
+    // The four newly-relaxed fields: all present-null -> None (the previously
     // deferred assertions, now live - reverting a field to `String` won't
     // compile this `None`).
     assert_eq!(empty_bomb.cwd, None);
@@ -215,7 +215,7 @@ fn parse_tolerates_null_string_fields() {
 
     // A real `--id --with-body` export where clyde itself reports an empty
     // transcript (`body: null`, `body-error: "parsed empty"`) - its
-    // title/cwd/created are null too and it parses cleanly post-Phase-1.
+    // title/cwd/created are null too and it parses cleanly.
     let body_export = parse_export(&read(EMPTY_BODY))
         .unwrap_or_else(|err| panic!("empty-body export must parse: {err:#}"))
         .export;
@@ -226,9 +226,9 @@ fn parse_tolerates_null_string_fields() {
     assert_eq!(empty_session.body_error.as_deref(), Some("parsed empty"));
 }
 
-// ---- harvest-completion Phase 1: per-record parse resilience. The Phase 0
-// spike asserted `parse_export(MALFORMED_RECORD).is_err()` (the whole-batch
-// parser aborted on one wrong-typed element). Phase 1 INVERTS that: the
+// ---- harvest-completion: per-record parse resilience. The spike
+// asserted `parse_export(MALFORMED_RECORD).is_err()` (the whole-batch
+// parser aborted on one wrong-typed element). This INVERTS that: the
 // malformed element is SKIPPED and carried out as a `ParseRejection` while the
 // rest of the batch parses. Reverting to whole-batch parsing turns this RED.
 #[test]
@@ -350,8 +350,8 @@ fn clyde_uri_shape() {
     assert_eq!(rec.clyde_uri(), "clyde://abc-123");
 }
 
-// ---- harvest-completion Phase 6: gap-fill for `BodyMessage.role`/`text`, the
-// one Phase-1-relaxed nullable pair that Phase 0/1 never asserted a direct
+// ---- harvest-completion: gap-fill for `BodyMessage.role`/`text`, the
+// one relaxed nullable pair that was never asserted a direct
 // `None` deserialization for (only the already-non-null golden fixture body
 // was exercised, `with_body_payload_parses_body_array`). Reverting either
 // field's `Option<String>` back to a plain `String` is a compile error against

@@ -148,7 +148,7 @@ async fn golden_fixture_selects_expected_ids_and_one_note() {
         assert!(r.record.reason.contains("skipped-personal"), "{}", r.record.reason);
     }
     assert_eq!(plan.new_cursor, 1500);
-    // NewNote never fetches a body (that is Phase 5's publish step).
+    // NewNote never fetches a body (that is the publish step).
     assert_eq!(reader.body_fetch_count(), 0);
 }
 
@@ -165,7 +165,7 @@ async fn same_cwd_unrelated_does_not_merge() {
     assert_eq!(plan.rejections.len(), 0);
 }
 
-// ---- Phase 2 (harvest-run integrity): duplicate session_id, fail-closed.
+// ---- harvest-run integrity: duplicate session_id, fail-closed.
 
 #[tokio::test]
 async fn duplicate_session_id_byte_identical_collapses_to_one_candidate() {
@@ -309,7 +309,7 @@ async fn rerun_with_unchanged_catalog_is_a_no_op() {
     .unwrap();
     assert_eq!(plan1.threads[0].decision, Reappearance::NewNote);
 
-    // Simulate Phase 5 publish: advance cursor + record the snapshot.
+    // Simulate publish: advance cursor + record the snapshot.
     let mut state = apply_plan_to_state(WatermarkState::default(), &plan1);
     let published_hash = body_hash(&thread_body_text(&[(primary.to_string(), body.clone())]));
     record_published(
@@ -450,7 +450,7 @@ async fn force_redistills_published_session() {
 
 #[tokio::test]
 async fn run_with_dry_run_writes_nothing_and_reports_selection() {
-    // Phase 6: `sb borg harvest --dry-run` lists selections/rejections and
+    // `sb borg harvest --dry-run` lists selections/rejections and
     // writes NOTHING. Drives the corrected deterministic golden outcome
     // (2 selected -> 1 thread note, 2 rejected) through the run core.
     let reader = FakeReader::new(load(GOLDEN));
@@ -476,7 +476,7 @@ async fn run_with_dry_run_writes_nothing_and_reports_selection() {
 #[tokio::test]
 async fn dry_run_surfaces_parse_rejections_but_writes_no_receipt() {
     // Dry-run persists nothing and advances no watermark, so a parse skip is
-    // WARN-only there (harvest-completion Phase 1) - the report still surfaces
+    // WARN-only there - the report still surfaces
     // it for the operator's soak review, but no receipt is forced.
     let reader = FakeReader::new(load(GOLDEN)).with_parse_rejections(vec![ParseRejection {
         session_id: Some("malformed-aaaa".to_string()),
@@ -501,7 +501,7 @@ async fn dry_run_surfaces_parse_rejections_but_writes_no_receipt() {
 async fn live_run_writes_parse_skip_receipt_before_cursor_advances() {
     // Success criterion: a LIVE-path parse skip lands a durable
     // `received->rejected` receipt keyed by `session_id`, written BEFORE the
-    // watermark advances (harvest-completion Phase 1, Resolved Decision
+    // watermark advances (harvest-completion, Resolved Decision
     // "Per-record parse skip must be DURABLE"). The export carries ZERO good
     // records and ONE parse rejection, so nothing publishable runs - the run
     // reduces to exactly the durable-skip + cursor-advance sequence under test.

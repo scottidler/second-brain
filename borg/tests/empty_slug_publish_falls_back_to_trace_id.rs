@@ -1,4 +1,4 @@
-//! Regression guard for Phase 4 (F1) of
+//! Regression guard (F1) from
 //! `docs/design/2026-09-05-discovery-remediation.md`: a `kind: text` ingest
 //! whose title sanitizes to empty (a title made entirely of box-drawing
 //! characters) must land a note, not silently write `inbox/.md`. Drives the
@@ -30,7 +30,7 @@ async fn box_drawing_title_lands_a_note_stemmed_untitled() {
     // Ten U+2500 (BOX DRAWINGS LIGHT HORIZONTAL): short enough to be taken
     // verbatim as the title (`generate_text_title`'s first-line branch), then
     // `vault::hygiene::sanitize_filename` strips every char, leaving an empty
-    // slug - the exact case Phase 4 guards.
+    // slug - the exact case this guards.
     let title_text = "\u{2500}".repeat(10);
 
     let result = pipeline::process_content(

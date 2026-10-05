@@ -40,7 +40,7 @@ pub fn month_subdir(now: &DateTime<Utc>) -> String {
 /// present in the manifest are dropped silently. Existing files at the
 /// destination are NOT overwritten - on collision we pick a different
 /// sequence suffix so a previously-published note's slides survive until
-/// the cleanup step (Phase 2.2) deletes them.
+/// the cleanup step deletes them.
 pub fn publish_slides(
     vault_root: &Path,
     slug: &str,

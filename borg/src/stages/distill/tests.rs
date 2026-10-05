@@ -44,8 +44,7 @@ fn ingest_kind_maps_to_distill_kind() {
 
 #[test]
 fn session_kind_maps_to_session_distill_kind() {
-    // Harvest-clyde-sessions Phase 4: IngestKind::Session routes to
-    // DistillKind::Session (the SessionDistiller).
+    // IngestKind::Session routes to DistillKind::Session (the SessionDistiller).
     assert_eq!(
         distill_kind_from_ingest(IngestKind::Session).expect("map session"),
         DistillKind::Session
@@ -86,7 +85,7 @@ async fn session_distillation_is_subject_to_gate_2() {
 
 #[test]
 fn vocabulary_kinds_map_to_vocabulary_distill_kind() {
-    // Phase 9c-hotfix: Vocabulary is now wired (routes through IdeaDistiller).
+    // Vocabulary is wired (routes through IdeaDistiller).
     assert_eq!(
         distill_kind_from_ingest(IngestKind::VocabularyEn).expect("map vocab-en"),
         DistillKind::Vocabulary
@@ -105,7 +104,7 @@ async fn distill_stage_handles_idea_through_dispatcher() {
         .await
         .expect("distill");
     assert_eq!(distilled.summary, "A small idea.");
-    // Phase 9c-hotfix: IdeaDistiller ID bumped to v2 after 280-cap deletion.
+    // IdeaDistiller ID bumped to v2 after 280-cap deletion.
     assert_eq!(distilled.meta.extractor, "distill-idea-v2");
     assert_eq!(distilled.transcript.as_deref(), Some("A small idea."));
 }
@@ -133,7 +132,7 @@ async fn distill_stage_handles_vocabulary_through_idea_distiller() {
 
 #[tokio::test]
 async fn distill_stage_handles_image_through_image_distiller() {
-    // Phase 9c-image: Image routes to ImageDistiller (Fabric-backed). With a
+    // Image routes to ImageDistiller (Fabric-backed). With a
     // stub FakeFabric (no canned response) the call falls back; the fallback
     // path mirrors the live extractor id.
     let stage = make_stage();
@@ -499,11 +498,11 @@ fn persist_github_stage_0_1_no_op_when_staging_disabled() {
 }
 
 // ---------------------------------------------------------------------------
-// Article source/quality gate. Moved here from pipeline/tests.rs (2026-07-07
-// distillation-output-restore, Phase 3): the gate now lives in this module
+// Article source/quality gate. Moved here from pipeline/tests.rs
+// (distillation-output-restore): the gate now lives in this module
 // and runs BEFORE `write_distilled_yml`, not just before render, so a
 // non-clean or chrome-heavy transcript never reaches staging or embeddings.
-// The pre-Phase-3 `enabled` toggle (`distill.article-transcript`) is gone
+// The old `enabled` toggle (`distill.article-transcript`) is gone
 // entirely, so these tests exercise only `clean_source`.
 // ---------------------------------------------------------------------------
 
@@ -552,8 +551,8 @@ fn transcript_quality_keeps_short_legit() {
     assert!(transcript_quality_ok(short), "short-but-legit prose must pass");
 }
 
-/// A prose-like page is NOT dropped by the coarse gate - bot-walls are Phase-3's
-/// `detect_block_page` job; this gate must not overreach onto prose.
+/// A prose-like page is NOT dropped by the coarse gate - bot-walls are
+/// `detect_block_page`'s job; this gate must not overreach onto prose.
 #[test]
 fn transcript_quality_keeps_prose_like_content() {
     let prose = "Please verify you are a human to continue reading this article. \
@@ -661,7 +660,7 @@ fn gate_clears_transcript_from_non_clean_source() {
     );
 }
 
-/// Ordering regression (2026-07-07 distillation-output-restore, Phase 3): the
+/// Ordering regression (distillation-output-restore): the
 /// source gate must clear a non-clean transcript BEFORE `distilled.yml` is
 /// persisted, not after - otherwise chrome junk from a non-clean fetch would
 /// land in staging and the transcript-chunk embedding source even though the

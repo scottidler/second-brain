@@ -370,7 +370,7 @@ fn test_apply_cortex_fields_filters_unknown_keys() {
 
 /// The 2026-05-08 incident: an Err returned mid-pipeline (after the old
 /// note's metadata was captured but before the new note was published)
-/// must NOT delete the old note. With Phase 3's deferred-delete pattern,
+/// must NOT delete the old note. With the deferred-delete pattern,
 /// the old note stays on disk until write_atomic returns Ok. Simulate
 /// the failure mode: capture old note metadata, return an Err before
 /// calling write_atomic, and assert the old file is byte-for-byte
@@ -390,8 +390,8 @@ fn test_reingest_failure_before_publish_preserves_old_note() {
     let pipeline_result: Result<()> = Err(eyre::eyre!("simulated mid-pipeline failure"));
     assert!(pipeline_result.is_err(), "pipeline failed before publish");
 
-    // Phase 3 invariant: write_atomic was never called, so the old
-    // file must still exist with its original bytes. Pre-Phase 3 code
+    // Deferred-delete invariant: write_atomic was never called, so the old
+    // file must still exist with its original bytes. The old up-front delete
     // would have deleted old_path here and lost the data.
     let after = std::fs::read(&old_path).unwrap();
     assert_eq!(

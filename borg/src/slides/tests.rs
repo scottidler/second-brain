@@ -529,7 +529,7 @@ fn test_enforce_shape_drops_unknown_slide_ids() {
     assert_eq!(slides, vec!["s001"]);
 }
 
-// --- Phase 2: capture stage (collapse_runs / best_frame / shape_from_kept_count) ---
+// --- capture stage (collapse_runs / best_frame / shape_from_kept_count) ---
 
 fn cluster_at(start: f64, end: f64) -> Cluster {
     Cluster {
@@ -688,7 +688,7 @@ fn test_write_manifest_round_trip() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-// ---- Phase 4: content-filter prefix + manifest builder ----------------------
+// ---- content-filter prefix + manifest builder ----------------------
 
 use crate::config::{ContentFilterConfig, SlideCategory, SlideClass};
 
@@ -812,7 +812,7 @@ fn test_segment_filtered_many_kept_is_slide_section_with_transcript() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-// ---- Phase 5: end-to-end filter pipeline (mocked classifier) ----------------
+// ---- end-to-end filter pipeline (mocked classifier) ----------------
 //
 // These tests exercise the FULL content-filter path:
 //   fixture JPEGs -> prepare_runs -> [mock classification results] ->
@@ -859,7 +859,7 @@ fn run_filter_pipeline(
     let cfg = YoutubeSlidesConfig::default();
     let duration = frames.last().map(|f| f.timestamp_secs + 10.0).unwrap_or(0.0);
 
-    // Phase 1: pure prefix.
+    // Pure prefix.
     let runs = prepare_runs(frames, &cfg, duration);
     let best_frames: Vec<std::path::PathBuf> = runs.iter().filter_map(|(_, best)| best.clone()).collect();
     let windows: Vec<crate::slides::Run> = runs
@@ -867,10 +867,10 @@ fn run_filter_pipeline(
         .filter_map(|(run, best)| best.as_ref().map(|_| run.clone()))
         .collect();
 
-    // Phase 2: inject mock results at the apply_filter seam (no network).
+    // Inject mock results at the apply_filter seam (no network).
     let (kept, _tally) = classify::apply_filter(&windows, &best_frames, &mock_results, filter);
 
-    // Phase 3: materialize kept runs into the manifest.
+    // Materialize kept runs into the manifest.
     segment_filtered(
         "ht-test",
         "https://x",

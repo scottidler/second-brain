@@ -88,7 +88,7 @@ fn render_systemd_unit_carries_env_bootstrap_when_configured() {
     );
 }
 
-/// PATH hygiene (Phase 5, 2026-07-20 harvest-completion): fabric is
+/// PATH hygiene (harvest-completion): fabric is
 /// mise-managed, so its shim dir must be on PATH and FIRST; the retired
 /// `~/go/bin` hand-built-fabric entry must be gone.
 #[test]
@@ -118,7 +118,7 @@ fn render_systemd_unit_path_includes_mise_shims_and_excludes_go_bin() {
     );
 }
 
-// Byte-exact goldens (2026-10-05 quality-review-fixes): the renderer's output
+// Byte-exact goldens (quality-review-fixes): the renderer's output
 // at fixed inputs, so a refactor of the unit renderers cannot change a byte
 // unnoticed. `render_systemd_unit` is pure, so the inputs are just the args.
 

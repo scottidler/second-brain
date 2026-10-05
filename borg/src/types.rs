@@ -34,7 +34,7 @@ pub enum ContentKind {
     },
     /// A clyde session/thread export, pre-fetched by the harvest reader
     /// (harvest-clyde-sessions design). `body` is the concatenated
-    /// role-labeled transcript text for every member session (Phase 3's
+    /// role-labeled transcript text for every member session (built by
     /// `watermark::thread_body_text`). `members` are the bulk-metadata
     /// records (repo, scope, title, duration, redaction-count, dates) for
     /// every session in the thread, in `created` order - carried WITHOUT
@@ -55,7 +55,7 @@ pub enum ContentKind {
     /// prior published entry `ThreadDecision.decision` carries, threaded
     /// through so the handler can back-link `follows:` to the note it
     /// continues (design doc `2026-08-15-harvest-note-identity-trace-keyed-
-    /// replace.md`, Phase 4). `None` for `NewNote` and for a stage-2 replay
+    /// replace.md`). `None` for `NewNote` and for a stage-2 replay
     /// (which carries no `ThreadDecision` at all and instead re-derives any
     /// `follows:` from the note being replaced).
     Session {
@@ -144,7 +144,7 @@ pub enum GateId {
     /// is a structural no-op for this source.
     Selection,
     /// Harvest's per-record PARSE gate (`sb borg harvest`, harvest-completion
-    /// design Phase 1): a single `sessions[]` element that failed contract
+    /// design): a single `sessions[]` element that failed contract
     /// deserialization is skipped and receipted here (rather than aborting the
     /// whole batch), keyed by the `session-id` recovered from the malformed
     /// element. The durable-skip defense against a future clyde contract drift.
@@ -314,7 +314,7 @@ pub struct IngestRequest {
     pub force: bool,
     #[serde(default)]
     pub method: Option<IngestMethod>,
-    /// Operator capture annotation accompanying the URL (Phase 8). Additive +
+    /// Operator capture annotation accompanying the URL. Additive +
     /// optional: existing extension bodies that omit it deserialize unchanged
     /// (`extension_body_matches_ingest_request` enforces this). Rendered into
     /// the published note's `## Why Captured` section.

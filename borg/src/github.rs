@@ -5,7 +5,7 @@
 //! directly (`GET /repos/{owner}/{repo}` + `GET /repos/{owner}/{repo}/readme`)
 //! and returns a `FetchResult` whose bytes are the README markdown plus a
 //! short metadata block. The structured fields (stars, primary language,
-//! last commit, topics) come back on `RepoMetadata` so the Phase-4
+//! last commit, topics) come back on `RepoMetadata` so the
 //! `RepoDistiller` can attach them to `Distilled.kind_specific` without
 //! re-fetching.
 //!

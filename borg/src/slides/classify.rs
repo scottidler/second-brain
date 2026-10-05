@@ -1,8 +1,8 @@
-//! Vision classification of slide frames (Phase 3 of content-aware filtering).
+//! Vision classification of slide frames (content-aware filtering).
 //!
 //! One vision call per *run* (post `collapse_runs`) tags the run's most-complete
 //! frame with a [`SlideClass`] - a taxonomy [`SlideCategory`] plus a confidence.
-//! The orchestrator (Phase 4) keeps only runs whose category is in
+//! The orchestrator keeps only runs whose category is in
 //! `content-filter.keep` at or above `min-confidence`; everything else is
 //! dropped. Classification is **fail-closed**: a malformed or ambiguous model
 //! reply produces an `Err`, which drops that run rather than guessing a category.
@@ -23,7 +23,7 @@ use crate::slides::{KeptRun, Run};
 
 /// Why a single classification did not yield a usable [`SlideClass`]. Carried as
 /// a typed value (never re-parsed from an error string, per the typed-seam rule)
-/// so the Phase 4 orchestrator can tally the *cause* of each drop. The two
+/// so the orchestrator can tally the *cause* of each drop. The two
 /// failure causes are kept distinct because they mean different operational
 /// things: an [`ClassifyError::Api`] (or [`ClassifyError::Read`]/[`ClassifyError::Join`])
 /// is a degradation signal an operator must investigate, while a

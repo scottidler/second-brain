@@ -35,7 +35,7 @@ fn collect_md_files_skips_listed_folders() {
     assert!(!names.contains(&"cache.md".to_string()));
 }
 
-/// Architect-flagged Phase 3 deliverable: a known-input fixture produces the same
+/// Architect-flagged deliverable: a known-input fixture produces the same
 /// `BackfillReport` field values under the parallel implementation as the sequential baseline
 /// would. Five notes exercise every counter:
 /// - 1 backfills (origin=assisted, has date, no ingested, old mtime)
@@ -102,7 +102,7 @@ fn backfill_on_counter_values_match_known_fixture() {
     );
 }
 
-/// Phase 0 deliverable the audit flagged as missing: `borg backfill-ingested --dry-run` runs
+/// Deliverable the audit flagged as missing: `borg backfill-ingested --dry-run` runs
 /// to completion. Exercises the sync conversion end-to-end via the same `backfill_on`
 /// helper that the CLI entry point now calls; assertion is that an empty tempdir returns
 /// a zeroed report rather than panicking or propagating an error.
@@ -268,7 +268,7 @@ fn backfill_idempotent_when_value_already_matches() {
     assert_eq!(report.skipped_already_had, 1);
 }
 
-// --- Phase 4: trace-expires backfill -----------------------------------------
+// --- trace-expires backfill -----------------------------------------
 
 #[test]
 fn backfill_stamps_trace_expires_on_note_with_datetime_ingested() {

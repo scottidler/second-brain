@@ -127,7 +127,7 @@ fn rejects_excluded_first_prompt_pattern() {
 fn rejects_null_created() {
     // A present-null `created` (empty/never-touched session) is rejected at the
     // selection stage so it never reaches `cluster::parse_ts` (which would
-    // error the WHOLE plan). harvest-completion Phase 1 created guard.
+    // error the WHOLE plan). harvest-completion created guard.
     let mut r = base();
     r.created = None;
     let rec = evaluate_selection(&r, &cfg(6, &[]), "hv-000001").unwrap_err();

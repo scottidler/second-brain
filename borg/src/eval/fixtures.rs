@@ -120,7 +120,7 @@ pub fn judge_note_text(distilled: &Distilled) -> String {
 }
 
 /// The `RenderOptions` a real publish/backfill call site would apply to a
-/// fixture of this `kind` (2026-07-07 distillation-output-restore, Phase 7b:
+/// fixture of this `kind` (distillation-output-restore design:
 /// `sb borg eval` note-size wiring). Video/Article/Repo/Thread all render at
 /// borg's single URL site (`RenderOptions::for_url_publish`, keyed on the
 /// typed `KindPayload` so only Thread keeps its transcript); the

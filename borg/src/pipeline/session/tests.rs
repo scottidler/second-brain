@@ -116,7 +116,7 @@ fn earliest_created_skips_unparseable_timestamps() {
 
 #[test]
 fn earliest_created_skips_null_created() {
-    // A present-null `created` (harvest-completion Phase 1 relaxation) is
+    // A present-null `created` (the harvest-completion relaxation) is
     // skipped from the min/max, never panicking - the selection guard rejects
     // these upstream, so reaching here is a warn-and-skip backstop.
     let mut null_created = session_record("null", "2026-07-01T00:00:00+00:00", "2026-07-01T01:00:00+00:00", 5);
@@ -165,7 +165,7 @@ fn test_config(vault_root: &std::path::Path, staging_root: &std::path::Path) -> 
 
 /// End-to-end: fixture members -> distill (graceful fallback, no real
 /// fabric) -> a rendered `inbox/` note carrying both `trace:` and
-/// `source: clyde://<primary-id>` (Phase 5 success criterion).
+/// `source: clyde://<primary-id>`.
 #[tokio::test]
 async fn process_session_inner_publishes_note_with_trace_and_source() {
     let _sandbox = XdgSandbox::new().await;
@@ -418,7 +418,7 @@ fn harvest_publish_path_force_overwrites_bare_slug_in_place() {
 
 /// End-to-end fallback: with no real fabric the distillation degrades and emits
 /// no slug, so the note filename is the title-slug and `slug:` is persisted to
-/// frontmatter matching that stem (harvest-content-slug-naming Phase 2).
+/// frontmatter matching that stem.
 #[tokio::test]
 async fn process_session_inner_names_file_from_title_slug_on_distiller_fallback() {
     let _sandbox = XdgSandbox::new().await;
@@ -496,7 +496,7 @@ async fn process_session_inner_fails_loudly_when_primary_id_missing() {
     assert!(format!("{err:#}").contains("not-present"));
 }
 
-// ---- trace-keyed replace-in-place (2026-08-15 note-identity design, Phase 3) ----
+// ---- trace-keyed replace-in-place (note-identity design) ----
 
 const REPLACE_BODY: &str = "human: migrate ci.yml to the reusable workflow\nassistant: here is the plan\n";
 
@@ -517,7 +517,7 @@ async fn publish_session(
 }
 
 /// [`publish_session`] plus an explicit `follows_prior` - the follow-up
-/// back-link source (Phase 4), threaded through exactly the way
+/// back-link source, threaded through exactly the way
 /// `harvest::publish::publish_thread_inner` derives it from
 /// `Reappearance::FollowUp { prior }`.
 #[allow(clippy::too_many_arguments)]
@@ -1029,7 +1029,7 @@ async fn a_broken_receipts_db_fails_the_publish_closed() {
     );
 }
 
-// ---- follow-up back-link (2026-08-15 note-identity design, Phase 4) ----
+// ---- follow-up back-link (note-identity design) ----
 
 /// Acceptance: "A follow-up note carries `follows:` pointing at the prior
 /// note's CURRENT path, including when cortex has moved it."
@@ -1103,7 +1103,7 @@ async fn a_follow_up_back_links_to_the_prior_notes_current_path_even_after_a_cor
 
 /// Acceptance: "An unresolvable prior note omits `follows:` and WARNs; it
 /// never blocks the publish." Two unresolvable shapes in one test: no `trace`
-/// on the prior entry (pre-Phase-2 watermark row) and a `trace` that never
+/// on the prior entry (a legacy watermark row) and a `trace` that never
 /// resolves to any note.
 #[tokio::test]
 async fn an_unresolvable_prior_note_omits_follows_and_never_blocks_the_publish() {
@@ -1158,7 +1158,7 @@ async fn an_unresolvable_prior_note_omits_follows_and_never_blocks_the_publish()
     );
 }
 
-/// Acceptance (Phase 4, "confirm ... that `follows:` survives a replace"):
+/// Acceptance ("confirm ... that `follows:` survives a replace"):
 /// replaying a follow-up note re-emits BOTH the frontmatter key and the body
 /// wikilink, even though the replay itself carries no `follows_prior` (a
 /// stage-2 replay has no `ThreadDecision` to derive one from - see

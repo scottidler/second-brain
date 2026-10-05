@@ -61,7 +61,7 @@ fn title_snippet_collapses_embedded_newlines_without_lowercasing() {
     assert!(!snippet.contains('\n'));
 }
 
-// --- title_for_thread (Phase 1 success criteria a-e) ---
+// --- title_for_thread (success criteria a-e) ---
 
 #[test]
 fn title_for_thread_author_handle_and_snippet_preserves_casing() {
@@ -124,7 +124,7 @@ fn title_for_thread_is_pure_and_deterministic() {
     assert_eq!(a, b);
 }
 
-// --- thread_title / resolve_title (Phase 2 seam success criteria a-c) ---
+// --- thread_title / resolve_title (seam success criteria a-c) ---
 
 /// A purely-numeric title is the exact bug this design exists to eliminate.
 fn is_purely_numeric(s: &str) -> bool {
@@ -275,7 +275,7 @@ fn resolve_title_thread_replaces_numeric_article_title() {
     assert_eq!(out, "@tom_doerr on X: \"Fjall is a Rust KV store\"");
 }
 
-// --- Phase 3: regression test (break-the-code, numeric-ID fallback) ---
+// --- regression test (break-the-code, numeric-ID fallback) ---
 
 /// Header-less markdown body shaped exactly like what `BrowserUaFetcher`
 /// serves when the Jina rung fails: no `Title:` metadata line, no top-level
@@ -297,7 +297,7 @@ const THREAD_NUMERIC_ID: &str = "2067473155988332909";
 
 #[test]
 fn break_the_code_extract_article_title_degenerates_to_numeric_id() {
-    // WITHOUT the Phase 2 override, `extract_article_title` is exactly what
+    // WITHOUT the title override, `extract_article_title` is exactly what
     // the pipeline used to bind directly to `title` for every thread note --
     // Strategies 1 and 2 both miss on this header-less fixture, so Strategy 3
     // (URL path segment) fires and returns the bare numeric post ID verbatim.
@@ -309,7 +309,7 @@ fn break_the_code_extract_article_title_degenerates_to_numeric_id() {
 
 #[test]
 fn resolve_title_override_prevents_the_numeric_id_from_becoming_the_title() {
-    // Same fixture routed through the real Phase 2 seam. `extract_article_title`
+    // Same fixture routed through the real title seam. `extract_article_title`
     // still degenerates identically (confirmed below as the precondition) --
     // the fix is that the pipeline no longer trusts that value for threads at
     // all. `resolve_title` overrides it with the thread-aware title before it
@@ -336,7 +336,7 @@ fn resolve_title_override_prevents_the_numeric_id_from_becoming_the_title() {
 
     assert!(
         !is_purely_numeric(&title),
-        "the Phase 2 override must prevent the numeric ID from becoming the title"
+        "the title override must prevent the numeric ID from becoming the title"
     );
     assert_eq!(title, "@tom_doerr on X: \"Fjall is a Rust KV store\"");
 }

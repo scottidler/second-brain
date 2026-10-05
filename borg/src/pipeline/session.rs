@@ -1,4 +1,4 @@
-//! `ContentKind::Session` handler (harvest-clyde-sessions design, Phase 5).
+//! `ContentKind::Session` handler.
 //!
 //! Mirrors `process_text`'s shape: a thin timing/error wrapper
 //! (`process_session`) around the real work (`process_session_inner`), which
@@ -18,12 +18,12 @@ use std::collections::{BTreeMap, HashSet};
 use vault::schema::TAGS_KEY;
 
 /// Length of the primary-session-id prefix used to disambiguate a harvest
-/// filename collision (harvest-content-slug-naming Phase 3). Clyde ids are
+/// filename collision. Clyde ids are
 /// UUIDs; the first 8 hex chars are ample to separate two same-slug sessions.
 const SESSION_SLUG_SUFFIX_LEN: usize = 8;
 
-/// Resolve a harvest session note's filename stem (harvest-content-slug-naming,
-/// 2026-07-24). The distiller's content-derived slug names the note's real
+/// Resolve a harvest session note's filename stem (harvest-content-slug-naming).
+/// The distiller's content-derived slug names the note's real
 /// subject; the generic clyde title is only the fallback when the distiller
 /// omitted a slug. Returns `(stem, used_title_fallback)` so the caller can WARN
 /// on the fallback. Both branches pass through `hygiene::note_filename` for
@@ -53,7 +53,7 @@ pub(crate) fn harvest_note_title(slug: Option<&str>, clyde_title: &str) -> Strin
 }
 
 /// Resolve the harvest note path DETERMINISTICALLY (harvest-content-slug-naming
-/// Phase 3). The shared `atomic::resolve_publish_path` disambiguates collisions
+/// design). The shared `atomic::resolve_publish_path` disambiguates collisions
 /// with an order-dependent `-N` counter, which is nondeterministic across
 /// re-harvests (a re-run can renumber notes, breaking the watermark idempotency
 /// contract). A harvest collision on the content-slug is instead disambiguated
@@ -82,7 +82,7 @@ fn harvest_publish_path(dir: &std::path::Path, slug_stem: &str, primary_id: &str
 }
 
 /// Frontmatter keys this handler adds on top of [`markdown::RENDER_NOTE_KEYS`]
-/// (design doc: Data Model, "plus session additions"). `follows` (Phase 4) is
+/// (design doc: Data Model, "plus session additions"). `follows` is
 /// borg-owned like `slug:`: a replace REWRITES it from a fresh derivation
 /// (either the current publish's own follow-up prior, or - on a plain replay -
 /// the value carried off the note being replaced), rather than leaving the
@@ -118,13 +118,13 @@ const DISTILLER_OWNED_KEYS: &[&str] = &[
 
 /// `status:` is written by [`markdown::render_note`] and so is nominally
 /// borg-owned, but on a REPLACE its value is user state (design doc: Data
-/// Model, "`status:` is a deliberate ownership change ... Phase 3 reads the
+/// Model, "`status:` is a deliberate ownership change ... the pipeline reads the
 /// existing note's `status:` and feeds it back so a replay does not reset a
 /// note the user marked `read`"). It is therefore the one writer key excluded
 /// from the drop-list when merging a prior note.
 const STATUS_KEY: &str = "status";
 
-/// `follows:` frontmatter key (design doc: Data Model, Phase 4). Holds a bare
+/// `follows:` frontmatter key (design doc: Data Model). Holds a bare
 /// filename STEM, no extension, no directory - the same convention
 /// `superseded-by:` already uses (`cortex::association::tombstone_content`).
 /// A bare stem is deliberate: Obsidian resolves a `[[stem]]` wikilink by
@@ -288,14 +288,14 @@ fn resolve_prior_note(
 ///
 /// Uses `ResolveIntent::Replay`, not `NewNote`/`FollowUp`: this is a DIFFERENT
 /// lookup than the current publish's own resolution above - `prior.trace` is
-/// already known (Phase 2 populates it), so only the receipts-fast-path +
+/// already known (populated at publish), so only the receipts-fast-path +
 /// vault-index steps (with tombstone-follow) apply, which is exactly what
 /// `Replay` names ("the trace is authoritative, steps 1-2 only"). Step 3's
 /// crash-recovery fallback exists to find a note when NO trace is known yet;
 /// it does not apply here and `NewNote`/`FollowUp` would either pull in that
 /// irrelevant branch or (for `FollowUp`) refuse to resolve at all.
 ///
-/// Never fails the publish (design doc Phase 4 acceptance: "an unresolvable
+/// Never fails the publish (design doc acceptance: "an unresolvable
 /// prior note omits `follows:` and WARNs; it never blocks the publish") - a
 /// missing trace, a DB error, or a resolution miss all WARN and return `None`
 /// rather than propagating.
@@ -488,7 +488,7 @@ pub(crate) async fn process_session_inner(
     .await;
 
     // `title` is present-null in the contract; a null OR empty title falls back
-    // to `Session <id>` (the null case is new in harvest-completion Phase 1;
+    // to `Session <id>` (the null case is new in harvest-completion;
     // the empty-string case is preserved). Resolved here (rather than at its
     // original spot below) because the tag classifier needs it too.
     let title = match primary.title.as_deref() {
@@ -549,8 +549,8 @@ pub(crate) async fn process_session_inner(
     let mut frontmatter_additions = rendered_distilled.frontmatter_additions;
     // `repo:` rides verbatim from the export contract's `repo` field
     // (present-as-null, not omitted, when the cwd has no repo anchor -
-    // design doc: Data Model / Phase 9 owns validation + hub wiring; this
-    // renderer only emits the field). `repos-touched:` is Phase 9's addition
+    // design doc: Data Model; validation + hub wiring live elsewhere; this
+    // renderer only emits the field). `repos-touched:` is added
     // once clyde ships files-touched.
     frontmatter_additions.insert(
         "repo".to_string(),
@@ -567,7 +567,7 @@ pub(crate) async fn process_session_inner(
     }
     frontmatter_additions = insert_author_tags(frontmatter_additions, &outcome.author_tags);
 
-    // harvest-content-slug-naming (2026-07-24): the note's filename is the
+    // harvest-content-slug-naming: the note's filename is the
     // distiller's content-derived slug (naming the real subject/outcome), NOT
     // the generic, collision-prone clyde session title. Fall back to the
     // title-slug only when the distiller omitted a slug, and WARN so the gap is
@@ -612,7 +612,7 @@ pub(crate) async fn process_session_inner(
         .to_string();
     frontmatter_additions.insert("slug".to_string(), serde_yaml::Value::String(effective_stem));
     // Readers: the confirmation guard and the crash-recovery fallback in
-    // `harvest::identity`, plus Phase 6's `--rebuild-state`.
+    // `harvest::identity`, plus the `--rebuild-state` path.
     frontmatter_additions.insert(
         "harvest-body-hash".to_string(),
         serde_yaml::Value::String(body_hash.clone()),
@@ -622,7 +622,7 @@ pub(crate) async fn process_session_inner(
     // every other key forward verbatim, `status:` included (its value is user
     // state, not borg's). A carried key never displaces a freshly-derived one.
     let mut status = Some(vault::schema::Status::Unread);
-    // `follows:` back-link (design doc Phase 4). A genuine follow-up resolves
+    // `follows:` back-link. A genuine follow-up resolves
     // its prior note FRESH (`follows_prior` is `Some` only for that case); a
     // plain replace/replay falls back to whatever the note being replaced
     // already carried, so the key (and the body wikilink re-derived from it
@@ -795,7 +795,7 @@ fn build_session_metadata(members: &[SessionRecord], primary_id: &str, body_trun
 }
 
 /// Earliest `created` across members. Every member here already passed
-/// through Phase 3's `cluster_threads` (which errors loudly on an
+/// through `cluster_threads` (which errors loudly on an
 /// unparseable timestamp), so a parse failure here would mean a caller
 /// bypassed that gate - logged, not panicked, and simply excluded from the
 /// min/max rather than failing the whole publish.

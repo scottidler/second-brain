@@ -559,7 +559,7 @@ fn render_note_frontmatter_parses_with_nasty_title() {
 
 #[test]
 fn render_note_emits_trace_expires_from_frontmatter_additions() {
-    // Phase 3: the pipeline injects `trace-expires` via frontmatter_additions;
+    // The pipeline injects `trace-expires` via frontmatter_additions;
     // render_note must splice it into the YAML alongside `trace`/`ingested`.
     let mut additions = BTreeMap::new();
     additions.insert(
@@ -585,13 +585,13 @@ fn render_note_emits_trace_expires_from_frontmatter_additions() {
         "missing trace-expires:\n{rendered}"
     );
     // And it round-trips back through the shared frontmatter parser as a named
-    // field (the Phase-1 promotion), proving the stamp is consumable.
+    // field (the promotion), proving the stamp is consumable.
     let (fm, _) = vault::frontmatter::parse_frontmatter(&rendered).expect("parse");
     assert_eq!(fm.trace_expires.as_deref(), Some("2026-08-19"));
     assert_eq!(fm.trace.as_deref(), Some("ht-95aa4e"));
 }
 
-// --- Phase 8: capture-note rendering (## Why Captured + frontmatter) ---
+// --- capture-note rendering (## Why Captured + frontmatter) ---
 
 #[test]
 fn test_capture_note_renders_why_captured_above_summary() {

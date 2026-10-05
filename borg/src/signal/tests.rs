@@ -1,4 +1,4 @@
-//! Phase 6 tests for the Signal transport. Privacy filter, rate gate, and
+//! Tests for the Signal transport. Privacy filter, rate gate, and
 //! classify outcomes per `docs/design/2026-05-24-signal-as-borg-transport.md`.
 
 use super::*;
@@ -388,8 +388,7 @@ fn classify_photo_plus_document_is_partial_keeping_first() {
 
 #[test]
 fn signal_prose_and_url_captures_note() {
-    // Phase 8 (signal transport capture-note fixture): the signal URL arm
-    // builds its content via `router::url_content_from_text`.
+    // The signal URL arm builds its content via `router::url_content_from_text`.
     let (content, _display) =
         crate::router::url_content_from_text("this rebuts the linker post https://example.com/x").expect("url present");
     match content {
@@ -403,7 +402,7 @@ fn signal_prose_and_url_captures_note() {
 
 #[test]
 fn signal_attachment_caption_migrates_to_capture_note() {
-    // Phase 8: the Signal attachment caption (formerly a mangled `caption:` tag)
+    // The Signal attachment caption (formerly a mangled `caption:` tag)
     // now travels as the capture note.
     assert_eq!(
         attachment_caption(Some("  a screenshot of the bug  ")),

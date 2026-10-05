@@ -32,7 +32,7 @@ fn audit_health_stats_conn_counts_by_status_and_window() {
     assert_eq!(h.degraded_24h, 1, "d1 landed degraded just now");
 }
 
-// ---- harvest-completion Phase 6: the harvest drift guard (Opus SE K2). Never
+// ---- harvest-completion: the harvest drift guard (Opus SE K2). Never
 // touches the real `~/.local/share/sb/borg/` state; drives the path/conn-
 // injectable core directly with a temp state file + an in-memory receipts DB.
 

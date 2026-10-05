@@ -247,7 +247,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )
         .context("add degraded column")?;
     }
-    // v3 (harvest-clyde-sessions design, Phase 1): widen the `kind` and
+    // v3: widen the `kind` and
     // `status` CHECK constraints to add 'session' and 'rejected'. SQLite has
     // no ALTER-CHECK-CONSTRAINT, so this rebuilds the table: create a copy
     // with the widened constraints, copy every row, drop the old table,
@@ -299,8 +299,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )
         .context("rebuild receipts table for v3 CHECK constraint widen")?;
     }
-    // v4 (harvest-watchdog-cross-process-reaping design, Phase 1): add the
-    // shared trace-lease columns (`lease_owner_pid`, `lease_until`) so the
+    // v4: add the shared trace-lease columns (`lease_owner_pid`, `lease_until`) so the
     // daemon watchdog and a separate `sb borg harvest` process can agree on
     // trace liveness through the shared receipts row instead of the
     // process-local `ACTIVE_TRACES` set. MUST run AFTER the v3 rebuild block
@@ -320,7 +319,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE receipts ADD COLUMN lease_until TEXT DEFAULT NULL", [])
             .context("add lease_until column")?;
     }
-    // v5 (ingest-queue-status design, Phase 1): `started_at` records when a
+    // v5: `started_at` records when a
     // trace got its general permit, so the queue snapshot can tell queued from
     // processing. Same placement rule as v4: AFTER the v3 rebuild, whose fixed
     // 12-column INSERT...SELECT would drop it on a pre-v3 DB.
@@ -582,7 +581,7 @@ pub fn mark_failed(conn: &Connection, trace_id: &str, stage: FailureStage, reaso
 /// liveness gate) and `lease_until` (the gate itself, [`TIMESTAMP_FMT`]).
 /// Guarded to `status='received'` so a lease can never be stamped onto a row
 /// that has already reached a terminal state. Called at trace entry
-/// (`pipeline.rs`, Phase 4) before the permit is granted, so a permit-queued
+/// (`pipeline.rs`) before the permit is granted, so a permit-queued
 /// trace already holds a lease the watchdog must respect.
 pub fn write_lease(conn: &Connection, trace_id: &str, pid: u32, lease_until: &str) -> Result<()> {
     log::debug!("receipts::write_lease: trace={trace_id} pid={pid} lease_until={lease_until}");
@@ -871,8 +870,8 @@ pub fn row_count(conn: &Connection) -> Result<i64> {
 
 /// Count receipts by status. Returns `(received, succeeded, failed, rejected)`.
 /// `rejected` is the harvest selection gate's outcome (`GateId::Selection`,
-/// harvest-clyde-sessions design) - written starting Phase 3, plumbed here in
-/// Phase 1 so this aggregate never hard-errors the moment the first rejected
+/// harvest-clyde-sessions design) - written once the selection gate records them,
+/// plumbed here early so this aggregate never hard-errors the moment the first rejected
 /// row lands.
 pub fn count_by_status(conn: &Connection) -> Result<(i64, i64, i64, i64)> {
     let mut stmt = conn
@@ -969,8 +968,8 @@ pub fn count_degraded_since(conn: &Connection, since_iso: &str) -> Result<i64> {
 /// Count receipts of a given `kind` received at or after `since_iso`
 /// (`received_at`, not `terminal_at` - a rejected/still-`received` row still
 /// TOUCHED the pipeline in the window even if it never reached a successful
-/// terminal state). This is the durable proxy the harvest drift guard (Phase 6
-/// of the harvest-completion design) reads: "did the harvest run produce ANY
+/// terminal state). This is the durable proxy the harvest drift guard
+/// (harvest-completion design) reads: "did the harvest run produce ANY
 /// session activity recently", independent of whether that activity ultimately
 /// succeeded. `since_iso` must be in [`TIMESTAMP_FMT`].
 pub fn count_kind_since(conn: &Connection, kind: ReceiptKind, since_iso: &str) -> Result<i64> {

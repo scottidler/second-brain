@@ -29,13 +29,13 @@ pub(crate) fn detect_text_pattern(text: &str) -> TextPattern {
 
     // `idea:` prefix forces an Idea note even when the text carries a URL - the
     // explicit escape hatch that replaces the old `<10 chars` prose heuristic
-    // (Phase 8 resolved decision). It short-circuits the URL redirect below.
+    // (a resolved design decision). It short-circuits the URL redirect below.
     let is_idea = trimmed
         .strip_prefix("idea:")
         .or_else(|| trimmed.strip_prefix("Idea:"))
         .is_some();
 
-    // Phase 8: prose+URL ALWAYS becomes an annotated URL ingest (the source is
+    // Prose+URL ALWAYS becomes an annotated URL ingest (the source is
     // fetched). The surrounding prose becomes the capture note. A bare URL
     // yields `note = None`. Additional URLs stay in the note text as plain
     // links; the first URL is the capture target.
@@ -94,7 +94,7 @@ pub(crate) async fn process_text_inner(
 
     match pattern {
         TextPattern::ContainsUrl { url, note } => {
-            // Redirect to URL pipeline, carrying the capture note (Phase 8).
+            // Redirect to URL pipeline, carrying the capture note.
             return Ok(process_url(&url, note, tags, method, force, config, trace_id).await);
         }
         TextPattern::Define { .. } | TextPattern::Clarify { .. } => {
@@ -114,7 +114,7 @@ pub(crate) async fn process_text_inner(
     // Generate title from text (first line or LLM-generated)
     let title = generate_text_title(text, use_fabric, config).await;
 
-    // Phase 9c-hotfix cutover: route the general text branch through the
+    // Route the general text branch through the
     // Idea distiller so the published note carries `distilled: true` plus the
     // structured `## Summary` / `## Claims` / `## Links` / `## Transcript`
     // body sections. IdeaDistiller is synthesis-only (no Fabric call); the
@@ -258,7 +258,7 @@ pub(crate) async fn process_vocab(
         _ => unreachable!("process_vocab called with non-vocab pattern"),
     };
 
-    // Phase 9c-hotfix cutover: route the vocab body through the distiller
+    // Route the vocab body through the distiller
     // dispatcher (which maps Vocabulary to IdeaDistiller). The vocab
     // definition prose is preserved verbatim in `distilled.transcript`.
     let ingest_kind = match &content_type {

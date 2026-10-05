@@ -1,4 +1,4 @@
-//! Phase 8: the nightly harvest systemd user timer. `sb borg harvest
+//! The nightly harvest systemd user timer. `sb borg harvest
 //! --install` writes a `sb-harvest.service` (oneshot: `sb borg harvest`) plus a
 //! `sb-harvest.timer` whose ONLY tunable is `OnCalendar` (from
 //! `harvest.schedule`); every behavioral knob stays in `borg.yml`, read by the
@@ -11,8 +11,8 @@
 //! likewise absolute and tilde-expanded).
 //!
 //! The stripped environment also means NO decrypted secrets reach the run
-//! unless the unit bootstraps them itself (design doc: 2026-07-20
-//! harvest-completion, Phase 5). When `harvest.env_bootstrap` is configured,
+//! unless the unit bootstraps them itself (design doc:
+//! harvest-completion). When `harvest.env_bootstrap` is configured,
 //! `sb-harvest.service` carries the same `ExecStartPre` decrypt +
 //! `EnvironmentFile` directives the borg/cortex daemon units already emit
 //! (all three render through `vault::systemd::render_service`),

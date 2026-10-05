@@ -27,7 +27,7 @@ struct JsonBody {
     url: String,
     #[serde(default)]
     tags: Vec<String>,
-    /// Optional operator capture annotation (Phase 8), threaded to the note's
+    /// Optional operator capture annotation, threaded to the note's
     /// `## Why Captured`. Absent in existing ntfy senders -> `None`.
     #[serde(default)]
     note: Option<String>,
@@ -43,7 +43,7 @@ enum ParsedMessage {
         url: String,
         tags: Vec<String>,
         force: bool,
-        /// Operator capture annotation (Phase 8): the JSON `note`, or the prose
+        /// Operator capture annotation: the JSON `note`, or the prose
         /// surrounding the URL in a plain-text message (first-URL token removed).
         note: Option<String>,
     },

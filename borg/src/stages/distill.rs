@@ -1,15 +1,14 @@
 //! Stage 2 distillation entry point.
 //!
 //! Sits alongside the Gate-2 detector in `summarize.rs` and produces the
-//! structured `Distilled` contract. As of Phase 6 the stage routes all
+//! structured `Distilled` contract. The stage routes all
 //! four URL kinds (Article, Repo, Video, Thread) through their Fabric-
 //! backed distillers, plus Idea / Image / VoiceNote through the no-LLM
 //! distillers. Only the `Vocabulary*` kinds remain outside the contract
 //! (handled upstream).
 //!
-//! As of the post-Phase-6 cutover the `distill_for_publish_*` functions
-//! are the primary path: `pipeline.rs` awaits them, renders the result
-//! into the published note's body and frontmatter, and the legacy
+//! The `distill_for_publish_*` functions are the primary path: `pipeline.rs`
+//! awaits them, renders the result into the published note's body and frontmatter, and the legacy
 //! `fabric::summarize` prose path is gone for URL kinds. Each function
 //! also persists `distilled.yml` to the staging directory for forensics
 //! and `borg replay` support.
@@ -87,7 +86,7 @@ pub fn render_timestamped_transcript(segments: &[(f64, String)]) -> String {
 
 /// Convert borg's `IngestKind` to the distillers crate's `DistillKind`.
 ///
-/// As of Phase 9c-hotfix every `IngestKind` has a counterpart - `Vocabulary*`
+/// Every `IngestKind` has a counterpart - `Vocabulary*`
 /// routes through `DistillKind::Vocabulary`, which the dispatcher dispatches
 /// to `IdeaDistiller` (degenerate Distilled: summary = definition prose,
 /// claims empty, full verbatim text preserved in `Distilled.transcript`).
@@ -151,7 +150,7 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
             .await
     }
 
-    /// Repo-aware variant. Phase 4's shadow path passes `repo_metadata` from
+    /// Repo-aware variant. The shadow path passes `repo_metadata` from
     /// the GitHub REST API; non-repo dispatches leave it `None`.
     pub async fn distill_with_metadata(
         &self,
@@ -183,7 +182,7 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
         self.dispatcher.distill(distill_kind, inputs).await
     }
 
-    /// Video-aware variant. Phase 5's shadow path passes `video_metadata`
+    /// Video-aware variant. The shadow path passes `video_metadata`
     /// alongside the transcript so the distiller can validate anchors
     /// against `duration_seconds` and attach `KindPayload::Video`.
     pub async fn distill_with_video_metadata(
@@ -216,7 +215,7 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
         self.dispatcher.distill(distill_kind, inputs).await
     }
 
-    /// Session-aware variant (harvest-clyde-sessions Phase 4). Harvest's
+    /// Session-aware variant. Harvest's
     /// pipeline handler passes `session_metadata` (repo anchor, member ids,
     /// message count, date range, `body-truncated` flag) so the distiller can
     /// attach `KindPayload::Session` and mark truncation. `source_url` is the
@@ -247,7 +246,7 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
 }
 
 /// Filename inside the per-trace staging directory where shadow-mode
-/// (Phases 3-4) and the future Stage-2 cutover write the structured payload.
+/// runs and the future Stage-2 cutover write the structured payload.
 pub const DISTILLED_FILENAME: &str = "distilled.yml";
 
 /// Shared core for the simple single-call publish distillers (image,
@@ -351,7 +350,7 @@ fn transcript_quality_ok(transcript: &str) -> bool {
 /// Gate an ARTICLE's `Distilled.transcript` through, in order: a SOURCE gate,
 /// then the coarse quality gate. Runs on the single FINAL `Distilled` produced
 /// by `distill_for_publish_article`, BEFORE `write_distilled_yml` persists it
-/// (2026-07-07 distillation-output-restore, Phase 3 re-scope) - so chrome junk
+/// (distillation-output-restore design) - so chrome junk
 /// never reaches the staged `distilled.yml` or the transcript-chunk embedding
 /// source, not just the rendered note. Covers both the dispatch-success and
 /// `fallback_distilled` paths, since both flow through the same `Distilled`
@@ -369,9 +368,9 @@ fn transcript_quality_ok(transcript: &str) -> bool {
 /// - otherwise (clean source): run the coarse `transcript_quality_ok` as
 ///   defense-in-depth against a readable mis-extraction.
 ///
-/// The pre-Phase-3 `distill.article-transcript` config toggle (an `enabled`
+/// The removed `distill.article-transcript` config toggle (an `enabled`
 /// bool here) is gone: with `## Transcript` no longer rendered for articles at
-/// all (Phase 2's `RenderOptions::for_url_publish`), there was nothing left
+/// all (`RenderOptions::for_url_publish`), there was nothing left
 /// for the toggle to configure. Every article transcript now flows through
 /// this same two-stage quality gate before landing in staging.
 fn gate_article_transcript(mut distilled: Distilled, clean_source: bool) -> Distilled {
@@ -416,12 +415,11 @@ fn gate_and_persist_article(
     distilled
 }
 
-/// Post-Phase-6 cutover: run the article distiller against the raw article
+/// Run the article distiller against the raw article
 /// markdown and return the `Distilled`. `clean_source` mirrors the caller's
 /// fetch provenance (true only for the in-process readable extractor's
 /// output); the source/quality gate (`gate_article_transcript`) runs on the
-/// raw dispatch output BEFORE `distilled.yml` is persisted (Phase 3
-/// re-scope), so a non-clean fetch source or a chrome-heavy body never
+/// raw dispatch output BEFORE `distilled.yml` is persisted, so a non-clean fetch source or a chrome-heavy body never
 /// reaches staging or embeddings - not just the rendered note. On any error
 /// (dispatch failure, etc.) the same gate still runs against the
 /// `fallback_distilled` payload, so publish never blocks on distillation and
@@ -471,7 +469,7 @@ pub async fn distill_for_publish_article(
     gate_and_persist_article(staging, trace_id, distilled, clean_source)
 }
 
-/// Phase 9c-voicenote cutover: run the VoiceNote distiller against a Groq ASR
+/// Run the VoiceNote distiller against a Groq ASR
 /// transcript. Short transcripts dispatch a single Fabric call; long
 /// transcripts (>12K tokens) go through map-reduce. The raw Groq output is
 /// always preserved in `Distilled.transcript` so the published note is a
@@ -498,7 +496,7 @@ pub async fn distill_for_publish_voicenote(
     .await
 }
 
-/// Phase 9c-image cutover: run the Image distiller against the Vision+OCR
+/// Run the Image distiller against the Vision+OCR
 /// transcript. The full input is preserved as `Distilled.transcript` so the
 /// published note carries verbatim extracted text below the LLM-distilled
 /// `## Summary` / `## Claims`.
@@ -524,7 +522,7 @@ pub async fn distill_for_publish_image(
     .await
 }
 
-/// Phase 9c-hotfix cutover: run the Idea distiller against a free-form text
+/// Run the Idea distiller against a free-form text
 /// note. No Fabric call (synthesis-only); the full input is preserved as
 /// `Distilled.transcript` so the published note is a verbatim archive even
 /// after the global `MAX_SUMMARY_CHARS` cap clips the summary. Persists
@@ -553,7 +551,7 @@ pub async fn distill_for_publish_idea(
     .await
 }
 
-/// Phase 9c-hotfix cutover: run the Vocabulary kind through the distiller
+/// Run the Vocabulary kind through the distiller
 /// dispatcher (which routes to `IdeaDistiller` as a degenerate path - the
 /// vocab definition is preserved verbatim in `Distilled.transcript`). Takes
 /// the `IngestKind` so EN vs ES can flow through to translation; both map
@@ -583,7 +581,7 @@ pub async fn distill_for_publish_vocab(
     .await
 }
 
-/// Post-Phase-6 cutover: fetch the github repo's README + metadata via the
+/// Fetch the github repo's README + metadata via the
 /// REST API and distill into a `Distilled`. Persists `distilled.yml` on
 /// success. On any error (URL not a repo root, REST fetch failed, dispatch
 /// failure) returns a `fallback_distilled` so publish always has a payload
@@ -682,7 +680,7 @@ pub async fn distill_for_publish_repo(
     distilled
 }
 
-/// Post-Phase-6 cutover: run the YouTube distiller. Fetches yt-dlp metadata
+/// Run the YouTube distiller. Fetches yt-dlp metadata
 /// and raw VTT subtitles in parallel so the distiller sees real timestamps,
 /// rather than the legacy transcript that strips them. Persists
 /// `distilled.yml` on success. On any error returns a `fallback_distilled`
@@ -805,14 +803,14 @@ pub async fn distill_for_publish_video(
     distilled
 }
 
-/// Post-Phase-6 cutover: run the thread distiller against the markdown rendered
+/// Run the thread distiller against the markdown rendered
 /// by the standard Stage-0 fetcher chain (Jina / fabric -u / browser-UA +
 /// markitdown) for X/Reddit/HN URLs. The returned `Distilled` is the source of
 /// truth for the published note's body and `cortex-thread-*` frontmatter.
 ///
 /// Persists two artifacts in the per-trace staging directory:
 /// - `transcript.md` + `transcript.yml` (the rendered markdown the distiller
-///   saw, with `extractor: thread-markdown-shim`). The Phase-6 audit verified
+///   saw, with `extractor: thread-markdown-shim`). The structured-distillation audit verified
 ///   the rendered markdown is sufficient input for `distill-thread`; a
 ///   dedicated X/Reddit/HN JSON fetcher remains tracked as a potential future
 ///   enhancement but is not required.
@@ -878,7 +876,7 @@ pub async fn distill_for_publish_thread(
 /// the article defaults every other kind inherits. Every other kind's config
 /// is built identically to [`dispatcher_from_fabric_config`]; only the
 /// session sub-config differs - the `Dispatcher::new` doc comment explicitly
-/// invites this Phase 5 rebuild ("borg's harvest handler (Phase 5) rebuilds
+/// invites this rebuild ("borg's harvest handler rebuilds
 /// it via with_configs when harvest.token-cap differs").
 pub fn dispatcher_for_session(fabric: &FabricConfig, session_config: SessionConfig) -> Dispatcher<FabricShell> {
     log::debug!(
@@ -931,13 +929,13 @@ pub fn dispatcher_for_session(fabric: &FabricConfig, session_config: SessionConf
     )
 }
 
-/// Harvest-clyde-sessions Phase 4 cutover: run the session distiller against
+/// Run the session distiller against
 /// the concatenated role-labeled body of a harvested thread. `source_url` is
 /// the primary session's `clyde://<id>` pointer; `session_metadata` carries the
 /// deterministic bookkeeping (repo anchor, member ids, message count, date
 /// range, `body-truncated`) the distiller attaches as `KindPayload::Session`.
-/// `session_config` carries harvest's model/token-cap overrides (Phase 5 -
-/// resolved by the caller, which holds `HarvestConfig`/`llm.model`).
+/// `session_config` carries harvest's model/token-cap overrides (resolved by the
+/// caller, which holds `HarvestConfig`/`llm.model`).
 /// Persists `distilled.yml` on success. On any dispatch error returns a
 /// `fallback_distilled` so publish always has a payload - degraded distillation
 /// never blocks the note from landing (the borg degraded-quality contract).
