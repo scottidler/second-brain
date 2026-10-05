@@ -13,9 +13,6 @@ pub mod wait;
 #[cfg(test)]
 mod tests;
 
-/// Per-request ceiling for `sb borg queue`; the daemon answers from one indexed read.
-const QUEUE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 static HELP_TEXT: LazyLock<String> = LazyLock::new(get_tool_validation_help);
 
 #[derive(Args)]
@@ -533,7 +530,7 @@ impl BorgCli {
                 Ok(())
             }
             Some(Command::Queue { format }) => {
-                let snapshot = borg::queue::fetch(&config, None, QUEUE_REQUEST_TIMEOUT).await?;
+                let snapshot = borg::queue::fetch(&config, None, config.hotkey.request_timeout).await?;
                 crate::cli::output::emit(&snapshot, format)
             }
             Some(Command::Wait { timeout, format }) => {

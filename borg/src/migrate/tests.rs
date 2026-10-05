@@ -109,3 +109,99 @@ fn test_reclassify_type_article() {
         "article"
     );
 }
+
+mod reingest_failed_daemon {
+    use super::*;
+    use crate::stub::{Behavior, serve};
+    use std::time::{Duration, Instant};
+
+    const T: Duration = Duration::from_millis(400);
+
+    /// A vault with one note whose body carries the failed-fetch signature.
+    fn vault_with_failed_note() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("notes")).expect("notes dir");
+        std::fs::write(
+            dir.path().join("notes/failed.md"),
+            "---\ntitle: Failed\nsource: https://example.com/failed\n---\n\nThis page contains only an error message.\n",
+        )
+        .expect("write note");
+        dir
+    }
+
+    fn config_for(vault: &std::path::Path, port: u16) -> Config {
+        let mut config = Config::default();
+        config.vault.root_path = Some(vault.display().to_string());
+        config.hotkey.host = "127.0.0.1".to_string();
+        config.hotkey.port = port;
+        config.hotkey.request_timeout = T;
+        config
+    }
+
+    async fn run_against(behavior: Behavior, token_file: Option<&std::path::Path>) -> (Vec<String>, Duration) {
+        let vault = vault_with_failed_note();
+        let (port, _) = serve(behavior).await;
+        let mut config = config_for(vault.path(), port);
+        config.server.auth_token = token_file.map(|p| p.display().to_string());
+        let mut events = Vec::new();
+        let started = Instant::now();
+        reingest_failed(&config, false, |e| events.push(format!("{e:?}")))
+            .await
+            .expect("per-item errors are events, not fatal");
+        (events, started.elapsed())
+    }
+
+    #[tokio::test]
+    async fn a_silent_daemon_is_an_http_error_event_within_twice_the_timeout() {
+        let (events, took) = run_against(Behavior::Silent, None).await;
+        assert!(events.iter().any(|e| e.starts_with("HttpError")), "{events:?}");
+        assert!(took < T * 2 + Duration::from_millis(300), "took {took:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_body_is_an_error_event_within_twice_the_timeout() {
+        let (events, took) = run_against(Behavior::HeadersThenStall, None).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| e.starts_with("ParseError") || e.starts_with("HttpError")),
+            "{events:?}"
+        );
+        assert!(took < T * 2 + Duration::from_millis(300), "took {took:?}");
+    }
+
+    #[tokio::test]
+    async fn a_401_names_the_401_not_a_parse_error() {
+        let (events, _) = run_against(Behavior::Unauthorized, None).await;
+        let http = events
+            .iter()
+            .find(|e| e.starts_with("HttpError"))
+            .expect("HttpError event");
+        assert!(http.contains("(401)"), "{http}");
+        assert!(!events.iter().any(|e| e.starts_with("ParseError")), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_token_requiring_daemon_accepts_the_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_file = dir.path().join("token");
+        std::fs::write(&token_file, "s3cret\n").expect("write token");
+        let behavior = Behavior::RequireToken {
+            token: "s3cret".to_string(),
+            body: r#"{"status":"Completed","note_path":null,"title":"T","tags":[]}"#.to_string(),
+        };
+        let (events, _) = run_against(behavior, Some(&token_file)).await;
+        assert!(events.iter().any(|e| e.starts_with("Ok")), "{events:?}");
+        assert!(!events.iter().any(|e| e.starts_with("HttpError")), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn without_a_token_a_token_requiring_daemon_rejects() {
+        let behavior = Behavior::RequireToken {
+            token: "s3cret".to_string(),
+            body: r#"{"status":"Completed","note_path":null,"title":"T","tags":[]}"#.to_string(),
+        };
+        let (events, _) = run_against(behavior, None).await;
+        assert!(events.iter().any(|e| e.starts_with("HttpError")), "{events:?}");
+    }
+}

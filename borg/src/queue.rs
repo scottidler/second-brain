@@ -17,6 +17,7 @@ use std::str::FromStr;
 use chrono::{DateTime, TimeDelta, Utc};
 use eyre::{Context, Result, eyre};
 use rusqlite::{Connection, params};
+use vault::daemon::client::{DaemonClient, DaemonError};
 use vault::queue::{BatchSummary, ItemState, QueueItem, QueueSnapshot, QueueState};
 use vault::receipts::{FailureStage, ReceiptStatus};
 use vault::schema::Method;
@@ -424,6 +425,8 @@ pub enum FetchError {
     BadAddress { addr: String, reason: String },
     #[error("daemon at {addr} refused the credentials (HTTP 401); check server.auth-token")]
     Unauthorized { addr: String },
+    #[error("cannot build an HTTP client for the daemon at {addr}: {reason}")]
+    Client { addr: String, reason: String },
     #[error("cannot reach daemon at {addr} for GET {path}: {source}")]
     Unreachable {
         addr: String,
@@ -472,23 +475,26 @@ async fn fetch_inner(
     batch: Option<&str>,
     timeout: std::time::Duration,
 ) -> Result<QueueSnapshot, FetchError> {
-    let mut url = reqwest::Url::parse(&format!("http://{addr}/queue")).map_err(|e| FetchError::BadAddress {
-        addr: addr.to_string(),
-        reason: e.to_string(),
+    let daemon = DaemonClient::new(&config.hotkey, config.server.auth_token.as_deref()).map_err(|e| match e {
+        DaemonError::BadAddress { addr, reason } => FetchError::BadAddress { addr, reason },
+        other => FetchError::Client {
+            addr: addr.to_string(),
+            reason: other.to_string(),
+        },
     })?;
-    if let Some(id) = batch {
-        url.query_pairs_mut().append_pair("batch", id);
-    }
-    let unreachable = |source| FetchError::Unreachable {
-        addr: addr.to_string(),
-        path: path.to_string(),
-        source,
-    };
-    let mut req = reqwest::Client::new().get(url).timeout(timeout);
-    if let Some(token) = crate::config::client_auth_token(config.server.auth_token.as_deref()) {
-        req = req.bearer_auth(token);
-    }
-    let resp = req.send().await.map_err(unreachable)?;
+    let query: Vec<(&str, &str)> = batch.map(|id| ("batch", id)).into_iter().collect();
+    let resp = daemon.get("/queue", &query, Some(timeout)).await.map_err(|e| match e {
+        DaemonError::BadAddress { addr, reason } => FetchError::BadAddress { addr, reason },
+        DaemonError::Unreachable { source, .. } => FetchError::Unreachable {
+            addr: addr.to_string(),
+            path: path.to_string(),
+            source,
+        },
+        other => FetchError::Client {
+            addr: addr.to_string(),
+            reason: other.to_string(),
+        },
+    })?;
     let status = resp.status();
     if status.is_success() {
         return resp.json::<QueueSnapshot>().await.map_err(|source| FetchError::Parse {
@@ -501,7 +507,11 @@ async fn fetch_inner(
         (404, None) => Err(FetchError::PredatesQueue { addr: addr.to_string() }),
         (401, _) => Err(FetchError::Unauthorized { addr: addr.to_string() }),
         (code, _) => {
-            let body = resp.text().await.map_err(unreachable)?;
+            let body = resp.text().await.map_err(|source| FetchError::Unreachable {
+                addr: addr.to_string(),
+                path: path.to_string(),
+                source,
+            })?;
             Err(FetchError::Http {
                 addr: addr.to_string(),
                 path: path.to_string(),

@@ -5,16 +5,12 @@
 //! that holds only what a client needs. Every failure is an error naming the
 //! daemon address; nothing here can turn a failed read into an idle answer.
 
-use std::path::PathBuf;
-use std::time::Duration;
-
 use serde::Deserialize;
+use std::path::PathBuf;
 use tracing::debug;
 use vault::config::{Normalize, load_config};
-use vault::daemon::{HotkeyConfig, client_auth_token};
-
-/// Per-request ceiling covering connect, headers and body.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+use vault::daemon::HotkeyConfig;
+use vault::daemon::client::{DaemonClient, DaemonError};
 
 /// The slice of `borg.yml` a daemon client reads. Not `deny_unknown_fields`:
 /// the rest of the file belongs to borg.
@@ -39,40 +35,25 @@ pub fn load_view(config_path: Option<&PathBuf>) -> eyre::Result<BorgView> {
     load_config::<BorgView>(config_path)
 }
 
-/// GET `/queue` from the daemon in `view`, returning its JSON verbatim.
-/// Any failure (connect, timeout, non-2xx, bad body) is an error naming
-/// `host:port`.
-pub async fn fetch(view: &BorgView, timeout: Duration) -> eyre::Result<serde_json::Value> {
-    let addr = format!("{}:{}", view.hotkey.host, view.hotkey.port);
-    let url = format!("http://{addr}/queue");
-    debug!("queue::fetch: addr={addr} timeout={timeout:?}");
+/// GET `/queue` from the daemon in `view`, returning its JSON verbatim, bounded
+/// by `hotkey.request-timeout`. Any failure (connect, timeout, non-2xx, bad
+/// body) is an error naming `host:port`.
+pub async fn fetch(view: &BorgView) -> eyre::Result<serde_json::Value> {
+    let daemon = DaemonClient::new(&view.hotkey, view.server.auth_token.as_deref())?;
+    let addr = daemon.addr().to_string();
+    debug!("queue::fetch: addr={addr} timeout={:?}", view.hotkey.request_timeout);
 
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|e| eyre::eyre!("cannot build HTTP client for borg daemon at {addr}: {e}"))?;
-    let mut req = client.get(&url);
-    if let Some(token) = client_auth_token(view.server.auth_token.as_deref()) {
-        req = req.bearer_auth(token);
-    }
-
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("borg daemon at {addr} unreachable: {e}"))?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::NOT_FOUND {
+    let resp = daemon.get("/queue", &[], None).await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
         eyre::bail!("daemon at {addr} predates /queue; run otto deploy there");
     }
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        let preview: String = body.chars().take(200).collect();
-        eyre::bail!("borg daemon at {addr} answered GET /queue with HTTP {status}: {preview}");
-    }
-    let value = resp
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| eyre::eyre!("borg daemon at {addr} returned an unparseable /queue body: {e}"))?;
+    let value = match daemon.json::<serde_json::Value>("/queue", resp).await {
+        Ok(v) => v,
+        Err(e @ DaemonError::Parse { .. }) => {
+            eyre::bail!("borg daemon at {addr} returned an unparseable /queue body: {e}")
+        }
+        Err(e) => return Err(e.into()),
+    };
     debug!("queue::fetch: addr={addr} ok state={:?}", value.get("state"));
     Ok(value)
 }

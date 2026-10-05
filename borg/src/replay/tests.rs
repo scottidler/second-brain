@@ -235,3 +235,61 @@ async fn url_trace_replay_never_takes_the_harvest_lock() {
         None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
     }
 }
+
+mod daemon_timeouts {
+    use super::*;
+    use crate::stub::{Behavior, serve};
+    use std::time::{Duration, Instant};
+
+    const T: Duration = Duration::from_millis(400);
+
+    fn config_for(port: u16) -> Config {
+        let mut config = Config::default();
+        config.hotkey.host = "127.0.0.1".to_string();
+        config.hotkey.port = port;
+        config.hotkey.request_timeout = T;
+        config
+    }
+
+    #[tokio::test]
+    async fn reingest_via_a_silent_daemon_errs_within_twice_the_timeout() {
+        let (port, _) = serve(Behavior::Silent).await;
+        let started = Instant::now();
+        let result = reingest_via_daemon(&config_for(port), "https://example.com", "cli").await;
+        assert!(result.is_err());
+        assert!(started.elapsed() < T * 2, "took {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn reingest_via_a_stalled_body_errs_within_twice_the_timeout() {
+        let (port, _) = serve(Behavior::HeadersThenStall).await;
+        let started = Instant::now();
+        let result = reingest_via_daemon(&config_for(port), "https://example.com", "cli").await;
+        assert!(result.is_err());
+        assert!(started.elapsed() < T * 2, "took {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn reingest_401_with_a_non_json_body_names_the_401() {
+        let (port, _) = serve(Behavior::Unauthorized).await;
+        let err = reingest_via_daemon(&config_for(port), "https://example.com", "cli")
+            .await
+            .expect_err("401");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("(401)"), "{msg}");
+        assert!(!msg.to_lowercase().contains("parse"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn trace_polling_stops_on_a_stalled_body_instead_of_looping_to_the_ceiling() {
+        // A 200 whose body never completes is a Parse error: polling stops with
+        // Err instead of looping to the ceiling.
+        let (port, _) = serve(Behavior::HeadersThenStall).await;
+        let config = config_for(port);
+        let daemon = DaemonClient::new(&config.hotkey, None).expect("client");
+        let started = Instant::now();
+        let result = poll_trace_terminal(&config, &daemon, "trace-1").await;
+        assert!(result.is_err());
+        assert!(started.elapsed() < T * 2, "took {:?}", started.elapsed());
+    }
+}

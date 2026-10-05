@@ -53,6 +53,8 @@ pub mod signal;
 pub mod slides;
 pub mod stages;
 pub mod startup;
+#[cfg(test)]
+pub(crate) mod stub;
 pub mod telegram;
 pub mod thread;
 pub mod trace;
@@ -795,6 +797,7 @@ pub async fn reingest(
         dry_run,
     });
 
+    let daemon = vault::daemon::client::DaemonClient::new(&config.hotkey, config.server.auth_token.as_deref())?;
     for (i, entry) in entries.iter().enumerate() {
         progress(&ReingestEvent::ItemStart {
             index: i,
@@ -815,7 +818,6 @@ pub async fn reingest(
 
         let host = &config.hotkey.host;
         let port = config.hotkey.port;
-        let endpoint = format!("http://{host}:{port}/ingest");
 
         let body = serde_json::json!({
             "url": entry.source,
@@ -824,22 +826,19 @@ pub async fn reingest(
             "method": "cli",
         });
 
-        let client = reqwest::Client::new();
-        let mut req = client.post(&endpoint).json(&body);
-        if let Some(token) = config::client_auth_token(config.server.auth_token.as_deref()) {
-            req = req.bearer_auth(token);
-        }
-        let status = match req.send().await {
-            Ok(response) => {
-                let mut result: types::IngestResult =
-                    response.json().await.context("Failed to parse response from daemon")?;
+        let sent = match daemon.post_json("/ingest", &body).await {
+            Ok(response) => daemon.json::<types::IngestResult>("/ingest", response).await,
+            Err(e) => Err(e),
+        };
+        let status = match sent {
+            Ok(mut result) => {
                 // The daemon answers `Queued`; poll `/trace/{id}` for the real
                 // terminal state so reingest reports accurate counts and paces
                 // one entry at a time.
                 if matches!(result.status, types::IngestStatus::Queued)
                     && let Some(tid) = result.trace_id.clone()
                 {
-                    result = replay::poll_trace_terminal(&config, host, port, &tid)
+                    result = replay::poll_trace_terminal(&config, &daemon, &tid)
                         .await
                         .unwrap_or(result);
                 }
@@ -889,7 +888,6 @@ pub async fn ingest(
 ) -> Result<IngestOutcome> {
     let host = &config.hotkey.host;
     let port = config.hotkey.port;
-    let endpoint = format!("http://{host}:{port}/ingest");
 
     let body = serde_json::json!({
         "url": url,
@@ -898,19 +896,15 @@ pub async fn ingest(
         "method": method,
     });
 
-    let client = reqwest::Client::new();
-    // Send the write-route Bearer token when one is configured, so enabling
-    // server.auth-token doesn't 401 this first-party CLI path.
-    let mut req = client.post(&endpoint).json(&body);
-    if let Some(token) = config::client_auth_token(config.server.auth_token.as_deref()) {
-        req = req.bearer_auth(token);
-    }
+    // The client sends the write-route Bearer token when one is configured, so
+    // enabling server.auth-token doesn't 401 this first-party CLI path.
+    let daemon = vault::daemon::client::DaemonClient::new(&config.hotkey, config.server.auth_token.as_deref())?;
     // The Error toast here is unconditional and load-bearing: when the HTTP
     // POST itself fails (daemon not running), the daemon by definition
     // cannot deliver the failure notification. The CLI may be wired to a
     // desktop hotkey where stderr is not visible. This is the symmetric
     // counterpart to the `fail()` / `catch (err)` path in popup.js.
-    let response = req.send().await.map_err(|e| {
+    let response = daemon.post_json("/ingest", &body).await.map_err(|e| {
         let msg = if e.is_connect() {
             format!("cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?")
         } else {
@@ -920,7 +914,7 @@ pub async fn ingest(
         eyre::eyre!("{msg}")
     })?;
 
-    let result: types::IngestResult = response.json().await.context("Failed to parse response from daemon")?;
+    let result: types::IngestResult = daemon.json("/ingest", response).await?;
 
     Ok(match result.status {
         types::IngestStatus::Completed => {

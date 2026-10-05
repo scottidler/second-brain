@@ -509,3 +509,44 @@ mod fetch_stub {
         assert!(matches!(err, FetchError::Parse { .. }), "{err:?}");
     }
 }
+
+mod daemon_timeouts {
+    use super::*;
+    use crate::stub::{Behavior, serve};
+    use std::time::{Duration, Instant};
+
+    const T: Duration = Duration::from_millis(400);
+
+    fn config_for(port: u16) -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.hotkey.host = "127.0.0.1".to_string();
+        config.hotkey.port = port;
+        config
+    }
+
+    #[tokio::test]
+    async fn silent_daemon_errs_within_twice_the_timeout() {
+        let (port, _) = serve(Behavior::Silent).await;
+        let started = Instant::now();
+        let err = fetch(&config_for(port), None, T).await.expect_err("silent");
+        assert!(matches!(err, FetchError::Unreachable { .. }), "{err:?}");
+        assert!(started.elapsed() < T * 2, "took {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn stalled_body_errs_within_twice_the_timeout() {
+        let (port, _) = serve(Behavior::HeadersThenStall).await;
+        let started = Instant::now();
+        let err = fetch(&config_for(port), None, T).await.expect_err("stalled");
+        assert!(matches!(err, FetchError::Parse { .. }), "{err:?}");
+        assert!(started.elapsed() < T * 2, "took {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn the_batch_id_travels_as_an_encoded_query_pair() {
+        let (port, seen) = serve(Behavior::Json(r#"{"state":"idle"}"#.to_string())).await;
+        fetch(&config_for(port), Some("a b"), T).await.expect("fetch");
+        let req = seen.lock().expect("log")[0].clone();
+        assert!(req.starts_with("GET /queue?batch=a+b "), "{req}");
+    }
+}

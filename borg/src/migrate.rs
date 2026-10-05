@@ -6,6 +6,7 @@ use eyre::{Context, Result};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use vault::daemon::client::{DaemonClient, DaemonError};
 
 /// Per-note migration outcome produced by the parallel phase. The sequential drain afterward
 /// collects each `rel_path` into `MigrateReport::changed` and accumulates the `ledger_entry`
@@ -401,8 +402,7 @@ pub async fn reingest_failed(
     // -> Stage-2 -> Gate-2 -> publish, preserving cortex-owned frontmatter.
     let host = &config.hotkey.host;
     let port = config.hotkey.port;
-    let endpoint = format!("http://{host}:{port}/ingest");
-    let client = reqwest::Client::new();
+    let daemon = DaemonClient::new(&config.hotkey, config.server.auth_token.as_deref())?;
     for (path, source) in &matched {
         progress(&ReingestFailedEvent::Dispatching { source: source.clone() });
         let body = serde_json::json!({
@@ -411,31 +411,33 @@ pub async fn reingest_failed(
             "force": true,
             "method": "cli",
         });
-        match client.post(&endpoint).json(&body).send().await {
-            Ok(response) => match response.json::<crate::types::IngestResult>().await {
-                Ok(result) => match &result.status {
-                    crate::types::IngestStatus::Completed => {
-                        progress(&ReingestFailedEvent::Ok {
-                            title: result.title.clone(),
-                        });
-                    }
-                    crate::types::IngestStatus::Duplicate { .. } => {
-                        progress(&ReingestFailedEvent::Duplicate);
-                    }
-                    crate::types::IngestStatus::Failed { reason } => {
-                        progress(&ReingestFailedEvent::Failed { reason: reason.clone() });
-                    }
-                    crate::types::IngestStatus::Queued => {
-                        progress(&ReingestFailedEvent::Queued);
-                    }
-                },
-                Err(e) => {
-                    progress(&ReingestFailedEvent::ParseError {
-                        path: path.clone(),
-                        error: e.to_string(),
+        let sent = match daemon.post_json("/ingest", &body).await {
+            Ok(response) => daemon.json::<crate::types::IngestResult>("/ingest", response).await,
+            Err(e) => Err(e),
+        };
+        match sent {
+            Ok(result) => match &result.status {
+                crate::types::IngestStatus::Completed => {
+                    progress(&ReingestFailedEvent::Ok {
+                        title: result.title.clone(),
                     });
                 }
+                crate::types::IngestStatus::Duplicate { .. } => {
+                    progress(&ReingestFailedEvent::Duplicate);
+                }
+                crate::types::IngestStatus::Failed { reason } => {
+                    progress(&ReingestFailedEvent::Failed { reason: reason.clone() });
+                }
+                crate::types::IngestStatus::Queued => {
+                    progress(&ReingestFailedEvent::Queued);
+                }
             },
+            Err(e @ DaemonError::Parse { .. }) => {
+                progress(&ReingestFailedEvent::ParseError {
+                    path: path.clone(),
+                    error: e.to_string(),
+                });
+            }
             Err(e) => {
                 if e.is_connect() {
                     eyre::bail!("cannot reach obsidian-borg at http://{host}:{port} - is the daemon running?");

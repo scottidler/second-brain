@@ -1,8 +1,10 @@
 use eyre::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde::{Deserializer, Serializer};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Post-deserialization normalization hook run by [`load_config`] on every
 /// loaded config, regardless of which path in the fallback chain produced it.
@@ -128,6 +130,26 @@ pub fn resolve_secret(value: &str) -> Result<String> {
     } else {
         std::env::var(value).context(format!("secret '{value}' is not a file and env var is not set"))
     }
+}
+
+/// Deserialize a humantime string (`15m`, `90s`, `1h 30m`) straight into a
+/// `Duration`. An unparseable value is a deserialize error naming `key` and
+/// the bad value, so the YAML load itself fails. `key` is explicit because
+/// serde_yaml's error path stops at the enclosing map for a field-level
+/// `deserialize_with` error (observed: `queue: invalid duration ...`).
+pub fn deserialize_humantime<'de, D: Deserializer<'de>>(
+    deserializer: D,
+    key: &str,
+) -> std::result::Result<Duration, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    humantime::parse_duration(raw.trim())
+        .map_err(|e| serde::de::Error::custom(format!("{key}: invalid duration {raw:?} (humantime, e.g. 15m): {e}")))
+}
+
+/// Serialize a `Duration` back to the humantime form [`deserialize_humantime`]
+/// reads, so a round-tripped config keeps its shape.
+pub fn serialize_humantime<S: Serializer>(value: &Duration, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(&humantime::format_duration(*value).to_string())
 }
 
 #[cfg(test)]

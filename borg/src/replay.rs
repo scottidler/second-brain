@@ -6,6 +6,7 @@
 use chrono::{Duration, Utc};
 use eyre::{Context, Result, bail};
 use std::path::{Path, PathBuf};
+use vault::daemon::client::{DaemonClient, DaemonError};
 
 use crate::config::Config;
 use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
@@ -247,25 +248,18 @@ const POLL_GRACE_SECS: u64 = 90;
 const POLL_INTERVAL_SECS: u64 = 2;
 
 async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result<IngestResult> {
-    let host = &config.hotkey.host;
-    let port = config.hotkey.port;
-    let endpoint = format!("http://{host}:{port}/ingest");
+    let daemon = DaemonClient::new(&config.hotkey, config.server.auth_token.as_deref())?;
     let body = serde_json::json!({
         "url": url,
         "tags": [],
         "force": true,
         "method": method,
     });
-    let client = reqwest::Client::new();
-    let mut req = client.post(&endpoint).json(&body);
-    if let Some(token) = crate::config::client_auth_token(config.server.auth_token.as_deref()) {
-        req = req.bearer_auth(token);
-    }
-    let response = req
-        .send()
+    let response = daemon
+        .post_json("/ingest", &body)
         .await
-        .with_context(|| format!("reingest HTTP call to {endpoint}"))?;
-    let result: IngestResult = response.json().await.context("parse daemon response")?;
+        .with_context(|| format!("reingest HTTP call to {}", daemon.addr()))?;
+    let result: IngestResult = daemon.json("/ingest", response).await?;
 
     // The daemon dispatches the pipeline in the background and answers
     // `Queued` immediately. Poll `/trace/{id}` for the terminal state so the
@@ -273,7 +267,7 @@ async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result
     // at a time (the documented sequential pacing - without the poll it
     // silently became enqueue-everything).
     match (&result.status, result.trace_id.as_deref()) {
-        (IngestStatus::Queued, Some(trace_id)) => poll_trace_terminal(config, host, port, trace_id).await,
+        (IngestStatus::Queued, Some(trace_id)) => poll_trace_terminal(config, &daemon, trace_id).await,
         _ => Ok(result),
     }
 }
@@ -283,24 +277,20 @@ async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result
 /// Shared by replay (`reingest_via_daemon`) and `crate::reingest`.
 pub(crate) async fn poll_trace_terminal(
     config: &Config,
-    host: &str,
-    port: u16,
+    daemon: &DaemonClient,
     trace_id: &str,
 ) -> Result<IngestResult> {
-    let endpoint = format!("http://{host}:{port}/trace/{trace_id}");
-    let client = reqwest::Client::new();
+    let path = format!("/trace/{trace_id}");
     let ceiling = std::time::Duration::from_secs(config.pipeline.hard_timeout_secs + POLL_GRACE_SECS);
     let interval = std::time::Duration::from_secs(POLL_INTERVAL_SECS);
-    let auth = crate::config::client_auth_token(config.server.auth_token.as_deref());
     let start = std::time::Instant::now();
     loop {
-        let mut req = client.get(&endpoint);
-        if let Some(token) = &auth {
-            req = req.bearer_auth(token);
-        }
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let body: crate::routes::TraceStateResponse = resp.json().await.context("parse /trace response")?;
+        let polled = match daemon.get(&path, &[], None).await {
+            Ok(resp) => daemon.json::<crate::routes::TraceStateResponse>(&path, resp).await,
+            Err(e) => Err(e),
+        };
+        match polled {
+            Ok(body) => {
                 match body.status.as_deref() {
                     Some("succeeded") => {
                         return Ok(IngestResult {
@@ -322,7 +312,9 @@ pub(crate) async fn poll_trace_terminal(
                     _ => {}
                 }
             }
-            Ok(resp) => log::warn!("poll /trace/{trace_id}: HTTP {}", resp.status()),
+            // A 200 whose body is not a trace state is a contract break, not a
+            // transient: stop instead of polling to the ceiling.
+            Err(e @ DaemonError::Parse { .. }) => return Err(e).context("parse /trace response"),
             Err(e) => log::warn!("poll /trace/{trace_id} failed: {e}"),
         }
         if start.elapsed() > ceiling {
