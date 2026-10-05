@@ -2,7 +2,9 @@
 //! group, feeds its stdin and drains stdout and stderr on their own threads,
 //! and bounds the whole call (exit AND end-of-output) by one deadline. On the
 //! deadline it SIGKILLs the group, so a grandchild that inherited the pipes
-//! (fabric -> yt-dlp, `sh -c 'x &'`) cannot hold a drain open.
+//! (fabric -> yt-dlp, `sh -c 'x &'`) cannot hold a drain open, and returns
+//! without joining the drains, so one that escaped the group (`setsid`)
+//! cannot hold the call open either.
 //!
 //! A child in its own group no longer receives the terminal's Ctrl-C, so every
 //! live group is recorded in a lock-free registry; [`kill_registered`] SIGKILLs
@@ -97,13 +99,11 @@ pub fn run(mut cmd: Command, stdin: Option<Vec<u8>>, timeout: Duration, label: &
         if Instant::now() >= deadline {
             kill_group(pgid);
             let _ = child.wait();
-            // The group is dead, so every write end is closed and the drains
-            // return; join them so no thread outlives the call.
-            let _ = stdout_drain.join();
-            let _ = stderr_drain.join();
-            if let Some(f) = feeder {
-                let _ = f.join();
-            }
+            // Detach the drain and feeder threads instead of joining them: a
+            // descendant that left the group (`setsid`) survives the kill and
+            // still holds the pipes, and a join would wait out its whole life.
+            // Each thread ends on its own when the last write end closes.
+            drop((stdout_drain, stderr_drain, feeder));
             drop(registration);
             let after = start.elapsed();
             log::warn!(
