@@ -350,7 +350,10 @@ fn drift_finding_errors_when_the_unit_cannot_be_read() {
 fn installed_vault_arg_reads_the_vault_flag_from_exec_start() {
     let unit = "[Service]\nExecStart=/bin/sb cortex --vault /srv/vault --log-level info daemon --start\n";
     assert_eq!(installed_vault_arg(unit), Some(PathBuf::from("/srv/vault")));
-    assert_eq!(installed_vault_arg("[Service]\nExecStart=/bin/sb cortex daemon\n"), None);
+    assert_eq!(
+        installed_vault_arg("[Service]\nExecStart=/bin/sb cortex daemon\n"),
+        None
+    );
 }
 
 /// A unit installed with `--vault` is current even when the config names a
@@ -374,5 +377,8 @@ fn cortex_drift_uses_the_vault_the_unit_was_installed_with() {
     );
 
     std::fs::write(&installed, rendered.replace("--log-level", "--log-levels")).unwrap();
-    assert!(cortex_drift_finding(&installed, &cfg).is_some(), "a changed unit still drifts");
+    assert!(
+        cortex_drift_finding(&installed, &cfg).is_some(),
+        "a changed unit still drifts"
+    );
 }
