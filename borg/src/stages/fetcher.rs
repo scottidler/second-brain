@@ -1,10 +1,11 @@
 use async_trait::async_trait;
-use eyre::{Context, ContextCompat, Result, bail};
-use std::io::Write;
+use eyre::{Context, Result, bail};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+use vault::process::{self, Outcome};
 
-use crate::config::FabricConfig;
 use crate::stages::artifact::{ArtifactStore, sha256_hex};
 use crate::types::{FetchMeta, FetchResult};
 
@@ -16,197 +17,17 @@ pub trait Fetcher: Send + Sync {
     async fn fetch(&self, url: &str) -> Result<FetchResult>;
 }
 
-/// Chain of Stage-0 fetchers tried in order: github API (when the URL is a
-/// `github.com/<owner>/<repo>` root) → Jina Reader → Fabric `-u` → browser-UA
-/// (reqwest with a realistic Firefox User-Agent piped through markitdown).
-/// Each fetcher's failure is logged and the next is attempted.
-pub struct MultiFetcher {
-    github: crate::github::GitHubFetcher,
-    jina: JinaFetcher,
-    fabric: FabricFetcher,
-    browser: BrowserUaFetcher,
-}
-
-impl MultiFetcher {
-    pub fn new(fabric_cfg: FabricConfig) -> Self {
-        Self {
-            github: crate::github::GitHubFetcher::new(),
-            jina: JinaFetcher::new(),
-            fabric: FabricFetcher::new(fabric_cfg),
-            browser: BrowserUaFetcher::new(),
-        }
-    }
-}
-
-#[async_trait]
-impl Fetcher for MultiFetcher {
-    async fn fetch(&self, url: &str) -> Result<FetchResult> {
-        let mut tried: Vec<String> = Vec::new();
-        if crate::github::parse_repo_url(url).is_some() {
-            match self.github.fetch(url).await {
-                Ok(mut r) => {
-                    r.meta.fallbacks_attempted = tried;
-                    return Ok(r);
-                }
-                Err(e) => {
-                    log::warn!("MultiFetcher: github API failed for {url}: {e:#}");
-                    tried.push("github".to_string());
-                }
-            }
-        }
-        match self.jina.fetch(url).await {
-            Ok(mut r) => {
-                r.meta.fallbacks_attempted = tried;
-                return Ok(r);
-            }
-            Err(e) => {
-                log::warn!("MultiFetcher: jina failed for {url}: {e:#}");
-                tried.push("jina".to_string());
-            }
-        }
-        match self.fabric.fetch(url).await {
-            Ok(mut r) => {
-                r.meta.fallbacks_attempted = tried;
-                return Ok(r);
-            }
-            Err(e) => {
-                log::warn!("MultiFetcher: fabric -u failed for {url}: {e:#}");
-                tried.push("fabric".to_string());
-            }
-        }
-        match self.browser.fetch(url).await {
-            Ok(mut r) => {
-                r.meta.fallbacks_attempted = tried;
-                Ok(r)
-            }
-            Err(e) => {
-                log::warn!("MultiFetcher: browser-UA failed for {url}: {e:#}");
-                bail!("all fetchers failed for {url}: last error: {e:#}")
-            }
-        }
-    }
-}
-
-/// Jina Reader (https://r.jina.ai/<url>). Emits markdown; we treat the body as
-/// text/markdown. HTTP 451 signals Jina's own IP-based block and is returned
-/// as a FetchResult so Gate-1 can inspect it (block-page detection runs from disk).
-pub struct JinaFetcher {
-    client: reqwest::Client,
-}
-
-impl JinaFetcher {
-    pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
-    }
-}
-
-impl Default for JinaFetcher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl Fetcher for JinaFetcher {
-    async fn fetch(&self, url: &str) -> Result<FetchResult> {
-        let jina_url = format!("https://r.jina.ai/{url}");
-        let response = self
-            .client
-            .get(&jina_url)
-            .header("Accept", "text/markdown")
-            .send()
-            .await
-            .context("jina: request failed")?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let bytes = response.bytes().await.context("jina: read body")?.to_vec();
-        // Gate-1 will reject downstream, but Jina `status` above 400 typically
-        // means we should not treat the body as authoritative.
-        if !(200..300).contains(&status) && !matches!(status, 451) {
-            bail!("jina returned HTTP {status} for {url}");
-        }
-        let sha256 = sha256_hex(&bytes);
-        let meta = FetchMeta {
-            source: url.to_string(),
-            extractor: "jina".to_string(),
-            status,
-            content_type,
-            bytes: bytes.len() as u64,
-            sha256,
-            fallbacks_attempted: Vec::new(),
-            author: None,
-        };
-        Ok(FetchResult { bytes, meta })
-    }
-}
-
-/// `fabric -u <url>` extractor. Executes the fabric binary; stdout is the body.
-pub struct FabricFetcher {
-    config: FabricConfig,
-}
-
-impl FabricFetcher {
-    pub fn new(config: FabricConfig) -> Self {
-        Self { config }
-    }
-}
-
-#[async_trait]
-impl Fetcher for FabricFetcher {
-    async fn fetch(&self, url: &str) -> Result<FetchResult> {
-        let binary = vault::fabric::resolve_binary(&self.config.binary);
-        let url_owned = url.to_string();
-        let output = tokio::task::spawn_blocking(move || -> Result<std::process::Output> {
-            let out = std::process::Command::new(&binary)
-                .args(["-u", &url_owned])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .context("fabric: spawn failed")?
-                .wait_with_output()
-                .context("fabric: wait_with_output failed")?;
-            Ok(out)
-        })
-        .await
-        .context("fabric: join failed")??;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            bail!("fabric -u failed: {stderr}");
-        }
-        let bytes = output.stdout;
-        if bytes.is_empty() {
-            bail!("fabric -u returned empty body");
-        }
-        let sha256 = sha256_hex(&bytes);
-        let meta = FetchMeta {
-            source: url.to_string(),
-            extractor: "fabric-u".to_string(),
-            status: 200,
-            content_type: Some("text/markdown".to_string()),
-            bytes: bytes.len() as u64,
-            sha256,
-            fallbacks_attempted: Vec::new(),
-            author: None,
-        };
-        Ok(FetchResult { bytes, meta })
-    }
-}
-
 /// Fetch via reqwest with a realistic browser User-Agent and convert the
 /// response body to markdown via markitdown. Recovers URLs that block
 /// bot IPs (Jina) but not browser UAs (e.g. XDA Developers on 2026-04-19).
 pub struct BrowserUaFetcher {
     client: reqwest::Client,
+    /// Bound on the markitdown subprocess (`pipeline.browser-ua-timeout`).
+    markitdown_timeout: Duration,
 }
 
 impl BrowserUaFetcher {
-    pub fn new() -> Self {
+    pub fn new(markitdown_timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .user_agent(BROWSER_UA)
             .redirect(reqwest::redirect::Policy::limited(5))
@@ -216,13 +37,29 @@ impl BrowserUaFetcher {
                 log::warn!("browser-ua: falling back to default client: {e:#}");
                 reqwest::Client::new()
             });
-        Self { client }
+        Self {
+            client,
+            markitdown_timeout,
+        }
     }
 }
 
-impl Default for BrowserUaFetcher {
-    fn default() -> Self {
-        Self::new()
+/// The markitdown invocation that converts fetched HTML (fed on stdin) to markdown.
+fn markitdown_stdin_command() -> Command {
+    Command::new("markitdown")
+}
+
+/// Run markitdown over `html` on stdin. A timeout, a spawn failure, and a
+/// non-zero exit are each `Err`; the caller falls back to the raw bytes.
+fn run_markitdown(cmd: Command, html: Vec<u8>, timeout: Duration) -> Result<Vec<u8>> {
+    match process::run(cmd, Some(html), timeout, "markitdown (browser-ua)")
+        .context("spawn markitdown-cli (is it installed?)")?
+    {
+        Outcome::TimedOut { after } => bail!("markitdown timed out after {after:?}"),
+        Outcome::Exited { status, stderr, .. } if !status.success() => {
+            bail!("markitdown failed ({status}): {}", String::from_utf8_lossy(&stderr))
+        }
+        Outcome::Exited { stdout, .. } => Ok(stdout),
     }
 }
 
@@ -248,24 +85,8 @@ impl Fetcher for BrowserUaFetcher {
         // Pipe the raw HTML through markitdown-cli to get markdown.
         let md = tokio::task::spawn_blocking({
             let raw = raw.clone();
-            move || -> Result<Vec<u8>> {
-                let mut child = std::process::Command::new("markitdown")
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .context("spawn markitdown-cli (is it installed?)")?;
-                {
-                    let stdin = child.stdin.as_mut().context("markitdown: no stdin")?;
-                    stdin.write_all(&raw).context("markitdown: write stdin")?;
-                }
-                let output = child.wait_with_output().context("markitdown: wait")?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                    bail!("markitdown failed: {stderr}");
-                }
-                Ok(output.stdout)
-            }
+            let timeout = self.markitdown_timeout;
+            move || run_markitdown(markitdown_stdin_command(), raw, timeout)
         })
         .await
         .context("markitdown: join failed")?

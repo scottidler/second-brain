@@ -10,34 +10,56 @@ fn test_ocr_extract_nonexistent_file() {
     }
 }
 
-#[test]
-fn test_ocr_extract_short_timeout_terminates() {
-    // Use `sleep` as a stand-in tesseract that hangs. With a sub-second
-    // timeout, the internal kill path must fire and we must return Ok("")
-    // rather than blocking.
-    let mut child = std::process::Command::new("sleep")
-        .arg("30")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn sleep");
+fn sh_command(script: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", script]);
+    cmd
+}
 
-    let timeout = Duration::from_millis(200);
-    let start = std::time::Instant::now();
-    let mut killed = false;
-    loop {
-        if let Some(_status) = child.try_wait().expect("try_wait") {
-            break;
-        }
-        if start.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            killed = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(killed, "expected timeout-driven kill");
+#[test]
+fn tesseract_one_mib_of_stdout_is_returned_whole() {
+    let started = std::time::Instant::now();
+    let text = run_tesseract(
+        sh_command("head -c 1048576 /dev/zero | tr '\\0' a"),
+        Duration::from_secs(30),
+        "big.png",
+    )
+    .expect("run");
+    assert_eq!(text.len(), 1_048_576);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn tesseract_timeout_is_err_naming_the_image() {
+    let started = std::time::Instant::now();
+    let err = run_tesseract(sh_command("sleep 30"), Duration::from_millis(300), "slow.png").expect_err("timeout");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("timed out") && msg.contains("slow.png"), "{msg}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn tesseract_non_zero_exit_is_empty_text() {
+    let text = run_tesseract(sh_command("echo bad >&2; exit 1"), Duration::from_secs(10), "a.png").expect("degrade");
+    assert!(text.is_empty());
+}
+
+#[test]
+fn tesseract_command_builds_the_documented_argv() {
+    let cmd = tesseract_command(Path::new("/x/a.png"));
+    assert_eq!(cmd.get_program(), "tesseract");
+    assert_eq!(
+        cmd.get_args().collect::<Vec<_>>(),
+        ["/x/a.png", "stdout", "--oem", "3", "--psm", "3"]
+    );
 }
 
 #[test]

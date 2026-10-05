@@ -70,31 +70,20 @@ async fn test_with_hard_timeout_bounds_a_wedged_non_url_handler() {
     );
 }
 
-/// Per-call poll-based timeouts (fabric.rs / ocr.rs / youtube.rs) must kill
-/// the child process when the deadline passes. Uses `sleep` as a stand-in
-/// for any external tool that might hang (yt-dlp, fabric, tesseract).
+/// A per-call subprocess timeout must come back as `Err` promptly, killing
+/// the child. Drives production `extraction::run_extraction` (which goes
+/// through `vault::process::run`) with `sleep` standing in for a hung tool.
 #[test]
 fn test_per_call_timeout_kills_blocking_child() {
-    let mut child = std::process::Command::new("sleep")
-        .arg("30")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn sleep");
-    let timeout = Duration::from_millis(200);
+    let mut cmd = std::process::Command::new("sleep");
+    cmd.arg("30");
     let start = std::time::Instant::now();
-    let mut killed = false;
-    loop {
-        if let Some(_status) = child.try_wait().expect("try_wait") {
-            break;
-        }
-        if start.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            killed = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(killed, "expected the timeout path to fire and kill the child");
+    let err = crate::extraction::run_extraction(cmd, Duration::from_millis(200), "hung.pdf")
+        .expect_err("the timeout path must return Err");
+    assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "must return near the 200ms deadline, not the 30s sleep: {:?}",
+        start.elapsed()
+    );
 }

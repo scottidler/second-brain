@@ -45,15 +45,6 @@ impl Fetcher for CountingFakeFetcher {
     }
 }
 
-struct AlwaysFailFetcher(&'static str);
-
-#[async_trait]
-impl Fetcher for AlwaysFailFetcher {
-    async fn fetch(&self, _url: &str) -> Result<FetchResult> {
-        bail!("{} always fails", self.0);
-    }
-}
-
 #[tokio::test]
 async fn fs_caching_fetcher_persists_and_counts_calls() {
     let store: Arc<dyn ArtifactStore> = Arc::new(MemArtifactStore::new());
@@ -102,32 +93,73 @@ async fn fs_caching_fetcher_enforces_one_fetch_per_ingestion() {
     assert_eq!(cache.call_count(), 1);
 }
 
-#[tokio::test]
-async fn multifetcher_falls_back_on_first_failure() {
-    // Force the first two fetchers to fail via a compose helper.
-    struct Chain {
-        jina: AlwaysFailFetcher,
-        fabric: AlwaysFailFetcher,
-        browser: CountingFakeFetcher,
-    }
-    #[async_trait]
-    impl Fetcher for Chain {
-        async fn fetch(&self, url: &str) -> Result<FetchResult> {
-            if let Ok(r) = self.jina.fetch(url).await {
-                return Ok(r);
-            }
-            if let Ok(r) = self.fabric.fetch(url).await {
-                return Ok(r);
-            }
-            self.browser.fetch(url).await
-        }
-    }
-    let chain = Chain {
-        jina: AlwaysFailFetcher("jina"),
-        fabric: AlwaysFailFetcher("fabric"),
-        browser: CountingFakeFetcher::new(b"ok", "browser-ua"),
-    };
-    let got = chain.fetch("https://example.com").await.unwrap();
-    assert_eq!(got.bytes, b"ok");
-    assert_eq!(got.meta.extractor, "browser-ua");
+fn sh_command(script: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", script]);
+    cmd
+}
+
+#[test]
+fn browser_ua_markitdown_one_mib_of_stdout_is_returned_whole() {
+    let started = std::time::Instant::now();
+    let out = run_markitdown(
+        sh_command("head -c 1048576 /dev/zero | tr '\\0' a"),
+        b"<html></html>".to_vec(),
+        Duration::from_secs(30),
+    )
+    .expect("run");
+    assert_eq!(out.len(), 1_048_576);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn browser_ua_markitdown_one_mib_of_stdin_round_trips() {
+    let started = std::time::Instant::now();
+    let html = vec![b'x'; 1_048_576];
+    let out = run_markitdown(sh_command("cat | tr x y"), html, Duration::from_secs(30)).expect("run");
+    assert_eq!(out.len(), 1_048_576);
+    assert!(out.iter().all(|b| *b == b'y'));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn browser_ua_markitdown_timeout_is_err_and_bounded() {
+    let started = std::time::Instant::now();
+    let err = run_markitdown(sh_command("sleep 30"), b"x".to_vec(), Duration::from_millis(300)).expect_err("timeout");
+    assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn browser_ua_markitdown_non_zero_exit_is_err_with_stderr() {
+    let err = run_markitdown(
+        sh_command("echo bad >&2; exit 4"),
+        b"x".to_vec(),
+        Duration::from_secs(10),
+    )
+    .expect_err("non-zero exit");
+    assert!(format!("{err:#}").contains("bad"), "{err:#}");
+}
+
+#[test]
+fn browser_ua_markitdown_missing_binary_is_err() {
+    let err = run_markitdown(
+        Command::new("/nonexistent/markitdown"),
+        b"x".to_vec(),
+        Duration::from_secs(5),
+    )
+    .expect_err("spawn failure");
+    assert!(format!("{err:#}").contains("markitdown"), "{err:#}");
 }

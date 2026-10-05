@@ -1,35 +1,10 @@
 use eyre::{Context, Result, bail};
 use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
+use vault::process::{self, Outcome};
 
 use crate::config::{FabricConfig, PipelineConfig};
-
-/// Wait for a child process with a per-call timeout. Kills the child on
-/// elapsed and returns an error. Caller still owns the `Child`; on success
-/// they call `wait_with_output()` to collect output.
-///
-/// This is the URL-fetch variant (own-the-`Child`, drain via
-/// `wait_with_output`); the deadlock-safe stdin/stdout-draining primitive for
-/// pattern invocations is `vault::process::run`.
-fn wait_with_timeout(child: &mut Child, timeout_secs: u64, label: &str) -> Result<()> {
-    let timeout = Duration::from_secs(timeout_secs);
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return Ok(()),
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    bail!("{label} timed out after {timeout_secs}s");
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => bail!("Failed to wait for {label}: {e}"),
-        }
-    }
-}
 
 /// Resolve a pattern name to a file path.
 ///
@@ -74,26 +49,34 @@ pub fn fetch_transcript(url: &str, fabric: &FabricConfig, pipeline: &PipelineCon
     let binary = vault::fabric::resolve_binary(&fabric.binary);
     let timeout_secs = pipeline.fabric_transcript_timeout_secs;
     log::debug!("fabric: fetching YouTube transcript for {url} (timeout={timeout_secs}s)");
-    let mut child = Command::new(&binary)
-        // fabric defaults to `--sub-langs en,en.*`, which includes the
-        // machine-translated `en` track YouTube 429s (yt-dlp/yt-dlp#13831,
-        // danielmiessler/Fabric#2231). `en-orig` is the original ASR track.
-        .args(["-y", url, "--transcript", "--yt-dlp-args=--sub-lang en-orig"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("Failed to spawn fabric")?;
+    run_transcript(
+        transcript_command(&binary, url),
+        Duration::from_secs(timeout_secs),
+        "fabric -y --transcript",
+    )
+}
 
-    if wait_with_timeout(&mut child, timeout_secs, "fabric -y --transcript").is_err() {
-        return Ok(String::new());
-    }
-    let output = child.wait_with_output().context("Failed to collect fabric output")?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        log::warn!("fabric -y --transcript failed: {stderr}");
-        Ok(String::new())
+fn transcript_command(binary: &str, url: &str) -> Command {
+    let mut cmd = Command::new(binary);
+    // fabric defaults to `--sub-langs en,en.*`, which includes the
+    // machine-translated `en` track YouTube 429s (yt-dlp/yt-dlp#13831,
+    // danielmiessler/Fabric#2231). `en-orig` is the original ASR track.
+    cmd.args(["-y", url, "--transcript", "--yt-dlp-args=--sub-lang en-orig"]);
+    cmd
+}
+
+/// Run a transcript command. A timeout is `Err` (the caller WARNs and
+/// degrades); a non-zero exit is an empty transcript with a WARN.
+fn run_transcript(cmd: Command, timeout: Duration, label: &str) -> Result<String> {
+    match process::run(cmd, None, timeout, label)? {
+        Outcome::TimedOut { after } => bail!("{label} timed out after {after:?}"),
+        Outcome::Exited { status, stdout, .. } if status.success() => {
+            Ok(String::from_utf8_lossy(&stdout).trim().to_string())
+        }
+        Outcome::Exited { stderr, .. } => {
+            log::warn!("{label} failed: {}", String::from_utf8_lossy(&stderr));
+            Ok(String::new())
+        }
     }
 }
 
@@ -107,11 +90,8 @@ pub fn fetch_transcript(url: &str, fabric: &FabricConfig, pipeline: &PipelineCon
 /// complete in under a minute; an LLM pattern call genuinely can need
 /// several. Conflating them lets a hung scrape burn the LLM budget.
 pub async fn fetch_article(url: &str, fabric: &FabricConfig, pipeline: &PipelineConfig) -> Result<String> {
-    // The body is blocking (spawn + sync `wait_with_timeout` poll loop).
-    // Run it on a blocking thread so it never stalls a tokio worker - the
-    // previous direct call ran the 100ms-sleep poll loop on the async
-    // runtime. `fetch_transcript` is already wrapped at its call site; this
-    // brings `fetch_article` in line.
+    // `vault::process::run` blocks the calling thread until the child exits,
+    // so run it on a blocking thread and never stall a tokio worker.
     let binary = vault::fabric::resolve_binary(&fabric.binary);
     let fabric_timeout = pipeline.fabric_url_timeout_secs;
     let markitdown_timeout = pipeline.markitdown_timeout_secs;
@@ -123,70 +103,73 @@ pub async fn fetch_article(url: &str, fabric: &FabricConfig, pipeline: &Pipeline
 
 fn fetch_article_blocking(url: &str, binary: &str, fabric_timeout: u64, markitdown_timeout: u64) -> Result<String> {
     log::debug!("fabric: fetching article for {url} (timeout={fabric_timeout}s)");
-    let mut child = Command::new(binary)
-        .args(["-u", url])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("Failed to spawn fabric")?;
-
-    if wait_with_timeout(&mut child, fabric_timeout, "fabric -u").is_ok() {
-        match child.wait_with_output() {
-            Ok(output) if output.status.success() => {
-                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if text.is_empty() {
-                    log::warn!("fabric -u produced empty output for {url}");
-                } else {
-                    return Ok(text);
-                }
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!(
-                    "fabric -u exited {} for {url}; stderr: {}",
-                    output.status,
-                    stderr.trim().chars().take(500).collect::<String>()
-                );
-            }
-            Err(e) => log::warn!("fabric -u wait_with_output failed for {url}: {e}"),
-        }
+    match run_article_command(
+        article_command(binary, url),
+        Duration::from_secs(fabric_timeout),
+        "fabric -u",
+        url,
+    ) {
+        Ok(Some(text)) => return Ok(text),
+        Ok(None) => {}
+        Err(e) => log::warn!("fabric -u failed for {url}: {e:#}"),
     }
 
     log::debug!("fabric -u failed, trying markitdown for {url} (timeout={markitdown_timeout}s)");
-    match Command::new("markitdown")
-        .arg(url)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(mut markitdown) => {
-            if wait_with_timeout(&mut markitdown, markitdown_timeout, "markitdown").is_ok() {
-                match markitdown.wait_with_output() {
-                    Ok(output) if output.status.success() => {
-                        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        if text.is_empty() {
-                            log::warn!("markitdown produced empty output for {url}");
-                        } else {
-                            return Ok(text);
-                        }
-                    }
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        log::warn!(
-                            "markitdown exited {} for {url}; stderr: {}",
-                            output.status,
-                            stderr.trim().chars().take(500).collect::<String>()
-                        );
-                    }
-                    Err(e) => log::warn!("markitdown wait_with_output failed for {url}: {e}"),
-                }
-            }
-        }
-        Err(e) => log::warn!("failed to spawn markitdown for {url}: {e}"),
+    match run_article_command(
+        markitdown_command(url),
+        Duration::from_secs(markitdown_timeout),
+        "markitdown",
+        url,
+    ) {
+        Ok(Some(text)) => return Ok(text),
+        Ok(None) => {}
+        Err(e) => log::warn!("markitdown failed for {url}: {e:#}"),
     }
 
     // Last resort: jina.rs (caller handles this)
     bail!("Both fabric -u and markitdown failed for {url}")
+}
+
+fn article_command(binary: &str, url: &str) -> Command {
+    let mut cmd = Command::new(binary);
+    cmd.args(["-u", url]);
+    cmd
+}
+
+fn markitdown_command(url: &str) -> Command {
+    let mut cmd = Command::new("markitdown");
+    cmd.arg(url);
+    cmd
+}
+
+/// Run one article extractor. `Ok(Some(text))` is a usable extraction;
+/// `Ok(None)` is a clean run that produced nothing usable (non-zero exit or
+/// empty output, already WARNed); `Err` is a spawn failure, read error, or
+/// timeout.
+fn run_article_command(cmd: Command, timeout: Duration, label: &str, url: &str) -> Result<Option<String>> {
+    match process::run(cmd, None, timeout, label)? {
+        Outcome::TimedOut { after } => bail!("{label} timed out after {after:?}"),
+        Outcome::Exited { status, stdout, .. } if status.success() => {
+            let text = String::from_utf8_lossy(&stdout).trim().to_string();
+            if text.is_empty() {
+                log::warn!("{label} produced empty output for {url}");
+                Ok(None)
+            } else {
+                Ok(Some(text))
+            }
+        }
+        Outcome::Exited { status, stderr, .. } => {
+            log::warn!(
+                "{label} exited {status} for {url}; stderr: {}",
+                String::from_utf8_lossy(&stderr)
+                    .trim()
+                    .chars()
+                    .take(500)
+                    .collect::<String>()
+            );
+            Ok(None)
+        }
+    }
 }
 
 pub async fn summarize(content: &str, is_youtube: bool, config: &FabricConfig) -> Result<String> {
