@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "borg"
-version = "0.15.15"
+version = "0.15.16"
 dependencies = [
  "arboard",
  "async-trait",
@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "cortex"
-version = "0.15.15"
+version = "0.15.16"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1971,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "distillers"
-version = "0.15.15"
+version = "0.15.16"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4999,7 +4999,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oracle"
-version = "0.15.15"
+version = "0.15.16"
 dependencies = [
  "chrono",
  "clap",
@@ -6433,7 +6433,7 @@ dependencies = [
 
 [[package]]
 name = "sb"
-version = "0.15.15"
+version = "0.15.16"
 dependencies = [
  "borg",
  "chrono",
@@ -7365,7 +7365,7 @@ dependencies = [
 
 [[package]]
 name = "strip-transcripts"
-version = "0.15.15"
+version = "0.15.16"
 dependencies = [
  "chrono",
  "clap",
@@ -8457,7 +8457,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vault"
-version = "0.15.15"
+version = "0.15.16"
 dependencies = [
  "candle-core",
  "candle-nn",
