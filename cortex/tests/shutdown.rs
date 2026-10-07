@@ -49,6 +49,7 @@ fn loop_child() -> ! {
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         loop {
             tokio::select! {
+                biased;
                 () = shutdown.recv() => break,
                 _ = tick.tick() => {
                     println!("tick");

@@ -227,7 +227,15 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut shutdown = crate::shutdown::Shutdown::listen();
 
     loop {
+        // `biased` with shutdown first: after a long tick several arms are
+        // ready at once, and the default random pick can run more ticks
+        // before it ever picks the stop signal.
         tokio::select! {
+            biased;
+            () = shutdown.recv() => {
+                log::info!("received shutdown signal; shutting down daemon");
+                break;
+            }
             Some(change) = watch_rx.recv() => {
                 // VaultWatcher already debounced and filtered - process immediately
                 let pending: Vec<PathBuf> = change.changed_paths.iter()
@@ -439,10 +447,6 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     ),
                     Err(e) => log::error!("daemon cold sweep failed: {e}"),
                 }
-            }
-            () = shutdown.recv() => {
-                log::info!("received shutdown signal; shutting down daemon");
-                break;
             }
         }
     }
