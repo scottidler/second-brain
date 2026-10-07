@@ -184,3 +184,18 @@ fn scan_vault_skips_unreadable_notes_and_keeps_good_ones() {
     assert_eq!(notes.len(), 1, "expected only the good note to survive parse");
     assert_eq!(notes[0].path.to_string_lossy(), "good.md");
 }
+
+#[test]
+fn write_atomic_new_refuses_to_clobber() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("note.md");
+    assert!(write_atomic_new(&path, b"first").expect("create"));
+    assert!(!write_atomic_new(&path, b"second").expect("refuse"));
+    assert_eq!(fs::read_to_string(&path).expect("read"), "first");
+    let leftovers: Vec<_> = fs::read_dir(dir.path())
+        .expect("readdir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".sb-tmp-"))
+        .collect();
+    assert!(leftovers.is_empty(), "refused write left a temp file behind");
+}

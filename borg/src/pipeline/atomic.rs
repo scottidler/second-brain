@@ -48,6 +48,54 @@ pub fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
     vault::note::write_atomic(dest, bytes)
 }
 
+/// Highest `-N` suffix `publish_unique` tries before giving up.
+const MAX_PUBLISH_SUFFIX: u32 = 1000;
+
+/// Publish a URL note without ever overwriting a note that belongs to another
+/// source. Returns the path actually written.
+///
+/// `dest` is the title-derived path. Two different pages routinely share a
+/// title ("Claude Code Mods"), so when `dest` is taken the note lands at
+/// `-2`, `-3`, ... (the convention `resolve_publish_path` and cortex use).
+/// `replaces` is the existing note for THIS source (a reingest); it is the one
+/// file allowed to be overwritten, so a reingest still updates in place.
+///
+/// A name is also taken when it exists in any of `vault_dirs`: obsidian links
+/// resolve by bare stem vault-wide, and cortex promotes `inbox/` to `notes/`.
+/// The create itself is atomic no-clobber (`write_atomic_new`), so notes
+/// published in parallel under one title each keep their own file.
+pub fn publish_unique(dest: &Path, bytes: &[u8], replaces: Option<&Path>, vault_dirs: &[PathBuf]) -> Result<PathBuf> {
+    let stem = dest.file_stem().and_then(|s| s.to_str()).unwrap_or("note");
+    let ext = dest.extension().and_then(|e| e.to_str()).unwrap_or("md");
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    for attempt in 1..=MAX_PUBLISH_SUFFIX {
+        let candidate = if attempt == 1 {
+            dest.to_path_buf()
+        } else {
+            parent.join(format!("{stem}-{attempt}.{ext}"))
+        };
+        if Some(candidate.as_path()) == replaces {
+            write_atomic(&candidate, bytes)?;
+            return Ok(candidate);
+        }
+        let name = candidate.file_name().unwrap_or_default();
+        let taken_elsewhere = vault_dirs
+            .iter()
+            .map(|dir| dir.join(name))
+            .any(|other| other != candidate && Some(other.as_path()) != replaces && other.exists());
+        if taken_elsewhere {
+            continue;
+        }
+        if vault::note::write_atomic_new(&candidate, bytes)? {
+            return Ok(candidate);
+        }
+    }
+    Err(eyre::eyre!(
+        "no free filename for {} after {MAX_PUBLISH_SUFFIX} attempts",
+        dest.display()
+    ))
+}
+
 /// Replace the `date:` line in `rendered` with `new_date`. If no `date:` line
 /// is found, return `rendered` unchanged. Pure-string form of the previous
 /// `patch_note_date` helper, kept compatible so the publish path can compose

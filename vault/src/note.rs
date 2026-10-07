@@ -110,22 +110,52 @@ pub fn scan_vault(vault_root: &Path, scan_config: &ScanConfig) -> Result<Vec<Not
 /// unique name (cortex writes notes concurrently via rayon, so a fixed
 /// `.tmp` name would collide).
 pub fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
     let parent = dest.parent().context("destination has no parent directory")?;
+    let temp = stage_temp(parent, bytes)?;
+    temp.persist(dest)
+        .map_err(|e| eyre::eyre!("persist temp -> {}: {e}", dest.display()))?;
+    sync_parent(parent);
+    Ok(())
+}
+
+/// Like [`write_atomic`], but never replaces an existing `dest`: returns
+/// `Ok(true)` when the note was created and `Ok(false)` when something already
+/// lives at `dest` (left untouched, temp file removed). The exists-check and
+/// the create are one filesystem operation (`link`), so two writers racing for
+/// the same name cannot both win; a separate `exists()` followed by
+/// `write_atomic` leaves a window where the later rename silently clobbers the
+/// earlier note.
+pub fn write_atomic_new(dest: &Path, bytes: &[u8]) -> Result<bool> {
+    let parent = dest.parent().context("destination has no parent directory")?;
+    let temp = stage_temp(parent, bytes)?;
+    match temp.persist_noclobber(dest) {
+        Ok(_) => {
+            sync_parent(parent);
+            Ok(true)
+        }
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(eyre::eyre!("persist temp -> {}: {e}", dest.display())),
+    }
+}
+
+/// Write `bytes` to a uniquely-named, fsynced temp file in `parent`.
+fn stage_temp(parent: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile> {
+    use std::io::Write;
     let mut temp = tempfile::Builder::new()
         .prefix(".sb-tmp-")
         .tempfile_in(parent)
         .with_context(|| format!("create temp in {}", parent.display()))?;
     temp.write_all(bytes).context("write temp bytes")?;
     temp.as_file().sync_all().context("fsync temp")?;
-    temp.persist(dest)
-        .map_err(|e| eyre::eyre!("persist temp -> {}: {e}", dest.display()))?;
-    // Best-effort fsync of the parent directory so the new dirent is durable
-    // across power loss.
+    Ok(temp)
+}
+
+/// Best-effort fsync of the parent directory so the new dirent is durable
+/// across power loss.
+fn sync_parent(parent: &Path) {
     if let Ok(dir) = std::fs::File::open(parent) {
         let _ = dir.sync_all();
     }
-    Ok(())
 }
 
 #[cfg(test)]

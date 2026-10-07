@@ -444,3 +444,107 @@ fn test_apply_trace_expires_noop_without_frontmatter() {
     let input = "no frontmatter";
     assert_eq!(apply_trace_expires(input, "2026-08-19"), input);
 }
+
+fn vault_dirs(root: &Path) -> (PathBuf, PathBuf, Vec<PathBuf>) {
+    let inbox = root.join("inbox");
+    let notes = root.join("notes");
+    std::fs::create_dir_all(&inbox).expect("inbox");
+    std::fs::create_dir_all(&notes).expect("notes");
+    let both = vec![notes.clone(), inbox.clone()];
+    (inbox, notes, both)
+}
+
+#[test]
+fn publish_unique_suffixes_instead_of_clobbering_a_different_source() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (inbox, _notes, dirs) = vault_dirs(root.path());
+    let dest = inbox.join("claude-code-mods.md");
+    std::fs::write(&dest, b"onewave").expect("seed");
+
+    let written = publish_unique(&dest, b"paddo", None, &dirs).expect("publish");
+
+    assert_eq!(written, inbox.join("claude-code-mods-2.md"));
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        b"onewave",
+        "the other source's note must survive"
+    );
+    assert_eq!(std::fs::read(&written).unwrap(), b"paddo");
+}
+
+#[test]
+fn publish_unique_replaces_the_note_it_is_reingesting() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (inbox, _notes, dirs) = vault_dirs(root.path());
+    let dest = inbox.join("title.md");
+    std::fs::write(&dest, b"old").expect("seed");
+
+    let written = publish_unique(&dest, b"new", Some(&dest), &dirs).expect("publish");
+
+    assert_eq!(written, dest);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+}
+
+#[test]
+fn publish_unique_replaces_a_suffixed_note_it_is_reingesting() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (inbox, _notes, dirs) = vault_dirs(root.path());
+    std::fs::write(inbox.join("title.md"), b"other source").expect("seed");
+    let mine = inbox.join("title-2.md");
+    std::fs::write(&mine, b"old").expect("seed mine");
+
+    let written = publish_unique(&inbox.join("title.md"), b"new", Some(&mine), &dirs).expect("publish");
+
+    assert_eq!(written, mine);
+    assert_eq!(std::fs::read(&mine).unwrap(), b"new");
+    assert_eq!(std::fs::read(inbox.join("title.md")).unwrap(), b"other source");
+}
+
+#[test]
+fn publish_unique_treats_a_name_in_the_other_vault_dir_as_taken() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (inbox, notes, dirs) = vault_dirs(root.path());
+    std::fs::write(notes.join("title.md"), b"promoted").expect("seed");
+
+    let written = publish_unique(&inbox.join("title.md"), b"fresh", None, &dirs).expect("publish");
+
+    assert_eq!(written, inbox.join("title-2.md"));
+    assert!(!inbox.join("title.md").exists());
+}
+
+#[test]
+fn publish_unique_parallel_same_title_keeps_every_note() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (inbox, _notes, dirs) = vault_dirs(root.path());
+    let dest = inbox.join("claude-code-mods.md");
+    let writers = 8;
+    let barrier = std::sync::Barrier::new(writers);
+
+    let written: Vec<PathBuf> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..writers)
+            .map(|i| {
+                let (dest, dirs, barrier) = (&dest, &dirs, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    publish_unique(dest, format!("body {i}").as_bytes(), None, dirs).expect("publish")
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("join")).collect()
+    });
+
+    let distinct: std::collections::HashSet<_> = written.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        writers,
+        "every writer must land on its own path: {written:?}"
+    );
+    let mut bodies: Vec<String> = written
+        .iter()
+        .map(|p| std::fs::read_to_string(p).expect("read"))
+        .collect();
+    bodies.sort();
+    let mut expected: Vec<String> = (0..writers).map(|i| format!("body {i}")).collect();
+    expected.sort();
+    assert_eq!(bodies, expected, "no body may be lost to an overwrite");
+}

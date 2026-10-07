@@ -28,7 +28,7 @@ use vault::schema::CORTEX_PRESERVE_KEYS;
 pub mod atomic;
 mod inflight;
 pub mod permits;
-use atomic::{apply_cortex_fields, apply_original_date, write_atomic};
+use atomic::{apply_cortex_fields, apply_original_date};
 use inflight::InflightGuard;
 
 mod handlers;
@@ -999,7 +999,7 @@ async fn process_url_inner(
     };
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
-    let note_path = dest_path.join(&filename);
+    let desired_path = dest_path.join(&filename);
 
     // Compose the FINAL note bytes in memory before any disk write.
     // The original three-write publish path (write rendered, patch date, patch
@@ -1047,18 +1047,38 @@ async fn process_url_inner(
         });
     }
 
-    if let Err(e) = write_atomic(&note_path, final_str.as_bytes()) {
-        log::error!("[{trace_id}] atomic publish failed: {e:#}");
-        return Ok(IngestResult {
-            status: IngestStatus::Failed {
-                reason: format!("Failed to atomically publish note: {e:#}"),
-            },
-            method: Some(method),
-            canonical_url: Some(canonical.clone()),
-            trace_id: Some(trace_id.to_string()),
-            failure_stage: Some(FailureStage::PublishFailed),
-            ..Default::default()
-        });
+    // Titles are not unique across sources (three different pages were all
+    // "Claude Code Mods"), so only THIS URL's own previous note may be
+    // overwritten; any other existing note keeps its file and this one lands
+    // at `-2`, `-3`, ... The vault dirs make a name taken vault-wide.
+    let vault_dirs = [vault_root_resolved.join("notes"), vault_root_resolved.join("inbox")];
+    let note_path = match atomic::publish_unique(
+        &desired_path,
+        final_str.as_bytes(),
+        old_path_to_delete.as_deref(),
+        &vault_dirs,
+    ) {
+        Ok(path) => path,
+        Err(e) => {
+            log::error!("[{trace_id}] atomic publish failed: {e:#}");
+            return Ok(IngestResult {
+                status: IngestStatus::Failed {
+                    reason: format!("Failed to atomically publish note: {e:#}"),
+                },
+                method: Some(method),
+                canonical_url: Some(canonical.clone()),
+                trace_id: Some(trace_id.to_string()),
+                failure_stage: Some(FailureStage::PublishFailed),
+                ..Default::default()
+            });
+        }
+    };
+    if note_path != desired_path {
+        log::warn!(
+            "[{trace_id}] filename {} taken by another source, published as {}",
+            desired_path.display(),
+            note_path.display()
+        );
     }
 
     // The new note exists at note_path. If we were replacing an old note at
