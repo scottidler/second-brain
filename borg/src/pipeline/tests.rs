@@ -1300,3 +1300,115 @@ async fn corrupt_blocklist_fails_the_capture_as_intake_rejected_in_receipts() {
     assert_eq!(std::fs::read(&bl_path).unwrap(), corrupt, "blocklist bytes unchanged");
     assert_eq!(crate::stages::alert::fired_count(&trace), 1, "exactly one gate alert");
 }
+
+fn ledger_with_rows(vault: &Path, rows: &[(&str, &str)]) -> PathBuf {
+    std::fs::create_dir_all(vault.join("system").join("views")).expect("mkdir ledger dir");
+    let ledger_file = vault.join("system").join("views").join("borg-ledger.md");
+    let mut content = String::from(
+        "---\ntitle: Borg Ledger\ndate: 2026-03-23\ntype: system\norigin: authored\ntags: []\n---\n\n\
+         # Borg Ledger\n\n\
+         | Date | Time | Method | Status | Title | Filename | Source | Trace |\n\
+         |------|------|--------|--------|-------|----------|--------|-------|\n",
+    );
+    for (i, (filename, source)) in rows.iter().enumerate() {
+        content.push_str(&format!(
+            "| 2026-10-06 | 23:10 | cli | \u{2705} | [[t]] | {filename} | {source} | tr-{i:06} |\n"
+        ));
+    }
+    std::fs::write(&ledger_file, content).expect("write ledger");
+    ledger_file
+}
+
+#[test]
+fn ledger_filename_fallback_skips_a_note_that_belongs_to_another_source() {
+    // Three pages titled alike share one ledger filename. Reingesting one must
+    // not pick the file that now holds a different source's note.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path();
+    std::fs::create_dir_all(vault.join("notes")).expect("mkdir notes");
+    std::fs::write(
+        vault.join("notes").join("claude-code-mods.md"),
+        "---\ntitle: claude code mods\nsource: https://www.onewave-ai.com/blog/claude-code-mods\n---\nBody.\n",
+    )
+    .expect("write note");
+    let ledger_file = ledger_with_rows(
+        vault,
+        &[
+            (
+                "claude-code-mods.md",
+                "https://www.onewave-ai.com/blog/claude-code-mods",
+            ),
+            ("claude-code-mods.md", "https://paddo.dev/blog/claude-code-mods/"),
+        ],
+    );
+
+    let found = find_note_by_ledger_filename(
+        vault,
+        "claude-code-mods.md",
+        "https://paddo.dev/blog/claude-code-mods/",
+        &ledger_file,
+    )
+    .expect("lookup");
+
+    assert!(found.is_none(), "another source's note must not be replaced: {found:?}");
+}
+
+#[test]
+fn ledger_filename_fallback_prefers_the_dir_holding_this_sources_own_note() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path();
+    std::fs::create_dir_all(vault.join("notes")).expect("mkdir notes");
+    std::fs::create_dir_all(vault.join("inbox")).expect("mkdir inbox");
+    std::fs::write(
+        vault.join("notes").join("title.md"),
+        "---\nsource: https://other.example/a\n---\n",
+    )
+    .expect("other");
+    std::fs::write(
+        vault.join("inbox").join("title.md"),
+        "---\nsource: https://mine.example/b\n---\n",
+    )
+    .expect("mine");
+    let ledger_file = ledger_with_rows(
+        vault,
+        &[
+            ("title.md", "https://other.example/a"),
+            ("title.md", "https://mine.example/b"),
+        ],
+    );
+
+    let found =
+        find_note_by_ledger_filename(vault, "title.md", "https://mine.example/b", &ledger_file).expect("lookup");
+
+    assert_eq!(found, Some(vault.join("inbox").join("title.md")));
+}
+
+#[test]
+fn ledger_filename_fallback_still_finds_a_recanonicalized_note() {
+    // The note's source is an old spelling the ledger never recorded, so
+    // nothing proves it belongs to someone else.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path();
+    std::fs::create_dir_all(vault.join("notes")).expect("mkdir notes");
+    std::fs::write(
+        vault.join("notes").join("fallback-note.md"),
+        "---\nsource: \"https://old-url.com/page\"\n---\n",
+    )
+    .expect("write");
+    let ledger_file = ledger_with_rows(vault, &[("fallback-note.md", "https://new-url.com/page")]);
+
+    let found = find_note_by_ledger_filename(vault, "fallback-note.md", "https://new-url.com/page", &ledger_file)
+        .expect("lookup");
+
+    assert_eq!(found, Some(vault.join("notes").join("fallback-note.md")));
+}
+
+#[test]
+fn ledger_filename_fallback_has_nothing_for_a_dash_filename() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger_file = ledger_with_rows(dir.path(), &[("-", "https://example.com/x")]);
+
+    let found = find_note_by_ledger_filename(dir.path(), "-", "https://example.com/x", &ledger_file).expect("lookup");
+
+    assert!(found.is_none());
+}

@@ -119,6 +119,60 @@ pub(crate) fn find_note_by_source_recursive(dir: &std::path::Path, needle: &str)
     None
 }
 
+/// The note a reingest should replace when the by-source scan found nothing:
+/// the ledger's filename under `notes/` or `inbox/`.
+///
+/// Titles are not unique across sources, so a file at that name may belong to
+/// a different source. When the file's own `source:` is another URL the
+/// ledger also records under this filename, it is that source's note and is
+/// skipped; replacing it would silently destroy it. A file whose source is
+/// unknown to the ledger (a re-canonicalized URL, a legacy note) still counts
+/// as this source's note.
+pub(crate) fn find_note_by_ledger_filename(
+    vault_root: &Path,
+    filename: &str,
+    canonical: &str,
+    ledger_file: &Path,
+) -> Result<Option<PathBuf>> {
+    if filename == "-" {
+        return Ok(None);
+    }
+    let stem = filename.strip_suffix(".md").unwrap_or(filename);
+    let other_sources: std::collections::HashSet<String> = ledger::parse_completed_entries(ledger_file)?
+        .into_iter()
+        .filter(|row| row.slug == stem && row.source != canonical)
+        .map(|row| row.source)
+        .collect();
+    for dir in [vault_root.join("notes"), vault_root.join("inbox")] {
+        let candidate = dir.join(filename);
+        if !candidate.exists() {
+            continue;
+        }
+        match read_note_source(&candidate) {
+            Some(source) if other_sources.contains(&source) => {
+                log::info!(
+                    "{} belongs to another source ({source}); not the note for {canonical}",
+                    candidate.display()
+                );
+            }
+            _ => return Ok(Some(candidate)),
+        }
+    }
+    Ok(None)
+}
+
+/// Read the `source:` field from a note's frontmatter, quoted or bare.
+fn read_note_source(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = vec![0u8; 4096];
+    let n = std::fs::File::open(path).ok()?.read(&mut buf).ok()?;
+    let header = String::from_utf8_lossy(&buf[..n]);
+    header
+        .lines()
+        .find_map(|line| line.strip_prefix("source:"))
+        .map(|value| value.trim().trim_matches('"').to_string())
+}
+
 /// Read the `date:` field from a note's frontmatter.
 pub(crate) fn read_note_date(path: &std::path::Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;

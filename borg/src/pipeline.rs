@@ -623,16 +623,10 @@ async fn process_url_inner(
             existing.date
         );
         let vault_root = config.vault_root()?;
-        let old_note_path = find_note_by_source(&vault_root, &canonical).or_else(|| {
-            if existing.filename != "-" {
-                [vault_root.join("notes"), vault_root.join("inbox")]
-                    .iter()
-                    .map(|dir| dir.join(&existing.filename))
-                    .find(|p| p.exists())
-            } else {
-                None
-            }
-        });
+        let old_note_path = match find_note_by_source(&vault_root, &canonical) {
+            Some(path) => Some(path),
+            None => find_note_by_ledger_filename(&vault_root, &existing.filename, &canonical, &ledger_file)?,
+        };
         if let Some(ref old_path) = old_note_path {
             original_date = read_note_date(old_path);
             // Fails the reingest CLOSED (tags-only design doc, reingest union): publishing a note
