@@ -75,6 +75,9 @@ pub async fn run(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Resul
 
 /// Start filesystem watcher and run actions on changes using async tokio::select! loop.
 async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
+    // First thing, before the startup sweep: from here on SIGTERM/SIGINT set the
+    // stop flag instead of killing the process, so work can stop at a check point.
+    let stop = crate::shutdown::StopHandle::listen();
     crate::startup::validate_canonical_assets()?;
     let daemon_config = &config.daemon;
     let poll_interval = Duration::from_secs(daemon_config.poll_interval);
@@ -221,18 +224,13 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     // edit clears it so periodic sweeps resume.
     let mut oscillating = false;
 
-    // One listener set for the loop's whole life, polled by reference in every
-    // iteration. A per-iteration listener is dropped whenever a tick wins, and a
-    // SIGTERM delivered during that tick's work is lost (see `crate::shutdown`).
-    let mut shutdown = crate::shutdown::Shutdown::listen();
-
     loop {
         // `biased` with shutdown first: after a long tick several arms are
         // ready at once, and the default random pick can run more ticks
         // before it ever picks the stop signal.
         tokio::select! {
             biased;
-            () = shutdown.recv() => {
+            () = stop.stopped() => {
                 log::info!("received shutdown signal; shutting down daemon");
                 break;
             }
