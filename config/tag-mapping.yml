@@ -2146,6 +2146,7 @@ just-in-time-exploration: null
 jwt: auth
 jwt-authentication: auth
 jwt-token: auth
+k8s: kubernetes
 kanban: productivity
 karis-nemik: null
 karpathy: null
@@ -4025,7 +4026,9 @@ tailscale: networking
 talent-retention: career
 talk: null
 talking-football-showcast: football
-talos-linux: linux
+talos: kubernetes
+talos-linux: kubernetes
+talosctl: kubernetes
 task-dependencies: workflow
 task-entropy: null
 task-execution: automation
