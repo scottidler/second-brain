@@ -145,6 +145,11 @@ fn to_slug_drops_non_latin_it_cannot_fold() {
 /// Rewrite one file's links for a single rename and hand back the new bytes.
 /// Uses the shared TestVault so the note list comes from a real scan.
 fn relink(body: &str, from: &str, to: &str) -> String {
+    relink_paths(body, &format!("notes/{from}.md"), &format!("notes/{to}.md"))
+}
+
+/// `relink` for a rename or move between two full vault-relative paths.
+fn relink_paths(body: &str, from: &str, to: &str) -> String {
     let v = crate::testutil::TestVault::new();
     let holder = "link-holder.md";
     v.add_note(
@@ -152,10 +157,7 @@ fn relink(body: &str, from: &str, to: &str) -> String {
         &format!("---\ntitle: Holder\ndate: 2026-08-19\ntype: note\norigin: authored\ntags: []\n---\n\n{body}\n"),
     );
     let notes = v.scan();
-    let renames = vec![(
-        std::path::PathBuf::from(format!("notes/{from}.md")),
-        std::path::PathBuf::from(format!("notes/{to}.md")),
-    )];
+    let renames = vec![(std::path::PathBuf::from(from), std::path::PathBuf::from(to))];
     update_wikilinks_batch(v.root(), &notes, &renames).expect("relink");
     // Body only: the assertions are about link markup, not frontmatter.
     let written = v.read(holder);
@@ -224,6 +226,38 @@ fn relink_leaves_a_path_link_to_another_directory_alone() {
     assert_eq!(
         relink("[[archive/old-name]] and [[notes/old-name]]", "old-name", "new-name"),
         "[[archive/old-name]] and [[notes/new-name]]"
+    );
+}
+
+#[test]
+fn relink_moves_a_path_qualified_target_to_the_new_folder() {
+    // classify's promotion: same stem, new folder. A path-qualified link would
+    // otherwise keep naming inbox/ and break; a bare link already resolves.
+    assert_eq!(
+        relink_paths(
+            "[[inbox/alpha]] [[inbox/alpha|A]] [[Inbox/Alpha.md#Summary]] ![[inbox/alpha]] [[alpha]]",
+            "inbox/alpha.md",
+            "notes/alpha.md"
+        ),
+        "[[notes/alpha]] [[notes/alpha|A]] [[notes/alpha.md#Summary]] ![[notes/alpha]] [[alpha]]"
+    );
+}
+
+#[test]
+fn relink_rewrites_a_partial_path_to_the_full_new_path() {
+    // `[[inbox/x]]` names `a/inbox/x.md` by suffix. The new path is written in
+    // full, so the link cannot match another `*/notes/x.md`.
+    assert_eq!(
+        relink_paths("[[inbox/x]] and [[x]]", "a/inbox/x.md", "a/notes/x.md"),
+        "[[a/notes/x]] and [[x]]"
+    );
+}
+
+#[test]
+fn relink_rewrites_path_and_stem_on_a_move_with_a_new_name() {
+    assert_eq!(
+        relink_paths("[[inbox/old|Old]] and [[old]]", "inbox/old.md", "notes/new.md"),
+        "[[notes/new|Old]] and [[new]]"
     );
 }
 

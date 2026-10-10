@@ -464,16 +464,79 @@ pub fn apply_classify(
     stop: &StopHandle,
 ) -> Result<(Report, Vec<String>)> {
     let target_notes = select_targets(notes, vault_root, config, opts);
-    let is_retag = !opts.retag.is_empty();
-    let mut report = Report::default();
-    let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
-    // Real, byte-changed paths this call wrote - the daemon fingerprints this,
-    // never `report.violations` (which named catch-up/needs-review notes that
-    // may not have changed on disk, or promotions the daemon used to sniff by
-    // matching the substring "promoted" in a violation message).
-    let mut written: Vec<String> = Vec::new();
+    let mut run = ApplyRun::default();
+    let looped = classify_targets(
+        vault_root,
+        &target_notes,
+        classifiers,
+        !opts.retag.is_empty(),
+        stop,
+        &mut run,
+    );
 
-    for note in &target_notes {
+    // Update wikilinks across the vault for the moves already made, whatever
+    // ended the loop: a stop or an error after a completed move must not leave
+    // a link pointing at the old path. Mandatory cleanup.
+    let relinked = relink_moves(vault_root, notes, &run.moves, &mut run.report);
+    if let Err(e) = looped {
+        match &relinked {
+            Ok(()) => log::warn!(
+                "classify: loop failed after {} completed move(s); relinked them before returning the error",
+                run.moves.len()
+            ),
+            Err(re) => log::error!(
+                "classify: loop failed after {} completed move(s), and their relink failed too: {re:#}",
+                run.moves.len()
+            ),
+        }
+        return Err(e);
+    }
+    relinked?;
+    let ApplyRun {
+        mut report,
+        mut written,
+        ..
+    } = run;
+
+    written.sort();
+    written.dedup();
+    // Surface the real write count/paths on the report too, matching the
+    // lint seam (`report.applied` / `report.applied_paths`); sb prints this.
+    report.applied = written.len();
+    report.applied_paths = written.clone();
+
+    log::debug!("classify::apply_classify: written={}", written.len());
+
+    // Caller (sb) formats the report; classify::run returns it directly.
+    Ok((report, written))
+}
+
+/// What `apply_classify`'s loop did so far: kept outside the loop so the
+/// moves it made are relinked even when the loop returns an error.
+#[derive(Default)]
+struct ApplyRun {
+    report: Report,
+    /// Same-stem promotions that landed, for the post-loop relink.
+    moves: Vec<(PathBuf, PathBuf)>,
+    /// Real, byte-changed paths this call wrote - the daemon fingerprints this,
+    /// never `report.violations` (which named catch-up/needs-review notes that
+    /// may not have changed on disk, or promotions the daemon used to sniff by
+    /// matching the substring "promoted" in a violation message).
+    written: Vec<String>,
+}
+
+/// The per-note classify loop of `apply_classify`. Every completed write is
+/// recorded in `run` before the next note, so an error here leaves `run`
+/// holding exactly the moves that landed.
+fn classify_targets(
+    vault_root: &Path,
+    target_notes: &[&Note],
+    classifiers: &Classifiers,
+    is_retag: bool,
+    stop: &StopHandle,
+    run: &mut ApplyRun,
+) -> Result<()> {
+    for note in target_notes {
         let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
         // Per-note stop check point. A stop leaves this note and every note
         // after it untouched; the relink below still runs for the moves
@@ -484,7 +547,7 @@ pub fn apply_classify(
                 log::info!(
                     "classify: stopped at a check point before {}; relinking {} move(s) already made",
                     note.path.display(),
-                    moves.len()
+                    run.moves.len()
                 );
                 break;
             }
@@ -517,8 +580,8 @@ pub fn apply_classify(
             let mut fields = vec![("tags".to_string(), tags_value(&fresh))];
             push_classification_fields(&mut fields, &result);
             if let Some(path) = write_fields(vault_root, note, &fields, "retag")? {
-                written.push(path);
-                report.add(Violation {
+                run.written.push(path);
+                run.report.add(Violation {
                     path: note.path.clone(),
                     rule: "classify".to_string(),
                     severity: Severity::Info,
@@ -541,7 +604,7 @@ pub fn apply_classify(
 
         if result.confidence() == Confidence::Low {
             if !already_in_notes && mark_needs_review(vault_root, note)? {
-                written.push(note.path.to_string_lossy().to_string());
+                run.written.push(note.path.to_string_lossy().to_string());
             }
             log::info!(
                 "held for review (no tag cleared the classifier): {}",
@@ -554,8 +617,8 @@ pub fn apply_classify(
         if already_in_notes {
             let fields = build_enrichment_fields(&result, note, &classifiers.canon);
             if let Some(path) = write_fields(vault_root, note, &fields, "catch-up classify")? {
-                written.push(path);
-                report.add(Violation {
+                run.written.push(path);
+                run.report.add(Violation {
                     path: note.path.clone(),
                     rule: "classify".to_string(),
                     severity: Severity::Info,
@@ -627,7 +690,7 @@ pub fn apply_classify(
         // the [[foo]] that other notes link to, so rewriting [[foo]] ->
         // [[foo-2]] would point them at the wrong note.
         if note.path.file_stem() == dest_relative.file_stem() {
-            moves.push((note.path.clone(), dest_relative.clone()));
+            run.moves.push((note.path.clone(), dest_relative.clone()));
         } else {
             log::info!(
                 "suffix-collision move {} -> {}: skipping wikilink rewrite",
@@ -639,8 +702,8 @@ pub fn apply_classify(
         // A promotion always mutates the vault (the inbox file is removed and a
         // notes/ file created), independent of whether the enrichment write
         // above changed bytes - so it is always a real write to fingerprint.
-        written.push(note.path.to_string_lossy().to_string());
-        report.add(Violation {
+        run.written.push(note.path.to_string_lossy().to_string());
+        run.report.add(Violation {
             path: note.path.clone(),
             rule: "classify".to_string(),
             severity: Severity::Info,
@@ -663,25 +726,38 @@ pub fn apply_classify(
         );
     }
 
-    // Update wikilinks across vault for moved files. Mandatory cleanup: it runs
-    // on a stopped loop too.
-    if !moves.is_empty() {
-        let all_notes = crate::vault::scan_vault(vault_root, &crate::config::VaultConfig::default())?;
-        let relinked = crate::naming::update_wikilinks_batch(vault_root, &all_notes, &moves)?;
-        report.add_unreadable_after_rename("classify", &relinked.unreadable);
+    Ok(())
+}
+
+/// Relink every wikilink to the notes `moves` relocated. The vault is
+/// rescanned so notes outside the run's note set are relinked too. When the
+/// rescan fails, the run's own note set (with the moved paths swapped for
+/// their destinations) is relinked instead, and the rescan error is returned
+/// after it.
+fn relink_moves(vault_root: &Path, notes: &[Note], moves: &[(PathBuf, PathBuf)], report: &mut Report) -> Result<()> {
+    if moves.is_empty() {
+        return Ok(());
     }
-
-    written.sort();
-    written.dedup();
-    // Surface the real write count/paths on the report too, matching the
-    // lint seam (`report.applied` / `report.applied_paths`); sb prints this.
-    report.applied = written.len();
-    report.applied_paths = written.clone();
-
-    log::debug!("classify::apply_classify: written={}", written.len());
-
-    // Caller (sb) formats the report; classify::run returns it directly.
-    Ok((report, written))
+    let (all_notes, rescan) = match crate::vault::scan_vault(vault_root, &crate::config::VaultConfig::default()) {
+        Ok(all) => (all, Ok(())),
+        Err(e) => {
+            log::error!("classify: rescan for the relink failed: {e:#}; relinking the run's own note set instead");
+            let moved: Vec<Note> = notes
+                .iter()
+                .cloned()
+                .map(|mut note| {
+                    if let Some((_, to)) = moves.iter().find(|(from, _)| *from == note.path) {
+                        note.path = to.clone();
+                    }
+                    note
+                })
+                .collect();
+            (moved, Err(e))
+        }
+    };
+    let relinked = crate::naming::update_wikilinks_batch(vault_root, &all_notes, moves)?;
+    report.add_unreadable_after_rename("classify", &relinked.unreadable);
+    rescan
 }
 
 /// Write frontmatter fields to a note in place, returning the vault-relative

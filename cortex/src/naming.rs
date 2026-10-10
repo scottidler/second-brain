@@ -320,11 +320,14 @@ pub(crate) struct Relinked {
     pub unreadable: Vec<PathBuf>,
 }
 
-/// Update wikilinks in all vault files for a batch of renames.
+/// Update wikilinks in all vault files for a batch of renames and moves.
 /// Single pass through all files. THE shared wikilink-rewrite for renames —
 /// case-insensitive, handles `[[link]]` and `[[link|alias]]`, skips renamed
 /// files, writes atomically. classify and migrate both delegate here (a consolidation
-/// that replaced two weaker copies).
+/// that replaced two weaker copies). A rename (same folder, new stem) rewrites
+/// the stem; a move to another folder also rewrites a path-qualified target
+/// (`[[inbox/x]]`) to the new path, and leaves a bare `[[x]]` alone when the
+/// stem is unchanged.
 ///
 /// Returns the paths of the notes it actually rewrote (real byte changes
 /// only) and the notes it could not read. Each unreadable note WARNs and is
@@ -346,10 +349,10 @@ pub(crate) fn update_wikilinks_batch(
         .map(|(from, _)| from.to_string_lossy().into_owned())
         .collect();
     let resolver = vault::wikilink::Resolver::new(from_paths.iter().cloned());
-    let new_stems: HashMap<&str, String> = from_paths
+    let destinations: HashMap<&str, Destination> = from_paths
         .iter()
         .zip(renames)
-        .filter_map(|(from, (_, to))| Some((from.as_str(), to.file_stem()?.to_str()?.to_string())))
+        .filter_map(|(from, (old, new))| Some((from.as_str(), Destination::new(old, new)?)))
         .collect();
 
     let mut out = Relinked::default();
@@ -372,7 +375,7 @@ pub(crate) fn update_wikilinks_batch(
             }
         };
 
-        let new_content = relink(&content, &resolver, &new_stems);
+        let new_content = relink(&content, &resolver, &destinations);
 
         if new_content != content {
             vault::note::write_atomic(&abs_path, new_content.as_bytes())?;
@@ -404,22 +407,56 @@ fn offset_in(outer: &str, inner: &str) -> usize {
     inner.as_ptr() as usize - outer.as_ptr() as usize
 }
 
-/// Rewrite every link that resolves to a renamed note by replacing only the
-/// file stem inside its target, so the folder prefix, `.md`, `#heading`,
-/// `#^block`, `|alias`, and `!` embed all survive byte for byte. Links in
-/// code are not links and are left alone.
-fn relink(content: &str, resolver: &vault::wikilink::Resolver, new_stems: &HashMap<&str, String>) -> String {
+/// Where a renamed or moved note now lives, in the two forms a link target
+/// can name it by.
+struct Destination {
+    /// New file stem, case kept: what a bare or same-folder link names.
+    stem: String,
+    /// New vault-relative path, `/`-separated, `.md` stripped: what a
+    /// path-qualified link names once the note changed folders.
+    path: String,
+    /// The note left its folder, so a path-qualified link's folder is stale.
+    changed_folder: bool,
+}
+
+impl Destination {
+    fn new(from: &Path, to: &Path) -> Option<Self> {
+        let stem = to.file_stem()?.to_str()?.to_string();
+        let path = to.with_extension("").to_str()?.to_string();
+        Some(Self {
+            stem,
+            path,
+            changed_folder: from.parent() != to.parent(),
+        })
+    }
+}
+
+/// Rewrite every link that resolves to a renamed or moved note. A bare
+/// target, or any target of a same-folder rename, gets only its file stem
+/// replaced, so the folder prefix, `.md`, `#heading`, `#^block`, `|alias`, and
+/// `!` embed all survive byte for byte. A path-qualified target of a note that
+/// changed folders gets its whole path replaced (its `.md` and everything
+/// after the target still survive), or it would keep pointing at the old
+/// folder. Links in code are not links and are left alone.
+fn relink(content: &str, resolver: &vault::wikilink::Resolver, destinations: &HashMap<&str, Destination>) -> String {
     let mut out = String::with_capacity(content.len());
     let mut last = 0;
     for link in file_links(content) {
-        let Some(new_stem) = resolver.resolve(link.target).find_map(|from| new_stems.get(from)) else {
+        let Some(dest) = resolver.resolve(link.target).find_map(|from| destinations.get(from)) else {
             continue;
         };
-        let old_stem = vault::wikilink::file_stem(link.target);
-        let start = offset_in(content, old_stem);
+        let target = link.target.trim();
+        let (old, new) = if dest.changed_folder && target.contains('/') {
+            let stem = vault::wikilink::file_stem(target);
+            let stem_end = offset_in(target, stem) + stem.len();
+            (&target[..stem_end], dest.path.as_str())
+        } else {
+            (vault::wikilink::file_stem(link.target), dest.stem.as_str())
+        };
+        let start = offset_in(content, old);
         out.push_str(&content[last..start]);
-        out.push_str(new_stem);
-        last = start + old_stem.len();
+        out.push_str(new);
+        last = start + old.len();
     }
     out.push_str(&content[last..]);
     out

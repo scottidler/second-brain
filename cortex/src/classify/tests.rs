@@ -903,8 +903,9 @@ fn broken_link_count(root: &Path) -> usize {
 }
 
 /// Flag set after note 1 of 3: note 1 is classified and moved, notes 2 and 3
-/// are byte-for-byte untouched, the post-loop relink ran for note 1's move, and
-/// no wikilink in the vault is broken.
+/// are byte-for-byte untouched, the post-loop relink ran for note 1's move
+/// (its path-qualified links now name `notes/`), and no wikilink in the vault
+/// is broken.
 #[test]
 fn stop_after_note_one_keeps_its_move_relinks_it_and_leaves_the_rest() {
     let dir = tempfile::tempdir().expect("tmpdir");
@@ -913,7 +914,7 @@ fn stop_after_note_one_keeps_its_move_relinks_it_and_leaves_the_rest() {
     for stem in ["alpha", "beta", "gamma"] {
         std::fs::write(root.join(format!("inbox/{stem}.md")), inbox_note(stem)).unwrap();
     }
-    let referrer = "---\ntitle: Refs\ndate: 2026-10-01\ntype: note\ntags:\n  - rust\n---\nSee [[alpha]], [[beta]] and [[gamma]].\n";
+    let referrer = "---\ntitle: Refs\ndate: 2026-10-01\ntype: note\ntags:\n  - rust\n---\nSee [[alpha]], [[beta]] and [[gamma]].\nAlso [[inbox/alpha]], [[inbox/alpha|Alpha]] and [[inbox/beta]].\n";
     std::fs::write(root.join("refs.md"), referrer).unwrap();
     let beta_before = std::fs::read(root.join("inbox/beta.md")).unwrap();
     let gamma_before = std::fs::read(root.join("inbox/gamma.md")).unwrap();
@@ -963,7 +964,133 @@ fn stop_after_note_one_keeps_its_move_relinks_it_and_leaves_the_rest() {
         vec!["notes/alpha.md"],
         "the referrer's link to note 1 resolves at its new path:\n{refs}"
     );
+    assert!(
+        refs.ends_with(
+            "See [[alpha]], [[beta]] and [[gamma]].\nAlso [[notes/alpha]], [[notes/alpha|Alpha]] and [[inbox/beta]].\n"
+        ),
+        "note 1's path-qualified links are relinked; the bare links and note 2's stay:\n{refs}"
+    );
     assert_eq!(broken_link_count(root), 0, "no broken wikilink after a stopped run");
+}
+
+/// Without a stop, a promotion relinks every path-qualified link to the
+/// promoted note and leaves 0 broken links.
+#[test]
+fn unstopped_promotion_relinks_path_qualified_links() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("inbox")).unwrap();
+    std::fs::write(root.join("inbox/alpha.md"), inbox_note("alpha")).unwrap();
+    let referrer = "---\ntitle: Refs\ndate: 2026-10-01\ntype: note\ntags:\n  - rust\n---\n[[inbox/alpha]] [[inbox/alpha|A]] [[inbox/alpha.md#Summary]] ![[inbox/alpha]] [[alpha]]\n";
+    std::fs::write(root.join("refs.md"), referrer).unwrap();
+    assert_eq!(broken_link_count(root), 0, "the fixture starts with no broken link");
+
+    let stop = StopHandle::never();
+    let (primary, _) = stopping_stub(&["rust"], false, &stop, NEVER);
+    let (fallback, _) = stopping_stub(&["rust"], false, &stop, NEVER);
+    let classifiers = Classifiers::new(primary, fallback, test_canon());
+    apply_classify(
+        root,
+        &scan_sorted(root),
+        &Config::default(),
+        &apply_opts(),
+        &classifiers,
+        &stop,
+    )
+    .expect("apply");
+
+    assert!(root.join("notes/alpha.md").exists());
+    let refs = std::fs::read_to_string(root.join("refs.md")).unwrap();
+    assert!(
+        refs.ends_with("[[notes/alpha]] [[notes/alpha|A]] [[notes/alpha.md#Summary]] ![[notes/alpha]] [[alpha]]\n"),
+        "every path-qualified link names the new path; the bare one is untouched:\n{refs}"
+    );
+    assert_eq!(broken_link_count(root), 0, "no broken wikilink after a promotion");
+}
+
+/// A classifier double that answers High on its first call and fails on
+/// every call after it.
+struct FirstCallOnlyStub(std::sync::atomic::AtomicUsize);
+
+impl TagClassifier for FirstCallOnlyStub {
+    fn classify(&self, _input: &TagInput) -> Result<TagOutput> {
+        if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            return Err(eyre::eyre!("stub classifier failure"));
+        }
+        Ok(TagOutput {
+            tags: vec!["rust".to_string()],
+            scores: None,
+            confidence: Confidence::High,
+            method: TagMethod::ClassifierDev,
+        })
+    }
+
+    fn method(&self) -> TagMethod {
+        TagMethod::ClassifierDev
+    }
+}
+
+/// An error on note 2 (its needs-review write cannot read the file, which
+/// vanished after the scan) returns the error, but only after note 1's
+/// completed move is relinked.
+#[test]
+fn loop_error_after_a_move_relinks_it_before_returning_the_error() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("inbox")).unwrap();
+    for stem in ["alpha", "beta"] {
+        std::fs::write(root.join(format!("inbox/{stem}.md")), inbox_note(stem)).unwrap();
+    }
+    let referrer = "---\ntitle: Refs\ndate: 2026-10-01\ntype: note\ntags:\n  - rust\n---\nSee [[inbox/alpha|Alpha]].\n";
+    std::fs::write(root.join("refs.md"), referrer).unwrap();
+    let notes = scan_sorted(root);
+    std::fs::remove_file(root.join("inbox/beta.md")).unwrap();
+
+    let stop = StopHandle::never();
+    let primary: Box<dyn TagClassifier> = Box::new(FirstCallOnlyStub(Default::default()));
+    let (fallback, _) = stopping_stub(&[], true, &stop, NEVER);
+    let classifiers = Classifiers::new(primary, fallback, test_canon());
+    let result = apply_classify(root, &notes, &Config::default(), &apply_opts(), &classifiers, &stop);
+
+    assert!(result.is_err(), "note 2's failed needs-review write is returned");
+    assert!(root.join("notes/alpha.md").exists(), "note 1 was moved");
+    let refs = std::fs::read_to_string(root.join("refs.md")).unwrap();
+    assert!(
+        refs.ends_with("See [[notes/alpha|Alpha]].\n"),
+        "note 1 relinked before the error returned:\n{refs}"
+    );
+    assert_eq!(broken_link_count(root), 0);
+}
+
+/// When the post-loop rescan fails (an unreadable directory), the run's own
+/// note set is relinked instead and the rescan error is returned after it.
+#[test]
+fn rescan_failure_still_relinks_completed_moves() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("inbox")).unwrap();
+    std::fs::create_dir_all(root.join("locked")).unwrap();
+    std::fs::write(root.join("inbox/alpha.md"), inbox_note("alpha")).unwrap();
+    let referrer = "---\ntitle: Refs\ndate: 2026-10-01\ntype: note\ntags:\n  - rust\n---\nSee [[inbox/alpha]].\n";
+    std::fs::write(root.join("refs.md"), referrer).unwrap();
+    let notes = scan_sorted(root);
+    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let stop = StopHandle::never();
+    let (primary, _) = stopping_stub(&["rust"], false, &stop, NEVER);
+    let (fallback, _) = stopping_stub(&["rust"], false, &stop, NEVER);
+    let classifiers = Classifiers::new(primary, fallback, test_canon());
+    let result = apply_classify(root, &notes, &Config::default(), &apply_opts(), &classifiers, &stop);
+    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(result.is_err(), "the rescan error is returned");
+    let refs = std::fs::read_to_string(root.join("refs.md")).unwrap();
+    assert!(
+        refs.ends_with("See [[notes/alpha]].\n"),
+        "the move is relinked over the run's own note set:\n{refs}"
+    );
 }
 
 /// A classifier failure returned once the flag is set is discarded: no
