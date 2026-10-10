@@ -16,6 +16,7 @@ use crate::config::{Config, FabricConfig, FrontmatterConfig};
 use crate::opts::ClassifyOpts;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::scope::insert_frontmatter_fields;
+use crate::shutdown::StopHandle;
 use crate::vault::{Note, scan_vault};
 use ::vault::canonical::{self, CanonicalSet, CanonicalTagsFile, TagMapping};
 use distillers::tags::{
@@ -31,11 +32,19 @@ use distillers::tags::{
 /// enrichment + needs-review marks) - the daemon's oscillation fingerprint
 /// draws only from this, never from the report's violation messages. This
 /// mirrors the lint seam (`lint_with_notes` -> `LintApplyReport`).
-pub fn run(vault_root: &Path, config: &Config, opts: &ClassifyOpts) -> Result<(Report, Vec<String>)> {
+///
+/// `stop` is the daemon's stop handle; one-shot callers pass
+/// `StopHandle::never()`.
+pub fn run(
+    vault_root: &Path,
+    config: &Config,
+    opts: &ClassifyOpts,
+    stop: &StopHandle,
+) -> Result<(Report, Vec<String>)> {
     crate::startup::validate_canonical_assets()?;
     log::info!("starting classify command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
-    run_with_notes(&notes, vault_root, config, opts)
+    run_with_notes(&notes, vault_root, config, opts, stop)
 }
 
 /// Same as `run`, but takes an already-scanned note list instead of scanning
@@ -49,6 +58,7 @@ pub fn run_with_notes(
     vault_root: &Path,
     config: &Config,
     opts: &ClassifyOpts,
+    stop: &StopHandle,
 ) -> Result<(Report, Vec<String>)> {
     log::debug!(
         "classify::run_with_notes: vault_root={} note_count={} apply={}",
@@ -62,10 +72,13 @@ pub fn run_with_notes(
     let classifiers = Classifiers::load(config)?;
 
     if opts.apply {
-        apply_classify(vault_root, notes, config, opts, &classifiers)
+        apply_classify(vault_root, notes, config, opts, &classifiers, stop)
     } else {
         // Dry-run writes nothing, so the written-paths list is always empty.
-        Ok((lint_classify(notes, vault_root, config, opts, &classifiers), Vec::new()))
+        Ok((
+            lint_classify(notes, vault_root, config, opts, &classifiers, stop),
+            Vec::new(),
+        ))
     }
 }
 
@@ -143,21 +156,38 @@ impl Classifiers {
     /// Run a note through the configured classifier, falling back on error.
     /// Never returns an `Err`: a total failure is a `Low` result, which holds
     /// the note exactly the way "no signal" always has.
-    fn classify(&self, input: &TagInput) -> TagOutput {
+    ///
+    /// Stop check points: before the classifier call and before the fallback.
+    /// A failure seen once the flag is set is discarded as `Stopped`, never
+    /// turned into a `Low` result: under SIGTERM a failed call is most likely
+    /// the stop itself (a killed Fabric child), and a `Low` result would write
+    /// `cortex-needs-review` onto a note that was never really judged.
+    fn classify(&self, input: &TagInput, stop: &StopHandle) -> Classification<TagOutput> {
+        if stop.is_stopped() {
+            return Classification::Stopped;
+        }
         match self.primary.classify(input) {
-            Ok(out) => out,
+            Ok(out) => Classification::Done(out),
             Err(e) => {
+                if stop.is_stopped() {
+                    log::info!("tag classifier failed after the stop signal; discarded, no fallback: {e:#}");
+                    return Classification::Stopped;
+                }
                 log::warn!("tag classifier failed, running the configured fallback: {e:#}");
                 match self.fallback.classify(input) {
-                    Ok(out) => out,
+                    Ok(out) => Classification::Done(out),
+                    Err(e) if stop.is_stopped() => {
+                        log::info!("tag classifier fallback failed after the stop signal; discarded: {e:#}");
+                        Classification::Stopped
+                    }
                     Err(e) => {
                         log::error!("tag classifier fallback also failed, holding the note: {e:#}");
-                        TagOutput {
+                        Classification::Done(TagOutput {
                             tags: Vec::new(),
                             scores: None,
                             confidence: Confidence::Low,
                             method: self.fallback.method(),
-                        }
+                        })
                     }
                 }
             }
@@ -188,6 +218,14 @@ fn fabric_runner_for(cfg: &TagsClassifierConfig, fabric: &FabricConfig) -> Optio
         max_chars: fabric.max_content_chars,
         timeout_secs: fabric.timeout_secs,
     }))
+}
+
+/// A classification, or the stop flag that pre-empted or discarded it. A
+/// `Stopped` note is not counted, not held for review, and not written.
+#[derive(Debug)]
+enum Classification<T> {
+    Done(T),
+    Stopped,
 }
 
 /// What classifying one note produced.
@@ -310,13 +348,20 @@ pub fn lint_classify(
     config: &Config,
     opts: &ClassifyOpts,
     classifiers: &Classifiers,
+    stop: &StopHandle,
 ) -> Report {
     let mut report = Report::default();
     let targets = select_targets(notes, vault_root, config, opts);
 
     for note in &targets {
         let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
-        let result = classify_note(note, classifiers);
+        let result = match classify_note(note, classifiers, stop) {
+            Classification::Done(result) => result,
+            Classification::Stopped => {
+                log::info!("classify lint: stopped at a check point before {}", note.path.display());
+                break;
+            }
+        };
 
         if !opts.retag.is_empty() {
             if result.confidence() == Confidence::Low {
@@ -416,6 +461,7 @@ pub fn apply_classify(
     config: &Config,
     opts: &ClassifyOpts,
     classifiers: &Classifiers,
+    stop: &StopHandle,
 ) -> Result<(Report, Vec<String>)> {
     let target_notes = select_targets(notes, vault_root, config, opts);
     let is_retag = !opts.retag.is_empty();
@@ -429,7 +475,20 @@ pub fn apply_classify(
 
     for note in &target_notes {
         let already_in_notes = note.path.to_string_lossy().starts_with("notes/");
-        let result = classify_note(note, classifiers);
+        // Per-note stop check point. A stop leaves this note and every note
+        // after it untouched; the relink below still runs for the moves
+        // already made, so no wikilink is left pointing at an old path.
+        let result = match classify_note(note, classifiers, stop) {
+            Classification::Done(result) => result,
+            Classification::Stopped => {
+                log::info!(
+                    "classify: stopped at a check point before {}; relinking {} move(s) already made",
+                    note.path.display(),
+                    moves.len()
+                );
+                break;
+            }
+        };
 
         // `--retag`: replace, not union. The fresh classification wins outright;
         // the previous tags survive only through the protect list or when the
@@ -604,7 +663,8 @@ pub fn apply_classify(
         );
     }
 
-    // Update wikilinks across vault for moved files
+    // Update wikilinks across vault for moved files. Mandatory cleanup: it runs
+    // on a stopped loop too.
     if !moves.is_empty() {
         let all_notes = crate::vault::scan_vault(vault_root, &crate::config::VaultConfig::default())?;
         let relinked = crate::naming::update_wikilinks_batch(vault_root, &all_notes, &moves)?;
@@ -659,27 +719,28 @@ fn write_fields(
 }
 
 /// Classify a single note: tags from the shared classifier, nothing else.
-fn classify_note(note: &Note, classifiers: &Classifiers) -> ClassifyResult {
+fn classify_note(note: &Note, classifiers: &Classifiers, stop: &StopHandle) -> Classification<ClassifyResult> {
     let candidates = note_candidates(note);
     let text = classifier_text(note);
     let title = note.frontmatter.title.as_deref().unwrap_or("Untitled");
-    let tags = classifiers.classify(&TagInput {
+    let input = TagInput {
         title,
         text: &text,
         candidates: &candidates,
-    });
+    };
+    let Classification::Done(tags) = classifiers.classify(&input, stop) else {
+        return Classification::Stopped;
+    };
 
-    if tags.confidence == Confidence::Low {
-        return ClassifyResult {
-            tags,
-            reason: "no tag cleared the classifier".to_string(),
-        };
-    }
-
-    ClassifyResult {
+    let reason = if tags.confidence == Confidence::Low {
+        "no tag cleared the classifier"
+    } else {
+        "tags classifier"
+    };
+    Classification::Done(ClassifyResult {
         tags,
-        reason: "tags classifier".to_string(),
-    }
+        reason: reason.to_string(),
+    })
 }
 
 /// Filter notes to the `--retag` set. Each argument is a vault-relative path

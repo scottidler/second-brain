@@ -22,6 +22,7 @@ use vault::search::{Edge, SearchIndex};
 
 use crate::config::GraphConfig;
 use crate::hub::{HUB_DIR, slugify};
+use crate::shutdown::StopHandle;
 use crate::vault::Note;
 
 /// A subject-predicate-object triple extracted from a note.
@@ -92,21 +93,35 @@ pub struct FactStats {
     pub triples_extracted: usize,
     pub facts_written: usize,
     pub facts_skipped: usize,
+    /// The pass stopped at a check point. Earlier notes' edges stand; there is
+    /// no watermark, so the next run re-selects from the start.
+    pub stopped: bool,
 }
 
 /// Extract typed `fact` edges from ingested notes (bounded to `limit`). A
 /// triple becomes an edge `subject_hub --predicate--> object_hub` only when
 /// both hubs resolve to existing notes (resolve-endpoint-or-skip in
 /// `insert_edges`), with the originating note in `src_note` for provenance.
+///
+/// `stop` is checked before every note's extraction call.
 pub fn extract_facts<E: TripleExtractor>(
     index: &mut SearchIndex,
     notes: &[Note],
     extractor: &E,
     cfg: &GraphConfig,
     limit: usize,
+    stop: &StopHandle,
 ) -> Result<FactStats> {
     let mut stats = FactStats::default();
     for note in notes.iter().filter(|n| is_ingested(n)).take(limit) {
+        if stop.is_stopped() {
+            log::info!(
+                "cortex::memgraph: facts stopped at a check point after {} note(s)",
+                stats.notes_scanned
+            );
+            stats.stopped = true;
+            break;
+        }
         stats.notes_scanned += 1;
         let note_path = note.path.to_string_lossy().to_string();
         let triples = extractor.extract(&note.body);
@@ -127,11 +142,12 @@ pub fn extract_facts<E: TripleExtractor>(
         stats.facts_skipped += skipped;
     }
     log::info!(
-        "cortex::memgraph: facts scanned={} triples={} written={} skipped={}",
+        "cortex::memgraph: facts scanned={} triples={} written={} skipped={} stopped={}",
         stats.notes_scanned,
         stats.triples_extracted,
         stats.facts_written,
-        stats.facts_skipped
+        stats.facts_skipped,
+        stats.stopped
     );
     Ok(stats)
 }

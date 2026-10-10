@@ -32,6 +32,7 @@ use vault::search::{Edge, GraphNoteRow, SearchIndex};
 
 use crate::config::Config;
 use crate::opts::GraphOpts;
+use crate::shutdown::StopHandle;
 
 /// `graph_state` key whose presence flips the next pass from full-rebuild to
 /// incremental (its absence after a restart forces one safe full rebuild).
@@ -83,6 +84,9 @@ pub struct GraphStats {
     /// note -> `entities/<source-host-slug>.md` membership edges.
     pub source_member: usize,
     pub skipped: usize,
+    /// The pass stopped at a check point: `last_run_at` was not written, so a
+    /// stopped first build is rebuilt in full by the next pass.
+    pub stopped: bool,
 }
 
 /// Outcome of the typed-`fact` layer pass (triple extraction + consolidation).
@@ -92,12 +96,17 @@ pub struct FactLayerStats {
     pub noise_removed: usize,
     pub contradictions: usize,
     pub bridges_added: usize,
+    /// Extraction stopped at a check point; consolidation did not run.
+    pub stopped: bool,
 }
 
 /// Run the graph pass against the oracle index DB. Opens its own connection
 /// (cortex commands do not share oracle's `Mutex<SearchIndex>`), takes the
 /// shared embed lock, and writes edges in per-note bounded transactions.
-pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<GraphStats> {
+///
+/// `stop` is the daemon's stop handle; one-shot callers pass
+/// `StopHandle::never()`.
+pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts, stop: &StopHandle) -> Result<GraphStats> {
     log::debug!(
         "cortex::graph::run: backfill={} rebuild={}",
         opts.backfill,
@@ -117,20 +126,20 @@ pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<Graph
     let stats = if opts.rebuild {
         rebuild(&mut index, &config.graph)?
     } else {
-        build(&mut index, &config.graph, opts.backfill)?
+        build(&mut index, &config.graph, opts.backfill, stop)?
     };
 
     // --backfill also extracts typed `fact` edges (bounded, LLM) and
     // runs the consolidation agents. Deterministic edges above stand alone; the
     // factual layer is layered on top only on an explicit backfill. The embed
     // lock is already held, so call the lock-agnostic helper directly.
-    if opts.backfill {
-        extract_fact_layer(&mut index, vault_root, config)?;
+    if opts.backfill && !stats.stopped {
+        extract_fact_layer(&mut index, vault_root, config, stop)?;
     }
 
     drop(lock);
     log::info!(
-        "graph complete: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={} repo_member={} creator_member={} source_member={} skipped={}",
+        "graph complete: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={} repo_member={} creator_member={} source_member={} skipped={} stopped={}",
         stats.full_rebuild,
         stats.notes_processed,
         stats.semantic,
@@ -141,6 +150,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &GraphOpts) -> Result<Graph
         stats.creator_member,
         stats.source_member,
         stats.skipped,
+        stats.stopped,
     );
     Ok(stats)
 }
@@ -160,7 +170,12 @@ fn check_exclusive(opts: &GraphOpts) -> Result<()> {
 /// shared embed lock — both `run` (under `--backfill`) and `fact_backfill` take
 /// it before calling — so this helper does not manage the lock and is therefore
 /// safe to reuse without re-entrant locking.
-fn extract_fact_layer(index: &mut SearchIndex, vault_root: &Path, config: &Config) -> Result<FactLayerStats> {
+fn extract_fact_layer(
+    index: &mut SearchIndex,
+    vault_root: &Path,
+    config: &Config,
+    stop: &StopHandle,
+) -> Result<FactLayerStats> {
     log::debug!(
         "cortex::graph::extract_fact_layer: fact_max_per_run={} fact_pattern={}",
         config.graph.fact_max_per_run,
@@ -173,14 +188,34 @@ fn extract_fact_layer(index: &mut SearchIndex, vault_root: &Path, config: &Confi
         max_input_tokens: config.graph.fact_max_input_tokens,
         timeout_secs: config.graph.fact_timeout_secs,
     };
-    let facts =
-        crate::memgraph::extract_facts(index, &notes, &extractor, &config.graph, config.graph.fact_max_per_run)?;
+    let facts = crate::memgraph::extract_facts(
+        index,
+        &notes,
+        &extractor,
+        &config.graph,
+        config.graph.fact_max_per_run,
+        stop,
+    )?;
+    if facts.stopped {
+        // Consolidation writes (noise deletes, bridges); a stopped pass writes
+        // nothing more. The facts already inserted stand.
+        log::info!(
+            "memgraph fact layer: stopped after facts_written={}; consolidation skipped",
+            facts.facts_written
+        );
+        return Ok(FactLayerStats {
+            facts_written: facts.facts_written,
+            stopped: true,
+            ..Default::default()
+        });
+    }
     let consolidation = crate::memgraph::consolidate(index, &config.graph)?;
     let stats = FactLayerStats {
         facts_written: facts.facts_written,
         noise_removed: consolidation.noise_removed,
         contradictions: consolidation.contradictions.len(),
         bridges_added: consolidation.bridges_added,
+        stopped: false,
     };
     log::info!(
         "memgraph fact layer: facts_written={} noise_removed={} contradictions={} bridges_added={}",
@@ -199,21 +234,29 @@ fn extract_fact_layer(index: &mut SearchIndex, vault_root: &Path, config: &Confi
 /// its own index connection and takes the shared embed lock IN-PROCESS, so it
 /// serializes against the daemon's embed/graph ticks via the same lock rather
 /// than colliding the way a separate-process systemd timer would.
-pub fn fact_backfill(vault_root: &Path, config: &Config) -> Result<FactLayerStats> {
+pub fn fact_backfill(vault_root: &Path, config: &Config, stop: &StopHandle) -> Result<FactLayerStats> {
     log::debug!("cortex::graph::fact_backfill: vault_root={}", vault_root.display());
     let db_path = config.oracle_db_path();
     let mut index = SearchIndex::open(&db_path)
         .wrap_err_with(|| format!("failed to open search index at {}", db_path.display()))?;
     let lock = crate::embed::acquire_lock()?;
     log::debug!("cortex::graph::fact_backfill: acquired embed file lock");
-    let stats = extract_fact_layer(&mut index, vault_root, config)?;
+    let stats = extract_fact_layer(&mut index, vault_root, config, stop)?;
     drop(lock);
     Ok(stats)
 }
 
 /// Core edge-build loop, factored out of `run` so tests can drive an
 /// in-memory index without the file lock / config-path machinery.
-pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_full: bool) -> Result<GraphStats> {
+///
+/// `stop` is checked before every note. A stopped pass keeps the notes it
+/// finished (edges and watermarks) and skips the `last_run_at` write.
+pub fn build(
+    index: &mut SearchIndex,
+    cfg: &crate::config::GraphConfig,
+    force_full: bool,
+    stop: &StopHandle,
+) -> Result<GraphStats> {
     let full_rebuild = force_full || index.graph_state_get(KEY_LAST_RUN_AT)?.is_none();
     log::debug!("cortex::graph::build: full_rebuild={full_rebuild}");
 
@@ -240,6 +283,14 @@ pub fn build(index: &mut SearchIndex, cfg: &crate::config::GraphConfig, force_fu
     };
 
     for src in &targets {
+        if stop.is_stopped() {
+            log::info!(
+                "cortex::graph::build: stopped at a check point after {} note(s)",
+                stats.notes_processed
+            );
+            stats.stopped = true;
+            return Ok(stats);
+        }
         let Some(row) = pass.by_path.get(src) else {
             continue;
         };
@@ -639,7 +690,7 @@ fn now_ts() -> i64 {
 
 /// Daemon tick: run an incremental graph pass. Mirrors the embed tick shape;
 /// the daemon wraps it in `block_in_place`.
-pub fn daemon_tick(vault_root: &Path, config: &Config) -> Result<GraphStats> {
+pub fn daemon_tick(vault_root: &Path, config: &Config, stop: &StopHandle) -> Result<GraphStats> {
     run(
         vault_root,
         config,
@@ -647,6 +698,7 @@ pub fn daemon_tick(vault_root: &Path, config: &Config) -> Result<GraphStats> {
             backfill: false,
             rebuild: false,
         },
+        stop,
     )
 }
 

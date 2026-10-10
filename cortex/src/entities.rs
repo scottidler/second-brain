@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::hub::slugify;
 use crate::opts::EntitiesOpts;
+use crate::shutdown::StopHandle;
 use crate::vault::Note;
 
 /// A proposed glossary entity awaiting human promotion. `slug` is the kebab
@@ -47,6 +48,17 @@ pub struct EntityReport {
     pub notes_scanned: usize,
     pub proposals: usize,
     pub proposals_path: Option<String>,
+    /// The pass stopped at a check point and wrote nothing.
+    pub stopped: bool,
+}
+
+/// What a discovery pass found. A stopped pass drops its in-memory proposals:
+/// `proposals` is empty and `stopped` is set.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Discovery {
+    pub proposals: Vec<EntityProposal>,
+    pub scanned: usize,
+    pub stopped: bool,
 }
 
 /// Extracts candidate entity surface forms from a note body. Injected so the
@@ -92,12 +104,14 @@ fn is_ingested(note: &Note) -> bool {
 /// Run discovery over `notes` using `extractor`, excluding any entity whose
 /// slug is already `known` (glossary concepts, alias targets, canonical tags).
 /// Bounded to `limit` ingested notes. Pure aside from the injected extractor.
+/// `stop` is checked before every note's extraction call.
 pub fn discover<E: EntityExtractor>(
     notes: &[Note],
     known: &HashSet<String>,
     extractor: &E,
     limit: usize,
-) -> (Vec<EntityProposal>, usize) {
+    stop: &StopHandle,
+) -> Discovery {
     // Aggregate by slug: frequency + a capped sample of source note paths + the
     // most common surface form.
     struct Acc {
@@ -110,6 +124,14 @@ pub fn discover<E: EntityExtractor>(
 
     let mut scanned = 0usize;
     for note in notes.iter().filter(|n| is_ingested(n)).take(limit) {
+        if stop.is_stopped() {
+            log::info!("cortex::entities: stopped at a check point after {scanned} note(s); proposals dropped");
+            return Discovery {
+                proposals: Vec::new(),
+                scanned,
+                stopped: true,
+            };
+        }
         scanned += 1;
         let path = note.path.to_string_lossy().to_string();
         let mut seen_in_note: HashSet<String> = HashSet::new();
@@ -154,7 +176,11 @@ pub fn discover<E: EntityExtractor>(
         .collect();
     // Most-mentioned first; stable slug order for ties.
     proposals.sort_by(|a, b| b.frequency.cmp(&a.frequency).then_with(|| a.slug.cmp(&b.slug)));
-    (proposals, scanned)
+    Discovery {
+        proposals,
+        scanned,
+        stopped: false,
+    }
 }
 
 /// Build the set of already-known entity slugs to exclude from proposals:
@@ -329,8 +355,9 @@ fn overwrite_proposals(path: &Path, file: &EntityProposalsFile) -> Result<()> {
 }
 
 /// Run the discovery pass: scan ingested notes, extract via Fabric, write
-/// `entity-proposals.yml`.
-pub fn run(vault_root: &Path, config: &Config, opts: &EntitiesOpts) -> Result<EntityReport> {
+/// `entity-proposals.yml`. `stop` is the daemon's stop handle; one-shot
+/// callers pass `StopHandle::never()`.
+pub fn run(vault_root: &Path, config: &Config, opts: &EntitiesOpts, stop: &StopHandle) -> Result<EntityReport> {
     log::debug!(
         "cortex::entities::run: vault_root={} discover={} limit={:?}",
         vault_root.display(),
@@ -349,7 +376,18 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EntitiesOpts) -> Result<En
         timeout_secs: config.entities.fabric_timeout_secs,
     };
 
-    let (proposals, scanned) = discover(&notes, &known, &extractor, limit);
+    let Discovery {
+        proposals,
+        scanned,
+        stopped,
+    } = discover(&notes, &known, &extractor, limit, stop);
+    if stopped {
+        return Ok(EntityReport {
+            notes_scanned: scanned,
+            stopped: true,
+            ..Default::default()
+        });
+    }
     log::info!(
         "cortex::entities: scanned {scanned} ingested note(s), {} proposal(s)",
         proposals.len()
@@ -359,6 +397,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EntitiesOpts) -> Result<En
         notes_scanned: scanned,
         proposals: proposals.len(),
         proposals_path: None,
+        stopped: false,
     };
     if !proposals.is_empty() {
         let path = ::vault::paths::entity_proposals();
@@ -369,7 +408,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EntitiesOpts) -> Result<En
 }
 
 /// Daemon tick: bounded discovery pass on the configured cadence.
-pub fn daemon_tick(vault_root: &Path, config: &Config) -> Result<EntityReport> {
+pub fn daemon_tick(vault_root: &Path, config: &Config, stop: &StopHandle) -> Result<EntityReport> {
     run(
         vault_root,
         config,
@@ -377,6 +416,7 @@ pub fn daemon_tick(vault_root: &Path, config: &Config) -> Result<EntityReport> {
             discover: true,
             limit: None,
         },
+        stop,
     )
 }
 

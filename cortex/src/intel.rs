@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{Config, FabricConfig, IntelConfig, LlmConfig};
 use crate::opts::IntelOpts;
+use crate::shutdown::StopHandle;
 use crate::vault::{Note, scan_vault};
 use vault::schema::NoteType;
 
@@ -50,6 +51,27 @@ impl IntelLlm for AnthropicLlm {
         api_key: &str,
     ) -> Result<String> {
         crate::llm::complete(system, user, model, max_tokens, timeout_secs, api_key)
+    }
+}
+
+/// Port for the Fabric pattern the weekly review falls back to when its LLM
+/// call fails. Extracted so a test can assert the fallback is skipped once the
+/// stop flag is set.
+pub trait IntelFabric {
+    fn is_available(&self) -> bool;
+    fn run_pattern(&self, pattern: &str, input: &str, timeout_secs: u64) -> Result<String>;
+}
+
+/// Production adapter over the `fabric` binary (`crate::fabric`).
+pub struct ShellFabric<'a>(pub &'a FabricConfig);
+
+impl IntelFabric for ShellFabric<'_> {
+    fn is_available(&self) -> bool {
+        crate::fabric::is_available(&self.0.binary)
+    }
+
+    fn run_pattern(&self, pattern: &str, input: &str, timeout_secs: u64) -> Result<String> {
+        crate::fabric::run_pattern(self.0, pattern, input, timeout_secs)
     }
 }
 
@@ -124,12 +146,23 @@ pub enum IntelMode {
 pub struct IntelReport {
     pub mode: IntelMode,
     pub output_path: PathBuf,
+    /// The run stopped at a check point and wrote nothing; `output_path` is
+    /// where it would have written.
+    pub stopped: bool,
+}
+
+/// How one generator ended: the path it wrote (or found unchanged), or a stop
+/// that left that path unwritten.
+enum Generated {
+    Done(PathBuf),
+    Stopped(PathBuf),
 }
 
 /// Top-level orchestrator for `sb cortex intel`. Scans the vault and runs
 /// the daily-digest or weekly-review generator based on `opts.mode`. The
-/// cortex daemon calls this directly on its daily/weekly tick.
-pub fn run(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<IntelReport> {
+/// cortex daemon calls this directly on its daily/weekly tick. `stop` is the
+/// daemon's stop handle; one-shot callers pass `StopHandle::never()`.
+pub fn run(vault_root: &Path, config: &Config, opts: &IntelOpts, stop: &StopHandle) -> Result<IntelReport> {
     crate::startup::validate_canonical_assets()?;
     log::info!("starting intel command (vault_root={})", vault_root.display());
     let notes = scan_vault(vault_root, &config.vault)?;
@@ -138,9 +171,10 @@ pub fn run(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<Intel
         &notes,
         &config.actions.intel,
         &config.llm,
-        &config.fabric,
+        &ShellFabric(&config.fabric),
         opts,
         &AnthropicLlm,
+        stop,
     )
 }
 
@@ -211,22 +245,28 @@ nothing else; do not copy any structure from the notes.";
 
 /// Generate intelligence output for the requested mode. Returns the path
 /// that was written so sb can announce it.
-pub fn generate<L: IntelLlm>(
+pub fn generate<F: IntelFabric, L: IntelLlm>(
     vault_root: &Path,
     notes: &[Note],
     config: &IntelConfig,
     llm_config: &LlmConfig,
-    fabric: &FabricConfig,
+    fabric: &F,
     opts: &IntelOpts,
     llm: &L,
+    stop: &StopHandle,
 ) -> Result<IntelReport> {
-    let output_path = match opts.mode {
-        IntelMode::Daily => generate_daily_digest(vault_root, notes, config, llm_config, opts, llm)?,
-        IntelMode::Weekly => generate_weekly_review(vault_root, notes, config, llm_config, fabric, opts, llm)?,
+    let generated = match opts.mode {
+        IntelMode::Daily => Generated::Done(generate_daily_digest(vault_root, notes, config, llm_config, opts, llm)?),
+        IntelMode::Weekly => generate_weekly_review(vault_root, notes, config, llm_config, fabric, opts, llm, stop)?,
+    };
+    let (output_path, stopped) = match generated {
+        Generated::Done(path) => (path, false),
+        Generated::Stopped(path) => (path, true),
     };
     Ok(IntelReport {
         mode: opts.mode,
         output_path,
+        stopped,
     })
 }
 
@@ -396,15 +436,21 @@ fn generate_daily_digest<L: IntelLlm>(
 }
 
 /// Generate a weekly review note.
-fn generate_weekly_review<L: IntelLlm>(
+///
+/// Stop check point: before the Fabric fallback that follows a failed LLM
+/// call. A stopped review writes nothing: writing it without its insights
+/// would persist the input hash and pin the degraded review until the week's
+/// notes change.
+fn generate_weekly_review<F: IntelFabric, L: IntelLlm>(
     vault_root: &Path,
     notes: &[Note],
     config: &IntelConfig,
     llm_config: &LlmConfig,
-    fabric: &FabricConfig,
+    fabric: &F,
     opts: &IntelOpts,
     llm: &L,
-) -> Result<PathBuf> {
+    stop: &StopHandle,
+) -> Result<Generated> {
     let today = opts.as_of.unwrap_or_else(|| Local::now().date_naive());
     let week_start = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
     let week_str = week_start.format("%Y-%m-%d").to_string();
@@ -436,7 +482,7 @@ fn generate_weekly_review<L: IntelLlm>(
             "weekly review inputs unchanged (input-hash={input_hash}); skipping regeneration (no LLM call, no write): {}",
             output_path.display()
         );
-        return Ok(output_path);
+        return Ok(Generated::Done(output_path));
     }
 
     // Group by type
@@ -503,14 +549,20 @@ fn generate_weekly_review<L: IntelLlm>(
                 review.push_str(synthesis.trim());
                 review.push_str("\n\n");
             }
+            Err(e) if stop.is_stopped() => {
+                log::info!(
+                    "LLM weekly synthesis failed after the stop signal; no Fabric fallback, nothing written: {e}"
+                );
+                return Ok(Generated::Stopped(output_path));
+            }
             Err(e) => {
                 log::warn!("LLM weekly synthesis failed: {e}");
                 // Fall back to the fabric pattern if one is configured/available.
                 if let Some(ref pattern) = config.batch_weekly
-                    && crate::fabric::is_available(&fabric.binary)
+                    && fabric.is_available()
                 {
                     let input = crate::fabric::truncate_input(&concatenated, config.max_input_tokens);
-                    if let Ok(wisdom) = crate::fabric::run_pattern(fabric, pattern, input, config.fabric_timeout_secs) {
+                    if let Ok(wisdom) = fabric.run_pattern(pattern, input, config.fabric_timeout_secs) {
                         review.push_str("## AI Insights\n\n");
                         review.push_str(wisdom.trim());
                         review.push_str("\n\n");
@@ -550,7 +602,7 @@ fn generate_weekly_review<L: IntelLlm>(
     write_intel_output(&output_path, &review)?;
 
     log::info!("generated weekly review: {}", output_path.display());
-    Ok(output_path)
+    Ok(Generated::Done(output_path))
 }
 
 /// Resolve the output path for an intel file.

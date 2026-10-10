@@ -75,8 +75,14 @@ fn configured_actions_association_is_a_no_op_never_a_per_change_write() {
         .actions
         .insert("association".to_string(), crate::config::DaemonAction { enable: true });
 
-    let fingerprint =
-        configured_actions_with_scanner(vault_root, &config, &daemon_config, &[], crate::vault::scan_vault);
+    let fingerprint = configured_actions_with_scanner(
+        vault_root,
+        &config,
+        &daemon_config,
+        &[],
+        &crate::shutdown::StopHandle::never(),
+        crate::vault::scan_vault,
+    );
 
     assert!(
         fingerprint.is_empty(),
@@ -205,7 +211,13 @@ fn configured_actions_lint_fingerprint_excludes_unfixable_violations() {
         .actions
         .insert("lint".to_string(), crate::config::DaemonAction { enable: true });
 
-    let fingerprint = configured_actions(vault_root, &config, &daemon_config, &[]);
+    let fingerprint = configured_actions(
+        vault_root,
+        &config,
+        &daemon_config,
+        &[],
+        &crate::shutdown::StopHandle::never(),
+    );
     assert!(
         fingerprint.is_empty(),
         "expected an empty fingerprint - the only violation present carries fix: None: {fingerprint:?}"
@@ -407,7 +419,8 @@ fn intel_sweep_two_writer_fight_no_longer_reproduces() {
     };
 
     // Cycle 1: intel writes the digest WITHOUT any tag.
-    let report = crate::intel::run(vault_root, &config, &intel_opts).expect("intel cycle 1");
+    let report = crate::intel::run(vault_root, &config, &intel_opts, &crate::shutdown::StopHandle::never())
+        .expect("intel cycle 1");
     let digest_path = report.output_path.clone();
     let after_intel_1 = std::fs::read_to_string(&digest_path).expect("read digest after intel cycle 1");
     assert!(
@@ -441,7 +454,7 @@ fn intel_sweep_two_writer_fight_no_longer_reproduces() {
     // Cycle 2: intel sees unchanged inputs (persisted input-hash matches) and
     // skips regeneration entirely - the digest is byte-for-byte identical, so
     // there is nothing left for sweep to fight over.
-    crate::intel::run(vault_root, &config, &intel_opts).expect("intel cycle 2");
+    crate::intel::run(vault_root, &config, &intel_opts, &crate::shutdown::StopHandle::never()).expect("intel cycle 2");
     let after_intel_2 = std::fs::read_to_string(&digest_path).expect("read digest after intel cycle 2");
     assert_eq!(
         after_intel_1, after_intel_2,
@@ -504,12 +517,24 @@ fn intel_sweep_fingerprint_converges_without_digest_tag_fight() {
         .insert("sweep".to_string(), crate::config::DaemonAction { enable: true });
 
     // First periodic sweep: baseline (writes the tagless digest once).
-    let fp1 = configured_actions(vault_root, &config, &daemon_config, &[]);
+    let fp1 = configured_actions(
+        vault_root,
+        &config,
+        &daemon_config,
+        &[],
+        &crate::shutdown::StopHandle::never(),
+    );
     // Second periodic sweep over the SAME, otherwise-unchanged vault: intel now
     // skips regeneration (unchanged inputs) and the tagless digest gives sweep
     // nothing to migrate, so the fingerprint is EMPTY - the daemon's oscillation
     // detector will never latch on this steady state.
-    let fp2 = configured_actions(vault_root, &config, &daemon_config, &[]);
+    let fp2 = configured_actions(
+        vault_root,
+        &config,
+        &daemon_config,
+        &[],
+        &crate::shutdown::StopHandle::never(),
+    );
 
     assert!(
         fp2.is_empty(),
@@ -769,7 +794,13 @@ fn full_action_set_periodic_sweep_fingerprint_converges() {
     // fixed exactly once; whichever cycle-1 ordering the daemon's
     // HashMap-iteration picks, every write this cycle makes is idempotent on
     // its own inputs, so it cannot recur.
-    let fp1 = configured_actions(vault_root, &config, &daemon_config, &[]);
+    let fp1 = configured_actions(
+        vault_root,
+        &config,
+        &daemon_config,
+        &[],
+        &crate::shutdown::StopHandle::never(),
+    );
 
     // Snapshot the on-disk state of every note file AFTER cycle 1 has fully
     // settled. This is the strengthening (audit finding #2: the old
@@ -784,7 +815,13 @@ fn full_action_set_periodic_sweep_fingerprint_converges() {
     // that wrote in cycle 1 finds its own fix already in place and writes
     // nothing more. This is the structural invariant the whole design doc
     // exists to enforce.
-    let fp2 = configured_actions(vault_root, &config, &daemon_config, &[]);
+    let fp2 = configured_actions(
+        vault_root,
+        &config,
+        &daemon_config,
+        &[],
+        &crate::shutdown::StopHandle::never(),
+    );
 
     let after = snapshot_note_files(vault_root);
 
@@ -900,7 +937,8 @@ async fn scheduled_intel_write_under_applying_guard_does_not_clear_latch() {
         // call `validate_canonical_assets`, which would otherwise resolve the
         // developer's real ~/.config/sb/ and fail in any clean checkout.
         let _cfg = crate::testutil::hermetic_config_home();
-        crate::intel::run(vault_root, &config, &intel_opts).expect("scheduled intel run");
+        crate::intel::run(vault_root, &config, &intel_opts, &crate::shutdown::StopHandle::never())
+            .expect("scheduled intel run");
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
     applying.store(false, Ordering::Relaxed);
@@ -969,7 +1007,14 @@ fn configured_actions_no_mutation_scans_vault_exactly_once() {
         crate::vault::scan_vault(root, vault_config)
     };
 
-    let fingerprint = configured_actions_with_scanner(vault_root, &config, &daemon_config, &[], counting_scan);
+    let fingerprint = configured_actions_with_scanner(
+        vault_root,
+        &config,
+        &daemon_config,
+        &[],
+        &crate::shutdown::StopHandle::never(),
+        counting_scan,
+    );
 
     assert!(
         fingerprint.is_empty(),
@@ -1027,7 +1072,14 @@ fn configured_actions_rescans_once_after_classify_promotion() {
         crate::vault::scan_vault(root, vault_config)
     };
 
-    let fingerprint = configured_actions_with_scanner(vault_root, &config, &daemon_config, &[], counting_scan);
+    let fingerprint = configured_actions_with_scanner(
+        vault_root,
+        &config,
+        &daemon_config,
+        &[],
+        &crate::shutdown::StopHandle::never(),
+        counting_scan,
+    );
 
     assert!(
         fingerprint.results.iter().any(|(action, _)| action == "classify"),
@@ -1279,4 +1331,139 @@ fn golden_cortex_service_full() {
         ..Config::default()
     };
     assert_eq!(golden_render(&config, true), include_str!("golden/full.service"));
+}
+
+/// Fixture for the action-cycle stop tests: an inbox note classify promotes,
+/// and a frontmatter-less root note lint's frontmatter applier would rewrite.
+/// Returns the vault and the root note's original bytes.
+fn stop_cycle_vault() -> (tempfile::TempDir, Vec<u8>) {
+    let vault_dir = tempfile::tempdir().expect("vault tmpdir");
+    let root = vault_dir.path();
+    std::fs::create_dir_all(root.join("inbox")).expect("mkdir inbox");
+    std::fs::write(
+        root.join("inbox/thing.md"),
+        "---\ntags:\n  - rust\n---\nSome inbox content about rust tooling.\n",
+    )
+    .expect("write inbox note");
+    let plain = b"Just text, no frontmatter.\n".to_vec();
+    std::fs::write(root.join("plain.md"), &plain).expect("write plain note");
+    (vault_dir, plain)
+}
+
+/// classify then lint, both applying. classify sorts first, so the order is
+/// fixed.
+fn classify_then_lint() -> DaemonConfig {
+    let mut daemon_config = DaemonConfig::default();
+    daemon_config.actions.clear();
+    for name in ["classify", "lint"] {
+        daemon_config
+            .actions
+            .insert(name.to_string(), crate::config::DaemonAction { enable: true });
+    }
+    daemon_config
+}
+
+/// A scanner double that records its calls and sets the stop flag during call
+/// `stop_on`, as a SIGTERM landing mid-cycle would.
+fn stopping_scanner(
+    stop: &StopHandle,
+    stop_on: usize,
+    calls: &Rc<Cell<usize>>,
+) -> impl FnMut(&Path, &VaultConfig) -> Result<Vec<Note>> {
+    let stop = stop.clone();
+    let calls = Rc::clone(calls);
+    move |root: &Path, vault_config: &VaultConfig| {
+        calls.set(calls.get() + 1);
+        let notes = crate::vault::scan_vault(root, vault_config);
+        if calls.get() == stop_on {
+            stop.stop();
+        }
+        notes
+    }
+}
+
+/// Stop lands during the rescan that follows classify's promotion: classify's
+/// move stands, lint never runs (the root note keeps its bytes), and the
+/// scanner saw exactly the top scan and that one rescan.
+#[test]
+fn no_action_runs_after_a_stop_between_actions() {
+    let _lock = crate::testutil::lock_env();
+    let _cfg = crate::testutil::hermetic_config_home();
+    let (vault_dir, plain) = stop_cycle_vault();
+    let root = vault_dir.path();
+    let stop = StopHandle::never();
+    let calls = Rc::new(Cell::new(0usize));
+
+    let fingerprint = configured_actions_with_scanner(
+        root,
+        &Config::default(),
+        &classify_then_lint(),
+        &[],
+        &stop,
+        stopping_scanner(&stop, 2, &calls),
+    );
+
+    assert!(root.join("notes/thing.md").exists(), "classify ran before the stop");
+    assert_eq!(calls.get(), 2, "top scan + the rescan the stop landed in");
+    assert_eq!(
+        std::fs::read(root.join("plain.md")).unwrap(),
+        plain,
+        "lint ran after the stop and inserted frontmatter"
+    );
+    let actions: Vec<&str> = fingerprint.results.iter().map(|(a, _)| a.as_str()).collect();
+    assert_eq!(actions, vec!["classify"], "only classify wrote: {fingerprint:?}");
+}
+
+/// Stop lands during the top-of-cycle scan: no action runs at all.
+#[test]
+fn no_action_runs_after_a_stop_during_the_top_scan() {
+    let _lock = crate::testutil::lock_env();
+    let _cfg = crate::testutil::hermetic_config_home();
+    let (vault_dir, plain) = stop_cycle_vault();
+    let root = vault_dir.path();
+    let stop = StopHandle::never();
+    let calls = Rc::new(Cell::new(0usize));
+
+    let fingerprint = configured_actions_with_scanner(
+        root,
+        &Config::default(),
+        &classify_then_lint(),
+        &[],
+        &stop,
+        stopping_scanner(&stop, 1, &calls),
+    );
+
+    assert!(fingerprint.is_empty(), "{fingerprint:?}");
+    assert_eq!(calls.get(), 1);
+    assert!(root.join("inbox/thing.md").exists(), "classify did not run");
+    assert_eq!(std::fs::read(root.join("plain.md")).unwrap(), plain, "lint did not run");
+}
+
+/// Control: with no stop, the same cycle runs both actions, so the two tests
+/// above observe the check point and not a fixture that never writes.
+#[test]
+fn both_actions_write_without_a_stop() {
+    let _lock = crate::testutil::lock_env();
+    let _cfg = crate::testutil::hermetic_config_home();
+    let (vault_dir, plain) = stop_cycle_vault();
+    let root = vault_dir.path();
+    let calls = Rc::new(Cell::new(0usize));
+
+    let fingerprint = configured_actions_with_scanner(
+        root,
+        &Config::default(),
+        &classify_then_lint(),
+        &[],
+        &StopHandle::never(),
+        stopping_scanner(&StopHandle::never(), usize::MAX, &calls),
+    );
+
+    assert!(root.join("notes/thing.md").exists());
+    assert_ne!(
+        std::fs::read(root.join("plain.md")).unwrap(),
+        plain,
+        "lint inserted frontmatter"
+    );
+    let actions: Vec<&str> = fingerprint.results.iter().map(|(a, _)| a.as_str()).collect();
+    assert_eq!(actions, vec!["classify", "lint"], "{fingerprint:?}");
 }

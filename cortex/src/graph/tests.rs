@@ -51,7 +51,7 @@ fn full_rebuild_builds_semantic_edges() {
     embed(&index, &m, "notes/a.md", "shared topic", 100);
     embed(&index, &m, "notes/b.md", "shared topic", 100);
 
-    let stats = build(&mut index, &cfg(), true).expect("build");
+    let stats = build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
     assert!(stats.full_rebuild);
     assert!(
         stats.semantic >= 2,
@@ -83,7 +83,7 @@ fn semantic_edge_not_stranded_when_embedding_lands_after_skip() {
 
     // First pass: full rebuild. `a` has no embedding -> no semantic edge owned
     // by `a`.
-    let s1 = build(&mut index, &cfg(), false).expect("build1");
+    let s1 = build(&mut index, &cfg(), false, &StopHandle::never()).expect("build1");
     assert!(s1.full_rebuild, "first run with no last_run_at is a full rebuild");
     let a_edges_1 = index
         .expand_graph(&["notes/a.md".to_string()], 1, Some(&["semantic".to_string()]), -1.0)
@@ -100,7 +100,7 @@ fn semantic_edge_not_stranded_when_embedding_lands_after_skip() {
 
     // Second pass: incremental. Keyed on produced_at, `a` is now a semantic
     // target and gets its edges — not stranded.
-    let s2 = build(&mut index, &cfg(), false).expect("build2");
+    let s2 = build(&mut index, &cfg(), false, &StopHandle::never()).expect("build2");
     assert!(!s2.full_rebuild, "second run is incremental");
     let a_edges_2 = index
         .expand_graph(&["notes/a.md".to_string()], 1, Some(&["semantic".to_string()]), -1.0)
@@ -126,7 +126,7 @@ fn dangling_wikilink_is_skipped_not_inserted() {
         .insert_test_note_graph("notes/b.md", &[], "", "", "body", 100)
         .expect("b");
 
-    let stats = build(&mut index, &cfg(), true).expect("build");
+    let stats = build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
     // Only the resolved [[b]] edge exists; [[ghost]] dangled and was skipped.
     assert_eq!(
         index.count_edges(Some("wikilink")).expect("count"),
@@ -152,7 +152,7 @@ fn shared_tag_rarity_downweights_blanket_tags() {
         .insert_test_note_graph("notes/c.md", &["common"], "", "", "z", 100)
         .expect("c");
 
-    build(&mut index, &cfg(), true).expect("build");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
     // a->b shared-tag weight = 1/ln(1+2) [rare, df=2] + 1/ln(1+3) [common, df=3].
     let neighbors = index
         .expand_graph(&["notes/a.md".to_string()], 1, Some(&["shared-tag".to_string()]), 0.0)
@@ -179,7 +179,7 @@ fn shared_tag_skips_buckets_over_fanout_cap() {
             .insert_test_note_graph(&format!("notes/{i}.md"), &["blanket"], "", "", "x", 100)
             .expect("note");
     }
-    build(&mut index, &cfg(), true).expect("build");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
     assert_eq!(
         index.count_edges(Some("shared-tag")).expect("count"),
         0,
@@ -196,7 +196,7 @@ fn shared_creator_edges_built_with_fixed_weight() {
     index
         .insert_test_note_graph("notes/b.md", &[], "", "alice", "y", 100)
         .expect("b");
-    build(&mut index, &cfg(), true).expect("build");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
     let neighbors = index
         .expand_graph(
             &["notes/a.md".to_string()],
@@ -218,7 +218,7 @@ fn shared_source_uses_host_not_full_url() {
     index
         .insert_test_note_graph("notes/b.md", &[], "https://youtube.com/watch?v=2", "", "y", 100)
         .expect("b");
-    build(&mut index, &cfg(), true).expect("build");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
     // Both normalize to host youtube.com -> a shared-source edge forms.
     let neighbors = index
         .expand_graph(
@@ -243,14 +243,14 @@ fn incremental_only_rebuilds_changed_notes() {
     index
         .insert_test_note_graph("notes/b.md", &["t"], "", "", "y", 100)
         .expect("b");
-    build(&mut index, &cfg(), true).expect("full");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("full");
     let before = index.count_edges(None).expect("count");
 
     // Add a new note c (modified_at higher than the content watermark).
     index
         .insert_test_note_graph("notes/c.md", &["t"], "", "", "z", 500)
         .expect("c");
-    let stats = build(&mut index, &cfg(), false).expect("incr");
+    let stats = build(&mut index, &cfg(), false, &StopHandle::never()).expect("incr");
     assert!(!stats.full_rebuild);
     assert_eq!(stats.notes_processed, 1, "only the new note c is reprocessed");
     assert!(index.count_edges(None).expect("count") > before, "c's edges added");
@@ -304,7 +304,7 @@ fn multi_repo_member_edges_join_every_touched_repo_hub_deduped() {
         Some(vec!["scottidler/loopr", "tatari-tv/marquee", "scottidler/second-brain"]),
     );
 
-    build(&mut index, &cfg(), true).expect("build");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(
         index.count_edges(Some("repo-member")).expect("count"),
@@ -335,7 +335,7 @@ fn no_extra_repo_member_edges_when_repos_touched_absent_or_empty() {
     index_repo_session(&index, "inbox/none.md", Some("scottidler/loopr"), None);
     index_repo_session(&index, "inbox/empty.md", Some("scottidler/loopr"), Some(vec![]));
 
-    build(&mut index, &cfg(), true).expect("build");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(
         index.count_edges(Some("repo-member")).expect("count"),
@@ -367,7 +367,7 @@ fn repo_member_edges_are_monotonic_across_incremental_builds() {
 
     // Sweep 1 (full rebuild): note A joins repo X (loopr) only.
     index_repo_session(&index, "inbox/a.md", Some("scottidler/loopr"), None);
-    let stats1 = build(&mut index, &cfg(), true).expect("build1");
+    let stats1 = build(&mut index, &cfg(), true, &StopHandle::never()).expect("build1");
     assert!(stats1.full_rebuild);
     assert_eq!(index.count_edges(Some("repo-member")).expect("count"), 1);
     assert_eq!(
@@ -385,7 +385,7 @@ fn repo_member_edges_are_monotonic_across_incremental_builds() {
         Some("scottidler/loopr"),
         Some(vec!["scottidler/loopr", "tatari-tv/marquee"]),
     );
-    let stats2 = build(&mut index, &cfg(), false).expect("build2");
+    let stats2 = build(&mut index, &cfg(), false, &StopHandle::never()).expect("build2");
     assert!(!stats2.full_rebuild, "second pass is incremental");
     assert_eq!(stats2.notes_processed, 1, "only the new note B is reprocessed");
 
@@ -442,7 +442,7 @@ fn stoplisted_wikilink_mints_no_edge_while_creator_member_does() {
         .insert_test_note_graph("notes/a.md", &[], "", "Every", "read on [[Every]] today", 100)
         .expect("a");
 
-    let stats = build(&mut index, &cfg_stoplisted(), true).expect("build");
+    let stats = build(&mut index, &cfg_stoplisted(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(
         index.count_edges(Some("wikilink")).expect("count"),
@@ -473,7 +473,7 @@ fn unstoplisted_wikilink_still_mints_an_edge() {
         "the code default suppresses nothing"
     );
 
-    let stats = build(&mut index, &cfg(), true).expect("build");
+    let stats = build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(stats.wikilink, 1, "with no stopword configured the prose match links");
 }
@@ -496,7 +496,7 @@ fn stoplisted_wikilink_leaves_the_note_body_byte_identical() {
         .map(|r| r.body.clone())
         .collect();
 
-    build(&mut index, &cfg_stoplisted(), true).expect("build");
+    build(&mut index, &cfg_stoplisted(), true, &StopHandle::never()).expect("build");
 
     let after: Vec<String> = index
         .graph_note_rows()
@@ -533,7 +533,7 @@ fn source_member_ignores_the_fanout_cap_that_zeroes_the_largest_host() {
             .expect("note");
     }
 
-    let stats = build(&mut index, &cfg(), true).expect("build");
+    let stats = build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(
         index.count_edges(Some("shared-source")).expect("count"),
@@ -565,7 +565,7 @@ fn source_member_normalizes_www_and_query_to_one_hub() {
         .insert_test_note_graph("notes/b.md", &[], "https://youtube.com/watch?v=2", "", "y", 100)
         .expect("b");
 
-    build(&mut index, &cfg(), true).expect("build");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(
         index.hub_members(&hub).expect("members"),
@@ -590,7 +590,7 @@ fn schemeless_source_emits_no_source_member_edge_and_no_dangling_target() {
         )
         .expect("session");
 
-    let stats = build(&mut index, &cfg(), true).expect("build");
+    let stats = build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(stats.source_member, 0, "no source-member edge for a schemeless source");
     assert_eq!(index.count_edges(Some("source-member")).expect("count"), 0);
@@ -609,7 +609,7 @@ fn creator_that_slugifies_empty_emits_no_creator_member_edge() {
         .insert_test_note_graph("notes/a.md", &[], "", "!!!", "x", 100)
         .expect("a");
 
-    let stats = build(&mut index, &cfg(), true).expect("build");
+    let stats = build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(stats.creator_member, 0);
     assert_eq!(index.count_edges(Some("creator-member")).expect("count"), 0);
@@ -628,7 +628,7 @@ fn creator_member_dst_matches_the_minted_creator_hub_path() {
         .insert_test_note_graph("notes/a.md", &[], "", creator, "x", 100)
         .expect("a");
 
-    build(&mut index, &cfg(), true).expect("build");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(
         index.hub_members(&hub).expect("members"),
@@ -661,7 +661,7 @@ fn run_report_counts_all_three_membership_kinds() {
         )
         .expect("a");
 
-    let stats = build(&mut index, &cfg_stoplisted(), true).expect("build");
+    let stats = build(&mut index, &cfg_stoplisted(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(stats.repo_member, 1, "repo-member is no longer swallowed");
     assert_eq!(stats.creator_member, 1);
@@ -694,7 +694,7 @@ fn schemeless_sources_still_share_a_shared_source_bucket() {
         .insert_test_note_graph("notes/b.md", &[], "pais-migration", "", "y", 100)
         .expect("b");
 
-    build(&mut index, &cfg(), true).expect("build");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
 
     let neighbors = index
         .expand_graph(
@@ -724,7 +724,7 @@ fn path_wikilink_edges_only_the_matching_directory() {
         .insert_test_note_graph("notes/src.md", &[], "", "", "see [[dir/x]]", 100)
         .expect("src");
 
-    build(&mut index, &cfg(), true).expect("build");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(index.hub_members("dir/x.md").expect("members"), vec!["notes/src.md"]);
     assert!(index.hub_members("otherdir/x.md").expect("members").is_empty());
@@ -742,7 +742,7 @@ fn fuzzy_substring_wikilink_mints_no_edge() {
         .insert_test_note_graph("notes/src.md", &[], "", "", "see [[note]]", 100)
         .expect("src");
 
-    let stats = build(&mut index, &cfg(), true).expect("build");
+    let stats = build(&mut index, &cfg(), true, &StopHandle::never()).expect("build");
 
     assert_eq!(stats.wikilink, 0);
     assert!(index.hub_members("notes/notebook.md").expect("members").is_empty());
@@ -838,7 +838,7 @@ fn a_full_build_still_clears_the_fact_layer_which_is_why_rebuild_exists() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (mut index, _db) = seeded_rebuild_index(&dir);
 
-    build(&mut index, &cfg(), true).expect("full build");
+    build(&mut index, &cfg(), true, &StopHandle::never()).expect("full build");
 
     assert_eq!(index.count_edges(Some("fact")).expect("count"), 0);
 }
@@ -901,4 +901,37 @@ fn record_watermark_propagates_a_read_failure() {
         .query_row("SELECT COUNT(*) FROM edge_build_state", [], |r| r.get(0))
         .expect("count");
     assert_eq!(recorded, 0, "no fabricated watermark is written");
+}
+
+/// A flag set before the pass builds no note and skips the `last_run_at`
+/// write, so a stopped first build is rebuilt in full by the next pass.
+#[test]
+fn stopped_build_processes_no_note_and_leaves_last_run_at_unset() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-graph-v1");
+    index
+        .insert_test_note_graph("notes/a.md", &[], "", "", "alpha", 100)
+        .expect("a");
+    index
+        .insert_test_note_graph("notes/b.md", &[], "", "", "beta", 100)
+        .expect("b");
+    set_active_mock(&mut index, &m);
+    embed(&index, &m, "notes/a.md", "shared topic", 100);
+    embed(&index, &m, "notes/b.md", "shared topic", 100);
+    let stop = StopHandle::never();
+    stop.stop();
+
+    let stats = build(&mut index, &cfg(), false, &stop).expect("a stop is not an error");
+
+    assert!(stats.stopped);
+    assert_eq!(stats.notes_processed, 0);
+    assert_eq!(index.count_edges(None).expect("count"), 0);
+    assert!(
+        index.graph_state_get(KEY_LAST_RUN_AT).expect("state").is_none(),
+        "a stopped pass must not flip the next pass to incremental"
+    );
+
+    let next = build(&mut index, &cfg(), false, &StopHandle::never()).expect("next pass");
+    assert!(next.full_rebuild, "the next pass rebuilds in full");
+    assert_eq!(next.notes_processed, 2);
 }

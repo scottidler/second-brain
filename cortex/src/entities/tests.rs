@@ -55,7 +55,13 @@ fn discover_excludes_known_glossary_slugs() {
     };
     let notes = vec![ingested("notes/a.md", "We use LangChain and GraphRAG together.")];
     // langchain already known -> only graphrag proposed.
-    let (proposals, scanned) = discover(&notes, &known(&["langchain"]), &extractor, 100);
+    let Discovery { proposals, scanned, .. } = discover(
+        &notes,
+        &known(&["langchain"]),
+        &extractor,
+        100,
+        &crate::shutdown::StopHandle::never(),
+    );
     assert_eq!(scanned, 1);
     let slugs: Vec<&str> = proposals.iter().map(|p| p.slug.as_str()).collect();
     assert_eq!(slugs, vec!["graphrag"]);
@@ -70,7 +76,13 @@ fn discover_aggregates_frequency_and_surface() {
         ingested("notes/a.md", "GraphRAG is great."),
         ingested("notes/b.md", "More on GraphRAG here."),
     ];
-    let (proposals, _) = discover(&notes, &known(&[]), &extractor, 100);
+    let Discovery { proposals, .. } = discover(
+        &notes,
+        &known(&[]),
+        &extractor,
+        100,
+        &crate::shutdown::StopHandle::never(),
+    );
     assert_eq!(proposals.len(), 1);
     assert_eq!(proposals[0].slug, "graphrag");
     assert_eq!(proposals[0].surface, "GraphRAG");
@@ -87,7 +99,13 @@ fn discover_scopes_to_ingested_notes_only() {
         authored("notes/hand.md", "GraphRAG in a hand-authored note."),
         ingested("notes/ingest.md", "GraphRAG in an ingested note."),
     ];
-    let (proposals, scanned) = discover(&notes, &known(&[]), &extractor, 100);
+    let Discovery { proposals, scanned, .. } = discover(
+        &notes,
+        &known(&[]),
+        &extractor,
+        100,
+        &crate::shutdown::StopHandle::never(),
+    );
     assert_eq!(scanned, 1, "only the ingested note is scanned");
     assert_eq!(proposals[0].frequency, 1, "authored note excluded from frequency");
 }
@@ -102,7 +120,13 @@ fn discover_honors_limit() {
         ingested("notes/b.md", "GraphRAG two."),
         ingested("notes/c.md", "GraphRAG three."),
     ];
-    let (proposals, scanned) = discover(&notes, &known(&[]), &extractor, 2);
+    let Discovery { proposals, scanned, .. } = discover(
+        &notes,
+        &known(&[]),
+        &extractor,
+        2,
+        &crate::shutdown::StopHandle::never(),
+    );
     assert_eq!(scanned, 2, "limit caps notes processed");
     assert_eq!(proposals[0].frequency, 2);
 }
@@ -115,7 +139,13 @@ fn discover_counts_entity_once_per_note() {
     // Body mentions it many times; MockExtractor returns it once, but even if
     // it returned duplicates the per-note dedup caps frequency at 1 per note.
     let notes = vec![ingested("notes/a.md", "GraphRAG GraphRAG GraphRAG.")];
-    let (proposals, _) = discover(&notes, &known(&[]), &extractor, 100);
+    let Discovery { proposals, .. } = discover(
+        &notes,
+        &known(&[]),
+        &extractor,
+        100,
+        &crate::shutdown::StopHandle::never(),
+    );
     assert_eq!(proposals[0].frequency, 1);
 }
 
@@ -259,4 +289,37 @@ fn known_slugs_warns_with_the_path_when_the_canonical_tags_file_is_unreadable() 
     let _ = known_slugs(&config);
 
     assert_eq!(vault::capture::warns_containing("entities-warn-canonical.yml").len(), 1);
+}
+
+/// Sets the stop flag after its first call; returns one entity per call.
+struct StoppingExtractor {
+    stop: crate::shutdown::StopHandle,
+    calls: std::cell::Cell<usize>,
+}
+
+impl EntityExtractor for StoppingExtractor {
+    fn extract(&self, _note_body: &str) -> Vec<String> {
+        self.calls.set(self.calls.get() + 1);
+        self.stop.stop();
+        vec!["GraphRAG".to_string()]
+    }
+}
+
+/// Flag set during note 1: note 2 is never extracted and the pass drops its
+/// in-memory proposals.
+#[test]
+fn discover_stops_before_the_next_note_and_drops_its_proposals() {
+    let stop = crate::shutdown::StopHandle::never();
+    let extractor = StoppingExtractor {
+        stop: stop.clone(),
+        calls: std::cell::Cell::new(0),
+    };
+    let notes = vec![ingested("notes/a.md", "x"), ingested("notes/b.md", "y")];
+
+    let found = discover(&notes, &known(&[]), &extractor, 100, &stop);
+
+    assert!(found.stopped);
+    assert_eq!(extractor.calls.get(), 1, "note 2 is never extracted");
+    assert_eq!(found.scanned, 1);
+    assert!(found.proposals.is_empty(), "a stopped pass drops its proposals");
 }

@@ -60,7 +60,15 @@ fn extract_facts_writes_typed_edge_with_provenance() {
     }]);
     let notes = vec![ingested("notes/a.md", "LangChain is built on Neo4j.")];
 
-    let stats = extract_facts(&mut index, &notes, &extractor, &graph_cfg(), 50).expect("facts");
+    let stats = extract_facts(
+        &mut index,
+        &notes,
+        &extractor,
+        &graph_cfg(),
+        50,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("facts");
     assert_eq!(stats.facts_written, 1);
 
     let facts = index.fact_edges().expect("facts");
@@ -85,7 +93,15 @@ fn extract_facts_skips_when_a_hub_is_missing() {
         object: "Neo4j".into(),
     }]);
     let notes = vec![ingested("notes/a.md", "x")];
-    let stats = extract_facts(&mut index, &notes, &extractor, &graph_cfg(), 50).expect("facts");
+    let stats = extract_facts(
+        &mut index,
+        &notes,
+        &extractor,
+        &graph_cfg(),
+        50,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("facts");
     assert_eq!(stats.facts_written, 0);
     assert_eq!(index.count_edges(Some("fact")).expect("count"), 0);
 }
@@ -188,4 +204,50 @@ fn consolidate_runs_all_three_agents() {
     let report = consolidate(&mut index, &graph_cfg()).expect("consolidate");
     assert_eq!(report.noise_removed, 1, "the `is` fact removed");
     assert_eq!(report.contradictions.len(), 1, "released-on conflict flagged");
+}
+
+/// Returns the fixed triple set and sets the stop flag after its first call.
+struct StoppingTriples {
+    triples: Vec<Triple>,
+    stop: crate::shutdown::StopHandle,
+    calls: std::cell::Cell<usize>,
+}
+
+impl TripleExtractor for StoppingTriples {
+    fn extract(&self, _body: &str) -> Vec<Triple> {
+        self.calls.set(self.calls.get() + 1);
+        self.stop.stop();
+        self.triples.clone()
+    }
+}
+
+/// Flag set during note 1's extraction: note 1's edge is written, note 2 is
+/// never extracted.
+#[test]
+fn extract_facts_stops_before_the_next_note() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    index
+        .insert_test_note_graph("entities/langchain.md", &[], "", "", "hub", 100)
+        .unwrap();
+    index
+        .insert_test_note_graph("entities/neo4j.md", &[], "", "", "hub", 100)
+        .unwrap();
+    let stop = crate::shutdown::StopHandle::never();
+    let extractor = StoppingTriples {
+        triples: vec![Triple {
+            subject: "LangChain".into(),
+            predicate: "built-on".into(),
+            object: "Neo4j".into(),
+        }],
+        stop: stop.clone(),
+        calls: std::cell::Cell::new(0),
+    };
+    let notes = vec![ingested("notes/a.md", "x"), ingested("notes/b.md", "y")];
+
+    let stats = extract_facts(&mut index, &notes, &extractor, &graph_cfg(), 50, &stop).expect("facts");
+
+    assert!(stats.stopped);
+    assert_eq!(extractor.calls.get(), 1, "note 2 is never extracted");
+    assert_eq!(stats.notes_scanned, 1);
+    assert_eq!(stats.facts_written, 1, "note 1's edge stands");
 }

@@ -311,6 +311,7 @@ fn test_catchup_classify_enriches_in_place() {
         &config,
         &apply_opts(),
         &stub_classifiers(&["rust", "cli"], Confidence::High),
+        &StopHandle::never(),
     )
     .unwrap();
 
@@ -358,6 +359,7 @@ fn test_lint_classify_includes_unclassified_notes() {
         &config,
         &opts,
         &stub_classifiers(&["rust"], Confidence::High),
+        &StopHandle::never(),
     );
     // Both should produce violations
     let paths: Vec<String> = report
@@ -425,7 +427,15 @@ fn promote_once(classifiers: &Classifiers, tags: &str) -> (bool, bool, String) {
     );
     let notes = vault.scan();
     let config = vault.config();
-    let (_report, _written) = apply_classify(vault.root(), &notes, &config, &apply_opts(), classifiers).expect("apply");
+    let (_report, _written) = apply_classify(
+        vault.root(),
+        &notes,
+        &config,
+        &apply_opts(),
+        classifiers,
+        &StopHandle::never(),
+    )
+    .expect("apply");
 
     let promoted = vault.root().join("notes/candidate.md").exists();
     let inbox_path = vault.root().join("inbox/candidate.md");
@@ -507,7 +517,15 @@ fn retag_replaces_and_never_writes_empty() {
         Stub::answering(&["llm"], Confidence::High),
         protecting.clone(),
     );
-    let (_report, written) = apply_classify(vault.root(), &vault.scan(), &config, &opts, &classifiers).expect("retag");
+    let (_report, written) = apply_classify(
+        vault.root(),
+        &vault.scan(),
+        &config,
+        &opts,
+        &classifiers,
+        &StopHandle::never(),
+    )
+    .expect("retag");
     assert_eq!(written, vec!["notes/keeper.md".to_string()]);
 
     let content = vault.read("notes/keeper.md");
@@ -525,7 +543,15 @@ fn retag_replaces_and_never_writes_empty() {
         Stub::answering(&[], Confidence::Low),
         protecting,
     );
-    let (_report, written) = apply_classify(vault.root(), &vault.scan(), &config, &opts, &empty).expect("retag");
+    let (_report, written) = apply_classify(
+        vault.root(),
+        &vault.scan(),
+        &config,
+        &opts,
+        &empty,
+        &StopHandle::never(),
+    )
+    .expect("retag");
     assert!(written.is_empty(), "an empty result writes nothing: {written:?}");
     let after = vault.read("notes/keeper.md");
     assert!(
@@ -602,7 +628,15 @@ fn retag_then_sweep_keeps_the_protected_tag() {
         Stub::answering(&["ai", "cli", "llm"], Confidence::High),
         canon,
     );
-    let (_report, written) = apply_classify(vault.root(), &vault.scan(), &config, &opts, &classifiers).expect("retag");
+    let (_report, written) = apply_classify(
+        vault.root(),
+        &vault.scan(),
+        &config,
+        &opts,
+        &classifiers,
+        &StopHandle::never(),
+    )
+    .expect("retag");
     assert_eq!(written, vec!["notes/keeper.md".to_string()]);
 
     let after_retag = vault.read("notes/keeper.md");
@@ -716,7 +750,15 @@ fn retag_report_line_carries_retained_and_selected_counts() {
         retag: vec!["notes/split.md".to_string()],
         ..apply_opts()
     };
-    let (report, _) = apply_classify(vault.root(), &vault.scan(), &vault.config(), &opts, &classifiers).expect("apply");
+    let (report, _) = apply_classify(
+        vault.root(),
+        &vault.scan(),
+        &vault.config(),
+        &opts,
+        &classifiers,
+        &StopHandle::never(),
+    )
+    .expect("apply");
     let line = &report.violations[0].message;
     assert!(
         line.contains("retained-protected=1") && line.contains("model-selected=2"),
@@ -774,4 +816,251 @@ fn fabric_runner_is_built_only_when_a_slot_is_fabric_closed() {
     assert!(some.is_some(), "fabric-closed needs a runner");
     let pair = Classifiers::from_parts(&cfg, test_canon(), &TagMapping::default(), some);
     assert_eq!(pair.primary.method(), TagMethod::FabricClosed);
+}
+
+// ---- stop check points ----
+
+/// A classifier double that answers High with `tags`, or fails, and sets the
+/// stop flag right after its `stop_after`th call. Counts every call.
+struct StoppingStub {
+    tags: Vec<String>,
+    fail: bool,
+    stop: StopHandle,
+    stop_after: usize,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Build a `StoppingStub` and a handle on its call count.
+fn stopping_stub(
+    tags: &[&str],
+    fail: bool,
+    stop: &StopHandle,
+    stop_after: usize,
+) -> (Box<dyn TagClassifier>, CallCount) {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stub = StoppingStub {
+        tags: tags.iter().map(|t| (*t).to_string()).collect(),
+        fail,
+        stop: stop.clone(),
+        stop_after,
+        calls: std::sync::Arc::clone(&calls),
+    };
+    (Box::new(stub), CallCount(calls))
+}
+
+impl TagClassifier for StoppingStub {
+    fn classify(&self, _input: &TagInput) -> Result<TagOutput> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if n == self.stop_after {
+            self.stop.stop();
+        }
+        if self.fail {
+            return Err(eyre::eyre!("stub classifier failure"));
+        }
+        Ok(TagOutput {
+            tags: self.tags.clone(),
+            scores: None,
+            confidence: Confidence::High,
+            method: TagMethod::ClassifierDev,
+        })
+    }
+
+    fn method(&self) -> TagMethod {
+        TagMethod::ClassifierDev
+    }
+}
+
+/// Shared read handle on a `StoppingStub`'s call counter.
+struct CallCount(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl CallCount {
+    fn get(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// `never` is beyond any call count, so the stub never sets the flag.
+const NEVER: usize = usize::MAX;
+
+fn inbox_note(stem: &str) -> String {
+    format!(
+        "---\ntitle: {stem}\ndate: 2026-10-01\ntype: link\nsource: \"https://example.com/{stem}\"\n---\n\n## Summary\n\nInbox note {stem}.\n"
+    )
+}
+
+/// Scan the vault in path order, so the classify loop's note order is fixed.
+fn scan_sorted(root: &Path) -> Vec<Note> {
+    let mut notes = scan_vault(root, &crate::config::VaultConfig::default()).expect("scan");
+    notes.sort_by(|a, b| a.path.cmp(&b.path));
+    notes
+}
+
+fn broken_link_count(root: &Path) -> usize {
+    let notes = scan_sorted(root);
+    crate::links::lint_broken_links(&notes, &notes, &crate::config::BrokenLinksConfig::default())
+        .violations
+        .len()
+}
+
+/// Flag set after note 1 of 3: note 1 is classified and moved, notes 2 and 3
+/// are byte-for-byte untouched, the post-loop relink ran for note 1's move, and
+/// no wikilink in the vault is broken.
+#[test]
+fn stop_after_note_one_keeps_its_move_relinks_it_and_leaves_the_rest() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("inbox")).unwrap();
+    for stem in ["alpha", "beta", "gamma"] {
+        std::fs::write(root.join(format!("inbox/{stem}.md")), inbox_note(stem)).unwrap();
+    }
+    let referrer = "---\ntitle: Refs\ndate: 2026-10-01\ntype: note\ntags:\n  - rust\n---\nSee [[alpha]], [[beta]] and [[gamma]].\n";
+    std::fs::write(root.join("refs.md"), referrer).unwrap();
+    let beta_before = std::fs::read(root.join("inbox/beta.md")).unwrap();
+    let gamma_before = std::fs::read(root.join("inbox/gamma.md")).unwrap();
+
+    let stop = StopHandle::never();
+    let (primary, calls) = stopping_stub(&["rust"], false, &stop, 1);
+    let (fallback, fallback_calls) = stopping_stub(&["rust"], false, &stop, NEVER);
+    let classifiers = Classifiers::new(primary, fallback, test_canon());
+
+    let (_report, written) = apply_classify(
+        root,
+        &scan_sorted(root),
+        &Config::default(),
+        &apply_opts(),
+        &classifiers,
+        &stop,
+    )
+    .expect("a stopped classify run is not an error");
+
+    assert_eq!(calls.get(), 1, "no classifier call after the stop");
+    assert_eq!(fallback_calls.get(), 0);
+    assert_eq!(written, vec!["inbox/alpha.md".to_string()]);
+    assert!(root.join("notes/alpha.md").exists(), "note 1 is moved");
+    assert!(!root.join("inbox/alpha.md").exists());
+    let alpha = std::fs::read_to_string(root.join("notes/alpha.md")).unwrap();
+    assert!(
+        alpha.contains("cortex-classified: true"),
+        "note 1 is classified:\n{alpha}"
+    );
+    assert_eq!(
+        std::fs::read(root.join("inbox/beta.md")).unwrap(),
+        beta_before,
+        "note 2 untouched"
+    );
+    assert_eq!(
+        std::fs::read(root.join("inbox/gamma.md")).unwrap(),
+        gamma_before,
+        "note 3 untouched"
+    );
+    assert!(!root.join("notes/beta.md").exists() && !root.join("notes/gamma.md").exists());
+
+    let refs = std::fs::read_to_string(root.join("refs.md")).unwrap();
+    let resolver =
+        vault::wikilink::Resolver::new(scan_sorted(root).iter().map(|n| n.path.to_string_lossy().into_owned()));
+    assert_eq!(
+        resolver.resolve("alpha").collect::<Vec<_>>(),
+        vec!["notes/alpha.md"],
+        "the referrer's link to note 1 resolves at its new path:\n{refs}"
+    );
+    assert_eq!(broken_link_count(root), 0, "no broken wikilink after a stopped run");
+}
+
+/// A classifier failure returned once the flag is set is discarded: no
+/// fallback call, no `cortex-needs-review` write.
+#[test]
+fn classifier_failure_after_the_stop_runs_no_fallback_and_writes_nothing() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("inbox")).unwrap();
+    std::fs::write(root.join("inbox/alpha.md"), inbox_note("alpha")).unwrap();
+    let before = std::fs::read(root.join("inbox/alpha.md")).unwrap();
+
+    let stop = StopHandle::never();
+    // The primary's one call sets the flag, then fails: the stop killed it.
+    let (primary, _calls) = stopping_stub(&[], true, &stop, 1);
+    let (fallback, fallback_calls) = stopping_stub(&["rust"], false, &stop, NEVER);
+    let classifiers = Classifiers::new(primary, fallback, test_canon());
+
+    let (_report, written) = apply_classify(
+        root,
+        &scan_sorted(root),
+        &Config::default(),
+        &apply_opts(),
+        &classifiers,
+        &stop,
+    )
+    .expect("apply");
+
+    assert_eq!(fallback_calls.get(), 0, "no fallback call after the stop");
+    assert!(written.is_empty(), "nothing written: {written:?}");
+    assert_eq!(
+        std::fs::read(root.join("inbox/alpha.md")).unwrap(),
+        before,
+        "no needs-review write"
+    );
+}
+
+/// The fallback's own failure after the flag is set is discarded the same way:
+/// the note is not held for review.
+#[test]
+fn fallback_failure_after_the_stop_writes_no_needs_review() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("inbox")).unwrap();
+    std::fs::write(root.join("inbox/alpha.md"), inbox_note("alpha")).unwrap();
+    let before = std::fs::read(root.join("inbox/alpha.md")).unwrap();
+
+    let stop = StopHandle::never();
+    let (primary, _) = stopping_stub(&[], true, &stop, NEVER);
+    let (fallback, fallback_calls) = stopping_stub(&[], true, &stop, 1);
+    let classifiers = Classifiers::new(primary, fallback, test_canon());
+
+    let (_report, written) = apply_classify(
+        root,
+        &scan_sorted(root),
+        &Config::default(),
+        &apply_opts(),
+        &classifiers,
+        &stop,
+    )
+    .expect("apply");
+
+    assert_eq!(fallback_calls.get(), 1);
+    assert!(written.is_empty(), "nothing written: {written:?}");
+    assert_eq!(
+        std::fs::read(root.join("inbox/alpha.md")).unwrap(),
+        before,
+        "no needs-review write"
+    );
+}
+
+/// Without a stop, a total classifier failure still holds the note for
+/// review: the discard applies only once the flag is set.
+#[test]
+fn total_failure_without_a_stop_still_holds_the_note_for_review() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("inbox")).unwrap();
+    std::fs::write(root.join("inbox/alpha.md"), inbox_note("alpha")).unwrap();
+
+    let stop = StopHandle::never();
+    let (primary, _) = stopping_stub(&[], true, &stop, NEVER);
+    let (fallback, fallback_calls) = stopping_stub(&[], true, &stop, NEVER);
+    let classifiers = Classifiers::new(primary, fallback, test_canon());
+
+    let (_report, written) = apply_classify(
+        root,
+        &scan_sorted(root),
+        &Config::default(),
+        &apply_opts(),
+        &classifiers,
+        &stop,
+    )
+    .expect("apply");
+
+    assert_eq!(fallback_calls.get(), 1);
+    assert_eq!(written, vec!["inbox/alpha.md".to_string()]);
+    let after = std::fs::read_to_string(root.join("inbox/alpha.md")).unwrap();
+    assert!(after.contains("cortex-needs-review: true"), "held for review:\n{after}");
 }

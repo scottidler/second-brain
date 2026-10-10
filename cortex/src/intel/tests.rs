@@ -66,7 +66,17 @@ fn daily_digest_second_run_on_unchanged_inputs_makes_zero_llm_calls_and_zero_wri
     let llm = CountingLlm::new();
 
     // First run: notes present -> exactly one LLM call, digest written.
-    let report = generate(v.root(), &notes, &config, &llm_config, &fabric, &opts, &llm).expect("generate 1");
+    let report = generate(
+        v.root(),
+        &notes,
+        &config,
+        &llm_config,
+        &ShellFabric(&fabric),
+        &opts,
+        &llm,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("generate 1");
     assert_eq!(llm.count(), 1, "first run must make exactly one LLM call");
     let digest_path = report.output_path.clone();
     assert!(digest_path.exists(), "first run must write the digest");
@@ -88,7 +98,17 @@ fn daily_digest_second_run_on_unchanged_inputs_makes_zero_llm_calls_and_zero_wri
     std::thread::sleep(std::time::Duration::from_millis(20));
 
     // Second run: identical inputs -> ZERO additional LLM calls, ZERO writes.
-    generate(v.root(), &notes, &config, &llm_config, &fabric, &opts, &llm).expect("generate 2");
+    generate(
+        v.root(),
+        &notes,
+        &config,
+        &llm_config,
+        &ShellFabric(&fabric),
+        &opts,
+        &llm,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("generate 2");
     assert_eq!(
         llm.count(),
         1,
@@ -129,7 +149,17 @@ fn daily_digest_regenerates_when_inputs_change() {
     let llm = CountingLlm::new();
 
     let notes1 = v.scan();
-    generate(v.root(), &notes1, &config, &llm_config, &fabric, &opts, &llm).expect("generate 1");
+    generate(
+        v.root(),
+        &notes1,
+        &config,
+        &llm_config,
+        &ShellFabric(&fabric),
+        &opts,
+        &llm,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("generate 1");
     assert_eq!(llm.count(), 1);
 
     // Change the input set: add another note dated yesterday.
@@ -140,7 +170,17 @@ fn daily_digest_regenerates_when_inputs_change() {
         ),
     );
     let notes2 = v.scan();
-    generate(v.root(), &notes2, &config, &llm_config, &fabric, &opts, &llm).expect("generate 2");
+    generate(
+        v.root(),
+        &notes2,
+        &config,
+        &llm_config,
+        &ShellFabric(&fabric),
+        &opts,
+        &llm,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("generate 2");
     assert_eq!(
         llm.count(),
         2,
@@ -161,7 +201,17 @@ fn test_daily_digest_on_vault() {
     };
 
     let fabric = FabricConfig::default();
-    generate(v.root(), &notes, &config, &llm_config, &fabric, &opts, &AnthropicLlm).expect("generate");
+    generate(
+        v.root(),
+        &notes,
+        &config,
+        &llm_config,
+        &ShellFabric(&fabric),
+        &opts,
+        &AnthropicLlm,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("generate");
 
     let today = Local::now().format("%Y-%m-%d").to_string();
     let digest_path = v.root().join("notes/ai/daily").join(format!("{today}.md"));
@@ -188,7 +238,17 @@ fn test_weekly_review_on_vault() {
     };
 
     let fabric = FabricConfig::default();
-    generate(v.root(), &notes, &config, &llm_config, &fabric, &opts, &AnthropicLlm).expect("generate");
+    generate(
+        v.root(),
+        &notes,
+        &config,
+        &llm_config,
+        &ShellFabric(&fabric),
+        &opts,
+        &AnthropicLlm,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("generate");
 
     let output_dir = v.root().join("notes/ai/weekly");
     assert!(output_dir.exists());
@@ -299,7 +359,17 @@ fn test_daily_digest_fallback_on_llm_failure() {
     };
 
     let fabric = FabricConfig::default();
-    generate(v.root(), &notes, &config, &llm_config, &fabric, &opts, &AnthropicLlm).expect("generate");
+    generate(
+        v.root(),
+        &notes,
+        &config,
+        &llm_config,
+        &ShellFabric(&fabric),
+        &opts,
+        &AnthropicLlm,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("generate");
 
     let today = Local::now().format("%Y-%m-%d").to_string();
     let digest_path = v.root().join("notes/ai/daily").join(format!("{today}.md"));
@@ -310,4 +380,110 @@ fn test_daily_digest_fallback_on_llm_failure() {
         content.contains("[[yesterday-note|Yesterday Note]]"),
         "should list the note"
     );
+}
+
+// ---- stop check point before the Fabric fallback ----
+
+/// An LLM double that fails every call, setting the stop flag first when
+/// `stop` is given: the call the stop interrupted.
+struct FailingLlm {
+    stop: Option<crate::shutdown::StopHandle>,
+}
+
+impl IntelLlm for FailingLlm {
+    fn complete(&self, _: &str, _: &str, _: &str, _: u32, _: u64, _: &str) -> Result<String> {
+        if let Some(stop) = &self.stop {
+            stop.stop();
+        }
+        Err(eyre::eyre!("stub LLM failure"))
+    }
+}
+
+/// A Fabric double that is always available and counts its calls.
+struct CountingFabric {
+    calls: AtomicUsize,
+}
+
+impl IntelFabric for CountingFabric {
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn run_pattern(&self, _pattern: &str, _input: &str, _timeout_secs: u64) -> Result<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok("fabric wisdom".to_string())
+    }
+}
+
+fn weekly_fixture() -> (TestVault, Vec<Note>, IntelOpts) {
+    let v = TestVault::new();
+    v.add_note(
+        "this-week.md",
+        "---\ntitle: This Week\ndate: 2026-01-06\ntype: note\norigin: authored\ntags: [rust]\n---\nA note from this week.\n",
+    );
+    let notes = v.scan();
+    let opts = IntelOpts {
+        mode: IntelMode::Weekly,
+        output: None,
+        as_of: chrono::NaiveDate::from_ymd_opt(2026, 1, 7),
+    };
+    (v, notes, opts)
+}
+
+/// The vault's intel config with the weekly Fabric fallback configured, so
+/// only the stop can skip it.
+fn with_weekly_fallback(v: &TestVault) -> IntelConfig {
+    IntelConfig {
+        batch_weekly: Some("weekly_digest".to_string()),
+        ..v.config().actions.intel
+    }
+}
+
+/// LLM fails after the flag is set: the Fabric fallback is never called and
+/// the review is not written.
+#[test]
+fn weekly_llm_failure_after_the_stop_skips_the_fabric_fallback_and_writes_nothing() {
+    let (v, notes, opts) = weekly_fixture();
+    let config = with_weekly_fallback(&v);
+    let stop = crate::shutdown::StopHandle::never();
+    let llm = FailingLlm {
+        stop: Some(stop.clone()),
+    };
+    let fabric = CountingFabric {
+        calls: AtomicUsize::new(0),
+    };
+
+    let report = generate(v.root(), &notes, &config, &v.config().llm, &fabric, &opts, &llm, &stop).expect("generate");
+
+    assert_eq!(fabric.calls.load(Ordering::SeqCst), 0, "no Fabric call after the stop");
+    assert!(report.stopped);
+    assert!(!report.output_path.exists(), "a stopped review writes nothing");
+}
+
+/// Without a stop the same LLM failure falls back to Fabric, as before.
+#[test]
+fn weekly_llm_failure_without_a_stop_falls_back_to_fabric() {
+    let (v, notes, opts) = weekly_fixture();
+    let config = with_weekly_fallback(&v);
+    let llm = FailingLlm { stop: None };
+    let fabric = CountingFabric {
+        calls: AtomicUsize::new(0),
+    };
+
+    let report = generate(
+        v.root(),
+        &notes,
+        &config,
+        &v.config().llm,
+        &fabric,
+        &opts,
+        &llm,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("generate");
+
+    assert_eq!(fabric.calls.load(Ordering::SeqCst), 1);
+    assert!(!report.stopped);
+    let content = std::fs::read_to_string(&report.output_path).expect("review written");
+    assert!(content.contains("fabric wisdom"), "{content}");
 }

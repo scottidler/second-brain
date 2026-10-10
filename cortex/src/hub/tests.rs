@@ -149,7 +149,7 @@ fn graph_skips_edges_to_out_of_band_deleted_hub() {
         ..GraphConfig::default()
     };
 
-    crate::graph::build(&mut index, &cfg, true).expect("build1");
+    crate::graph::build(&mut index, &cfg, true, &crate::shutdown::StopHandle::never()).expect("build1");
     assert!(
         index.count_edges(Some("shared-tag")).expect("count") >= 3,
         "each over-cap note routes one edge to the hub"
@@ -164,7 +164,8 @@ fn graph_skips_edges_to_out_of_band_deleted_hub() {
 
     // Re-run the graph pass (full rebuild). The hub is gone, so the over-cap
     // tag has no hub to route to -> edges are skipped, NOT an abort/crash.
-    let stats = crate::graph::build(&mut index, &cfg, true).expect("build2 must not crash");
+    let stats = crate::graph::build(&mut index, &cfg, true, &crate::shutdown::StopHandle::never())
+        .expect("build2 must not crash");
     assert_eq!(
         index.count_edges(Some("shared-tag")).expect("count"),
         0,

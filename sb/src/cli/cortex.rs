@@ -574,7 +574,8 @@ impl CortexCli {
         match self.command {
             Command::Classify(a) => {
                 let apply = a.apply;
-                let (report, _written) = cortex::classify::run(&vault_root, &config, &a.into())?;
+                let (report, _written) =
+                    cortex::classify::run(&vault_root, &config, &a.into(), &cortex::shutdown::StopHandle::never())?;
                 if apply {
                     println!("Classified {} note(s).", report.applied);
                     for line in report.format_human(true) {
@@ -613,7 +614,8 @@ impl CortexCli {
                 print_unlink_stats(&stats);
             }
             Command::Intel(a) => {
-                let report = cortex::intel::run(&vault_root, &config, &a.into())?;
+                let report =
+                    cortex::intel::run(&vault_root, &config, &a.into(), &cortex::shutdown::StopHandle::never())?;
                 print_intel_report(&report);
             }
             Command::State(a) => {
@@ -683,7 +685,8 @@ impl CortexCli {
                 }
             }
             Command::Graph(a) => {
-                let stats = cortex::graph::run(&vault_root, &config, &a.into())?;
+                let stats =
+                    cortex::graph::run(&vault_root, &config, &a.into(), &cortex::shutdown::StopHandle::never())?;
                 println!(
                     "graph complete: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={} repo_member={} creator_member={} source_member={} skipped={}",
                     stats.full_rebuild,
@@ -707,7 +710,8 @@ impl CortexCli {
                 if !a.discover {
                     eyre::bail!("nothing to do: pass --discover to run the entity discovery pass");
                 }
-                let report = cortex::entities::run(&vault_root, &config, &a.into())?;
+                let report =
+                    cortex::entities::run(&vault_root, &config, &a.into(), &cortex::shutdown::StopHandle::never())?;
                 match &report.proposals_path {
                     Some(path) => println!(
                         "entities discover: scanned {} note(s), {} proposal(s) -> {path}",

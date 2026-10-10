@@ -93,7 +93,7 @@ fn parse_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
 pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<(Report, LintApplyReport)> {
     log::info!("starting lint run (vault_root={})", vault_root.display());
     let all_notes = scan_vault(vault_root, &config.vault)?;
-    lint_with_notes(&all_notes, vault_root, config, opts)
+    lint_with_notes(&all_notes, vault_root, config, opts, &shutdown::StopHandle::never())
 }
 
 /// Same as `lint`, but takes an already-scanned note list instead of scanning
@@ -102,11 +102,16 @@ pub fn lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<(Repo
 /// once per cycle and shares the result across every action - `lint` stays
 /// the scan-then-delegate entry point every other caller (CLI, tests) keeps
 /// using unmodified.
+///
+/// `stop` reaches the naming applier only, which checks it before every
+/// rename; the other appliers are short and per-file atomic, so the daemon
+/// checks around the whole lint action instead.
 pub fn lint_with_notes(
     all_notes: &[Note],
     vault_root: &Path,
     config: &Config,
     opts: &LintOpts,
+    stop: &shutdown::StopHandle,
 ) -> Result<(Report, LintApplyReport)> {
     log::debug!(
         "lint_with_notes: vault_root={} note_count={} apply={}",
@@ -161,7 +166,7 @@ pub fn lint_with_notes(
     if rules.contains(&"naming") {
         report.merge(naming::lint_naming(&lintable_notes, &config.actions.naming));
         if opts.apply {
-            let applied = naming::apply_naming(vault_root, &lintable_notes, &config.actions.naming)?;
+            let applied = naming::apply_naming(vault_root, &lintable_notes, &config.actions.naming, stop)?;
             written_paths.extend(applied.written);
             report.add_unreadable_after_rename("naming", &applied.unreadable);
         }

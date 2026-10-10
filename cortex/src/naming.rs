@@ -5,6 +5,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::config::NamingConfig;
 use crate::report::{Fix, Report, Severity, Violation};
+use crate::shutdown::StopHandle;
 use crate::vault::Note;
 
 /// Convert a filename to lowercase-hyphenated slug.
@@ -149,7 +150,31 @@ pub fn lint_naming(notes: &[Note], config: &NamingConfig) -> Report {
 /// oscillation fingerprint (`LintApplyReport.written_paths`) draws from -
 /// callers must never substitute the lint report's violation paths, which
 /// include renames skipped as would-clobber.
-pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) -> eyre::Result<NamingApplied> {
+///
+/// `stop` is checked before every rename. The relink of renames already made
+/// is mandatory cleanup: it runs when the loop stops, and when a rename or
+/// `create_dir_all` fails mid-loop (the error is returned after it).
+pub fn apply_naming(
+    vault_root: &Path,
+    notes: &[Note],
+    config: &NamingConfig,
+    stop: &StopHandle,
+) -> eyre::Result<NamingApplied> {
+    apply_naming_with(vault_root, notes, config, stop, |from, to| std::fs::rename(from, to))
+}
+
+/// `apply_naming` with the filesystem rename injected, so tests can stop or
+/// fail the loop at a chosen rename.
+fn apply_naming_with<R>(
+    vault_root: &Path,
+    notes: &[Note],
+    config: &NamingConfig,
+    stop: &StopHandle,
+    rename: R,
+) -> eyre::Result<NamingApplied>
+where
+    R: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
     log::debug!(
         "naming::apply_naming: vault_root={} notes={}",
         vault_root.display(),
@@ -169,12 +194,79 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
         return Ok(NamingApplied::default());
     }
 
-    // Execute renames. Skip (never clobber) when the destination already
-    // exists: on a Syncthing'd vault a real file could occupy the normalized
-    // name, and `fs::rename` would silently destroy it. Only actually-applied
-    // renames feed the wikilink rewrite and the returned set.
     let mut applied = Vec::new();
-    for (from, to) in &renames {
+    let executed = execute_renames(vault_root, &renames, stop, rename, &mut applied);
+
+    // Batch update all wikilinks across the vault for the renames that landed,
+    // whatever ended the loop: a stop or an error after a completed rename
+    // must not leave links pointing at the old path.
+    let relinked = update_wikilinks_batch(vault_root, notes, &applied);
+    let end = match executed {
+        Ok(end) => end,
+        Err(e) => {
+            match &relinked {
+                Ok(r) => log::warn!(
+                    "naming: rename loop failed after {} completed rename(s); relinked {} note(s) before returning the error",
+                    applied.len(),
+                    r.rewritten.len()
+                ),
+                Err(re) => log::error!(
+                    "naming: rename loop failed after {} completed rename(s), and their relink failed too: {re:#}",
+                    applied.len()
+                ),
+            }
+            return Err(e);
+        }
+    };
+    let relinked = relinked?;
+
+    let mut written: Vec<String> = applied.iter().map(|(_, to)| to.to_string_lossy().to_string()).collect();
+    written.extend(relinked.rewritten);
+    log::debug!(
+        "naming::apply_naming: renamed={} written={} unreadable={} stopped={}",
+        applied.len(),
+        written.len(),
+        relinked.unreadable.len(),
+        end == RenameLoop::Stopped
+    );
+    Ok(NamingApplied {
+        written,
+        unreadable: relinked.unreadable,
+        stopped: end == RenameLoop::Stopped,
+    })
+}
+
+/// How the rename loop ended when it did not error.
+#[derive(Debug, PartialEq, Eq)]
+enum RenameLoop {
+    Complete,
+    Stopped,
+}
+
+/// Execute renames in order, pushing each one that lands onto `applied`.
+/// Skip (never clobber) when the destination already exists: on a
+/// Syncthing'd vault a real file could occupy the normalized name, and
+/// `fs::rename` would silently destroy it. Only actually-applied renames feed
+/// the wikilink rewrite and the returned set.
+fn execute_renames<R>(
+    vault_root: &Path,
+    renames: &[(PathBuf, PathBuf)],
+    stop: &StopHandle,
+    mut rename: R,
+    applied: &mut Vec<(PathBuf, PathBuf)>,
+) -> eyre::Result<RenameLoop>
+where
+    R: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    for (from, to) in renames {
+        if stop.is_stopped() {
+            log::info!(
+                "naming: stopped at a check point before {}; relinking {} rename(s) already made",
+                from.display(),
+                applied.len()
+            );
+            return Ok(RenameLoop::Stopped);
+        }
         let abs_from = vault_root.join(from);
         let abs_to = vault_root.join(to);
 
@@ -201,34 +293,22 @@ pub fn apply_naming(vault_root: &Path, notes: &[Note], config: &NamingConfig) ->
             continue;
         }
 
-        std::fs::rename(&abs_from, &abs_to)?;
+        rename(&abs_from, &abs_to)?;
         log::info!("renamed file: {} -> {}", from.display(), to.display());
         applied.push((from.clone(), to.clone()));
     }
-
-    // Batch update all wikilinks across the vault for the renames that landed.
-    let relinked = update_wikilinks_batch(vault_root, notes, &applied)?;
-
-    let mut written: Vec<String> = applied.iter().map(|(_, to)| to.to_string_lossy().to_string()).collect();
-    written.extend(relinked.rewritten);
-    log::debug!(
-        "naming::apply_naming: renamed={} written={} unreadable={}",
-        applied.len(),
-        written.len(),
-        relinked.unreadable.len()
-    );
-    Ok(NamingApplied {
-        written,
-        unreadable: relinked.unreadable,
-    })
+    Ok(RenameLoop::Complete)
 }
 
-/// What `apply_naming` did: the paths it wrote, and the notes it could not
-/// read to relink (their wikilinks to the renamed files are now stale).
+/// What `apply_naming` did: the paths it wrote, the notes it could not read
+/// to relink (their wikilinks to the renamed files are now stale), and
+/// whether a stop cut the loop short.
 #[derive(Debug, Default)]
 pub struct NamingApplied {
     pub written: Vec<String>,
     pub unreadable: Vec<PathBuf>,
+    /// The loop stopped at a check point; renames after it were not tried.
+    pub stopped: bool,
 }
 
 /// Result of a batch wikilink rewrite. `unreadable` notes were skipped, not

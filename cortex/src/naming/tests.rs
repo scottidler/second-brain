@@ -97,7 +97,9 @@ fn test_apply_naming_renames_files() {
     let notes = v.scan();
     let config = v.config().actions.naming;
 
-    let renames = apply_naming(v.root(), &notes, &config).expect("apply").written;
+    let renames = apply_naming(v.root(), &notes, &config, &crate::shutdown::StopHandle::never())
+        .expect("apply")
+        .written;
     assert!(!renames.is_empty());
     // "My Awesome Note.md" should be renamed to "my-awesome-note.md"
     assert!(v.exists("my-awesome-note.md"));
@@ -292,7 +294,7 @@ fn apply_naming_reports_the_unreadable_note_and_the_lint_report_names_it() {
     std::fs::write(v.root().join("linker.md"), [0xff, 0xfe, 0x00]).expect("corrupt");
     let config = v.config().actions.naming;
 
-    let applied = apply_naming(v.root(), &notes, &config).expect("apply");
+    let applied = apply_naming(v.root(), &notes, &config, &crate::shutdown::StopHandle::never()).expect("apply");
 
     assert!(v.exists("my-renamed-note.md"), "the rename itself still landed");
     assert_eq!(applied.unreadable, vec![PathBuf::from("linker.md")]);
@@ -302,4 +304,126 @@ fn apply_naming_reports_the_unreadable_note_and_the_lint_report_names_it() {
     assert_eq!(report.violations.len(), 1);
     assert_eq!(report.violations[0].path, PathBuf::from("linker.md"));
     assert_eq!(report.violations[0].severity, crate::report::Severity::Warning);
+}
+
+// ---- stop check points and relink on stop or error ----
+
+const FM: &str = "---\ntitle: T\ndate: 2026-10-01\ntype: note\norigin: authored\ntags: []\n---\n\n";
+
+/// A vault of three badly named notes and one note linking to all three, in a
+/// tempdir with no other notes, so its broken-link count starts at 0.
+fn three_renames_vault() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    for name in ["Alpha Note", "Beta Note", "Gamma Note"] {
+        std::fs::write(dir.path().join(format!("{name}.md")), format!("{FM}{name} body\n")).unwrap();
+    }
+    std::fs::write(
+        dir.path().join("refs.md"),
+        format!("{FM}See [[Alpha Note]], [[Beta Note]] and [[Gamma Note]].\n"),
+    )
+    .unwrap();
+    dir
+}
+
+/// Path order, so the rename order is Alpha, Beta, Gamma.
+fn scan_sorted(root: &Path) -> Vec<Note> {
+    let mut notes = crate::vault::scan_vault(root, &crate::config::VaultConfig::default()).expect("scan");
+    notes.sort_by(|a, b| a.path.cmp(&b.path));
+    notes
+}
+
+fn broken_link_count(root: &Path) -> usize {
+    let notes = scan_sorted(root);
+    crate::links::lint_broken_links(&notes, &notes, &crate::config::BrokenLinksConfig::default())
+        .violations
+        .len()
+}
+
+/// Flag set after rename 1 of 3: note 1 is renamed, notes 2 and 3 keep their
+/// names, the referrer is relinked to note 1's new name, and the vault has no
+/// broken wikilink.
+#[test]
+fn stop_after_rename_one_relinks_it_and_leaves_the_rest() {
+    let dir = three_renames_vault();
+    let root = dir.path();
+    assert_eq!(broken_link_count(root), 0, "fixture starts clean");
+    let notes = scan_sorted(root);
+    let stop = StopHandle::never();
+    let mut renames = 0;
+    let rename = |from: &Path, to: &Path| {
+        renames += 1;
+        std::fs::rename(from, to)?;
+        if renames == 1 {
+            stop.stop();
+        }
+        Ok(())
+    };
+
+    let applied =
+        apply_naming_with(root, &notes, &NamingConfig::default(), &stop, rename).expect("a stop is not an error");
+
+    assert!(applied.stopped);
+    assert!(root.join("alpha-note.md").exists(), "note 1 renamed");
+    assert!(
+        root.join("Beta Note.md").exists() && root.join("Gamma Note.md").exists(),
+        "notes 2 and 3 untouched"
+    );
+    assert!(!root.join("beta-note.md").exists() && !root.join("gamma-note.md").exists());
+    let refs = std::fs::read_to_string(root.join("refs.md")).unwrap();
+    assert!(
+        refs.contains("[[alpha-note]]"),
+        "referrer relinked to note 1's new name:\n{refs}"
+    );
+    assert!(
+        refs.contains("[[Beta Note]]") && refs.contains("[[Gamma Note]]"),
+        "{refs}"
+    );
+    assert_eq!(broken_link_count(root), 0, "no broken wikilink after a stopped run");
+    assert!(applied.written.contains(&"refs.md".to_string()));
+}
+
+/// A rename that fails on note 2 returns the error, and note 1's completed
+/// rename is relinked before it returns.
+#[test]
+fn rename_error_on_note_two_relinks_note_one_before_returning_the_error() {
+    let dir = three_renames_vault();
+    let root = dir.path();
+    let notes = scan_sorted(root);
+    let mut renames = 0;
+    let rename = |from: &Path, to: &Path| {
+        renames += 1;
+        if renames == 2 {
+            return Err(std::io::Error::other("injected rename failure"));
+        }
+        std::fs::rename(from, to)
+    };
+
+    let err = apply_naming_with(root, &notes, &NamingConfig::default(), &StopHandle::never(), rename)
+        .expect_err("the rename error is returned");
+
+    assert!(format!("{err:#}").contains("injected rename failure"), "{err:#}");
+    assert!(root.join("alpha-note.md").exists(), "note 1's rename landed");
+    assert!(root.join("Beta Note.md").exists() && root.join("Gamma Note.md").exists());
+    let refs = std::fs::read_to_string(root.join("refs.md")).unwrap();
+    assert!(
+        refs.contains("[[alpha-note]]"),
+        "note 1 relinked before the error returned:\n{refs}"
+    );
+    assert_eq!(broken_link_count(root), 0);
+}
+
+/// A flag set before the first rename renames nothing and writes nothing.
+#[test]
+fn preset_stop_renames_nothing() {
+    let dir = three_renames_vault();
+    let root = dir.path();
+    let notes = scan_sorted(root);
+    let stop = StopHandle::never();
+    stop.stop();
+
+    let applied = apply_naming(root, &notes, &NamingConfig::default(), &stop).expect("apply");
+
+    assert!(applied.stopped);
+    assert!(applied.written.is_empty(), "{:?}", applied.written);
+    assert!(root.join("Alpha Note.md").exists());
 }

@@ -10,6 +10,7 @@ use vault::watcher::{VaultWatcher, WatcherConfig};
 
 use crate::config::{Config, DaemonConfig, VaultConfig};
 use crate::opts::DaemonOpts;
+use crate::shutdown::StopHandle;
 use crate::vault::Note;
 
 /// Fingerprint of a single sweep's apply results.
@@ -217,7 +218,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     log::info!("running initial full sweep");
     applying.store(true, Ordering::Relaxed);
     let mut last_fingerprint =
-        tokio::task::block_in_place(|| configured_actions(vault_root, config, daemon_config, &[]));
+        tokio::task::block_in_place(|| configured_actions(vault_root, config, daemon_config, &[], &stop));
     applying.store(false, Ordering::Relaxed);
     // True once two consecutive periodic sweeps produced the IDENTICAL non-empty
     // fingerprint (same actions, same files) - genuine oscillation. A real user
@@ -245,7 +246,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 }
                 applying.store(true, Ordering::Relaxed);
                 let fingerprint = tokio::task::block_in_place(|| {
-                    configured_actions(vault_root, config, daemon_config, &pending)
+                    configured_actions(vault_root, config, daemon_config, &pending, &stop)
                 });
                 applying.store(false, Ordering::Relaxed);
                 // Real user edit - clear oscillation latch and re-baseline.
@@ -264,12 +265,12 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     log::warn!("oscillation latched: skipping periodic sweep (classify only) until a watcher event");
                     // classify is idempotent (marks cortex-classified: true), so it
                     // can never oscillate and must keep promoting new inbox notes.
-                    tokio::task::block_in_place(|| classify_only(vault_root, config, daemon_config));
+                    tokio::task::block_in_place(|| classify_only(vault_root, config, daemon_config, &stop));
                 } else {
                     log::info!("running periodic sweep");
                     applying.store(true, Ordering::Relaxed);
                     let fingerprint = tokio::task::block_in_place(|| {
-                        configured_actions(vault_root, config, daemon_config, &[])
+                        configured_actions(vault_root, config, daemon_config, &[], &stop)
                     });
                     applying.store(false, Ordering::Relaxed);
                     if !fingerprint.is_empty() && fingerprint == last_fingerprint {
@@ -294,7 +295,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 // scheduled arms were previously unguarded - a self-write here
                 // was one of the paths that re-triggered the watcher).
                 applying.store(true, Ordering::Relaxed);
-                let intel_result = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts));
+                let intel_result = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts, &stop));
                 applying.store(false, Ordering::Relaxed);
                 if let Err(e) = intel_result {
                     log::error!("scheduled daily intel failed: {e}");
@@ -318,7 +319,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 // the daily arm above) so the review write cannot re-trigger the
                 // watcher and clear the oscillation latch.
                 applying.store(true, Ordering::Relaxed);
-                let intel_result = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts));
+                let intel_result = tokio::task::block_in_place(|| crate::intel::run(vault_root, config, &opts, &stop));
                 applying.store(false, Ordering::Relaxed);
                 if let Err(e) = intel_result {
                     log::error!("scheduled weekly intel failed: {e}");
@@ -359,11 +360,11 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 // SQLite IO + brute-force cosine (when notes changed); it must
                 // not starve the watcher/timers. Ordered after the embed tick
                 // via cadence so semantic edges see fresh vectors.
-                match tokio::task::block_in_place(|| crate::graph::daemon_tick(vault_root, config)) {
-                    Ok(stats) if stats.notes_processed > 0 => log::info!(
-                        "daemon graph tick: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={} repo_member={} creator_member={} source_member={}",
+                match tokio::task::block_in_place(|| crate::graph::daemon_tick(vault_root, config, &stop)) {
+                    Ok(stats) if stats.notes_processed > 0 || stats.stopped => log::info!(
+                        "daemon graph tick: full_rebuild={} notes={} semantic={} wikilink={} shared_tag={} metadata={} repo_member={} creator_member={} source_member={} stopped={}",
                         stats.full_rebuild, stats.notes_processed, stats.semantic, stats.wikilink, stats.shared_tag, stats.metadata,
-                        stats.repo_member, stats.creator_member, stats.source_member,
+                        stats.repo_member, stats.creator_member, stats.source_member, stats.stopped,
                     ),
                     Ok(_) => {
                         // Idle tick - no changed notes. Stay quiet.
@@ -377,10 +378,10 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 // extraction) + SQLite IO; bounded by graph.fact_max_per_run.
                 // Takes the embed lock in-process so it cannot collide with the
                 // embed/graph ticks.
-                match tokio::task::block_in_place(|| crate::graph::fact_backfill(vault_root, config)) {
+                match tokio::task::block_in_place(|| crate::graph::fact_backfill(vault_root, config, &stop)) {
                     Ok(stats) => log::info!(
-                        "daemon fact tick: facts_written={} noise_removed={} contradictions={} bridges_added={}",
-                        stats.facts_written, stats.noise_removed, stats.contradictions, stats.bridges_added,
+                        "daemon fact tick: facts_written={} noise_removed={} contradictions={} bridges_added={} stopped={}",
+                        stats.facts_written, stats.noise_removed, stats.contradictions, stats.bridges_added, stats.stopped,
                     ),
                     Err(e) => log::error!("daemon fact tick failed: {e}"),
                 }
@@ -420,10 +421,10 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 // Entity-discovery tick. block_in_place because the
                 // pass runs blocking Fabric subprocess calls; bounded by
                 // entities.max_per_run.
-                match tokio::task::block_in_place(|| crate::entities::daemon_tick(vault_root, config)) {
-                    Ok(report) if report.proposals > 0 => log::info!(
-                        "daemon entities tick: scanned={} proposals={}",
-                        report.notes_scanned, report.proposals,
+                match tokio::task::block_in_place(|| crate::entities::daemon_tick(vault_root, config, &stop)) {
+                    Ok(report) if report.proposals > 0 || report.stopped => log::info!(
+                        "daemon entities tick: scanned={} proposals={} stopped={}",
+                        report.notes_scanned, report.proposals, report.stopped,
                     ),
                     Ok(_) => {
                         // No new proposals. Stay quiet.
@@ -455,7 +456,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
 
 /// Run classify only - used during cycle detection since classify is inherently idempotent
 /// (notes are marked cortex-classified: true and never reprocessed).
-fn classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonConfig) {
+fn classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonConfig, stop: &StopHandle) {
     if !daemon_config.configured_actions().contains(&"classify") {
         return;
     }
@@ -466,7 +467,7 @@ fn classify_only(vault_root: &Path, config: &Config, daemon_config: &DaemonConfi
         review_only: false,
         retag: Vec::new(),
     };
-    match crate::classify::run(vault_root, config, &opts) {
+    match crate::classify::run(vault_root, config, &opts, stop) {
         Ok((_report, written)) => {
             if !written.is_empty() {
                 log::info!("classify (cycle-exempt): wrote {} note(s)", written.len());
@@ -486,12 +487,14 @@ fn configured_actions(
     config: &Config,
     daemon_config: &DaemonConfig,
     changed_files: &[PathBuf],
+    stop: &StopHandle,
 ) -> SweepFingerprint {
     configured_actions_with_scanner(
         vault_root,
         config,
         daemon_config,
         changed_files,
+        stop,
         crate::vault::scan_vault,
     )
 }
@@ -525,11 +528,18 @@ fn configured_actions(
 /// writes during a cycle that also runs a cache-consuming action, the cache is
 /// conservatively marked dirty (see the `"intel"` arm) so a later reader in
 /// the same cycle cannot see a stale list.
+///
+/// STOP CHECK POINTS: `stop` is checked before every action, and again after
+/// a rescan, so no action starts once the flag is set and no rescan runs for
+/// an action that will not. classify and lint's naming applier also check
+/// inside their own loops. Every other action, intel's daily digest included
+/// (one LLM call, no fallback), is checked around only.
 fn configured_actions_with_scanner<S>(
     vault_root: &Path,
     config: &Config,
     daemon_config: &DaemonConfig,
     changed_files: &[PathBuf],
+    stop: &StopHandle,
     mut scan: S,
 ) -> SweepFingerprint
 where
@@ -559,6 +569,9 @@ where
     let mut dirty = false;
 
     for action in &action_names {
+        if stopped_before(stop, action) {
+            return fingerprint;
+        }
         // Rescan boundary: a prior action in this cycle wrote to disk, so the
         // cached `notes` is stale for every reader from here on until refreshed.
         if dirty {
@@ -569,6 +582,9 @@ where
                 }
             }
             dirty = false;
+            if stopped_before(stop, action) {
+                return fingerprint;
+            }
         }
 
         match *action {
@@ -581,7 +597,7 @@ where
                     review_only: false,
                     retag: Vec::new(),
                 };
-                match crate::classify::run_with_notes(&notes, vault_root, config, &opts) {
+                match crate::classify::run_with_notes(&notes, vault_root, config, &opts, stop) {
                     Ok((_report, written)) => {
                         // Fingerprint the paths classify ACTUALLY wrote - the
                         // lint/sweep shape - never a `"promoted"`
@@ -612,7 +628,7 @@ where
                     rule: Vec::new(),
                     path: None,
                 };
-                match crate::lint_with_notes(&notes, vault_root, config, &opts) {
+                match crate::lint_with_notes(&notes, vault_root, config, &opts, stop) {
                     Ok((report, lint_apply)) => {
                         if auto {
                             // Fingerprint ONLY the paths the four appliers actually
@@ -762,7 +778,8 @@ where
                 // cache dirty on success: `daemon_config.configured_actions()`
                 // order comes from a HashMap and is not guaranteed, so intel may
                 // run before a cache-consuming reader in this very cycle.
-                match crate::intel::run(vault_root, config, &opts) {
+                match crate::intel::run(vault_root, config, &opts, stop) {
+                    Ok(report) if report.stopped => {}
                     Ok(_) => dirty = true,
                     Err(e) => log::error!("intel action failed: {e}"),
                 }
@@ -836,6 +853,16 @@ where
 
     log::info!("daemon action cycle complete: {} changed file(s)", changed_files.len());
     fingerprint
+}
+
+/// The action-cycle stop check point: true, with a log line naming the action
+/// that will not run, once the stop flag is set.
+fn stopped_before(stop: &StopHandle, action: &str) -> bool {
+    let stopped = stop.is_stopped();
+    if stopped {
+        log::info!("action cycle stopped at a check point before {action}; the remaining actions do not run");
+    }
+    stopped
 }
 
 /// Describe `cortex.service` and render it through `vault::systemd`. Pure -
