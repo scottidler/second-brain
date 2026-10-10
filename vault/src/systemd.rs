@@ -75,6 +75,25 @@ pub struct Restart {
     pub sec: u32,
 }
 
+/// `[Service]` `KillMode=`: which processes in the unit's cgroup get the stop
+/// signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillMode {
+    /// SIGTERM to the main process only; SIGKILL to the rest at timeout.
+    Mixed,
+    /// SIGTERM to every process in the cgroup (systemd's default).
+    ControlGroup,
+}
+
+impl KillMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mixed => "mixed",
+            Self::ControlGroup => "control-group",
+        }
+    }
+}
+
 /// One `Environment="NAME=value"` line, optionally preceded by a comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvVar {
@@ -115,6 +134,12 @@ pub struct ServiceUnit {
     /// `ExecStart=` argv, space-joined; the first element is the binary.
     pub exec_start: Vec<String>,
     pub restart: Option<Restart>,
+    /// `TimeoutStopSec=` in seconds; the line is omitted when `None`.
+    pub timeout_stop_sec: Option<u64>,
+    /// `KillMode=`; the line is omitted when `None`.
+    pub kill_mode: Option<KillMode>,
+    /// `SuccessExitStatus=` codes, space-joined; the line is omitted when empty.
+    pub success_exit_status: Vec<i32>,
     pub hardening: Hardening,
     /// `[Install]` `WantedBy=`; the section is omitted when `None` (a
     /// timer-activated service is installed through its timer).
@@ -237,6 +262,16 @@ pub fn render_service(unit: &ServiceUnit) -> String {
     if let Some(restart) = unit.restart {
         let _ = writeln!(out, "Restart={}", restart.policy.as_str());
         let _ = writeln!(out, "RestartSec={}", restart.sec);
+    }
+    if let Some(secs) = unit.timeout_stop_sec {
+        let _ = writeln!(out, "TimeoutStopSec={secs}");
+    }
+    if let Some(mode) = unit.kill_mode {
+        let _ = writeln!(out, "KillMode={}", mode.as_str());
+    }
+    if !unit.success_exit_status.is_empty() {
+        let codes: Vec<String> = unit.success_exit_status.iter().map(i32::to_string).collect();
+        let _ = writeln!(out, "SuccessExitStatus={}", codes.join(" "));
     }
     let _ = writeln!(out, "WorkingDirectory={}", unit.home.display());
 

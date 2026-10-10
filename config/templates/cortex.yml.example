@@ -183,6 +183,17 @@ daemon:
   # against a runaway embed. Do not set this small on a many-core box: that
   # throttles every sweep to guard against what pool isolation already prevents.
   # rayon-threads: 8
+  # Rendered as `TimeoutStopSec=` in the installed unit (default 180): how long
+  # systemd waits after SIGTERM before SIGKILL. An in-flight Fabric, LLM or
+  # classifier call cannot be interrupted, so this must be at least the
+  # LARGEST per-call timeout + 30 (fabric.timeout-secs,
+  # entities.fabric-timeout-secs, graph.fact-timeout-secs,
+  # actions.intel.fabric-timeout-secs, actions.intel.llm-timeout-secs,
+  # tags.classifier.timeout-secs). `sb cortex daemon --install` refuses a value
+  # below that and `sb doctor` reports it as an Error. The user manager's own
+  # stop deadline (`user@<uid>.service` TimeoutStopUSec) must also be at least
+  # this + 30; doctor checks that too.
+  # stop-timeout-secs: 180
   # Optional secret/env bootstrap for the installed systemd unit: `command`'s
   # stdout is captured into `env-file` via an `ExecStartPre` shell redirect,
   # then the unit loads it with `EnvironmentFile=-<env-file>`. Omit this

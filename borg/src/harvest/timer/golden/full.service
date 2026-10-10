@@ -12,6 +12,7 @@ EnvironmentFile=-/run/user/1000/sb-harvest.env
 # any stale duplicate elsewhere on PATH.
 Environment="PATH=/home/tester/.local/share/mise/shims:/home/tester/.local/bin:/home/tester/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/home/tester/.cargo/bin/sb borg --config <XDG_CONFIG_HOME>/sb/borg.yml harvest
+SuccessExitStatus=130
 WorkingDirectory=/home/tester
 
 # Hardening (harvest writes the vault + ~/.local/share/sb, so no

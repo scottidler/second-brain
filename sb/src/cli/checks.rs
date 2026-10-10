@@ -156,7 +156,7 @@ fn systemd_findings() -> Vec<Finding> {
             )),
         }
     }
-    findings.extend(unit_drift_findings());
+    findings.extend(unit_drift_findings().into_iter().chain(stop_timeout::findings()));
     findings
 }
 
@@ -1494,7 +1494,7 @@ fn current_hostname() -> String {
     borg::config::current_hostname().unwrap_or_default()
 }
 
-mod vocab;
-
+mod stop_timeout;
 #[cfg(test)]
 mod tests;
+mod vocab;

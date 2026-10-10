@@ -248,3 +248,15 @@ fn golden_harvest_timer_nightly() {
     let (_service, timer) = golden_render(&cfg("*-*-* 04:30:00"), false);
     assert_eq!(timer, include_str!("golden/nightly.timer"));
 }
+
+#[test]
+fn harvest_service_treats_exit_130_as_success() {
+    let home = PathBuf::from("/home/tester");
+    let binary = PathBuf::from("/home/tester/.cargo/bin/sb");
+    let (service, _timer) = render_units(&home, &binary, None, &cfg("daily"));
+    assert_eq!(
+        service.lines().filter(|l| *l == "SuccessExitStatus=130").count(),
+        1,
+        "{service}"
+    );
+}

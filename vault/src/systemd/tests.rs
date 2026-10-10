@@ -19,6 +19,9 @@ fn strict_unit() -> ServiceUnit {
             policy: RestartPolicy::Always,
             sec: 5,
         }),
+        timeout_stop_sec: None,
+        kill_mode: None,
+        success_exit_status: Vec::new(),
         hardening: Hardening::Strict {
             rw_paths: vec![PathBuf::from("/a"), PathBuf::from("/b")],
         },
@@ -217,4 +220,32 @@ fn compare_installed_errors_on_unreadable_path() {
     let dir = tempfile::tempdir().unwrap();
     // A directory is not a readable file: an error, never "current".
     assert!(compare_installed(dir.path(), "abc").is_err());
+}
+
+#[test]
+fn unset_stop_fields_render_no_lines() {
+    let text = render_service(&strict_unit());
+    for key in ["TimeoutStopSec", "KillMode", "SuccessExitStatus"] {
+        assert!(!text.contains(key), "{key} must be omitted when unset:\n{text}");
+    }
+}
+
+#[test]
+fn stop_fields_render_between_restart_and_working_directory() {
+    let mut unit = strict_unit();
+    unit.timeout_stop_sec = Some(180);
+    unit.kill_mode = Some(KillMode::Mixed);
+    unit.success_exit_status = vec![130, 143];
+    let text = render_service(&unit);
+    assert!(
+        text.contains("RestartSec=5\nTimeoutStopSec=180\nKillMode=mixed\nSuccessExitStatus=130 143\nWorkingDirectory="),
+        "stop fields in order after RestartSec:\n{text}"
+    );
+}
+
+#[test]
+fn kill_mode_control_group_renders_its_systemd_name() {
+    let mut unit = strict_unit();
+    unit.kill_mode = Some(KillMode::ControlGroup);
+    assert!(render_service(&unit).contains("\nKillMode=control-group\n"));
 }

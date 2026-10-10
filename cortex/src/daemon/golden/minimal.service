@@ -8,6 +8,8 @@ Environment="PATH=/home/tester/.local/share/mise/shims:/home/tester/.local/bin:/
 ExecStart=/home/tester/.cargo/bin/sb cortex --vault /home/tester/repos/scottidler/obsidian --log-level info daemon --start
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=180
+KillMode=mixed
 WorkingDirectory=/home/tester
 
 # Hardening

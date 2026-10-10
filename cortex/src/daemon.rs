@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
-use vault::systemd::{EnvVar, Hardening, Restart, RestartPolicy, ServiceUnit, UnitType, render_service};
+use vault::systemd::{EnvVar, Hardening, KillMode, Restart, RestartPolicy, ServiceUnit, UnitType, render_service};
 use vault::watcher::{VaultWatcher, WatcherConfig};
 
 use crate::config::{Config, DaemonConfig, VaultConfig};
@@ -935,6 +935,12 @@ fn render_systemd_unit(
             policy: RestartPolicy::OnFailure,
             sec: 5,
         }),
+        timeout_stop_sec: Some(config.daemon.stop_timeout_secs),
+        // `mixed`: SIGTERM reaches cortex only, so an in-flight Fabric child
+        // finishes (bounded by its timeout) instead of being killed into a
+        // failure that classify would write as `needs-review`.
+        kill_mode: Some(KillMode::Mixed),
+        success_exit_status: Vec::new(),
         // Cortex writes under the sb data namespace too (the oracle DB it is
         // the sole embeddings writer for lives at `~/.local/share/sb/oracle/`),
         // so the unit must name it alongside the vault or
@@ -974,6 +980,7 @@ pub fn desired_systemd_unit(vault_root: &Path, config: &Config) -> Result<String
 /// should print (paths written, follow-up systemctl commands).
 fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<Vec<String>> {
     log::debug!("install_systemd_service: vault_root={}", vault_root.display());
+    ensure_stop_budget(&vault::paths::cortex_config())?;
     let mut lines = Vec::new();
     let service_dir = vault::systemd::user_unit_dir()?;
 
@@ -1159,6 +1166,9 @@ pub fn duration_until_next(schedule: &str) -> Duration {
         }
     }
 }
+
+mod stop_budget;
+use stop_budget::ensure_stop_budget;
 
 #[cfg(test)]
 mod tests;

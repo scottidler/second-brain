@@ -81,6 +81,11 @@ pub fn render_units(home: &Path, binary: &Path, config_path: Option<&Path>, conf
         extra_env: Vec::new(),
         exec_start,
         restart: None,
+        timeout_stop_sec: None,
+        kill_mode: None,
+        // The interrupt handler exits 130 on SIGINT/SIGTERM; under systemd only a
+        // stop delivers that, so it is a clean stop, not a failed run.
+        success_exit_status: vec![130],
         hardening: Hardening::Minimal {
             why: "harvest writes the vault + ~/.local/share/sb, so no\nProtectHome/ProtectSystem lockdown here"
                 .to_string(),

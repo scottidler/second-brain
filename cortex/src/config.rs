@@ -898,6 +898,48 @@ pub struct DaemonConfig {
     /// `daemon.env-bootstrap`: [`vault::systemd::EnvBootstrap`].
     #[serde(rename = "env-bootstrap")]
     pub env_bootstrap: Option<vault::systemd::EnvBootstrap>,
+    /// Rendered as `TimeoutStopSec=` in the installed unit: how long systemd
+    /// waits after SIGTERM before SIGKILL. Check points cannot interrupt an
+    /// in-flight call, so this must cover the longest per-call timeout plus
+    /// [`STOP_TIMEOUT_MARGIN_SECS`]; `sb cortex daemon --install` and
+    /// `sb doctor` both enforce it ([`Config::stop_budget_shortfall`]).
+    #[serde(rename = "stop-timeout-secs")]
+    pub stop_timeout_secs: u64,
+}
+
+/// Seconds `daemon.stop-timeout-secs` must exceed the longest per-call timeout
+/// by: the stretch from the call returning to cortex reaching its next check
+/// point and exiting.
+pub const STOP_TIMEOUT_MARGIN_SECS: u64 = 30;
+
+/// `daemon.stop-timeout-secs` is below the longest per-call timeout plus the
+/// margin. Names both config paths so the fix is a one-key edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopBudgetShortfall {
+    pub stop_timeout_secs: u64,
+    pub timeout_key: &'static str,
+    pub timeout_secs: u64,
+}
+
+impl StopBudgetShortfall {
+    pub fn required_secs(&self) -> u64 {
+        self.timeout_secs + STOP_TIMEOUT_MARGIN_SECS
+    }
+}
+
+impl std::fmt::Display for StopBudgetShortfall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "daemon.stop-timeout-secs ({}) is below {} ({}) + {}s margin = {}s; raise daemon.stop-timeout-secs to at least {}",
+            self.stop_timeout_secs,
+            self.timeout_key,
+            self.timeout_secs,
+            STOP_TIMEOUT_MARGIN_SECS,
+            self.required_secs(),
+            self.required_secs(),
+        )
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -936,6 +978,7 @@ impl Default for DaemonConfig {
             cold_interval_secs: 604_800,
             rayon_threads: 0,
             env_bootstrap: None,
+            stop_timeout_secs: 180,
         }
     }
 }
@@ -1050,6 +1093,54 @@ impl Config {
         let config: Self = serde_yaml::from_str(&content).context("failed to parse config file")?;
         log::info!("loaded config: {}", path.as_ref().display());
         Ok(config)
+    }
+
+    /// The six per-call timeouts a stop can wait out, by config path, in the
+    /// order a tie resolves to.
+    pub fn per_call_timeouts(&self) -> [(&'static str, u64); 6] {
+        [
+            ("fabric.timeout-secs", self.fabric.timeout_secs),
+            ("entities.fabric-timeout-secs", self.entities.fabric_timeout_secs),
+            ("graph.fact-timeout-secs", self.graph.fact_timeout_secs),
+            (
+                "actions.intel.fabric-timeout-secs",
+                self.actions.intel.fabric_timeout_secs,
+            ),
+            ("actions.intel.llm-timeout-secs", self.actions.intel.llm_timeout_secs),
+            ("tags.classifier.timeout-secs", self.tags.classifier.timeout_secs),
+        ]
+    }
+
+    /// `Some` when `daemon.stop-timeout-secs` is below the largest per-call
+    /// timeout plus [`STOP_TIMEOUT_MARGIN_SECS`]; the shortfall names the
+    /// offending timeout key (the first listed on a tie).
+    pub fn stop_budget_shortfall(&self) -> Option<StopBudgetShortfall> {
+        let (timeout_key, timeout_secs) = self
+            .per_call_timeouts()
+            .into_iter()
+            .fold(None::<(&'static str, u64)>, |best, cur| match best {
+                Some(b) if b.1 >= cur.1 => Some(b),
+                _ => Some(cur),
+            })
+            .expect("six timeouts are never empty");
+        let shortfall = StopBudgetShortfall {
+            stop_timeout_secs: self.daemon.stop_timeout_secs,
+            timeout_key,
+            timeout_secs,
+        };
+        (self.daemon.stop_timeout_secs < shortfall.required_secs()).then_some(shortfall)
+    }
+
+    /// The config the installed `cortex.service` loads: the file at
+    /// `path` (`vault::paths::cortex_config()` in production) when it exists,
+    /// defaults when it does not. A present file that fails to parse is an
+    /// error, as at daemon start.
+    pub fn load_service_config(path: &Path) -> Result<Self> {
+        if path.exists() {
+            Self::load_from_file(path).context(format!("failed to load config from {}", path.display()))
+        } else {
+            Ok(Self::default())
+        }
     }
 
     /// Resolve the vault root via the unified resolver. Precedence: CLI > config > marker-gated CWD.

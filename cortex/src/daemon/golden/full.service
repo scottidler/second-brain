@@ -12,6 +12,8 @@ Environment="RAYON_NUM_THREADS=8"
 ExecStart=/home/tester/.cargo/bin/sb cortex --config <XDG_CONFIG_HOME>/sb/cortex.yml --vault /home/tester/repos/scottidler/obsidian --log-level debug daemon --start
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=180
+KillMode=mixed
 WorkingDirectory=/home/tester
 
 # Hardening

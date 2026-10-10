@@ -1467,3 +1467,24 @@ fn both_actions_write_without_a_stop() {
     let actions: Vec<&str> = fingerprint.results.iter().map(|(a, _)| a.as_str()).collect();
     assert_eq!(actions, vec!["classify", "lint"], "{fingerprint:?}");
 }
+
+// ---- stop timeout rendering and install guard ----
+
+#[test]
+fn rendered_unit_has_default_timeout_stop_and_mixed_kill_mode() {
+    let unit = golden_render(&Config::default(), false);
+    assert!(unit.contains("\nTimeoutStopSec=180\n"), "{unit}");
+    assert!(unit.contains("\nKillMode=mixed\n"), "{unit}");
+}
+
+#[test]
+fn rendered_unit_takes_timeout_stop_from_the_config_key() {
+    let config = Config {
+        daemon: DaemonConfig {
+            stop_timeout_secs: 240,
+            ..DaemonConfig::default()
+        },
+        ..Config::default()
+    };
+    assert!(golden_render(&config, false).contains("\nTimeoutStopSec=240\n"));
+}

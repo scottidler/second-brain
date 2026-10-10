@@ -318,3 +318,75 @@ fn intel_config_tolerates_removed_fabric_patterns_and_on_new_note_keys() {
     let cfg: IntelConfig = serde_yaml::from_str(yaml).expect("stale keys in a deployed cortex.yml must still parse");
     assert_eq!(cfg.batch_weekly.as_deref(), Some("my_weekly"));
 }
+
+#[test]
+fn stop_timeout_secs_defaults_to_180_and_parses_from_daemon_block() {
+    assert_eq!(Config::default().daemon.stop_timeout_secs, 180);
+    let cfg: Config = serde_yaml::from_str("daemon:\n  stop-timeout-secs: 240\n").expect("deserialize");
+    assert_eq!(cfg.daemon.stop_timeout_secs, 240);
+}
+
+#[test]
+fn default_stop_budget_holds() {
+    assert_eq!(Config::default().stop_budget_shortfall(), None);
+}
+
+#[test]
+fn stop_budget_names_fabric_timeout_first_on_a_tie_of_120s_defaults() {
+    let mut cfg = Config::default();
+    cfg.daemon.stop_timeout_secs = 100;
+    let shortfall = cfg.stop_budget_shortfall().expect("100 < 120 + 30");
+    assert_eq!(shortfall.timeout_key, "fabric.timeout-secs");
+    assert_eq!(shortfall.timeout_secs, 120);
+    let text = shortfall.to_string();
+    assert!(text.contains("daemon.stop-timeout-secs"), "{text}");
+    assert!(text.contains("fabric.timeout-secs"), "{text}");
+}
+
+#[test]
+fn stop_budget_boundary_is_largest_timeout_plus_30() {
+    let mut cfg = Config::default();
+    cfg.daemon.stop_timeout_secs = 149;
+    assert!(cfg.stop_budget_shortfall().is_some(), "149 < 150");
+    cfg.daemon.stop_timeout_secs = 150;
+    assert_eq!(cfg.stop_budget_shortfall(), None, "150 == 120 + 30");
+}
+
+/// Each of the six keys, raised alone above the others, is the one named.
+#[test]
+fn stop_budget_covers_each_of_the_six_timeouts() {
+    type Raise = fn(&mut Config);
+    let cases: [(&str, Raise); 6] = [
+        ("fabric.timeout-secs", |c| c.fabric.timeout_secs = 500),
+        ("entities.fabric-timeout-secs", |c| c.entities.fabric_timeout_secs = 500),
+        ("graph.fact-timeout-secs", |c| c.graph.fact_timeout_secs = 500),
+        ("actions.intel.fabric-timeout-secs", |c| {
+            c.actions.intel.fabric_timeout_secs = 500
+        }),
+        ("actions.intel.llm-timeout-secs", |c| {
+            c.actions.intel.llm_timeout_secs = 500
+        }),
+        ("tags.classifier.timeout-secs", |c| c.tags.classifier.timeout_secs = 500),
+    ];
+    for (key, raise) in cases {
+        let mut cfg = Config::default();
+        raise(&mut cfg);
+        let shortfall = cfg
+            .stop_budget_shortfall()
+            .unwrap_or_else(|| panic!("{key} at 500s must trip the guard"));
+        assert_eq!(shortfall.timeout_key, key);
+        assert_eq!(shortfall.required_secs(), 530);
+    }
+}
+
+#[test]
+fn load_service_config_defaults_when_the_file_is_missing_and_errors_when_unparseable() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let missing = dir.path().join("cortex.yml");
+    assert_eq!(
+        Config::load_service_config(&missing).unwrap().daemon.stop_timeout_secs,
+        180
+    );
+    std::fs::write(&missing, "daemon: [not, a, map]\n").unwrap();
+    assert!(Config::load_service_config(&missing).is_err());
+}

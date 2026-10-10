@@ -235,6 +235,9 @@ fn render_systemd_unit(
             policy: RestartPolicy::Always,
             sec: 5,
         }),
+        timeout_stop_sec: None,
+        kill_mode: None,
+        success_exit_status: Vec::new(),
         hardening: Hardening::Strict {
             rw_paths: vec![vault_path.to_path_buf(), data_path.to_path_buf()],
         },
