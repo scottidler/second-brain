@@ -48,6 +48,9 @@ use crate::config::{Config, EmbedKindsConfig};
 use crate::opts::EmbedOpts;
 use crate::shutdown::StopHandle;
 
+mod carry;
+pub use carry::EmbedCarry;
+
 /// Default batch size for the embed loop. The transaction
 /// discipline test asserts the write transaction wall-clock stays under
 /// 200 ms at this batch.
@@ -426,11 +429,13 @@ pub fn load_daemon_model(config: &Config) -> Result<Box<dyn EmbeddingModel>> {
 /// Daemon tick that reuses a long-lived model loaded once at daemon
 /// startup. See `load_daemon_model`. `stop` is the daemon's stop handle;
 /// the tick checks it before every batch and between inference calls.
+/// `carry` is the daemon's [`EmbedCarry`], kept across ticks.
 pub fn daemon_tick_with_model(
     vault_root: &Path,
     config: &Config,
     model: &dyn EmbeddingModel,
     stop: &StopHandle,
+    carry: &mut EmbedCarry,
 ) -> Result<EmbedStats> {
     let rss_entry = vault::rss::read_self_rss();
     log::debug!(
@@ -457,7 +462,7 @@ pub fn daemon_tick_with_model(
         Err(e) => return Err(e),
     };
 
-    let total = embed_tick(&mut index, model, vault_root, config, stop)?;
+    let total = embed_tick(&mut index, model, vault_root, config, stop, carry)?;
 
     drop(lock);
     let rss_exit = vault::rss::read_self_rss();
@@ -482,27 +487,31 @@ pub fn daemon_tick_with_model(
 /// drive on `SearchIndex::open_memory()`.
 ///
 /// One `max-chunks-per-tick` allowance is shared by every kind in run order
-/// (summary first). The tick ends when the stop flag is set, the allowance
-/// cannot fit the next note, or the backlog is empty.
+/// (summary first, unless `carry` names a kind left waiting last tick). The
+/// tick ends when the stop flag is set, the allowance cannot fit the next
+/// note, or the backlog is empty.
 fn embed_tick(
     index: &mut SearchIndex,
     model: &dyn EmbeddingModel,
     vault_root: &Path,
     config: &Config,
     stop: &StopHandle,
+    carry: &mut EmbedCarry,
 ) -> Result<EmbedStats> {
     // The daemon tick has no per-invocation CLI surface, so the kinds it
     // generates are gated by config only. With defaults that is summary +
     // transcript-chunk (claim is default-OFF after the retrieval
     // gate failure); enabling `embed.kinds.claim` re-adds it here.
-    let kinds = enabled_default_kinds(&config.embed.kinds);
+    let kinds = carry.run_order(enabled_default_kinds(&config.embed.kinds));
     log::debug!(
         "cortex::embed::embed_tick: kinds={kinds:?} max_chunks_per_tick={}",
         config.embed.max_chunks_per_tick
     );
     let mut allowance = ChunkAllowance::per_tick(config.embed.max_chunks_per_tick);
     let mut total = EmbedStats::default();
-    'kinds: for kind in kinds {
+    carry.clear();
+    'kinds: for (at, &kind) in kinds.iter().enumerate() {
+        let mut drawn_by_kind = 0usize;
         loop {
             if stop.is_stopped() {
                 log::info!("cortex::embed: stop requested; ending the embed tick before the next batch");
@@ -513,6 +522,7 @@ fn embed_tick(
                     "cortex::embed: per-tick allowance of {} chunk(s) spent; the rest waits for the next tick",
                     config.embed.max_chunks_per_tick,
                 );
+                carry.allowance_ended(&kinds, at, drawn_by_kind);
                 break 'kinds;
             }
             let outcome = process_batch(
@@ -531,12 +541,16 @@ fn embed_tick(
             let batch_stats = *outcome.stats();
             total.merge(&batch_stats);
             allowance.draw(batch_stats.chunks_inferred());
+            drawn_by_kind += batch_stats.chunks_inferred();
             match outcome {
                 BatchOutcome::Stopped(_) => {
                     log::info!("cortex::embed: kind={kind:?} batch stopped; its vectors were dropped, nothing written");
                     break 'kinds;
                 }
-                BatchOutcome::AllowanceSpent(_) => break 'kinds,
+                BatchOutcome::AllowanceSpent(_) => {
+                    carry.allowance_ended(&kinds, at, drawn_by_kind);
+                    break 'kinds;
+                }
                 BatchOutcome::Complete(_) => {}
             }
             if batch_stats.scanned == 0 {

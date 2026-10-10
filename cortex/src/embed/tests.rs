@@ -1033,6 +1033,7 @@ struct CountingEmbedder {
     calls: std::sync::atomic::AtomicUsize,
     chunks: std::sync::atomic::AtomicUsize,
     stop_after_call: Option<(usize, StopHandle)>,
+    fail_when_any_text_contains: Option<&'static str>,
 }
 
 impl CountingEmbedder {
@@ -1042,6 +1043,15 @@ impl CountingEmbedder {
             calls: Default::default(),
             chunks: Default::default(),
             stop_after_call: None,
+            fail_when_any_text_contains: None,
+        }
+    }
+
+    /// Fails every call whose inputs include a text containing `needle`.
+    fn failing_on(needle: &'static str) -> Self {
+        Self {
+            fail_when_any_text_contains: Some(needle),
+            ..Self::new()
         }
     }
 
@@ -1075,7 +1085,10 @@ impl EmbeddingModel for CountingEmbedder {
     }
 
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let out = self.inner.embed_batch(texts);
+        let out = match self.fail_when_any_text_contains {
+            Some(needle) if texts.iter().any(|t| t.contains(needle)) => Err(eyre::eyre!("poisoned input")),
+            _ => self.inner.embed_batch(texts),
+        };
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         self.chunks.fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
         if let Some((n, stop)) = &self.stop_after_call
@@ -1171,7 +1184,8 @@ fn stop_between_sub_batches_drops_the_batch_and_writes_no_embedding_rows() {
 
     let mut config = tick_config(vault.path(), DEFAULT_MAX_CHUNKS_PER_TICK, 1);
     config.embed.kinds.summary = false;
-    let stats = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick");
+    let mut carry = EmbedCarry::default();
+    let stats = embed_tick(&mut index, &m, vault.path(), &config, &stop, &mut carry).expect("tick");
 
     assert_eq!(m.calls(), 1, "the check point before sub-batch 2 must stop the batch");
     assert_eq!(
@@ -1242,7 +1256,8 @@ fn preset_stop_returns_before_any_batch() {
     let stop = StopHandle::never();
     stop.stop();
     let config = tick_config(vault.path(), DEFAULT_MAX_CHUNKS_PER_TICK, DEFAULT_MAX_CHUNKS_PER_CALL);
-    let stats = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick");
+    let mut carry = EmbedCarry::default();
+    let stats = embed_tick(&mut index, &m, vault.path(), &config, &stop, &mut carry).expect("tick");
 
     assert_eq!(m.calls(), 0, "no model call");
     assert_eq!(stats.scanned, 0, "no batch was selected");
@@ -1280,9 +1295,10 @@ fn one_tick_embeds_at_most_the_cap_across_all_kinds() {
     let stop = StopHandle::never();
 
     let mut per_tick: Vec<(u64, usize)> = Vec::new();
+    let mut carry = EmbedCarry::default();
     for _ in 0..10 {
         let before = m.chunks();
-        let stats = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick");
+        let stats = embed_tick(&mut index, &m, vault.path(), &config, &stop, &mut carry).expect("tick");
         if stats.embedded == 0 {
             break;
         }
@@ -1330,12 +1346,13 @@ fn an_oversized_note_embeds_alone_in_its_tick() {
     let config = tick_config(vault.path(), 512, DEFAULT_MAX_CHUNKS_PER_CALL);
     let stop = StopHandle::never();
 
-    let t1 = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick 1");
+    let mut carry = EmbedCarry::default();
+    let t1 = embed_tick(&mut index, &m, vault.path(), &config, &stop, &mut carry).expect("tick 1");
     assert_eq!(t1.embedded, 5, "tick 1: the summaries draw first; the big note defers");
     assert_eq!(index.transcript_chunk_count("notes/big.md").expect("count"), 0);
 
     let before = m.chunks();
-    let t2 = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick 2");
+    let t2 = embed_tick(&mut index, &m, vault.path(), &config, &stop, &mut carry).expect("tick 2");
     assert_eq!(t2.embedded, 600, "tick 2 embeds the oversized note and nothing else");
     assert_eq!(m.chunks() - before, 600);
     assert_eq!(index.transcript_chunk_count("notes/big.md").expect("count"), 600);
@@ -1345,7 +1362,7 @@ fn an_oversized_note_embeds_alone_in_its_tick() {
         "nothing joins the oversized note in its tick"
     );
 
-    let t3 = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick 3");
+    let t3 = embed_tick(&mut index, &m, vault.path(), &config, &stop, &mut carry).expect("tick 3");
     assert_eq!(t3.embedded, 100);
 }
 
@@ -1417,9 +1434,51 @@ fn summary_draws_one_per_note_from_the_tick_allowance() {
     let config = tick_config(vault.path(), 500, DEFAULT_MAX_CHUNKS_PER_CALL);
     let stop = StopHandle::never();
 
-    let t1 = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick 1");
+    let mut carry = EmbedCarry::default();
+    let t1 = embed_tick(&mut index, &m, vault.path(), &config, &stop, &mut carry).expect("tick 1");
     assert_eq!(t1.embedded, 500);
     assert_eq!(m.chunks(), 500);
-    let t2 = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick 2");
+    let t2 = embed_tick(&mut index, &m, vault.path(), &config, &stop, &mut carry).expect("tick 2");
     assert_eq!(t2.embedded, 100, "the rest drains next tick");
+}
+
+#[test]
+fn a_summary_failing_every_tick_cannot_starve_an_oversized_note() {
+    // A summary that fails inference draws 1 from the allowance every tick and
+    // stays stale, so without the carry the transcript kind never saw a fresh
+    // allowance and the 600-chunk note deferred forever. The carry gives it
+    // the next tick's fresh allowance, inside the max(cap, largest note) bound.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = CountingEmbedder::failing_on("summary");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+    let vault = TempDir::new().expect("vault");
+    seed_summary_note(&index, "notes/poison.md", 1000);
+    seed_transcript_note(&index, vault.path(), "notes/big.md", 600, 900);
+    seed_transcript_note(&index, vault.path(), "notes/small.md", 100, 800);
+    let config = tick_config(vault.path(), 512, DEFAULT_MAX_CHUNKS_PER_CALL);
+    let stop = StopHandle::never();
+    let mut carry = EmbedCarry::default();
+
+    let mut inferred = Vec::new();
+    for tick in 1..=2 {
+        let before = m.chunks();
+        embed_tick(&mut index, &m, vault.path(), &config, &stop, &mut carry).expect("tick");
+        inferred.push(m.chunks() - before);
+        assert!(
+            inferred[tick - 1] <= 600,
+            "tick {tick} over max(cap, largest note): {inferred:?}"
+        );
+    }
+    assert_eq!(
+        index.transcript_chunk_count("notes/big.md").expect("count"),
+        600,
+        "the oversized note embeds within 2 ticks: {inferred:?}"
+    );
+
+    embed_tick(&mut index, &m, vault.path(), &config, &stop, &mut carry).expect("tick 3");
+    assert_eq!(
+        index.transcript_chunk_count("notes/small.md").expect("count"),
+        100,
+        "the summary leads again and the next note still fits behind it"
+    );
 }

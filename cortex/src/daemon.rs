@@ -169,6 +169,10 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
             }
         };
 
+    // Which embed kind leads the next tick: one left waiting on the tick
+    // allowance runs first on a fresh one, so it cannot starve.
+    let mut embed_carry = crate::embed::EmbedCarry::default();
+
     // Doc 3 cold-note sweep tick. Default cadence is one week; the
     // report is a checklist for review, not a polling watchdog. The
     // cold sweep is a pure consumer of the index oracle materializes;
@@ -342,7 +346,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     // for this process. Other actions keep running.
                     continue;
                 };
-                match tokio::task::block_in_place(|| crate::embed::daemon_tick_with_model(vault_root, config, model, &stop)) {
+                match tokio::task::block_in_place(|| crate::embed::daemon_tick_with_model(vault_root, config, model, &stop, &mut embed_carry)) {
                     Ok(stats) if stats.scanned > 0 => {
                         log::info!(
                             "daemon embed tick: scanned={} embedded={} skipped_empty={} failed={}",
