@@ -701,7 +701,7 @@ chrome-extension: null
 chrono-odyssey: gaming
 ci-pipeline: devops
 cidp: health
-cilium: kubernetes
+cilium: k8s
 cinemastix: null
 circle-of-fifths: music
 civilization: gaming
@@ -2146,7 +2146,7 @@ just-in-time-exploration: null
 jwt: auth
 jwt-authentication: auth
 jwt-token: auth
-k8s: kubernetes
+k8s: k8s
 kanban: productivity
 karis-nemik: null
 karpathy: null
@@ -2178,10 +2178,10 @@ knowledge-work: knowledge-management
 knowledgemanagement: knowledge-management
 knowledgework: knowledge-management
 korean-mmo: gaming
-kubernetes: kubernetes
-kubernetes-career: kubernetes
-kubernetes-homelab: kubernetes
-kubernetes-jobs: kubernetes
+kubernetes: k8s
+kubernetes-career: k8s
+kubernetes-homelab: k8s
+kubernetes-jobs: k8s
 kv-cache: ai
 la-aqueduct: null
 labels: null
@@ -4026,9 +4026,9 @@ tailscale: networking
 talent-retention: career
 talk: null
 talking-football-showcast: football
-talos: kubernetes
-talos-linux: kubernetes
-talosctl: kubernetes
+talos: k8s
+talos-linux: k8s
+talosctl: k8s
 task-dependencies: workflow
 task-entropy: null
 task-execution: automation
