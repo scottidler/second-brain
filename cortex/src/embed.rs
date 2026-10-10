@@ -46,6 +46,7 @@ use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
 use crate::config::{Config, EmbedKindsConfig};
 use crate::opts::EmbedOpts;
+use crate::shutdown::StopHandle;
 
 /// Default batch size for the embed loop. The transaction
 /// discipline test asserts the write transaction wall-clock stays under
@@ -152,6 +153,85 @@ impl EmbedStats {
         self.skipped_empty += other.skipped_empty;
         self.failed += other.failed;
     }
+
+    /// Chunks this batch sent to the model: the ones written plus the ones
+    /// whose inference or write failed. Both cost inference time, so both draw
+    /// from the tick's [`ChunkAllowance`].
+    fn chunks_inferred(&self) -> usize {
+        (self.embedded + self.failed) as usize
+    }
+}
+
+/// How one embed batch ended. A stop is its own outcome, so no caller can
+/// count it as a failure.
+#[derive(Debug, Clone, Copy)]
+pub enum BatchOutcome {
+    /// Every note the batch selected was attempted.
+    Complete(EmbedStats),
+    /// The tick's chunk allowance could not fit the next note. The notes past
+    /// it keep their stale marker and lead the next tick.
+    AllowanceSpent(EmbedStats),
+    /// The stop flag was seen before an inference call. No embedding row was
+    /// written and `failed` is untouched; the examined sentinels the read phase
+    /// wrote before inference stay.
+    Stopped(EmbedStats),
+}
+
+impl BatchOutcome {
+    pub fn stats(&self) -> &EmbedStats {
+        match self {
+            BatchOutcome::Complete(s) | BatchOutcome::AllowanceSpent(s) | BatchOutcome::Stopped(s) => s,
+        }
+    }
+}
+
+/// How many chunks a batch may still embed this tick.
+///
+/// The daemon tick builds one from `embed.max-chunks-per-tick` and every batch
+/// of every kind draws from it, in run order, so the cap bounds the whole tick
+/// and not one batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkAllowance {
+    /// `max-chunks-per-tick: 0`: no ceiling.
+    Unlimited,
+    /// Up to `remaining` chunks. `fresh` means nothing has been drawn yet this
+    /// tick: only then may a single note larger than `remaining` embed alone,
+    /// so a tick never exceeds max(cap, largest single note).
+    Limited { remaining: usize, fresh: bool },
+}
+
+impl ChunkAllowance {
+    pub fn per_tick(cap: usize) -> Self {
+        if cap == 0 {
+            ChunkAllowance::Unlimited
+        } else {
+            ChunkAllowance::Limited {
+                remaining: cap,
+                fresh: true,
+            }
+        }
+    }
+
+    pub fn is_spent(&self) -> bool {
+        matches!(self, ChunkAllowance::Limited { remaining: 0, .. })
+    }
+
+    pub fn draw(&mut self, chunks: usize) {
+        if let ChunkAllowance::Limited { remaining, fresh } = self
+            && chunks > 0
+        {
+            *remaining = remaining.saturating_sub(chunks);
+            *fresh = false;
+        }
+    }
+
+    /// Notes a one-chunk-per-note kind (summary) may select this batch.
+    fn note_limit(&self, batch_size: usize) -> usize {
+        match self {
+            ChunkAllowance::Unlimited => batch_size,
+            ChunkAllowance::Limited { remaining, .. } => batch_size.min(*remaining),
+        }
+    }
 }
 
 /// Prefetch the active embedding model and return the resolved model name
@@ -237,10 +317,13 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
     // transcript-chunk, NOT claim - see `resolve_kinds`).
     let kinds = resolve_kinds(opts.kind.as_deref(), &config.embed.kinds)?;
 
+    // A CLI pass drains the backlog, so each batch gets a fresh allowance: the
+    // cap bounds one batch's inference here, never the whole pass.
+    let stop = StopHandle::never();
     let mut total = EmbedStats::default();
     for kind in kinds {
         loop {
-            let batch_stats = process_batch(
+            let outcome = process_batch(
                 &mut index,
                 model.as_ref(),
                 kind,
@@ -249,9 +332,11 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
                 &config.staging_root,
                 opts.batch_size,
                 config.embed.max_chunks_per_call,
-                config.embed.max_chunks_per_tick,
+                ChunkAllowance::per_tick(config.embed.max_chunks_per_tick),
                 config.embed.workers,
+                &stop,
             )?;
+            let batch_stats = *outcome.stats();
             total.merge(&batch_stats);
             if batch_stats.scanned == 0 {
                 break;
@@ -339,8 +424,14 @@ pub fn load_daemon_model(config: &Config) -> Result<Box<dyn EmbeddingModel>> {
 }
 
 /// Daemon tick that reuses a long-lived model loaded once at daemon
-/// startup. See `load_daemon_model`.
-pub fn daemon_tick_with_model(vault_root: &Path, config: &Config, model: &dyn EmbeddingModel) -> Result<EmbedStats> {
+/// startup. See `load_daemon_model`. `stop` is the daemon's stop handle;
+/// the tick checks it before every batch and between inference calls.
+pub fn daemon_tick_with_model(
+    vault_root: &Path,
+    config: &Config,
+    model: &dyn EmbeddingModel,
+    stop: &StopHandle,
+) -> Result<EmbedStats> {
     let rss_entry = vault::rss::read_self_rss();
     log::debug!(
         "cortex::embed::daemon_tick_with_model: vault_root={} rss={}",
@@ -366,45 +457,7 @@ pub fn daemon_tick_with_model(vault_root: &Path, config: &Config, model: &dyn Em
         Err(e) => return Err(e),
     };
 
-    // The daemon tick has no per-invocation CLI surface, so the kinds it
-    // generates are gated by config only. With defaults that is summary +
-    // transcript-chunk (claim is default-OFF after the retrieval
-    // gate failure); enabling `embed.kinds.claim` re-adds it here.
-    let kinds = enabled_default_kinds(&config.embed.kinds);
-    let mut total = EmbedStats::default();
-    for kind in kinds {
-        loop {
-            let batch_stats = process_batch(
-                &mut index,
-                model,
-                kind,
-                model.model_version(),
-                vault_root,
-                &config.staging_root,
-                DEFAULT_BATCH_SIZE,
-                config.embed.max_chunks_per_call,
-                config.embed.max_chunks_per_tick,
-                config.embed.workers,
-            )?;
-            total.merge(&batch_stats);
-            if batch_stats.scanned == 0 {
-                break;
-            }
-            // Break on ANY zero-progress batch (all-skipped OR all-failed),
-            // not only all-skipped: a persistently failing embed_batch
-            // otherwise re-selects the same stale set every iteration.
-            if batch_stats.embedded == 0 {
-                log::warn!(
-                    "cortex::embed::daemon_tick_with_model: kind={:?} batch scanned={} embedded=0 (skipped={} failed={}); halting to avoid an infinite retry loop.",
-                    kind,
-                    batch_stats.scanned,
-                    batch_stats.skipped_empty,
-                    batch_stats.failed,
-                );
-                break;
-            }
-        }
-    }
+    let total = embed_tick(&mut index, model, vault_root, config, stop)?;
 
     drop(lock);
     let rss_exit = vault::rss::read_self_rss();
@@ -419,6 +472,90 @@ pub fn daemon_tick_with_model(vault_root: &Path, config: &Config, model: &dyn Em
             vault::rss::human_bytes(exit),
             vault::rss::human_bytes(exit.saturating_sub(entry)),
         );
+    }
+    Ok(total)
+}
+
+/// The body of one daemon embed tick, on an already-open index with the
+/// embed lock held. Split from `daemon_tick_with_model` because that opens
+/// the index at the fixed `oracle_db_path`; this is the hermetic seam tests
+/// drive on `SearchIndex::open_memory()`.
+///
+/// One `max-chunks-per-tick` allowance is shared by every kind in run order
+/// (summary first). The tick ends when the stop flag is set, the allowance
+/// cannot fit the next note, or the backlog is empty.
+fn embed_tick(
+    index: &mut SearchIndex,
+    model: &dyn EmbeddingModel,
+    vault_root: &Path,
+    config: &Config,
+    stop: &StopHandle,
+) -> Result<EmbedStats> {
+    // The daemon tick has no per-invocation CLI surface, so the kinds it
+    // generates are gated by config only. With defaults that is summary +
+    // transcript-chunk (claim is default-OFF after the retrieval
+    // gate failure); enabling `embed.kinds.claim` re-adds it here.
+    let kinds = enabled_default_kinds(&config.embed.kinds);
+    log::debug!(
+        "cortex::embed::embed_tick: kinds={kinds:?} max_chunks_per_tick={}",
+        config.embed.max_chunks_per_tick
+    );
+    let mut allowance = ChunkAllowance::per_tick(config.embed.max_chunks_per_tick);
+    let mut total = EmbedStats::default();
+    'kinds: for kind in kinds {
+        loop {
+            if stop.is_stopped() {
+                log::info!("cortex::embed: stop requested; ending the embed tick before the next batch");
+                break 'kinds;
+            }
+            if allowance.is_spent() {
+                log::info!(
+                    "cortex::embed: per-tick allowance of {} chunk(s) spent; the rest waits for the next tick",
+                    config.embed.max_chunks_per_tick,
+                );
+                break 'kinds;
+            }
+            let outcome = process_batch(
+                index,
+                model,
+                kind,
+                model.model_version(),
+                vault_root,
+                &config.staging_root,
+                DEFAULT_BATCH_SIZE,
+                config.embed.max_chunks_per_call,
+                allowance,
+                config.embed.workers,
+                stop,
+            )?;
+            let batch_stats = *outcome.stats();
+            total.merge(&batch_stats);
+            allowance.draw(batch_stats.chunks_inferred());
+            match outcome {
+                BatchOutcome::Stopped(_) => {
+                    log::info!("cortex::embed: kind={kind:?} batch stopped; its vectors were dropped, nothing written");
+                    break 'kinds;
+                }
+                BatchOutcome::AllowanceSpent(_) => break 'kinds,
+                BatchOutcome::Complete(_) => {}
+            }
+            if batch_stats.scanned == 0 {
+                break;
+            }
+            // Break on ANY zero-progress batch (all-skipped OR all-failed),
+            // not only all-skipped: a persistently failing embed_batch
+            // otherwise re-selects the same stale set every iteration.
+            if batch_stats.embedded == 0 {
+                log::warn!(
+                    "cortex::embed::embed_tick: kind={:?} batch scanned={} embedded=0 (skipped={} failed={}); halting to avoid an infinite retry loop.",
+                    kind,
+                    batch_stats.scanned,
+                    batch_stats.skipped_empty,
+                    batch_stats.failed,
+                );
+                break;
+            }
+        }
     }
     Ok(total)
 }
@@ -441,9 +578,10 @@ pub fn process_batch(
     staging_root: &Path,
     batch_size: usize,
     max_chunks_per_call: usize,
-    max_chunks_per_tick: usize,
+    allowance: ChunkAllowance,
     workers: usize,
-) -> Result<EmbedStats> {
+    stop: &StopHandle,
+) -> Result<BatchOutcome> {
     match kind {
         EmbeddingKind::Summary => process_summary_batch(
             index,
@@ -452,7 +590,9 @@ pub fn process_batch(
             vault_root,
             batch_size,
             max_chunks_per_call,
+            allowance,
             workers,
+            stop,
         ),
         EmbeddingKind::TranscriptChunk => process_transcript_batch(
             index,
@@ -462,8 +602,9 @@ pub fn process_batch(
             staging_root,
             batch_size,
             max_chunks_per_call,
-            max_chunks_per_tick,
+            allowance,
             workers,
+            stop,
         ),
         EmbeddingKind::Claim => process_claim_batch(
             index,
@@ -471,8 +612,9 @@ pub fn process_batch(
             model_version,
             batch_size,
             max_chunks_per_call,
-            max_chunks_per_tick,
+            allowance,
             workers,
+            stop,
         ),
     }
 }
@@ -573,14 +715,19 @@ fn process_summary_batch(
     _vault_root: &Path,
     batch_size: usize,
     max_chunks_per_call: usize,
+    allowance: ChunkAllowance,
     workers: usize,
-) -> Result<EmbedStats> {
+    stop: &StopHandle,
+) -> Result<BatchOutcome> {
     let mut stats = EmbedStats::default();
 
     // ---- 1. READ PHASE (auto-commit, no transaction). ----
-    let targets = index.stale_embedding_targets(EmbeddingKind::Summary, model_version, batch_size as u32)?;
+    // A summary is one embedding per note, so it draws 1 from the tick's
+    // allowance per note: select no more notes than the allowance has left.
+    let limit = allowance.note_limit(batch_size);
+    let targets = index.stale_embedding_targets(EmbeddingKind::Summary, model_version, limit as u32)?;
     if targets.is_empty() {
-        return Ok(stats);
+        return Ok(BatchOutcome::Complete(stats));
     }
     log::debug!("cortex::embed::process_summary_batch: scanned={}", targets.len());
 
@@ -633,7 +780,7 @@ fn process_summary_batch(
         index.mark_embedding_examined_batch(EmbeddingKind::Summary, model_version, &examined)?;
     }
     if work.is_empty() {
-        return Ok(stats);
+        return Ok(BatchOutcome::Complete(stats));
     }
 
     // ---- 2. INFERENCE PHASE (no SQLite contact). ----
@@ -645,12 +792,13 @@ fn process_summary_batch(
     // `vectors.len() == work.len()` invariant holds. Stale rows retry
     // next tick.
     let texts: Vec<&str> = work.iter().map(|w| w.text.as_str()).collect();
-    let vectors = match embed_in_sub_batches(model, &texts, max_chunks_per_call, workers) {
-        Ok(v) => v,
+    let vectors = match embed_in_sub_batches(model, &texts, max_chunks_per_call, workers, stop) {
+        Ok(Inference::Vectors(v)) => v,
+        Ok(Inference::Stopped) => return Ok(BatchOutcome::Stopped(stats)),
         Err(e) => {
             log::error!("cortex::embed: embed_batch failed: {e}");
             stats.failed += work.len() as u64;
-            return Ok(stats);
+            return Ok(BatchOutcome::Complete(stats));
         }
     };
     if vectors.len() != work.len() {
@@ -660,7 +808,7 @@ fn process_summary_batch(
             work.len(),
         );
         stats.failed += work.len() as u64;
-        return Ok(stats);
+        return Ok(BatchOutcome::Complete(stats));
     }
 
     // ---- 3. WRITE PHASE (one short transaction). ----
@@ -680,7 +828,7 @@ fn process_summary_batch(
     let scanned_count = work.len();
     index.upsert_embeddings_batch(&items)?;
     stats.embedded += scanned_count as u64;
-    Ok(stats)
+    Ok(BatchOutcome::Complete(stats))
 }
 
 /// one batch of transcript chunks. Each transcript-eligible
@@ -702,9 +850,10 @@ fn process_transcript_batch(
     staging_root: &Path,
     batch_size: usize,
     max_chunks_per_call: usize,
-    max_chunks_per_tick: usize,
+    allowance: ChunkAllowance,
     workers: usize,
-) -> Result<EmbedStats> {
+    stop: &StopHandle,
+) -> Result<BatchOutcome> {
     log::debug!(
         "cortex::embed::process_transcript_batch: vault_root={} staging_root={} batch_size={}",
         vault_root.display(),
@@ -719,7 +868,7 @@ fn process_transcript_batch(
     // matches `e.id IS NULL` forever and this loop spins.
     let targets = index.stale_embedding_targets(EmbeddingKind::TranscriptChunk, model_version, batch_size as u32)?;
     if targets.is_empty() {
-        return Ok(stats);
+        return Ok(BatchOutcome::Complete(stats));
     }
     log::debug!("cortex::embed::process_transcript_batch: scanned={}", targets.len());
 
@@ -782,7 +931,7 @@ fn process_transcript_batch(
         index.mark_embedding_examined_batch(EmbeddingKind::TranscriptChunk, model_version, &examined)?;
     }
     if work.is_empty() {
-        return Ok(stats);
+        return Ok(BatchOutcome::Complete(stats));
     }
 
     // ---- 2. INFERENCE PHASE. ----
@@ -794,19 +943,30 @@ fn process_transcript_batch(
     // daemon (observed 2026-05-19). Any failure aborts the whole tick;
     // the write phase below depends on
     // `flat_vectors.len() == flat.len()` for cursor alignment.
-    // Apply the per-tick chunk ceiling by dropping whole notes off the tail.
+    // Fit the batch to the tick's remaining chunk allowance by dropping whole
+    // notes off the tail.
     // Truncating at a NOTE boundary (never mid-note) is load-bearing: the write
     // phase replaces a note's ENTIRE chunk set, so a half-embedded note would
     // land a truncated set and then read as complete. Dropped notes keep their
     // stale marker and lead the next tick.
-    let work = cap_work_by_chunks(work, max_chunks_per_tick);
+    let selected = work.len();
+    let work = cap_work_by_chunks(work, allowance);
+    let finish = if work.len() < selected {
+        BatchOutcome::AllowanceSpent
+    } else {
+        BatchOutcome::Complete
+    };
+    if work.is_empty() {
+        return Ok(finish(stats));
+    }
     let flat: Vec<&str> = work.iter().flat_map(|w| w.chunks.iter().map(|s| s.as_str())).collect();
-    let flat_vectors = match embed_in_sub_batches(model, &flat, max_chunks_per_call, workers) {
-        Ok(v) => v,
+    let flat_vectors = match embed_in_sub_batches(model, &flat, max_chunks_per_call, workers, stop) {
+        Ok(Inference::Vectors(v)) => v,
+        Ok(Inference::Stopped) => return Ok(BatchOutcome::Stopped(stats)),
         Err(e) => {
             log::error!("cortex::embed: embed_batch failed for transcripts: {e}");
             stats.failed += flat.len() as u64;
-            return Ok(stats);
+            return Ok(finish(stats));
         }
     };
     if flat_vectors.len() != flat.len() {
@@ -816,7 +976,7 @@ fn process_transcript_batch(
             flat.len(),
         );
         stats.failed += flat.len() as u64;
-        return Ok(stats);
+        return Ok(finish(stats));
     }
 
     // ---- 3. WRITE PHASE. ----
@@ -839,7 +999,7 @@ fn process_transcript_batch(
         }
         stats.embedded += n as u64;
     }
-    Ok(stats)
+    Ok(finish(stats))
 }
 
 /// one batch of claim embeddings. Reads `notes.claims` from the
@@ -860,15 +1020,16 @@ fn process_claim_batch(
     model_version: &str,
     batch_size: usize,
     max_chunks_per_call: usize,
-    max_chunks_per_tick: usize,
+    allowance: ChunkAllowance,
     workers: usize,
-) -> Result<EmbedStats> {
+    stop: &StopHandle,
+) -> Result<BatchOutcome> {
     let mut stats = EmbedStats::default();
 
     // ---- 1. READ PHASE (auto-commit, no transaction; no file I/O). ----
     let targets = index.stale_embedding_targets(EmbeddingKind::Claim, model_version, batch_size as u32)?;
     if targets.is_empty() {
-        return Ok(stats);
+        return Ok(BatchOutcome::Complete(stats));
     }
     log::debug!("cortex::embed::process_claim_batch: scanned={}", targets.len());
 
@@ -900,23 +1061,34 @@ fn process_claim_batch(
         index.mark_embedding_examined_batch(EmbeddingKind::Claim, model_version, &examined)?;
     }
     if work.is_empty() {
-        return Ok(stats);
+        return Ok(BatchOutcome::Complete(stats));
     }
 
     // ---- 2. INFERENCE PHASE (no SQLite contact). ----
-    // Apply the per-tick chunk ceiling by dropping whole notes off the tail.
+    // Fit the batch to the tick's remaining chunk allowance by dropping whole
+    // notes off the tail.
     // Truncating at a NOTE boundary (never mid-note) is load-bearing: the write
     // phase replaces a note's ENTIRE chunk set, so a half-embedded note would
     // land a truncated set and then read as complete. Dropped notes keep their
     // stale marker and lead the next tick.
-    let work = cap_work_by_chunks(work, max_chunks_per_tick);
+    let selected = work.len();
+    let work = cap_work_by_chunks(work, allowance);
+    let finish = if work.len() < selected {
+        BatchOutcome::AllowanceSpent
+    } else {
+        BatchOutcome::Complete
+    };
+    if work.is_empty() {
+        return Ok(finish(stats));
+    }
     let flat: Vec<&str> = work.iter().flat_map(|w| w.chunks.iter().map(|s| s.as_str())).collect();
-    let flat_vectors = match embed_in_sub_batches(model, &flat, max_chunks_per_call, workers) {
-        Ok(v) => v,
+    let flat_vectors = match embed_in_sub_batches(model, &flat, max_chunks_per_call, workers, stop) {
+        Ok(Inference::Vectors(v)) => v,
+        Ok(Inference::Stopped) => return Ok(BatchOutcome::Stopped(stats)),
         Err(e) => {
             log::error!("cortex::embed: embed_batch failed for claims: {e}");
             stats.failed += flat.len() as u64;
-            return Ok(stats);
+            return Ok(finish(stats));
         }
     };
     if flat_vectors.len() != flat.len() {
@@ -926,7 +1098,7 @@ fn process_claim_batch(
             flat.len(),
         );
         stats.failed += flat.len() as u64;
-        return Ok(stats);
+        return Ok(finish(stats));
     }
 
     // ---- 3. WRITE PHASE (one short transaction per note). ----
@@ -951,7 +1123,7 @@ fn process_claim_batch(
         }
         stats.embedded += n as u64;
     }
-    Ok(stats)
+    Ok(finish(stats))
 }
 
 /// Group a note's newline-joined claim text into chunks whose word count
@@ -1001,26 +1173,20 @@ const CLAIM_GROUP_MAX_WORDS: usize = 400;
 const CHUNK_MAX_TOKENS: usize = 400;
 const CHUNK_OVERLAP_TOKENS: usize = 50;
 
-/// Call `embed_batch` repeatedly with at most `max_chunks_per_call`
-/// inputs at a time, preserving input order. A `max_chunks_per_call`
-/// of 0 is treated as "no cap" (one call with the full input).
+/// Drop whole notes off the tail of `work` until its chunk count fits the
+/// allowance. [`ChunkAllowance::Unlimited`] keeps everything.
 ///
-/// Any single sub-batch failure aborts the whole sequence and
-/// propagates the error. Vectors from earlier successful sub-batches
-/// in this call are discarded - callers depend on
-/// `result.len() == texts.len()` and a partial result would break
-/// downstream cursor alignment (see `process_transcript_batch`).
-/// Drop whole notes off the tail of `work` until the total chunk count fits
-/// `cap`. `cap == 0` disables the ceiling.
-///
-/// Always keeps at least one note: a single note whose transcript alone exceeds
-/// the cap must still make progress, or it would be skipped forever and its
-/// embeddings would never exist. That one note is the deliberate exception to
-/// the bound, and it is logged as such.
-fn cap_work_by_chunks(work: Vec<TranscriptWork>, cap: usize) -> Vec<TranscriptWork> {
-    if cap == 0 {
-        return work;
-    }
+/// A single note larger than the allowance embeds alone only while the
+/// allowance is fresh (nothing drawn yet this tick): it must still make
+/// progress, or it would be skipped forever and its embeddings would never
+/// exist. That one note is the deliberate exception to the bound, and it is
+/// logged as such. On a partly drawn allowance the same note defers to the
+/// next tick, which keeps a tick at or under max(cap, largest single note).
+fn cap_work_by_chunks(work: Vec<TranscriptWork>, allowance: ChunkAllowance) -> Vec<TranscriptWork> {
+    let (cap, fresh) = match allowance {
+        ChunkAllowance::Unlimited => return work,
+        ChunkAllowance::Limited { remaining, fresh } => (remaining, fresh),
+    };
     let total: usize = work.iter().map(|w| w.chunks.len()).sum();
     if total <= cap {
         return work;
@@ -1029,7 +1195,8 @@ fn cap_work_by_chunks(work: Vec<TranscriptWork>, cap: usize) -> Vec<TranscriptWo
     let mut running = 0usize;
     for w in work {
         let n = w.chunks.len();
-        if !kept.is_empty() && running + n > cap {
+        let oversized_exception = kept.is_empty() && fresh;
+        if running + n > cap && !oversized_exception {
             break;
         }
         running += n;
@@ -1047,7 +1214,7 @@ fn cap_work_by_chunks(work: Vec<TranscriptWork>, cap: usize) -> Vec<TranscriptWo
         );
     }
     log::info!(
-        "cortex::embed: per-tick cap {} chunk(s): embedding {} note(s)/{} chunk(s) now, deferring the rest of {} total",
+        "cortex::embed: per-tick allowance {} chunk(s): embedding {} note(s)/{} chunk(s) now, deferring the rest of {} total",
         cap,
         kept.len(),
         running,
@@ -1056,12 +1223,34 @@ fn cap_work_by_chunks(work: Vec<TranscriptWork>, cap: usize) -> Vec<TranscriptWo
     kept
 }
 
+/// What a sub-batched inference run produced.
+enum Inference {
+    /// One vector per input, in input order.
+    Vectors(Vec<Vec<f32>>),
+    /// The stop flag was seen before a sub-batch; the vectors so far are
+    /// dropped, because the write phase needs all of them or none.
+    Stopped,
+}
+
+/// Call `embed_batch` repeatedly with at most `max_chunks_per_call`
+/// inputs at a time, preserving input order. A `max_chunks_per_call`
+/// of 0 is treated as "no cap" (one call with the full input).
+///
+/// `stop` is checked before every sub-batch: one sub-batch is one model call
+/// and cannot be interrupted, so the gaps between calls are the check points.
+///
+/// Any single sub-batch failure aborts the whole sequence and
+/// propagates the error. Vectors from earlier successful sub-batches
+/// in this call are discarded - callers depend on
+/// `result.len() == texts.len()` and a partial result would break
+/// downstream cursor alignment (see `process_transcript_batch`).
 fn embed_in_sub_batches(
     model: &dyn EmbeddingModel,
     texts: &[&str],
     max_chunks_per_call: usize,
     workers: usize,
-) -> Result<Vec<Vec<f32>>> {
+    stop: &StopHandle,
+) -> Result<Inference> {
     log::debug!(
         "cortex::embed::embed_in_sub_batches: total={} max_per_call={} workers={}",
         texts.len(),
@@ -1069,13 +1258,21 @@ fn embed_in_sub_batches(
         workers,
     );
     if texts.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Inference::Vectors(Vec::new()));
     }
     let cap = if max_chunks_per_call == 0 { texts.len() } else { max_chunks_per_call };
     let total = texts.len();
     let started = std::time::Instant::now();
     let mut out: Vec<Vec<f32>> = Vec::with_capacity(total);
     for (i, sub) in texts.chunks(cap).enumerate() {
+        if stop.is_stopped() {
+            log::info!(
+                "cortex::embed: stop requested after {}/{} chunk(s); dropping this batch's vectors",
+                out.len(),
+                total,
+            );
+            return Ok(Inference::Stopped);
+        }
         // EVERY model call is reparented onto the dedicated pool. Doing it
         // here, at the single choke point all three kind-batches funnel
         // through, is what makes the isolation total: a future caller cannot
@@ -1100,7 +1297,7 @@ fn embed_in_sub_batches(
             started.elapsed(),
         );
     }
-    Ok(out)
+    Ok(Inference::Vectors(out))
 }
 
 struct EmbedWork {

@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tempfile::TempDir;
 
+use crate::config::EmbedConfig;
+
 use vault::distilled::Distilled;
 use vault::embedding::MockEmbedder;
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
@@ -28,7 +30,7 @@ fn process_batch_returns_zero_when_no_stale_targets() {
         .expect("set model");
 
     let tmp = TempDir::new().expect("tmp");
-    let stats = process_batch(
+    let stats = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::Summary,
@@ -37,10 +39,12 @@ fn process_batch_returns_zero_when_no_stale_targets() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("process");
+    .expect("process")
+    .stats();
     assert_eq!(stats.scanned, 0);
     assert_eq!(stats.embedded, 0);
 }
@@ -63,7 +67,7 @@ fn process_batch_embeds_stale_summary_rows() {
         .insert_test_note_row("notes/b.md", "article", 100)
         .expect("note b");
 
-    let stats = process_batch(
+    let stats = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::Summary,
@@ -72,10 +76,12 @@ fn process_batch_embeds_stale_summary_rows() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("process");
+    .expect("process")
+    .stats();
     assert_eq!(stats.scanned, 2);
     assert_eq!(stats.embedded, 2);
     assert_eq!(stats.skipped_empty, 0);
@@ -96,7 +102,7 @@ fn process_batch_prefixes_title_to_summary() {
     let tmp = TempDir::new().expect("tmp");
     index.insert_test_note_row("notes/a.md", "article", 100).expect("note");
 
-    let stats = process_batch(
+    let stats = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::Summary,
@@ -105,10 +111,12 @@ fn process_batch_prefixes_title_to_summary() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("process");
+    .expect("process")
+    .stats();
     assert_eq!(stats.embedded, 1);
 
     let text = index
@@ -198,7 +206,7 @@ fn process_transcript_batch_embeds_video_article_from_staging_ignoring_in_note_s
         .set_test_trace("notes/article.md", "missing-trace")
         .expect("trace");
 
-    let stats = process_batch(
+    let stats = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::TranscriptChunk,
@@ -207,10 +215,12 @@ fn process_transcript_batch_embeds_video_article_from_staging_ignoring_in_note_s
         staging.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("process");
+    .expect("process")
+    .stats();
 
     assert_eq!(stats.scanned, 2, "both notes are transcript-eligible and scanned");
     assert!(stats.embedded >= 1, "the video note's staged transcript must embed");
@@ -256,7 +266,7 @@ fn process_transcript_batch_missing_staged_file_degrades_to_sentinel_skip() {
     // Deliberately do NOT stage a distilled.yml for "gone-trace".
 
     // Tick 1: scanned + skipped, sentinel persisted at the note's modified_at.
-    let t1 = process_batch(
+    let t1 = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::TranscriptChunk,
@@ -265,10 +275,12 @@ fn process_transcript_batch_missing_staged_file_degrades_to_sentinel_skip() {
         staging.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("tick1");
+    .expect("tick1")
+    .stats();
     assert_eq!(t1.scanned, 1);
     assert_eq!(t1.skipped_empty, 1);
     assert_eq!(t1.embedded, 0);
@@ -282,7 +294,7 @@ fn process_transcript_batch_missing_staged_file_degrades_to_sentinel_skip() {
 
     // Tick 2 on the unchanged vault: the sentinel excludes the note -- no
     // re-scan, no error loop.
-    let t2 = process_batch(
+    let t2 = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::TranscriptChunk,
@@ -291,10 +303,12 @@ fn process_transcript_batch_missing_staged_file_degrades_to_sentinel_skip() {
         staging.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("tick2");
+    .expect("tick2")
+    .stats();
     assert_eq!(t2.scanned, 0, "sentinel must stop the re-scan; no error loop");
     assert_eq!(t2.embedded, 0);
 }
@@ -319,7 +333,7 @@ fn process_transcript_batch_expired_staged_file_degrades_to_sentinel_skip() {
     stage_distilled_transcript(staging.path(), "expired-trace", "transcript that will be swept");
     std::fs::remove_dir_all(staging.path().join("expired-trace")).expect("sweep trace dir");
 
-    let stats = process_batch(
+    let stats = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::TranscriptChunk,
@@ -328,10 +342,12 @@ fn process_transcript_batch_expired_staged_file_degrades_to_sentinel_skip() {
         staging.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("process");
+    .expect("process")
+    .stats();
     assert_eq!(stats.scanned, 1);
     assert_eq!(stats.skipped_empty, 1, "expired staged file -> sentinel skip");
     assert_eq!(stats.embedded, 0);
@@ -362,7 +378,7 @@ fn process_transcript_batch_verbatim_kind_still_reads_in_note_section() {
     index.insert_test_note_row("notes/voice.md", "audio", 100).expect("row");
     // No trace, no staged file: the verbatim path must not consult staging.
 
-    let stats = process_batch(
+    let stats = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::TranscriptChunk,
@@ -371,10 +387,12 @@ fn process_transcript_batch_verbatim_kind_still_reads_in_note_section() {
         staging.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("process");
+    .expect("process")
+    .stats();
 
     assert_eq!(stats.scanned, 1);
     assert!(stats.embedded >= 1, "verbatim-kind in-note transcript must still embed");
@@ -409,7 +427,7 @@ fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
     index.insert_test_note_row("notes/a.md", "article", 100).expect("note");
 
     // Tick 1: scanned + skipped, nothing embedded, sentinel persisted.
-    let t1 = process_batch(
+    let t1 = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::TranscriptChunk,
@@ -418,10 +436,12 @@ fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("tick1");
+    .expect("tick1")
+    .stats();
     assert_eq!(t1.scanned, 1);
     assert_eq!(t1.skipped_empty, 1);
     assert_eq!(t1.embedded, 0);
@@ -435,7 +455,7 @@ fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
 
     // Tick 2 on the unchanged vault: the sentinel excludes the note, so it is
     // no longer even scanned. This is the convergence the sentinel exists for.
-    let t2 = process_batch(
+    let t2 = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::TranscriptChunk,
@@ -444,10 +464,12 @@ fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("tick2");
+    .expect("tick2")
+    .stats();
     assert_eq!(t2.scanned, 0, "tick-2 must not re-scan the previously-skipped note");
     assert_eq!(t2.skipped_empty, 0);
     assert_eq!(t2.embedded, 0);
@@ -470,7 +492,7 @@ fn process_batch_skips_notes_with_empty_summary() {
         .insert_test_note_full("notes/empty.md", "article", "body text", "", 100)
         .expect("note");
 
-    let stats = process_batch(
+    let stats = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::Summary,
@@ -479,10 +501,12 @@ fn process_batch_skips_notes_with_empty_summary() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("process");
+    .expect("process")
+    .stats();
     assert_eq!(stats.scanned, 0, "SQL filter must exclude empty-summary notes");
     assert_eq!(stats.embedded, 0);
     assert_eq!(stats.skipped_empty, 0);
@@ -595,7 +619,7 @@ fn embed_in_sub_batches_caps_inputs_and_preserves_order() {
     let texts: Vec<String> = (0..250).map(|i| format!("doc-{i}")).collect();
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
 
-    let vectors = embed_in_sub_batches(&m, &refs, 64, 1).expect("embed");
+    let vectors = expect_vectors(embed_in_sub_batches(&m, &refs, 64, 1, &StopHandle::never()).expect("embed"));
 
     assert_eq!(vectors.len(), 250, "must return one vector per input");
 
@@ -619,7 +643,7 @@ fn embed_in_sub_batches_caps_inputs_and_preserves_order() {
 #[test]
 fn embed_in_sub_batches_handles_empty_input() {
     let m = CountingMockEmbedder::new();
-    let vectors = embed_in_sub_batches(&m, &[], 64, 1).expect("embed");
+    let vectors = expect_vectors(embed_in_sub_batches(&m, &[], 64, 1, &StopHandle::never()).expect("embed"));
     assert!(vectors.is_empty());
     assert!(m.calls().is_empty(), "no embed_batch call for empty input");
 }
@@ -629,7 +653,7 @@ fn embed_in_sub_batches_treats_zero_cap_as_no_cap() {
     let m = CountingMockEmbedder::new();
     let texts: Vec<String> = (0..30).map(|i| format!("doc-{i}")).collect();
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-    let vectors = embed_in_sub_batches(&m, &refs, 0, 1).expect("embed");
+    let vectors = expect_vectors(embed_in_sub_batches(&m, &refs, 0, 1, &StopHandle::never()).expect("embed"));
     assert_eq!(vectors.len(), 30);
     let calls = m.calls();
     assert_eq!(calls, vec![30], "cap=0 means one call with the full input");
@@ -659,8 +683,9 @@ fn summary_embed_text_is_byte_identical_when_no_capture_note() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
     .expect("process");
 
@@ -695,8 +720,9 @@ fn summary_embed_text_splices_capture_note_when_present() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
     .expect("process");
 
@@ -729,7 +755,7 @@ fn process_claim_batch_embeds_notes_with_claims() {
         .insert_test_note_row("notes/b.md", "article", 100)
         .expect("note b");
 
-    let stats = process_batch(
+    let stats = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::Claim,
@@ -738,10 +764,12 @@ fn process_claim_batch_embeds_notes_with_claims() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("process");
+    .expect("process")
+    .stats();
 
     assert_eq!(stats.scanned, 1, "only the note carrying claims is scanned");
     assert_eq!(stats.embedded, 1, "two short claims fit in one group -> one row");
@@ -767,7 +795,7 @@ fn process_claim_batch_splits_oversized_claim_sets_into_multiple_rows() {
     let claims: String = (0..500).map(|i| format!("claim{i}")).collect::<Vec<_>>().join("\n");
     index.set_test_claims("notes/big.md", &claims).expect("claims");
 
-    let stats = process_batch(
+    let stats = *process_batch(
         &mut index,
         &m,
         EmbeddingKind::Claim,
@@ -776,10 +804,12 @@ fn process_claim_batch_splits_oversized_claim_sets_into_multiple_rows() {
         tmp.path(),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
-        DEFAULT_MAX_CHUNKS_PER_TICK,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
         1,
+        &StopHandle::never(),
     )
-    .expect("process");
+    .expect("process")
+    .stats();
 
     assert_eq!(stats.scanned, 1);
     assert_eq!(stats.embedded, 2, "500 one-word claims at budget 400 -> two groups");
@@ -900,7 +930,7 @@ fn total_chunks(work: &[TranscriptWork]) -> usize {
 #[test]
 fn cap_zero_disables_the_ceiling() {
     let work = vec![tw("a.md", 500), tw("b.md", 500)];
-    let out = cap_work_by_chunks(work, 0);
+    let out = cap_work_by_chunks(work, ChunkAllowance::per_tick(0));
     assert_eq!(out.len(), 2, "0 means no cap");
     assert_eq!(total_chunks(&out), 1000);
 }
@@ -908,7 +938,7 @@ fn cap_zero_disables_the_ceiling() {
 #[test]
 fn work_under_the_cap_passes_through_untouched() {
     let work = vec![tw("a.md", 10), tw("b.md", 20)];
-    let out = cap_work_by_chunks(work, 512);
+    let out = cap_work_by_chunks(work, ChunkAllowance::per_tick(512));
     assert_eq!(out.len(), 2);
     assert_eq!(total_chunks(&out), 30);
 }
@@ -919,7 +949,7 @@ fn truncates_on_a_note_boundary_never_mid_note() {
     // embedded note would land a truncated set and then read as complete.
     // Every kept note must therefore keep ALL of its chunks.
     let work = vec![tw("a.md", 300), tw("b.md", 300), tw("c.md", 300)];
-    let out = cap_work_by_chunks(work, 512);
+    let out = cap_work_by_chunks(work, ChunkAllowance::per_tick(512));
     assert_eq!(out.len(), 1, "b would overshoot 512, so it is deferred whole");
     assert_eq!(out[0].note_path, "a.md");
     assert_eq!(out[0].chunks.len(), 300, "the kept note keeps every chunk");
@@ -928,7 +958,7 @@ fn truncates_on_a_note_boundary_never_mid_note() {
 #[test]
 fn packs_as_many_whole_notes_as_fit() {
     let work = vec![tw("a.md", 200), tw("b.md", 200), tw("c.md", 200)];
-    let out = cap_work_by_chunks(work, 512);
+    let out = cap_work_by_chunks(work, ChunkAllowance::per_tick(512));
     assert_eq!(out.len(), 2, "400 fits, 600 does not");
     assert_eq!(total_chunks(&out), 400);
 }
@@ -938,7 +968,7 @@ fn a_single_oversized_note_still_makes_progress() {
     // Regression guard against a livelock: if the cap could defer a note that
     // alone exceeds it, that note would be deferred forever and never embed.
     let work = vec![tw("huge.md", 5000)];
-    let out = cap_work_by_chunks(work, 512);
+    let out = cap_work_by_chunks(work, ChunkAllowance::per_tick(512));
     assert_eq!(out.len(), 1, "the lone oversized note is the deliberate exception");
     assert_eq!(out[0].chunks.len(), 5000, "and it embeds whole, not truncated");
 }
@@ -946,7 +976,7 @@ fn a_single_oversized_note_still_makes_progress() {
 #[test]
 fn oversized_first_note_does_not_drag_others_along() {
     let work = vec![tw("huge.md", 5000), tw("small.md", 5)];
-    let out = cap_work_by_chunks(work, 512);
+    let out = cap_work_by_chunks(work, ChunkAllowance::per_tick(512));
     assert_eq!(out.len(), 1, "only the oversized note; the rest defer");
     assert_eq!(out[0].note_path, "huge.md");
 }
@@ -991,4 +1021,405 @@ fn inference_pool_propagates_errors_not_panics() {
     // to travel back out as Err rather than poisoning a pool worker.
     let out: Result<()> = in_inference_pool(2, || eyre::bail!("model exploded"));
     assert!(out.is_err());
+}
+
+// --- stop check points and the per-tick chunk allowance --------------------
+
+/// Counts `embed_batch` calls and the chunks sent through them, and can set a
+/// stop flag right after its Nth call returns (the flag a SIGTERM would set
+/// while that sub-batch was in flight).
+struct CountingEmbedder {
+    inner: MockEmbedder,
+    calls: std::sync::atomic::AtomicUsize,
+    chunks: std::sync::atomic::AtomicUsize,
+    stop_after_call: Option<(usize, StopHandle)>,
+}
+
+impl CountingEmbedder {
+    fn new() -> Self {
+        Self {
+            inner: MockEmbedder::new(8, "mock-counting"),
+            calls: Default::default(),
+            chunks: Default::default(),
+            stop_after_call: None,
+        }
+    }
+
+    fn stopping_after(call: usize, stop: &StopHandle) -> Self {
+        Self {
+            stop_after_call: Some((call, stop.clone())),
+            ..Self::new()
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn chunks(&self) -> usize {
+        self.chunks.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl EmbeddingModel for CountingEmbedder {
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+
+    fn model_version(&self) -> &str {
+        self.inner.model_version()
+    }
+
+    fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
+        self.inner.embed_one(text)
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let out = self.inner.embed_batch(texts);
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        self.chunks.fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+        if let Some((n, stop)) = &self.stop_after_call
+            && call == *n
+        {
+            stop.stop();
+        }
+        out
+    }
+}
+
+fn expect_vectors(inference: Inference) -> Vec<Vec<f32>> {
+    match inference {
+        Inference::Vectors(v) => v,
+        Inference::Stopped => panic!("inference stopped under StopHandle::never()"),
+    }
+}
+
+/// A transcript that `chunk_transcript` splits into exactly `chunks` chunks
+/// (400-word window, 350-word stride).
+fn transcript_of_chunks(chunks: usize) -> String {
+    let words = CHUNK_MAX_TOKENS + (CHUNK_MAX_TOKENS - CHUNK_OVERLAP_TOKENS) * (chunks - 1);
+    (0..words).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ")
+}
+
+/// Claims text that `group_claims` packs into exactly `groups` groups.
+fn claims_of_groups(groups: usize) -> String {
+    (0..groups * CLAIM_GROUP_MAX_WORDS)
+        .map(|i| format!("c{i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// An `audio` note (in-note transcript source) with no summary, so it is a
+/// transcript-chunk target only.
+fn seed_transcript_note(index: &SearchIndex, vault: &std::path::Path, rel: &str, chunks: usize, modified_at: i64) {
+    write_note_with_transcript(vault, rel, "audio", "", &transcript_of_chunks(chunks));
+    index
+        .insert_test_note_full(rel, "audio", "body", "", modified_at)
+        .expect("transcript row");
+    assert_eq!(
+        vault::embedding::chunk_transcript(&transcript_of_chunks(chunks), CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS).len(),
+        chunks,
+        "fixture must chunk to exactly {chunks}"
+    );
+}
+
+/// A `repo` note (not transcript-eligible) with a summary: one summary target.
+fn seed_summary_note(index: &SearchIndex, rel: &str, modified_at: i64) {
+    index
+        .insert_test_note_full(rel, "repo", "body", "summary", modified_at)
+        .expect("summary row");
+}
+
+/// A `repo` note with no summary and `groups` claim groups: a claim target only.
+fn seed_claim_note(index: &SearchIndex, rel: &str, groups: usize, modified_at: i64) {
+    index
+        .insert_test_note_full(rel, "repo", "body", "", modified_at)
+        .expect("claim row");
+    index.set_test_claims(rel, &claims_of_groups(groups)).expect("claims");
+}
+
+fn tick_config(staging_root: &std::path::Path, max_chunks_per_tick: usize, max_chunks_per_call: usize) -> Config {
+    Config {
+        staging_root: staging_root.to_path_buf(),
+        embed: EmbedConfig {
+            max_chunks_per_tick,
+            max_chunks_per_call,
+            workers: 1,
+            ..EmbedConfig::default()
+        },
+        ..Config::default()
+    }
+}
+
+#[test]
+fn stop_between_sub_batches_drops_the_batch_and_writes_no_embedding_rows() {
+    // The flag is set while sub-batch 1 of 3 runs. The
+    // check point before sub-batch 2 sees it: exactly one model call, no
+    // embedding row, and the examined sentinel written before inference stays.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let stop = StopHandle::never();
+    let m = CountingEmbedder::stopping_after(1, &stop);
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+    let vault = TempDir::new().expect("vault");
+
+    seed_transcript_note(&index, vault.path(), "notes/three.md", 3, 200);
+    // Transcript-eligible with no transcript section: sentinel-skipped in the
+    // read phase, which runs before inference.
+    index
+        .insert_test_note_full("notes/skip.md", "audio", "body", "", 100)
+        .expect("skip row");
+
+    let mut config = tick_config(vault.path(), DEFAULT_MAX_CHUNKS_PER_TICK, 1);
+    config.embed.kinds.summary = false;
+    let stats = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick");
+
+    assert_eq!(m.calls(), 1, "the check point before sub-batch 2 must stop the batch");
+    assert_eq!(
+        index.count_embeddings(None).expect("count"),
+        0,
+        "a stopped batch writes no embedding rows"
+    );
+    assert_eq!(stats.embedded, 0);
+    assert_eq!(stats.failed, 0, "a stop is never counted as a failure");
+    assert_eq!(
+        index
+            .examined_watermark("notes/skip.md", EmbeddingKind::TranscriptChunk, m.model_version())
+            .expect("watermark"),
+        Some(100),
+        "the sentinel written before inference survives the stop"
+    );
+}
+
+#[test]
+fn stopped_batch_is_its_own_outcome() {
+    // process_batch reports the stop as Stopped, never Complete with failures.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let stop = StopHandle::never();
+    let m = CountingEmbedder::stopping_after(1, &stop);
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+    let vault = TempDir::new().expect("vault");
+    seed_summary_note(&index, "notes/a.md", 300);
+    seed_summary_note(&index, "notes/b.md", 200);
+
+    let outcome = process_batch(
+        &mut index,
+        &m,
+        EmbeddingKind::Summary,
+        m.model_version(),
+        vault.path(),
+        vault.path(),
+        16,
+        1,
+        ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
+        1,
+        &stop,
+    )
+    .expect("process");
+
+    assert!(
+        matches!(outcome, BatchOutcome::Stopped(_)),
+        "expected Stopped, got {outcome:?}"
+    );
+    assert_eq!(outcome.stats().failed, 0);
+    assert_eq!(outcome.stats().embedded, 0);
+    assert_eq!(index.count_embeddings(None).expect("count"), 0);
+}
+
+#[test]
+fn preset_stop_returns_before_any_batch() {
+    // With the flag already set, the tick's first check
+    // point fires before process_batch. No read phase runs, so the sentinel a
+    // read phase would write for the skip note is absent too.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = CountingEmbedder::new();
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+    let vault = TempDir::new().expect("vault");
+    seed_summary_note(&index, "notes/s.md", 300);
+    index
+        .insert_test_note_full("notes/skip.md", "audio", "body", "", 100)
+        .expect("skip row");
+
+    let stop = StopHandle::never();
+    stop.stop();
+    let config = tick_config(vault.path(), DEFAULT_MAX_CHUNKS_PER_TICK, DEFAULT_MAX_CHUNKS_PER_CALL);
+    let stats = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick");
+
+    assert_eq!(m.calls(), 0, "no model call");
+    assert_eq!(stats.scanned, 0, "no batch was selected");
+    assert_eq!(
+        index
+            .examined_watermark("notes/skip.md", EmbeddingKind::TranscriptChunk, m.model_version())
+            .expect("watermark"),
+        None,
+        "no read phase ran"
+    );
+    assert_eq!(index.count_embeddings(None).expect("count"), 0);
+}
+
+#[test]
+fn one_tick_embeds_at_most_the_cap_across_all_kinds() {
+    // Cap 512 and a 1300-chunk backlog across summary
+    // (200 notes x 1), transcript (6 notes x 150) and claim (1 note x 200).
+    // Every note fits the cap, so no tick may exceed it; the backlog drains
+    // over several ticks.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = CountingEmbedder::new();
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+    let vault = TempDir::new().expect("vault");
+
+    for i in 0..200 {
+        seed_summary_note(&index, &format!("notes/s{i:03}.md"), 1000 + i);
+    }
+    for i in 0..6 {
+        seed_transcript_note(&index, vault.path(), &format!("notes/t{i}.md"), 150, 500 + i);
+    }
+    seed_claim_note(&index, "notes/c.md", 200, 400);
+
+    let mut config = tick_config(vault.path(), 512, DEFAULT_MAX_CHUNKS_PER_CALL);
+    config.embed.kinds.claim = true;
+    let stop = StopHandle::never();
+
+    let mut per_tick: Vec<(u64, usize)> = Vec::new();
+    for _ in 0..10 {
+        let before = m.chunks();
+        let stats = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick");
+        if stats.embedded == 0 {
+            break;
+        }
+        per_tick.push((stats.embedded, m.chunks() - before));
+    }
+
+    for (tick, (embedded, inferred)) in per_tick.iter().enumerate() {
+        assert!(
+            *embedded <= 512,
+            "tick {tick} embedded {embedded} chunks, over the 512 cap: {per_tick:?}"
+        );
+        assert!(
+            *inferred <= 512,
+            "tick {tick} sent {inferred} chunks to the model: {per_tick:?}"
+        );
+    }
+    assert!(
+        per_tick.len() > 1,
+        "a 1300-chunk backlog cannot drain in one tick: {per_tick:?}"
+    );
+    assert_eq!(
+        per_tick.iter().map(|(e, _)| e).sum::<u64>(),
+        1300,
+        "the whole backlog drains across ticks: {per_tick:?}"
+    );
+    assert_eq!(index.count_embeddings(None).expect("count"), 1300);
+}
+
+#[test]
+fn an_oversized_note_embeds_alone_in_its_tick() {
+    // A 600-chunk note is over the 512 cap. It may only
+    // take a fresh allowance, so it defers past the tick where summary drew
+    // first, then embeds alone in the next one; the 100-chunk note waits.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = CountingEmbedder::new();
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+    let vault = TempDir::new().expect("vault");
+
+    for i in 0..5 {
+        seed_summary_note(&index, &format!("notes/s{i}.md"), 1000 + i);
+    }
+    seed_transcript_note(&index, vault.path(), "notes/big.md", 600, 900);
+    seed_transcript_note(&index, vault.path(), "notes/small.md", 100, 800);
+
+    let config = tick_config(vault.path(), 512, DEFAULT_MAX_CHUNKS_PER_CALL);
+    let stop = StopHandle::never();
+
+    let t1 = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick 1");
+    assert_eq!(t1.embedded, 5, "tick 1: the summaries draw first; the big note defers");
+    assert_eq!(index.transcript_chunk_count("notes/big.md").expect("count"), 0);
+
+    let before = m.chunks();
+    let t2 = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick 2");
+    assert_eq!(t2.embedded, 600, "tick 2 embeds the oversized note and nothing else");
+    assert_eq!(m.chunks() - before, 600);
+    assert_eq!(index.transcript_chunk_count("notes/big.md").expect("count"), 600);
+    assert_eq!(
+        index.transcript_chunk_count("notes/small.md").expect("count"),
+        0,
+        "nothing joins the oversized note in its tick"
+    );
+
+    let t3 = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick 3");
+    assert_eq!(t3.embedded, 100);
+}
+
+#[test]
+fn partly_drawn_allowance_defers_an_oversized_note() {
+    let work = vec![tw("huge.md", 600), tw("small.md", 5)];
+    let allowance = ChunkAllowance::Limited {
+        remaining: 500,
+        fresh: false,
+    };
+    assert!(cap_work_by_chunks(work, allowance).is_empty());
+}
+
+#[test]
+fn allowance_draws_down_and_reports_spent() {
+    let mut a = ChunkAllowance::per_tick(10);
+    assert!(!a.is_spent());
+    a.draw(0);
+    assert_eq!(
+        a,
+        ChunkAllowance::Limited {
+            remaining: 10,
+            fresh: true
+        },
+        "drawing nothing keeps it fresh"
+    );
+    a.draw(4);
+    assert_eq!(
+        a,
+        ChunkAllowance::Limited {
+            remaining: 6,
+            fresh: false
+        }
+    );
+    assert_eq!(a.note_limit(64), 6);
+    a.draw(99);
+    assert!(a.is_spent(), "an overdraw saturates at 0");
+
+    let mut unlimited = ChunkAllowance::per_tick(0);
+    unlimited.draw(1_000_000);
+    assert_eq!(unlimited, ChunkAllowance::Unlimited);
+    assert!(!unlimited.is_spent());
+    assert_eq!(unlimited.note_limit(64), 64);
+}
+
+#[test]
+fn sub_batches_stop_at_the_check_point() {
+    let stop = StopHandle::never();
+    let m = CountingEmbedder::stopping_after(2, &stop);
+    let texts: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let out = embed_in_sub_batches(&m, &refs, 1, 1, &stop).expect("embed");
+    assert!(matches!(out, Inference::Stopped));
+    assert_eq!(m.calls(), 2);
+}
+
+#[test]
+fn summary_draws_one_per_note_from_the_tick_allowance() {
+    // Summary used to take no tick cap at all. 600 summary targets against a
+    // 500 cap: the tick selects no more notes than the allowance has left, so
+    // the last batch is clipped to 52 and the tick embeds exactly 500.
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = CountingEmbedder::new();
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+    let vault = TempDir::new().expect("vault");
+    for i in 0..600 {
+        seed_summary_note(&index, &format!("notes/s{i:03}.md"), 1000 + i);
+    }
+    let config = tick_config(vault.path(), 500, DEFAULT_MAX_CHUNKS_PER_CALL);
+    let stop = StopHandle::never();
+
+    let t1 = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick 1");
+    assert_eq!(t1.embedded, 500);
+    assert_eq!(m.chunks(), 500);
+    let t2 = embed_tick(&mut index, &m, vault.path(), &config, &stop).expect("tick 2");
+    assert_eq!(t2.embedded, 100, "the rest drains next tick");
 }

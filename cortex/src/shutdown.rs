@@ -147,7 +147,9 @@ impl StopHandle {
         notified.await;
     }
 
-    fn stop(&self) {
+    /// Set the flag and wake every waiter. The listener task is the only
+    /// production caller; crate tests use it to stop work at a chosen point.
+    pub(crate) fn stop(&self) {
         self.inner.stopped.store(true, Ordering::Release);
         self.inner.notify.notify_waiters();
     }

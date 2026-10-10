@@ -341,7 +341,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     // for this process. Other actions keep running.
                     continue;
                 };
-                match tokio::task::block_in_place(|| crate::embed::daemon_tick_with_model(vault_root, config, model)) {
+                match tokio::task::block_in_place(|| crate::embed::daemon_tick_with_model(vault_root, config, model, &stop)) {
                     Ok(stats) if stats.scanned > 0 => {
                         log::info!(
                             "daemon embed tick: scanned={} embedded={} skipped_empty={} failed={}",
