@@ -741,7 +741,24 @@ async fn process_url_inner(
         // alone keeps chrome-heavy-but-mixed-line fallback pages (measured on the
         // tg-1a0305 trainwreck: 0.61 short-line ratio, below the 0.90 threshold).
         let transcript_clean_source = readable_triple.is_some();
-        let (scraped_title, article_md, byline) = match readable_triple {
+        // An HN discussion is read from the items API, not the rendered page:
+        // the page fetch below carried vote arrows, `[–]` toggles and nav links
+        // into the thread transcript. On an API failure the page chain still runs.
+        let hn_item = if is_thread { crate::hackernews::item_id(&url_match.url) } else { None };
+        let hn_triple = match hn_item {
+            Some(item_id) => match process_hn_thread(&url_match.url, item_id, config, trace_id).await {
+                Ok(triple) => Some(triple),
+                Err(e) => {
+                    log::warn!(
+                        "[{trace_id}] HN items API failed for {}: {e:#}; falling back to the page fetch",
+                        url_match.url
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        let (scraped_title, article_md, byline) = match readable_triple.or(hn_triple) {
             Some(triple) => triple,
             None if use_fabric => match process_article_fabric(&url_match.url, config, trace_id).await {
                 Ok(triple) => triple,

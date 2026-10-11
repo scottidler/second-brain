@@ -577,6 +577,38 @@ pub(crate) fn accept_readable_output(url: &str, article_md: String) -> Result<St
 /// distillation step uniformly. Gate-1 still runs against
 /// the fetched bytes here. The byline is `None` on the Jina markdown path and
 /// carries the browser-UA fallback's `byline::extract` result otherwise.
+/// Fetch an HN discussion through the items API (`hackernews`). Same
+/// `(title, markdown, byline)` shape as the other fetchers; the body is the
+/// story and comment tree with no page chrome. Persisted to staging as
+/// `extractor: hn-api`. An `Err` sends the caller to the generic thread chain.
+pub(crate) async fn process_hn_thread(
+    url: &str,
+    item_id: u64,
+    config: &Config,
+    trace_id: &str,
+) -> Result<(String, String, Option<String>)> {
+    log::debug!("process_hn_thread[{trace_id}]: url={url} item_id={item_id}");
+    let (title, thread_md) = crate::hackernews::fetch_thread(
+        crate::hackernews::ITEMS_API_BASE,
+        item_id,
+        config.pipeline.jina_timeout_secs,
+    )
+    .await?;
+    if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
+        config,
+        trace_id,
+        url,
+        thread_md.as_bytes(),
+        "hn-api",
+        200,
+        Some("text/markdown"),
+    ) {
+        log::warn!("[{trace_id}] persist_fetched (hn-api) failed: {e:#}");
+    }
+    crate::stages::raw::run_gate_1(config, trace_id, url, thread_md.as_bytes(), 200)?;
+    Ok((title, thread_md, None))
+}
+
 pub(crate) async fn process_article_jina(
     url: &str,
     config: &Config,

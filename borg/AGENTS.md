@@ -37,7 +37,7 @@ borg owns durable capture, multi-channel ingest, and the staged pipeline that pu
 
 ## Module Map
 
-**Sources (transports):** `telegram.rs`, `discord.rs`, `ntfy.rs`, `github.rs` (+`github/`), `youtube.rs`, `slides.rs`, `jina.rs`, `signal.rs` (+`signal/`).
+**Sources (transports):** `telegram.rs`, `discord.rs`, `ntfy.rs`, `github.rs` (+`github/`), `youtube.rs`, `slides.rs`, `jina.rs`, `hackernews.rs` (HN threads via the Algolia items API, so no page chrome reaches the note), `signal.rs` (+`signal/`).
 
 **Test-only:** the process-wide WARN capture is `vault::capture` (behind vault's `test-util` feature, shared by borg, cortex, and sb tests), `stub.rs` (stub daemon on `127.0.0.1:0` with silent / stalled-body / 401 / token-required / ntfy-keepalive behaviors, shared by the daemon-client, fetcher, and ntfy-stream tests).
 
