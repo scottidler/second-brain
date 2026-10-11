@@ -696,8 +696,20 @@ fn test_shipped_empty_proposals_still_parses() {
 /// treats an unreadable DB as an `Err` by design, so a test that exercises the
 /// arm has to provide one; these tests are about the arm, not about identity
 /// resolution, which `cortex::proposals::tests` covers against its own rows.
-fn empty_receipts_db() {
+///
+/// The DB lives under a private `XDG_DATA_HOME`, redirected until the
+/// returned guard drops (callers hold `lock_env`). Without it this opened the
+/// operator's live `~/.local/share/sb/borg/receipts.db`, and the test failed
+/// with `disk I/O error` whenever a running borg was writing that file.
+fn empty_receipts_db() -> (tempfile::TempDir, crate::testutil::EnvGuard) {
+    let data_home = tempfile::tempdir().expect("data home tmpdir");
+    let guard = crate::testutil::EnvGuard::set("XDG_DATA_HOME", data_home.path());
     let path = vault::receipts::receipts_db_path().expect("receipts path");
+    assert!(
+        path.starts_with(data_home.path()),
+        "receipts DB must resolve under the private data home: {}",
+        path.display()
+    );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("receipts dir");
     }
@@ -710,6 +722,7 @@ fn empty_receipts_db() {
          );",
     )
     .expect("receipts schema");
+    (data_home, guard)
 }
 
 fn write_staged(root: &Path, trace: &str, body: &str) {
@@ -728,7 +741,7 @@ fn test_scan_proposals_staged_arm_finds_what_the_note_arm_cannot() {
     let mut config = make_config(dir.path());
     config.staged_proposals = true;
 
-    empty_receipts_db();
+    let _data_home = empty_receipts_db();
     let staging = dir.path().join("stages");
     write_staged(&staging, "hv-1", "tags:\n  - ci-cd\n");
     write_staged(&staging, "hv-2", "tags:\n  - ci-cd\n");
@@ -780,7 +793,7 @@ fn test_staged_window_is_written_to_the_queue() {
     let mut config = make_config(dir.path());
     config.staged_proposals = true;
 
-    empty_receipts_db();
+    let _data_home = empty_receipts_db();
     let staging = dir.path().join("stages");
     write_staged(
         &staging,
