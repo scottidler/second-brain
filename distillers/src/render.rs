@@ -255,16 +255,28 @@ fn push_enumeration(body: &mut String, enumeration: Option<&Enumeration>) {
             body.push_str(": ");
             body.push_str(&crate::text::flatten_lines(text));
         }
-        if let Some(anchor) = &item.anchor
-            && !anchor.trim().is_empty()
-        {
-            body.push_str(" [");
-            body.push_str(anchor.trim());
-            body.push(']');
-        }
+        push_anchor(body, item.anchor.as_deref());
         body.push('\n');
     }
     body.push('\n');
+}
+
+/// Append ` [anchor]` for a claim or enumeration item. The model copies
+/// anchors out of a `[HH:MM:SS]`-prefixed transcript and often keeps the
+/// brackets (`'[00:14:45]'`), which the video validator accepts; wrapping that
+/// in our own brackets wrote `[[00:14:45]]`, a broken wikilink. Strip any
+/// brackets the anchor already carries so exactly one pair is emitted.
+fn push_anchor(body: &mut String, anchor: Option<&str>) {
+    let Some(anchor) = anchor else {
+        return;
+    };
+    let bare = anchor.trim().trim_start_matches('[').trim_end_matches(']').trim();
+    if bare.is_empty() {
+        return;
+    }
+    body.push_str(" [");
+    body.push_str(bare);
+    body.push(']');
 }
 
 fn push_key_ideas(body: &mut String, key_ideas: &[String]) {
@@ -316,13 +328,7 @@ fn push_claims(body: &mut String, claims: &[Claim]) {
         // Flatten any internal line breaks: a multi-line claim would otherwise
         // break the `- ` bullet into stray continuation lines.
         body.push_str(&crate::text::flatten_lines(claim.text.trim()));
-        if let Some(anchor) = &claim.anchor
-            && !anchor.is_empty()
-        {
-            body.push_str(" [");
-            body.push_str(anchor);
-            body.push(']');
-        }
+        push_anchor(body, claim.anchor.as_deref());
         body.push('\n');
         // Optional verbatim quote as an indented blockquote line beneath the
         // bullet. Flattened so a multi-line quote can't spill into stray lines.

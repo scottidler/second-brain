@@ -909,3 +909,39 @@ fn frontmatter_additions_escape_special_chars_on_serialize() {
         Some(&serde_yaml::Value::String(nasty.to_string()))
     );
 }
+
+/// The video model copies anchors out of a `[HH:MM:SS]`-prefixed transcript and
+/// often keeps the brackets. The renderer adds its own pair, so a bracketed
+/// anchor must not land as `[[00:14:45]]` (an Obsidian wikilink).
+#[test]
+fn render_strips_brackets_the_model_left_on_anchors() {
+    let distilled = Distilled {
+        summary: "A video.".to_string(),
+        claims: vec![Claim {
+            text: "Jeff is hundreds of times cheaper.".to_string(),
+            anchor: Some("[00:14:45]".to_string()),
+            ..Default::default()
+        }],
+        enumeration: Some(Enumeration {
+            lead_in: None,
+            declared_count: Some(1),
+            items: vec![EnumeratedItem {
+                name: "Routing".to_string(),
+                text: "Multi-agent routing demo.".to_string(),
+                anchor: Some(" [00:29:06] ".to_string()),
+            }],
+        }),
+        meta: base_meta("distill-video-v1"),
+        ..Default::default()
+    };
+    let body = render(&distilled, NO_TRANSCRIPT).body_markdown;
+    assert!(!body.contains("[["), "anchor rendered as a wikilink: {body}");
+    assert!(
+        body.contains("- Jeff is hundreds of times cheaper. [00:14:45]\n"),
+        "claim anchor shape wrong: {body}"
+    );
+    assert!(
+        body.contains("1. **Routing**: Multi-agent routing demo. [00:29:06]\n"),
+        "enumeration anchor shape wrong: {body}"
+    );
+}
