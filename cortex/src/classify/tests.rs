@@ -1062,28 +1062,31 @@ fn loop_error_after_a_move_relinks_it_before_returning_the_error() {
     assert_eq!(broken_link_count(root), 0);
 }
 
-/// When the post-loop rescan fails (an unreadable directory), the run's own
+/// When the post-loop rescan fails, the run's own
 /// note set is relinked instead and the rescan error is returned after it.
 #[test]
 fn rescan_failure_still_relinks_completed_moves() {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = tempfile::tempdir().expect("tmpdir");
     let root = dir.path();
     std::fs::create_dir_all(root.join("inbox")).unwrap();
-    std::fs::create_dir_all(root.join("locked")).unwrap();
     std::fs::write(root.join("inbox/alpha.md"), inbox_note("alpha")).unwrap();
     let referrer = "---\ntitle: Refs\ndate: 2026-10-01\ntype: note\ntags:\n  - rust\n---\nSee [[inbox/alpha]].\n";
     std::fs::write(root.join("refs.md"), referrer).unwrap();
     let notes = scan_sorted(root);
-    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let alpha = notes
+        .iter()
+        .find(|n| n.path.ends_with("inbox/alpha.md"))
+        .expect("alpha scanned");
 
-    let stop = StopHandle::never();
-    let (primary, _) = stopping_stub(&["rust"], false, &stop, NEVER);
-    let (fallback, _) = stopping_stub(&["rust"], false, &stop, NEVER);
-    let classifiers = Classifiers::new(primary, fallback, test_canon());
-    let result = apply_classify(root, &notes, &Config::default(), &apply_opts(), &classifiers, &stop);
-    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The loop's completed move, made by hand so only the relink is under test.
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+    std::fs::rename(root.join("inbox/alpha.md"), root.join("notes/alpha.md")).unwrap();
+    let moves = vec![(alpha.path.clone(), PathBuf::from("notes/alpha.md"))];
+
+    let mut report = Report::default();
+    let result = relink_moves_with(root, &notes, &moves, &mut report, |_| {
+        Err(eyre::eyre!("stub rescan failure"))
+    });
 
     assert!(result.is_err(), "the rescan error is returned");
     let refs = std::fs::read_to_string(root.join("refs.md")).unwrap();

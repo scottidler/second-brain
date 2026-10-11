@@ -735,10 +735,24 @@ fn classify_targets(
 /// their destinations) is relinked instead, and the rescan error is returned
 /// after it.
 fn relink_moves(vault_root: &Path, notes: &[Note], moves: &[(PathBuf, PathBuf)], report: &mut Report) -> Result<()> {
+    relink_moves_with(vault_root, notes, moves, report, |root| {
+        crate::vault::scan_vault(root, &crate::config::VaultConfig::default())
+    })
+}
+
+/// `relink_moves` with the rescan injected, so a test can fail it without
+/// relying on file permissions (CI runs as root, where `chmod 000` blocks nothing).
+fn relink_moves_with(
+    vault_root: &Path,
+    notes: &[Note],
+    moves: &[(PathBuf, PathBuf)],
+    report: &mut Report,
+    rescan_vault: impl FnOnce(&Path) -> Result<Vec<Note>>,
+) -> Result<()> {
     if moves.is_empty() {
         return Ok(());
     }
-    let (all_notes, rescan) = match crate::vault::scan_vault(vault_root, &crate::config::VaultConfig::default()) {
+    let (all_notes, rescan) = match rescan_vault(vault_root) {
         Ok(all) => (all, Ok(())),
         Err(e) => {
             log::error!("classify: rescan for the relink failed: {e:#}; relinking the run's own note set instead");
