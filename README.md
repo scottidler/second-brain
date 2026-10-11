@@ -37,7 +37,8 @@ filesystem for content.
 cargo install --git https://github.com/scottidler/second-brain --bin sb
 
 # 2. Install Daniel Miessler's fabric (external dep; provides
-#    summarize, weekly_digest, etc.)
+#    summarize. sb's own patterns, weekly-digest included, come from
+#    `sb bootstrap` below)
 go install github.com/danielmiessler/fabric/cmd/fabric@latest
 fabric -y --update-patterns
 
@@ -47,7 +48,7 @@ sb bootstrap
 ```
 
 Bootstrap drops config templates, shared vocabulary (`canonical-tags.yml`,
-`tag-mapping.yml`, `tag-proposals.yml`), and 14 fabric distill patterns
+`tag-mapping.yml`, `tag-proposals.yml`), and sb's 27 fabric patterns
 into `~/.config/sb/`. It also installs the borg and cortex systemd
 user units and prefetches the embedding model (~100 MB on first run).
 

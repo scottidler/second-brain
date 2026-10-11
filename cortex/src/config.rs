@@ -718,13 +718,20 @@ pub struct IntelConfig {
     pub llm_timeout_secs: u64,
 }
 
+/// The `intel.batch-weekly` default: the weekly review's Fabric fallback
+/// pattern. sb ships it (`borg/patterns/weekly-digest.md`, installed into
+/// `vault::paths::patterns_dir()` by `sb bootstrap`), so the bare name
+/// resolves through `vault::fabric::resolve_pattern` to that file. It is not
+/// an upstream fabric pattern.
+pub const DEFAULT_WEEKLY_PATTERN: &str = "weekly-digest";
+
 impl Default for IntelConfig {
     fn default() -> Self {
         Self {
             daily_note: true,
             weekly_review: true,
             output_path: "notes/ai".to_string(),
-            batch_weekly: Some("weekly_digest".to_string()),
+            batch_weekly: Some(DEFAULT_WEEKLY_PATTERN.to_string()),
             max_input_tokens: 50000,
             fabric_timeout_secs: 120,
             // None = fall back to the shared `llm.model`. A hardcoded pin here

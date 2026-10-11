@@ -434,7 +434,7 @@ fn weekly_fixture() -> (TestVault, Vec<Note>, IntelOpts) {
 /// only the stop can skip it.
 fn with_weekly_fallback(v: &TestVault) -> IntelConfig {
     IntelConfig {
-        batch_weekly: Some("weekly_digest".to_string()),
+        batch_weekly: Some(crate::config::DEFAULT_WEEKLY_PATTERN.to_string()),
         ..v.config().actions.intel
     }
 }

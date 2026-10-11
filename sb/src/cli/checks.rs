@@ -434,7 +434,7 @@ fn external_binaries_findings() -> Vec<Finding> {
     let mut findings = Vec::new();
     findings.extend(fabric_cli_findings());
     findings.extend(fabric_max_tokens_findings());
-    findings.extend(fabric_default_patterns_findings());
+    findings.extend(fabric_patterns::findings());
     findings.extend(fabric_live_probe_findings());
     if let Ok(config) = borg::config::load_config::<borg::config::Config>(None)
         && config.signal.is_some()
@@ -488,67 +488,6 @@ fn fabric_max_tokens_findings() -> Vec<Finding> {
          go build -ldflags=\"-s -w\" -o ~/.local/bin/fabric ./cmd/fabric \
          (and check `which fabric`: mise shims precede ~/.local/bin on PATH)",
     )]
-}
-
-/// Fabric pattern borg and cortex call unconditionally (`vault::fabric` summarize path).
-const REQUIRED_FABRIC_PATTERN: &str = "summarize";
-/// Fallback `intel.batch-weekly` default when cortex config is unavailable; mirrors
-/// `IntelConfig::default`.
-const DEFAULT_WEEKLY_PATTERN: &str = "weekly_digest";
-
-/// Verifies the fabric patterns the code actually calls are installed:
-/// `summarize` (required, Error) and the configured `intel.batch-weekly`
-/// fallback (Warn, since the weekly review only falls back to it when the LLM
-/// call fails). `None` means no fallback is configured, so nothing to check.
-fn fabric_default_patterns_findings() -> Vec<Finding> {
-    let Ok(out) = Command::new("fabric")
-        .arg("-l")
-        .stdin(std::process::Stdio::null())
-        .output()
-    else {
-        // The CLI-missing case is already covered by fabric_cli_findings.
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return vec![Finding::warn(
-            "fabric -l exited non-zero (CLI installed, pattern list unavailable)",
-            "rerun `fabric -y --update-patterns` to (re)provision Daniel Miessler's default patterns",
-        )];
-    }
-    let weekly = cortex::config::Config::load(None)
-        .map(|c| c.actions.intel.batch_weekly)
-        .unwrap_or_else(|_| Some(DEFAULT_WEEKLY_PATTERN.to_string()));
-    fabric_pattern_findings(&String::from_utf8_lossy(&out.stdout), weekly.as_deref())
-}
-
-/// Pure half of `fabric_default_patterns_findings`: `fabric -l` stdout (one
-/// pattern per line) plus the configured weekly fallback pattern.
-fn fabric_pattern_findings(list_stdout: &str, weekly_pattern: Option<&str>) -> Vec<Finding> {
-    let has = |name: &str| list_stdout.lines().any(|line| line.trim() == name);
-    let mut findings = Vec::new();
-    if has(REQUIRED_FABRIC_PATTERN) {
-        findings.push(Finding::ok(format!(
-            "fabric pattern present ({REQUIRED_FABRIC_PATTERN})"
-        )));
-    } else {
-        findings.push(Finding::error(
-            format!("missing required fabric pattern: {REQUIRED_FABRIC_PATTERN}"),
-            "fabric -y --update-patterns",
-        ));
-    }
-    if let Some(weekly) = weekly_pattern {
-        if has(weekly) {
-            findings.push(Finding::ok(format!(
-                "fabric weekly fallback pattern present ({weekly})"
-            )));
-        } else {
-            findings.push(Finding::warn(
-                format!("missing fabric pattern {weekly} (intel.batch-weekly fallback for the weekly review)"),
-                "fabric -y --update-patterns, or set intel.batch-weekly to an installed pattern",
-            ));
-        }
-    }
-    findings
 }
 
 /// Live end-to-end fabric probe: run the `summarize` pattern on a trivial input
@@ -1494,6 +1433,7 @@ fn current_hostname() -> String {
     borg::config::current_hostname().unwrap_or_default()
 }
 
+mod fabric_patterns;
 mod stop_timeout;
 #[cfg(test)]
 mod tests;
