@@ -207,8 +207,16 @@ fn push_summary(body: &mut String, summary: &str) {
     // snippet that can open with a markdown heading (`#` / `##`); demote any
     // embedded headings so they stay subordinate to this `## Summary` L2
     // heading rather than colliding with the note's section structure.
-    body.push_str(&crate::text::demote_headings(trimmed, 2));
+    body.push_str(&crate::text::literal_wikilinks(&crate::text::demote_headings(
+        trimmed, 2,
+    )));
     body.push_str("\n\n");
+}
+
+/// One line of model-written prose: flattened, with any `[[...]]` the model
+/// emitted kept literal (see `text::literal_wikilinks`).
+fn prose_line(text: &str) -> String {
+    crate::text::literal_wikilinks(&crate::text::flatten_lines(text))
 }
 
 fn push_tldr(body: &mut String, tldr: Option<&str>) {
@@ -223,7 +231,7 @@ fn push_tldr(body: &mut String, tldr: Option<&str>) {
     // `> [!tldr]` marker as a summary signal. Flatten so a multi-sentence hook
     // can't break the callout syntax into stray blockquote continuation lines.
     body.push_str("> [!tldr]\n> ");
-    body.push_str(&crate::text::flatten_lines(trimmed));
+    body.push_str(&prose_line(trimmed));
     body.push_str("\n\n");
 }
 
@@ -238,7 +246,7 @@ fn push_enumeration(body: &mut String, enumeration: Option<&Enumeration>) {
     if let Some(lead_in) = &enumeration.lead_in {
         let trimmed = lead_in.trim();
         if !trimmed.is_empty() {
-            body.push_str(&crate::text::flatten_lines(trimmed));
+            body.push_str(&prose_line(trimmed));
             body.push_str("\n\n");
         }
     }
@@ -248,12 +256,12 @@ fn push_enumeration(body: &mut String, enumeration: Option<&Enumeration>) {
     for (idx, item) in enumeration.items.iter().enumerate() {
         body.push_str(&(idx + 1).to_string());
         body.push_str(". **");
-        body.push_str(&crate::text::flatten_lines(item.name.trim()));
+        body.push_str(&prose_line(item.name.trim()));
         body.push_str("**");
         let text = item.text.trim();
         if !text.is_empty() {
             body.push_str(": ");
-            body.push_str(&crate::text::flatten_lines(text));
+            body.push_str(&prose_line(text));
         }
         push_anchor(body, item.anchor.as_deref());
         body.push('\n');
@@ -291,7 +299,7 @@ fn push_key_ideas(body: &mut String, key_ideas: &[String]) {
     body.push_str("## Key Ideas\n\n");
     for idea in ideas {
         body.push_str("- ");
-        body.push_str(&crate::text::flatten_lines(idea));
+        body.push_str(&prose_line(idea));
         body.push('\n');
     }
     body.push('\n');
@@ -327,7 +335,7 @@ fn push_claims(body: &mut String, claims: &[Claim]) {
         }
         // Flatten any internal line breaks: a multi-line claim would otherwise
         // break the `- ` bullet into stray continuation lines.
-        body.push_str(&crate::text::flatten_lines(claim.text.trim()));
+        body.push_str(&prose_line(claim.text.trim()));
         push_anchor(body, claim.anchor.as_deref());
         body.push('\n');
         // Optional verbatim quote as an indented blockquote line beneath the
@@ -336,7 +344,7 @@ fn push_claims(body: &mut String, claims: &[Claim]) {
             && !quote.trim().is_empty()
         {
             body.push_str("  > \"");
-            body.push_str(&crate::text::flatten_lines(quote.trim()));
+            body.push_str(&prose_line(quote.trim()));
             body.push_str("\"\n");
         }
     }

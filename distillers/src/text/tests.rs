@@ -73,3 +73,16 @@ Channel description.";
 fn test_demote_headings_empty_input() {
     assert_eq!(demote_headings("", 3), "");
 }
+
+#[test]
+fn literal_wikilinks_code_spans_a_bare_link_and_leaves_code_and_embeds() {
+    assert_eq!(
+        literal_wikilinks("a library crate with no [[bin]], so no command"),
+        "a library crate with no `[[bin]]`, so no command"
+    );
+    assert_eq!(
+        literal_wikilinks("declares a `[[bin]]` target and ![[slide.jpg]]"),
+        "declares a `[[bin]]` target and ![[slide.jpg]]"
+    );
+    assert_eq!(literal_wikilinks("no links here"), "no links here");
+}

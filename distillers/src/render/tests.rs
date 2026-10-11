@@ -945,3 +945,30 @@ fn render_strips_brackets_the_model_left_on_anchors() {
         "enumeration anchor shape wrong: {body}"
     );
 }
+
+/// The session model drops the backticks around Cargo's `[[bin]]` table
+/// header. Rendered bare, it is a broken Obsidian link to a note named `bin`.
+#[test]
+fn render_keeps_model_written_wikilink_syntax_literal() {
+    let distilled = Distilled {
+        summary: "Removed the [[bin]] shims.".to_string(),
+        claims: vec![Claim {
+            text: "okta-auth is a library crate with no [[bin]], so that command does not exist.".to_string(),
+            quote: Some("each declare a [[bin]] target".to_string()),
+            ..Default::default()
+        }],
+        key_ideas: vec!["Delete the [[bin]] blocks.".to_string()],
+        meta: base_meta("distill-session-v1"),
+        ..Default::default()
+    };
+    let body = render(&distilled, NO_TRANSCRIPT).body_markdown;
+    assert_eq!(
+        vault::wikilink::parse(&body).count(),
+        0,
+        "model prose rendered a live wikilink: {body}"
+    );
+    assert!(
+        body.contains("- okta-auth is a library crate with no `[[bin]]`, so that command does not exist.\n"),
+        "claim shape wrong: {body}"
+    );
+}

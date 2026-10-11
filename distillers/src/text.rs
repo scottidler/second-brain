@@ -59,6 +59,33 @@ pub fn flatten_lines(text: &str) -> String {
         .join(" ")
 }
 
+/// Put every `[[...]]` in model-written prose inside an inline code span so
+/// Obsidian shows it as text, not a link. A distilled note carries no links
+/// of the model's making; the cortex linker adds links later, against notes
+/// that exist. A model summarizing a Rust session drops the backticks around
+/// Cargo's `[[bin]]` table header and the note gains a broken `[[bin]]` link.
+/// Embeds (`![[x]]`) and anything already in code are left as they are.
+pub fn literal_wikilinks(text: &str) -> String {
+    let spans: Vec<std::ops::Range<usize>> = vault::wikilink::parse(text)
+        .filter(|link| !link.embed)
+        .map(|link| link.span)
+        .collect();
+    if spans.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + spans.len() * 2);
+    let mut cursor = 0;
+    for span in spans {
+        out.push_str(&text[cursor..span.start]);
+        out.push('`');
+        out.push_str(&text[span.clone()]);
+        out.push('`');
+        cursor = span.end;
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
 /// True when the trimmed line matches `^#+ ` (one or more hashes followed
 /// by a space and at least one more character). Excludes bare `###`,
 /// `#nospace`, and lines where the first non-space character is not `#`.

@@ -175,7 +175,9 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig, stopwords: &Stopword
                 }
 
                 // Check if the title or stem appears in the body (case-insensitive)
-                if let Some((context, surface)) = lowered.find_mention(title, stem, config.min_word_length) {
+                if let Some((context, surface)) =
+                    lowered.find_mention_shaped(title, stem, config.min_word_length, MentionShape::ProperNoun)
+                {
                     report.add(Violation {
                         path: note.path.clone(),
                         rule: "linking.concept".to_string(),
@@ -327,14 +329,15 @@ pub fn apply_linking(
 
     // Group fixes by file, carrying (target, surface) so the apply step can
     // emit a piped link that preserves the prose wording.
-    let mut fixes_by_path: std::collections::HashMap<&std::path::Path, Vec<(&str, &str)>> =
+    let mut fixes_by_path: std::collections::HashMap<&std::path::Path, Vec<(&str, &str, MentionShape)>> =
         std::collections::HashMap::new();
     for violation in &report.violations {
         if let Some(Fix::AddWikilink { target, surface, .. }) = &violation.fix {
-            fixes_by_path
-                .entry(violation.path.as_path())
-                .or_default()
-                .push((target, surface));
+            fixes_by_path.entry(violation.path.as_path()).or_default().push((
+                target,
+                surface,
+                MentionShape::for_rule(&violation.rule),
+            ));
         }
     }
 
@@ -343,9 +346,9 @@ pub fn apply_linking(
         let content = std::fs::read_to_string(&abs_path)?;
         let mut new_content = content.clone();
 
-        for (target, surface) in fixes {
+        for (target, surface, shape) in fixes {
             // Find the first mention of the surface form and wrap it in [[]].
-            if let Some(new) = insert_first_wikilink(&new_content, target, surface) {
+            if let Some(new) = insert_first_wikilink_shaped(&new_content, target, surface, *shape) {
                 new_content = new;
             }
         }
@@ -369,6 +372,47 @@ fn extract_existing_links(body: &str) -> HashSet<String> {
         .filter(|l| !l.target.is_empty())
         .map(|l| l.stem())
         .collect()
+}
+
+/// Which written forms of a term may become a link.
+///
+/// A note's file stem is a link target the moment the note exists, and borg
+/// derives stems from model titles and URL path segments (`notes/guide.md`,
+/// `notes/history.md`, `notes/unknown.md`). When that stem is one bare word,
+/// every lowercase use of the word is a "mention" of the note: the vault
+/// gained "the publication date is [[unknown]]", and `[[iterate]]`,
+/// `[[frame]]` and `[[reject]]` in prose that meant the verb and the noun,
+/// which dangled once those notes were gone. A one-word note name is a
+/// reference only when written as a proper noun (`Python`, `Claude`), the
+/// signal the `hub-hygiene` audit measures by hand. Curated targets (people,
+/// projects, glossary concepts, aliases) are the operator's explicit choice
+/// and stay `Any`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MentionShape {
+    Any,
+    ProperNoun,
+}
+
+impl MentionShape {
+    /// The shape a `lint_linking` rule detected with, so the apply step
+    /// mutates under exactly the same constraint.
+    fn for_rule(rule: &str) -> Self {
+        if rule == "linking.concept" {
+            MentionShape::ProperNoun
+        } else {
+            MentionShape::Any
+        }
+    }
+
+    fn allows(self, surface: &str) -> bool {
+        match self {
+            MentionShape::Any => true,
+            MentionShape::ProperNoun => {
+                let one_word = !surface.contains(|c: char| c.is_whitespace() || c == '-');
+                !one_word || surface.chars().any(char::is_uppercase)
+            }
+        }
+    }
 }
 
 /// A note body lowercased ONCE, with a map from lowercased-byte offsets back to
@@ -414,6 +458,17 @@ impl<'a> LoweredBody<'a> {
     /// Returns `(context, surface)` where `surface` is the text actually matched
     /// (preserving original case) so the caller can emit `[[target|surface]]`.
     fn find_mention(&self, title: &str, stem: &str, min_len: usize) -> Option<(String, String)> {
+        self.find_mention_shaped(title, stem, min_len, MentionShape::Any)
+    }
+
+    /// `find_mention`, accepting only occurrences whose surface `shape` allows.
+    fn find_mention_shaped(
+        &self,
+        title: &str,
+        stem: &str,
+        min_len: usize,
+        shape: MentionShape,
+    ) -> Option<(String, String)> {
         let body = self.body;
         for term in [title, stem] {
             let term_lower = term.to_lowercase();
@@ -435,6 +490,10 @@ impl<'a> LoweredBody<'a> {
                 // arbiter both sides call (see its doc comment).
                 if !is_clean_mention(body, pos, after_pos) {
                     log::trace!("skipping unclean mention: {term}");
+                    continue;
+                }
+                if !shape.allows(&body[pos..after_pos]) {
+                    log::trace!("skipping common-word mention: {term}");
                     continue;
                 }
 
@@ -613,7 +672,14 @@ fn is_clean_mention(body: &str, start: usize, end: usize) -> bool {
 /// corrupting YAML fields. Emits a piped link `[[target|matched]]` when the
 /// matched text differs from `target` (an alias surface form, or a title whose
 /// stem differs); a plain `[[matched]]` otherwise.
+#[cfg(test)]
 fn insert_first_wikilink(content: &str, target: &str, surface: &str) -> Option<String> {
+    insert_first_wikilink_shaped(content, target, surface, MentionShape::Any)
+}
+
+/// `insert_first_wikilink`, wrapping only an occurrence `shape` allows. The
+/// apply step passes the same shape detection used, so the two still agree.
+fn insert_first_wikilink_shaped(content: &str, target: &str, surface: &str, shape: MentionShape) -> Option<String> {
     log::debug!(
         "insert_first_wikilink: target={target} surface={surface} content_len={}",
         content.len()
@@ -646,7 +712,7 @@ fn insert_first_wikilink(content: &str, target: &str, surface: &str) -> Option<S
     // candidate to the SAME clean/appliable predicate, so they can no
     // longer disagree on which mentions are linkable.
     for mat in re.find_iter(body) {
-        if !is_clean_mention(body, mat.start(), mat.end()) {
+        if !is_clean_mention(body, mat.start(), mat.end()) || !shape.allows(mat.as_str()) {
             continue;
         }
 

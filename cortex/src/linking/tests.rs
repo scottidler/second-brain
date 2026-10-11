@@ -237,7 +237,9 @@ fn stoplisted_note_title_is_never_a_link_candidate() {
     // word "every" into `[[every]]` across 707 files.
     let notes = vec![
         note_with_body("entities/every.md", "Hub note for the creator entity every."),
-        note_with_body("notes/a.md", "I read that every single day."),
+        // Capitalized, so the proper-noun shape gate alone would let it link:
+        // this isolates the stopword gate.
+        note_with_body("notes/a.md", "I read Every, the newsletter, every single day."),
     ];
     let cfg = LinkingConfig {
         scan_for: vec!["concepts".to_string()],
@@ -1027,5 +1029,94 @@ fn title_text_reads_a_link_title_as_its_alias_or_file_stem() {
         title_text("[[foo]] and more"),
         "[[foo]] and more",
         "not a whole-title link"
+    );
+}
+
+/// A note whose stem is one bare English word (`iterate.md`, the shape borg
+/// gives a note titled from a single word) must not turn every lowercase use
+/// of that word into a link. Only a proper-noun use names the note.
+#[test]
+fn a_one_word_note_stem_links_only_a_proper_noun_mention() {
+    let notes = vec![
+        note_with_body("notes/iterate.md", "A note."),
+        note_with_body("notes/a.md", "Teams iterate on outputs and frame problems."),
+        note_with_body("notes/b.md", "We iterate daily, then read Iterate, the zine."),
+    ];
+    let cfg = LinkingConfig {
+        scan_for: vec!["concepts".to_string()],
+        min_word_length: 5,
+        ..Default::default()
+    };
+
+    let report = lint_linking(&notes, &cfg, &Stopwords::default());
+    let flagged: Vec<(&str, &str)> = report
+        .violations
+        .iter()
+        .filter_map(|v| match &v.fix {
+            Some(Fix::AddWikilink { target, surface, .. }) if target == "iterate" => {
+                Some((v.path.to_str().unwrap_or(""), surface.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        flagged,
+        vec![("notes/b.md", "Iterate")],
+        "only the proper-noun mention is a candidate"
+    );
+
+    // Mutation agrees with detection: the lowercase verb earlier in the line
+    // is left alone and the capitalized mention is the one wrapped.
+    let applied = insert_first_wikilink_shaped(
+        "We iterate daily, then read Iterate, the zine.",
+        "iterate",
+        "Iterate",
+        MentionShape::ProperNoun,
+    );
+    assert_eq!(
+        applied.as_deref(),
+        Some("We iterate daily, then read [[iterate|Iterate]], the zine.")
+    );
+    assert_eq!(
+        insert_first_wikilink_shaped(
+            "Teams iterate on outputs.",
+            "iterate",
+            "iterate",
+            MentionShape::ProperNoun
+        ),
+        None
+    );
+}
+
+/// The shape gate is for one-word note stems only: a curated glossary
+/// concept still links its lowercase mention, and a multi-word title still
+/// links as written.
+#[test]
+fn the_proper_noun_gate_spares_curated_and_multi_word_targets() {
+    let cfg = glossary_config(&["tmux"], &[]);
+    let notes = vec![note_with_body("notes/x.md", "I live in tmux all day.")];
+    assert!(
+        lint_linking(&notes, &cfg, &Stopwords::default())
+            .violations
+            .iter()
+            .any(|v| v.rule == "linking.glossary"),
+        "lowercase glossary concept still links"
+    );
+
+    let cfg = LinkingConfig {
+        scan_for: vec!["concepts".to_string()],
+        min_word_length: 5,
+        ..Default::default()
+    };
+    let notes = vec![
+        note_with_body("notes/rust-lifetimes.md", "A note."),
+        note_with_body("notes/a.md", "Reading the rust-lifetimes write-up today."),
+    ];
+    assert!(
+        lint_linking(&notes, &cfg, &Stopwords::default())
+            .violations
+            .iter()
+            .any(|v| v.rule == "linking.concept"),
+        "a multi-word stem is specific enough to link lowercase"
     );
 }
