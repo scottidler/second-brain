@@ -71,6 +71,40 @@ fn collect_md_paths(vault_root: &Path, scan_config: &ScanConfig) -> Result<Vec<P
     Ok(paths)
 }
 
+/// Vault-relative, `/`-separated paths of every non-markdown file a wikilink
+/// can name (`![[x.png]]`, `[[doc.pdf]]`).
+///
+/// Obsidian resolves an attachment link against every file in the vault, so
+/// this walk honours no `ignore` list: attachments live in exactly the
+/// `attachments/` and `assets/` folders a note scan skips. Only dot-named
+/// entries (`.git`, `.obsidian`, `.trash`), which Obsidian never indexes, are
+/// skipped. A file with no extension is skipped too: an attachment link names
+/// the full filename, so indexing `foo` would let a bare `[[foo]]` note link
+/// resolve to it.
+pub fn attachment_paths(vault_root: &Path) -> Result<Vec<String>> {
+    log::debug!("note::attachment_paths: vault_root={}", vault_root.display());
+    let mut paths = Vec::new();
+    for entry in WalkDir::new(vault_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'))
+    {
+        let entry = entry.context("failed to read directory entry")?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        match path.extension().and_then(|e| e.to_str()) {
+            None | Some("md") => continue,
+            Some(_) => {}
+        }
+        let relative = path.strip_prefix(vault_root).unwrap_or(path);
+        paths.push(relative.to_string_lossy().replace('\\', "/"));
+    }
+    log::debug!("note::attachment_paths: collected {} attachment path(s)", paths.len());
+    Ok(paths)
+}
+
 /// Scan an entire vault and return all parsed notes.
 ///
 /// Walks the vault sequentially to discover `.md` paths, then parses them in parallel via

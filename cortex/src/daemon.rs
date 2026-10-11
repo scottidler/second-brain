@@ -666,9 +666,15 @@ where
             }
             "broken-links" => {
                 // Read-only lint - no apply path, so it never dirties the cache.
-                let report = crate::links::lint_broken_links(&notes, &notes, &config.actions.broken_links);
-                if !report.is_empty() {
-                    log::info!("[daemon] broken-links: {} violation(s)", report.violations.len());
+                match ::vault::note::attachment_paths(vault_root) {
+                    Ok(attachments) => {
+                        let report =
+                            crate::links::lint_broken_links(&notes, &notes, &attachments, &config.actions.broken_links);
+                        if !report.is_empty() {
+                            log::info!("[daemon] broken-links: {} violation(s)", report.violations.len());
+                        }
+                    }
+                    Err(e) => log::error!("broken-links action failed: attachment scan: {e:#}"),
                 }
             }
             "link" => {

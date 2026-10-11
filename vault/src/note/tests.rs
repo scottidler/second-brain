@@ -199,3 +199,25 @@ fn write_atomic_new_refuses_to_clobber() {
         .collect();
     assert!(leftovers.is_empty(), "refused write left a temp file behind");
 }
+
+#[test]
+fn attachment_paths_walks_ignored_folders_and_skips_dot_dirs_notes_and_bare_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    for rel in [
+        "system/attachments/images/a.jpg",
+        "assets/b.pdf",
+        "notes/c.md",
+        ".obsidian/plugins/d.json",
+        ".trash/e.png",
+        "LICENSE",
+    ] {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(&path, b"x").expect("write");
+    }
+
+    let mut found = attachment_paths(root).expect("walk");
+    found.sort();
+    assert_eq!(found, vec!["assets/b.pdf", "system/attachments/images/a.jpg"]);
+}

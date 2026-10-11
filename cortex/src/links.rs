@@ -41,7 +41,15 @@ fn is_asset_reference(target: &str) -> bool {
 /// Run broken link detection.
 /// `lintable_notes` are checked for violations; `all_notes` are used to build
 /// the resolution indexes (so excluded files still count as valid link targets).
-pub fn lint_broken_links(lintable_notes: &[Note], all_notes: &[Note], config: &BrokenLinksConfig) -> Report {
+/// `attachments` are the vault's non-markdown files
+/// (`vault::note::attachment_paths`), so an `![[x.png]]` naming a file that
+/// exists anywhere in the vault resolves the way Obsidian resolves it.
+pub fn lint_broken_links(
+    lintable_notes: &[Note],
+    all_notes: &[Note],
+    attachments: &[String],
+    config: &BrokenLinksConfig,
+) -> Report {
     let mut report = Report::default();
 
     if !config.check_wikilinks {
@@ -52,7 +60,14 @@ pub fn lint_broken_links(lintable_notes: &[Note], all_notes: &[Note], config: &B
     // excluded files still resolve correctly.
 
     // Path/stem resolution is `Resolver`'s (Obsidian's rules), built once.
-    let resolver = Resolver::new(all_notes.iter().map(|n| n.path.to_string_lossy().replace('\\', "/")));
+    // An attachment's key keeps its extension (`x.png`), so it can only
+    // answer a link that names the extension too, never a bare note link.
+    let resolver = Resolver::new(
+        all_notes
+            .iter()
+            .map(|n| n.path.to_string_lossy().replace('\\', "/"))
+            .chain(attachments.iter().cloned()),
+    );
 
     // Title index: lowercased frontmatter titles for exact title match
     let title_set: HashSet<String> = all_notes

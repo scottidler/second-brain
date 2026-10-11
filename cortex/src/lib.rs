@@ -207,9 +207,11 @@ pub fn lint_with_notes(
     }
 
     if rules.contains(&"broken-links") {
+        let attachments = ::vault::note::attachment_paths(vault_root)?;
         report.merge(links::lint_broken_links(
             &lintable_notes,
             &all_notes,
+            &attachments,
             &config.actions.broken_links,
         ));
     }

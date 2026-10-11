@@ -7,7 +7,7 @@ fn test_broken_link_detected_on_vault() {
     let notes = v.scan();
     let config = v.config().actions.broken_links;
 
-    let report = lint_broken_links(&notes, &notes, &config);
+    let report = lint_broken_links(&notes, &notes, &[], &config);
     // linker.md has [[nonexistent-page]] which is broken (unresolved note link)
     let violation = report
         .violations
@@ -24,7 +24,7 @@ fn test_valid_links_not_flagged() {
     let notes = v.scan();
     let config = v.config().actions.broken_links;
 
-    let report = lint_broken_links(&notes, &notes, &config);
+    let report = lint_broken_links(&notes, &notes, &[], &config);
     // python-guide.md links to [[rust-guide]] which exists - should NOT be broken
     assert!(
         !report
@@ -43,7 +43,7 @@ fn test_disabled_check() {
         check_urls: false,
     };
 
-    let report = lint_broken_links(&notes, &notes, &config);
+    let report = lint_broken_links(&notes, &notes, &[], &config);
     assert!(report.is_empty());
 }
 
@@ -61,7 +61,7 @@ fn test_title_case_wikilink_resolves_via_slug() {
     let notes = v.scan();
     let config = v.config().actions.broken_links;
 
-    let report = lint_broken_links(&notes, &notes, &config);
+    let report = lint_broken_links(&notes, &notes, &[], &config);
     // [[Zone Blocking Families]] should resolve to zone-blocking-families.md via slug match
     assert!(
         !report
@@ -87,7 +87,7 @@ fn test_title_match_wikilink_resolves() {
     let notes = v.scan();
     let config = v.config().actions.broken_links;
 
-    let report = lint_broken_links(&notes, &notes, &config);
+    let report = lint_broken_links(&notes, &notes, &[], &config);
     assert!(
         !report
             .violations
@@ -118,7 +118,7 @@ fn test_excluded_files_still_resolve_as_targets() {
         check_urls: false,
     };
 
-    let report = lint_broken_links(&lintable_notes, &all_notes, &config);
+    let report = lint_broken_links(&lintable_notes, &all_notes, &[], &config);
     assert!(
         !report.violations.iter().any(|vi| vi.message.contains("readme")),
         "excluded file should still be a valid link target"
@@ -155,7 +155,7 @@ fn test_severity_asset_is_error() {
         check_urls: false,
     };
 
-    let report = lint_broken_links(&notes, &notes, &config);
+    let report = lint_broken_links(&notes, &notes, &[], &config);
     let violation = report
         .violations
         .iter()
@@ -180,7 +180,7 @@ fn test_severity_folder_is_error() {
         check_urls: false,
     };
 
-    let report = lint_broken_links(&notes, &notes, &config);
+    let report = lint_broken_links(&notes, &notes, &[], &config);
     let violation = report.violations.iter().find(|vi| vi.message.contains("Old Folder/"));
     assert!(violation.is_some(), "should detect stale folder link");
     assert_eq!(violation.unwrap().rule, "broken-links.folder");
@@ -202,7 +202,7 @@ fn test_severity_unresolved_note_is_info() {
         check_urls: false,
     };
 
-    let report = lint_broken_links(&notes, &notes, &config);
+    let report = lint_broken_links(&notes, &notes, &[], &config);
     for vi in &report.violations {
         assert_eq!(vi.rule, "broken-links.unresolved");
         assert_eq!(vi.severity, Severity::Info);
@@ -225,7 +225,7 @@ fn test_code_block_wikilinks_skipped() {
         check_urls: false,
     };
 
-    let report = lint_broken_links(&notes, &notes, &config);
+    let report = lint_broken_links(&notes, &notes, &[], &config);
     assert!(
         !report
             .violations
@@ -256,7 +256,7 @@ fn test_heading_link_is_not_broken() {
     let notes = v.scan();
     let config = v.config().actions.broken_links;
 
-    let report = lint_broken_links(&notes, &notes, &config);
+    let report = lint_broken_links(&notes, &notes, &[], &config);
     assert!(
         !report.violations.iter().any(|vi| vi.path.to_string_lossy() == "src.md"),
         "heading, block and same-note links are not broken: {:?}",
@@ -278,7 +278,7 @@ fn test_path_link_does_not_resolve_to_another_directory() {
     let notes = v.scan();
     let config = v.config().actions.broken_links;
 
-    let report = lint_broken_links(&notes, &notes, &config);
+    let report = lint_broken_links(&notes, &notes, &[], &config);
     let src: Vec<_> = report
         .violations
         .iter()
@@ -286,4 +286,66 @@ fn test_path_link_does_not_resolve_to_another_directory() {
         .collect();
     assert_eq!(src.len(), 1, "only [[dir/x]] is broken: {src:?}");
     assert!(src[0].message.contains("dir/x"));
+}
+
+/// The live layout: attachments under `system/attachments/`, a folder the note
+/// scan ignores (`attachments`) inside a folder lint excludes (`system/**`).
+/// Obsidian resolves an attachment link by filename anywhere in the vault, or
+/// by path, so both forms resolve and only the missing file is reported.
+#[test]
+fn test_asset_links_resolve_against_vault_files_in_ignored_folders() {
+    let _lock = crate::testutil::lock_env();
+    let _cfg = crate::testutil::hermetic_config_home();
+    let v = TestVault::new();
+    let image = v.root().join("system/attachments/images/2026-09/slide-001.jpg");
+    std::fs::create_dir_all(image.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&image, b"\xff\xd8\xff").expect("write jpg");
+    std::fs::write(v.root().join("report.pdf"), b"%PDF").expect("write pdf");
+    v.add_note(
+        "embeds.md",
+        "---\ntitle: Embeds\ndate: 2026-03-18\ntype: note\norigin: authored\ntags: []\n---\n\
+         ![[slide-001.jpg]]\n![[system/attachments/images/2026-09/slide-001.jpg|300]]\n\
+         [[report.pdf|the report]]\n![[missing-slide.png]]\n",
+    );
+    let mut config = v.config();
+    config.vault.ignore.push("attachments".to_string());
+    let opts = crate::opts::LintOpts {
+        apply: false,
+        format: crate::opts::LintFormat::Human,
+        rule: vec!["broken-links".to_string()],
+        path: None,
+    };
+
+    let (report, _) = crate::lint(v.root(), &config, &opts).expect("lint");
+    let embeds: Vec<_> = report
+        .violations
+        .iter()
+        .filter(|vi| vi.path.to_string_lossy() == "embeds.md")
+        .collect();
+    assert_eq!(embeds.len(), 1, "only the missing asset is broken: {embeds:?}");
+    assert_eq!(embeds[0].rule, "broken-links.asset");
+    assert!(embeds[0].message.contains("missing-slide.png"), "{embeds:?}");
+}
+
+/// An attachment answers only a link naming its extension: a file
+/// named `x.png` never makes a bare `[[x]]` resolve.
+#[test]
+fn test_attachment_does_not_resolve_a_bare_note_link() {
+    let v = TestVault::new();
+    v.add_note(
+        "src.md",
+        "---\ntitle: Src\ndate: 2026-03-18\ntype: note\norigin: authored\ntags: []\n---\nSee [[diagram]].\n",
+    );
+    let notes = v.scan();
+    let attachments = vec!["assets/diagram.png".to_string()];
+
+    let report = lint_broken_links(&notes, &notes, &attachments, &v.config().actions.broken_links);
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|vi| vi.path.to_string_lossy() == "src.md" && vi.rule == "broken-links.unresolved"),
+        "[[diagram]] names a note, not diagram.png: {:?}",
+        report.violations
+    );
 }

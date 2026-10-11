@@ -897,7 +897,7 @@ fn scan_sorted(root: &Path) -> Vec<Note> {
 
 fn broken_link_count(root: &Path) -> usize {
     let notes = scan_sorted(root);
-    crate::links::lint_broken_links(&notes, &notes, &crate::config::BrokenLinksConfig::default())
+    crate::links::lint_broken_links(&notes, &notes, &[], &crate::config::BrokenLinksConfig::default())
         .violations
         .len()
 }
