@@ -548,3 +548,29 @@ fn publish_unique_parallel_same_title_keeps_every_note() {
     expected.sort();
     assert_eq!(bodies, expected, "no body may be lost to an overwrite");
 }
+
+/// A reingest whose fresh title differs (the model renamed the note) still
+/// publishes over the old note, so `[[santiago-on-x-mcp-is-not-dead]]` keeps
+/// resolving: one file, the old path, the new bytes.
+#[test]
+fn reingest_with_a_new_title_publishes_over_the_old_note() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (_inbox, notes, dirs) = vault_dirs(root.path());
+    let old = notes.join("santiago-on-x-mcp-is-not-dead.md");
+    std::fs::write(&old, b"old").expect("seed");
+    let fresh = "svpino-on-x-santiago-svpino-argues-that-mcp-is-not-dead.md";
+
+    let dest = url_publish_path(&notes, fresh, Some(&old));
+    let written = publish_unique(&dest, b"new", Some(&old), &dirs).expect("publish");
+
+    assert_eq!(written, old);
+    assert_eq!(std::fs::read(&old).unwrap(), b"new");
+    assert!(!notes.join(fresh).exists(), "no second file under the fresh title");
+}
+
+#[test]
+fn first_ingest_publishes_at_the_title_path() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (inbox, _notes, _dirs) = vault_dirs(root.path());
+    assert_eq!(url_publish_path(&inbox, "title.md", None), inbox.join("title.md"));
+}

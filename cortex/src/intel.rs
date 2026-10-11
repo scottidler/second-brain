@@ -1,6 +1,7 @@
 use chrono::{Datelike, Local, NaiveDate};
 use eyre::{Context, Result};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::config::{Config, FabricConfig, IntelConfig, LlmConfig};
@@ -286,6 +287,40 @@ fn link_target(note: &Note) -> String {
     }
 }
 
+/// The link targets a prompt hands the model, lowercased: the only wikilink
+/// targets its reply may keep.
+fn link_refs(notes: &[&Note]) -> HashSet<String> {
+    notes.iter().map(|n| link_target(n).to_lowercase()).collect()
+}
+
+/// Unwrap each wikilink in model-written `text` whose target is not one of
+/// `refs`. The model shortens, truncates, or invents refs
+/// (`[[i-spent-200-hours-teaching-ai-writing]]` for the note
+/// `i-spent-200-hours-teaching-ai-writing-here-are-6-principles-everyone-gets-wrong`),
+/// and each one landed in the vault as a broken link. An unwrapped link keeps
+/// its alias, or its target when it has none, so the sentence still reads.
+fn unlink_unknown_refs(text: &str, refs: &HashSet<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut unlinked = 0usize;
+    for link in vault::wikilink::parse(text) {
+        let target = link.target.to_lowercase();
+        let target = target.strip_suffix(".md").unwrap_or(&target);
+        if link.target.is_empty() || refs.contains(target) {
+            continue;
+        }
+        out.push_str(&text[last..link.span.start]);
+        out.push_str(link.alias.unwrap_or(link.target));
+        last = link.span.end;
+        unlinked += 1;
+    }
+    out.push_str(&text[last..]);
+    if unlinked > 0 {
+        log::info!("intel: unlinked {unlinked} model-written wikilink(s) naming no supplied note");
+    }
+    out
+}
+
 /// Strip ATX markdown headers (`#`..`######`) from a note body before feeding
 /// it to the synthesis LLM. Heavily fabric-distilled notes carry their own
 /// `## Summary` / `## Claims` / `## Transcript` headings; left intact, the model
@@ -415,8 +450,8 @@ fn generate_daily_digest<L: IntelLlm>(
         ) {
             Ok(synthesis) => {
                 // Strip any accidental frontmatter or title from LLM output
-                let cleaned = synthesis.trim();
-                digest.push_str(cleaned);
+                let cleaned = unlink_unknown_refs(synthesis.trim(), &link_refs(&recent_notes));
+                digest.push_str(&cleaned);
                 digest.push_str("\n\n");
             }
             Err(e) => {
@@ -546,7 +581,7 @@ fn generate_weekly_review<F: IntelFabric, L: IntelLlm>(
         ) {
             Ok(synthesis) => {
                 review.push_str("## AI Insights\n\n");
-                review.push_str(synthesis.trim());
+                review.push_str(&unlink_unknown_refs(synthesis.trim(), &link_refs(&week_notes)));
                 review.push_str("\n\n");
             }
             Err(e) if stop.is_stopped() => {
@@ -564,7 +599,7 @@ fn generate_weekly_review<F: IntelFabric, L: IntelLlm>(
                     let input = crate::fabric::truncate_input(&concatenated, config.max_input_tokens);
                     if let Ok(wisdom) = fabric.run_pattern(pattern, input, config.fabric_timeout_secs) {
                         review.push_str("## AI Insights\n\n");
-                        review.push_str(wisdom.trim());
+                        review.push_str(&unlink_unknown_refs(wisdom.trim(), &link_refs(&week_notes)));
                         review.push_str("\n\n");
                     }
                 }

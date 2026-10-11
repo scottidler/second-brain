@@ -487,3 +487,83 @@ fn weekly_llm_failure_without_a_stop_falls_back_to_fabric() {
     let content = std::fs::read_to_string(&report.output_path).expect("review written");
     assert!(content.contains("fabric wisdom"), "{content}");
 }
+
+/// The model's daily reply keeps a wikilink only when its target is a `ref`
+/// the prompt supplied: a truncated ref and an invented one are unwrapped to
+/// plain text instead of landing in the vault as broken links.
+#[test]
+fn daily_digest_unlinks_model_refs_that_name_no_supplied_note() {
+    let v = TestVault::new();
+    let yesterday = Local::now().date_naive() - chrono::Duration::days(1);
+    v.add_note(
+        "i-spent-200-hours-teaching-ai-writing-here-are-6-principles.md",
+        &format!(
+            "---\ntitle: I Spent 200 Hours\ndate: {}\ntype: note\norigin: authored\ntags: [ai]\n---\nWriting.\n",
+            yesterday.format("%Y-%m-%d")
+        ),
+    );
+    let notes = v.scan();
+    let llm = CountingLlm {
+        calls: AtomicUsize::new(0),
+        reply: "## Themes\nWriting.\n\n## Highlights\n\
+                - [[i-spent-200-hours-teaching-ai-writing-here-are-6-principles|I Spent 200 Hours]] - kept\n\
+                - [[i-spent-200-hours-teaching-ai-writing|truncated ref]] - unwrapped\n\n\
+                ## Breadcrumbs\n- What links [[invented-note]] to it?"
+            .to_string(),
+    };
+    let opts = IntelOpts {
+        mode: IntelMode::Daily,
+        output: None,
+        as_of: None,
+    };
+
+    let report = generate(
+        v.root(),
+        &notes,
+        &v.config().actions.intel,
+        &v.config().llm,
+        &ShellFabric(&FabricConfig::default()),
+        &opts,
+        &llm,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("generate");
+
+    let digest = std::fs::read_to_string(&report.output_path).expect("digest written");
+    assert!(
+        digest.contains("- [[i-spent-200-hours-teaching-ai-writing-here-are-6-principles|I Spent 200 Hours]] - kept")
+    );
+    assert!(digest.contains("- truncated ref - unwrapped"), "{digest}");
+    assert!(digest.contains("What links invented-note to it?"), "{digest}");
+    assert!(!digest.contains("[[i-spent-200-hours-teaching-ai-writing|"), "{digest}");
+    assert!(!digest.contains("[[invented-note]]"), "{digest}");
+}
+
+/// Same rule for the weekly review's insights, whose prompt supplies no refs
+/// at all: a guessed stem that names a week note survives, a wrong one does not.
+#[test]
+fn weekly_review_unlinks_model_refs_that_name_no_week_note() {
+    let (v, notes, opts) = weekly_fixture();
+    let llm = CountingLlm {
+        calls: AtomicUsize::new(0),
+        reply: "You read [[this-week|one note]] and guessed at [[this-week-summary]].".to_string(),
+    };
+
+    let report = generate(
+        v.root(),
+        &notes,
+        &v.config().actions.intel,
+        &v.config().llm,
+        &ShellFabric(&FabricConfig::default()),
+        &opts,
+        &llm,
+        &crate::shutdown::StopHandle::never(),
+    )
+    .expect("generate");
+
+    let review = std::fs::read_to_string(&report.output_path).expect("review written");
+    assert!(
+        review.contains("You read [[this-week|one note]] and guessed at this-week-summary."),
+        "{review}"
+    );
+}

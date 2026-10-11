@@ -993,7 +993,13 @@ async fn process_url_inner(
     };
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
-    let desired_path = dest_path.join(&filename);
+    let desired_path = atomic::url_publish_path(&dest_path, &filename, old_path_to_delete.as_deref());
+    if old_path_to_delete.is_some() && desired_path.file_name() != Some(std::ffi::OsStr::new(&filename)) {
+        log::info!(
+            "[{trace_id}] reingest keeps the note's filename {} (fresh title would name it {filename})",
+            desired_path.display()
+        );
+    }
 
     // Compose the FINAL note bytes in memory before any disk write.
     // The original three-write publish path (write rendered, patch date, patch
@@ -1075,10 +1081,10 @@ async fn process_url_inner(
         );
     }
 
-    // The new note exists at note_path. If we were replacing an old note at
-    // a different path (rare - happens when the dir heuristic resolves the
-    // new write to a different location than the old note lived in), delete
-    // it now. A failure here is non-fatal: the new note already exists; the
+    // The new note exists at note_path. A reingest publishes over the old
+    // note's own path (`url_publish_path`), so today note_path == old_path and
+    // nothing is removed; this delete only runs if a reingest ever lands
+    // elsewhere. A failure here is non-fatal: the new note already exists; the
     // user has a transient duplicate which cortex's existing duplicate
     // detection will surface.
     if let Some(old_path) = old_path_to_delete

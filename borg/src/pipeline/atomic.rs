@@ -48,6 +48,20 @@ pub fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
     vault::note::write_atomic(dest, bytes)
 }
 
+/// Where a URL note publishes. A reingest (`replaces` is THIS source's
+/// existing note) overwrites that note at its own path, filename included:
+/// the title, and so the slug, is model output that differs between distills,
+/// and publishing under the new name then deleting the old file broke every
+/// inbound wikilink to it. A first ingest uses the title-derived
+/// `dest_dir/filename`. Harvest's trace-keyed replace keeps the filename for
+/// the same reason (docs/design/2026-08-15-harvest-note-identity-trace-keyed-replace.md).
+pub fn url_publish_path(dest_dir: &Path, filename: &str, replaces: Option<&Path>) -> PathBuf {
+    match replaces {
+        Some(old) => old.to_path_buf(),
+        None => dest_dir.join(filename),
+    }
+}
+
 /// Highest `-N` suffix `publish_unique` tries before giving up.
 const MAX_PUBLISH_SUFFIX: u32 = 1000;
 
