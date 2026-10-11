@@ -320,6 +320,19 @@ pub(crate) struct Relinked {
     pub unreadable: Vec<PathBuf>,
 }
 
+/// One note that moved, for [`relink_relocations`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Relocation {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    /// Rewrite only path-qualified links (`[[inbox/foo]]`), never bare ones.
+    /// Set for a move that landed on a suffixed stem because the plain name
+    /// was taken (`inbox/foo.md` -> `notes/foo-2.md`): a bare `[[foo]]` then
+    /// names the note already at `notes/foo.md`, while `[[inbox/foo]]` still
+    /// names exactly the note that moved.
+    pub path_qualified_only: bool,
+}
+
 /// Update wikilinks in all vault files for a batch of renames and moves.
 /// Single pass through all files. THE shared wikilink-rewrite for renames —
 /// case-insensitive, handles `[[link]]` and `[[link|alias]]`, skips renamed
@@ -337,29 +350,52 @@ pub(crate) fn update_wikilinks_batch(
     notes: &[Note],
     renames: &[(PathBuf, PathBuf)],
 ) -> eyre::Result<Relinked> {
-    if renames.is_empty() {
+    let relocations: Vec<Relocation> = renames
+        .iter()
+        .map(|(from, to)| Relocation {
+            from: from.clone(),
+            to: to.clone(),
+            path_qualified_only: false,
+        })
+        .collect();
+    relink_relocations(vault_root, notes, &relocations)
+}
+
+/// [`update_wikilinks_batch`] over relocations that may each be limited to
+/// path-qualified links ([`Relocation::path_qualified_only`]).
+pub(crate) fn relink_relocations(
+    vault_root: &Path,
+    notes: &[Note],
+    relocations: &[Relocation],
+) -> eyre::Result<Relinked> {
+    if relocations.is_empty() {
         return Ok(Relinked::default());
     }
+    log::debug!(
+        "naming::relink_relocations: relocations={} path_qualified_only={}",
+        relocations.len(),
+        relocations.iter().filter(|r| r.path_qualified_only).count()
+    );
 
     // One Resolver over the OLD paths: a link is rewritten only when it
     // resolves to a renamed note by Obsidian's rules, so `[[otherdir/x]]`
     // is left alone when `notes/x.md` is renamed.
-    let from_paths: Vec<String> = renames
+    let from_paths: Vec<String> = relocations
         .iter()
-        .map(|(from, _)| from.to_string_lossy().into_owned())
+        .map(|r| r.from.to_string_lossy().into_owned())
         .collect();
     let resolver = vault::wikilink::Resolver::new(from_paths.iter().cloned());
     let destinations: HashMap<&str, Destination> = from_paths
         .iter()
-        .zip(renames)
-        .filter_map(|(from, (old, new))| Some((from.as_str(), Destination::new(old, new)?)))
+        .zip(relocations)
+        .filter_map(|(from, r)| Some((from.as_str(), Destination::new(r)?)))
         .collect();
 
     let mut out = Relinked::default();
     for note in notes {
         let abs_path = vault_root.join(&note.path);
         // Skip files that were renamed (they no longer exist at old path)
-        if renames.iter().any(|(from, _)| *from == note.path) {
+        if relocations.iter().any(|r| r.from == note.path) {
             continue;
         }
 
@@ -417,16 +453,24 @@ struct Destination {
     path: String,
     /// The note left its folder, so a path-qualified link's folder is stale.
     changed_folder: bool,
+    /// See [`Relocation::path_qualified_only`].
+    path_qualified_only: bool,
 }
 
 impl Destination {
-    fn new(from: &Path, to: &Path) -> Option<Self> {
+    fn new(relocation: &Relocation) -> Option<Self> {
+        let Relocation {
+            from,
+            to,
+            path_qualified_only,
+        } = relocation;
         let stem = to.file_stem()?.to_str()?.to_string();
         let path = to.with_extension("").to_str()?.to_string();
         Some(Self {
             stem,
             path,
             changed_folder: from.parent() != to.parent(),
+            path_qualified_only: *path_qualified_only,
         })
     }
 }
@@ -437,7 +481,8 @@ impl Destination {
 /// `!` embed all survive byte for byte. A path-qualified target of a note that
 /// changed folders gets its whole path replaced (its `.md` and everything
 /// after the target still survive), or it would keep pointing at the old
-/// folder. Links in code are not links and are left alone.
+/// folder. A bare target of a path-qualified-only relocation is left alone.
+/// Links in code are not links and are left alone.
 fn relink(content: &str, resolver: &vault::wikilink::Resolver, destinations: &HashMap<&str, Destination>) -> String {
     let mut out = String::with_capacity(content.len());
     let mut last = 0;
@@ -446,6 +491,9 @@ fn relink(content: &str, resolver: &vault::wikilink::Resolver, destinations: &Ha
             continue;
         };
         let target = link.target.trim();
+        if dest.path_qualified_only && !target.contains('/') {
+            continue;
+        }
         let (old, new) = if dest.changed_folder && target.contains('/') {
             let stem = vault::wikilink::file_stem(target);
             let stem_end = offset_in(target, stem) + stem.len();

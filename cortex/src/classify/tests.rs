@@ -1081,7 +1081,11 @@ fn rescan_failure_still_relinks_completed_moves() {
     // The loop's completed move, made by hand so only the relink is under test.
     std::fs::create_dir_all(root.join("notes")).unwrap();
     std::fs::rename(root.join("inbox/alpha.md"), root.join("notes/alpha.md")).unwrap();
-    let moves = vec![(alpha.path.clone(), PathBuf::from("notes/alpha.md"))];
+    let moves = vec![crate::naming::Relocation {
+        from: alpha.path.clone(),
+        to: PathBuf::from("notes/alpha.md"),
+        path_qualified_only: false,
+    }];
 
     let mut report = Report::default();
     let result = relink_moves_with(root, &notes, &moves, &mut report, |_| {
@@ -1193,4 +1197,48 @@ fn total_failure_without_a_stop_still_holds_the_note_for_review() {
     assert_eq!(written, vec!["inbox/alpha.md".to_string()]);
     let after = std::fs::read_to_string(root.join("inbox/alpha.md")).unwrap();
     assert!(after.contains("cortex-needs-review: true"), "held for review:\n{after}");
+}
+
+/// A promotion that collides (`notes/alpha.md` is another source's note)
+/// lands at `notes/alpha-2.md`. `[[inbox/alpha]]` names the moved note and
+/// follows it; a bare `[[alpha]]` names the note already at `notes/alpha.md`
+/// and is left alone.
+#[test]
+fn collision_promotion_relinks_path_qualified_links_only() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("inbox")).unwrap();
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+    std::fs::write(root.join("inbox/alpha.md"), inbox_note("alpha")).unwrap();
+    let occupant = "---\ntitle: Other Alpha\ndate: 2026-09-01\ntype: link\nsource: \"https://example.com/other\"\ntags:\n  - rust\n---\n\nThe other alpha.\n";
+    std::fs::write(root.join("notes/alpha.md"), occupant).unwrap();
+    let referrer = "---\ntitle: Refs\ndate: 2026-10-01\ntype: note\ntags:\n  - rust\n---\n[[inbox/alpha]] [[inbox/alpha|A]] ![[inbox/alpha.md#Summary]] [[alpha]]\n";
+    std::fs::write(root.join("refs.md"), referrer).unwrap();
+
+    let stop = StopHandle::never();
+    let (primary, _) = stopping_stub(&["rust"], false, &stop, NEVER);
+    let (fallback, _) = stopping_stub(&["rust"], false, &stop, NEVER);
+    let classifiers = Classifiers::new(primary, fallback, test_canon());
+    apply_classify(
+        root,
+        &scan_sorted(root),
+        &Config::default(),
+        &apply_opts(),
+        &classifiers,
+        &stop,
+    )
+    .expect("apply");
+
+    assert!(root.join("notes/alpha-2.md").exists(), "the collision lands at -2");
+    assert_eq!(std::fs::read_to_string(root.join("notes/alpha.md")).unwrap(), occupant);
+    let refs = std::fs::read_to_string(root.join("refs.md")).unwrap();
+    assert!(
+        refs.ends_with("[[notes/alpha-2]] [[notes/alpha-2|A]] ![[notes/alpha-2.md#Summary]] [[alpha]]\n"),
+        "path-qualified links follow the moved note; the bare link keeps naming notes/alpha.md:\n{refs}"
+    );
+    assert_eq!(
+        broken_link_count(root),
+        0,
+        "no broken wikilink after a collision promotion"
+    );
 }

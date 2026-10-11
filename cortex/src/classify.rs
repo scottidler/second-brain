@@ -516,8 +516,8 @@ pub fn apply_classify(
 #[derive(Default)]
 struct ApplyRun {
     report: Report,
-    /// Same-stem promotions that landed, for the post-loop relink.
-    moves: Vec<(PathBuf, PathBuf)>,
+    /// Promotions that landed, for the post-loop relink.
+    moves: Vec<crate::naming::Relocation>,
     /// Real, byte-changed paths this call wrote - the daemon fingerprints this,
     /// never `report.violations` (which named catch-up/needs-review notes that
     /// may not have changed on disk, or promotions the daemon used to sniff by
@@ -685,19 +685,23 @@ fn classify_targets(
             continue;
         }
 
-        // Only redirect wikilinks for a plain inbox->notes move (same stem). A
-        // suffix-collision move (foo.md -> foo-2.md) is a DIFFERENT note from
-        // the [[foo]] that other notes link to, so rewriting [[foo]] ->
-        // [[foo-2]] would point them at the wrong note.
-        if note.path.file_stem() == dest_relative.file_stem() {
-            run.moves.push((note.path.clone(), dest_relative.clone()));
-        } else {
+        // A suffix-collision move (foo.md -> foo-2.md) relinks path-qualified
+        // links only: a bare [[foo]] names the note already at notes/foo.md,
+        // so rewriting it to [[foo-2]] would point it at the wrong note, while
+        // [[inbox/foo]] names exactly this one and would otherwise break.
+        let path_qualified_only = note.path.file_stem() != dest_relative.file_stem();
+        if path_qualified_only {
             log::info!(
-                "suffix-collision move {} -> {}: skipping wikilink rewrite",
+                "suffix-collision move {} -> {}: relinking path-qualified links only",
                 note.path.display(),
                 dest_relative.display()
             );
         }
+        run.moves.push(crate::naming::Relocation {
+            from: note.path.clone(),
+            to: dest_relative.clone(),
+            path_qualified_only,
+        });
 
         // A promotion always mutates the vault (the inbox file is removed and a
         // notes/ file created), independent of whether the enrichment write
@@ -734,7 +738,12 @@ fn classify_targets(
 /// rescan fails, the run's own note set (with the moved paths swapped for
 /// their destinations) is relinked instead, and the rescan error is returned
 /// after it.
-fn relink_moves(vault_root: &Path, notes: &[Note], moves: &[(PathBuf, PathBuf)], report: &mut Report) -> Result<()> {
+fn relink_moves(
+    vault_root: &Path,
+    notes: &[Note],
+    moves: &[crate::naming::Relocation],
+    report: &mut Report,
+) -> Result<()> {
     relink_moves_with(vault_root, notes, moves, report, |root| {
         crate::vault::scan_vault(root, &crate::config::VaultConfig::default())
     })
@@ -745,7 +754,7 @@ fn relink_moves(vault_root: &Path, notes: &[Note], moves: &[(PathBuf, PathBuf)],
 fn relink_moves_with(
     vault_root: &Path,
     notes: &[Note],
-    moves: &[(PathBuf, PathBuf)],
+    moves: &[crate::naming::Relocation],
     report: &mut Report,
     rescan_vault: impl FnOnce(&Path) -> Result<Vec<Note>>,
 ) -> Result<()> {
@@ -760,8 +769,8 @@ fn relink_moves_with(
                 .iter()
                 .cloned()
                 .map(|mut note| {
-                    if let Some((_, to)) = moves.iter().find(|(from, _)| *from == note.path) {
-                        note.path = to.clone();
+                    if let Some(moved) = moves.iter().find(|m| m.from == note.path) {
+                        note.path = moved.to.clone();
                     }
                     note
                 })
@@ -769,7 +778,7 @@ fn relink_moves_with(
             (moved, Err(e))
         }
     };
-    let relinked = crate::naming::update_wikilinks_batch(vault_root, &all_notes, moves)?;
+    let relinked = crate::naming::relink_relocations(vault_root, &all_notes, moves)?;
     report.add_unreadable_after_rename("classify", &relinked.unreadable);
     rescan
 }

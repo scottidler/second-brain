@@ -461,3 +461,33 @@ fn preset_stop_renames_nothing() {
     assert!(applied.written.is_empty(), "{:?}", applied.written);
     assert!(root.join("Alpha Note.md").exists());
 }
+
+/// A path-qualified-only relocation rewrites `[[inbox/foo]]` and leaves a
+/// bare `[[foo]]` alone, even though the bare link resolves to the old path
+/// by stem.
+#[test]
+fn path_qualified_only_relocation_leaves_bare_links_alone() {
+    let v = crate::testutil::TestVault::new();
+    v.add_note("inbox/foo.md", "---\ntitle: Foo\n---\nFoo.\n");
+    v.add_note(
+        "refs.md",
+        "---\ntitle: Refs\n---\n[[inbox/foo]] [[inbox/foo|F]] [[foo]] [[Foo|F]]\n",
+    );
+    let notes = v.scan();
+    std::fs::create_dir_all(v.root().join("notes")).expect("mkdir");
+    std::fs::rename(v.root().join("inbox/foo.md"), v.root().join("notes/foo-2.md")).expect("move");
+
+    let relocations = vec![Relocation {
+        from: PathBuf::from("inbox/foo.md"),
+        to: PathBuf::from("notes/foo-2.md"),
+        path_qualified_only: true,
+    }];
+    relink_relocations(v.root(), &notes, &relocations).expect("relink");
+
+    assert!(
+        v.read("refs.md")
+            .ends_with("[[notes/foo-2]] [[notes/foo-2|F]] [[foo]] [[Foo|F]]\n"),
+        "{}",
+        v.read("refs.md")
+    );
+}
