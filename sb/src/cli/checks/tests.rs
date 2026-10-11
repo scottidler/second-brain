@@ -358,7 +358,10 @@ fn installed_vault_arg_reads_the_vault_flag_from_exec_start() {
 
 /// A unit installed with `--vault` is current even when the config names a
 /// different root: the flag, not the config, was install's input.
+/// Serial with the XDG tests: `desired_systemd_unit` reads the service config
+/// under `XDG_CONFIG_HOME`, which those tests repoint.
 #[test]
+#[serial_test::serial(env_xdg)]
 fn cortex_drift_uses_the_vault_the_unit_was_installed_with() {
     let tmp = tempfile::TempDir::new().unwrap();
     let flag_vault = tmp.path().join("flag-vault");

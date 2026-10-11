@@ -889,10 +889,11 @@ fn render_systemd_unit(
     vault_root: &Path,
     data_dir: &Path,
     config_path: Option<&Path>,
+    timeout_stop_sec: u64,
     config: &Config,
 ) -> String {
     log::debug!(
-        "render_systemd_unit: vault_root={} data_dir={} config_path={:?} log_level={} rayon_threads={} env_bootstrap={}",
+        "render_systemd_unit: vault_root={} data_dir={} config_path={:?} timeout_stop_sec={timeout_stop_sec} log_level={} rayon_threads={} env_bootstrap={}",
         vault_root.display(),
         data_dir.display(),
         config_path,
@@ -939,7 +940,7 @@ fn render_systemd_unit(
             policy: RestartPolicy::OnFailure,
             sec: 5,
         }),
-        timeout_stop_sec: Some(config.daemon.stop_timeout_secs),
+        timeout_stop_sec: Some(timeout_stop_sec),
         // `mixed`: SIGTERM reaches cortex only, so an in-flight Fabric child
         // finishes (bounded by its timeout) instead of being killed into a
         // failure that classify would write as `needs-review`.
@@ -967,15 +968,37 @@ pub fn desired_systemd_unit(vault_root: &Path, config: &Config) -> Result<String
     let data_dir = vault::paths::xdg_data_dir()
         .ok_or_else(|| eyre::eyre!("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)"))?
         .join("sb");
-    let cortex_config = vault::paths::cortex_config();
-    let config_path = cortex_config.exists().then_some(cortex_config.as_path());
-
-    Ok(render_systemd_unit(
+    service_unit(
+        vault_root,
+        config,
         &home,
         &binary,
-        vault_root,
         &data_dir,
+        &vault::paths::cortex_config(),
+    )
+}
+
+/// The unit text for a service that loads `service_config_path`. Its
+/// `TimeoutStopSec` comes from that file, the same one the install guard
+/// validates, so an install run with a different `--config` cannot render a
+/// timeout the guard never checked. Everything else renders from `config`.
+fn service_unit(
+    vault_root: &Path,
+    config: &Config,
+    home: &Path,
+    binary: &Path,
+    data_dir: &Path,
+    service_config_path: &Path,
+) -> Result<String> {
+    let service_config = Config::load_service_config(service_config_path)?;
+    let config_path = service_config_path.exists().then_some(service_config_path);
+    Ok(render_systemd_unit(
+        home,
+        binary,
+        vault_root,
+        data_dir,
         config_path,
+        service_config.daemon.stop_timeout_secs,
         config,
     ))
 }

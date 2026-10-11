@@ -1128,7 +1128,7 @@ fn test_render_systemd_unit_includes_bootstrap_rayon_and_log_level() {
     let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
     let vault_root = std::path::Path::new("/home/user/vault");
 
-    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, 180, &config);
 
     assert!(
         unit.contains(
@@ -1161,7 +1161,7 @@ fn test_render_systemd_unit_excludes_debug_when_config_is_info() {
     let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
     let vault_root = std::path::Path::new("/home/user/vault");
 
-    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, 180, &config);
 
     assert!(
         !unit.contains("--log-level debug"),
@@ -1191,7 +1191,7 @@ fn test_render_systemd_unit_keeps_bootstrap_and_rayon_regardless_of_log_level() 
     let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
     let vault_root = std::path::Path::new("/home/user/vault");
 
-    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, 180, &config);
 
     assert!(
         unit.contains(
@@ -1213,7 +1213,7 @@ fn test_render_systemd_unit_omits_bootstrap_and_rayon_when_unset() {
     let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
     let vault_root = std::path::Path::new("/home/user/vault");
 
-    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, 180, &config);
 
     assert!(!unit.contains("ExecStartPre"), "no bootstrap configured:\n{unit}");
     assert!(!unit.contains("EnvironmentFile"), "no bootstrap configured:\n{unit}");
@@ -1235,7 +1235,7 @@ fn test_render_systemd_unit_readwritepaths_covers_vault_and_data_dir() {
     let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
     let vault_root = std::path::Path::new("/home/user/vault");
 
-    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, 180, &config);
 
     let line = unit
         .lines()
@@ -1270,7 +1270,7 @@ fn test_render_systemd_unit_path_includes_mise_shims_and_excludes_go_bin() {
     let binary = std::path::Path::new("/home/user/.cargo/bin/sb");
     let vault_root = std::path::Path::new("/home/user/vault");
 
-    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, &config);
+    let unit = render_systemd_unit(home, binary, vault_root, data_dir(), None, 180, &config);
 
     assert!(
         unit.contains("/home/user/.local/share/mise/shims"),
@@ -1304,6 +1304,7 @@ fn golden_render(config: &Config, config_present: bool) -> String {
         std::path::Path::new("/home/tester/repos/scottidler/obsidian"),
         std::path::Path::new("/golden-xdg-data-home/sb"),
         config_present.then_some(std::path::Path::new("<XDG_CONFIG_HOME>/sb/cortex.yml")),
+        config.daemon.stop_timeout_secs,
         config,
     )
 }
