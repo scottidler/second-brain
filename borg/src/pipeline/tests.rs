@@ -1412,3 +1412,27 @@ fn ledger_filename_fallback_has_nothing_for_a_dash_filename() {
 
     assert!(found.is_none());
 }
+
+/// An HN thread note's creator is the site, so a reingest does not wipe the
+/// `creator` field the article schema requires.
+#[tokio::test]
+async fn hn_thread_carries_the_site_as_creator() {
+    use axum::response::IntoResponse;
+    const ITEM: &str = r#"{"id": 1, "type": "story", "author": "op", "points": 3,
+        "title": "Show HN: a tool", "url": "https://example.com", "text": null, "children": []}"#;
+    let app = axum::Router::new().route(
+        "/api/v1/items/1",
+        axum::routing::get(|| async { ([("content-type", "application/json")], ITEM).into_response() }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+    let base = format!("http://127.0.0.1:{port}/api/v1/items/");
+    let config = crate::config::Config::default();
+    let (_, _, byline) =
+        handlers::process_hn_thread_from(&base, "https://news.ycombinator.com/item?id=1", 1, &config, "test")
+            .await
+            .expect("hn thread");
+    assert_eq!(byline.as_deref(), Some(crate::hackernews::CREATOR));
+}

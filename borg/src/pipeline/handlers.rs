@@ -587,13 +587,20 @@ pub(crate) async fn process_hn_thread(
     config: &Config,
     trace_id: &str,
 ) -> Result<(String, String, Option<String>)> {
+    process_hn_thread_from(crate::hackernews::ITEMS_API_BASE, url, item_id, config, trace_id).await
+}
+
+/// `process_hn_thread` against an explicit items-API base, so a test can serve it.
+pub(crate) async fn process_hn_thread_from(
+    api_base: &str,
+    url: &str,
+    item_id: u64,
+    config: &Config,
+    trace_id: &str,
+) -> Result<(String, String, Option<String>)> {
     log::debug!("process_hn_thread[{trace_id}]: url={url} item_id={item_id}");
-    let (title, thread_md) = crate::hackernews::fetch_thread(
-        crate::hackernews::ITEMS_API_BASE,
-        item_id,
-        config.pipeline.jina_timeout_secs,
-    )
-    .await?;
+    let (title, thread_md) =
+        crate::hackernews::fetch_thread(api_base, item_id, config.pipeline.jina_timeout_secs).await?;
     if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
         config,
         trace_id,
@@ -606,7 +613,9 @@ pub(crate) async fn process_hn_thread(
         log::warn!("[{trace_id}] persist_fetched (hn-api) failed: {e:#}");
     }
     crate::stages::raw::run_gate_1(config, trace_id, url, thread_md.as_bytes(), 200)?;
-    Ok((title, thread_md, None))
+    // The site, not the submitter: per-username creators would mint a hub
+    // note for every HN poster.
+    Ok((title, thread_md, Some(crate::hackernews::CREATOR.to_string())))
 }
 
 pub(crate) async fn process_article_jina(

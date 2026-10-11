@@ -14,6 +14,8 @@ use std::time::Duration;
 
 /// Items endpoint of the HN Algolia API; the item id is appended.
 pub const ITEMS_API_BASE: &str = "https://hn.algolia.com/api/v1/items/";
+/// The `creator` an HN thread note carries.
+pub const CREATOR: &str = "Hacker News";
 
 /// One story or comment in the API's tree. A deleted comment has no author
 /// and no text but may still carry live replies.
