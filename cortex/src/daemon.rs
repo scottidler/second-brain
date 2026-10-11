@@ -157,17 +157,16 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     // embed tick is disabled for this process but every other governance
     // action (lint/link/sweep/cold/graph/intel) still runs. The `?` here used
     // to take the whole daemon down repeatedly on a model-load failure.
-    let embed_model: Option<Box<dyn vault::embedding::EmbeddingModel>> =
-        match tokio::task::block_in_place(|| crate::embed::load_daemon_model(config)) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                log::error!(
-                    "daemon: embedding model failed to load: {e:#}; embed tick DISABLED for this process \
-                     - every non-embed action still runs"
-                );
-                None
-            }
-        };
+    // A stop that landed during the load exits here, before the startup sweep.
+    let embed_model = match tokio::task::block_in_place(|| {
+        model_load::load_unless_stopped(&stop, || crate::embed::load_daemon_model(config))
+    }) {
+        StartupModel::Ready(model) => model,
+        StartupModel::Stopped => {
+            drop(watcher);
+            return Ok(());
+        }
+    };
 
     // Which embed kind leads the next tick: one left waiting on the tick
     // allowance runs first on a fresh one, so it cannot starve.
@@ -1194,6 +1193,8 @@ pub fn duration_until_next(schedule: &str) -> Duration {
     }
 }
 
+mod model_load;
+use model_load::StartupModel;
 mod stop_budget;
 use stop_budget::ensure_stop_budget;
 
