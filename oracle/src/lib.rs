@@ -11,6 +11,7 @@
 // stdout are exempted via the not(test) guard below.
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 
+pub mod channel;
 pub mod config;
 pub mod eval;
 pub mod queue;

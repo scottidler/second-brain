@@ -184,6 +184,12 @@ impl super::SearchIndex {
         // rides the same UPDATE/INSERT path as the rest.
         let superseded_by = extract_cortex_string(&fm.extra, "superseded-by");
 
+        // The YouTube channel handle (`channel-handle: '@letsgetrusty'`, written
+        // by borg at ingest and by `sb borg channels --backfill`). Not a known
+        // Frontmatter field, so it lands in `extra`; `creator_browse` reads it
+        // back as the per-creator `handle`.
+        let channel_handle = extract_cortex_string(&fm.extra, "channel-handle");
+
         // A note with no `tags` key indexes as `[]`, not `''`. The empty string
         // is not valid JSON, so `json_each` errors on it and every tag query
         // has to special-case it; 303 such rows existed before this change.
@@ -283,7 +289,7 @@ impl super::SearchIndex {
                     pinned = ?29,
                     trace = ?30, ingested = ?31, trace_expires = ?32,
                     capture_note = ?33, repo = ?34, repos_touched = ?35,
-                    superseded_by = ?36
+                    superseded_by = ?36, channel_handle = ?37
                  WHERE path = ?1",
                 params![
                     path_str.as_ref(),
@@ -322,6 +328,7 @@ impl super::SearchIndex {
                     repo,
                     repos_touched,
                     superseded_by,
+                    channel_handle,
                 ],
             )?;
             self.sync_note_tags(&path_str, &tag_list)?;
@@ -343,7 +350,7 @@ impl super::SearchIndex {
                     pinned,
                     trace, ingested, trace_expires,
                     capture_note, repo, repos_touched,
-                    superseded_by
+                    superseded_by, channel_handle
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                     ?14, ?15, ?16, ?17, ?18, ?19,
@@ -352,7 +359,7 @@ impl super::SearchIndex {
                     ?29,
                     ?30, ?31, ?32,
                     ?33, ?34, ?35,
-                    ?36
+                    ?36, ?37
                 )",
                 params![
                     path_str.as_ref(),
@@ -391,6 +398,7 @@ impl super::SearchIndex {
                     repo,
                     repos_touched,
                     superseded_by,
+                    channel_handle,
                 ],
             )?;
             self.sync_note_tags(&path_str, &tag_list)?;

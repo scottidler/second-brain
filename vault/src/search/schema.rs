@@ -89,6 +89,7 @@ impl super::SearchIndex {
         self.ensure_repo_columns()?;
         self.ensure_repos_touched_column()?;
         self.ensure_superseded_by_column()?;
+        self.ensure_channel_handle_column()?;
 
         // FTS5 cannot ALTER, so we detect old (no-claims) schemas and rebuild.
         // Triggers attach to `notes`, not `notes_fts`, so they must be dropped
@@ -406,6 +407,26 @@ impl super::SearchIndex {
         if !existing_columns.contains(&"repo".to_string()) {
             self.conn
                 .execute_batch("ALTER TABLE notes ADD COLUMN repo TEXT DEFAULT '';")?;
+        }
+
+        Ok(())
+    }
+
+    /// Add the `channel_handle` column to existing DBs (YouTube channel search
+    /// design): the `channel-handle:` frontmatter value, `''` when absent.
+    /// Same idempotent `PRAGMA table_info` + single `ALTER ADD COLUMN` pattern
+    /// as `ensure_repos_touched_column`; existing rows read `''` until the
+    /// next reindex of each note picks the frontmatter up.
+    fn ensure_channel_handle_column(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(notes)")?;
+        let existing_columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(warn_row)
+            .collect();
+
+        if !existing_columns.contains(&"channel_handle".to_string()) {
+            self.conn
+                .execute_batch("ALTER TABLE notes ADD COLUMN channel_handle TEXT DEFAULT '';")?;
         }
 
         Ok(())

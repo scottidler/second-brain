@@ -491,3 +491,75 @@ fn list_notes_filters_by_tag_or_and_and() {
         .expect("none");
     assert_eq!(rows.len(), 3);
 }
+
+fn youtube_row(path: &str, creator: &str, handle: Option<&str>) -> crate::note::Note {
+    let mut fm = crate::frontmatter::Frontmatter {
+        title: Some(path.to_string()),
+        note_type: Some("youtube".to_string()),
+        creator: Some(creator.to_string()),
+        source: Some("https://www.youtube.com/watch?v=abc_DEF-123".to_string()),
+        ..Default::default()
+    };
+    if let Some(h) = handle {
+        fm.extra
+            .insert("channel-handle".to_string(), serde_yaml::Value::String(h.to_string()));
+    }
+    crate::note::Note {
+        path: std::path::PathBuf::from(path),
+        frontmatter: fm,
+        body: "b".to_string(),
+        raw: "---\n---\nb".to_string(),
+    }
+}
+
+#[test]
+fn channel_handle_is_indexed_and_creator_handles_filters_by_type() {
+    let index = SearchIndex::open_memory().expect("open");
+    index
+        .index_one(&youtube_row("a.md", "Rusty", Some("@letsgetrusty")), 1)
+        .unwrap();
+    index.index_one(&youtube_row("b.md", "Bare", None), 1).unwrap();
+    let h = index.creator_handles(Some("youtube")).unwrap();
+    assert_eq!(h.get("Rusty").map(String::as_str), Some("@letsgetrusty"));
+    assert!(!h.contains_key("Bare"));
+    assert!(index.creator_handles(Some("article")).unwrap().is_empty());
+}
+
+#[test]
+fn reindexing_a_note_that_gains_a_handle_updates_the_column() {
+    let index = SearchIndex::open_memory().expect("open");
+    index.index_one(&youtube_row("a.md", "Rusty", None), 1).unwrap();
+    assert!(index.creator_handles(Some("youtube")).unwrap().is_empty());
+    index
+        .index_one(&youtube_row("a.md", "Rusty", Some("@letsgetrusty")), 2)
+        .unwrap();
+    assert_eq!(index.creator_handles(None).unwrap().len(), 1);
+}
+
+#[test]
+fn channel_handle_column_is_added_to_a_pre_existing_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.db");
+    {
+        let index = SearchIndex::open(&path).expect("open");
+        index
+            .conn
+            .execute_batch("ALTER TABLE notes DROP COLUMN channel_handle;")
+            .expect("drop");
+    }
+    let index = SearchIndex::open(&path).expect("reopen migrates");
+    index
+        .index_one(&youtube_row("a.md", "Rusty", Some("@letsgetrusty")), 1)
+        .unwrap();
+    assert_eq!(index.creator_handles(Some("youtube")).unwrap().len(), 1);
+}
+
+#[test]
+fn youtube_note_path_matches_on_id_not_like_wildcards() {
+    let index = SearchIndex::open_memory().expect("open");
+    index.index_one(&youtube_row("a.md", "Rusty", None), 1).unwrap();
+    assert_eq!(index.youtube_note_path("abc_DEF-123").unwrap().as_deref(), Some("a.md"));
+    // `_` must not act as a wildcard.
+    assert_eq!(index.youtube_note_path("abcXDEF-123").unwrap(), None);
+    assert_eq!(index.youtube_note_path("").unwrap(), None);
+}

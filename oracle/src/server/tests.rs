@@ -638,6 +638,7 @@ fn note_returning_tools_advertise_trace_block() {
         "duplicate_groups",
         "classify_status",
         "ingest_queue",
+        "channel_search",
     ];
 
     let tools = OracleMcpServer::list_tools();
@@ -1224,4 +1225,104 @@ async fn ingest_queue_rejects_unknown_arguments() {
         .await
         .expect_err("unknown field must fail loudly");
     assert!(err.message.contains("unknown field"), "{}", err.message);
+}
+
+fn seed_youtube(db: &SearchIndex, path: &str, creator: &str, source: &str, handle: Option<&str>) {
+    let mut fm = Frontmatter {
+        title: Some(path.to_string()),
+        note_type: Some("youtube".to_string()),
+        origin: Some("assisted".to_string()),
+        creator: Some(creator.to_string()),
+        source: Some(source.to_string()),
+        ..Frontmatter::default()
+    };
+    if let Some(h) = handle {
+        fm.extra
+            .insert("channel-handle".to_string(), serde_yaml::Value::String(h.to_string()));
+    }
+    let note = Note {
+        path: PathBuf::from(path),
+        frontmatter: fm,
+        body: "body".to_string(),
+        raw: "---\n---\nbody".to_string(),
+    };
+    db.index_one(&note, 100).expect("seed youtube");
+}
+
+async fn call_json(server: &OracleMcpServer, tool: &str, args: serde_json::Value) -> serde_json::Value {
+    let res = server.dispatch(tool, args).await.expect("dispatch");
+    let text = res.content[0].as_text().expect("text content").text.clone();
+    serde_json::from_str(&text).expect("json body")
+}
+
+#[tokio::test]
+async fn creator_browse_type_youtube_carries_handle_per_creator() {
+    let db = SearchIndex::open_memory().expect("db");
+    seed_youtube(
+        &db,
+        "a.md",
+        "Let's Get Rusty",
+        "https://www.youtube.com/watch?v=AAAAAAAAAAA",
+        Some("@letsgetrusty"),
+    );
+    seed_youtube(
+        &db,
+        "b.md",
+        "No Handle Yet",
+        "https://www.youtube.com/watch?v=BBBBBBBBBBB",
+        None,
+    );
+    seed_one_article(&db, "c.md", "art", "body");
+    let server = OracleMcpServer::new(Config::default(), db);
+    let v = call_json(&server, "creator_browse", json!({"type": "youtube"})).await;
+    let results = v["results"].as_array().expect("results");
+    let by_name = |n: &str| results.iter().find(|r| r["name"] == n).expect("creator").clone();
+    assert_eq!(by_name("Let's Get Rusty")["handle"], "@letsgetrusty");
+    assert!(by_name("No Handle Yet").get("handle").is_none(), "no handle -> no key");
+}
+
+#[tokio::test]
+async fn creator_browse_without_type_has_no_handle_key() {
+    let db = SearchIndex::open_memory().expect("db");
+    seed_youtube(
+        &db,
+        "a.md",
+        "Let's Get Rusty",
+        "https://www.youtube.com/watch?v=AAAAAAAAAAA",
+        Some("@letsgetrusty"),
+    );
+    let server = OracleMcpServer::new(Config::default(), db);
+    let v = call_json(&server, "creator_browse", json!({})).await;
+    assert!(v["results"][0].get("handle").is_none());
+}
+
+#[tokio::test]
+async fn channel_search_with_daemon_unreachable_names_the_address() {
+    let closed = vault::testnet::closed_port();
+    let port = closed.port();
+    let db = SearchIndex::open_memory().expect("db");
+    let (_dir, server) = server_with_borg_yml(db, &format!("hotkey:\n  host: 127.0.0.1\n  port: {port}\n"));
+    let err = server
+        .dispatch("channel_search", json!({"handle": "@letsgetrusty", "query": "tokio"}))
+        .await
+        .expect_err("must fail");
+    assert!(err.message.contains(&format!("127.0.0.1:{port}")), "{}", err.message);
+}
+
+#[tokio::test]
+async fn channel_search_rejects_unknown_arguments_and_missing_fields() {
+    let db = SearchIndex::open_memory().expect("db");
+    let server = OracleMcpServer::new(Config::default(), db);
+    assert!(
+        server
+            .dispatch("channel_search", json!({"handle": "@x", "query": "q", "bogus": 1}))
+            .await
+            .is_err()
+    );
+    assert!(
+        server
+            .dispatch("channel_search", json!({"handle": "@x"}))
+            .await
+            .is_err()
+    );
 }

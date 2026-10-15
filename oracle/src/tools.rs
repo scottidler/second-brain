@@ -469,6 +469,25 @@ pub struct InboxStatusRequest {
 #[serde(deny_unknown_fields)]
 pub struct IngestQueueRequest {}
 
+/// Search one YouTube channel through the borg daemon.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelSearchRequest {
+    /// Channel handle, as `creator_browse` reports it
+    #[schemars(
+        description = "Channel handle with the leading @, e.g. @letsgetrusty (as creator_browse type=youtube reports it)"
+    )]
+    pub handle: String,
+
+    /// What to search the channel for
+    #[schemars(description = "Search text, matched against the channel's videos by YouTube")]
+    pub query: String,
+
+    /// Maximum number of videos to read from the channel's results
+    #[schemars(description = "Maximum number of results to read (default: the daemon's default, max 50)")]
+    pub limit: Option<u32>,
+}
+
 /// Cortex quality level for `quality_report`. A schema enum so a typo fails
 /// deserialization with the valid options rather than silently matching no
 /// rows in `notes_by_quality`.

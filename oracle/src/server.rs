@@ -171,6 +171,10 @@ impl OracleMcpServer {
                 let req: IngestQueueRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
                 self.ingest_queue(Parameters(req)).await
             }
+            "channel_search" => {
+                let req: ChannelSearchRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.channel_search(Parameters(req)).await
+            }
             "quality_report" => {
                 let req: QualityReportRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
                 self.quality_report(Parameters(req)).await
@@ -969,14 +973,24 @@ impl OracleMcpServer {
                     .creator_stats(req.note_type.as_ref().map(|t| t.as_str()))
                     .map_err(Self::err)?;
                 let limit = req.limit.unwrap_or(50) as usize;
+                let handles = match req.note_type {
+                    Some(NoteType::Youtube) => db
+                        .creator_handles(Some(NoteType::Youtube.as_str()))
+                        .map_err(Self::err)?,
+                    _ => Default::default(),
+                };
                 let creators: Vec<serde_json::Value> = stats
                     .iter()
                     .take(limit)
                     .map(|(name, count)| {
-                        json!({
+                        let mut entry = json!({
                             "name": name,
                             "count": count,
-                        })
+                        });
+                        if let Some(handle) = handles.get(name) {
+                            entry["handle"] = json!(handle);
+                        }
+                        entry
                     })
                     .collect();
 
@@ -1086,6 +1100,22 @@ impl OracleMcpServer {
         Ok(CallToolResult::success(vec![Content::json(snapshot)?]))
     }
 
+    /// Search one YouTube channel via the borg daemon, marking videos already in the vault
+    #[tool(
+        description = "Search one followed YouTube channel for videos matching a query, via the borg daemon's GET /channels/search (yt-dlp runs on the daemon host). Takes the channel `handle` (with @, as `creator_browse` type=youtube reports it), a `query`, and an optional `limit`. Each hit carries id, title, url, duration-secs, view-count, and `in-vault: <note path>` when the vault already has that video. Any failure to reach the daemon, or a yt-dlp failure, is an error naming the daemon address, never an empty result."
+    )]
+    async fn channel_search(&self, params: Parameters<ChannelSearchRequest>) -> Result<CallToolResult, McpError> {
+        let ChannelSearchRequest { handle, query, limit } = params.0;
+        debug!("channel_search: entry handle={handle} query={query:?} limit={limit:?}");
+        let view = crate::queue::load_view(self.borg_config.as_ref()).map_err(Self::err)?;
+        let search = crate::channel::fetch(&view, &handle, &query, limit)
+            .await
+            .map_err(Self::err)?;
+        let db = self.db.lock().map_err(Self::err)?;
+        let answer = crate::channel::render(&search, &db).map_err(Self::err)?;
+        Ok(CallToolResult::success(vec![Content::json(answer)?]))
+    }
+
     /// Notes by quality score and common issues
     #[tool(
         description = "View note quality distribution and browse notes by quality level. Shows quality score distribution and notes filtered by quality. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
@@ -1184,6 +1214,9 @@ impl ServerHandler for OracleMcpServer {
              metadata (fields only), tldr (one-liner), summary (summary section), full (complete body). \
              Use vault_overview for the big picture, tag_brief for tag-specific intelligence, \
              and knowledge_search for targeted queries. \
+             creator_browse with type=youtube lists channels with their `handle`; channel_search \
+             takes such a handle plus a query, searches that channel through the borg daemon, and \
+             marks hits the vault already has with `in-vault: <path>`. \
              Returned notes include a `trace` block: when `trace.available` is true, `trace.ref` is a \
              borg staged-source handle for the verbatim captured source (e.g. a full transcript), and \
              `trace.within-window` indicates the retention policy says it is still worth trying. Prefer \

@@ -402,3 +402,24 @@
   ```
 - Observed, library level: `cargo test --workspace --lib search_channel_live -- --ignored --nocapture` passed in 0.71 s with 9 `watch?v=` hits (FUg1y-yv6cs, wXtngLBkK4Q, _6QSe8Xzbnk, 9RsgFFp67eo, iSB31t7pnzE, K8LNPYNvT-U, FPRH66r-zUQ, eIB3Pd5LBkc, luOgEhLE2sg). The ranking differs from the CLI run moments earlier: YouTube's search order is not stable between calls.
 - Observed, failure path: `sb borg channel-search @this-handle-does-not-exist-zq9x tokio` exited 1 in 1.5 s with `Error: yt-dlp exited exit status: 1: WARNING: [youtube:tab] HTTP Error 404: Not Found. Retrying (3/3)... ...`. The message now reads `yt-dlp failed (exit status: 1): <tail>`. A 404 handle costs yt-dlp 3 retries, still well inside 8 s here.
+
+## Phase 17: Oracle channel search and creator handles
+### Design decisions
+- New `notes.channel_handle TEXT DEFAULT ''` column, added by `ensure_channel_handle_column` (idempotent `PRAGMA table_info` + `ALTER ADD COLUMN`, no version bump) - `vault/src/search/schema.rs` - the same migration pattern as `repos_touched`/`superseded_by`. It is filled from `channel-handle:` in `Frontmatter.extra` in `index_one` (both UPDATE and INSERT arms).
+- `SearchIndex::creator_handles(note_type)` returns creator -> handle (`MAX(channel_handle)`, deterministic on a rename) - `vault/src/search/stats.rs`. `creator_browse` calls it only for `type: youtube` and adds `handle` to an entry only when one exists; an absent handle is an absent key, not `""`/null.
+- `SearchIndex::youtube_note_path(video_id)` matches `source` on the video id with `instr`, not `LIKE`, because ids contain `_` (a LIKE wildcard); restricted to `note_type = 'youtube'`, so it matches `youtu.be/ID?t=30` as well as `watch?v=ID`.
+- `oracle/src/channel.rs`: `fetch` (GET `/channels/search` via `DaemonClient` and `queue::BorgView`) and `render` (`{handle, query, count, results}` with `in-vault: <path>` per marked hit). A 400/502 with a `ChannelSearchFailure` body becomes an error naming the daemon address, the daemon's `error` and the yt-dlp stderr tail; 404 says the daemon predates the route.
+- The tool loads the view with `self.borg_config` (the server's existing override), unlike `ingest_queue`, which passes `None`; that makes the error path testable without touching `~/.config/sb/`.
+- Registered via `#[tool]`, a `dispatch()` arm, and the MCP instructions text. Added to `NON_NOTE_TOOLS` in the trace-marker coverage test.
+### Deviations
+- None.
+### Tradeoffs
+- `creator_handles` is a second query beside `creator_stats` vs widening `creator_stats`' return tuple: it leaves the other callers and the untyped path untouched.
+- Instance-wide `in-vault` lookup is one indexed-table scan per hit (at most 50) vs a single `IN` query: `source` has no index either way, and the hit count is small.
+### Open questions
+- Owed after deploy: `sb oracle call creator_browse --json '{"type":"youtube","limit":5}'` showing `handle` on each entry needs the Phase 15 backfill on ripr, then a reindex. Existing index rows have `channel_handle = ''` until each note is reindexed (the column migration does not touch their mtime). Proven here on a temp index (`creator_browse_type_youtube_carries_handle_per_creator`, `channel_handle_is_indexed_and_creator_handles_filters_by_type`, `channel_handle_column_is_added_to_a_pre_existing_db`).
+- Owed after deploy: the live `channel_search` call against the real daemon (the running daemon is the old binary, no `/channels/search`; it would answer 404 "predates /channels/search").
+- Daemon-unreachable check, run with the live daemon untouched: `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME` pointed at a scratch dir (borg.yml `hotkey.port` set to an unused port, oracle.yml `vault.root-path` set to an empty scratch vault, so no live index was written), `sb oracle call channel_search --json '{"handle":"@letsgetrusty","query":"tokio"}'`, exit 1:
+  ```
+  Error: cannot reach daemon at 127.0.0.1:46689 for GET /channels/search: error sending request for url (http://127.0.0.1:46689/channels/search?handle=%40letsgetrusty&q=tokio)
+  ```

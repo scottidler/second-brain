@@ -384,6 +384,44 @@ impl super::SearchIndex {
         Ok(rows)
     }
 
+    /// Creator name -> channel handle for notes of `note_type`, taken from the
+    /// `channel_handle` column. A creator with several handles (a rename)
+    /// resolves to the lexically greatest, so the answer is deterministic;
+    /// creators with no handle are absent.
+    pub fn creator_handles(&self, note_type: Option<&str>) -> Result<HashMap<String, String>> {
+        log::debug!("search::creator_handles: note_type={note_type:?}");
+        let f = Filter::new(
+            "SELECT creator, MAX(channel_handle) FROM notes WHERE creator != '' AND channel_handle != ''",
+            vec![],
+        )
+        .and_eq("note_type", note_type)
+        .then(" GROUP BY creator");
+        let mut stmt = self.conn.prepare(&f.sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(&f.params), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(warn_row)
+            .collect();
+        Ok(rows)
+    }
+
+    /// Path of the YouTube note whose `source` carries `video_id`, if any.
+    /// `instr`, not `LIKE`: a video id may contain `_`, a LIKE wildcard.
+    pub fn youtube_note_path(&self, video_id: &str) -> Result<Option<String>> {
+        log::debug!("search::youtube_note_path: video_id={video_id}");
+        if video_id.is_empty() {
+            return Ok(None);
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM notes WHERE note_type = ?1 AND instr(source, ?2) > 0 ORDER BY path LIMIT 1")?;
+        let mut rows = stmt.query_map(params![crate::schema::NoteType::Youtube.as_str(), video_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
     /// Get notes by a specific creator
     pub fn notes_by_creator(
         &self,
