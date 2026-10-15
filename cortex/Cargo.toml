@@ -38,7 +38,6 @@ sha2 = "0.11.0"
 vault = { path = "../vault", features = ["search", "watcher", "vec", "test-util"] }
 distillers = { path = "../distillers", features = ["test-util"] }
 async-trait = "0.1.89"
-serial_test = { workspace = true }
 tempfile = { workspace = true }
 # The REAL BGE tokenizer, driven from the committed
 # `tests/fixtures/bge-small-en-v1.5-tokenizer.json`, so the hub retrieval

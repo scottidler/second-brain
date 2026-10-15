@@ -5,31 +5,7 @@ use super::*;
 // `crate::testutil::ENV_LOCK` - see that static's doc comment for the race
 // this closes.
 
-struct EnvGuard {
-    key: &'static str,
-    original: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &std::path::Path) -> Self {
-        let original = std::env::var_os(key);
-        // SAFETY: intentional env mutation for path-resolution tests.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, original }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: restore env to avoid leaking state.
-        unsafe {
-            match self.original.take() {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
+use crate::testutil::EnvGuard;
 
 #[test]
 fn load_inner_defaults_when_primary_config_missing() {

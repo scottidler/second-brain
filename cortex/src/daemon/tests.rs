@@ -1247,7 +1247,6 @@ fn test_render_systemd_unit_readwritepaths_covers_vault_and_data_dir() {
 /// The data dir `install_systemd_service` passes (`<xdg data>/sb`) must
 /// contain the oracle DB cortex writes, or `ProtectHome=read-only` blocks
 /// every embed write.
-#[serial_test::serial(xdg_data_home)]
 #[test]
 fn test_sb_data_dir_contains_oracle_db() {
     let _lock = crate::testutil::lock_env();

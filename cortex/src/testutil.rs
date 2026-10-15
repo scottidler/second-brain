@@ -587,3 +587,30 @@ impl NoteBuilder {
         }
     }
 }
+
+/// Every env mutation in this crate's tests goes through [`EnvGuard`] under
+/// [`lock_env`]. A test that calls `set_var` directly can skip the lock, which
+/// is how `test_daemon_cold_tick_fires` raced the staged-proposal tests on
+/// `XDG_DATA_HOME`.
+#[test]
+fn env_mutation_only_in_testutil() {
+    fn walk(dir: &Path, offenders: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, offenders);
+            } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("testutil.rs") {
+                let text = std::fs::read_to_string(&path).expect("read source");
+                if text.contains("env::set_var") || text.contains("env::remove_var") {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+    }
+    let mut offenders = Vec::new();
+    walk(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut offenders);
+    assert!(
+        offenders.is_empty(),
+        "env mutated outside testutil::EnvGuard: {offenders:?}"
+    );
+}

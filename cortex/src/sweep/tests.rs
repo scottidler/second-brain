@@ -159,7 +159,6 @@ fn render_cold_report_lists_a_single_row_with_no_group_header() {
 /// `XDG_DATA_HOME`. macOS resolves data_local_dir via system APIs
 /// that ignore env vars (see the `dirs` crate platform notes).
 #[cfg(target_os = "linux")]
-#[serial_test::serial(xdg_data_home)]
 #[test]
 fn test_daemon_cold_tick_fires() {
     use std::path::PathBuf;
@@ -171,65 +170,47 @@ fn test_daemon_cold_tick_fires() {
     let vault_tmp = tempfile::tempdir().expect("vault tmpdir");
 
     // Redirect `dirs::data_local_dir()` so config.oracle_db_path()
-    // resolves under our tempdir instead of the real user store.
-    // safety: behind serial_test::serial(xdg_data_home), no
-    // concurrent test mutates XDG_DATA_HOME.
-    let prior = std::env::var_os("XDG_DATA_HOME");
-    // SAFETY: tests serialized by the `xdg_data_home` lock; no
-    // concurrent reader exists, so the mutation is sound here.
-    unsafe {
-        std::env::set_var("XDG_DATA_HOME", xdg_tmp.path());
-    }
+    // resolves under our tempdir instead of the real user store. Held under
+    // the suite-wide env lock that every other XDG_DATA_HOME writer takes.
+    let _lock = crate::testutil::lock_env();
+    let _data_env = crate::testutil::EnvGuard::set("XDG_DATA_HOME", xdg_tmp.path());
 
-    let result = std::panic::catch_unwind(|| {
-        // Resolve the DB path the same way production does.
-        let config = crate::config::Config::default();
-        let db_path = config.oracle_db_path();
-        assert!(
-            db_path.starts_with(xdg_tmp.path()),
-            "XDG_DATA_HOME redirect did not take: db_path={}",
-            db_path.display(),
-        );
-        std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("mkdir db parent");
+    // Resolve the DB path the same way production does.
+    let config = crate::config::Config::default();
+    let db_path = config.oracle_db_path();
+    assert!(
+        db_path.starts_with(xdg_tmp.path()),
+        "XDG_DATA_HOME redirect did not take: db_path={}",
+        db_path.display(),
+    );
+    std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("mkdir db parent");
 
-        // Pre-seed the DB with a cold note (no signals, old content date).
-        let index = SearchIndex::open(&db_path).expect("open db");
-        let fm = Frontmatter {
-            title: Some("Stale Note".to_string()),
-            date: Some("2020-01-01".to_string()),
-            note_type: Some("article".to_string()),
-            origin: Some("assisted".to_string()),
-            ..Frontmatter::default()
-        };
-        let note = Note {
-            path: PathBuf::from("notes/ai/stale.md"),
-            frontmatter: fm,
-            body: "## Summary\n\nS.\n".to_string(),
-            raw: String::new(),
-        };
-        index.index_one(&note, 1_000).expect("seed cold note");
-        drop(index);
+    // Pre-seed the DB with a cold note (no signals, old content date).
+    let index = SearchIndex::open(&db_path).expect("open db");
+    let fm = Frontmatter {
+        title: Some("Stale Note".to_string()),
+        date: Some("2020-01-01".to_string()),
+        note_type: Some("article".to_string()),
+        origin: Some("assisted".to_string()),
+        ..Frontmatter::default()
+    };
+    let note = Note {
+        path: PathBuf::from("notes/ai/stale.md"),
+        frontmatter: fm,
+        body: "## Summary\n\nS.\n".to_string(),
+        raw: String::new(),
+    };
+    index.index_one(&note, 1_000).expect("seed cold note");
+    drop(index);
 
-        // Invoke the same function the daemon's select! arm calls.
-        let stats = daemon_cold_tick(vault_tmp.path(), &config).expect("daemon_cold_tick");
-        assert_eq!(stats.surfaced, 1, "the cold note must surface");
+    // Invoke the same function the daemon's select! arm calls.
+    let stats = daemon_cold_tick(vault_tmp.path(), &config).expect("daemon_cold_tick");
+    assert_eq!(stats.surfaced, 1, "the cold note must surface");
 
-        let report = vault_tmp.path().join("system").join("views").join("cold-notes.md");
-        assert!(report.exists(), "report file must appear at {}", report.display());
-        let body = std::fs::read_to_string(&report).expect("read report");
-        assert!(body.contains("`notes/ai/stale.md`"), "report must list the cold note");
-    });
-
-    // SAFETY: same serialization guarantee as the set_var above.
-    unsafe {
-        match prior {
-            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-    }
-    if let Err(payload) = result {
-        std::panic::resume_unwind(payload);
-    }
+    let report = vault_tmp.path().join("system").join("views").join("cold-notes.md");
+    assert!(report.exists(), "report file must appear at {}", report.display());
+    let body = std::fs::read_to_string(&report).expect("read report");
+    assert!(body.contains("`notes/ai/stale.md`"), "report must list the cold note");
 }
 
 #[test]
