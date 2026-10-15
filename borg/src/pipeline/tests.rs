@@ -1437,3 +1437,38 @@ async fn hn_thread_carries_the_site_as_creator() {
             .expect("hn thread");
     assert_eq!(byline.as_deref(), Some(crate::hackernews::CREATOR));
 }
+
+#[test]
+fn is_fetchable_scheme_accepts_only_http_and_https() {
+    for ok in ["http://a.com", "https://a.com/x", "HTTPS://A.COM", " https://a.com"] {
+        assert!(is_fetchable_scheme(ok), "{ok} must be fetchable");
+    }
+    for bad in ["clyde://e9413f89", "ftp://a.com", "file:///etc/passwd", "a.com", ""] {
+        assert!(!is_fetchable_scheme(bad), "{bad} must not be fetchable");
+    }
+}
+
+/// A `clyde://` session source posted to `/ingest` once had every reader
+/// fail, and the article distiller summarized the reader's 400 JSON over the
+/// session note. It must stop at the door, before any fetch or publish.
+#[tokio::test]
+async fn process_url_rejects_a_session_source_at_the_door() {
+    let config = crate::config::Config::default();
+    let result = process_url(
+        "clyde://e9413f89-1d2e-4a86-aef7-62f45254f4c0",
+        None,
+        vec![],
+        IngestMethod::Cli,
+        true,
+        &config,
+        "cl-test",
+    )
+    .await;
+    assert!(
+        matches!(result.status, IngestStatus::Failed { .. }),
+        "got {:?}",
+        result.status
+    );
+    assert_eq!(result.failure_stage, Some(FailureStage::IntakeRejected));
+    assert!(result.note_path.is_none());
+}

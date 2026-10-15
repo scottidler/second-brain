@@ -192,6 +192,9 @@ impl BorgCli {
                         }
                         borg::ReingestEvent::ItemOther(s) => println!("    -> {s}"),
                         borg::ReingestEvent::ItemError(e) => eprintln!("    -> Error: {e}"),
+                        borg::ReingestEvent::SkippedNonUrl { count } => println!(
+                            "Skipping {count} non-http(s) entries (session notes: use `sb borg replay <trace> --from-stage 2`)"
+                        ),
                         borg::ReingestEvent::Complete { dry_run } => {
                             if !*dry_run {
                                 println!("Reingest complete.");

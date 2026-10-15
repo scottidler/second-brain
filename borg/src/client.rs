@@ -198,6 +198,10 @@ pub enum ReingestEvent {
     },
     ItemOther(String),
     ItemError(String),
+    /// Selected entries whose source is not http(s), left out of the run.
+    SkippedNonUrl {
+        count: usize,
+    },
     Complete {
         dry_run: bool,
     },
@@ -313,6 +317,16 @@ pub async fn reingest(
         entries
     };
 
+    // Only http(s) sources go back through `/ingest`. A `clyde://` session
+    // note is rebuilt by `sb borg replay <hv-trace> --from-stage 2`; posting
+    // it here once overwrote 24 session notes with a fetch error's summary.
+    let (entries, skipped): (Vec<QueriedEntry>, Vec<QueriedEntry>) = entries
+        .into_iter()
+        .partition(|e| crate::pipeline::is_fetchable_scheme(&e.source));
+    if !skipped.is_empty() {
+        progress(&ReingestEvent::SkippedNonUrl { count: skipped.len() });
+    }
+
     let mut report = ReingestReport::default();
 
     if entries.is_empty() {
@@ -373,7 +387,11 @@ pub async fn reingest(
                 }
                 match result.status {
                     types::IngestStatus::Completed => {
-                        let title = result.title.unwrap_or_else(|| "Untitled".to_string());
+                        // The polled `/trace` result carries the note path but no title.
+                        let title = result
+                            .title
+                            .or_else(|| result.note_path.clone())
+                            .unwrap_or_else(|| "Untitled".to_string());
                         progress(&ReingestEvent::ItemReplaced { title: title.clone() });
                         ReingestEntryStatus::Replaced { title }
                     }

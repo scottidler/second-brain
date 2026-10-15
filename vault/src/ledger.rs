@@ -322,13 +322,14 @@ pub fn query_entries(ledger_path: &Path, filter: &EntryFilter) -> Result<Vec<Que
         {
             continue;
         }
+        // Inclusive bounds: `--before`/`--after` are "on or before/after".
         if let Some(ref f_before) = filter.before
-            && date.as_str() >= f_before.as_str()
+            && date.as_str() > f_before.as_str()
         {
             continue;
         }
         if let Some(ref f_after) = filter.after
-            && date.as_str() <= f_after.as_str()
+            && date.as_str() < f_after.as_str()
         {
             continue;
         }

@@ -281,3 +281,38 @@ fn parse_note_slug_reads_the_file_stem_of_heading_and_path_links() {
     assert_eq!(parse_note_slug("[[notes/my-note.md#^b|x]]"), "my-note");
     assert_eq!(parse_note_slug("-"), "-", "a cell with no link is returned as is");
 }
+
+/// `--before`/`--after` are documented "on or before/after": an entry dated
+/// exactly on a bound is selected. They were exclusive, which silently
+/// dropped a whole day at each end of a reingest window.
+#[test]
+fn query_entries_date_bounds_are_inclusive() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("borg-ledger.md");
+    let row = |date: &str, slug: &str| {
+        format!("| {date} | 10:00 | cli | \u{2705} | [[{slug}]] | https://example.com/{slug} | cl-{slug} |\n")
+    };
+    let body = format!(
+        "| Date | Time | Method | Status | Note | Source | Trace |\n|------|------|--------|--------|------|--------|-------|\n{}{}{}",
+        row("2026-10-03", "late"),
+        row("2026-10-02", "mid"),
+        row("2026-10-01", "early"),
+    );
+    fs::write(&path, body).expect("write ledger");
+    let slugs = |before: Option<&str>, after: Option<&str>| -> Vec<String> {
+        let filter = EntryFilter {
+            source: None,
+            before: before.map(str::to_string),
+            after: after.map(str::to_string),
+        };
+        query_entries(&path, &filter)
+            .expect("query")
+            .into_iter()
+            .map(|e| e.slug)
+            .collect()
+    };
+    assert_eq!(slugs(Some("2026-10-02"), Some("2026-10-02")), vec!["mid"]);
+    assert_eq!(slugs(Some("2026-10-02"), None), vec!["mid", "early"]);
+    assert_eq!(slugs(None, Some("2026-10-02")), vec!["late", "mid"]);
+    assert!(slugs(Some("2026-09-30"), None).is_empty());
+}

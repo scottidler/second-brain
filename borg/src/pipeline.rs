@@ -475,6 +475,12 @@ where
     }
 }
 
+/// Whether `url` is http or https, the only schemes the URL fetchers read.
+pub fn is_fetchable_scheme(url: &str) -> bool {
+    let lower = url.trim_start().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
 pub async fn process_url(
     url: &str,
     note: Option<String>,
@@ -484,6 +490,20 @@ pub async fn process_url(
     config: &Config,
     trace_id: &str,
 ) -> IngestResult {
+    // Fail closed on a scheme no fetcher can read. A `clyde://` session
+    // source sent here once had every reader fail, and the article distiller
+    // summarized the reader's 400 error JSON over the session note.
+    if !is_fetchable_scheme(url) {
+        let reason = format!("not an http(s) URL: {url}");
+        log::warn!("[{trace_id}] URL rejected at the door: {reason}");
+        return IngestResult {
+            status: IngestStatus::Failed { reason },
+            trace_id: Some(trace_id.to_string()),
+            method: Some(method),
+            failure_stage: Some(FailureStage::IntakeRejected),
+            ..Default::default()
+        };
+    }
     let start = Instant::now();
     let hard_timeout = std::time::Duration::from_secs(config.pipeline.hard_timeout_secs);
     let outcome = tokio::time::timeout(
