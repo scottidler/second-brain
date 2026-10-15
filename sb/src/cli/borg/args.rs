@@ -128,6 +128,15 @@ pub enum Command {
     Replay(ReplayCliArgs),
     /// Manage staging retention
     Retention(RetentionCliArgs),
+    /// Stamp channel id/handle/url onto YouTube notes that lack them (dry run by default)
+    Channels {
+        /// Backfill `channel-*` frontmatter, one yt-dlp call per YouTube note
+        #[arg(long, required = true)]
+        backfill: bool,
+        /// Write the notes; without it, only report which notes would be written
+        #[arg(long)]
+        apply: bool,
+    },
     /// Re-ingest every vault note whose body matches the failed-fetch signature
     ReingestFailed {
         /// List the notes that would be reingested and exit without writing

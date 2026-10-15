@@ -295,6 +295,31 @@ impl BorgCli {
                     Ok(())
                 }
             },
+            Some(Command::Channels { backfill: _, apply }) => {
+                let report = borg::channels::run(&config, apply).await?;
+                let verb = if apply { "written" } else { "to write" };
+                println!(
+                    "Scanned {} youtube notes: {} {verb}, {} already complete, {} unavailable, {} failed",
+                    report.scanned,
+                    report.to_write.len(),
+                    report.already_complete,
+                    report.unavailable.len(),
+                    report.failed.len()
+                );
+                for path in &report.to_write {
+                    println!("  {verb}: {}", path.display());
+                }
+                for (path, reason) in &report.unavailable {
+                    eprintln!("  unavailable: {}: {reason}", path.display());
+                }
+                for (path, reason) in &report.failed {
+                    eprintln!("  failed: {}: {reason}", path.display());
+                }
+                if !report.failed.is_empty() {
+                    eyre::bail!("{} notes could not be updated", report.failed.len());
+                }
+                Ok(())
+            }
             Some(Command::ReingestFailed { dry_run }) => {
                 let report = borg::migrate::reingest_failed(&config, dry_run, |event| {
                     print_reingest_failed_event(event);

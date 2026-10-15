@@ -16,6 +16,7 @@ pub mod backfill;
 pub mod backoff;
 pub mod blocklist;
 pub mod byline;
+pub mod channels;
 pub mod config;
 pub mod dedupe;
 pub mod description;

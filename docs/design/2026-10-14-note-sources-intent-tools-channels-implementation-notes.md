@@ -307,3 +307,19 @@
 ### Open questions
 - The live re-ingest check (`channel-handle: '@letsgetrusty'` after re-ingesting https://www.youtube.com/watch?v=53XYcpCgQWE) is OWED after deploy; the daemon runs the old binary, so it was not run here. The unit test proves the same chain (fixture -> parse -> map -> distill -> render) and observed `channel-handle: '@letsgetrusty'`, `channel-id: UCSp-OaMpsO8K0KkOqyBl7_w`, `cortex-video-published-at: 2025-11-21`.
 - Phase 17 owns indexing these keys in oracle; not touched here.
+
+## Phase 15: Channel backfill
+### Design decisions
+- Dry run makes no network call; candidates are `type: youtube` notes whose `source:` carries a video id and that lack at least one `channel-*` key. Where: `borg/src/channels.rs:run_with`. Why: a 1,400-call loop to preview is not a dry run anyone would run; the unavailable count only exists after `--apply`.
+- The yt-dlp call sits behind the `ChannelFetcher` async trait (`YtDlpFetcher` wraps `youtube::fetch_metadata`, bounded by `pipeline.yt-dlp-timeout-secs`) in `borg/src/channels.rs`, so tests inject a fake.
+- Never-clobber is per key: an existing `channel-id`/`channel-handle`/`channel-url` line (any value) is left alone and only missing keys are appended at the end of the frontmatter. Where: `borg/src/channels.rs:insert_missing` (pure, string in, string out).
+- Writes use `pipeline::atomic::write_atomic`; the lookup key is the note's own `source:` URL, never `creator:`.
+- Any fetch error (deleted, private, timeout) lands in `unavailable` and the loop continues; read/write errors land in `failed`, which makes the CLI exit non-zero after the loop finishes (`sb/src/cli/borg.rs`).
+- `--backfill` is `required = true` on `sb borg channels` so a bare `sb borg channels` errors instead of doing nothing.
+### Deviations
+- None. (The creator backfill in `audit.rs` uses a plain `std::fs::write`; this one keeps its shape but writes atomically, as the phase bullet requires.)
+### Tradeoffs
+- Appending keys at the end of the frontmatter vs inserting after `type:` like the creator backfill: appending is order-independent and cannot misplace keys on unusual layouts.
+- Own directory walk (the shape of `audit::collect_md_files`) vs `vault::note::scan_vault`: the backfill needs two raw frontmatter fields and must not reparse every note as typed YAML.
+### Open questions
+- Owed: Scott's `sb borg channels --backfill --apply` run on ripr after deploy (about 1,400 yt-dlp calls). Success check: `rg -l '^channel-handle:' ~/repos/scottidler/obsidian/notes | wc -l` >= 1,300. Not run here: it is a live-vault network loop.
