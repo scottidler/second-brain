@@ -77,6 +77,24 @@ pub fn extract_url_from_text(text: &str) -> Option<String> {
     })
 }
 
+/// True for a line the Android share sheet adds: `Source: <site>`, nothing else.
+fn is_share_boilerplate_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.len() > "source:".len()
+        && trimmed.is_char_boundary("source:".len())
+        && trimmed[.."source:".len()].eq_ignore_ascii_case("source:")
+}
+
+/// Drop a capture note that merely repeats the fetched page title (share
+/// sheets and bookmarkers paste the title as the "note"). Compared
+/// case-insensitively on whitespace-collapsed text. Runs at publish, because
+/// the title only exists after the fetch. An empty result is `None`.
+pub fn drop_note_equal_to_title<'a>(note: Option<&'a str>, title: &str) -> Option<&'a str> {
+    let collapse = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let note = note.map(str::trim).filter(|n| !n.is_empty())?;
+    (collapse(note) != collapse(title)).then_some(note)
+}
+
 /// The one capture-note extraction rule, shared by every transport (telegram,
 /// signal, ntfy, discord, CLI text). Given the raw message `text` and the
 /// already-extracted first `url`, the capture note is the message text with the
@@ -85,9 +103,18 @@ pub fn extract_url_from_text(text: &str) -> Option<String> {
 /// the note text as plain links; the first URL remains the capture target (as
 /// today). This is the single source of truth for the rule so no transport can
 /// drift from the others.
+///
+/// Android share-sheet boilerplate (`Source: <site>` lines) is not intent and is
+/// dropped before whitespace is collapsed, because collapsing would erase the
+/// line boundary the rule needs. See [`is_share_boilerplate_line`].
 pub fn extract_capture_note(text: &str, url: &str) -> Option<String> {
     let mut removed = false;
-    let note = text
+    let intent_lines = text
+        .lines()
+        .filter(|line| !is_share_boilerplate_line(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let note = intent_lines
         .split_whitespace()
         .filter(|token| {
             if !removed && token.contains(url) {

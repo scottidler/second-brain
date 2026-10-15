@@ -382,3 +382,50 @@ fn url_content_from_text_builds_url_with_note() {
 fn url_content_from_text_returns_none_without_url() {
     assert!(crate::router::url_content_from_text("no url here").is_none());
 }
+
+#[test]
+fn extract_capture_note_drops_share_sheet_source_line() {
+    assert_eq!(
+        extract_capture_note(
+            "Source: XDA\nhttps://www.xda-developers.com/a",
+            "https://www.xda-developers.com/a"
+        ),
+        None
+    );
+}
+
+#[test]
+fn extract_capture_note_keeps_intent_and_drops_source_line_beside_it() {
+    let url = "https://example.com/survey";
+    let note = extract_capture_note(
+        "Great overview of always-on agents. (bookmark it) https://example.com/survey",
+        url,
+    );
+    assert_eq!(
+        note.as_deref(),
+        Some("Great overview of always-on agents. (bookmark it)")
+    );
+    let note = extract_capture_note("Worth a read\nSource: X\nhttps://example.com/survey", url);
+    assert_eq!(note.as_deref(), Some("Worth a read"));
+}
+
+#[test]
+fn extract_capture_note_keeps_source_word_inside_prose() {
+    let url = "https://example.com/p";
+    let note = extract_capture_note("Source code is the interesting part https://example.com/p", url);
+    assert_eq!(note.as_deref(), Some("Source code is the interesting part"));
+}
+
+#[test]
+fn drop_note_equal_to_title_drops_only_a_repeat() {
+    assert_eq!(
+        drop_note_equal_to_title(Some("Build Your  Software Factory"), "build your software factory"),
+        None
+    );
+    assert_eq!(drop_note_equal_to_title(Some("   "), "Anything"), None);
+    assert_eq!(drop_note_equal_to_title(None, "Anything"), None);
+    assert_eq!(
+        drop_note_equal_to_title(Some("for the agent section"), "Build Your Software Factory"),
+        Some("for the agent section")
+    );
+}

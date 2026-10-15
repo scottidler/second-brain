@@ -981,7 +981,7 @@ async fn process_url_inner(
         tags: all_tags.clone(),
         summary: distilled.summary.clone(),
         description: filtered_description,
-        capture_note: capture_note.map(str::to_string),
+        capture_note: router::drop_note_equal_to_title(capture_note, &scraped_title).map(str::to_string),
         content_type,
         embed_code,
         method: Some(method),

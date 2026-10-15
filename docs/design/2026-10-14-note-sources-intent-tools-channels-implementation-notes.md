@@ -51,3 +51,17 @@
 - A repo whose `fetched.html` has no readme gets `distilled.yml` alone, as the live path does when the README is unavailable, rather than failing the trace.
 ### Open questions
 - Operator step still owed: run `sb borg retention archive --apply` on ripr before anyone runs `sb borg retention sweep`.
+
+## Phase 4: Capture-note boilerplate filter
+### Design decisions
+- `router::extract_capture_note` filters `Source: <site>` lines (case-insensitive prefix, trimmed, non-empty remainder) BEFORE the whitespace-collapsing token pass — borg/src/router.rs — the line boundary is gone once whitespace is collapsed. Prose that merely starts with the word "Source" (`Source code is...`) is kept because the rule requires the `Source:` colon form.
+- `router::drop_note_equal_to_title(note, title)` — borg/src/router.rs — pure, case-insensitive, whitespace-collapsed equality; returns `None` for empty/blank notes.
+- Publish seam: applied where `NoteContent` is built in `process_url_inner` (borg/src/pipeline.rs), against `scraped_title` (the title the fetcher returned, not the owner/repo or thread override). That drops `## Why Captured` and the `capture-note:` frontmatter key.
+- Measurement: the 58 `capture-note:` values from ~/repos/scottidler/obsidian/notes (YAML-decoded, each fed through `extract_capture_note` with a trailing URL line) via a throwaway test, reverted and not committed. Observed: `MEASURE survivors=9 of 58`. The 9 survivors are 1 real intent note and 8 page titles, which the title-equality rule handles at publish (needs the fetched title, not measurable offline).
+### Deviations
+- The title-equality drop runs at the `NoteContent` construction seam, after the distiller has already received the note (the title only exists after the fetch and distill runs inside the same fetch step). So a title-equal note can still reach the single-call distill context; it is dropped from `## Why Captured` and frontmatter only.
+### Tradeoffs
+- Prefix-line rule vs. a per-site allowlist: the share sheet emits `Source: <any site>`, so an allowlist would never keep up.
+- Title equality by collapsed case-insensitive match vs. fuzzy match: exact is predictable and cannot discard real intent that merely overlaps the title.
+### Open questions
+- None.
