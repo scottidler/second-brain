@@ -79,11 +79,11 @@ fn test_compose_then_write_atomic_is_complete_in_one_write() {
     let dest = dir.path().join("note.md");
     let rendered = "---\ntitle: Example\ndate: 2026-05-08\n---\nBody text.\n";
     let composed = apply_original_date(rendered, "2026-04-19");
-    let cortex_fields = vec![
+    let preserved_fields = vec![
         ("status".to_string(), FieldValue::Scalar("read".to_string())),
         ("cortex-quality".to_string(), FieldValue::Scalar("ok".to_string())),
     ];
-    let composed = apply_cortex_fields(&composed, &cortex_fields, Some(&canon(8, &[])));
+    let composed = apply_preserved_fields(&composed, &preserved_fields, Some(&canon(8, &[])));
     write_atomic(&dest, composed.as_bytes()).expect("write");
 
     let contents = std::fs::read_to_string(&dest).unwrap();
@@ -170,13 +170,13 @@ fn test_apply_original_date_noop_when_no_date_line() {
 }
 
 #[test]
-fn test_apply_cortex_fields_inserts_fields() {
+fn test_apply_preserved_fields_inserts_fields() {
     let input = "---\ntitle: Test\nsource: \"https://x\"\n---\nBody.\n";
     let fields = vec![
         ("status".to_string(), FieldValue::Scalar("read".to_string())),
         ("cortex-quality".to_string(), FieldValue::Scalar("ok".to_string())),
     ];
-    let out = apply_cortex_fields(input, &fields, Some(&canon(8, &[])));
+    let out = apply_preserved_fields(input, &fields, Some(&canon(8, &[])));
     assert!(out.contains("status: read"));
     assert!(out.contains("cortex-quality: ok"));
     assert!(out.contains("title: Test"));
@@ -185,19 +185,19 @@ fn test_apply_cortex_fields_inserts_fields() {
 }
 
 #[test]
-fn test_apply_cortex_fields_replaces_existing() {
+fn test_apply_preserved_fields_replaces_existing() {
     let input = "---\ntitle: T\nstatus: unread\n---\nBody.\n";
     let fields = vec![("status".to_string(), FieldValue::Scalar("read".to_string()))];
-    let out = apply_cortex_fields(input, &fields, Some(&canon(8, &[])));
+    let out = apply_preserved_fields(input, &fields, Some(&canon(8, &[])));
     assert!(out.contains("status: read"));
     assert!(!out.contains("status: unread"));
 }
 
 #[test]
-fn test_apply_cortex_fields_no_frontmatter_is_noop() {
+fn test_apply_preserved_fields_no_frontmatter_is_noop() {
     let input = "no frontmatter here";
     let fields = vec![("status".to_string(), FieldValue::Scalar("read".to_string()))];
-    let out = apply_cortex_fields(input, &fields, Some(&canon(8, &[])));
+    let out = apply_preserved_fields(input, &fields, Some(&canon(8, &[])));
     assert_eq!(out, input);
 }
 
@@ -211,7 +211,7 @@ fn reingest_keeps_cortex_added_tag() {
         "tags".to_string(),
         FieldValue::List(vec!["rust".to_string(), "ai".to_string()]),
     )];
-    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(8, &[])));
+    let out = apply_preserved_fields(rendered, &preserved, Some(&canon(8, &[])));
     assert!(out.contains("  - ai"), "cortex-added tag was dropped:\n{out}");
     assert!(out.contains("  - rust"), "fresh tag was dropped:\n{out}");
     assert_eq!(out.matches("tags:").count(), 1, "duplicated the tags key:\n{out}");
@@ -224,7 +224,7 @@ fn reingest_merges_an_inline_fresh_list_into_block_form() {
     // the block-form migration is inline. Either way the merged result is one block list.
     let rendered = "---\ntitle: T\ntags: [rust]\n---\nBody.\n";
     let preserved = vec![("tags".to_string(), FieldValue::List(vec!["ai".to_string()]))];
-    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(8, &[])));
+    let out = apply_preserved_fields(rendered, &preserved, Some(&canon(8, &[])));
     assert!(out.contains("tags:\n  - ai\n  - rust"), "expected block form:\n{out}");
     assert!(!out.contains("tags: ["), "inline form survived:\n{out}");
 }
@@ -238,7 +238,7 @@ fn union_at_cap_keeps_preserved_and_logs() {
         "tags".to_string(),
         FieldValue::List(vec!["kept-a".to_string(), "kept-b".to_string()]),
     )];
-    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(2, &[])));
+    let out = apply_preserved_fields(rendered, &preserved, Some(&canon(2, &[])));
     assert!(out.contains("  - kept-a"), "preserved tag lost at the cap:\n{out}");
     assert!(out.contains("  - kept-b"), "preserved tag lost at the cap:\n{out}");
     assert!(!out.contains("fresh-one"), "cap was exceeded:\n{out}");
@@ -256,7 +256,7 @@ fn protected_tag_in_the_fresh_set_survives_a_full_cap() {
         "tags".to_string(),
         FieldValue::List(vec!["kept-a".to_string(), "kept-b".to_string()]),
     )];
-    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(2, &["protected-one"])));
+    let out = apply_preserved_fields(rendered, &preserved, Some(&canon(2, &["protected-one"])));
     assert!(
         out.contains("  - protected-one"),
         "protected tag dropped by the cap:\n{out}"
@@ -286,7 +286,7 @@ fn protected_tag_in_the_preserved_set_survives_an_oversize_preserved_list() {
             "protected-one".to_string(),
         ]),
     )];
-    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(2, &["protected-one"])));
+    let out = apply_preserved_fields(rendered, &preserved, Some(&canon(2, &["protected-one"])));
     assert!(
         out.contains("  - protected-one"),
         "protected tag dropped by the cap:\n{out}"
@@ -313,7 +313,7 @@ fn the_cap_applies_to_tags_only_and_not_to_the_other_preserved_lists() {
         ("cortex-quality-issues".to_string(), FieldValue::List(issues.clone())),
         ("tags".to_string(), FieldValue::List(vec!["kept".to_string()])),
     ];
-    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(2, &[])));
+    let out = apply_preserved_fields(rendered, &preserved, Some(&canon(2, &[])));
     for issue in &issues {
         assert!(
             out.contains(&format!("  - {issue}")),
@@ -337,7 +337,7 @@ fn block_list_bullets_are_not_orphaned_on_replace() {
     // `- item` bullets dangling under whatever key came next.
     let rendered = "---\ntitle: T\ntags:\n  - fresh\nstatus: unread\n---\nBody.\n";
     let preserved = vec![("tags".to_string(), FieldValue::List(vec!["kept".to_string()]))];
-    let out = apply_cortex_fields(rendered, &preserved, Some(&canon(8, &[])));
+    let out = apply_preserved_fields(rendered, &preserved, Some(&canon(8, &[])));
 
     // Both values belong in the union. What must not happen is a bullet left
     // dangling under some OTHER key once `tags:` moves to the end.
@@ -359,12 +359,12 @@ fn block_list_bullets_are_not_orphaned_on_replace() {
 }
 
 #[test]
-fn test_apply_cortex_fields_filters_unknown_keys() {
+fn test_apply_preserved_fields_filters_unknown_keys() {
     let input = "---\ntitle: T\n---\nBody.\n";
     // `not-a-cortex-key` is not in CORTEX_PRESERVE_KEYS and must be
     // ignored.
     let fields = vec![("not-a-cortex-key".to_string(), FieldValue::Scalar("value".to_string()))];
-    let out = apply_cortex_fields(input, &fields, Some(&canon(8, &[])));
+    let out = apply_preserved_fields(input, &fields, Some(&canon(8, &[])));
     assert!(!out.contains("not-a-cortex-key"));
 }
 

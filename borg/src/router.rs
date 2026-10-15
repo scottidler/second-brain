@@ -85,6 +85,23 @@ fn is_share_boilerplate_line(line: &str) -> bool {
         && trimmed[.."source:".len()].eq_ignore_ascii_case("source:")
 }
 
+/// Drop every share-sheet boilerplate line (see [`is_share_boilerplate_line`])
+/// from `text`, keeping the remaining lines and their line breaks. The one
+/// boilerplate rule, shared by ingest ([`extract_capture_note`]) and the
+/// `--force` reingest preserve path, so an old boilerplate note is not carried
+/// forward. An all-boilerplate or blank result is `None`.
+pub fn strip_share_boilerplate(text: &str) -> Option<String> {
+    let kept = text
+        .lines()
+        .filter(|line| !is_share_boilerplate_line(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    match kept.trim() {
+        "" => None,
+        trimmed => Some(trimmed.to_string()),
+    }
+}
+
 /// Drop a capture note that merely repeats the fetched page title (share
 /// sheets and bookmarkers paste the title as the "note"). Compared
 /// case-insensitively on whitespace-collapsed text. Runs at publish, because
@@ -109,11 +126,7 @@ pub fn drop_note_equal_to_title<'a>(note: Option<&'a str>, title: &str) -> Optio
 /// line boundary the rule needs. See [`is_share_boilerplate_line`].
 pub fn extract_capture_note(text: &str, url: &str) -> Option<String> {
     let mut removed = false;
-    let intent_lines = text
-        .lines()
-        .filter(|line| !is_share_boilerplate_line(line))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let intent_lines = strip_share_boilerplate(text)?;
     let note = intent_lines
         .split_whitespace()
         .filter(|token| {

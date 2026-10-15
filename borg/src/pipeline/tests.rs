@@ -711,7 +711,7 @@ fn test_reingest_finds_note_via_ledger_filename_fallback() {
 }
 
 #[test]
-fn test_read_cortex_fields_all_present() {
+fn test_read_preserved_fields_all_present() {
     let dir = tempfile::tempdir().unwrap();
     let note = dir.path().join("test.md");
     std::fs::write(
@@ -720,7 +720,7 @@ fn test_read_cortex_fields_all_present() {
         )
         .unwrap();
 
-    let fields = read_cortex_fields(&note).expect("read");
+    let fields = read_preserved_fields(&note).expect("read");
     assert_eq!(fields.len(), 6);
     assert!(fields.iter().any(|(k, v)| k == "status" && *v == scalar("read")));
     assert!(
@@ -760,7 +760,7 @@ fn list(items: &[&str]) -> FieldValue {
 }
 
 #[test]
-fn test_read_cortex_fields_partial() {
+fn test_read_preserved_fields_partial() {
     let dir = tempfile::tempdir().unwrap();
     let note = dir.path().join("test.md");
     std::fs::write(
@@ -769,14 +769,14 @@ fn test_read_cortex_fields_partial() {
     )
     .unwrap();
 
-    let fields = read_cortex_fields(&note).expect("read");
+    let fields = read_preserved_fields(&note).expect("read");
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0], ("status".to_string(), scalar("unread")));
 }
 
 #[test]
-fn test_read_cortex_fields_reads_a_block_tag_list() {
-    // Was `test_read_cortex_fields_none_present`: `tags` joined
+fn test_read_preserved_fields_reads_a_block_tag_list() {
+    // Was `test_read_preserved_fields_none_present`: `tags` joined
     // CORTEX_PRESERVE_KEYS, so this note now yields exactly one field.
     let dir = tempfile::tempdir().unwrap();
     let note = dir.path().join("test.md");
@@ -786,17 +786,17 @@ fn test_read_cortex_fields_reads_a_block_tag_list() {
     )
     .unwrap();
 
-    let fields = read_cortex_fields(&note).expect("read");
+    let fields = read_preserved_fields(&note).expect("read");
     assert_eq!(fields, vec![("tags".to_string(), list(&["rust"]))]);
 }
 
 #[test]
-fn test_read_cortex_fields_no_frontmatter() {
+fn test_read_preserved_fields_no_frontmatter() {
     let dir = tempfile::tempdir().unwrap();
     let note = dir.path().join("test.md");
     std::fs::write(&note, "Just plain text, no frontmatter.\n").unwrap();
 
-    let fields = read_cortex_fields(&note).expect("read");
+    let fields = read_preserved_fields(&note).expect("read");
     assert!(fields.is_empty());
 }
 
@@ -804,23 +804,23 @@ fn test_read_cortex_fields_no_frontmatter() {
 fn preserve_read_failure_aborts_reingest() {
     // Fails CLOSED. The URL path used to swallow this and return an empty
     // set, publishing a note that had silently lost every preserved field.
-    let err = read_cortex_fields(std::path::Path::new("/tmp/nonexistent-cortex-test.md"));
+    let err = read_preserved_fields(std::path::Path::new("/tmp/nonexistent-cortex-test.md"));
     assert!(err.is_err(), "an unreadable note must not read as 'no fields'");
 }
 
 #[test]
-fn read_cortex_fields_round_trips_block_inline_and_quoted_lists() {
+fn read_preserved_fields_round_trips_block_inline_and_quoted_lists() {
     let dir = tempfile::tempdir().unwrap();
 
     let block = dir.path().join("block.md");
     std::fs::write(&block, "---\ntags:\n  - rust\n  - ai\nstatus: read\n---\nBody.\n").unwrap();
-    let fields = read_cortex_fields(&block).expect("read");
+    let fields = read_preserved_fields(&block).expect("read");
     assert!(fields.contains(&("tags".to_string(), list(&["rust", "ai"]))));
     assert!(fields.contains(&("status".to_string(), scalar("read"))));
 
     let inline = dir.path().join("inline.md");
     std::fs::write(&inline, "---\ntags: [rust, ai]\n---\nBody.\n").unwrap();
-    let fields = read_cortex_fields(&inline).expect("read");
+    let fields = read_preserved_fields(&inline).expect("read");
     assert_eq!(fields, vec![("tags".to_string(), list(&["rust", "ai"]))]);
 
     let quoted = dir.path().join("quoted.md");
@@ -829,18 +829,18 @@ fn read_cortex_fields_round_trips_block_inline_and_quoted_lists() {
         "---\ntags:\n  - \"rust\"\n  - 'ai'\nstatus: \"read\"\n---\nBody.\n",
     )
     .unwrap();
-    let fields = read_cortex_fields(&quoted).expect("read");
+    let fields = read_preserved_fields(&quoted).expect("read");
     assert!(fields.contains(&("tags".to_string(), list(&["rust", "ai"]))));
     assert!(fields.contains(&("status".to_string(), scalar("read"))));
 
     let empty_inline = dir.path().join("empty.md");
     std::fs::write(&empty_inline, "---\ntags: []\n---\nBody.\n").unwrap();
-    let fields = read_cortex_fields(&empty_inline).expect("read");
+    let fields = read_preserved_fields(&empty_inline).expect("read");
     assert_eq!(fields, vec![("tags".to_string(), FieldValue::List(Vec::new()))]);
 }
 
 // borg-pipeline-resilience: the previous patch_cortex_fields
-// tests have moved to pipeline/atomic.rs alongside the apply_cortex_fields
+// tests have moved to pipeline/atomic.rs alongside the apply_preserved_fields
 // and apply_original_date helpers that replaced the patch_* functions.
 
 // ---------------------------------------------------------------------------

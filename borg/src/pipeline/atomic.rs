@@ -7,12 +7,13 @@
 //! 1. `write_atomic` writes bytes to a sibling temp file (dot-prefixed so it
 //!    is invisible to Obsidian / the vault watcher), fsyncs the file and
 //!    parent directory, and renames atomically over the destination.
-//! 2. `apply_original_date` and `apply_cortex_fields` replace the previous
+//! 2. `apply_original_date` and `apply_preserved_fields` replace the previous
 //!    `patch_*` helpers that read a file and rewrote it. The new helpers
 //!    operate on `String` so the caller composes the final note in memory
 //!    and writes it once via `write_atomic`. There is no window during
 //!    which the file on disk is missing the date or cortex fields.
 
+use crate::markdown::{BORG_PRESERVE_KEYS, yaml_scalar};
 use crate::pipeline::publish::FieldValue;
 use eyre::Result;
 use std::path::{Path, PathBuf};
@@ -335,15 +336,19 @@ fn union_capped(preserved: &[String], fresh: &[String], canon: Option<&Canonical
     canonical::cap_protecting(out, canon.max_per_note, &canon.no_classifier)
 }
 
-/// Apply (insert or replace) the given cortex-managed frontmatter fields
-/// in `rendered`. Returns `rendered` unchanged when no `---` frontmatter
-/// is present. Pure-string form of the previous `patch_cortex_fields`
-/// helper. Only keys present in `CORTEX_PRESERVE_KEYS` are accepted; the
-/// caller is expected to filter before calling.
+/// Apply the given preserved frontmatter fields to `rendered`. Returns
+/// `rendered` unchanged when no `---` frontmatter is present. Pure-string form
+/// of the previous `patch_cortex_fields` helper. Only keys on
+/// `CORTEX_PRESERVE_KEYS` or `markdown::BORG_PRESERVE_KEYS` are accepted.
+///
+/// Cortex keys replace (scalars) or union into (lists) the fresh render.
+/// A borg key fills in only when the fresh render lacks it, because a fresh
+/// value is the operator's newer statement; it is written through
+/// `yaml_scalar`, so a multiline value lands as a valid block scalar.
 ///
 /// `canon` supplies the tags cap and its protect list; `None` means no
 /// vocabulary is loaded and nothing is capped.
-pub fn apply_cortex_fields(rendered: &str, fields: &[(String, FieldValue)], canon: Option<&CanonicalSet>) -> String {
+pub fn apply_preserved_fields(rendered: &str, fields: &[(String, FieldValue)], canon: Option<&CanonicalSet>) -> String {
     let trimmed = rendered.trim_start();
     if !trimmed.starts_with("---") {
         return rendered.to_string();
@@ -358,13 +363,17 @@ pub fn apply_cortex_fields(rendered: &str, fields: &[(String, FieldValue)], cano
 
     let mut lines: Vec<String> = fm_block.lines().map(String::from).collect();
     for (key, value) in fields {
+        if BORG_PRESERVE_KEYS.contains(&key.as_str()) {
+            apply_borg_field(&mut lines, key, value);
+            continue;
+        }
         if !CORTEX_PRESERVE_KEYS.contains(&key.as_str()) {
             continue;
         }
         match value {
             FieldValue::Scalar(v) => {
                 remove_key(&mut lines, key);
-                lines.push(format!("{key}: {v}"));
+                lines.push(format!("{key}: {}", yaml_scalar(v)));
             }
             FieldValue::List(preserved) => {
                 // Union, preserved first: a refetch never removes a tag that
@@ -378,7 +387,7 @@ pub fn apply_cortex_fields(rendered: &str, fields: &[(String, FieldValue)], cano
                 };
                 if merged != fresh {
                     log::info!(
-                        "apply_cortex_fields: {key} merged {} preserved + {} fresh -> {}",
+                        "apply_preserved_fields: {key} merged {} preserved + {} fresh -> {}",
                         preserved.len(),
                         fresh.len(),
                         merged.len()
@@ -393,6 +402,29 @@ pub fn apply_cortex_fields(rendered: &str, fields: &[(String, FieldValue)], cano
     let offset = rendered.len() - trimmed.len();
     let prefix = &rendered[..offset];
     format!("{prefix}---\n{}\n{rest}", lines.join("\n"))
+}
+
+/// Insert one borg-owned preserved scalar unless the fresh render already
+/// carries the key. A list value is not a shape any borg key has, so it is
+/// dropped with a warning rather than written raw.
+fn apply_borg_field(lines: &mut Vec<String>, key: &str, value: &FieldValue) {
+    let prefix = format!("{key}:");
+    if lines.iter().any(|line| line.starts_with(&prefix)) {
+        log::debug!("apply_borg_field: {key} present in the fresh render; it wins over the preserved value");
+        return;
+    }
+    match value {
+        FieldValue::Scalar(v) => {
+            log::debug!("apply_borg_field: restoring preserved {key} ({} bytes)", v.len());
+            lines.push(format!("{key}: {}", yaml_scalar(v)));
+        }
+        FieldValue::List(items) => {
+            log::warn!(
+                "apply_borg_field: {key} preserved as a {}-item list, but borg keys are scalars; not restored",
+                items.len()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

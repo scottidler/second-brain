@@ -65,3 +65,21 @@
 - Title equality by collapsed case-insensitive match vs. fuzzy match: exact is predictable and cannot discard real intent that merely overlaps the title.
 ### Open questions
 - None.
+
+## Phase 5: Borg-owned preserve key, reader and writer
+### Design decisions
+- `markdown::BORG_PRESERVE_KEYS = &[CAPTURE_NOTE_KEY]` and `markdown::CAPTURE_NOTE_KEY` (borg/src/markdown.rs), beside `RENDER_NOTE_KEYS`: borg owns the field, so the list lives with borg's renderer. `CORTEX_PRESERVE_KEYS` is untouched; `publish/tests.rs::borg_preserve_keys_are_not_cortex_keys` pins the two lists disjoint.
+- Reader: `publish::read_preserved_fields` collects a borg key's line plus every following indented or blank line and decodes that one entry with `serde_yaml` (`decode_borg_scalar`), so `|-` block scalars and multi-line quoted strings decode exactly. Cortex keys keep the existing line-based reader, whose doc comment explains why a full-frontmatter parse is avoided.
+- Fail closed: an undecodable `capture-note` entry is an `Err` that aborts the reingest, matching the reader's existing contract for an unreadable note.
+- Writer: `atomic::apply_borg_field` writes `{key}: {yaml_scalar(v)}`; `markdown::yaml_scalar` became `pub(crate)` for it.
+- Precedence: a fresh render that already carries `capture-note` wins and the preserved value is dropped (debug log). The newest stated intent is the operator's current one; Phase 6's `--note` on a `--force` reingest is the case this protects.
+- Renamed `read_cortex_fields` -> `read_preserved_fields`, `apply_cortex_fields` -> `apply_preserved_fields`, and the `cortex_fields` local -> `preserved_fields` (borg/src/pipeline.rs, publish.rs, atomic.rs, tests, pipeline/AGENTS.md): they now carry borg keys too, and the old names would lie. pipeline/AGENTS.md gains invariant 12 for the borg list.
+- Orchestrator decision (resolves this phase's open question): the preserve path runs the same `Source: <site>` boilerplate rule as ingest. `router::strip_share_boilerplate` is the one shared function; `extract_capture_note` and `publish::read_preserved_fields` both call it. A preserved `capture-note` that is boilerplate only is not preserved at all. No vault cleanup verb. Test: `publish/tests.rs::preserved_boilerplate_capture_note_is_dropped_and_intent_survives`.
+### Deviations
+- Cortex scalars still write raw (`{key}: {v}`), not through `yaml_scalar`. Re-encoding them would quote values like `cortex-confidence: 0.85` into strings and change their on-disk type; the doc's `yaml_scalar` bullet is scoped to the borg key that can carry free text.
+- New tests live in borg/src/pipeline/publish/tests.rs, not pipeline/tests.rs: the latter would exceed the 1500-line `otto ci` bloat limit.
+### Tradeoffs
+- Per-entry YAML decode vs. whole-frontmatter parse: per-entry decodes the borg key exactly while a malformed unrelated key elsewhere in an old note still cannot block the reingest.
+- Fresh-wins vs. preserved-wins for `capture-note`: cortex scalars are preserved-wins because cortex's work is newer than a refetch; for a borg key the refetch IS the operator's newer statement.
+### Open questions
+- None. (Resolved: whether the preserve path filters share boilerplate. The orchestrator answered yes; see Design decisions.)

@@ -185,7 +185,9 @@ pub(crate) fn read_note_date(path: &std::path::Path) -> Option<String> {
 }
 
 /// A preserved frontmatter value. `tags` arrives as a list in either on-disk
-/// form; everything else on `CORTEX_PRESERVE_KEYS` is a scalar.
+/// form; everything else on `CORTEX_PRESERVE_KEYS` is a scalar, as is every
+/// `markdown::BORG_PRESERVE_KEYS` entry (decoded, so a block scalar arrives as
+/// its multiline text).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldValue {
     Scalar(String),
@@ -210,15 +212,31 @@ fn split_inline_list(body: &str) -> Vec<String> {
     body.split(',').map(unquote).filter(|item| !item.is_empty()).collect()
 }
 
-/// Read cortex-managed fields from frontmatter, list-aware.
+/// Decode one borg-owned frontmatter entry: the `key:` line plus every
+/// continuation line under it (indented or blank), parsed as YAML. A value
+/// borg wrote through `markdown::yaml_scalar` may be a `|-` block scalar or a
+/// multi-line quoted string, which a single-line read would truncate.
+fn decode_borg_scalar(key: &str, entry: &str) -> eyre::Result<String> {
+    let parsed: serde_yaml::Mapping =
+        serde_yaml::from_str(entry).map_err(|e| eyre::eyre!("decode preserved `{key}` as YAML: {e}"))?;
+    match parsed.get(key) {
+        Some(serde_yaml::Value::String(s)) => Ok(s.clone()),
+        Some(other) => Err(eyre::eyre!("preserved `{key}` is not a string scalar: {other:?}")),
+        None => Err(eyre::eyre!("preserved `{key}` vanished from its own entry")),
+    }
+}
+
+/// Read every preserved frontmatter field: cortex-owned
+/// (`CORTEX_PRESERVE_KEYS`, list-aware) and borg-owned
+/// (`markdown::BORG_PRESERVE_KEYS`, YAML-decoded scalars).
 ///
 /// Fails CLOSED. The URL reingest path used to swallow a read error and return
 /// an empty set, which published a note that had silently lost its preserved
 /// fields; the session path has always failed closed. Both now agree.
-pub(crate) fn read_cortex_fields(path: &std::path::Path) -> eyre::Result<Vec<(String, FieldValue)>> {
+pub(crate) fn read_preserved_fields(path: &std::path::Path) -> eyre::Result<Vec<(String, FieldValue)>> {
     use eyre::Context;
     let content = std::fs::read_to_string(path)
-        .with_context(|| format!("read preserved cortex fields from {}", path.display()))?;
+        .with_context(|| format!("read preserved frontmatter fields from {}", path.display()))?;
 
     let mut fields = Vec::new();
     let mut in_frontmatter = false;
@@ -232,6 +250,33 @@ pub(crate) fn read_cortex_fields(path: &std::path::Path) -> eyre::Result<Vec<(St
             continue;
         }
         if !in_frontmatter {
+            continue;
+        }
+        if let Some(key) = markdown::BORG_PRESERVE_KEYS
+            .iter()
+            .find(|k| line.starts_with(&format!("{k}:")))
+        {
+            let mut entry = line.to_string();
+            while let Some(next) = lines.peek() {
+                if !(next.trim().is_empty() || next.starts_with([' ', '\t'])) {
+                    break;
+                }
+                entry.push('\n');
+                entry.push_str(next);
+                lines.next();
+            }
+            let value = decode_borg_scalar(key, &entry).with_context(|| format!("in {}", path.display()))?;
+            // The ingest-time boilerplate rule applies here too, so a
+            // pre-filter `Source: <site>` note is not carried forward.
+            let value = if *key == markdown::CAPTURE_NOTE_KEY {
+                router::strip_share_boilerplate(&value)
+            } else {
+                Some(value)
+            };
+            match value {
+                Some(value) => fields.push((key.to_string(), FieldValue::Scalar(value))),
+                None => log::debug!("read_preserved_fields: {key} was share boilerplate only; not preserved"),
+            }
             continue;
         }
         let Some(key) = CORTEX_PRESERVE_KEYS.iter().find(|k| line.starts_with(&format!("{k}:"))) else {

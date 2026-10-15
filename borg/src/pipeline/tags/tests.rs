@@ -184,10 +184,10 @@ async fn ingest_tags_are_repeatable_under_deterministic() {
 /// SAME URL where the distiller's own `tags` output DRIFTS between calls (the
 /// actual source of instability G5 restates around, `classifier-dev` at 23%
 /// in the baseline measurement) must not lose a canonical tag the first ingest produced. The
-/// reingest union (`apply_cortex_fields`, preserved-first) is what
+/// reingest union (`apply_preserved_fields`, preserved-first) is what
 /// delivers that, not the classifier call alone - so this drives BOTH:
 /// `finalize_tags` twice with deliberately different `model` candidates, then
-/// the same `apply_cortex_fields` union a URL reingest runs.
+/// the same `apply_preserved_fields` union a URL reingest runs.
 ///
 /// Break-the-code evidence (implementation notes): reverting the reingest union to a
 /// plain replace (fresh tags overwrite preserved) falsifies this immediately
@@ -216,7 +216,7 @@ async fn ingest_tags_are_stable_under_distiller_drift() {
     // The reingest union: preserved (ingest 1's landed tags, read back off
     // the old note on disk) merged into the fresh render (ingest 2's tags).
     let preserved = vec![("tags".to_string(), FieldValue::List(ingest_1.tags.clone()))];
-    let merged = apply_cortex_fields(&fresh_note, &preserved, Some(&canon(7, &[])));
+    let merged = apply_preserved_fields(&fresh_note, &preserved, Some(&canon(7, &[])));
     let (yaml, _body) = vault::frontmatter::split_raw(&merged).expect("frontmatter block");
     let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("parse merged frontmatter");
     let final_tags: Vec<String> = map

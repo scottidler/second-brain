@@ -28,7 +28,7 @@ use vault::schema::CORTEX_PRESERVE_KEYS;
 pub mod atomic;
 mod inflight;
 pub mod permits;
-use atomic::{apply_cortex_fields, apply_original_date};
+use atomic::{apply_original_date, apply_preserved_fields};
 use inflight::InflightGuard;
 
 mod handlers;
@@ -575,7 +575,7 @@ async fn process_url_inner(
     let log_time = now.format("%H:%M").to_string();
 
     let mut original_date: Option<String> = None;
-    let mut cortex_fields: Vec<(String, publish::FieldValue)> = Vec::new();
+    let mut preserved_fields: Vec<(String, publish::FieldValue)> = Vec::new();
     let mut old_slides_frontmatter: Vec<String> = Vec::new();
     // Instead of deleting the old note up front (which would create
     // a window where the vault has no copy of the URL's note while the rest
@@ -632,13 +632,13 @@ async fn process_url_inner(
             // Fails the reingest CLOSED (tags-only design doc, reingest union): publishing a note
             // that silently lost its preserved fields is worse than not
             // publishing, and the old note is left untouched either way.
-            cortex_fields = read_cortex_fields(old_path)?;
+            preserved_fields = read_preserved_fields(old_path)?;
             reingest_dest = old_path.parent().map(|p| p.to_path_buf());
             // Capture the old note's `slides:` frontmatter list BEFORE removing it
             // so reingest cleanup can find any orphaned slide attachments.
             old_slides_frontmatter = crate::slides::cleanup::read_old_slides_frontmatter(old_path).unwrap_or_default();
             log::debug!("[{trace_id}] Preserved original date: {:?}", original_date);
-            log::debug!("[{trace_id}] Preserved cortex fields: {:?}", cortex_fields);
+            log::debug!("[{trace_id}] Preserved frontmatter fields: {:?}", preserved_fields);
             log::debug!(
                 "[{trace_id}] Captured old slides for cleanup: {:?}",
                 old_slides_frontmatter
@@ -1036,16 +1036,20 @@ async fn process_url_inner(
         final_str = apply_original_date(&final_str, orig_date);
         log::info!("[{trace_id}] Restored original date: {orig_date}");
     }
-    if !cortex_fields.is_empty() {
+    if !preserved_fields.is_empty() {
         // The vocabulary snapshot carries both the tags cap and the protect
         // list `cap_protecting` honors. `None` when no vocabulary is loaded:
         // nothing is capped, because we cannot know the cap and inventing one
         // would silently drop a preserved tag.
         let canonical_state = tags::get_or_init_canonical(config).await;
-        final_str = apply_cortex_fields(&final_str, &cortex_fields, canonical_state.as_deref().map(|s| &s.canon));
+        final_str = apply_preserved_fields(
+            &final_str,
+            &preserved_fields,
+            canonical_state.as_deref().map(|s| &s.canon),
+        );
         log::info!(
-            "[{trace_id}] Restored cortex fields: {:?}",
-            cortex_fields.iter().map(|(k, _)| k).collect::<Vec<_>>()
+            "[{trace_id}] Restored preserved fields: {:?}",
+            preserved_fields.iter().map(|(k, _)| k).collect::<Vec<_>>()
         );
     }
     // No `ingested:` re-stamp here. `final_str` began as `render_note` output

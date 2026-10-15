@@ -127,13 +127,26 @@ pub const RENDER_NOTE_KEYS: &[&str] = &[
     "status",
     "method",
     "trace",
-    "capture-note",
+    CAPTURE_NOTE_KEY,
     "slides",
     "tags",
     "creator",
     "duration",
     "language",
 ];
+
+/// The `capture-note:` frontmatter key: the operator's stated reason for the
+/// capture. Borg writes it and borg owns it.
+pub const CAPTURE_NOTE_KEY: &str = "capture-note";
+
+/// Frontmatter keys borg owns that a URL reingest carries forward from the
+/// note it replaces. The borg-owned twin of `vault::schema::CORTEX_PRESERVE_KEYS`:
+/// those keys belong to cortex, these to borg, so neither list claims the
+/// other's field. A value here is a free-text scalar that may span lines, so
+/// the preserve reader decodes it as YAML and the writer re-encodes it through
+/// [`yaml_scalar`]. A freshly rendered value wins over the preserved one: the
+/// newest stated intent is the operator's current intent.
+pub const BORG_PRESERVE_KEYS: &[&str] = &[CAPTURE_NOTE_KEY];
 
 pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -> String {
     let tz: Tz = frontmatter_config
@@ -208,7 +221,7 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
     // Capture note: the operator's own annotation. Emitted only when
     // present and non-empty so a bare capture never writes an empty key.
     if let Some(capture) = note.capture_note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        fm.push_str(&format!("capture-note: {}\n", yaml_scalar(capture)));
+        fm.push_str(&format!("{CAPTURE_NOTE_KEY}: {}\n", yaml_scalar(capture)));
     }
 
     if !note.slides.is_empty() {
@@ -352,7 +365,7 @@ pub fn creator_for(ct: &ContentType) -> Option<String> {
 /// `cortex-repo-install`, ...) corrupted the entire frontmatter block
 /// (empirically confirmed). The returned string includes whatever quoting
 /// `serde_yaml` deems necessary and never carries a trailing newline.
-fn yaml_scalar(s: &str) -> String {
+pub(crate) fn yaml_scalar(s: &str) -> String {
     serde_yaml::to_string(&serde_yaml::Value::String(s.to_string()))
         .unwrap_or_else(|_| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
         .trim_end()
