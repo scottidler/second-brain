@@ -2,3 +2,5 @@ body { width: 220px; padding: 12px; font-family: system-ui, sans-serif; font-siz
 .row { display: flex; align-items: center; gap: 10px; }
 .row img { width: 48px; height: 48px; flex: 0 0 auto; }
 #status { color: #2E7D32; }
+#note { box-sizing: border-box; width: 100%; margin-top: 10px; resize: vertical; font: inherit; }
+#capture { margin-top: 8px; width: 100%; }

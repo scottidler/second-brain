@@ -37,11 +37,27 @@ function fail(status, message) {
   });
 }
 
+// Pure body builder: `note` is left out when empty after trimming, so an empty
+// textarea is a bare capture. Its test is the Rust contract
+// borg/tests/extension_body_matches_ingest_request.rs plus the stage check.
+function buildBody(url, rawNote) {
+  const body = { url };
+  const note = (rawNote || "").trim();
+  if (note) {
+    body.note = note;
+  }
+  return body;
+}
+
 async function capture() {
   const status = document.getElementById("status");
+  const noteField = document.getElementById("note");
+  const button = document.getElementById("capture");
+  button.disabled = true;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.url) {                  // guard only on missing URL; do NOT filter by scheme
     status.textContent = "No active tab URL";
+    button.disabled = false;
     return;
   }
   const { endpoint, authToken } = await getConfig();
@@ -50,18 +66,14 @@ async function capture() {
     headers["Authorization"] = `Bearer ${authToken}`;
   }
   try {
-    // IngestRequest gained an optional `note` capture-annotation field
-    // (Phase 8, docs/design/2026-07-05-distillation-knowledge-extraction.md).
-    // The toolbar popup captures a bare tab URL with no annotation surface, so
-    // `note` is omitted here; it deserializes to None server-side. If a future
-    // popup adds a note textarea, send it as `note` in this body.
     const res = await fetch(`${endpoint}/ingest`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ url: tab.url }),
+      body: JSON.stringify(buildBody(tab.url, noteField.value)),
     });                                    // NO keepalive - see requirement 1 above
     if (!res.ok) {                         // fetch does not reject on 4xx/5xx
       fail(status, `Daemon error: HTTP ${res.status}`);
+      button.disabled = false;
       return;
     }
     await res.json();
@@ -69,7 +81,18 @@ async function capture() {
     setTimeout(() => window.close(), 400);
   } catch (err) {
     fail(status, `Error: ${err.message}`);  // network-level failure
+    button.disabled = false;
   }
 }
 
-document.addEventListener("DOMContentLoaded", capture);
+// The popup no longer posts on open: Enter in the textarea or the Capture
+// button submits, and Shift+Enter inserts a newline.
+document.addEventListener("DOMContentLoaded", () => {
+  document.getElementById("capture").addEventListener("click", capture);
+  document.getElementById("note").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      capture();
+    }
+  });
+});

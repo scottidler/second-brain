@@ -261,3 +261,18 @@
 ### Open questions
 - Video tool *names* sit at 90.2% (5 ungrounded of 51 in each arm of run 3). The phase criterion covers commands only, and names were not tuned. I did not diagnose which names miss: the DEBUG line logs ungrounded commands only. The video sources are ASR transcripts (one says "Cloud Code" for Claude Code), so a canonical spelling may be the cause, but that is unconfirmed. Is the name rate worth its own pass?
 - The judge sometimes replies with kebab-case axis keys (`claim-coverage`), and a full `--regenerate` run then aborts and loses every distill. Should the judge parser absorb that drift with a WARN (the `ClaimKind` precedent), so a long run survives?
+
+## Phase 12: Popup note field
+### Design decisions
+- The popup no longer posts on open; a textarea (`#note`, autofocused) and a Capture button submit — `borg/clients/extension/popup.html`, `popup.js` — the doc's Resolved Decision. Enter submits with focus in the textarea, Shift+Enter inserts a newline, so a bare capture is one keypress.
+- `buildBody(url, rawNote)` is a pure function that returns `{url}` or `{url, note}`, with `note` trimmed and omitted when empty — `popup.js:buildBody`.
+- The button is disabled while a capture is in flight and re-enabled on every failure path, so a failed capture can be retried; success closes the popup as before.
+- `borg/clients/AGENTS.md` updated to describe the new popup flow. `popup.css` gained two rules for the textarea and button. The no-`keepalive` rule is untouched.
+### Deviations
+- No JS test was added: the extension has no JS test setup (no package.json). Per the phase instruction, the body builder is extracted as a pure function and its test is the Rust `borg/tests/extension_body_matches_ingest_request.rs` contract (the `note` field exists on `IngestRequest`) plus the `sb borg extension stage` check. I also ran `buildBody` once under node by hand (`{url}` for blank input, `{url, note}` for " hi\n"); that run is not committed.
+### Tradeoffs
+- Extracting `buildBody` vs. inlining it: it costs a few lines and gives a seam a future JS test can import.
+- The status text reads "Enter to capture" before submit vs. a blank line: it tells the operator the popup is waiting, since it no longer posts on open.
+### Open questions
+- OWED to Scott, not attempted: the live check (`sb borg extension stage --to ./dev-ext`, load in `about:debugging`, capture a page with a note, confirm the vault note carries `capture-note:`).
+- OWED to Scott, not attempted: the operator step `sb borg extension sign`, then `otto deploy`.
