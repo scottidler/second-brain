@@ -24,6 +24,7 @@ fn with_enumeration(declared_count: Option<u32>, item_count: usize) -> Distilled
         claims: Vec::new(),
         tags: Vec::new(),
         links: Vec::new(),
+        tools: Vec::new(),
         kind_specific: None,
         meta: meta("distill-video-v1"),
         transcript: None,
@@ -60,6 +61,7 @@ fn enforce_bounds_truncates_excess_claims() {
         claims,
         tags: Vec::new(),
         links: Vec::new(),
+        tools: Vec::new(),
         kind_specific: None,
         meta: meta("distill-article-v1"),
         transcript: None,
@@ -89,6 +91,7 @@ fn enforce_bounds_truncates_excess_tags() {
         claims: Vec::new(),
         tags,
         links: Vec::new(),
+        tools: Vec::new(),
         kind_specific: None,
         meta: meta("distill-article-v1"),
         transcript: None,
@@ -121,6 +124,7 @@ fn enforce_bounds_truncates_summary_at_sentence() {
         claims: Vec::new(),
         tags: Vec::new(),
         links: Vec::new(),
+        tools: Vec::new(),
         kind_specific: None,
         meta: meta("distill-article-v1"),
         transcript: None,
@@ -153,6 +157,7 @@ fn enforce_bounds_leaves_within_limit_payload_untouched() {
             url: "https://example.com".to_string(),
             label: None,
         }],
+        tools: Vec::new(),
         kind_specific: None,
         meta: meta("distill-article-v1"),
         transcript: None,
@@ -344,4 +349,61 @@ fn mark_enumeration_shortfall_silent_without_enumeration() {
     distilled.enumeration = None;
     mark_enumeration_shortfall(&mut distilled);
     assert!(!distilled.meta.validation.enumeration_shortfall);
+}
+
+fn with_tools(tools: Vec<vault::distilled::Tool>) -> Distilled {
+    let mut d = with_enumeration(None, 0);
+    d.enumeration = None;
+    d.tools = tools;
+    d
+}
+
+fn tool(name: &str, command: Option<String>) -> vault::distilled::Tool {
+    vault::distilled::Tool {
+        name: name.to_string(),
+        url: None,
+        command,
+    }
+}
+
+#[test]
+fn enforce_bounds_caps_tool_count_and_records_it() {
+    let tools = (0..MAX_TOOLS + 5).map(|i| tool(&format!("t{i}"), None)).collect();
+    let bounded = enforce_bounds(with_tools(tools), max_claims(1));
+    assert_eq!(bounded.tools.len(), MAX_TOOLS);
+    assert_eq!(bounded.tools[0].name, "t0");
+    assert!(
+        bounded
+            .meta
+            .validation
+            .bounds_truncations
+            .contains(&format!("tools:{}>{MAX_TOOLS}", MAX_TOOLS + 5))
+    );
+}
+
+#[test]
+fn enforce_bounds_drops_over_limit_tool_command() {
+    let long = "x".repeat(MAX_TOOL_COMMAND_CHARS + 10);
+    let bounded = enforce_bounds(
+        with_tools(vec![tool("a", Some(long)), tool("b", Some("cargo install b".into()))]),
+        max_claims(1),
+    );
+    assert_eq!(bounded.tools[0].name, "a");
+    assert!(bounded.tools[0].command.is_none());
+    assert_eq!(bounded.tools[1].command.as_deref(), Some("cargo install b"));
+    assert!(
+        bounded
+            .meta
+            .validation
+            .bounds_truncations
+            .iter()
+            .any(|t| t.starts_with("tool-command:0:") && t.ends_with(" dropped"))
+    );
+}
+
+#[test]
+fn enforce_bounds_leaves_in_bounds_tools_untouched() {
+    let bounded = enforce_bounds(with_tools(vec![tool("a", Some("a --help".into()))]), max_claims(1));
+    assert_eq!(bounded.tools.len(), 1);
+    assert!(bounded.meta.validation.bounds_truncations.is_empty());
 }

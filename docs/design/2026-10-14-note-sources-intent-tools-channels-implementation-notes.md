@@ -96,3 +96,19 @@
 - Published-trace replay does a vault scan per replayed trace that has no envelope note, vs. trusting the receipts `note_path`: that path is a location snapshot, stale once `cortex classify` moves a note. Phase 5's fresh-vs-preserved rule means a force reingest keeps `capture-note` even without this lookup; the lookup makes the POST body honest.
 ### Open questions
 - None.
+
+## Phase 7: tools contract
+### Design decisions
+- `Tool { name, url, command }` with `PartialEq` added beyond the doc's derive set, no `kind` field (vault/src/distilled.rs): equality lets the round-trip test assert whole values.
+- `Distilled.tools` is `#[serde(default, skip_serializing_if = "Vec::is_empty")]` (vault/src/distilled.rs): empty tools stay out of serialized yml, so pre-tools staged files and fresh no-tools files share a shape.
+- Bounds `MAX_TOOLS = 20`, `MAX_TOOL_COMMAND_CHARS = 500` in `enforce_tool_bounds`, called from `enforce_bounds` (distillers/src/validate.rs). Records `tools:N>20` and `tool-command:idx:orig>500` in `bounds_truncations`.
+- Command overflow is cut at a char boundary, not a sentence boundary: a command is verbatim text, not prose.
+- Every existing `Distilled { .. }` literal (distillers, plus tests in vault/borg/cortex/distillers) gained `tools: Vec::new()`; the compiler enforced it.
+- Superseded: the char-boundary-cut bullet above (and the `tool-command:idx:orig>500` record format) no longer applies.
+- Orchestrator decision: an over-limit `command` is dropped (set to `None`, tool kept), recorded as `tool-command:idx:orig>500 dropped`. Why: the doc pins the ceiling to `cortex-repo-install`, which drops over-limit values; a cut shell command is a different, possibly harmful command; Phase 9 grades commands by exact substring.
+### Deviations
+- None. Observed eval output: `sb borg eval --staged --no-judge` exit 0, line `  note-size: 1361/1361 within the 65536-byte ceiling` (built from this tree with `cargo build --release -p sb`, run as `./target/release/sb`). Flag spelling matches the doc; the line carries a trailing "within the 65536-byte ceiling" clause.
+### Tradeoffs
+- Skip-serialize-when-empty vs always emitting `tools: []`: chose skip to keep staged yml diffs quiet.
+### Open questions
+- None.

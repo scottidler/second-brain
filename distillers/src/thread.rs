@@ -228,6 +228,7 @@ impl<F: FabricCaller + Clone> ThreadDistiller<F> {
             claims,
             tags,
             links,
+            tools: Vec::new(),
             kind_specific: None,
             meta: DistilledMeta {
                 extractor: ID.to_string(),
@@ -427,6 +428,7 @@ impl<F: FabricCaller + Clone> ThreadDistiller<F> {
             claims,
             tags: combined_tags,
             links: combined_links,
+            tools: Vec::new(),
             kind_specific: None,
             meta: DistilledMeta {
                 extractor: ID.to_string(),

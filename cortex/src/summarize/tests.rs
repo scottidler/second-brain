@@ -589,6 +589,7 @@ fn rewrite_note_file_is_atomic_and_merges_frontmatter() {
         claims: Vec::new(),
         tags: Vec::new(),
         links: Vec::new(),
+        tools: Vec::new(),
         kind_specific: None,
         meta: ::vault::distilled::DistilledMeta {
             extractor: "distill-article-v1".to_string(),

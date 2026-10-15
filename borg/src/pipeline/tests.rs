@@ -980,6 +980,7 @@ fn distilled_with_transcript(kind: Option<vault::distilled::KindPayload>) -> vau
     vault::distilled::Distilled {
         summary: "A summary.".to_string(),
         transcript: Some("Raw fetched body markdown.".to_string()),
+        tools: Vec::new(),
         kind_specific: kind,
         ..Default::default()
     }

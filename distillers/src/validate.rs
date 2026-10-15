@@ -20,6 +20,10 @@ pub const MAX_ENUMERATION_ITEMS: usize = 30;
 /// Per-item length cap (name + text combined) before that item's `text` is
 /// truncated at a sentence boundary. Each item is meant to be one line.
 pub const MAX_ENUM_ITEM_CHARS: usize = 400;
+/// Maximum tools kept before truncation.
+pub const MAX_TOOLS: usize = 20;
+/// Per-tool `command` length cap, the same ceiling as `cortex-repo-install`.
+pub const MAX_TOOL_COMMAND_CHARS: usize = 500;
 /// Maximum thematic key-idea bullets kept before truncation (April rule: 5-7,
 /// with headroom for a rich source).
 pub const MAX_KEY_IDEAS: usize = 10;
@@ -86,6 +90,7 @@ pub fn enforce_bounds(mut distilled: Distilled, max_claims: usize) -> Distilled 
     enforce_tldr_bound(&mut distilled);
     enforce_enumeration_bounds(&mut distilled);
     enforce_key_idea_bounds(&mut distilled);
+    enforce_tool_bounds(&mut distilled);
     distilled
 }
 
@@ -139,6 +144,33 @@ fn enforce_enumeration_bounds(distilled: &mut Distilled) {
         }
     }
     distilled.meta.validation.bounds_truncations.extend(item_cuts);
+}
+
+/// Cap the tool count and each tool's `command` length. Count overflow is
+/// recorded as `tools:N>MAX`; a dropped command as `tool-command:idx:orig>MAX dropped`.
+/// A command is verbatim text and a cut one is a different command, so an
+/// over-limit command is dropped (set to `None`), keeping the tool's name/url.
+fn enforce_tool_bounds(distilled: &mut Distilled) {
+    if distilled.tools.len() > MAX_TOOLS {
+        let original = distilled.tools.len();
+        distilled.tools.truncate(MAX_TOOLS);
+        distilled
+            .meta
+            .validation
+            .bounds_truncations
+            .push(format!("tools:{original}>{MAX_TOOLS}"));
+    }
+    let mut cuts: Vec<String> = Vec::new();
+    for (idx, tool) in distilled.tools.iter_mut().enumerate() {
+        let original = tool.command.as_deref().map_or(0, |c| c.chars().count());
+        if original > MAX_TOOL_COMMAND_CHARS {
+            tool.command = None;
+            cuts.push(format!(
+                "tool-command:{idx}:{original}>{MAX_TOOL_COMMAND_CHARS} dropped"
+            ));
+        }
+    }
+    distilled.meta.validation.bounds_truncations.extend(cuts);
 }
 
 /// Cap the key-idea bullet count and each bullet's length.
@@ -242,6 +274,7 @@ pub fn fallback_distilled(
         claims: Vec::new(),
         tags: Vec::new(),
         links: Vec::new(),
+        tools: Vec::new(),
         kind_specific: None,
         meta: DistilledMeta {
             extractor: extractor.to_string(),

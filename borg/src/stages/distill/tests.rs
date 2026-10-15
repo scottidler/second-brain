@@ -347,6 +347,7 @@ fn write_distilled_yml_no_op_when_staging_disabled() {
         claims: Vec::new(),
         tags: Vec::new(),
         links: Vec::new(),
+        tools: Vec::new(),
         kind_specific: None,
         meta: DistilledMeta {
             extractor: "distill-article-v1".to_string(),
@@ -384,6 +385,7 @@ fn write_distilled_yml_persists_to_per_trace_dir() {
         claims: Vec::new(),
         tags: Vec::new(),
         links: Vec::new(),
+        tools: Vec::new(),
         kind_specific: None,
         meta: DistilledMeta {
             extractor: "distill-article-v1".to_string(),

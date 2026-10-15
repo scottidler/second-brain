@@ -68,6 +68,7 @@ fn render_emits_session_footer_with_clyde_backpointers() {
     let distilled = Distilled {
         summary: "Session distilled a decision and a gotcha.".to_string(),
         meta: base_meta("distill-session-v1"),
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Session(SessionPayload {
             repo: Some("scottidler/second-brain".to_string()),
             session_ids: vec!["871f6428".to_string(), "4ae69e3a".to_string()],
@@ -97,6 +98,7 @@ fn render_omits_session_footer_when_no_member_ids() {
     let distilled = Distilled {
         summary: "s".to_string(),
         meta: base_meta("distill-session-v1"),
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Session(SessionPayload {
             repo: Some("a/b".to_string()),
             session_ids: Vec::new(),
@@ -147,6 +149,7 @@ fn render_emits_control_frontmatter_fields() {
 fn render_emits_repo_frontmatter() {
     let distilled = Distilled {
         summary: "x".to_string(),
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Repo(RepoPayload {
             stars: Some(1432),
             primary_language: Some("Rust".to_string()),
@@ -186,6 +189,7 @@ fn render_drops_oversized_install_string() {
     let install = "x".repeat(501);
     let distilled = Distilled {
         summary: "x".to_string(),
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Repo(RepoPayload {
             stars: None,
             primary_language: None,
@@ -204,6 +208,7 @@ fn render_drops_oversized_install_string() {
 fn render_emits_video_frontmatter() {
     let distilled = Distilled {
         summary: "x".to_string(),
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Video(VideoPayload {
             channel: Some("Some Channel".to_string()),
             duration_seconds: Some(3247),
@@ -234,6 +239,7 @@ fn render_emits_video_frontmatter() {
 fn render_emits_github_sequence_for_video_repos() {
     let distilled = Distilled {
         summary: "x".to_string(),
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Video(VideoPayload {
             channel: None,
             duration_seconds: None,
@@ -257,6 +263,7 @@ fn render_emits_github_sequence_for_video_repos() {
 fn render_omits_github_key_when_repos_empty() {
     let distilled = Distilled {
         summary: "x".to_string(),
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Video(VideoPayload {
             channel: Some("Chan".to_string()),
             duration_seconds: None,
@@ -274,6 +281,7 @@ fn render_omits_github_key_when_repos_empty() {
 fn render_emits_thread_frontmatter() {
     let distilled = Distilled {
         summary: "x".to_string(),
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Thread(ThreadPayload {
             author: Some("@someone".to_string()),
             post_count: 47,
@@ -780,6 +788,7 @@ fn render_round_trips_new_sections_through_vault_body_parsers() {
 fn transcript_distilled(kind: Option<KindPayload>) -> Distilled {
     Distilled {
         summary: "A summary.".to_string(),
+        tools: Vec::new(),
         kind_specific: kind,
         meta: base_meta("distill-x-v1"),
         transcript: Some("Verbatim source text.".to_string()),
@@ -888,6 +897,7 @@ fn frontmatter_additions_escape_special_chars_on_serialize() {
     let nasty = "Bad: value\nwith newline\\and backslash: 12:00";
     let distilled = Distilled {
         summary: "x".to_string(),
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Video(VideoPayload {
             channel: Some(nasty.to_string()),
             duration_seconds: None,

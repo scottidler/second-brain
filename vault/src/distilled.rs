@@ -82,6 +82,13 @@ pub struct Distilled {
     #[serde(default)]
     pub links: Vec<Link>,
 
+    /// Actionable tools, commands and install steps the source names. Empty
+    /// by default and omitted from the serialized form when empty, so every
+    /// pre-tools staged `distilled.yml` deserializes unchanged. Bounded in
+    /// `distillers::validate` (20 entries, `command` 500 chars).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<Tool>,
+
     /// Per-kind structured payload. Articles and Ideas leave this None;
     /// GitHub, YouTube, and Thread populate it with kind-specific data
     /// (stars, timestamps, thread author chain, etc.).
@@ -219,6 +226,19 @@ pub struct Claim {
     /// indented blockquote line beneath the claim bullet when present.
     #[serde(default)]
     pub quote: Option<String>,
+}
+
+/// One actionable tool the source names. No `kind` field: the renderer treats
+/// every entry the same (Resolved Decision, note-sources design).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Tool {
+    pub name: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Install or usage command, verbatim from the source.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 /// A detected enumeration ("Top 10 X"). Present on `Distilled` only when the

@@ -36,6 +36,7 @@ fn roundtrip_article_distilled() {
             url: "https://example.com".to_string(),
             label: Some("Reference".to_string()),
         }],
+        tools: Vec::new(),
         kind_specific: None,
         meta: sample_meta(),
         transcript: None,
@@ -65,6 +66,7 @@ fn roundtrip_repo_payload() {
         claims: vec![],
         tags: vec![],
         links: vec![],
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Repo(RepoPayload {
             stars: Some(1432),
             primary_language: Some("Rust".to_string()),
@@ -106,6 +108,7 @@ fn roundtrip_video_payload() {
         }],
         tags: vec![],
         links: vec![],
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Video(VideoPayload {
             channel: Some("Some Channel".to_string()),
             duration_seconds: Some(3247),
@@ -140,6 +143,7 @@ fn roundtrip_thread_payload() {
         claims: vec![],
         tags: vec![],
         links: vec![],
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Thread(ThreadPayload {
             author: Some("@someone".to_string()),
             post_count: 47,
@@ -173,6 +177,7 @@ fn roundtrip_session_payload() {
         claims: vec![],
         tags: vec![],
         links: vec![],
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Session(SessionPayload {
             repo: Some("scottidler/loopr".to_string()),
             session_ids: vec!["abc123".to_string(), "def456".to_string()],
@@ -231,6 +236,7 @@ fn kebab_case_keys_on_serialize() {
         claims: vec![],
         tags: vec![],
         links: vec![],
+        tools: Vec::new(),
         kind_specific: Some(KindPayload::Repo(RepoPayload {
             stars: Some(10),
             primary_language: None,
@@ -422,4 +428,42 @@ fn claim_kind_roundtrips_all_known_values() {
         let decoded: ClaimKind = serde_yaml::from_str(&yaml).expect("deserialize");
         assert_eq!(decoded, kind);
     }
+}
+
+#[test]
+fn roundtrip_distilled_with_tools() {
+    let original = Distilled {
+        summary: "s".to_string(),
+        tools: vec![
+            Tool {
+                name: "ripgrep".to_string(),
+                url: Some("https://github.com/BurntSushi/ripgrep".to_string()),
+                command: Some("cargo install ripgrep".to_string()),
+            },
+            Tool {
+                name: "bare".to_string(),
+                url: None,
+                command: None,
+            },
+        ],
+        meta: sample_meta(),
+        ..Default::default()
+    };
+    let yaml = serde_yaml::to_string(&original).expect("serialize");
+    let decoded: Distilled = serde_yaml::from_str(&yaml).expect("deserialize");
+    assert_eq!(decoded.tools, original.tools);
+}
+
+#[test]
+fn distilled_without_tools_key_deserializes_empty() {
+    let mut d = Distilled {
+        summary: "s".to_string(),
+        meta: sample_meta(),
+        ..Default::default()
+    };
+    d.tools.clear();
+    let yaml = serde_yaml::to_string(&d).expect("serialize");
+    assert!(!yaml.contains("tools"), "empty tools is omitted");
+    let decoded: Distilled = serde_yaml::from_str(&yaml).expect("deserialize");
+    assert!(decoded.tools.is_empty());
 }

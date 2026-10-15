@@ -344,6 +344,7 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
             claims,
             tags: combined_tags,
             links: combined_links,
+            tools: Vec::new(),
             kind_specific: None,
             meta: DistilledMeta {
                 extractor: ID.to_string(),
@@ -440,6 +441,7 @@ fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str
         claims,
         tags,
         links,
+        tools: Vec::new(),
         kind_specific: None,
         meta: DistilledMeta {
             extractor: ID.to_string(),

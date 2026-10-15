@@ -170,6 +170,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for ImageDistiller<F> {
             claims,
             tags,
             links,
+            tools: Vec::new(),
             kind_specific: None,
             meta: DistilledMeta {
                 extractor: ID.to_string(),

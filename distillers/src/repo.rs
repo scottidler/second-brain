@@ -207,6 +207,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
             claims,
             tags,
             links,
+            tools: Vec::new(),
             kind_specific: None,
             meta: DistilledMeta {
                 extractor: ID.to_string(),

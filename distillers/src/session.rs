@@ -262,6 +262,7 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
             claims,
             tags,
             links,
+            tools: Vec::new(),
             kind_specific: None,
             meta: build_meta(
                 &self.config.model,
@@ -417,6 +418,7 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
             claims,
             tags: combined_tags,
             links: combined_links,
+            tools: Vec::new(),
             kind_specific: None,
             meta: build_meta(&self.config.model, input_tokens, output_tokens, validation),
             transcript: None,

@@ -141,6 +141,7 @@ fn thread_distilled(
     Distilled {
         summary: summary.to_string(),
         tldr: tldr.map(str::to_string),
+        tools: Vec::new(),
         kind_specific: payload.map(KindPayload::Thread),
         meta: DistilledMeta {
             validation: ValidationMeta {

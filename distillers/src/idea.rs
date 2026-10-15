@@ -56,6 +56,7 @@ impl DistillExtractor for IdeaDistiller {
             claims: Vec::new(),
             tags: Vec::new(),
             links,
+            tools: Vec::new(),
             kind_specific: None,
             meta: DistilledMeta {
                 extractor: ID.to_string(),
