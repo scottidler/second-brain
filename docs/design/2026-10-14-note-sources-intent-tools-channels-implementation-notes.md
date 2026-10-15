@@ -323,3 +323,82 @@
 - Own directory walk (the shape of `audit::collect_md_files`) vs `vault::note::scan_vault`: the backfill needs two raw frontmatter fields and must not reparse every note as typed YAML.
 ### Open questions
 - Owed: Scott's `sb borg channels --backfill --apply` run on ripr after deploy (about 1,400 yt-dlp calls). Success check: `rg -l '^channel-handle:' ~/repos/scottidler/obsidian/notes | wc -l` >= 1,300. Not run here: it is a live-vault network loop.
+
+## Phase 16: Channel search in borg
+### Design decisions
+- `search_channel(handle, query, limit) -> Result<Vec<ChannelHit>, ChannelSearchError>` lives in a `youtube/search.rs` submodule, re-exported as `borg::youtube::search_channel`. It runs through `vault::process::run` (the workspace's one subprocess primitive: process group, drained pipes, SIGKILL on deadline) inside `spawn_blocking`, not a hand-rolled `tokio::process` call. The URL is one argument; nothing goes through a shell.
+- Validation (`^@[A-Za-z0-9._-]+$` handle, non-blank query, `limit` in 1..=50) runs before anything is spawned (`search.rs:validate`). The test proves the order with a control: an invalid handle against a nonexistent program gives `InvalidHandle`, and a valid handle against the same program gives `Spawn`. `sb/tests/channel_search.rs` repeats this end to end against the built binary with an empty PATH.
+- The query is percent-encoded with `urlencoding::encode` (already a borg dependency). Spaces become `%20`, not `+`.
+- Wire types go in a new `vault::channel` (`ChannelHit`, `ChannelSearch`, `ChannelSearchFailure`), following the `vault::queue` precedent, so Phase 17's oracle client can deserialize the route's 200 and 502 bodies without depending on borg.
+- Typed `ChannelSearchError`. `InvalidHandle`, `InvalidLimit` and `EmptyQuery` map to HTTP 400, because nothing ran. `Spawn`, `TimedOut`, `Failed` (non-zero exit) and `Parse` map to HTTP 502. One pure mapper, `routes::channel_search_failure`, builds both, and its unit test pins the 502 shape: `{"error": ..., "stderr-tail": ...}`.
+- The stderr tail is the last 10 non-blank lines, capped at 2,000 chars, keeping the end (`search.rs:stderr_tail`).
+- `parse_hits` keeps `url` entries containing `watch?v=` in listed order. A body with no `entries` array, or a video entry missing `id` or `title`, is a loud `Parse` error (502), not zero hits. `entries: []` is zero hits.
+- The route `GET /channels/search?handle=&q=&limit=` sits in the `protected` subrouter next to `/queue`, behind `routes::require_auth`. A missing `handle` or `q` is axum's 400 query rejection.
+- CLI choice: `sb borg channel-search` calls `borg::youtube::search_channel` in-process and does NOT go through the daemon (`sb/src/cli/borg.rs`). `sb borg queue` goes through the daemon because the receipts DB exists only on the daemon host. Channel search has no host-bound state: it needs only yt-dlp and the network, so the direct call works on any machine with yt-dlp, and the daemon does not have to be the new binary. The daemon route exists for remote callers (oracle, Phase 17) and runs the same function.
+- `in-vault` marking per hit is left to Phase 17 (oracle). The design lists it under oracle's `channel_search`, and oracle owns the index that answers "is this video already a note". borg's daemon host has the vault, but a vault scan per search is the wrong place for that lookup.
+- Fixture: `borg/src/youtube/fixtures/flat-search-letsgetrusty-tokio.json`, a real `yt-dlp --flat-playlist -J --playlist-end 10 "https://www.youtube.com/@letsgetrusty/search?query=tokio"` capture (2026-10-15, yt-dlp 2026.08.19) trimmed to the per-entry fields. Entry 3 is `playlist?list=PLai5B987bZ9CoVR-QEIN9foz4QCJ0H2Y8` ("The Rust Lang Book"), so the filter test has a real playlist to drop.
+- Tests bite: with the handle check disabled and the `watch?v=` filter loosened, `bad_handle_is_rejected_before_yt_dlp_runs`, `parse_hits_keeps_only_watch_entries_in_order` and `run_search_parses_stdout_of_a_successful_run` all fail. Restored afterwards.
+### Deviations
+- A timeout 502 carries `"stderr-tail": null`, not a stderr tail. `vault::process::run` returns `Outcome::TimedOut` without the partial output: it deliberately does not join the drain threads after a SIGKILL, so an escaped grandchild cannot hold the call open. Getting the tail would mean a second subprocess path, which that module exists to prevent. A `Failed` exit carries the tail. The error text names the timeout ("yt-dlp timed out after 8s").
+- `search_channel` returns a typed `ChannelSearchError`, not `eyre::Result`, so the route can tell 400 from 502. Same effect, correct seam.
+- Inputs the design does not name are added: an empty query is refused, and `limit` is capped at 50 (`MAX_LIMIT`). Both are refused as 400 before yt-dlp runs.
+### Tradeoffs
+- `limit` feeds `--playlist-end`, so it bounds entries read, not hits returned. A dropped playlist leaves fewer hits: limit 10 gave 9 live. The alternative (over-fetch, then truncate) costs more yt-dlp time inside the 8 s bound. The design's command line uses `--playlist-end N` as is.
+- The 8 s bound and the 50 cap are constants (`SEARCH_TIMEOUT`, `MAX_LIMIT`), not config. The design pins 8 s against the client's 10 s default. Making it configurable would let it pass the client timeout.
+- `yt-dlp` is resolved from PATH, as `fetch_metadata` does, not a configured binary path.
+- Spawn failure, timeout, non-zero exit and unparseable output all map to 502 (a bad gateway: the upstream tool failed). Only refused input is 400.
+### Open questions
+- The daemon route's live check (`GET /channels/search` on desk/ripr) is OWED after deploy: the running daemon is the old binary. The library and CLI were run live from this tree; output below.
+- Observed: `sb borg channel-search @letsgetrusty tokio --limit 10 --format yaml`, built from this tree (target/debug/sb), exit 0, 9 hits, no playlist entry (the playlist at position 3 was dropped):
+  ```
+  handle: '@letsgetrusty'
+  query: tokio
+  hits:
+  - id: FUg1y-yv6cs
+    title: How Rust engineered the perfect async runtime
+    url: https://www.youtube.com/watch?v=FUg1y-yv6cs
+    duration-secs: 488
+    view-count: 68792
+  - id: wXtngLBkK4Q
+    title: Async Rust explained in 20 minutes
+    url: https://www.youtube.com/watch?v=wXtngLBkK4Q
+    duration-secs: 1155
+    view-count: 85838
+  - id: K8LNPYNvT-U
+    title: Intro to async/.await in Rust
+    url: https://www.youtube.com/watch?v=K8LNPYNvT-U
+    duration-secs: 837
+    view-count: 125434
+  - id: _6QSe8Xzbnk
+    title: 7 Rust project ideas for senior developers
+    url: https://www.youtube.com/watch?v=_6QSe8Xzbnk
+    duration-secs: 583
+    view-count: 30110
+  - id: 0y6RKiIk6cs
+    title: Rust for Dummies in 12 Minutes
+    url: https://www.youtube.com/watch?v=0y6RKiIk6cs
+    duration-secs: 750
+    view-count: 421020
+  - id: q3VOsGzkM-M
+    title: The ultimate Rust performance guide
+    url: https://www.youtube.com/watch?v=q3VOsGzkM-M
+    duration-secs: 731
+    view-count: 69862
+  - id: 9RsgFFp67eo
+    title: Rust’s most complicated features explained
+    url: https://www.youtube.com/watch?v=9RsgFFp67eo
+    duration-secs: 1819
+    view-count: 117715
+  - id: luOgEhLE2sg
+    title: Build your entire tech stack in Rust
+    url: https://www.youtube.com/watch?v=luOgEhLE2sg
+    duration-secs: 442
+    view-count: 283296
+  - id: iSB31t7pnzE
+    title: Rust’s hardest features in 10 minutes
+    url: https://www.youtube.com/watch?v=iSB31t7pnzE
+    duration-secs: 527
+    view-count: 24250
+  ```
+- Observed, library level: `cargo test --workspace --lib search_channel_live -- --ignored --nocapture` passed in 0.71 s with 9 `watch?v=` hits (FUg1y-yv6cs, wXtngLBkK4Q, _6QSe8Xzbnk, 9RsgFFp67eo, iSB31t7pnzE, K8LNPYNvT-U, FPRH66r-zUQ, eIB3Pd5LBkc, luOgEhLE2sg). The ranking differs from the CLI run moments earlier: YouTube's search order is not stable between calls.
+- Observed, failure path: `sb borg channel-search @this-handle-does-not-exist-zq9x tokio` exited 1 in 1.5 s with `Error: yt-dlp exited exit status: 1: WARNING: [youtube:tab] HTTP Error 404: Not Found. Retrying (3/3)... ...`. The message now reads `yt-dlp failed (exit status: 1): <tail>`. A 404 handle costs yt-dlp 3 retries, still well inside 8 s here.

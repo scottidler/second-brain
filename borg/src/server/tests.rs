@@ -374,3 +374,75 @@ async fn trace_route_reports_source_durable_from_the_archive() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn channel_search_route_requires_token_when_configured() {
+    // An invalid handle keeps every authorized call short of yt-dlp.
+    let uri = "/channels/search?handle=letsgetrusty&q=tokio";
+    let router = || test_router_with_auth(Config::default(), Some("secret".to_string()));
+    let no_token = router().oneshot(get_queue(uri, None)).await.expect("response");
+    assert_eq!(no_token.status(), StatusCode::UNAUTHORIZED);
+    let wrong = router().oneshot(get_queue(uri, Some("wrong"))).await.expect("response");
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    let ok = router()
+        .oneshot(get_queue(uri, Some("secret")))
+        .await
+        .expect("response");
+    assert_eq!(ok.status(), StatusCode::BAD_REQUEST, "past the gate, refused as input");
+}
+
+#[tokio::test]
+async fn channel_search_route_refuses_a_bad_handle_with_400() {
+    for uri in [
+        "/channels/search?handle=letsgetrusty&q=tokio",
+        "/channels/search?handle=%40lets%2Fget&q=tokio",
+        "/channels/search?handle=%40letsgetrusty&q=tokio&limit=0",
+    ] {
+        let resp = test_router().oneshot(get_queue(uri, None)).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let json = body_json(resp).await;
+        assert!(json["error"].is_string(), "{uri}: {json}");
+        assert!(json["stderr-tail"].is_null(), "{uri}: nothing ran, no stderr: {json}");
+    }
+    let missing_query = test_router()
+        .oneshot(get_queue("/channels/search?handle=%40letsgetrusty", None))
+        .await
+        .expect("response");
+    assert_eq!(missing_query.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn channel_search_failure_is_502_with_the_stderr_tail() {
+    use crate::youtube::ChannelSearchError;
+    let failed = ChannelSearchError::Failed {
+        status: "exit status: 1".into(),
+        stderr_tail: "ERROR: [youtube:tab] @nope: This channel does not exist.".into(),
+    };
+    let resp = crate::routes::channel_search_failure(&failed);
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let body: vault::channel::ChannelSearchFailure =
+        serde_json::from_value(body_json(resp).await).expect("ChannelSearchFailure body");
+    assert_eq!(
+        body.stderr_tail.as_deref(),
+        Some("ERROR: [youtube:tab] @nope: This channel does not exist.")
+    );
+    assert!(body.error.contains("This channel does not exist."));
+
+    for err in [
+        ChannelSearchError::TimedOut {
+            after: std::time::Duration::from_secs(8),
+        },
+        ChannelSearchError::Spawn {
+            reason: "No such file or directory".into(),
+        },
+        ChannelSearchError::Parse {
+            reason: "no `entries` array".into(),
+        },
+    ] {
+        let resp = crate::routes::channel_search_failure(&err);
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "{err}");
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], err.to_string());
+        assert!(json["stderr-tail"].is_null(), "{err}: {json}");
+    }
+}

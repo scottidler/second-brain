@@ -295,6 +295,16 @@ impl BorgCli {
                     Ok(())
                 }
             },
+            Some(Command::ChannelSearch {
+                handle,
+                query,
+                limit,
+                format,
+            }) => {
+                let hits = borg::youtube::search_channel(&handle, &query, limit).await?;
+                let result = vault::channel::ChannelSearch { handle, query, hits };
+                crate::cli::output::emit(&result, format)
+            }
             Some(Command::Channels { backfill: _, apply }) => {
                 let report = borg::channels::run(&config, apply).await?;
                 let verb = if apply { "written" } else { "to write" };

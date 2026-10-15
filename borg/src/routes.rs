@@ -301,6 +301,65 @@ pub async fn queue(State(state): State<AppState>, Query(params): Query<QueuePara
     }
 }
 
+fn default_channel_search_limit() -> usize {
+    crate::youtube::search::DEFAULT_LIMIT
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChannelSearchParams {
+    pub handle: String,
+    pub q: String,
+    #[serde(default = "default_channel_search_limit")]
+    pub limit: usize,
+}
+
+/// The error response for a failed channel search: 400 when the input was
+/// refused before yt-dlp ran, 502 when yt-dlp failed, timed out, or printed
+/// output that would not parse. The body is `vault::channel::ChannelSearchFailure`.
+pub fn channel_search_failure(err: &crate::youtube::ChannelSearchError) -> Response {
+    let status = if err.is_invalid_input() {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    let body = vault::channel::ChannelSearchFailure {
+        error: err.to_string(),
+        stderr_tail: err.stderr_tail().map(str::to_string),
+    };
+    (status, Json(body)).into_response()
+}
+
+/// `GET /channels/search?handle=@x&q=...&limit=N` - one yt-dlp search of a
+/// channel's own search page. Auth-gated like `/queue`. 200 with
+/// `vault::channel::ChannelSearch`, else [`channel_search_failure`].
+pub async fn channel_search(Query(params): Query<ChannelSearchParams>) -> Response {
+    log::debug!(
+        "channel_search: handle={:?} q={:?} limit={}",
+        params.handle,
+        params.q,
+        params.limit
+    );
+    match crate::youtube::search_channel(&params.handle, &params.q, params.limit).await {
+        Ok(hits) => {
+            log::debug!("channel_search: ok hits={}", hits.len());
+            Json(vault::channel::ChannelSearch {
+                handle: params.handle,
+                query: params.q,
+                hits,
+            })
+            .into_response()
+        }
+        Err(e) => {
+            if e.is_invalid_input() {
+                log::debug!("channel_search: refused input: {e}");
+            } else {
+                log::error!("channel_search: handle={:?} failed: {e}", params.handle);
+            }
+            channel_search_failure(&e)
+        }
+    }
+}
+
 pub async fn note(State(state): State<AppState>, Json(request): Json<NoteRequest>) -> Json<IngestResult> {
     log::info!("Received note request: {} chars", request.text.len());
 

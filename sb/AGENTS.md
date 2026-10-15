@@ -14,7 +14,7 @@
 
 ## Command Modules (`src/cli/`)
 
-- `borg.rs` (+`cli/borg/`) — Daemon, Ingest, Note, Hotkey, Extension, Migrate, Audit, Log, Queue (`sb borg queue`: `borg::queue::fetch` -> `output::emit`), Wait (`sb borg wait`, `cli/borg/wait.rs`: pins the plain-`/queue` batch id, polls `?batch=<id>` every 2s under one monotonic `--timeout` deadline; pure `decide(snapshot, deadline_reached)` is the exit table 0/3/4/5, returned as `ExitWith`; prints only the final snapshot), Reingest, … → borg lib.
+- `borg.rs` (+`cli/borg/`) — Daemon, Ingest, Note, Hotkey, Extension, Migrate, Audit, Log, Queue (`sb borg queue`: `borg::queue::fetch` -> `output::emit`), ChannelSearch (`sb borg channel-search <@HANDLE> <QUERY> [--limit N] [--format]`: runs `borg::youtube::search_channel` in-process on this machine, not through the daemon, -> `output::emit`), Wait (`sb borg wait`, `cli/borg/wait.rs`: pins the plain-`/queue` batch id, polls `?batch=<id>` every 2s under one monotonic `--timeout` deadline; pure `decide(snapshot, deadline_reached)` is the exit table 0/3/4/5, returned as `ExitWith`; prints only the final snapshot), Reingest, … → borg lib.
 - `cortex.rs` — Classify, Lint, Link, Intel, State, Daemon, Migrate, Sweep, Summarize, Embed, … → cortex lib (after-help checks `fabric` availability).
 - `oracle.rs`: Serve, Index, Stats (prints "By tag (top 20)" plus the true "Distinct tags" count; the old "By domain" block is gone with the facet), Call (`--list`, `--json`); width-aware tool-list formatting; exit codes via `outcome_is_failure`.
 - `bootstrap.rs`, `status.rs`, `doctor.rs`, `checks.rs` — setup + health.

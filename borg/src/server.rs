@@ -60,6 +60,9 @@ pub fn build_router(state: AppState) -> Router {
         // Ingest-queue snapshot (batch progress, wedged items). Auth-gated:
         // it carries source URLs and failure reasons.
         .route("/queue", get(routes::queue))
+        // YouTube channel search (one yt-dlp call, 8 s bound). Auth-gated:
+        // it spends the daemon host's network and yt-dlp on the caller's behalf.
+        .route("/channels/search", get(routes::channel_search))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             routes::require_auth,

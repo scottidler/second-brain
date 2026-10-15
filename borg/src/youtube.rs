@@ -734,7 +734,9 @@ fn clean_vtt(vtt: &str) -> String {
 }
 
 pub(crate) mod diagnostics;
+pub mod search;
 use diagnostics::{download_diagnostics, error_summary, is_http_403};
+pub use search::{ChannelSearchError, search_channel};
 
 #[cfg(test)]
 mod tests;

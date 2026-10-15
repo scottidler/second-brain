@@ -1,5 +1,5 @@
 //! Structured output for agent-facing commands: yaml for humans on a TTY, json
-//! when piped, `--format` to override. Only `sb borg queue` uses it today.
+//! when piped, `--format` to override.
 
 use std::io::IsTerminal;
 

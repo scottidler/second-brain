@@ -137,6 +137,22 @@ pub enum Command {
         #[arg(long)]
         apply: bool,
     },
+    /// Search one YouTube channel's videos for QUERY (one yt-dlp call, 8s
+    /// bound, run on this machine). Prints only `watch?v=` videos, never
+    /// playlists
+    ChannelSearch {
+        /// Channel handle, `@` included (e.g. @letsgetrusty)
+        #[arg(value_name = "@HANDLE")]
+        handle: String,
+        /// Search terms; quote a multi-word query
+        query: String,
+        /// Read at most N search results (1-50); dropped playlists can leave fewer hits
+        #[arg(long, default_value_t = borg::youtube::search::DEFAULT_LIMIT)]
+        limit: usize,
+        /// yaml or json (default: yaml on a terminal, json when piped)
+        #[arg(long, value_enum, ignore_case = true)]
+        format: Option<crate::cli::output::Format>,
+    },
     /// Re-ingest every vault note whose body matches the failed-fetch signature
     ReingestFailed {
         /// List the notes that would be reingested and exit without writing
