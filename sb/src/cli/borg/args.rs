@@ -123,6 +123,9 @@ pub enum Command {
         /// List what would be reingested and exit without writing
         #[arg(long)]
         dry_run: bool,
+        /// How many entries to have in flight at once
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
     },
     /// Replay the ingestion pipeline for staged traces or vault notes
     Replay(ReplayCliArgs),

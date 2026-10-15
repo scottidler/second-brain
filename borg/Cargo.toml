@@ -49,6 +49,7 @@ humantime = "2.3.0"
 dom_smoothie = "0.18.0"
 htmd = "0.5.4"
 httpdate = "1.0.3"
+futures = "0.3.34"
 
 [dependencies.serenity]
 version = "0.12"

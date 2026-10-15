@@ -160,6 +160,7 @@ impl BorgCli {
                 before,
                 after,
                 dry_run,
+                jobs,
             }) => {
                 let _report = borg::reingest(
                     config,
@@ -169,6 +170,7 @@ impl BorgCli {
                     before,
                     after,
                     dry_run,
+                    jobs,
                     |event| match event {
                         borg::ReingestEvent::NoMatches => println!("No matching entries found."),
                         borg::ReingestEvent::Matched { count, dry_run } => println!(

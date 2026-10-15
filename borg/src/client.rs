@@ -289,6 +289,7 @@ pub async fn reingest(
     before: Option<String>,
     after: Option<String>,
     dry_run: bool,
+    jobs: usize,
     mut progress: impl FnMut(&ReingestEvent) + Send,
 ) -> Result<ReingestReport> {
     use ledger::{EntryFilter, QueriedEntry};
@@ -340,81 +341,50 @@ pub async fn reingest(
         dry_run,
     });
 
-    let daemon = vault::daemon::client::DaemonClient::new(&config.hotkey, config.server.auth_token.as_deref())?;
-    for (i, entry) in entries.iter().enumerate() {
-        progress(&ReingestEvent::ItemStart {
-            index: i,
-            total: entries.len(),
-            date: entry.date.clone(),
-            slug: entry.slug.clone(),
-            source: entry.source.clone(),
-        });
-
-        if dry_run {
+    if dry_run {
+        for (i, entry) in entries.iter().enumerate() {
+            progress(&ReingestEvent::ItemStart {
+                index: i,
+                total: entries.len(),
+                date: entry.date.clone(),
+                slug: entry.slug.clone(),
+                source: entry.source.clone(),
+            });
             report.would_process.push(ReingestCandidate {
                 date: entry.date.clone(),
                 slug: entry.slug.clone(),
                 source: entry.source.clone(),
             });
-            continue;
         }
+        progress(&ReingestEvent::Complete { dry_run });
+        return Ok(report);
+    }
 
-        let host = &config.hotkey.host;
-        let port = config.hotkey.port;
-
-        let body = serde_json::json!({
-            "url": entry.source,
-            "tags": [],
-            "force": true,
-            "method": "cli",
+    // Up to `jobs` entries in flight. Events are emitted per entry on
+    // completion (start line, then its result) so lines never interleave.
+    use futures::StreamExt;
+    let daemon = vault::daemon::client::DaemonClient::new(&config.hotkey, config.server.auth_token.as_deref())?;
+    let total = entries.len();
+    let config_ref = &config;
+    let daemon_ref = &daemon;
+    let mut results = futures::stream::iter(entries.iter().enumerate())
+        .map(|(i, entry)| async move { (i, entry, reingest_one(config_ref, daemon_ref, &entry.source).await) })
+        .buffer_unordered(jobs.max(1));
+    while let Some((i, entry, outcome)) = results.next().await {
+        progress(&ReingestEvent::ItemStart {
+            index: i,
+            total,
+            date: entry.date.clone(),
+            slug: entry.slug.clone(),
+            source: entry.source.clone(),
         });
-
-        let sent = match daemon.post_json("/ingest", &body).await {
-            Ok(response) => daemon.json::<types::IngestResult>("/ingest", response).await,
-            Err(e) => Err(e),
-        };
-        let status = match sent {
-            Ok(mut result) => {
-                // The daemon answers `Queued`; poll `/trace/{id}` for the real
-                // terminal state so reingest reports accurate counts and paces
-                // one entry at a time.
-                if matches!(result.status, types::IngestStatus::Queued)
-                    && let Some(tid) = result.trace_id.clone()
-                {
-                    result = replay::poll_trace_terminal(&config, &daemon, &tid)
-                        .await
-                        .unwrap_or(result);
-                }
-                match result.status {
-                    types::IngestStatus::Completed => {
-                        // The polled `/trace` result carries the note path but no title.
-                        let title = result
-                            .title
-                            .or_else(|| result.note_path.clone())
-                            .unwrap_or_else(|| "Untitled".to_string());
-                        progress(&ReingestEvent::ItemReplaced { title: title.clone() });
-                        ReingestEntryStatus::Replaced { title }
-                    }
-                    types::IngestStatus::Failed { reason } => {
-                        progress(&ReingestEvent::ItemFailed { reason: reason.clone() });
-                        ReingestEntryStatus::Failed { reason }
-                    }
-                    other => {
-                        let s = format!("{other:?}");
-                        progress(&ReingestEvent::ItemOther(s.clone()));
-                        ReingestEntryStatus::Other(s)
-                    }
-                }
-            }
-            Err(e) => {
-                if e.is_connect() {
-                    eyre::bail!("cannot reach the borg daemon at http://{host}:{port} - is the daemon running?");
-                }
-                let s = e.to_string();
-                progress(&ReingestEvent::ItemError(s.clone()));
-                ReingestEntryStatus::Error(s)
-            }
-        };
+        let status = outcome?;
+        progress(&match &status {
+            ReingestEntryStatus::Replaced { title } => ReingestEvent::ItemReplaced { title: title.clone() },
+            ReingestEntryStatus::Failed { reason } => ReingestEvent::ItemFailed { reason: reason.clone() },
+            ReingestEntryStatus::Other(s) => ReingestEvent::ItemOther(s.clone()),
+            ReingestEntryStatus::Error(e) => ReingestEvent::ItemError(e.clone()),
+        });
         report.processed.push(ReingestEntry {
             source: entry.source.clone(),
             status,
@@ -424,6 +394,60 @@ pub async fn reingest(
     progress(&ReingestEvent::Complete { dry_run });
 
     Ok(report)
+}
+
+/// POST one source to `/ingest` with `force`, then poll its trace to a
+/// terminal state. An unreachable daemon is an error for the whole run.
+async fn reingest_one(
+    config: &Config,
+    daemon: &vault::daemon::client::DaemonClient,
+    source: &str,
+) -> Result<ReingestEntryStatus> {
+    let body = serde_json::json!({
+        "url": source,
+        "tags": [],
+        "force": true,
+        "method": "cli",
+    });
+    let sent = match daemon.post_json("/ingest", &body).await {
+        Ok(response) => daemon.json::<types::IngestResult>("/ingest", response).await,
+        Err(e) => Err(e),
+    };
+    let status = match sent {
+        Ok(mut result) => {
+            // The daemon answers `Queued`; poll `/trace/{id}` for the real
+            // terminal state so reingest reports accurate counts.
+            if matches!(result.status, types::IngestStatus::Queued)
+                && let Some(tid) = result.trace_id.clone()
+            {
+                result = replay::poll_trace_terminal(config, daemon, &tid)
+                    .await
+                    .unwrap_or(result);
+            }
+            match result.status {
+                // The polled `/trace` result carries the note path but no title.
+                types::IngestStatus::Completed => ReingestEntryStatus::Replaced {
+                    title: result
+                        .title
+                        .or(result.note_path)
+                        .unwrap_or_else(|| "Untitled".to_string()),
+                },
+                types::IngestStatus::Failed { reason } => ReingestEntryStatus::Failed { reason },
+                other => ReingestEntryStatus::Other(format!("{other:?}")),
+            }
+        }
+        Err(e) => {
+            if e.is_connect() {
+                eyre::bail!(
+                    "cannot reach the borg daemon at http://{}:{} - is the daemon running?",
+                    config.hotkey.host,
+                    config.hotkey.port
+                );
+            }
+            ReingestEntryStatus::Error(e.to_string())
+        }
+    };
+    Ok(status)
 }
 
 /// The `/ingest` body `sb borg ingest` POSTs. `note` is the existing

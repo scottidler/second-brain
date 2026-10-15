@@ -109,6 +109,7 @@ async fn reingest_against_a_silent_daemon_reports_the_item_error_within_twice_th
             None,
             None,
             false,
+            1,
             |_| {},
         )
         .await
@@ -189,4 +190,52 @@ fn ingest_body_deserializes_as_an_ingest_request() {
     let body = ingest_body("https://example.com", None, true, types::IngestMethod::Cli, Some("n"));
     let req: types::IngestRequest = serde_json::from_value(body).unwrap();
     assert_eq!(req.note.as_deref(), Some("n"));
+}
+
+/// `--jobs 4` keeps four entries in flight: four silent-daemon items finish
+/// in about one timeout, where one-at-a-time takes four.
+#[tokio::test]
+async fn reingest_jobs_runs_entries_concurrently() {
+    let data_home = tempfile::TempDir::new().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let ledger_path = ledger::ledger_path().expect("ledger path");
+        for n in 0..4 {
+            ledger::append_entry(
+                &ledger_path,
+                &ledger::LedgerEntry {
+                    date: "2026-10-05".to_string(),
+                    time: "10:00".to_string(),
+                    method: vault::schema::Method::Http,
+                    filename: Some(format!("n{n}.md")),
+                    source: format!("https://example.com/{n}"),
+                    trace_id: None,
+                },
+            )
+            .expect("append");
+        }
+        let (port, _) = crate::stub::serve(crate::stub::Behavior::Silent).await;
+        let started = std::time::Instant::now();
+        let mut starts = 0;
+        let report = reingest(
+            config_for_daemon(port, DAEMON_TIMEOUT),
+            true,
+            None,
+            None,
+            None,
+            None,
+            false,
+            4,
+            |e| {
+                if matches!(e, ReingestEvent::ItemStart { .. }) {
+                    starts += 1;
+                }
+            },
+        )
+        .await
+        .expect("per-item errors are reported, not fatal");
+        assert_eq!(report.processed.len(), 4);
+        assert_eq!(starts, 4);
+        assert!(started.elapsed() < DAEMON_TIMEOUT * 2, "took {:?}", started.elapsed());
+    })
+    .await;
 }
