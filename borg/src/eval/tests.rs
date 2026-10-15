@@ -40,6 +40,7 @@ fn fixture(kind: &str, slug: &str, source: &str, distilled: Distilled) -> Fixtur
         slug: slug.to_string(),
         source: source.to_string(),
         distilled,
+        capture_note: None,
     }
 }
 
@@ -474,4 +475,59 @@ fn no_judge_refuses_emit_calibration() {
     let judge = MockJudge::new(scores(2, 2, 2));
     let claims = MockClaimJudge::new(ClaimVerdict::Supported);
     assert!(evaluate(&two_kinds(), &BTreeMap::new(), &cache, &judge, &claims, &opts).is_err());
+}
+
+fn tools_grounding_line(fixtures: &[Fixture]) -> String {
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let opts = EvalOpts {
+        no_judge: true,
+        ..EvalOpts::default()
+    };
+    let report = unwrap_report(
+        evaluate(
+            fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &MockJudge::new(scores(3, 3, 3)),
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &opts,
+        )
+        .expect("evaluate"),
+    );
+    report
+        .render()
+        .lines()
+        .find(|l| l.trim_start().starts_with("tools-grounding:"))
+        .expect("the report prints a tools-grounding line")
+        .to_string()
+}
+
+#[test]
+fn removing_a_fixtures_tools_changes_the_tools_grounding_line() {
+    let mut with_tools = distilled("s", &[("c", None)], None);
+    with_tools.tools = vec![vault::distilled::Tool {
+        name: "ripgrep".to_string(),
+        url: None,
+        command: Some("cargo install ripgrep".to_string()),
+    }];
+    let source = "install ripgrep with cargo install ripgrep";
+    let before = tools_grounding_line(&[fixture("repo", "r", source, with_tools.clone())]);
+    assert_eq!(
+        before,
+        "  tools-grounding: names 1/1 (100.0%), commands 1/1 (100.0%)  (1 fixture)"
+    );
+
+    let mut without_tools = with_tools;
+    without_tools.tools.clear();
+    let after = tools_grounding_line(&[fixture("repo", "r", source, without_tools)]);
+    assert_eq!(after, "  tools-grounding: N/A (no note renders a tool)");
+    assert_ne!(before, after);
+}
+
+#[test]
+fn committed_fixtures_report_prints_a_tools_grounding_line() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../config/eval/distill-fixtures");
+    let fixtures = load(&dir).expect("load committed fixtures");
+    let line = tools_grounding_line(&fixtures);
+    assert!(line.contains("tools-grounding:"), "{line}");
 }

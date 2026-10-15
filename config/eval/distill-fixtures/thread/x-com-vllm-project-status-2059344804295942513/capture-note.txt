@@ -1,0 +1,1 @@
+Saving for the vLLM Rust frontend: ~5x throughput over Python (837 vs 162 req/s on preprocess-heavy workload), drop-in via VLLM_USE_RUST_FRONTEND=1, same engine/ZMQ boundary. Worth trying if CPU-side request handling is a bottleneck.

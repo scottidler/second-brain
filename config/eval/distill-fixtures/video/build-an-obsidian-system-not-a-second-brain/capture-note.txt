@@ -1,0 +1,1 @@
+Daily template uses properties for metrics + three-priority system (carried over from previous day's notes), runs off two slash commands (morning/night) to populate everything automatically — worth stealing for my own Obsidian daily-note setup.

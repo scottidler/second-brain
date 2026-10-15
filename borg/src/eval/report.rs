@@ -119,6 +119,15 @@ pub struct GroundingMetric {
     pub quoted: usize,
 }
 
+/// Per-fixture tools grounding (`calc::tools_grounding`). Only fixtures whose
+/// note renders at least one tool.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolsGroundingMetric {
+    pub fixture: String,
+    pub kind: String,
+    pub counts: calc::ToolsGrounding,
+}
+
 /// A fixture whose note carries LLM placeholder filler, one reason per field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArtifactMetric {
@@ -219,6 +228,8 @@ pub struct EvalReport {
     pub new_claim_judgments: usize,
     /// Quote grounding, one row per fixture that has quotes.
     pub grounding: Vec<GroundingMetric>,
+    /// Tools grounding, one row per fixture whose note renders a tool.
+    pub tools_grounding: Vec<ToolsGroundingMetric>,
     /// Fixtures carrying placeholder filler.
     pub artifacts: Vec<ArtifactMetric>,
     /// Per-kind claim-verdict tallies (empty on a `--no-judge` run).
@@ -421,6 +432,7 @@ impl EvalReport {
                 o.push_str(&format!("    ... {} more below 100%\n", worst.len() - LIST_LIMIT));
             }
         }
+        self.render_tools_grounding(o);
         o.push_str(&format!(
             "  placeholder-artifacts: {} fixture{}\n",
             self.artifacts.len(),
@@ -430,6 +442,73 @@ impl EvalReport {
             o.push_str(&format!("    {} ({})\n", a.fixture, a.reasons.join("; ")));
         }
     }
+}
+
+impl EvalReport {
+    fn render_tools_grounding(&self, o: &mut String) {
+        if self.tools_grounding.is_empty() {
+            o.push_str("  tools-grounding: N/A (no note renders a tool)\n");
+            return;
+        }
+        let total = self
+            .tools_grounding
+            .iter()
+            .fold(calc::ToolsGrounding::default(), |acc, m| add_counts(acc, m.counts));
+        o.push_str(&format!(
+            "  tools-grounding: {}  ({} fixture{})\n",
+            tools_counts_line(total),
+            self.tools_grounding.len(),
+            if self.tools_grounding.len() == 1 { "" } else { "s" },
+        ));
+        let mut by_kind: std::collections::BTreeMap<&str, calc::ToolsGrounding> = std::collections::BTreeMap::new();
+        for m in &self.tools_grounding {
+            let e = by_kind.entry(m.kind.as_str()).or_default();
+            *e = add_counts(*e, m.counts);
+        }
+        for (kind, counts) in &by_kind {
+            o.push_str(&format!("    {kind:<10} {}\n", tools_counts_line(*counts)));
+        }
+        let low: Vec<&ToolsGroundingMetric> = self
+            .tools_grounding
+            .iter()
+            .filter(|m| m.counts.names_grounded < m.counts.names || m.counts.commands_grounded < m.counts.commands)
+            .collect();
+        for m in low.iter().take(LIST_LIMIT) {
+            o.push_str(&format!("    LOW {} {}\n", m.fixture, tools_counts_line(m.counts)));
+        }
+        if low.len() > LIST_LIMIT {
+            o.push_str(&format!("    ... {} more below 100%\n", low.len() - LIST_LIMIT));
+        }
+    }
+}
+
+fn add_counts(a: calc::ToolsGrounding, b: calc::ToolsGrounding) -> calc::ToolsGrounding {
+    calc::ToolsGrounding {
+        names_grounded: a.names_grounded + b.names_grounded,
+        names: a.names + b.names,
+        commands_grounded: a.commands_grounded + b.commands_grounded,
+        commands: a.commands + b.commands,
+    }
+}
+
+/// `names g/n (p%), commands g/n (p%)`, `N/A` for a zero denominator.
+fn tools_counts_line(c: calc::ToolsGrounding) -> String {
+    let pct = |g: usize, n: usize| {
+        if n == 0 {
+            "N/A".to_string()
+        } else {
+            format!("{:.1}%", g as f64 / n as f64 * 100.0)
+        }
+    };
+    format!(
+        "names {}/{} ({}), commands {}/{} ({})",
+        c.names_grounded,
+        c.names,
+        pct(c.names_grounded, c.names),
+        c.commands_grounded,
+        c.commands,
+        pct(c.commands_grounded, c.commands),
+    )
 }
 
 #[cfg(test)]

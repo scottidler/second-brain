@@ -1,0 +1,1 @@
+Saving for the Codex-as-adversarial-reviewer trick — using OpenAI's Codex to critique Claude's own code since Claude rarely flags its own bugs. Also want to check the Playwright CLI vs official MCP comparison.

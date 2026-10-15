@@ -81,6 +81,59 @@ fn judge_note_text_renders_summary_and_anchored_claims() {
     assert!(text.contains("- bare claim\n"));
     // a bare claim must not render an empty anchor bracket
     assert!(!text.contains("bare claim ["));
+    // no tools, no TOOLS section
+    assert!(!text.contains("TOOLS:"));
+}
+
+#[test]
+fn judge_note_text_includes_the_tools_section() {
+    let d = Distilled {
+        summary: "s".to_string(),
+        tools: vec![
+            vault::distilled::Tool {
+                name: "ripgrep".to_string(),
+                url: Some("https://github.com/BurntSushi/ripgrep".to_string()),
+                command: Some("cargo install ripgrep".to_string()),
+            },
+            vault::distilled::Tool {
+                name: "fd".to_string(),
+                url: None,
+                command: None,
+            },
+        ],
+        kind_specific: Some(KindPayload::Repo(vault::distilled::RepoPayload {
+            install: Some("npm install -g granola-cli".to_string()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let text = judge_note_text(&d);
+    assert!(
+        text.contains(
+            "\nTOOLS:\n- ripgrep https://github.com/BurntSushi/ripgrep: cargo install ripgrep\n- fd\n- Install: npm install -g granola-cli\n"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn load_reads_an_optional_trimmed_capture_note() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    write_fixture(tmp.path(), "video", "noted", "src", MINIMAL_DISTILLED);
+    write_fixture(tmp.path(), "video", "bare", "src", MINIMAL_DISTILLED);
+    write_fixture(tmp.path(), "video", "blank", "src", MINIMAL_DISTILLED);
+    std::fs::write(
+        tmp.path().join("video/noted").join(CAPTURE_NOTE_FILE),
+        "  saving this for X  \n",
+    )
+    .expect("note");
+    std::fs::write(tmp.path().join("video/blank").join(CAPTURE_NOTE_FILE), " \n\t").expect("note");
+
+    let fixtures = load(tmp.path()).expect("load");
+    let note = |id: &str| fixtures.iter().find(|f| f.id == id).expect(id).capture_note.clone();
+    assert_eq!(note("video/noted").as_deref(), Some("saving this for X"));
+    assert_eq!(note("video/bare"), None);
+    assert_eq!(note("video/blank"), None);
 }
 
 // --- render_options_for_kind (sb borg eval note-size wiring) -----

@@ -1,0 +1,1 @@
+Saving this for the distractor experiment: even one topically-related distractor measurably drops NIAH accuracy, and it gets worse with input length, plus Claude models abstain under uncertainty while GPT models hallucinate confidently. Useful for picking models/prompts in RAG pipelines with noisy retrieved context.

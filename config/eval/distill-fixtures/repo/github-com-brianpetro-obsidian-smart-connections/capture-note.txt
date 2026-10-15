@@ -1,0 +1,1 @@
+Obsidian plugin that does local-only embeddings for semantic search/connections — no API key, zero-setup, and the "Send to Smart Context" feature copies related notes as AI-ready context. Worth it for the local-first semantic search approach, no cloud dependency.

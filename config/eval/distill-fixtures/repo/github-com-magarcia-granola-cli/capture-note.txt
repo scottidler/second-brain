@@ -1,0 +1,1 @@
+Saving for the `--format toon` export option — piping meeting transcripts/notes as TOON into an LLM uses ~40% fewer tokens than JSON, useful for scripting meeting data into AI tools.

@@ -1,0 +1,1 @@
+Helix plugin system PR finally landing — uses Steel (a Scheme/Lisp dialect embeddable in Rust) as the plugin language, built by the same author. Worth revisiting once merged for how a Rust editor embeds a Lisp runtime for extensibility.

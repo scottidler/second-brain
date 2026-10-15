@@ -15,7 +15,10 @@
 pub mod cache;
 pub mod calc;
 pub mod fixtures;
+pub mod intents;
 pub mod judge;
+pub mod patterns;
+pub mod regenerate;
 pub mod report;
 
 use std::collections::BTreeMap;
@@ -23,13 +26,16 @@ use std::path::{Path, PathBuf};
 
 use eyre::{Context, Result};
 
-pub use fixtures::{Fixture, judge_note_text, load, load_staged, render_options_for_kind};
+pub use fixtures::{CAPTURE_NOTE_FILE, Fixture, judge_note_text, load, load_staged, render_options_for_kind};
+pub use intents::{FabricIntentWriter, INTENT_KINDS, IntentWriter, SynthReport, synth_intents};
 pub use judge::{AxisScores, ClaimJudge, ClaimVerdict, DistillationJudge, FabricClaimJudge, FabricJudge};
 #[cfg(test)]
 pub use judge::{MockClaimJudge, MockJudge};
+pub use patterns::{PatternDirFabric, pattern_in, resolve_patterns_dir};
+pub use regenerate::{RegenerateReport, regenerate_dispatcher, run_regenerate};
 pub use report::{
     ArtifactMetric, CalibrationPanel, ClaimSupport, EvalReport, FlaggedClaim, GroundingMetric, KindReport,
-    ListicleMetric, NoteSizeMetric,
+    ListicleMetric, NoteSizeMetric, ToolsGroundingMetric,
 };
 
 /// Char budget for the source text shown to the judge. Larger than the oracle
@@ -49,6 +55,14 @@ pub struct EvalOpts {
     pub calibration_path: PathBuf,
     /// Judge model name; empty = fabric's default model.
     pub judge_model: String,
+    /// Name of the env var (or file) holding the Anthropic credential every
+    /// eval fabric call hands the child as `ANTHROPIC_API_KEY` (borg's
+    /// `fabric.api-key`). Empty leaves fabric on its own `.env`.
+    pub api_key: String,
+    /// Absolute dir every eval pattern (distill, judge, intent) resolves from;
+    /// `None` = the deployed `vault::paths::patterns_dir()`. Set it through
+    /// [`resolve_patterns_dir`].
+    pub patterns_dir: Option<PathBuf>,
     /// Ignore and overwrite cached judgments.
     pub rebuild_cache: bool,
     /// When set, write a fillable calibration sheet to this path and skip metrics.
@@ -68,6 +82,8 @@ impl Default for EvalOpts {
             fixtures_dir: PathBuf::from("config/eval/distill-fixtures"),
             calibration_path: PathBuf::from("config/eval/distill-calibration.yml"),
             judge_model: String::new(),
+            api_key: String::new(),
+            patterns_dir: None,
             rebuild_cache: false,
             emit_calibration: None,
             staged_root: None,
@@ -155,9 +171,26 @@ pub fn run(opts: &EvalOpts) -> Result<EvalOutcome> {
     };
     let calibration = load_calibration(&opts.calibration_path)?;
     let cache = cache::JudgmentCache::open(&vault::paths::borg_eval_cache_path())?;
-    let judge = FabricJudge::new(opts.judge_model.clone());
-    let claim_judge = FabricClaimJudge::new(opts.judge_model.clone());
+    let (judge, claim_judge) = fabric_judges(opts)?;
     evaluate(&fixtures, &calibration, &cache, &judge, &claim_judge, opts)
+}
+
+/// The production judges for `opts`: its model and credential var, with each
+/// pattern resolved from `opts.patterns_dir` when set.
+pub fn fabric_judges(opts: &EvalOpts) -> Result<(FabricJudge, FabricClaimJudge)> {
+    let mut judge = FabricJudge::new(opts.judge_model.clone(), opts.api_key.clone());
+    judge.pattern = pattern_in(opts.patterns_dir.as_deref(), &judge.pattern)?;
+    let mut claim_judge = FabricClaimJudge::new(opts.judge_model.clone(), opts.api_key.clone());
+    claim_judge.pattern = pattern_in(opts.patterns_dir.as_deref(), &claim_judge.pattern)?;
+    Ok((judge, claim_judge))
+}
+
+/// The production intent writer for `opts`, its pattern resolved from
+/// `opts.patterns_dir` when set.
+pub fn fabric_intent_writer(opts: &EvalOpts) -> Result<FabricIntentWriter> {
+    let mut writer = FabricIntentWriter::new(opts.judge_model.clone(), opts.api_key.clone());
+    writer.pattern = pattern_in(opts.patterns_dir.as_deref(), &writer.pattern)?;
+    Ok(writer)
 }
 
 /// Judge each fixture (cache-first), aggregate per kind + overall, and build the
@@ -198,6 +231,7 @@ pub fn evaluate(
     let mut note_size: Vec<report::NoteSizeMetric> = Vec::new();
     let mut grounding: Vec<GroundingMetric> = Vec::new();
     let mut artifacts: Vec<ArtifactMetric> = Vec::new();
+    let mut tools_grounding: Vec<ToolsGroundingMetric> = Vec::new();
     let mut claim_support: BTreeMap<String, ClaimSupport> = BTreeMap::new();
     let mut flagged_claims: Vec<FlaggedClaim> = Vec::new();
 
@@ -239,6 +273,14 @@ pub fn evaluate(
                 kind: fx.kind.clone(),
                 grounded,
                 quoted,
+            });
+        }
+        let tool_counts = calc::tools_grounding(&fx.source, &fx.distilled);
+        if !tool_counts.is_empty() {
+            tools_grounding.push(ToolsGroundingMetric {
+                fixture: fx.id.clone(),
+                kind: fx.kind.clone(),
+                counts: tool_counts,
             });
         }
         let reasons = calc::placeholder_artifacts(&fx.distilled);
@@ -384,6 +426,7 @@ pub fn evaluate(
         judged: !opts.no_judge,
         new_claim_judgments,
         grounding,
+        tools_grounding,
         artifacts,
         claim_support,
         claim_support_overall,

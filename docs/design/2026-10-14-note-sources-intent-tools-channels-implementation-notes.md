@@ -126,3 +126,46 @@
 - Case-insensitive URL compare vs exact: a case-only-different path could be dropped wrongly, but that risk is smaller than leaving duplicates.
 ### Open questions
 - FTS criterion proven by `rendered_install_command_is_found_by_bm25_after_indexing` (temp `SearchIndex`, bm25 `search` on `quuxtool`). The live check, `sb oracle call knowledge_search --json '{"query":"<that command>","mode":"bm25"}'` after reindex, is owed after deploy. Nothing live was touched.
+
+## Phase 9: Eval harness for Parts 2 and 3
+### Design decisions
+- A fixture's optional `capture-note.txt` loads into `Fixture.capture_note`, trimmed, and is `None` when absent or blank (`borg/src/eval/fixtures.rs:read_capture_note`). A blank note counts as a bare capture, the same as on ingest. Staged fixtures always carry `None`.
+- `--synth-intents` lives in `borg/src/eval/intents.rs:synth_intents`. The writer sits behind the `IntentWriter` trait, and production uses `FabricIntentWriter`, which calls `vault::fabric::run_pattern` (the same seam the judges use) with a new pattern, `borg/patterns/synth-capture-intent.md`. The pattern is added to `bootstrap::PATTERNS`, which brings CLAUDE.md to 29 pattern files.
+- Notes go only to `INTENT_KINDS` = article, repo, session, thread, video, the kinds whose distill patterns take a capture note (Phase 10's list). Files open with `create_new`, so an existing note is never overwritten, even one that appears mid-run. A writer error stops the run. Notes already written stay, and a rerun picks up where it stopped.
+- `clean_intent` strips fences and wrapping quotes and collapses whitespace. An empty reply, or one over `MAX_INTENT_CHARS` (400), is an error and is never truncated into a note.
+- `--regenerate` lives in `borg/src/eval/regenerate.rs`. `redistill` (async, through an injected `distillers::Dispatch`) distills each fixture twice, without and then with its note. `grade` then runs the existing sync `evaluate` once per arm. The judges and the SQLite cache never live across an await. Production builds the dispatcher with `borg::stages::distill::dispatcher_from_fabric_config(&config.fabric)`, the same one the pipeline uses.
+- Both arms run over the same set: the fixtures that carry a `capture-note.txt`. Fixtures without one are skipped and counted, so the two arms' numbers compare directly (Phase 10's "no more unsupported with the note than without"). Both arms run uncalibrated, because the hand labels describe the golden distillations. If no fixture has a note, the run fails and points at `--synth-intents`. An unroutable kind label is an error (`distill_kind_for_fixture`).
+- The `tools-grounding` metric is `calc::tools_grounding`. Names come from `Distilled.tools` and are graded by the quote shingle rule (`piece_grounded`). A name with no words is ungrounded. Commands come from `distillers::tools_to_render` (made `pub` and re-exported), so a repo's `install` line counts. They are graded by `command_grounded`: an exact, case-sensitive substring after whitespace collapse on both sides. The `Install` label render gives that line is not graded as a name.
+- Report line: `tools-grounding: names g/n (p%), commands g/n (p%)  (k fixtures)`, plus per-kind rows and `LOW` rows (`report.rs:render_tools_grounding`). With no tools it prints `tools-grounding: N/A (no note renders a tool)`.
+- `judge_note_text` appends a `TOOLS:` block (name, URL, `: command`) built from `tools_to_render`, so the judge sees what the note renders.
+- Observed, golden fixtures, `cargo run -q -p sb -- borg eval --no-judge`:
+  ```
+    tools-grounding: names 0/0 (N/A), commands 2/2 (100.0%)  (2 fixtures)
+      repo       names 0/0 (N/A), commands 2/2 (100.0%)
+  ```
+- Observed, `cargo run -q -p sb -- borg eval --staged --no-judge` (1364 fixtures):
+  ```
+    tools-grounding: names 0/0 (N/A), commands 47/64 (73.4%)  (64 fixtures)
+      repo       names 0/0 (N/A), commands 47/64 (73.4%)
+  ```
+  Spot check: `repo/cl-05e26c9f` is ungrounded because its install is `git clone ... && cd ClaudeJSONLbrowser && npm install && npm run dev`, a chain the LLM assembled from separate README steps. That is the case the metric exists to flag.
+- `--synth-intents` live run: `synth-intents: 18 written, 0 already present (kept), 5 fixtures outside article/repo/session/thread/video`. 18 `capture-note.txt` files are committed: 5 article, 3 repo, 1 session, 3 thread, 6 video. None was hand-written or edited.
+- `--patterns-dir <DIR>` (orchestrator decision, answering open question 1: no deploy in the middle of the run). Every pattern the eval distills or judges through resolves from DIR. That covers the distill patterns behind `--regenerate`, `judge-distillation`, `judge-claims`, and the intent writer's `synth-capture-intent`. Phases 10 and 11 measure with `sb borg eval --regenerate --patterns-dir borg/patterns`.
+  - `borg/src/eval/patterns.rs:resolve_patterns_dir` tilde-expands and canonicalizes DIR at the boundary and requires it to be a directory.
+  - `pattern_in` maps a name to the absolute `DIR/<name>.md`, which must exist. A missing pattern is an error before fabric runs.
+  - `PatternDirFabric` wraps the `FabricCaller` and rewrites each request's pattern. `vault::fabric::resolve_pattern` passes the absolute path through.
+  - The dispatcher comes from `regenerate_dispatcher`, which calls the new generic `stages::distill::dispatcher_with_caller` (same per-kind config as production). The judges come from `eval::fabric_judges`, the writer from `eval::fabric_intent_writer`.
+  - With no flag, behavior is unchanged: names resolve through `vault::paths::patterns_dir()`. Live ingest still goes through `dispatcher_from_fabric_config` -> `FabricShell`, and that path is untouched.
+  - Tests: `eval::patterns::tests` (the dispatcher sends `DIR/distill-{article,repo,video,thread}.md` to fabric; a missing pattern never reaches fabric; the judges and writer resolve from DIR).
+### Deviations
+- The eval's fabric calls now pass borg's configured credential var. `EvalOpts.api_key` comes from `config.fabric.api_key`, and `FabricJudge::new` / `FabricClaimJudge::new` take it. Before this, they passed `""` and relied on fabric's own `.env`. On this host that `.env` has no `ANTHROPIC_API_KEY`, and `fabric` fails with `could not find vendor`, so neither the judges nor the intent writer could run. Same seam (`run_pattern`), now given the credential the pipeline already uses.
+- The design names no model flag for the intent writer. `--synth-intents` reuses `--judge-model`, and that flag's help now says it covers every eval fabric call.
+- To run the one-time synth before any deploy, I copied the single new file `borg/patterns/synth-capture-intent.md` into `~/.config/sb/patterns/`. It was a new file, nothing was overwritten, and it holds the same bytes `sb bootstrap --force` / `otto deploy` will write.
+- `--regenerate` was not run live: it means two full distills (map-reduce on the long videos) plus both judges for 18 fixtures. Its wiring is proven by `regenerate::tests::regenerate_distills_each_noted_fixture_twice_and_grades_both_arms`, which uses a fake `Dispatch` and the mock judges.
+### Tradeoffs
+- Regenerate's arms cover only note-bearing fixtures, not every fixture: a same-set comparison beats including image/voicenote/idea fixtures that would distill identically in both arms.
+- A hard 400-char ceiling on a synthesized note, with an error past it, instead of truncating: a truncated note is a hand-shaped note, and the design forbids those.
+- An eval-local `PatternDirFabric` wrapper vs threading a base dir into `vault::fabric::resolve_pattern`: the wrapper keeps live ingest's resolution untouched.
+### Open questions
+- RESOLVED (orchestrator): Phases 10 and 11 would have measured deployed patterns. Answer: no deploy in the middle of the run; add `--patterns-dir` (see Design decisions).
+- Pre-existing flake, unrelated to this phase, which hit one `otto ci` run: `cortex::sweep::tests::test_daemon_cold_tick_fires` takes only `serial_test::serial(xdg_data_home)`. The staged-proposal tests at `cortex/src/sweep/tests.rs:738` and `:790` take only `testutil::lock_env()` and redirect `XDG_DATA_HOME` through `empty_receipts_db()`. Two disjoint locks guard one env var. When they overlap, the cold tick opens another DB and surfaces 0. The fix is for all three to take the same lock. Left out of this phase's commit.

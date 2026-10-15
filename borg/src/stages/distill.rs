@@ -108,13 +108,25 @@ pub fn distill_kind_from_ingest(kind: IngestKind) -> Result<DistillKind> {
 /// callers go through `DistillStage::from_fabric_config`; tests build a
 /// `DistillStage::with_dispatcher` to inject a `FakeFabric`-driven one.
 pub fn dispatcher_from_fabric_config(config: &FabricConfig) -> Dispatcher<FabricShell> {
-    let fabric = FabricShell::with_max_tokens(config.binary.clone(), config.api_key.clone(), config.max_tokens);
+    dispatcher_with_caller(config, fabric_shell(config))
+}
+
+/// The production `FabricShell` for borg's FabricConfig (binary, credential
+/// var, output-token ceiling).
+pub fn fabric_shell(config: &FabricConfig) -> FabricShell {
+    FabricShell::with_max_tokens(config.binary.clone(), config.api_key.clone(), config.max_tokens)
+}
+
+/// A dispatcher configured from borg's FabricConfig around any caller, so a
+/// wrapper (e.g. the eval's pattern-dir override) gets the same per-kind
+/// model, char budget and timeout as production.
+pub fn dispatcher_with_caller<F: FabricCaller + Clone>(config: &FabricConfig, caller: F) -> Dispatcher<F> {
     let article_config = ArticleConfig {
         model: config.model.clone(),
         max_chars: config.max_content_chars,
         timeout_secs: config.timeout_secs,
     };
-    Dispatcher::new(fabric, article_config)
+    Dispatcher::new(caller, article_config)
 }
 
 /// Stage-2 entry point. Wraps the dispatcher with the IngestKind translation

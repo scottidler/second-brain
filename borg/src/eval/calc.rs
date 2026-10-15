@@ -193,6 +193,71 @@ pub fn quote_grounding(source: &str, distilled: &Distilled) -> (usize, usize) {
     (grounded, quoted)
 }
 
+/// Counts behind the `tools-grounding` metric for one note.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolsGrounding {
+    pub names_grounded: usize,
+    pub names: usize,
+    pub commands_grounded: usize,
+    pub commands: usize,
+}
+
+impl ToolsGrounding {
+    /// No tool to grade: the metric is N/A for this note.
+    pub fn is_empty(&self) -> bool {
+        self.names == 0 && self.commands == 0
+    }
+}
+
+/// `s` with every whitespace run collapsed to one space, ends trimmed.
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A command is grounded only when it occurs in the source as an exact,
+/// case-sensitive substring once both sides have their whitespace collapsed.
+/// No shingles and no lowercasing: `cargo test --release` against a source
+/// saying `cargo test release` is a different command, and a reader who pastes
+/// it gets a different result.
+pub fn command_grounded(source: &str, command: &str) -> bool {
+    command_in_collapsed_source(&collapse_whitespace(source), command)
+}
+
+fn command_in_collapsed_source(collapsed_source: &str, command: &str) -> bool {
+    let command = collapse_whitespace(command);
+    !command.is_empty() && collapsed_source.contains(&command)
+}
+
+/// Tools grounding: of the tools the note renders, how many names and commands
+/// the source backs. A name is grounded by the quote-grounding shingle rule (a
+/// name with no words is ungrounded); a command by [`command_grounded`].
+/// Commands come from `distillers::tools_to_render`, so a repo's `install` line
+/// counts; names come from `Distilled.tools` only, because the `Install` label
+/// render gives that line is not extracted text. Deterministic, zero judge calls.
+pub fn tools_grounding(source: &str, distilled: &Distilled) -> ToolsGrounding {
+    let source_words = grounding_words(source);
+    let source_shingles = shingles(&source_words);
+    let collapsed_source = collapse_whitespace(source);
+    let mut counts = ToolsGrounding::default();
+    for tool in distilled.tools.iter().filter(|t| !t.name.trim().is_empty()) {
+        counts.names += 1;
+        let name_words = grounding_words(&tool.name);
+        if !name_words.is_empty() && piece_grounded(&name_words, &source_words, &source_shingles) {
+            counts.names_grounded += 1;
+        }
+    }
+    for tool in distillers::tools_to_render(distilled) {
+        let Some(command) = tool.command.as_deref().filter(|c| !c.trim().is_empty()) else {
+            continue;
+        };
+        counts.commands += 1;
+        if command_in_collapsed_source(&collapsed_source, command) {
+            counts.commands_grounded += 1;
+        }
+    }
+    counts
+}
+
 /// Placeholder artifacts: LLM filler like `[not detailed in provided content]`
 /// anywhere in the summary, tldr, key ideas, or claims. Reuses the ingest
 /// gate's indicator list (`quality::detect_truncation_artifacts`). Returns one

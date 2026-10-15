@@ -1,0 +1,1 @@
+Pinning this for the Gemini config trick: temperature=0.0, top_p=0.0, seed=42 to get deterministic, factual extraction when turning docs into knowledge graphs (nodes/edges JSON) instead of creative output.

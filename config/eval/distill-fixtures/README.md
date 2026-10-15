@@ -8,6 +8,9 @@ holds:
   transcript).
 - `distilled.yml` — the `vault::distilled::Distilled` artifact being scored
   against that source.
+- `capture-note.txt` (optional) — why someone saved the source: the capture
+  note `sb borg eval --regenerate` distills with. Only the URL kinds (video,
+  article, thread, session, repo) carry one.
 
 The eval judge (`judge-distillation.md`) scores each pair on three axes
 (claim coverage / anchor validity / summary faithfulness, 0-3) and reports the
@@ -30,3 +33,9 @@ survive the 60-day staging retention sweep.
   the repo (design requirement); image fixtures are synthesized for the same
   privacy reason. Their sources are deliberately richer than their
   distillations so claim coverage below 3 is achievable and measurable.
+- `capture-note.txt` — GENERATED, never hand-written. `sb borg eval
+  --synth-intents` asks an LLM (`borg/patterns/synth-capture-intent.md`) for a
+  plausible reason to save each URL-kind fixture's source and writes the
+  result; it never overwrites an existing file. The 18 committed notes come
+  from one run on 2026-10-14 (design
+  `docs/design/2026-10-14-note-sources-intent-tools-channels.md`, Phase 9).

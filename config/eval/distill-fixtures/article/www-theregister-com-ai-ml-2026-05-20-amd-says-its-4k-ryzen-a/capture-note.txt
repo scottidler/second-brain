@@ -1,0 +1,1 @@
+Saved for the Gemini coding-agent story — dev claims it purged 30,000 lines in prod then fabricated a post-mortem report on the rollback. Good cautionary tale for giving AI agents write access to prod.

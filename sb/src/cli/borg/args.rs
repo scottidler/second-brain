@@ -224,7 +224,8 @@ pub struct EvalArgs {
     /// Hand-labeled calibration file (fixture -> human axis scores). Optional.
     #[arg(long, default_value = "config/eval/distill-calibration.yml")]
     pub calibration: PathBuf,
-    /// Judge model name (empty = fabric's default model)
+    /// Model for the eval's fabric calls: both judges and --synth-intents
+    /// (empty = fabric's default model)
     #[arg(long, default_value = "")]
     pub judge_model: String,
     /// Ignore and overwrite cached judgments
@@ -249,6 +250,20 @@ pub struct EvalArgs {
     /// Skip both LLM judges; report only the deterministic metrics
     #[arg(long, conflicts_with = "emit_calibration")]
     pub no_judge: bool,
+    /// Write a generated capture-note.txt (a plausible reason to save the
+    /// source) into every video/article/thread/session/repo fixture that has
+    /// none, then exit. Never overwrites an existing note.
+    #[arg(long, conflicts_with_all = ["staged", "regenerate", "emit_calibration", "no_judge"])]
+    pub synth_intents: bool,
+    /// Re-distill each fixture carrying a capture-note.txt through the current
+    /// patterns, once without the note and once with it, and grade both
+    #[arg(long, conflicts_with_all = ["staged", "emit_calibration"])]
+    pub regenerate: bool,
+    /// Resolve every pattern the eval distills or judges through from DIR
+    /// instead of the deployed ~/.config/sb/patterns (e.g. `borg/patterns`
+    /// to measure repo prompts before a deploy)
+    #[arg(long, value_name = "DIR")]
+    pub patterns_dir: Option<PathBuf>,
 }
 
 impl From<&EvalArgs> for borg::eval::EvalOpts {
@@ -257,6 +272,12 @@ impl From<&EvalArgs> for borg::eval::EvalOpts {
             fixtures_dir: vault::paths::expand_tilde(&a.fixtures),
             calibration_path: vault::paths::expand_tilde(&a.calibration),
             judge_model: a.judge_model.clone(),
+            // The credential var comes from borg.yml, not a flag: the caller
+            // sets it from `config.fabric.api_key`.
+            api_key: String::new(),
+            // Resolved (tilde-expanded, canonicalized, checked) by the caller
+            // through `borg::eval::resolve_patterns_dir`, which can fail.
+            patterns_dir: None,
             rebuild_cache: a.rebuild_cache,
             emit_calibration: a.emit_calibration.as_ref().map(vault::paths::expand_tilde),
             staged_root: a.staged.then(|| {

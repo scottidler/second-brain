@@ -324,7 +324,33 @@ impl BorgCli {
                 Ok(())
             }
             Some(Command::Eval(a)) => {
-                let opts = borg::eval::EvalOpts::from(&a);
+                let opts = borg::eval::EvalOpts {
+                    api_key: config.fabric.api_key.clone(),
+                    patterns_dir: a
+                        .patterns_dir
+                        .as_deref()
+                        .map(borg::eval::resolve_patterns_dir)
+                        .transpose()?,
+                    ..borg::eval::EvalOpts::from(&a)
+                };
+                if a.synth_intents {
+                    let writer = borg::eval::fabric_intent_writer(&opts)?;
+                    let report = borg::eval::synth_intents(&opts.fixtures_dir, &writer)?;
+                    print!("{}", report.render());
+                    return Ok(());
+                }
+                if a.regenerate {
+                    let dispatcher = borg::eval::regenerate_dispatcher(&config.fabric, &opts);
+                    let report = borg::eval::run_regenerate(&opts, &dispatcher).await?;
+                    let rendered = report.render();
+                    print!("{rendered}");
+                    if let Some(path) = a.report {
+                        std::fs::write(&path, &rendered)
+                            .with_context(|| format!("writing report to {}", path.display()))?;
+                        println!("\nreport written to {}", path.display());
+                    }
+                    return Ok(());
+                }
                 match borg::eval::run(&opts)? {
                     borg::eval::EvalOutcome::CalibrationSheet(path) => {
                         println!("wrote calibration sheet: {}", path.display());

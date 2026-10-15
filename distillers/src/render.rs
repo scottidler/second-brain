@@ -417,8 +417,9 @@ fn url_key(url: &str) -> String {
 
 /// The tools that render: `Distilled.tools` with a name, plus the repo
 /// payload's `install` line as an `Install` entry unless a tool already
-/// carries that exact command.
-fn tools_to_render(distilled: &Distilled) -> Vec<Tool> {
+/// carries that exact command. Public so `sb borg eval` grades and shows the
+/// judge exactly the tools the note renders.
+pub fn tools_to_render(distilled: &Distilled) -> Vec<Tool> {
     let mut tools: Vec<Tool> = distilled
         .tools
         .iter()

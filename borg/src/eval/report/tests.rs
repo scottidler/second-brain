@@ -62,6 +62,7 @@ fn stub_report(
         judged: true,
         new_claim_judgments: 0,
         grounding: vec![],
+        tools_grounding: vec![],
         artifacts: vec![],
         claim_support: vec![],
         claim_support_overall: ClaimSupport::empty(crate::eval::OVERALL_LABEL),
@@ -281,4 +282,55 @@ fn render_lists_only_listicle_shortfalls_past_the_list_limit() {
     let text = stub_report(listicle, Some(0.97), vec![]).render();
     assert!(text.contains("video/v03 0.500"), "{text}");
     assert!(!text.contains("video/v04"), "{text}");
+}
+
+#[test]
+fn render_prints_tools_grounding_totals_per_kind_and_low_rows() {
+    let mut report = stub_report(vec![], None, vec![]);
+    report.tools_grounding = vec![
+        ToolsGroundingMetric {
+            fixture: "repo/a".to_string(),
+            kind: "repo".to_string(),
+            counts: calc::ToolsGrounding {
+                names_grounded: 2,
+                names: 2,
+                commands_grounded: 1,
+                commands: 2,
+            },
+        },
+        ToolsGroundingMetric {
+            fixture: "video/b".to_string(),
+            kind: "video".to_string(),
+            counts: calc::ToolsGrounding {
+                names_grounded: 1,
+                names: 1,
+                commands_grounded: 0,
+                commands: 0,
+            },
+        },
+    ];
+    let text = report.render();
+    assert!(
+        text.contains("  tools-grounding: names 3/3 (100.0%), commands 1/2 (50.0%)  (2 fixtures)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("    repo       names 2/2 (100.0%), commands 1/2 (50.0%)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("    video      names 1/1 (100.0%), commands 0/0 (N/A)\n"),
+        "{text}"
+    );
+    assert!(text.contains("    LOW repo/a "), "{text}");
+    assert!(!text.contains("LOW video/b"), "{text}");
+}
+
+#[test]
+fn render_prints_tools_grounding_na_without_tools() {
+    let text = stub_report(vec![], None, vec![]).render();
+    assert!(
+        text.contains("  tools-grounding: N/A (no note renders a tool)\n"),
+        "{text}"
+    );
 }

@@ -1,0 +1,1 @@
+Saving for the architecture: runs Codex in the cloud on Cloudflare Firecracker boxes, offloads heavier test runs to "crabbox," and uses Ghostty via WebAssembly for the terminal — good reference for sandboxed cloud dev-agent setups.

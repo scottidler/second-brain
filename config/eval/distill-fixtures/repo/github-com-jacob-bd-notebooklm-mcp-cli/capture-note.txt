@@ -1,0 +1,1 @@
+Saved for wiring NotebookLM into agent workflows via MCP — 35 tools (notebook_create, source_add, studio_create, research_start, pipeline) plus `nlm setup add` auto-configures Claude/Cursor/Gemini. Note free tier caps at ~50 queries/day.

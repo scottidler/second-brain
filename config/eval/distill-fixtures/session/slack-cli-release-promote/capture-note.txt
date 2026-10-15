@@ -1,0 +1,1 @@
+Fixed our slack-cli release-promote orphaned-tag bug: don't tag before merge, and never use `git push --tags` — chain `git push origin main && git push origin vX.Y.Z` so a rejected branch push blocks the tag.

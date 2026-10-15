@@ -1,5 +1,7 @@
 //! Golden distillation fixtures: `(source, distilled)` pairs loaded from
-//! `config/eval/distill-fixtures/<kind>/<slug>/{source.md,distilled.yml}`.
+//! `config/eval/distill-fixtures/<kind>/<slug>/{source.md,distilled.yml}`,
+//! plus an optional `capture-note.txt` (the reason the source was saved, the
+//! capture note `sb borg eval --regenerate` distills with).
 //!
 //! The kind is the first path component; the slug is the second. `distilled.yml`
 //! deserializes into the canonical [`vault::distilled::Distilled`] contract, so
@@ -19,6 +21,9 @@ use vault::distilled::Distilled;
 const SOURCE_FILE: &str = "source.md";
 /// The distilled artifact inside each fixture directory.
 const DISTILLED_FILE: &str = "distilled.yml";
+/// The optional capture note inside each fixture directory, written by
+/// `sb borg eval --synth-intents`.
+pub const CAPTURE_NOTE_FILE: &str = "capture-note.txt";
 
 /// One golden fixture: a source and the distilled artifact scored against it.
 #[derive(Debug, Clone)]
@@ -34,6 +39,9 @@ pub struct Fixture {
     pub source: String,
     /// The distilled artifact being scored.
     pub distilled: Distilled,
+    /// The fixture's `capture-note.txt`, trimmed; `None` when the file is
+    /// absent or blank (a blank note is a bare capture, as on ingest).
+    pub capture_note: Option<String>,
 }
 
 /// Load every fixture under `dir`, sorted by id for deterministic output.
@@ -72,12 +80,14 @@ pub fn load(dir: &Path) -> Result<Vec<Fixture>> {
                 .with_context(|| format!("reading {}", distilled_path.display()))?;
             let distilled: Distilled =
                 serde_yaml::from_str(&raw).with_context(|| format!("parsing {}", distilled_path.display()))?;
+            let capture_note = read_capture_note(&slug_path)?;
             fixtures.push(Fixture {
                 id: format!("{kind}/{slug}"),
                 kind: kind.clone(),
                 slug,
                 source,
                 distilled,
+                capture_note,
             });
         }
     }
@@ -88,6 +98,18 @@ pub fn load(dir: &Path) -> Result<Vec<Fixture>> {
     }
     log::debug!("eval::fixtures::load: loaded {} fixtures", fixtures.len());
     Ok(fixtures)
+}
+
+/// The trimmed `capture-note.txt` of a fixture directory, `None` when absent or
+/// blank. A present file that cannot be read is an error.
+fn read_capture_note(fixture_dir: &Path) -> Result<Option<String>> {
+    let path = fixture_dir.join(CAPTURE_NOTE_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let trimmed = text.trim();
+    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
 }
 
 /// Per-trace files [`load_staged`] reads.
@@ -198,6 +220,7 @@ pub fn load_staged(root: &Path, sample: Option<usize>) -> Result<Vec<Fixture>> {
             slug: trace,
             source,
             distilled,
+            capture_note: None,
         });
     }
 
@@ -242,7 +265,8 @@ fn read_sorted(dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
 }
 
 /// Render the distilled artifact into the plain-text "note" the judge scores:
-/// the summary followed by each claim (text + trailing `[anchor]` when present).
+/// the summary, each claim (text + trailing `[anchor]` when present), then the
+/// tools the note renders (`distillers::tools_to_render`: name, URL, command).
 /// This is the same shape the judge would see in a published note's body, minus
 /// vault-specific decoration.
 pub fn judge_note_text(distilled: &Distilled) -> String {
@@ -260,6 +284,23 @@ pub fn judge_note_text(distilled: &Distilled) -> String {
             }
         }
         out.push('\n');
+    }
+    let tools = distillers::tools_to_render(distilled);
+    if !tools.is_empty() {
+        out.push_str("\nTOOLS:\n");
+        for tool in &tools {
+            out.push_str("- ");
+            out.push_str(tool.name.trim());
+            if let Some(url) = tool.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+                out.push(' ');
+                out.push_str(url);
+            }
+            if let Some(command) = tool.command.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+                out.push_str(": ");
+                out.push_str(command);
+            }
+            out.push('\n');
+        }
     }
     out
 }

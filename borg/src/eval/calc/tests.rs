@@ -318,3 +318,78 @@ fn quote_grounding_grounds_elided_quotes_piece_by_piece() {
     ]);
     assert_eq!(quote_grounding(source, &d), (1, 2));
 }
+
+fn with_tools(tools: &[(&str, Option<&str>)]) -> Distilled {
+    Distilled {
+        tools: tools
+            .iter()
+            .map(|(name, command)| vault::distilled::Tool {
+                name: name.to_string(),
+                url: None,
+                command: command.map(str::to_string),
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn command_with_flag_against_bare_word_source_is_ungrounded() {
+    let source = "Run cargo test release to check the build.";
+    assert!(!command_grounded(source, "cargo test --release"));
+    let counts = tools_grounding(source, &with_tools(&[("cargo", Some("cargo test --release"))]));
+    assert_eq!(counts.commands, 1);
+    assert_eq!(counts.commands_grounded, 0);
+}
+
+#[test]
+fn command_grounding_collapses_whitespace_but_keeps_case() {
+    let source = "Install it:\n\n    npm   install\n  -g granola-cli\n";
+    assert!(command_grounded(source, "npm install -g granola-cli"));
+    assert!(command_grounded(source, "npm install\n-g   granola-cli"));
+    assert!(!command_grounded(source, "NPM install -g granola-cli"));
+    assert!(!command_grounded(source, "   "));
+}
+
+#[test]
+fn tool_name_grounds_by_shingle_rule() {
+    let source = "We used the Granola CLI, then Smart Connections for Obsidian.";
+    let counts = tools_grounding(
+        source,
+        &with_tools(&[
+            ("granola-cli", None),
+            ("Smart Connections", None),
+            ("Dataview", None),
+            ("!!", None),
+        ]),
+    );
+    assert_eq!(counts.names, 4);
+    // "granola-cli" -> words [granola, cli] occur as a run; "Dataview" is absent;
+    // a name with no words is ungrounded.
+    assert_eq!(counts.names_grounded, 2);
+    assert_eq!(counts.commands, 0);
+}
+
+#[test]
+fn tools_grounding_counts_the_repo_install_line() {
+    let mut d = with_tools(&[]);
+    d.kind_specific = Some(vault::distilled::KindPayload::Repo(vault::distilled::RepoPayload {
+        install: Some("uv tool install notebooklm-mcp-cli".to_string()),
+        ..Default::default()
+    }));
+    let counts = tools_grounding("pip? no: uv tool install notebooklm-mcp-cli", &d);
+    assert_eq!(
+        counts,
+        ToolsGrounding {
+            names_grounded: 0,
+            names: 0,
+            commands_grounded: 1,
+            commands: 1,
+        }
+    );
+}
+
+#[test]
+fn tools_grounding_empty_without_tools() {
+    assert!(tools_grounding("anything", &Distilled::default()).is_empty());
+}

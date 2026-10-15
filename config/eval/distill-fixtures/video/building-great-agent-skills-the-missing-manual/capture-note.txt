@@ -1,0 +1,1 @@
+Talk gives an actual checklist for writing agent skills—trigger design, internal structure, steering the agent, and pruning to minimize size—plus points to his 'writing great skills' skill in his repo to apply it immediately.

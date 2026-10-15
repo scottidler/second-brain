@@ -35,7 +35,7 @@ pub use fabric::FakeFabric;
 pub use fabric::{FabricCaller, FabricRequest, FabricShell};
 pub use idea::IdeaDistiller;
 pub use image::{ImageConfig, ImageDistiller};
-pub use render::{RenderOptions, RenderedDistilled, render};
+pub use render::{RenderOptions, RenderedDistilled, render, tools_to_render};
 pub use repo::{RepoConfig, RepoDistiller, RepoMetadata};
 pub use session::{SessionConfig, SessionDistiller, SessionMetadata};
 pub use text::demote_headings;

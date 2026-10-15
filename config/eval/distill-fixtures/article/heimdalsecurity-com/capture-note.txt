@@ -1,0 +1,1 @@
+Heimdal's product/comparisons pages are useful if I ever need to benchmark their XDR+PAM platform against CrowdStrike, Huntress, or ThreatLocker for an MSP security stack decision.

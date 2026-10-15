@@ -1,0 +1,1 @@
+Saved for the 127.0.0.1-bound debug port puzzle — good reminder that localhost-only services inside a container aren't reachable from outside even if the container's network is published. Want the hands-on challenge link for practicing docker exec/debugging access.

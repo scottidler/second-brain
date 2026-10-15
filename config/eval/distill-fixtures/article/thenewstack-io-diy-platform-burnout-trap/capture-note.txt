@@ -1,0 +1,1 @@
+Saving this just for the Jaeger/ClickHouse piece claiming 8.6× compression on 10M spans — worth digging into for trace storage sizing. Rest of page is just TNS nav/newsletter cruft.

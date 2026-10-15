@@ -110,6 +110,9 @@ pub struct FabricJudge {
     pub binary: String,
     /// Model name; empty = fabric's default model.
     pub model: String,
+    /// Name of the env var (or file) holding the Anthropic credential; empty
+    /// leaves fabric on its own `.env`.
+    pub api_key: String,
     /// Fabric pattern name (resolved under `~/.config/sb/patterns/`).
     pub pattern: String,
     /// Truncation budget (chars) for the text sent to the judge.
@@ -119,12 +122,14 @@ pub struct FabricJudge {
 }
 
 impl FabricJudge {
-    /// A judge using the `judge-distillation` pattern and the given model
-    /// (empty string = fabric's default model).
-    pub fn new(model: impl Into<String>) -> Self {
+    /// A judge using the `judge-distillation` pattern, the given model (empty
+    /// string = fabric's default model) and credential var name (empty =
+    /// fabric's own `.env`).
+    pub fn new(model: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             binary: "fabric".to_string(),
             model: model.into(),
+            api_key: api_key.into(),
             pattern: "judge-distillation".to_string(),
             max_chars: DEFAULT_JUDGE_MAX_CHARS,
             timeout_secs: DEFAULT_JUDGE_TIMEOUT_SECS,
@@ -143,15 +148,11 @@ impl DistillationJudge for FabricJudge {
             note.len()
         );
         let input = format!("# KIND\n{kind}\n\n# SOURCE\n{source}\n\n# DISTILLED NOTE\n{note}\n");
-        // Eval-only path: no configured credential var is threaded here, so pass
-        // "" and let fabric fall back to its own .env (prior behavior). The
-        // daemon/harvest hot path routes through the borg/cortex FabricConfig
-        // wrapper, which carries the mirrored llm.api-key.
         let reply = vault::fabric::run_pattern(
             &self.pattern,
             &input,
             &self.binary,
-            "",
+            &self.api_key,
             &self.model,
             self.max_chars,
             self.timeout_secs,
@@ -291,16 +292,20 @@ impl ClaimJudge for MockClaimJudge {
 pub struct FabricClaimJudge {
     pub binary: String,
     pub model: String,
+    /// Name of the env var (or file) holding the Anthropic credential; empty
+    /// leaves fabric on its own `.env`.
+    pub api_key: String,
     pub pattern: String,
     pub max_chars: usize,
     pub timeout_secs: u64,
 }
 
 impl FabricClaimJudge {
-    pub fn new(model: impl Into<String>) -> Self {
+    pub fn new(model: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             binary: "fabric".to_string(),
             model: model.into(),
+            api_key: api_key.into(),
             pattern: "judge-claims".to_string(),
             max_chars: DEFAULT_JUDGE_MAX_CHARS,
             timeout_secs: DEFAULT_JUDGE_TIMEOUT_SECS,
@@ -333,7 +338,7 @@ impl ClaimJudge for FabricClaimJudge {
             &self.pattern,
             &input,
             &self.binary,
-            "",
+            &self.api_key,
             &self.model,
             self.max_chars,
             self.timeout_secs,

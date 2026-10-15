@@ -1,0 +1,1 @@
+Shows the exact problem git worktrees solve: mid-feature with uncommitted changes, urgent bug comes in, don't want to stash/lose progress. Good to revisit for the actual worktree commands to run parallel Claude Code/agentic sessions without branch-switching pain.

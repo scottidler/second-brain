@@ -176,6 +176,10 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
         include_str!("../../../borg/patterns/judge-relevance.md"),
     ),
     (
+        "synth-capture-intent.md",
+        include_str!("../../../borg/patterns/synth-capture-intent.md"),
+    ),
+    (
         "weekly-digest.md",
         include_str!("../../../borg/patterns/weekly-digest.md"),
     ),
