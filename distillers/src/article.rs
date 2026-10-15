@@ -248,7 +248,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
             claims,
             tags,
             links,
-            tools: Vec::new(),
+            tools: crate::parse::collect_tools(parsed.tools),
             kind_specific: None,
             meta: DistilledMeta {
                 extractor: ID.to_string(),
@@ -331,6 +331,9 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
         let mut combined_claims: Vec<Claim> = Vec::new();
         let mut combined_links: Vec<Link> = Vec::new();
         let mut combined_tags: Vec<String> = Vec::new();
+        // Tools pool across chunks and merge structurally, like links: the
+        // reduce step never sees the source, so it cannot copy a command verbatim.
+        let mut combined_tools: Vec<vault::distilled::Tool> = Vec::new();
         // Pool enumeration candidates for the reduce step (an
         // awesome-list article is a listicle too). Articles carry no anchors, so
         // candidate anchors are null.
@@ -376,6 +379,13 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
                     label: l.label.filter(|s| !s.is_empty()),
                 })
             }));
+            combined_tools.extend(
+                parsed
+                    .tools
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(crate::parse::PatternTool::into_tool),
+            );
             combined_tags.extend(
                 parsed
                     .tags
@@ -496,7 +506,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
             claims,
             tags: combined_tags,
             links: combined_links,
-            tools: Vec::new(),
+            tools: crate::parse::merge_tools(combined_tools),
             kind_specific: None,
             meta: DistilledMeta {
                 extractor: ID.to_string(),

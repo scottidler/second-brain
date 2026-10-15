@@ -1012,3 +1012,75 @@ async fn long_video_without_capture_note_has_no_note_block() {
     assert!(!input.contains("Operator Capture Note"));
     assert!(input.starts_with("## Chunk Summaries"));
 }
+
+#[tokio::test]
+async fn single_call_video_extracts_tools() {
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN_SHORT,
+        "summary: \"A tour of a search CLI.\"\nclaims: []\ntags: []\nlinks: []\n\
+         tools:\n  - name: \"ripgrep\"\n    url: \"https://github.com/BurntSushi/ripgrep\"\n    command: \"cargo install ripgrep\"\n\
+         \x20 - name: \"fzf\"\n    url: null\n    command: null\n",
+    );
+    let distilled = make_distiller(fake)
+        .distill(DistillInputs {
+            transcript: "[00:00:01] Install it with cargo install ripgrep and pair it with fzf.",
+            ..Default::default()
+        })
+        .await
+        .expect("distill");
+    let names: Vec<&str> = distilled.tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, vec!["ripgrep", "fzf"]);
+    assert_eq!(distilled.tools[0].command.as_deref(), Some("cargo install ripgrep"));
+    assert!(distilled.tools[1].command.is_none());
+}
+
+#[tokio::test]
+async fn long_video_merges_chunk_tools_structurally() {
+    // Every chunk returns the same tool; the merged result carries it once,
+    // and the reduce step (which emits no tools) cannot drop or rewrite it.
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    assert!(approx_tokens(transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+    let fake = std::sync::Arc::new(FakeFabric::new());
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary.\"\nclaims:\n  - text: \"Pool claim.\"\n    anchor: \"00:00:05\"\ntags: []\nlinks: []\n\
+         tools:\n  - name: \"etcd\"\n    url: \"https://etcd.io\"\n    command: \"etcdctl member list\"\n",
+    );
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Reduced.\"\nclaims:\n  - text: \"Pool claim.\"\n    anchor: \"00:00:05\"\n",
+    );
+    let distilled = VideoDistiller::new(fake.clone(), VideoConfig::default())
+        .distill(DistillInputs {
+            transcript: &transcript,
+            ..Default::default()
+        })
+        .await
+        .expect("distill");
+    let chunk_calls = fake.calls().iter().filter(|c| c.pattern == PATTERN_CHUNK).count();
+    assert!(chunk_calls >= 2, "map-reduce path ran: {chunk_calls} chunk calls");
+    assert_eq!(
+        distilled.tools,
+        vec![vault::distilled::Tool {
+            name: "etcd".to_string(),
+            url: Some("https://etcd.io".to_string()),
+            command: Some("etcdctl member list".to_string()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn video_without_tools_key_has_no_tools() {
+    let fake = FakeFabric::new();
+    fake.set_response(PATTERN_SHORT, "summary: \"No tools here.\"\nclaims: []\n");
+    let distilled = make_distiller(fake)
+        .distill(DistillInputs {
+            transcript: "[00:00:01] A talk about ideas.",
+            ..Default::default()
+        })
+        .await
+        .expect("distill");
+    assert!(distilled.tools.is_empty());
+}

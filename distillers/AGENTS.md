@@ -31,6 +31,7 @@ Per-kind Stage-2 processors that take a Stage-1 transcript (markitdown / VTT / t
 - **Transcript: set for Image/VoiceNote/Idea/Vocabulary + Video/Thread; `None` for Article/Repo.**
 - **Fabric calls respect `max_chars` + `timeout_secs`**, falling back to passthrough on timeout/error.
 - **The capture note reaches both paths.** Single-call inputs go through `parse::compose_capture_input`; map-reduce inputs through `parse::build_reduce_input` / `build_thread_reduce_input` (`note` arg). All three share one labeled "context only" block, and a blank note leaves the input byte-identical to a bare capture. Voice notes pass `None` (the operator's words are the content). Each note-taking pattern carries a `# CAPTURE NOTE` block.
+- **Tools are extracted, never composed.** The video, article and repo patterns (and the video/article chunk patterns) emit `tools:`; each `command` is copied verbatim from the source or left null (COMMAND-HONESTY RULE in the pattern). `parse::collect_tools` converts the single-call list; the long path pools every chunk's tools and merges them with `parse::merge_tools`, like links. Reduce patterns emit no tools: they never see the source, so they could not copy a command verbatim.
 
 ## Rendering
 

@@ -212,3 +212,52 @@
 - One identical block in 9 files vs. per-kind wording: identical text keeps the rule auditable with one `rg`. "tldr (when the schema has one)" covers the thread and session patterns, which have no tldr.
 ### Open questions
 - None.
+
+## Phase 11: Tools extraction prompts
+### Design decisions
+- `parse::PatternTool { name, url, command }` is the YAML leaf, with every field serde-defaulted. `into_tool` trims, turns an empty url or command into `None`, and drops a nameless tool. A `name: null` entry drops that one tool and does not fail the whole parse (`parse::tests::pattern_yaml_parses_tools_and_a_null_name_does_not_fail_the_parse`).
+- `parse::collect_tools` converts a single-call list. `parse::merge_tools` dedupes in first-seen order. A repeated command (whitespace-collapsed) only fills the earlier tool's missing URL. A same-name tool (case-insensitive) where either side has no command fills missing fields. One name with two different commands keeps both, because each is verbatim source text. Existing values are never overwritten.
+- `PatternYaml.tools` (shared video/article struct) and repo's own `PatternYaml.tools` feed `Distilled.tools` on the single-call paths (`video.rs:build_distilled`, `article.rs:distill_short`, `repo.rs:distill`).
+- Map-reduce (video, article `distill_long`): each chunk's tools are pooled and merged with `merge_tools`, the same structural merge links already get. The reduce patterns do not emit tools. Their existing "Do NOT produce tags or links" rule now names tools too, and says why: the reduce never sees the source, so it could not copy a command verbatim. So a long-path command is always one a chunk copied from the source, and no `ReduceYaml` change was needed.
+- Patterns: `distill-video`, `distill-article`, `distill-video-chunk`, `distill-article-chunk` and `distill-repo` gain a `tools:` schema entry and a `tools` rule. A tool is a named, usable thing, not a topic. The URL is set only when the source gives it, and a URL on a tool must not also appear in `links`. The COMMAND-HONESTY RULE: copy the command verbatim, or leave it null. Never compose a command from prose, never chain with `&&`/`;`/`|`, never join separate lines, never add or drop flags/sudo/versions/placeholders, never fix a typo. Several commands for one tool: copy the single most useful one.
+- `distill-repo`: the repository itself is not a `tools` entry. Its install stays in `install`, which is now "the ONE command that installs this project, copied VERBATIM", and the rule names the chained `git clone` + `cd` + `npm install` shape as forbidden. Phase 9's staged run found exactly that shape in `repo/cl-05e26c9f`. `install` counts toward `tools-grounding` through `tools_to_render`.
+- `distill-video` and `distill-video-chunk` add a "SPOKEN COMMANDS ARE NOT COMMANDS" sub-rule: speech-to-text writes "Git work tree add" for `git worktree add`, so a command read aloud gets `command: null`. Only a command written out as text in the input qualifies.
+- `eval::calc::tools_grounding` logs each ungrounded command at DEBUG (tool name plus command), so `-v` shows which command missed. I added it to diagnose attempt 3 and kept it for diagnosability.
+- distillers/AGENTS.md gains a "Tools are extracted, never composed" invariant.
+- Tests: 8 parse tests (trim and empty-to-None, nameless drop, null-name parse, absent key, fill from a later same-name tool, repeated command across chunks, two commands kept, no overwrite). Distiller tests: `video::tests::{single_call_video_extracts_tools, long_video_merges_chunk_tools_structurally, video_without_tools_key_has_no_tools}`, `article::tests::{single_call_article_extracts_tools, long_article_merges_chunk_tools_structurally}`, `repo::tests::repo_extracts_tools_beside_install`. Bite check: I replaced the video long-path `merge_tools(combined_tools)` with `Vec::new()`, and `long_video_merges_chunk_tools_structurally` failed (`panicked at distillers/src/video/tests.rs:1064`). It passes again after the revert.
+- Live runs. Each was a release build of this tree (`cargo build --release -p sb`, run as `./target/release/sb`). Coverage: `--regenerate` only covers fixtures with a `capture-note.txt`. For repo and video that is all 9 of them. Repo: github-com-brianpetro-obsidian-smart-connections, github-com-jacob-bd-notebooklm-mcp-cli, github-com-magarcia-granola-cli. Video: build-an-obsidian-system-not-a-second-brain, building-great-agent-skills-the-missing-manual, game-over-neovim, git-worktrees-for-agents-are-awesome, there-are-only-5-safe-places-to-build-in-ai-right-now-are-yo, top-10-claude-code-skills-plugins-clis-april-2026.
+  - Run 1, wording: the initial tools rules above, without the spoken-commands sub-rule. Command: `sb borg eval --regenerate --patterns-dir borg/patterns` over all 18 fixtures. No `tools-grounding:` line was printed. Every distill ran, but then the run died in the judge: `Error: judging fixture article/research-trychroma-com-context-rot ... judge reply missing axis 'claim.coverage': "{\"claim-coverage\":2,\"anchor-validity\":0,\"summary-faithfulness\":0}"` (exit 1). The judge returned kebab-case axis keys. This is a judge-reply flake, not the tools metric.
+  - Run 2, same wording as run 1. Command: `sb borg eval --regenerate --patterns-dir borg/patterns --fixtures <dir holding only the repo and video fixture dirs> --no-judge`. Exit 0.
+    ```
+    === without capture note ===
+      tools-grounding: names 76/80 (95.0%), commands 13/14 (92.9%)  (9 fixtures)
+        repo       names 28/28 (100.0%), commands 10/10 (100.0%)
+        video      names 48/52 (92.3%), commands 3/4 (75.0%)
+    === with capture note ===
+      tools-grounding: names 82/89 (92.1%), commands 14/16 (87.5%)  (9 fixtures)
+        repo       names 32/32 (100.0%), commands 10/10 (100.0%)
+        video      names 50/57 (87.7%), commands 4/6 (66.7%)
+    ```
+    Every ungrounded command came from `video/git-worktrees-for-agents-are-awesome`. Its source is an ASR transcript that says "Git work tree" and "UV run main.py", never a typed command, so any `git worktree ...` command is composed from speech.
+  - Run 3, wording change: the "SPOKEN COMMANDS ARE NOT COMMANDS" sub-rule added to `distill-video` and `distill-video-chunk`. Same command as run 2 plus `-v`. Exit 0.
+    ```
+    === without capture note ===
+      tools-grounding: names 73/78 (93.6%), commands 8/8 (100.0%)  (9 fixtures)
+        repo       names 27/27 (100.0%), commands 8/8 (100.0%)
+        video      names 46/51 (90.2%), commands 0/0 (N/A)
+    === with capture note ===
+      tools-grounding: names 78/83 (94.0%), commands 16/16 (100.0%)  (9 fixtures)
+        repo       names 32/32 (100.0%), commands 15/15 (100.0%)
+        video      names 46/51 (90.2%), commands 1/1 (100.0%)
+    ```
+    Commands are at 100% in both arms, so the criterion (>= 90% for commands) passes. The DEBUG log has no `ungrounded command` line. One `VideoDistiller: reduce yaml parse failed: did not find expected key at line 3 column 8` WARN fired. The reduce output carries no tools, and Phase 10's run logged the same class of reduce parse failure.
+### Deviations
+- The criterion command was `sb borg eval --regenerate --patterns-dir borg/patterns`. The passing runs added `--fixtures` pointing at a scratch directory that holds only the repo and video fixture dirs (symlinks to `config/eval/distill-fixtures/{repo,video}`, nothing committed), plus `--no-judge`. Why: the criterion names the repo and video fixtures, and `tools-grounding` is deterministic, so the judges cannot change it. The full run with judges lost its whole result to a judge-reply parse error (run 1).
+- The doc says the "chunk/reduce siblings extract tools". The chunk patterns extract them. The reduce patterns are told not to, and the code merges the chunk tools structurally, as it already does for links. Same effect, correct seam: a reduce never sees the source, so a reduce-emitted command could only be a copy or a rewrite of a chunk's.
+### Tradeoffs
+- Structural merge vs. a reduce-selected tool list with a pool-honesty gate: the structural merge cannot alter a command and needs no new reduce input section. The cost is that a long video keeps every tool any chunk named, up to the 20-tool bound in `validate.rs`.
+- One name with two different commands keeps two bullets vs. picking one: picking would drop verbatim source text, and the renderer handles repeated names.
+- The prompt makes `null` the normal command for videos. That gives fewer video commands (0 to 1 per arm in run 3) in exchange for no composed ones. The doc's Risks row ("The tools prompt invents install commands") is the failure this guards.
+### Open questions
+- Video tool *names* sit at 90.2% (5 ungrounded of 51 in each arm of run 3). The phase criterion covers commands only, and names were not tuned. I did not diagnose which names miss: the DEBUG line logs ungrounded commands only. The video sources are ASR transcripts (one says "Cloud Code" for Claude Code), so a canonical spelling may be the cause, but that is unconfirmed. Is the name rate worth its own pass?
+- The judge sometimes replies with kebab-case axis keys (`claim-coverage`), and a full `--regenerate` run then aborts and loses every distill. Should the judge parser absorb that drift with a WARN (the `ClaimKind` precedent), so a long run survives?

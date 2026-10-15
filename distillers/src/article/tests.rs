@@ -723,3 +723,51 @@ async fn long_article_reduce_input_carries_capture_note() {
     assert!(reduce_call.input.contains(note));
     assert!(reduce_call.input.contains("## Claim Pool"));
 }
+
+#[tokio::test]
+async fn single_call_article_extracts_tools() {
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN,
+        "summary: \"How to search code fast.\"\nclaims: []\ntags: []\nlinks: []\n\
+         tools:\n  - name: \"ripgrep\"\n    url: null\n    command: \"brew install ripgrep\"\n",
+    );
+    let distilled = make_distiller(fake)
+        .distill(DistillInputs {
+            transcript: "Run `brew install ripgrep` first.",
+            ..Default::default()
+        })
+        .await
+        .expect("distill");
+    assert_eq!(distilled.tools.len(), 1);
+    assert_eq!(distilled.tools[0].name, "ripgrep");
+    assert_eq!(distilled.tools[0].command.as_deref(), Some("brew install ripgrep"));
+}
+
+#[tokio::test]
+async fn long_article_merges_chunk_tools_structurally() {
+    let transcript = article_with_late_fact();
+    let fake = std::sync::Arc::new(FakeFabric::new());
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary.\"\nclaims:\n  - text: \"Pooled claim.\"\n    anchor: null\ntags: []\nlinks: []\n\
+         tools:\n  - name: \"jq\"\n    url: null\n    command: null\n",
+    );
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Reduced.\"\nclaims:\n  - text: \"Pooled claim.\"\n    anchor: null\n",
+    );
+    let distilled = ArticleDistiller::new(fake.clone(), ArticleConfig::default())
+        .distill(DistillInputs {
+            transcript: &transcript,
+            ..Default::default()
+        })
+        .await
+        .expect("distill");
+    assert!(
+        fake.calls().iter().any(|c| c.pattern == PATTERN_REDUCE),
+        "long path ran"
+    );
+    let names: Vec<&str> = distilled.tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, vec!["jq"], "chunk tools merged once");
+}

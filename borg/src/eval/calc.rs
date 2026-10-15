@@ -253,6 +253,8 @@ pub fn tools_grounding(source: &str, distilled: &Distilled) -> ToolsGrounding {
         counts.commands += 1;
         if command_in_collapsed_source(&collapsed_source, command) {
             counts.commands_grounded += 1;
+        } else {
+            log::debug!("tools_grounding: ungrounded command for '{}': {command:?}", tool.name);
         }
     }
     counts

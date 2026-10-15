@@ -5,7 +5,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use vault::distilled::{Claim, ClaimKind, EnumeratedItem, Enumeration};
+use vault::distilled::{Claim, ClaimKind, EnumeratedItem, Enumeration, Tool};
 
 /// ~4 chars per token (English-prose rule of thumb); good enough for budget
 /// reporting.
@@ -483,6 +483,90 @@ pub struct PatternLink {
     pub url: String,
     #[serde(default)]
     pub label: Option<String>,
+}
+
+/// One `tools:` entry as a single-call or chunk pattern emits it. Every field
+/// is serde-defaulted, so a `name: null` or a missing `url` drops one tool
+/// in [`collect_tools`] instead of failing the whole distillation's parse.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PatternTool {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+impl PatternTool {
+    /// Convert into the canonical `Tool`, trimming every field and turning an
+    /// empty `url` / `command` into `None`. Returns `None` for an empty name: a
+    /// tool with no name renders nothing.
+    pub fn into_tool(self) -> Option<Tool> {
+        let name = self.name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())?;
+        Some(Tool {
+            name,
+            url: self.url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            command: self.command.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        })
+    }
+}
+
+/// Convert a pattern's parsed `tools:` list into canonical tools, dropping
+/// nameless entries, then [`merge_tools`]. An absent list is no tools.
+pub fn collect_tools(parsed: Option<Vec<PatternTool>>) -> Vec<Tool> {
+    merge_tools(
+        parsed
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(PatternTool::into_tool),
+    )
+}
+
+/// Merge a tool list, first-seen order, the structural merge the map-reduce
+/// path applies to the tools every chunk extracted (the reduce step never sees
+/// the source, so it cannot copy a command verbatim and does not emit tools).
+///
+/// - A tool whose command (whitespace-collapsed) matches an earlier tool's is
+///   the same command seen twice: it only fills the earlier one's missing URL.
+/// - A tool whose name matches an earlier one (case-insensitive) where either
+///   side has no command is the same tool: it fills the earlier one's missing
+///   URL and command.
+/// - Same name with two different commands keeps both entries: each command is
+///   verbatim source text, and choosing one would drop the other.
+pub fn merge_tools(tools: impl IntoIterator<Item = Tool>) -> Vec<Tool> {
+    let mut merged: Vec<Tool> = Vec::new();
+    for tool in tools {
+        let command_key = tool.command.as_deref().map(collapse_whitespace);
+        let same_command = command_key.as_ref().and_then(|key| {
+            merged
+                .iter()
+                .position(|m| m.command.as_deref().map(collapse_whitespace).as_ref() == Some(key))
+        });
+        let target = same_command.or_else(|| {
+            merged.iter().position(|m| {
+                m.name.to_lowercase() == tool.name.to_lowercase() && (m.command.is_none() || tool.command.is_none())
+            })
+        });
+        match target {
+            Some(idx) => {
+                let existing = &mut merged[idx];
+                if existing.url.is_none() {
+                    existing.url = tool.url;
+                }
+                if existing.command.is_none() {
+                    existing.command = tool.command;
+                }
+            }
+            None => merged.push(tool),
+        }
+    }
+    merged
+}
+
+/// `s` with every whitespace run collapsed to one space, ends trimmed.
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// One enumerated item as a single-call / reduce pattern emits it.
@@ -967,6 +1051,10 @@ pub struct PatternYaml {
     /// chunk that enumerated nothing.
     #[serde(default)]
     pub enumeration_candidates: Option<Vec<PatternEnumCandidate>>,
+    /// Tools and commands the source names, single-call and chunk paths
+    /// (video / article). Absent for every pattern that does not extract them.
+    #[serde(default)]
+    pub tools: Option<Vec<PatternTool>>,
 }
 
 #[cfg(test)]

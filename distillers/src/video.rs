@@ -242,6 +242,9 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
         let mut combined_claims: Vec<Claim> = Vec::new();
         let mut combined_links: Vec<Link> = Vec::new();
         let mut combined_tags: Vec<String> = Vec::new();
+        // Tools pool across chunks and merge structurally, like links: the
+        // reduce step never sees the source, so it cannot copy a command verbatim.
+        let mut combined_tools: Vec<vault::distilled::Tool> = Vec::new();
         // Pool enumeration candidates across chunks for the reduce step,
         // and carry the first declared count any chunk saw (stated once, in the
         // intro chunk).
@@ -290,6 +293,13 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
             }));
             // Union chunk tags (was dropped entirely - long videos lost ALL
             // distiller tags). Deduped below; enforce_bounds caps at 7.
+            combined_tools.extend(
+                parsed
+                    .tools
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(crate::parse::PatternTool::into_tool),
+            );
             combined_tags.extend(
                 parsed
                     .tags
@@ -421,7 +431,7 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
             claims,
             tags: combined_tags,
             links: combined_links,
-            tools: Vec::new(),
+            tools: crate::parse::merge_tools(combined_tools),
             kind_specific: None,
             meta: DistilledMeta {
                 extractor: ID.to_string(),
@@ -504,6 +514,8 @@ fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str
         })
         .collect();
 
+    let tools = crate::parse::collect_tools(parsed.tools);
+
     let word_count = transcript.split_whitespace().count();
     if claims.is_empty() && word_count > 500 {
         log::warn!("VideoDistiller: empty claims for transcript with {word_count} words (possible pattern drift)");
@@ -531,7 +543,7 @@ fn build_distilled(parsed: PatternYaml, transcript: &str, raw: &str, model: &str
         claims,
         tags,
         links,
-        tools: Vec::new(),
+        tools,
         kind_specific: None,
         meta: DistilledMeta {
             extractor: ID.to_string(),

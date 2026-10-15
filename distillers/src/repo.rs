@@ -7,7 +7,7 @@
 //! API at fetch time; the LLM only contributes `summary`, `claims`, and the
 //! `install` hint.
 
-use crate::parse::{PatternClaim, PatternEnumeration, PatternLink, approx_tokens, strip_fences};
+use crate::parse::{PatternClaim, PatternEnumeration, PatternLink, PatternTool, approx_tokens, strip_fences};
 use async_trait::async_trait;
 use chrono::Utc;
 use eyre::Result;
@@ -207,7 +207,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for RepoDistiller<F> {
             claims,
             tags,
             links,
-            tools: Vec::new(),
+            tools: crate::parse::collect_tools(parsed.tools),
             kind_specific: None,
             meta: DistilledMeta {
                 extractor: ID.to_string(),
@@ -286,6 +286,10 @@ struct PatternYaml {
     enumeration: Option<PatternEnumeration>,
     #[serde(default)]
     key_ideas: Option<Vec<String>>,
+    /// Tools and commands the README names. Serde-defaulted so a pre-tools
+    /// `distill-repo` output parses.
+    #[serde(default)]
+    tools: Option<Vec<PatternTool>>,
 }
 #[cfg(test)]
 mod tests;

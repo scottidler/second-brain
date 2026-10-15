@@ -339,3 +339,28 @@ async fn single_call_repo_populates_enumeration_and_strips_item_anchors() {
     assert_eq!(distilled.key_ideas.len(), 1);
     assert!(!distilled.meta.validation.enumeration_shortfall);
 }
+
+#[tokio::test]
+async fn repo_extracts_tools_beside_install() {
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN,
+        "summary: \"A CLI for notebooks.\"\nclaims: []\ntags: []\nlinks: []\n\
+         install: \"pipx install nlm\"\n\
+         tools:\n  - name: \"uv\"\n    url: \"https://github.com/astral-sh/uv\"\n    command: \"uv tool install nlm\"\n\
+         \x20 - name: \"\"\n    command: \"dropped\"\n",
+    );
+    let distilled = make_distiller(fake)
+        .distill(DistillInputs {
+            transcript: "pipx install nlm\nor: uv tool install nlm",
+            ..Default::default()
+        })
+        .await
+        .expect("distill");
+    assert_eq!(distilled.tools.len(), 1, "nameless tool dropped: {:?}", distilled.tools);
+    assert_eq!(distilled.tools[0].command.as_deref(), Some("uv tool install nlm"));
+    let Some(KindPayload::Repo(payload)) = distilled.kind_specific else {
+        panic!("expected install-only Repo payload");
+    };
+    assert_eq!(payload.install.as_deref(), Some("pipx install nlm"));
+}
