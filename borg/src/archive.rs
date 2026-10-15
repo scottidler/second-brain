@@ -130,5 +130,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ArchiveError> {
     })
 }
 
+pub mod backfill;
+
 #[cfg(test)]
 mod tests;

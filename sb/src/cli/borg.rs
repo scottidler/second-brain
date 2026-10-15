@@ -250,6 +250,28 @@ impl BorgCli {
                     }
                     Ok(())
                 }
+                RetentionAction::Archive { apply } => {
+                    let report = borg::archive::backfill::run(&config, apply)?;
+                    let verb = if apply { "copied" } else { "to copy" };
+                    println!(
+                        "Scanned {} staged traces: {} {verb}, {} already archived, {} sessions skipped, {} failed",
+                        report.scanned,
+                        report.to_copy.len(),
+                        report.already_archived,
+                        report.skipped_session,
+                        report.failed.len()
+                    );
+                    for trace in &report.to_copy {
+                        println!("  {verb}: {trace}");
+                    }
+                    for (trace, reason) in &report.failed {
+                        eprintln!("  failed: {trace}: {reason}");
+                    }
+                    if !report.failed.is_empty() {
+                        eyre::bail!("{} staged traces could not be archived", report.failed.len());
+                    }
+                    Ok(())
+                }
                 RetentionAction::Status => {
                     let report = borg::retention::status(&config)?;
                     println!("Staging root:   {}", report.root.display());

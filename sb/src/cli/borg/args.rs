@@ -417,6 +417,12 @@ pub enum RetentionAction {
         #[arg(long)]
         sidecars_only: bool,
     },
+    /// Copy staged traces that have no source archive yet (dry run by default)
+    Archive {
+        /// Write the archive; without it, only report what would be copied
+        #[arg(long)]
+        apply: bool,
+    },
     /// Report trace counts and disk usage
     Status,
 }

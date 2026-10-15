@@ -36,3 +36,18 @@
 - Archive-first falls back to staging when the archived `distilled.yml` has no transcript, rather than treating an archive hit as final: the staged copy is the same bytes when present, and the fallback costs one read.
 ### Open questions
 - None.
+
+## Phase 3: Archive backfill verb
+### Design decisions
+- `borg::archive::backfill::run(config, apply) -> BackfillReport` (borg/src/archive/backfill.rs) walks `staging.root`, and for each trace dir holding `distilled.yml` and no durable archive, builds a `SourceArchive` and calls `.write()`. It is the same writer the live publish seam uses, so the per-kind file layout lives in one place.
+- Kind comes from the staged `distilled.yml`'s `meta.extractor` (`distill-repo-v1`, `distill-thread-v1`, `distill-session-v1`). Repo and thread take the staged `transcript.md` as `source_md`; repo falls back to `readme_from_stage0` on `fetched.html` (the Resolved Decision's order); session is skipped and counted; everything else archives `distilled.yml` alone.
+- "No archive dir yet" is `archive::is_durable` (archived `distilled.yml` exists), so an existing complete archive is never rewritten, and a crash-partial dir (only `transcript.md`) gets completed.
+- Unreadable or unparseable staged `distilled.yml` is collected in `failed` and printed; the CLI exits non-zero after processing the rest, rather than silently skipping.
+- CLI: `sb borg retention archive [--apply]`, dry-run by default (sb/src/cli/borg.rs, args.rs).
+### Deviations
+- The ripr success criterion (`fd ... | wc -l` >= 1,361 after `--apply`) is an operator step and is not run here. Covered by unit tests: dry run reports N to copy and writes nothing, `--apply` copies them, a second run reports 0 to copy.
+### Tradeoffs
+- Kind detection by extractor id vs. inferring from file presence: the extractor id is explicit; file-presence would archive Stage-1 `transcript.md` for article traces too, which the live path does not.
+- A repo whose `fetched.html` has no readme gets `distilled.yml` alone, as the live path does when the README is unavailable, rather than failing the trace.
+### Open questions
+- Operator step still owed: run `sb borg retention archive --apply` on ripr before anyone runs `sb borg retention sweep`.
