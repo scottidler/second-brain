@@ -58,3 +58,12 @@ fn test_different_methods_different_prefix() {
     assert!(tg.starts_with("tg-"));
     assert!(dc.starts_with("dc-"));
 }
+
+#[test]
+fn dir_joins_a_plain_trace_and_rejects_traversal() {
+    let root = Path::new("/data/sources");
+    assert_eq!(dir(root, "tg-1a2b3c4d"), Some(root.join("tg-1a2b3c4d")));
+    for bad in ["", ".", "..", "../etc", "a/b", "/abs", "a/"] {
+        assert_eq!(dir(root, bad), None, "{bad:?} must not resolve");
+    }
+}

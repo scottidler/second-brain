@@ -43,6 +43,18 @@ pub struct Config {
         deserialize_with = "vault::paths::deserialize_tilde_pathbuf"
     )]
     pub staging_root: PathBuf,
+    /// Root of borg's durable per-trace source archive
+    /// (2026-10-14-note-sources-intent-tools-channels). The embed loop reads a
+    /// Video/Article transcript from `<archive-root>/<trace>/distilled.yml`
+    /// FIRST and falls back to `staging-root`, so a trace swept out of staging
+    /// still embeds. Defaults to borg's `archive.root` default,
+    /// `vault::paths::borg_sources_dir()`. Read-only here; borg is the sole
+    /// writer. Same explicit `rename` reason as `staging-root`.
+    #[serde(
+        rename = "archive-root",
+        deserialize_with = "vault::paths::deserialize_tilde_pathbuf"
+    )]
+    pub archive_root: PathBuf,
 }
 
 impl Default for Config {
@@ -64,6 +76,7 @@ impl Default for Config {
             entities: EntitiesConfig::default(),
             tags: TagsSection::default(),
             staging_root: vault::paths::borg_stages_dir(),
+            archive_root: vault::paths::borg_sources_dir(),
         }
     }
 }

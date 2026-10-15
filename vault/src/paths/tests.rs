@@ -121,6 +121,22 @@ fn dir_size_of_missing_dir_is_zero() {
 }
 
 #[test]
+fn borg_sources_dir_sits_beside_staging_not_inside_it() {
+    let sources = borg_sources_dir();
+    assert!(
+        sources.ends_with("sb/borg/sources"),
+        "borg_sources_dir() = {}",
+        sources.display()
+    );
+    let stages = borg_stages_dir();
+    assert_eq!(sources.parent(), stages.parent());
+    assert!(
+        !sources.starts_with(&stages),
+        "the archive must live outside the swept staging root"
+    );
+}
+
+#[test]
 fn oracle_paths_land_under_the_sb_data_namespace() {
     // R1: the oracle DB moved from `~/.local/share/oracle/` into the same
     // `sb/` namespace borg's data already lives in. `legacy_oracle_dir` is

@@ -316,3 +316,61 @@ async fn queue_route_db_error_is_500_not_idle() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn trace_route_reports_source_durable_from_the_archive() {
+    let data_home = tempfile::TempDir::new().expect("tempdir");
+    let archive_root = tempfile::TempDir::new().expect("archive");
+    with_xdg_data_home(data_home.path(), || async {
+        let conn = crate::receipts::open_default().expect("open receipts");
+        for trace in ["tr-archived", "tr-staged-only"] {
+            crate::receipts::record_received(
+                &conn,
+                trace,
+                vault::schema::Method::Http,
+                vault::receipts::ReceiptKind::Url,
+                "https://example.com/a",
+            )
+            .expect("record");
+        }
+        drop(conn);
+        let distilled = vault::distilled::Distilled::default();
+        crate::archive::SourceArchive {
+            root: archive_root.path(),
+            trace_id: "tr-archived",
+            distilled: &distilled,
+            source_md: None,
+        }
+        .write()
+        .expect("archive");
+
+        let router = || {
+            let mut config = Config::default();
+            config.archive.root = archive_root.path().to_path_buf();
+            test_router_with_auth(config, None)
+        };
+
+        let durable = router()
+            .oneshot(get_queue("/trace/tr-archived", None))
+            .await
+            .expect("response");
+        assert_eq!(durable.status(), StatusCode::OK);
+        let json = body_json(durable).await;
+        assert_eq!(json["found"], serde_json::json!(true));
+        assert_eq!(json["source-durable"], serde_json::json!(true), "{json}");
+
+        let staged_only = router()
+            .oneshot(get_queue("/trace/tr-staged-only", None))
+            .await
+            .expect("response");
+        assert_eq!(body_json(staged_only).await["source-durable"], serde_json::json!(false));
+
+        let unknown = router()
+            .oneshot(get_queue("/trace/tr-unknown", None))
+            .await
+            .expect("response");
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(unknown).await["source-durable"], serde_json::json!(false));
+    })
+    .await;
+}

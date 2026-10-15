@@ -651,6 +651,70 @@ fn mark_embedding_examined_batch_upsert_advances_watermark() {
 }
 
 #[test]
+fn sentinelled_notes_lists_only_currently_excluded_rows_and_clear_requalifies() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-test-v1");
+    insert_note(&index, "notes/held.md", "video", 100);
+    insert_note(&index, "notes/bumped.md", "video", 300);
+    index
+        .conn
+        .execute("UPDATE notes SET trace = 'tr-held' WHERE path = 'notes/held.md'", [])
+        .expect("trace");
+    index
+        .mark_embedding_examined_batch(
+            EmbeddingKind::TranscriptChunk,
+            m.model_version(),
+            &[("notes/held.md".into(), 100), ("notes/bumped.md".into(), 200)],
+        )
+        .expect("mark");
+
+    // bumped.md's note advanced past its watermark: not held, not listed.
+    let held = index
+        .sentinelled_notes(EmbeddingKind::TranscriptChunk, m.model_version())
+        .expect("list");
+    assert_eq!(
+        held,
+        vec![ExaminedNote {
+            note_path: "notes/held.md".into(),
+            note_type: "video".into(),
+            trace: "tr-held".into(),
+            examined_at: 100,
+        }]
+    );
+    // Another kind or model sees nothing.
+    assert!(
+        index
+            .sentinelled_notes(EmbeddingKind::Summary, m.model_version())
+            .expect("other kind")
+            .is_empty()
+    );
+
+    index
+        .clear_embedding_examined_batch(
+            EmbeddingKind::TranscriptChunk,
+            m.model_version(),
+            &["notes/held.md".into()],
+        )
+        .expect("clear");
+    assert_eq!(
+        index
+            .examined_watermark("notes/held.md", EmbeddingKind::TranscriptChunk, m.model_version())
+            .expect("watermark"),
+        None
+    );
+    let stale = index
+        .stale_embedding_targets(EmbeddingKind::TranscriptChunk, m.model_version(), 100)
+        .expect("stale");
+    assert!(
+        stale.iter().any(|t| t.note_path == "notes/held.md"),
+        "a cleared sentinel re-qualifies the note"
+    );
+    index
+        .clear_embedding_examined_batch(EmbeddingKind::TranscriptChunk, m.model_version(), &[])
+        .expect("empty clear is a no-op");
+}
+
+#[test]
 fn rrf_fuses_two_rank_lists_correctly() {
     let bm25 = vec![
         "notes/a.md".to_string(),

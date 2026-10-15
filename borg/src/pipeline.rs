@@ -692,6 +692,10 @@ async fn process_url_inner(
     // for URL kinds; image/audio/text/vocab paths still flow through the
     // older `summary: String` field unchanged.
     let mut slide_payload: Option<SlidePayload> = None;
+    // The source text the archive needs beside `distilled.yml` for the kinds
+    // whose `Distilled.transcript` does not carry it: the repo README and the
+    // thread markdown. Video and article leave it `None`.
+    let mut archive_source_md: Option<String> = None;
     let (title, scraped_title, distilled, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
         let yt_result = process_youtube(&url_match.url, config, trace_id, capture_note).await?;
         slide_payload = yt_result.slide_payload;
@@ -801,7 +805,7 @@ async fn process_url_inner(
         // else → article distiller. The repo path uses `article_md` only as
         // a fallback when the GitHub API call fails.
         let distilled = if github_repo.is_some() {
-            crate::stages::distill::distill_for_publish_repo(
+            let repo = crate::stages::distill::distill_for_publish_repo(
                 &config.fabric,
                 &config.staging,
                 config.pipeline.github_timeout,
@@ -810,8 +814,11 @@ async fn process_url_inner(
                 &article_md,
                 capture_note,
             )
-            .await
+            .await;
+            archive_source_md = repo.readme_transcript;
+            repo.distilled
         } else if is_thread {
+            archive_source_md = Some(article_md.clone());
             crate::stages::distill::distill_for_publish_thread(
                 &config.fabric,
                 &config.staging,
@@ -1069,7 +1076,16 @@ async fn process_url_inner(
     // overwritten; any other existing note keeps its file and this one lands
     // at `-2`, `-3`, ... The vault dirs make a name taken vault-wide.
     let vault_dirs = [vault_root_resolved.join("notes"), vault_root_resolved.join("inbox")];
-    let note_path = match atomic::publish_unique(
+    // The source archive is written first and fails closed: no archive, no
+    // note. Independent of `staging.enabled`.
+    let archive = crate::archive::SourceArchive {
+        root: &config.archive.root,
+        trace_id,
+        distilled: &distilled,
+        source_md: archive_source_md.as_deref(),
+    };
+    let note_path = match archive_then_publish(
+        &archive,
         &desired_path,
         final_str.as_bytes(),
         old_path_to_delete.as_deref(),
@@ -1077,17 +1093,8 @@ async fn process_url_inner(
     ) {
         Ok(path) => path,
         Err(e) => {
-            log::error!("[{trace_id}] atomic publish failed: {e:#}");
-            return Ok(IngestResult {
-                status: IngestStatus::Failed {
-                    reason: format!("Failed to atomically publish note: {e:#}"),
-                },
-                method: Some(method),
-                canonical_url: Some(canonical.clone()),
-                trace_id: Some(trace_id.to_string()),
-                failure_stage: Some(FailureStage::PublishFailed),
-                ..Default::default()
-            });
+            log::error!("[{trace_id}] publish failed: {e}");
+            return Ok(publish_failure_result(&e, method, &canonical, trace_id));
         }
     };
     if note_path != desired_path {

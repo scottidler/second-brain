@@ -60,6 +60,15 @@ embed:
 # remains the sole staging writer.
 # staging-root: ~/.local/share/sb/borg/stages
 
+# Root of borg's durable per-trace source archive. The embed loop reads a
+# Video/Article transcript from <archive-root>/<trace>/distilled.yml FIRST and
+# falls back to staging-root only when the archive has none, so a trace swept
+# out of staging still embeds. A note skipped for "no transcript source" is
+# retried once its archive dir appears (an archive backfill revives it).
+# Defaults to borg's own default (~/.local/share/sb/borg/sources); only set
+# this if you overrode `archive.root` in borg.yml. Read-only here.
+# archive-root: ~/.local/share/sb/borg/sources
+
 # Tag sweep / proposal scan.
 sweep:
   # Read open-vocabulary tag candidates from borg's staged distilled.yml files

@@ -148,6 +148,7 @@ pub struct Config {
     pub vision: VisionConfig,
     pub tags: TagsConfig,
     pub staging: StagingConfig,
+    pub archive: ArchiveConfig,
     pub youtube: YoutubeConfig,
     pub extension: ExtensionConfig,
     #[serde(default)]
@@ -886,6 +887,29 @@ impl Default for StagingConfig {
             max_size_gb: 20,
             size_alert_threshold_pct: 80,
             double_write: true,
+        }
+    }
+}
+
+/// The `archive:` block of `borg.yml`: the durable per-trace source archive
+/// (`crate::archive`). Every distilled URL ingest writes
+/// `<root>/<trace>/distilled.yml` plus the source the distiller saw BEFORE
+/// the vault note, whatever `staging.enabled` says, and a failed write fails
+/// the trace `publish-failed`. Nothing sweeps it. Deliberately not under
+/// `staging:` so the retention sweep and its window never reach it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ArchiveConfig {
+    /// Root directory; per-trace directories hang off it. cortex's top-level
+    /// `archive-root` must name the same directory.
+    #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
+    pub root: PathBuf,
+}
+
+impl Default for ArchiveConfig {
+    fn default() -> Self {
+        Self {
+            root: vault::paths::borg_sources_dir(),
         }
     }
 }

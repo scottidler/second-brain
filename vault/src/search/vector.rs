@@ -122,6 +122,18 @@ pub struct StaleTarget {
     pub trace: String,
 }
 
+/// One note the examined sentinel currently holds out of the stale set for a
+/// kind/model (`examined_at >= notes.modified_at`). Cortex reads these to
+/// revive notes whose transcript source appeared after they were sentinelled
+/// (the durable source archive, 2026-10-14-note-sources-intent-tools-channels).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExaminedNote {
+    pub note_path: String,
+    pub note_type: String,
+    pub trace: String,
+    pub examined_at: i64,
+}
+
 /// Validate that a stored embedding BLOB matches its declared `dim`.
 ///
 /// `bytes.len()` must equal `dim * 4` (little-endian f32). Returns a
@@ -798,6 +810,64 @@ impl SearchIndex {
             params![note_path, kind.as_str(), model_version],
             |row| row.get(0),
         ))
+    }
+
+    /// Every note the examined sentinel currently excludes for `kind` under
+    /// `model_version`: a sentinel row whose watermark is at or past the note's
+    /// indexed `modified_at`. Superseded notes are left out, matching
+    /// `stale_embedding_targets`, so a revived note is one that query returns.
+    pub fn sentinelled_notes(&self, kind: EmbeddingKind, model_version: &str) -> Result<Vec<ExaminedNote>> {
+        log::debug!("search::sentinelled_notes: kind={kind:?} model_version={model_version}");
+        let mut stmt = self.conn.prepare(
+            "SELECT n.path, n.note_type, n.trace, x.examined_at
+             FROM embedding_examined x
+             JOIN notes n ON n.path = x.note_path
+             WHERE x.kind = ?1
+               AND x.model_version = ?2
+               AND x.examined_at >= n.modified_at
+               AND (n.superseded_by IS NULL OR n.superseded_by = '')
+             ORDER BY n.path",
+        )?;
+        let rows = stmt
+            .query_map(params![kind.as_str(), model_version], |row| {
+                Ok(ExaminedNote {
+                    note_path: row.get(0)?,
+                    note_type: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    trace: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    examined_at: row.get(3)?,
+                })
+            })?
+            .filter_map(warn_row)
+            .collect();
+        Ok(rows)
+    }
+
+    /// Drop the examined sentinel for `note_paths` under `kind`/`model_version`,
+    /// so `stale_embedding_targets` selects them again on the next read. One
+    /// short `BEGIN IMMEDIATE` transaction, like
+    /// [`mark_embedding_examined_batch`](Self::mark_embedding_examined_batch).
+    pub fn clear_embedding_examined_batch(
+        &mut self,
+        kind: EmbeddingKind,
+        model_version: &str,
+        note_paths: &[String],
+    ) -> Result<()> {
+        log::debug!(
+            "search::clear_embedding_examined_batch: kind={kind:?} model_version={model_version} count={}",
+            note_paths.len()
+        );
+        if note_paths.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for note_path in note_paths {
+            tx.execute(
+                "DELETE FROM embedding_examined WHERE note_path = ?1 AND kind = ?2 AND model_version = ?3",
+                params![note_path, kind.as_str(), model_version],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Count embedding rows matching an optional kind. Used by tests

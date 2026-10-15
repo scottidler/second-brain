@@ -312,6 +312,21 @@ fn staging_root_defaults_to_borg_stages_dir() {
     assert_eq!(cfg.staging_root, vault::paths::borg_stages_dir());
 }
 
+/// Absent key falls back to borg's own archive default; a set key is read
+/// top-level and tilde-expanded.
+#[test]
+fn archive_root_defaults_to_borg_sources_dir_and_expands_tilde() {
+    let cfg: Config = serde_yaml::from_str("log-level: info\n").expect("deserialize");
+    assert_eq!(cfg.archive_root, vault::paths::borg_sources_dir());
+    let cfg: Config = serde_yaml::from_str("archive-root: ~/arch\n").expect("deserialize");
+    assert!(
+        !cfg.archive_root.starts_with("~"),
+        "tilde must expand: {}",
+        cfg.archive_root.display()
+    );
+    assert!(cfg.archive_root.ends_with("arch"));
+}
+
 #[test]
 fn intel_config_tolerates_removed_fabric_patterns_and_on_new_note_keys() {
     let yaml = "fabric-patterns: [summarize]\non-new-note: summarize\nbatch-weekly: my_weekly\n";

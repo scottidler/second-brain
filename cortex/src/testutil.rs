@@ -437,6 +437,7 @@ impl TestVault {
             entities: crate::config::EntitiesConfig::default(),
             tags: crate::config::TagsSection::default(),
             staging_root: ::vault::paths::borg_stages_dir(),
+            archive_root: ::vault::paths::borg_sources_dir(),
         }
     }
 

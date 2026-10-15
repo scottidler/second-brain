@@ -317,6 +317,25 @@ pub fn borg_stages_dir() -> PathBuf {
         .join("stages")
 }
 
+/// Default root of borg's durable per-trace source archive, under the
+/// `sb/borg/` data namespace, beside (never inside) the staging root. Each
+/// distilled URL ingest writes `<this>/<trace_id>/distilled.yml` plus the
+/// source the distiller saw, before the vault note is written
+/// (2026-10-14-note-sources-intent-tools-channels, Part 1). Unlike staging it
+/// is never swept, so the verbatim source outlives the retention window.
+/// borg's `archive.root` and cortex's top-level `archive-root` both default to
+/// this, so the writer and the reader resolve one path. borg is the sole
+/// writer.
+///
+/// `~/.local/share/sb/borg/sources/` on Linux. Panics only when
+/// `xdg_data_dir()` returns `None` (see [`borg_signal_state_dir`]).
+pub fn borg_sources_dir() -> PathBuf {
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("sb/borg")
+        .join("sources")
+}
+
 /// cortex's embed/graph file-lock path, under the `sb/cortex/` data
 /// namespace. The lock serializes the embed and graph passes (they share
 /// it). Lives under `sb/cortex/` like borg's data, NOT the legacy

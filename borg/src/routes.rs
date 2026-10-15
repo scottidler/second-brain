@@ -204,12 +204,20 @@ pub struct TraceStateResponse {
     pub status: Option<String>,
     pub failure_stage: Option<String>,
     pub note_path: Option<String>,
+    /// Whether the trace's source archive (`archive.root/<trace>/distilled.yml`)
+    /// exists on this daemon host, so its verbatim source outlives the staging
+    /// sweep. Answered here, not by oracle's trace block, because oracle runs
+    /// on hosts that hold no archive. `default` keeps a client reading an
+    /// older daemon's response working.
+    #[serde(rename = "source-durable", default)]
+    pub source_durable: bool,
 }
 
 /// `GET /trace/{trace_id}` - read a single receipts row's terminal state.
 /// Auth-gated like the write routes.
-pub async fn trace_state(State(_state): State<AppState>, Path(trace_id): Path<String>) -> Response {
+pub async fn trace_state(State(state): State<AppState>, Path(trace_id): Path<String>) -> Response {
     log::debug!("trace_state: trace_id={trace_id}");
+    let source_durable = crate::archive::is_durable(&state.config.archive.root, &trace_id);
     let lookup = crate::receipts::open_default().and_then(|conn| crate::receipts::get(&conn, &trace_id));
     match lookup {
         Ok(Some(r)) => Json(TraceStateResponse {
@@ -218,6 +226,7 @@ pub async fn trace_state(State(_state): State<AppState>, Path(trace_id): Path<St
             status: Some(r.status),
             failure_stage: r.failure_stage,
             note_path: r.note_path,
+            source_durable,
         })
         .into_response(),
         Ok(None) => (
@@ -228,6 +237,7 @@ pub async fn trace_state(State(_state): State<AppState>, Path(trace_id): Path<St
                 status: None,
                 failure_stage: None,
                 note_path: None,
+                source_durable,
             }),
         )
             .into_response(),

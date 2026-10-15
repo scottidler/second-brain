@@ -261,3 +261,67 @@ pub(crate) fn read_cortex_fields(path: &std::path::Path) -> eyre::Result<Vec<(St
     }
     Ok(fields)
 }
+
+/// Why the final publish step failed. Every variant is a `publish-failed`
+/// trace; the type keeps the archive seam's fail-closed failure distinct from
+/// the note write's in logs and the receipt reason.
+#[derive(Debug, thiserror::Error)]
+pub enum PublishError {
+    /// The durable source archive could not be written, so the vault note was
+    /// not written either (2026-10-14-note-sources-intent-tools-channels).
+    #[error("source archive write failed: {0}")]
+    ArchiveWrite(#[from] crate::archive::ArchiveError),
+    /// The atomic note write itself failed.
+    #[error("failed to atomically publish note: {0:#}")]
+    NoteWrite(eyre::Report),
+}
+
+impl PublishError {
+    pub fn failure_stage(&self) -> FailureStage {
+        match self {
+            Self::ArchiveWrite(_) | Self::NoteWrite(_) => FailureStage::PublishFailed,
+        }
+    }
+}
+
+/// The URL publish seam: write the trace's source archive, then the note. The
+/// archive comes first and fails closed, so a trace whose source could not be
+/// made durable never lands a note that points at a source about to expire.
+pub(crate) fn archive_then_publish(
+    archive: &crate::archive::SourceArchive<'_>,
+    desired_path: &Path,
+    bytes: &[u8],
+    replaces: Option<&Path>,
+    vault_dirs: &[PathBuf],
+) -> std::result::Result<PathBuf, PublishError> {
+    log::debug!(
+        "archive_then_publish: trace={} desired={} replaces={replaces:?}",
+        archive.trace_id,
+        desired_path.display()
+    );
+    archive.write()?;
+    atomic::publish_unique(desired_path, bytes, replaces, vault_dirs).map_err(PublishError::NoteWrite)
+}
+
+/// The terminal `IngestResult` for a failed publish, its stage taken from the
+/// typed error.
+pub(crate) fn publish_failure_result(
+    err: &PublishError,
+    method: IngestMethod,
+    canonical: &str,
+    trace_id: &str,
+) -> IngestResult {
+    IngestResult {
+        status: IngestStatus::Failed {
+            reason: err.to_string(),
+        },
+        method: Some(method),
+        canonical_url: Some(canonical.to_string()),
+        trace_id: Some(trace_id.to_string()),
+        failure_stage: Some(err.failure_stage()),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests;

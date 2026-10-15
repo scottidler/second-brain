@@ -247,7 +247,7 @@ impl<F: FabricCaller + Clone> DistillStage<F> {
 
 /// Filename inside the per-trace staging directory where shadow-mode
 /// runs and the future Stage-2 cutover write the structured payload.
-pub const DISTILLED_FILENAME: &str = "distilled.yml";
+pub const DISTILLED_FILENAME: &str = vault::distilled::FILENAME;
 
 /// Shared core for the simple single-call publish distillers (image,
 /// voicenote, idea, vocab): dispatch the kind, fall back on error, log the
@@ -581,6 +581,18 @@ pub async fn distill_for_publish_vocab(
     .await
 }
 
+/// A repo distillation plus the source text the distiller saw. The README
+/// transcript is not carried in `Distilled.transcript` (`repo.rs` sets it
+/// `None`), so the source archive needs it handed over separately.
+#[derive(Debug)]
+pub struct RepoDistillation {
+    pub distilled: Distilled,
+    /// The rendered README transcript from the GitHub REST fetch; `None` on
+    /// the fallback paths, whose `fallback_distilled` already keeps the
+    /// fallback text as `Distilled.transcript`.
+    pub readme_transcript: Option<String>,
+}
+
 /// Fetch the github repo's README + metadata via the
 /// REST API and distill into a `Distilled`. Persists `distilled.yml` on
 /// success. On any error (URL not a repo root, REST fetch failed, dispatch
@@ -596,17 +608,20 @@ pub async fn distill_for_publish_repo(
     url: &str,
     article_md_fallback: &str,
     capture_note: Option<&str>,
-) -> Distilled {
+) -> RepoDistillation {
     log::debug!("distill_for_publish_repo: trace={trace_id} url={url} github_timeout={github_timeout:?}");
     let Some((owner, repo)) = crate::github::parse_repo_url(url) else {
         log::warn!("[{trace_id}] distill_for_publish_repo: url is not a github repo root: {url}; using fallback");
-        return distillers::fallback_distilled(
-            "distill-repo-v1",
-            "not-a-repo-root",
-            article_md_fallback,
-            None,
-            &fabric.model,
-        );
+        return RepoDistillation {
+            distilled: distillers::fallback_distilled(
+                "distill-repo-v1",
+                "not-a-repo-root",
+                article_md_fallback,
+                None,
+                &fabric.model,
+            ),
+            readme_transcript: None,
+        };
     };
     let started = std::time::Instant::now();
     let fetched = match GitHubFetcher::new(github_timeout) {
@@ -619,13 +634,16 @@ pub async fn distill_for_publish_repo(
             log::warn!(
                 "[{trace_id}] distill_for_publish_repo: github fetch failed: {e:#}; falling back to article_md path"
             );
-            return distillers::fallback_distilled(
-                "distill-repo-v1",
-                "github-fetch-error",
-                article_md_fallback,
-                None,
-                &fabric.model,
-            );
+            return RepoDistillation {
+                distilled: distillers::fallback_distilled(
+                    "distill-repo-v1",
+                    "github-fetch-error",
+                    article_md_fallback,
+                    None,
+                    &fabric.model,
+                ),
+                readme_transcript: None,
+            };
         }
     };
     if let Err(e) = persist_github_stage_0_1_if_staging(staging, trace_id, url, &fetch_result) {
@@ -677,7 +695,10 @@ pub async fn distill_for_publish_repo(
     if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
         log::warn!("[{trace_id}] distill_for_publish_repo: persist distilled.yml failed: {e:#}");
     }
-    distilled
+    RepoDistillation {
+        distilled,
+        readme_transcript: Some(fetch_result.transcript),
+    }
 }
 
 /// Run the YouTube distiller. Fetches yt-dlp metadata

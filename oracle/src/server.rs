@@ -267,7 +267,9 @@ impl OracleMcpServer {
     /// Build the `trace` block advertising staged-source availability.
     ///
     /// Pure echo + a calendar-date comparison; never reads borg config or the
-    /// filesystem. Shapes (per the design's API section):
+    /// filesystem, because oracle runs on hosts that hold no source archive.
+    /// Durability past the staging window is the daemon's `GET /trace/{id}`
+    /// `source-durable` answer, not this block's. Shapes (per the design's API section):
     /// - no trace handle: `{ "available": false }` (other keys omitted)
     /// - trace, no expires: `available:true`, ref/ingested, expires omitted,
     ///   `within-window: null`
@@ -1182,8 +1184,10 @@ impl ServerHandler for OracleMcpServer {
              Returned notes include a `trace` block: when `trace.available` is true, `trace.ref` is a \
              borg staged-source handle for the verbatim captured source (e.g. a full transcript), and \
              `trace.within-window` indicates the retention policy says it is still worth trying. Prefer \
-             that staged source over the lossy summary when exact wording matters. Oracle only advertises \
-             the handle; it does not return, search, fetch, or verify staged-source content."
+             that staged source over the lossy summary when exact wording matters. `within-window` only \
+             reflects staging retention: the borg daemon's `GET /trace/<ref>` reports `source-durable: true` \
+             when the source is also in borg's durable archive, which outlives the window. Oracle only \
+             advertises the handle; it does not return, search, fetch, or verify staged-source content."
                 .to_string(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();

@@ -266,6 +266,16 @@ intake:
   # `sb borg retention sweep [--sidecars-only] [--dry-run]`.
   retention-days: 21
 
+# Source archive - the durable copy of every distilled URL source. Each video,
+# article, repo and thread ingest writes <root>/<trace>/distilled.yml (plus the
+# repo README or thread markdown as transcript.md) BEFORE the vault note, with
+# or without staging. A failed archive write fails the trace `publish-failed`
+# and no note lands. Nothing sweeps it, unlike staging. `GET /trace/<id>`
+# reports `source-durable: true` once a trace's archive dir exists. cortex's
+# top-level `archive-root` must name the same directory.
+# archive:
+#   root: ~/.local/share/sb/borg/sources
+
 # Ingest queue - what `GET /queue`, `sb borg queue`, `sb borg wait` and the
 # oracle `ingest_queue` tool report. Durations are humantime strings (15m, 90s);
 # a bad value fails the config load naming the key.

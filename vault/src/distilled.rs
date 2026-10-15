@@ -7,6 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Filename of a serialized [`Distilled`] inside a per-trace directory, in
+/// borg's staging root and its source archive alike. borg writes it; cortex
+/// reads it.
+pub const FILENAME: &str = "distilled.yml";
+
 /// Single structured contract every Stage 2 extractor produces.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

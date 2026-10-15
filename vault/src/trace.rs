@@ -1,4 +1,5 @@
 use crate::schema::Method;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -53,6 +54,20 @@ fn method_prefix(method: Method) -> &'static str {
         Method::Signal => "sg",
         Method::Manual => "mn",
         Method::Harvest => "hv",
+    }
+}
+
+/// `<root>/<trace>`, the per-trace directory under a staging or archive root,
+/// or `None` when `trace` is not exactly one plain path component (empty, `.`,
+/// `..`, or containing a separator). Trace ids reach path joins from
+/// frontmatter and from the daemon's `/trace/{id}` route, so a `..` must never
+/// resolve outside `root`. Shared by borg's archive writer and cortex's
+/// archive reader so both judge a trace id the same way.
+pub fn dir(root: &Path, trace: &str) -> Option<PathBuf> {
+    let mut components = Path::new(trace).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(c)), None) if c == trace => Some(root.join(trace)),
+        _ => None,
     }
 }
 

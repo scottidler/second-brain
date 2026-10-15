@@ -9,6 +9,7 @@
 
 pub use vault;
 
+pub mod archive;
 pub mod assets;
 pub mod audit;
 pub mod backfill;

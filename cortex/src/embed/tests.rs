@@ -10,6 +10,8 @@ use vault::distilled::Distilled;
 use vault::embedding::MockEmbedder;
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
+mod archive;
+
 /// Build a minimal vault structure on disk with one note that has a
 /// `## Summary` body section.
 fn write_note_with_summary(vault: &std::path::Path, rel: &str, summary: &str) {
@@ -36,7 +38,7 @@ fn process_batch_returns_zero_when_no_stale_targets() {
         EmbeddingKind::Summary,
         m.model_version(),
         tmp.path(),
-        tmp.path(),
+        roots(tmp.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -73,7 +75,7 @@ fn process_batch_embeds_stale_summary_rows() {
         EmbeddingKind::Summary,
         m.model_version(),
         tmp.path(),
-        tmp.path(),
+        roots(tmp.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -108,7 +110,7 @@ fn process_batch_prefixes_title_to_summary() {
         EmbeddingKind::Summary,
         m.model_version(),
         tmp.path(),
-        tmp.path(),
+        roots(tmp.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -141,6 +143,18 @@ fn write_note_with_transcript(vault: &std::path::Path, rel: &str, note_type: &st
         "---\ntitle: T\nnote-type: {note_type}\norigin: assisted\n---\n# T\n\n{body_head}## Transcript\n\n{transcript}\n"
     );
     std::fs::write(abs, body).expect("write note");
+}
+
+/// An archive root that never exists, for tests about staging alone: keeps
+/// them off the operator's real `~/.local/share/sb/borg/sources`.
+const NO_ARCHIVE: &str = "/nonexistent/sb-test-archive";
+
+/// Source roots with no archive, reading transcripts from `staging` only.
+fn roots(staging: &std::path::Path) -> SourceRoots<'_> {
+    SourceRoots {
+        archive: std::path::Path::new(NO_ARCHIVE),
+        staging,
+    }
 }
 
 /// Stage a `distilled.yml` under `<staging_root>/<trace>/distilled.yml` carrying
@@ -212,7 +226,7 @@ fn process_transcript_batch_embeds_video_article_from_staging_ignoring_in_note_s
         EmbeddingKind::TranscriptChunk,
         m.model_version(),
         tmp.path(),
-        staging.path(),
+        roots(staging.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -272,7 +286,7 @@ fn process_transcript_batch_missing_staged_file_degrades_to_sentinel_skip() {
         EmbeddingKind::TranscriptChunk,
         m.model_version(),
         tmp.path(),
-        staging.path(),
+        roots(staging.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -300,7 +314,7 @@ fn process_transcript_batch_missing_staged_file_degrades_to_sentinel_skip() {
         EmbeddingKind::TranscriptChunk,
         m.model_version(),
         tmp.path(),
-        staging.path(),
+        roots(staging.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -339,7 +353,7 @@ fn process_transcript_batch_expired_staged_file_degrades_to_sentinel_skip() {
         EmbeddingKind::TranscriptChunk,
         m.model_version(),
         tmp.path(),
-        staging.path(),
+        roots(staging.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -384,7 +398,7 @@ fn process_transcript_batch_verbatim_kind_still_reads_in_note_section() {
         EmbeddingKind::TranscriptChunk,
         m.model_version(),
         tmp.path(),
-        staging.path(),
+        roots(staging.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -433,7 +447,7 @@ fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
         EmbeddingKind::TranscriptChunk,
         m.model_version(),
         tmp.path(),
-        tmp.path(),
+        roots(tmp.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -461,7 +475,7 @@ fn process_transcript_batch_marks_unembeddable_notes_examined_and_converges() {
         EmbeddingKind::TranscriptChunk,
         m.model_version(),
         tmp.path(),
-        tmp.path(),
+        roots(tmp.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -498,7 +512,7 @@ fn process_batch_skips_notes_with_empty_summary() {
         EmbeddingKind::Summary,
         m.model_version(),
         tmp.path(),
-        tmp.path(),
+        roots(tmp.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -680,7 +694,7 @@ fn summary_embed_text_is_byte_identical_when_no_capture_note() {
         EmbeddingKind::Summary,
         m.model_version(),
         tmp.path(),
-        tmp.path(),
+        roots(tmp.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -717,7 +731,7 @@ fn summary_embed_text_splices_capture_note_when_present() {
         EmbeddingKind::Summary,
         m.model_version(),
         tmp.path(),
-        tmp.path(),
+        roots(tmp.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -761,7 +775,7 @@ fn process_claim_batch_embeds_notes_with_claims() {
         EmbeddingKind::Claim,
         m.model_version(),
         tmp.path(),
-        tmp.path(),
+        roots(tmp.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -801,7 +815,7 @@ fn process_claim_batch_splits_oversized_claim_sets_into_multiple_rows() {
         EmbeddingKind::Claim,
         m.model_version(),
         tmp.path(),
-        tmp.path(),
+        roots(tmp.path()),
         16,
         DEFAULT_MAX_CHUNKS_PER_CALL,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
@@ -1154,6 +1168,7 @@ fn seed_claim_note(index: &SearchIndex, rel: &str, groups: usize, modified_at: i
 fn tick_config(staging_root: &std::path::Path, max_chunks_per_tick: usize, max_chunks_per_call: usize) -> Config {
     Config {
         staging_root: staging_root.to_path_buf(),
+        archive_root: PathBuf::from(NO_ARCHIVE),
         embed: EmbedConfig {
             max_chunks_per_tick,
             max_chunks_per_call,
@@ -1221,7 +1236,7 @@ fn stopped_batch_is_its_own_outcome() {
         EmbeddingKind::Summary,
         m.model_version(),
         vault.path(),
-        vault.path(),
+        roots(vault.path()),
         16,
         1,
         ChunkAllowance::per_tick(DEFAULT_MAX_CHUNKS_PER_TICK),
