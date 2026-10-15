@@ -66,6 +66,33 @@ fn rolling_dedupe_action(last: Option<&str>, candidate: &str) -> RollingAction {
     }
 }
 
+/// Fewest words a cue's leading overlap with the previous cue's tail must span
+/// before it counts as a rolling "previous line + new line" repeat. Below this a
+/// legitimately repeated short phrase ("so what") would be eaten.
+const MIN_OVERLAP_WORDS: usize = 3;
+
+/// For ASR two-line rolling cues (`A B` then `B C`), return the text of
+/// `candidate` that is NOT already covered by `last`'s suffix, or `None` when
+/// no whole-word suffix of `last` (at least `MIN_OVERLAP_WORDS` words) is a
+/// prefix of `candidate`. An empty remainder means the candidate is fully
+/// covered.
+fn overlap_remainder<'a>(last: &str, candidate: &'a str) -> Option<&'a str> {
+    let last_words: Vec<&str> = last.split_whitespace().collect();
+    let cand_words: Vec<&str> = candidate.split_whitespace().collect();
+    let max = last_words.len().min(cand_words.len());
+    for n in (MIN_OVERLAP_WORDS..=max).rev() {
+        if last_words[last_words.len() - n..] == cand_words[..n] {
+            let mut rest = candidate;
+            for _ in 0..n {
+                rest = rest.trim_start();
+                rest = &rest[rest.find(char::is_whitespace).unwrap_or(rest.len())..];
+            }
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
 pub fn extract_video_id(url: &str) -> Option<String> {
     VIDEO_ID_REGEX
         .captures(url)
@@ -267,7 +294,17 @@ pub fn parse_vtt_segments(vtt: &str) -> Vec<(f64, String)> {
                         segments.push((prev_start, cleaned));
                     }
                     RollingAction::Skip => {}
-                    RollingAction::Push => segments.push((s, cleaned)),
+                    RollingAction::Push => {
+                        let remainder = segments
+                            .last()
+                            .and_then(|(_, prev)| overlap_remainder(prev, &cleaned))
+                            .map(str::to_string);
+                        match remainder {
+                            Some(rest) if rest.is_empty() => {}
+                            Some(rest) => segments.push((s, rest)),
+                            None => segments.push((s, cleaned)),
+                        }
+                    }
                 }
             }
             text.clear();

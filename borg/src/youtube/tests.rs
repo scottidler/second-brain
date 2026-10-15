@@ -468,3 +468,26 @@ fn test_error_summary_prefers_last_error_line() {
     assert_eq!(diagnostics::error_summary("[debug] a\nlast line\n\n"), "last line");
     assert_eq!(diagnostics::error_summary(""), "(no stderr)");
 }
+
+#[test]
+fn test_parse_vtt_segments_collapses_two_line_rolling_overlap() {
+    // ASR cues repeat the previous line, then add a new one.
+    let vtt = "WEBVTT\n\n00:00:00.000 --> 00:00:03.000\nwelcome to the show today\nwe talk about rust\n\n00:00:03.000 --> 00:00:06.000\nwe talk about rust\nand its borrow checker\n\n00:00:06.000 --> 00:00:09.000\nand its borrow checker\nthanks for watching\n";
+    let segs = parse_vtt_segments(vtt);
+    let joined: Vec<&str> = segs.iter().map(|(_, t)| t.as_str()).collect();
+    let text = joined.join(" ");
+    assert_eq!(
+        text,
+        "welcome to the show today we talk about rust and its borrow checker thanks for watching"
+    );
+    assert_eq!(text.matches("we talk about rust").count(), 1);
+    assert_eq!(text.matches("borrow checker").count(), 1);
+}
+
+#[test]
+fn test_parse_vtt_segments_keeps_non_adjacent_repeat() {
+    let vtt = "00:00:00.000 --> 00:00:03.000\nlike and subscribe to the channel\n\n00:00:03.000 --> 00:00:06.000\nnow the real content starts here\n\n00:00:06.000 --> 00:00:09.000\nlike and subscribe to the channel\n";
+    let segs = parse_vtt_segments(vtt);
+    assert_eq!(segs.len(), 3);
+    assert_eq!(segs[0].1, segs[2].1);
+}
