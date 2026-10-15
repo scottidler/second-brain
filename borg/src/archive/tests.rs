@@ -1,5 +1,4 @@
 use super::*;
-use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 fn distilled_with_transcript(transcript: Option<&str>) -> Distilled {
@@ -54,11 +53,12 @@ fn write_lands_source_md_for_repo_and_thread_kinds() {
 }
 
 #[test]
-fn write_into_a_read_only_root_is_an_io_error() {
+fn write_under_an_unwritable_root_is_an_io_error() {
+    // A root that is a regular file fails `create_dir_all` with ENOTDIR even
+    // as root; a 0o555 dir does not, because root bypasses permission bits.
     let parent = TempDir::new().expect("tmp");
     let root = parent.path().join("sources");
-    std::fs::create_dir(&root).expect("mkdir");
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    std::fs::write(&root, b"not a dir").expect("write file");
     let distilled = distilled_with_transcript(Some("t"));
     let err = SourceArchive {
         root: &root,
@@ -67,8 +67,7 @@ fn write_into_a_read_only_root_is_an_io_error() {
         source_md: None,
     }
     .write()
-    .expect_err("a read-only root must fail the write");
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("chmod back");
+    .expect_err("an unwritable root must fail the write");
     assert!(matches!(err, ArchiveError::Io { .. }), "got {err:?}");
     assert!(!is_durable(&root, "yt-ro"));
 }

@@ -1,15 +1,14 @@
 use super::*;
 
 #[test]
-fn archive_write_into_read_only_dir_fails_publish_and_writes_no_note() {
-    use std::os::unix::fs::PermissionsExt;
+fn archive_write_under_unwritable_root_fails_publish_and_writes_no_note() {
     let vault = tempfile::TempDir::new().expect("vault");
     let inbox = vault.path().join("inbox");
     std::fs::create_dir_all(&inbox).expect("inbox");
     let archive_parent = tempfile::TempDir::new().expect("archive");
     let archive_root = archive_parent.path().join("sources");
-    std::fs::create_dir(&archive_root).expect("mkdir");
-    std::fs::set_permissions(&archive_root, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    // A file where the root dir should be: ENOTDIR holds even when CI runs as root.
+    std::fs::write(&archive_root, b"not a dir").expect("write file");
 
     let distilled = vault::distilled::Distilled {
         summary: "s".to_string(),
@@ -30,9 +29,8 @@ fn archive_write_into_read_only_dir_fails_publish_and_writes_no_note() {
         None,
         std::slice::from_ref(&inbox),
     );
-    std::fs::set_permissions(&archive_root, std::fs::Permissions::from_mode(0o755)).expect("chmod back");
 
-    let err = result.expect_err("a read-only archive root must fail the publish");
+    let err = result.expect_err("an unwritable archive root must fail the publish");
     assert!(matches!(err, PublishError::ArchiveWrite(_)), "got {err:?}");
     let ingest = publish_failure_result(&err, IngestMethod::Cli, "https://example.com/x", "tr-ro");
     assert_eq!(ingest.failure_stage, Some(FailureStage::PublishFailed));
