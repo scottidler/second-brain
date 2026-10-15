@@ -112,3 +112,17 @@
 - Skip-serialize-when-empty vs always emitting `tools: []`: chose skip to keep staged yml diffs quiet.
 ### Open questions
 - None.
+
+## Phase 8: Tools render section, repo install in body, Links dedup
+### Design decisions
+- `## Tools & Commands` sits after Claims, before Links, omitted when empty (`distillers/src/render.rs:push_tools`, per Part 3). A tool with an empty name is skipped.
+- Bullet shape is `- name url `command``. A multiline command becomes a fenced block indented under the bullet (`push_tools`). The code span/fence delimiter is one longer than the longest backtick run in the command, padded per CommonMark when it touches a backtick, so a command cannot break out.
+- `RepoPayload.install` joins the section as an `Install` entry (`tools_to_render`), skipped when a tool already carries that exact command. The body has no length cap; frontmatter `cortex-repo-install` keeps its 500-char cap.
+- Links dedup lives in `render` for every kind (`push_links`). URLs compare trimmed, trailing-slash-insensitive, case-insensitive. `## Links` disappears if every entry was a tool URL. `merge_description_links` untouched.
+- `tempfile` added as a distillers dev-dependency (workspace version) for the indexing test.
+### Deviations
+- None.
+### Tradeoffs
+- Case-insensitive URL compare vs exact: a case-only-different path could be dropped wrongly, but that risk is smaller than leaving duplicates.
+### Open questions
+- FTS criterion proven by `rendered_install_command_is_found_by_bm25_after_indexing` (temp `SearchIndex`, bm25 `search` on `quuxtool`). The live check, `sb oracle call knowledge_search --json '{"query":"<that command>","mode":"bm25"}'` after reindex, is owed after deploy. Nothing live was touched.

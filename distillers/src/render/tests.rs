@@ -1,7 +1,7 @@
 use super::*;
 use vault::distilled::{
     Claim, ClaimKind, Distilled, DistilledMeta, EnumeratedItem, Enumeration, KindPayload, Link, RepoPayload,
-    SessionPayload, ThreadPayload, ValidationMeta, VideoPayload,
+    SessionPayload, ThreadPayload, Tool, ValidationMeta, VideoPayload,
 };
 
 /// Transcript-emission policies used at the render seams. `NO_TRANSCRIPT` is the
@@ -981,4 +981,169 @@ fn render_keeps_model_written_wikilink_syntax_literal() {
         body.contains("- okta-auth is a library crate with no `[[bin]]`, so that command does not exist.\n"),
         "claim shape wrong: {body}"
     );
+}
+
+fn repo_with_install(install: &str) -> Distilled {
+    Distilled {
+        summary: "A repo.".to_string(),
+        kind_specific: Some(KindPayload::Repo(RepoPayload {
+            install: Some(install.to_string()),
+            ..Default::default()
+        })),
+        meta: base_meta("distill-repo-v1"),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn repo_install_renders_in_tools_section_and_keeps_frontmatter() {
+    let rendered = render(&repo_with_install("cargo install quuxtool"), NO_TRANSCRIPT);
+    assert!(rendered.body_markdown.contains("## Tools & Commands"));
+    assert!(rendered.body_markdown.contains("- Install `cargo install quuxtool`"));
+    assert_eq!(
+        rendered.frontmatter_additions.get("cortex-repo-install"),
+        Some(&serde_yaml::Value::String("cargo install quuxtool".to_string()))
+    );
+}
+
+#[test]
+fn oversized_install_stays_out_of_frontmatter_but_renders_in_body() {
+    let install = format!("cargo install {}", "x".repeat(600));
+    let rendered = render(&repo_with_install(&install), NO_TRANSCRIPT);
+    assert!(!rendered.frontmatter_additions.contains_key("cortex-repo-install"));
+    assert!(rendered.body_markdown.contains(&install));
+}
+
+#[test]
+fn tools_section_sits_between_claims_and_links() {
+    let distilled = Distilled {
+        summary: "s".to_string(),
+        claims: vec![Claim {
+            text: "c".to_string(),
+            ..Default::default()
+        }],
+        links: vec![Link {
+            url: "https://other.example".to_string(),
+            label: None,
+        }],
+        tools: vec![Tool {
+            name: "ripgrep".to_string(),
+            url: Some("https://github.com/BurntSushi/ripgrep".to_string()),
+            command: Some("rg foo".to_string()),
+        }],
+        meta: base_meta("distill-video-v1"),
+        ..Default::default()
+    };
+    let body = render(&distilled, NO_TRANSCRIPT).body_markdown;
+    let claims = body.find("## Claims").unwrap();
+    let tools = body.find("## Tools & Commands").unwrap();
+    let links = body.find("## Links").unwrap();
+    assert!(claims < tools && tools < links);
+    assert!(body.contains("- ripgrep https://github.com/BurntSushi/ripgrep `rg foo`"));
+}
+
+#[test]
+fn tool_url_appears_once_and_other_links_survive() {
+    let distilled = Distilled {
+        summary: "s".to_string(),
+        links: vec![
+            Link {
+                url: "https://github.com/BurntSushi/ripgrep/".to_string(),
+                label: Some("rg".to_string()),
+            },
+            Link {
+                url: "https://other.example".to_string(),
+                label: None,
+            },
+        ],
+        tools: vec![Tool {
+            name: "ripgrep".to_string(),
+            url: Some("https://github.com/BurntSushi/ripgrep".to_string()),
+            command: None,
+        }],
+        meta: base_meta("distill-article-v1"),
+        ..Default::default()
+    };
+    let body = render(&distilled, NO_TRANSCRIPT).body_markdown;
+    assert_eq!(body.matches("github.com/BurntSushi/ripgrep").count(), 1);
+    assert!(body.contains("- https://other.example"));
+}
+
+#[test]
+fn links_section_vanishes_when_every_link_is_a_tool_url() {
+    let distilled = Distilled {
+        summary: "s".to_string(),
+        links: vec![Link {
+            url: "https://a.example".to_string(),
+            label: None,
+        }],
+        tools: vec![Tool {
+            name: "a".to_string(),
+            url: Some("https://a.example".to_string()),
+            command: None,
+        }],
+        meta: base_meta("distill-article-v1"),
+        ..Default::default()
+    };
+    let body = render(&distilled, NO_TRANSCRIPT).body_markdown;
+    assert!(!body.contains("## Links"));
+}
+
+#[test]
+fn multiline_command_renders_as_fenced_block_under_bullet() {
+    let distilled = Distilled {
+        summary: "s".to_string(),
+        tools: vec![Tool {
+            name: "setup".to_string(),
+            url: None,
+            command: Some("git clone x\ncd x".to_string()),
+        }],
+        meta: base_meta("distill-video-v1"),
+        ..Default::default()
+    };
+    let body = render(&distilled, NO_TRANSCRIPT).body_markdown;
+    assert!(body.contains("- setup\n  ```\n  git clone x\n  cd x\n  ```\n"));
+}
+
+#[test]
+fn command_containing_backticks_gets_a_longer_code_span_delimiter() {
+    let distilled = Distilled {
+        summary: "s".to_string(),
+        tools: vec![Tool {
+            name: "t".to_string(),
+            url: None,
+            command: Some("echo `date`".to_string()),
+        }],
+        meta: base_meta("distill-video-v1"),
+        ..Default::default()
+    };
+    let body = render(&distilled, NO_TRANSCRIPT).body_markdown;
+    assert!(body.contains("- t `` echo `date` ``"));
+}
+
+#[test]
+fn no_tools_and_no_install_emits_no_tools_section() {
+    let body = render(&repo_with_install("  "), NO_TRANSCRIPT).body_markdown;
+    assert!(!body.contains("## Tools & Commands"));
+}
+
+#[test]
+fn rendered_install_command_is_found_by_bm25_after_indexing() {
+    // Success criterion: the install command in the rendered body is
+    // findable by a bm25 query. The live `sb oracle call knowledge_search`
+    // check is owed after deploy.
+    let rendered = render(&repo_with_install("cargo install quuxtool"), NO_TRANSCRIPT);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let note = format!("---\ntitle: Quux\n---\n{}", rendered.body_markdown);
+    std::fs::write(dir.path().join("quux.md"), note).expect("write");
+    let other = "---\ntitle: Other\n---\n## Summary\n\nUnrelated prose.\n";
+    std::fs::write(dir.path().join("other.md"), other).expect("write");
+
+    let index = vault::search::SearchIndex::open_memory().expect("open");
+    index.index_vault(dir.path()).expect("index");
+    let hits = index
+        .search("quuxtool", None, false, None, None, Some(10))
+        .expect("search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, "quux.md");
 }

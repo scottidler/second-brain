@@ -33,6 +33,7 @@ url = { workspace = true }
 # NOT enable this feature, so rusqlite stays out of the borg dependency tree.
 vault = { path = "../vault", features = ["search"] }
 distillers = { path = ".", features = ["test-util"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

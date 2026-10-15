@@ -5,7 +5,7 @@
 //! `index_vault` later parses these sections back into the FTS5 index.
 
 use std::collections::BTreeMap;
-use vault::distilled::{Claim, ClaimKind, Distilled, Enumeration, KindPayload, SessionPayload};
+use vault::distilled::{Claim, ClaimKind, Distilled, Enumeration, KindPayload, SessionPayload, Tool};
 
 /// Caller policy for [`render`]. Transcript emission is the caller's decision,
 /// not a global kind rule (distillation-output-restore): borg
@@ -69,7 +69,8 @@ pub struct RenderedDistilled {
 ///
 /// Body section order (April `obsidian-note.md` shape restored): the `> [!tldr]`
 /// callout, `## Summary`, `## Enumerated Points` (listicles only), `## Key
-/// Ideas` (omitted when empty), `## Claims`, `## Links`, then `## Transcript`
+/// Ideas` (omitted when empty), `## Claims`, `## Tools & Commands` (omitted when
+/// there is nothing to show), `## Links`, then `## Transcript`
 /// last (only when `options.include_transcript`). `## Why Captured`, when
 /// present, is prepended by the borg markdown layer above this body.
 pub fn render(distilled: &Distilled, options: RenderOptions) -> RenderedDistilled {
@@ -79,7 +80,9 @@ pub fn render(distilled: &Distilled, options: RenderOptions) -> RenderedDistille
     push_enumeration(&mut body, distilled.enumeration.as_ref());
     push_key_ideas(&mut body, &distilled.key_ideas);
     push_claims(&mut body, &distilled.claims);
-    push_links(&mut body, &distilled.links);
+    let tools = tools_to_render(distilled);
+    push_tools(&mut body, &tools);
+    push_links(&mut body, &distilled.links, &tools);
     // Session body footer (harvest-clyde-sessions): list the member
     // sessions as `clyde://` back-pointers so `clyde session resume` recovers
     // full fidelity (the conductor-validated back-pointer, vault-native).
@@ -406,7 +409,110 @@ fn push_session_footer(body: &mut String, payload: &SessionPayload) {
     body.push('\n');
 }
 
-fn push_links(body: &mut String, links: &[vault::distilled::Link]) {
+/// Normalize a URL for the Links-vs-Tools dedup comparison: trimmed, trailing
+/// slashes ignored, case-insensitive.
+fn url_key(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_lowercase()
+}
+
+/// The tools that render: `Distilled.tools` with a name, plus the repo
+/// payload's `install` line as an `Install` entry unless a tool already
+/// carries that exact command.
+fn tools_to_render(distilled: &Distilled) -> Vec<Tool> {
+    let mut tools: Vec<Tool> = distilled
+        .tools
+        .iter()
+        .filter(|t| !t.name.trim().is_empty())
+        .cloned()
+        .collect();
+    if let Some(KindPayload::Repo(p)) = &distilled.kind_specific
+        && let Some(install) = p.install.as_deref().map(str::trim)
+        && !install.is_empty()
+        && !tools
+            .iter()
+            .any(|t| t.command.as_deref().map(str::trim) == Some(install))
+    {
+        tools.push(Tool {
+            name: "Install".to_string(),
+            url: None,
+            command: Some(install.to_string()),
+        });
+    }
+    tools
+}
+
+fn push_tools(body: &mut String, tools: &[Tool]) {
+    if tools.is_empty() {
+        return;
+    }
+    body.push_str("## Tools & Commands\n\n");
+    for tool in tools {
+        body.push_str("- ");
+        body.push_str(&prose_line(tool.name.trim()));
+        if let Some(url) = tool.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+            body.push(' ');
+            body.push_str(url);
+        }
+        let command = tool.command.as_deref().map(str::trim).filter(|c| !c.is_empty());
+        match command {
+            Some(cmd) if cmd.contains('\n') => {
+                body.push('\n');
+                let fence = "`".repeat(longest_backtick_run(cmd).max(2) + 1);
+                body.push_str("  ");
+                body.push_str(&fence);
+                body.push('\n');
+                for line in cmd.lines() {
+                    body.push_str("  ");
+                    body.push_str(line);
+                    body.push('\n');
+                }
+                body.push_str("  ");
+                body.push_str(&fence);
+            }
+            Some(cmd) => {
+                let ticks = "`".repeat(longest_backtick_run(cmd) + 1);
+                body.push(' ');
+                body.push_str(&ticks);
+                // CommonMark: pad when the content touches a backtick.
+                let pad = cmd.starts_with('`') || cmd.ends_with('`');
+                if pad {
+                    body.push(' ');
+                }
+                body.push_str(cmd);
+                if pad {
+                    body.push(' ');
+                }
+                body.push_str(&ticks);
+            }
+            None => {}
+        }
+        body.push('\n');
+    }
+    body.push('\n');
+}
+
+fn longest_backtick_run(text: &str) -> usize {
+    let mut longest = 0;
+    let mut run = 0;
+    for c in text.chars() {
+        if c == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    longest
+}
+
+fn push_links(body: &mut String, links: &[vault::distilled::Link], tools: &[Tool]) {
+    let tool_urls: std::collections::HashSet<String> = tools
+        .iter()
+        .filter_map(|t| t.url.as_deref())
+        .map(url_key)
+        .filter(|u| !u.is_empty())
+        .collect();
+    let links: Vec<&vault::distilled::Link> = links.iter().filter(|l| !tool_urls.contains(&url_key(&l.url))).collect();
     if links.is_empty() {
         return;
     }
